@@ -87,6 +87,13 @@ pub enum SystemUiState {
         entries: Vec<NotificationEntry>,
         selected: usize,
     },
+    SessionMenu {
+        entries: Vec<crate::jwm::features::SessionAction>,
+        selected: usize,
+        /// Whether the selected row has been armed by a first Enter. Moving
+        /// the selection disarms it.
+        armed: bool,
+    },
 }
 
 /// One notification-center row: the pre-rendered text plus what activating it
@@ -109,8 +116,11 @@ pub enum ControlKind {
     Media,
     Volume,
     Brightness,
+    NightLight,
     DoNotDisturb,
     LockScreen,
+    /// Opens the session menu, the way LockScreen opens the lock overlay.
+    Session,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +213,15 @@ impl Clone for SystemUiState {
                 entries: entries.clone(),
                 selected: *selected,
             },
+            Self::SessionMenu {
+                entries,
+                selected,
+                armed,
+            } => Self::SessionMenu {
+                entries: entries.clone(),
+                selected: *selected,
+                armed: *armed,
+            },
         }
     }
 }
@@ -251,6 +270,7 @@ impl SystemUiState {
         media: Option<&crate::jwm::features::MediaState>,
         volume: Option<(u8, bool)>,
         brightness: Option<u8>,
+        night_light: bool,
         do_not_disturb: bool,
     ) -> Self {
         let mut entries = Vec::new();
@@ -273,11 +293,17 @@ impl SystemUiState {
             ));
         }
         entries.push(ControlEntry::simple(
+            ControlKind::NightLight,
+            0,
+            night_light,
+        ));
+        entries.push(ControlEntry::simple(
             ControlKind::DoNotDisturb,
             0,
             do_not_disturb,
         ));
         entries.push(ControlEntry::simple(ControlKind::LockScreen, 0, false));
+        entries.push(ControlEntry::simple(ControlKind::Session, 0, false));
         Self::ControlCenter {
             entries,
             selected: 0,
@@ -334,6 +360,42 @@ impl SystemUiState {
             entries.clear();
             *selected = 0;
         }
+    }
+
+    /// Build the session menu from what this machine can actually do.
+    pub fn session_menu() -> Self {
+        Self::SessionMenu {
+            entries: crate::jwm::features::session::available_actions(
+                crate::jwm::features::session::hibernate_supported(),
+            ),
+            selected: 0,
+            armed: false,
+        }
+    }
+
+    pub fn is_session_menu(&self) -> bool {
+        matches!(self, Self::SessionMenu { .. })
+    }
+
+    /// Activate the selected row, returning the action only once it is
+    /// confirmed. Destructive rows arm on the first Enter and run on the
+    /// second, so a stray keystroke cannot end the session.
+    pub fn activate_session_entry(&mut self) -> Option<crate::jwm::features::SessionAction> {
+        let Self::SessionMenu {
+            entries,
+            selected,
+            armed,
+        } = self
+        else {
+            return None;
+        };
+        let action = *entries.get(*selected)?;
+        if action.needs_confirmation() && !*armed {
+            *armed = true;
+            return None;
+        }
+        *armed = false;
+        Some(action)
     }
 
     /// Put the selection back on a rebuilt control center, clamped in case the
@@ -601,7 +663,8 @@ impl SystemUiState {
             Self::Inactive
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. } => return,
+            | Self::NotificationCenter { .. }
+            | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
     }
@@ -618,7 +681,8 @@ impl SystemUiState {
             Self::Inactive
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. } => return,
+            | Self::NotificationCenter { .. }
+            | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
     }
@@ -646,6 +710,20 @@ impl SystemUiState {
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         } else if let Self::NotificationCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        } else if let Self::SessionMenu {
+            entries,
+            selected,
+            armed,
+        } = self
+        {
+            // Moving off an armed row cancels it: the confirmation belongs to
+            // the row the user was looking at.
+            *armed = false;
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -790,11 +868,16 @@ impl SystemUiState {
                             slider_bar(entry.percent),
                             entry.percent
                         ),
+                        ControlKind::NightLight => format!(
+                            "\u{f186}  Night Light{:>26}",
+                            if entry.enabled { "[ on ]" } else { "[ off ]" }
+                        ),
                         ControlKind::DoNotDisturb => format!(
                             "\u{f1f6}  Do Not Disturb{:>23}",
                             if entry.enabled { "[ on ]" } else { "[ off ]" }
                         ),
                         ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
+                        ControlKind::Session => "\u{f011}  Session\u{2026}".to_string(),
                     })
                     .collect();
                 OverlayParts {
@@ -824,6 +907,34 @@ impl SystemUiState {
                     items,
                     selected: (!entries.is_empty()).then(|| selected - start),
                     hint: "Enter  activate    d  dismiss    c  clear all    Esc  close".into(),
+                }
+            }
+            Self::SessionMenu {
+                entries,
+                selected,
+                armed,
+            } => {
+                let items = entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, action)| {
+                        crate::jwm::features::session::menu_row(
+                            *action,
+                            *armed && index == *selected,
+                        )
+                    })
+                    .collect();
+                let hint = if *armed {
+                    "Enter  confirm    Esc  cancel".to_string()
+                } else {
+                    "Enter  select    \u{f062}/\u{f063}  move    Esc  close".to_string()
+                };
+                OverlayParts {
+                    title: "\u{f011}  SESSION".into(),
+                    query: None,
+                    items,
+                    selected: Some((*selected).min(entries.len().saturating_sub(1))),
+                    hint,
                 }
             }
             Self::MonitorLayout {
@@ -935,7 +1046,8 @@ impl SystemUiState {
             | Self::Locked { .. }
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. } => {}
+            | Self::NotificationCenter { .. }
+            | Self::SessionMenu { .. } => {}
         }
     }
 }
@@ -1408,19 +1520,89 @@ mod tests {
 
     #[test]
     fn control_center_builds_rows_for_available_controls() {
-        // Volume and brightness present.
-        let state = SystemUiState::control_center(None, Some((45, false)), Some(60), true);
+        // Volume and brightness present, DND on, night light off.
+        let state = SystemUiState::control_center(None, Some((45, false)), Some(60), false, true);
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));
         let parts = state.overlay_parts();
-        assert_eq!(parts.items.len(), 4);
+        // volume, brightness, night light, DND, lock, session
+        assert_eq!(parts.items.len(), 6);
         assert!(parts.items[0].contains("45%"));
         assert!(parts.items[1].contains("60%"));
-        assert!(parts.items[2].contains("[ on ]"));
+        assert!(parts.items[2].contains("[ off ]"), "night light off");
+        assert!(parts.items[3].contains("[ on ]"), "DND on");
 
-        // No audio, no backlight: only the toggles remain.
-        let state = SystemUiState::control_center(None, None, None, false);
-        assert_eq!(state.selected_control(), Some(ControlKind::DoNotDisturb));
-        assert_eq!(state.overlay_parts().items.len(), 2);
+        // No audio, no backlight: only the toggles and actions remain.
+        let state = SystemUiState::control_center(None, None, None, false, false);
+        assert_eq!(state.selected_control(), Some(ControlKind::NightLight));
+        assert_eq!(state.overlay_parts().items.len(), 4);
+    }
+
+    #[test]
+    fn a_destructive_session_row_runs_only_on_the_second_enter() {
+        use crate::jwm::features::SessionAction;
+
+        let mut menu = SystemUiState::SessionMenu {
+            entries: vec![SessionAction::Lock, SessionAction::Shutdown],
+            selected: 1,
+            armed: false,
+        };
+
+        // First Enter arms and says so; nothing runs yet.
+        assert_eq!(menu.activate_session_entry(), None);
+        assert!(menu.overlay_parts().items[1].contains("Enter to confirm"));
+        assert!(menu.overlay_parts().hint.contains("confirm"));
+
+        // Second Enter runs it and disarms.
+        assert_eq!(menu.activate_session_entry(), Some(SessionAction::Shutdown));
+        assert!(!menu.overlay_parts().items[1].contains("confirm"));
+    }
+
+    #[test]
+    fn a_recoverable_session_row_runs_immediately() {
+        use crate::jwm::features::SessionAction;
+
+        let mut menu = SystemUiState::SessionMenu {
+            entries: vec![SessionAction::Lock, SessionAction::Suspend],
+            selected: 1,
+            armed: false,
+        };
+        assert_eq!(menu.activate_session_entry(), Some(SessionAction::Suspend));
+    }
+
+    #[test]
+    fn moving_off_an_armed_session_row_cancels_the_confirmation() {
+        use crate::jwm::features::SessionAction;
+
+        let mut menu = SystemUiState::SessionMenu {
+            entries: vec![SessionAction::Reboot, SessionAction::Shutdown],
+            selected: 0,
+            armed: false,
+        };
+        assert_eq!(menu.activate_session_entry(), None);
+        menu.move_selection(1);
+        menu.move_selection(-1);
+
+        // Back on the same row, but disarmed: it must arm again, not run.
+        assert!(!menu.overlay_parts().items[0].contains("confirm"));
+        assert_eq!(menu.activate_session_entry(), None);
+    }
+
+    #[test]
+    fn an_empty_session_menu_activates_nothing() {
+        let mut menu = SystemUiState::SessionMenu {
+            entries: Vec::new(),
+            selected: 0,
+            armed: false,
+        };
+        assert_eq!(menu.activate_session_entry(), None);
+        menu.move_selection(1);
+        assert!(menu.is_session_menu());
+    }
+
+    #[test]
+    fn the_night_light_row_reflects_the_live_state() {
+        let state = SystemUiState::control_center(None, None, None, true, false);
+        assert!(state.overlay_parts().items[0].contains("[ on ]"));
     }
 
     #[test]
@@ -1434,7 +1616,8 @@ mod tests {
             can_go_next: true,
             can_go_previous: true,
         };
-        let state = SystemUiState::control_center(Some(&media), Some((45, false)), None, false);
+        let state =
+            SystemUiState::control_center(Some(&media), Some((45, false)), None, false, false);
 
         assert_eq!(state.selected_control(), Some(ControlKind::Media));
         let parts = state.overlay_parts();
@@ -1444,18 +1627,19 @@ mod tests {
 
     #[test]
     fn restoring_the_selection_clamps_when_rows_disappear() {
-        // Selection sat on the lock row of a five-row panel; rebuilt without
-        // the media row it must not point past the end.
-        let mut rebuilt = SystemUiState::control_center(None, None, None, false);
-        rebuilt.restore_control_selection(4);
-        assert_eq!(rebuilt.selected_control(), Some(ControlKind::LockScreen));
+        // Selection sat past the end of a shorter, rebuilt panel; it must land
+        // on the last row instead of pointing nowhere.
+        let mut rebuilt = SystemUiState::control_center(None, None, None, false, false);
+        rebuilt.restore_control_selection(9);
+        assert_eq!(rebuilt.selected_control(), Some(ControlKind::Session));
     }
 
     #[test]
     fn control_center_selection_wraps_and_updates_write_back() {
-        let mut state = SystemUiState::control_center(None, Some((45, false)), Some(60), false);
+        let mut state =
+            SystemUiState::control_center(None, Some((45, false)), Some(60), false, false);
         state.move_selection(-1);
-        assert_eq!(state.selected_control(), Some(ControlKind::LockScreen));
+        assert_eq!(state.selected_control(), Some(ControlKind::Session));
         state.move_selection(1);
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));
 
@@ -1478,7 +1662,7 @@ mod tests {
 
     #[test]
     fn control_center_ignores_text_input() {
-        let mut state = SystemUiState::control_center(None, Some((45, false)), None, false);
+        let mut state = SystemUiState::control_center(None, Some((45, false)), None, false, false);
         state.push_char('x');
         state.backspace();
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));

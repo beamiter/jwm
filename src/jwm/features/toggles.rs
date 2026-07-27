@@ -155,10 +155,12 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
+        let night_light = self.night_light_active();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
             self.features.media.get(),
             volume,
             brightness,
+            night_light,
             self.do_not_disturb,
         );
         self.sync_system_ui(backend);
@@ -181,14 +183,141 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
+        let night_light = self.night_light_active();
         let mut rebuilt = crate::jwm::features::SystemUiState::control_center(
             self.features.media.get(),
             volume,
             brightness,
+            night_light,
             self.do_not_disturb,
         );
         rebuilt.restore_control_selection(selected);
         self.features.system_ui = rebuilt;
+    }
+
+    /// Open the session menu: lock, suspend, hibernate, log out, restart,
+    /// shut down. Destructive rows need a second Enter to confirm.
+    pub(crate) fn session_menu(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("session menu requires the JWM compositor".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for session menu".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::session_menu();
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Run one session action. Lock swaps in the lock overlay; log out quits
+    /// the window manager; the rest run their configured command.
+    pub(crate) fn run_session_action(
+        &mut self,
+        backend: &mut dyn Backend,
+        action: crate::jwm::features::SessionAction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::jwm::features::SessionAction;
+
+        let cfg = CONFIG.load();
+        let command = match action {
+            SessionAction::Lock => {
+                // Keep the grabs: the lock overlay wants them anyway.
+                self.features.system_ui = crate::jwm::features::SystemUiState::lock();
+                self.sync_system_ui(backend);
+                return Ok(());
+            }
+            SessionAction::Logout => {
+                self.close_system_ui(backend);
+                info!("Session menu: logging out");
+                self.quit(backend, &WMArgEnum::Int(0))?;
+                return Ok(());
+            }
+            SessionAction::Suspend => cfg.behavior().suspend_command.clone(),
+            SessionAction::Hibernate => cfg.behavior().hibernate_command.clone(),
+            SessionAction::Reboot => cfg.behavior().reboot_command.clone(),
+            SessionAction::Shutdown => cfg.behavior().shutdown_command.clone(),
+        };
+
+        let Some((program, args)) = crate::jwm::features::session::split_command(&command) else {
+            return Err(format!("no command configured for {}", action.as_str()).into());
+        };
+        // Close the panel first: suspend hands control to logind, and coming
+        // back to a stale menu would be confusing.
+        self.close_system_ui(backend);
+        info!("Session menu: {} -> {command}", action.as_str());
+        match Command::new(&program).args(&args).spawn() {
+            Ok(_) => Ok(()),
+            Err(error) => Err(format!("could not run {command:?}: {error}").into()),
+        }
+    }
+
+    /// Toggle night light on top of its schedule. The override sticks until
+    /// toggled back, so a user who wants warmth at noon gets it.
+    pub(crate) fn toggle_night_light(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let enabled = !self.night_light_active();
+        self.set_night_light_override(backend, enabled);
+        Ok(())
+    }
+
+    /// Whether the screen is currently warmed, by schedule or by override.
+    pub(crate) fn night_light_active(&self) -> bool {
+        if let Some(forced) = self.night_light_override {
+            return forced;
+        }
+        let cfg = CONFIG.load();
+        let behavior = cfg.behavior();
+        behavior.night_light
+            && Self::compute_night_light_temp(
+                &behavior.night_light_start,
+                &behavior.night_light_end,
+                behavior.night_light_temp,
+                behavior.night_light_transition_mins,
+            ) > 0.0
+    }
+
+    /// Force night light on or off and apply it immediately, rather than
+    /// waiting for the once-a-minute schedule tick.
+    pub(crate) fn set_night_light_override(&mut self, backend: &mut dyn Backend, enabled: bool) {
+        self.night_light_override = Some(enabled);
+        let temperature = if enabled {
+            CONFIG.load().behavior().night_light_temp
+        } else {
+            0.0
+        };
+        backend.compositor_set_color_temperature(temperature);
+        self.last_night_light_update = Some(std::time::Instant::now());
+        log::info!("Night light {}", if enabled { "ON" } else { "OFF" });
+        self.broadcast_ipc_event(
+            "night_light/toggle",
+            serde_json::json!({ "enabled": enabled }),
+        );
+    }
+
+    /// Drop the panel and release its grabs.
+    pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.features.system_ui.cancel();
+        backend.compositor_set_system_ui(None);
+        let _ = backend.key_ops().ungrab_keyboard();
+        let _ = backend.input_ops().ungrab_pointer();
+        backend.compositor_force_full_redraw();
     }
 
     /// Open the notification center: the bounded history JWM kept while

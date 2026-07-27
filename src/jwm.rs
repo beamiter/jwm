@@ -174,6 +174,9 @@ pub struct Jwm {
 
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
+    /// User override for night light: `None` follows the configured
+    /// schedule, `Some` forces it on or off until toggled back.
+    pub(crate) night_light_override: Option<bool>,
 
     /// 所有特殊功能的状态（截图、overview、录制、放大镜等）
     pub features: FeatureStates,
@@ -579,6 +582,7 @@ impl Jwm {
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
             last_night_light_update: None,
+            night_light_override: None,
             features: FeatureStates::new(),
             event_coalescer:
                 crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),

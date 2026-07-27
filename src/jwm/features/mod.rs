@@ -23,6 +23,7 @@ pub mod overview_plan;
 pub mod recording;
 pub mod recording_plan;
 pub mod screenshot;
+pub mod session;
 pub mod system_controls;
 pub mod system_ui;
 pub mod toggles;
@@ -41,6 +42,7 @@ pub use overview_plan::CyclePlan;
 pub use recording::RecordingState;
 pub use recording_plan::FinalizationPlan;
 pub use screenshot::ScreenshotState;
+pub use session::SessionAction;
 pub use system_ui::{ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState};
 
 /// 所有特性的组合状态

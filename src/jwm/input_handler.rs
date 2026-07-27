@@ -267,6 +267,15 @@ impl Jwm {
                         }
                     }
                 }
+                ControlKind::NightLight => {
+                    if activate {
+                        let enabled = !self.night_light_active();
+                        self.set_night_light_override(backend, enabled);
+                        self.features
+                            .system_ui
+                            .update_control(ControlKind::NightLight, 0, enabled);
+                    }
+                }
                 ControlKind::DoNotDisturb => {
                     if activate {
                         self.do_not_disturb = !self.do_not_disturb;
@@ -276,6 +285,15 @@ impl Jwm {
                             0,
                             enabled,
                         );
+                    }
+                }
+                ControlKind::Session => {
+                    if activate {
+                        // Swap the panel for the session menu; the grabs stay.
+                        self.features.system_ui =
+                            crate::jwm::features::SystemUiState::session_menu();
+                        self.sync_system_ui(backend);
+                        return;
                     }
                 }
                 ControlKind::LockScreen => {
@@ -324,6 +342,27 @@ impl Jwm {
                 || keysym == keys::KEY_BackSpace
             {
                 self.close_notification(id, CloseReason::Dismissed);
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
+    /// Key handling while the session menu is open: Up/Down move, Return
+    /// arms a destructive row and then runs it.
+    fn handle_session_menu_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
+        if keysym == keys::KEY_Up {
+            self.features.system_ui.move_selection(-1);
+        } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+            self.features.system_ui.move_selection(1);
+        } else if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+            if let Some(action) = self.features.system_ui.activate_session_entry() {
+                if let Err(error) = self.run_session_action(backend, action) {
+                    error!("Session action {} failed: {error}", action.as_str());
+                    // Leave the menu open so the failure is visible rather
+                    // than dropping the user back to a bare desktop.
+                    self.sync_system_ui(backend);
+                }
+                return;
             }
         }
         self.sync_system_ui(backend);
@@ -439,6 +478,10 @@ impl Jwm {
             }
             if self.features.system_ui.is_notification_center() {
                 self.handle_notification_center_key(backend, keysym);
+                return Ok(());
+            }
+            if self.features.system_ui.is_session_menu() {
+                self.handle_session_menu_key(backend, keysym);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

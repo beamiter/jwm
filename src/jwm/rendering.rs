@@ -95,17 +95,20 @@ impl Jwm {
                 self.last_night_light_update = Some(Instant::now());
                 let cfg = CONFIG.load();
                 let behavior = cfg.behavior();
-                if behavior.night_light {
-                    let temp = Self::compute_night_light_temp(
+                // A user override outranks the schedule until it is toggled
+                // back, so the control-center row does not lose to the clock.
+                let temp = match self.night_light_override {
+                    Some(true) => behavior.night_light_temp,
+                    Some(false) => 0.0,
+                    None if behavior.night_light => Self::compute_night_light_temp(
                         &behavior.night_light_start,
                         &behavior.night_light_end,
                         behavior.night_light_temp,
                         behavior.night_light_transition_mins,
-                    );
-                    backend.compositor_set_color_temperature(temp);
-                } else {
-                    backend.compositor_set_color_temperature(0.0);
-                }
+                    ),
+                    None => 0.0,
+                };
+                backend.compositor_set_color_temperature(temp);
             }
         }
 

@@ -554,6 +554,19 @@ pub struct BehaviorConfig {
     #[serde(default = "default_night_light_transition")]
     pub night_light_transition_mins: u32,
 
+    // --- Session menu ---
+    // Commands the session menu runs. Each is argv, not a shell line: it is
+    // split on whitespace and executed directly. Logout is handled inside
+    // JWM (it quits the window manager) and has no command.
+    #[serde(default = "default_suspend_command")]
+    pub suspend_command: String,
+    #[serde(default = "default_hibernate_command")]
+    pub hibernate_command: String,
+    #[serde(default = "default_reboot_command")]
+    pub reboot_command: String,
+    #[serde(default = "default_shutdown_command")]
+    pub shutdown_command: String,
+
     // --- Magnifier ---
     #[serde(default)]
     pub magnifier_enabled: bool,
@@ -991,6 +1004,18 @@ fn default_night_light_end() -> String {
 fn default_night_light_transition() -> u32 {
     30
 }
+fn default_suspend_command() -> String {
+    "systemctl suspend".to_string()
+}
+fn default_hibernate_command() -> String {
+    "systemctl hibernate".to_string()
+}
+fn default_reboot_command() -> String {
+    "systemctl reboot".to_string()
+}
+fn default_shutdown_command() -> String {
+    "systemctl poweroff".to_string()
+}
 fn default_magnifier_radius() -> f32 {
     100.0
 }
@@ -1400,6 +1425,10 @@ impl Default for Config {
                     night_light_start: default_night_light_start(),
                     night_light_end: default_night_light_end(),
                     night_light_transition_mins: default_night_light_transition(),
+                    suspend_command: default_suspend_command(),
+                    hibernate_command: default_hibernate_command(),
+                    reboot_command: default_reboot_command(),
+                    shutdown_command: default_shutdown_command(),
                     magnifier_enabled: false,
                     magnifier_radius: default_magnifier_radius(),
                     magnifier_zoom: default_magnifier_zoom(),
@@ -1620,6 +1649,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string()],
                 key: "F11".to_string(),
                 function: "notification_center".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Shift".to_string()],
+                key: "Escape".to_string(),
+                function: "session_menu".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2540,6 +2575,8 @@ impl Config {
             "media_next" => Some(Jwm::media_next),
             "media_previous" => Some(Jwm::media_previous),
             "media_stop" => Some(Jwm::media_stop),
+            "session_menu" => Some(Jwm::session_menu),
+            "toggle_night_light" => Some(Jwm::toggle_night_light),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 
