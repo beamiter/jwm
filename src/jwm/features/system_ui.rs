@@ -87,6 +87,15 @@ pub enum SystemUiState {
         entries: Vec<NotificationEntry>,
         selected: usize,
     },
+    WifiPicker {
+        /// Rendered rows; empty while the scan is still running.
+        entries: Vec<WifiEntry>,
+        selected: usize,
+        /// `Some` while prompting for the selected network's passphrase.
+        passphrase: Option<String>,
+        /// Status line: scanning, connecting, or why it failed.
+        message: String,
+    },
     SessionMenu {
         entries: Vec<crate::jwm::features::SessionAction>,
         selected: usize,
@@ -105,6 +114,15 @@ pub struct NotificationEntry {
     pub row: String,
     /// Action key the sender marked as default, invoked on Return.
     pub default_action: Option<String>,
+}
+
+/// One Wi-Fi picker row: the rendered text plus what joining it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiEntry {
+    pub ssid: String,
+    pub row: String,
+    /// Whether the network is secured, i.e. may need a passphrase.
+    pub secured: bool,
 }
 
 /// One row of the control center: sliders react to Left/Right, toggles and
@@ -242,6 +260,18 @@ impl Clone for SystemUiState {
                 entries: entries.clone(),
                 selected: *selected,
             },
+            // Never duplicate a passphrase into another allocation.
+            Self::WifiPicker {
+                entries,
+                selected,
+                passphrase,
+                message,
+            } => Self::WifiPicker {
+                entries: entries.clone(),
+                selected: *selected,
+                passphrase: passphrase.as_ref().map(|_| String::new()),
+                message: message.clone(),
+            },
             Self::SessionMenu {
                 entries,
                 selected,
@@ -268,9 +298,14 @@ impl SystemUiState {
     }
 
     pub fn cancel(&mut self) {
-        if let Self::Locked { password, .. } = self {
-            // Keep the optimizer from eliding the overwrite before dropping.
-            unsafe { password.as_bytes_mut().fill(0) };
+        // Keep the optimizer from eliding the overwrites before dropping.
+        match self {
+            Self::Locked { password, .. } => unsafe { password.as_bytes_mut().fill(0) },
+            Self::WifiPicker {
+                passphrase: Some(typed),
+                ..
+            } => unsafe { typed.as_bytes_mut().fill(0) },
+            _ => {}
         }
         *self = Self::Inactive;
     }
@@ -425,6 +460,112 @@ impl SystemUiState {
         if let Self::NotificationCenter { entries, selected } = self {
             entries.clear();
             *selected = 0;
+        }
+    }
+
+    /// Open the Wi-Fi picker in its scanning state. The list arrives later:
+    /// nmcli's first scan takes seconds and must not block the compositor.
+    pub fn wifi_picker(message: impl Into<String>) -> Self {
+        Self::WifiPicker {
+            entries: Vec::new(),
+            selected: 0,
+            passphrase: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn is_wifi_picker(&self) -> bool {
+        matches!(self, Self::WifiPicker { .. })
+    }
+
+    /// Fill in a finished scan, keeping the selection on the same network
+    /// when it is still in range.
+    pub fn set_wifi_networks(&mut self, networks: &[crate::jwm::features::WifiNetwork]) {
+        let Self::WifiPicker {
+            entries,
+            selected,
+            message,
+            ..
+        } = self
+        else {
+            return;
+        };
+        let previous = entries.get(*selected).map(|entry| entry.ssid.clone());
+        *entries = networks
+            .iter()
+            .map(|network| WifiEntry {
+                ssid: network.ssid.clone(),
+                row: crate::jwm::features::connectivity::picker_row(network),
+                secured: !network.is_open(),
+            })
+            .collect();
+        *selected = previous
+            .and_then(|ssid| entries.iter().position(|entry| entry.ssid == ssid))
+            .unwrap_or(0);
+        message.clear();
+    }
+
+    /// The network the selection rests on.
+    pub fn selected_wifi(&self) -> Option<&WifiEntry> {
+        let Self::WifiPicker {
+            entries, selected, ..
+        } = self
+        else {
+            return None;
+        };
+        entries.get(*selected)
+    }
+
+    /// Start prompting for the selected network's passphrase.
+    pub fn prompt_wifi_passphrase(&mut self) {
+        if let Self::WifiPicker {
+            passphrase,
+            message,
+            ..
+        } = self
+        {
+            *passphrase = Some(String::new());
+            message.clear();
+        }
+    }
+
+    /// Whether the picker is currently asking for a passphrase.
+    pub fn is_prompting_wifi_passphrase(&self) -> bool {
+        matches!(
+            self,
+            Self::WifiPicker {
+                passphrase: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Take the typed passphrase, clearing the prompt. The caller owns the
+    /// only copy afterwards and is responsible for wiping it.
+    pub fn take_wifi_passphrase(&mut self) -> Option<String> {
+        let Self::WifiPicker { passphrase, .. } = self else {
+            return None;
+        };
+        passphrase.take()
+    }
+
+    /// Abandon the passphrase prompt, wiping what was typed.
+    pub fn cancel_wifi_passphrase(&mut self) -> bool {
+        let Self::WifiPicker { passphrase, .. } = self else {
+            return false;
+        };
+        let Some(mut typed) = passphrase.take() else {
+            return false;
+        };
+        // Keep the optimizer from eliding the overwrite before dropping.
+        unsafe { typed.as_bytes_mut().fill(0) };
+        true
+    }
+
+    /// Replace the picker's status line.
+    pub fn set_wifi_message(&mut self, text: impl Into<String>) {
+        if let Self::WifiPicker { message, .. } = self {
+            *message = text.into();
         }
     }
 
@@ -722,6 +863,15 @@ impl SystemUiState {
     pub fn push_char(&mut self, ch: char) {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => query.push(ch),
+            Self::WifiPicker {
+                passphrase: Some(typed),
+                message,
+                ..
+            } => {
+                typed.push(ch);
+                message.clear();
+                return;
+            }
             Self::Locked { password, message } => {
                 password.push(ch);
                 message.clear();
@@ -730,6 +880,7 @@ impl SystemUiState {
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
+            | Self::WifiPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -740,6 +891,15 @@ impl SystemUiState {
             Self::Launcher { query, .. } | Self::Info { query, .. } => {
                 query.pop();
             }
+            Self::WifiPicker {
+                passphrase: Some(typed),
+                message,
+                ..
+            } => {
+                typed.pop();
+                message.clear();
+                return;
+            }
             Self::Locked { password, message } => {
                 password.pop();
                 message.clear();
@@ -748,6 +908,7 @@ impl SystemUiState {
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
+            | Self::WifiPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -776,6 +937,15 @@ impl SystemUiState {
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         } else if let Self::NotificationCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        } else if let Self::WifiPicker {
+            entries, selected, ..
+        } = self
+        {
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -919,7 +1089,7 @@ impl SystemUiState {
                         | ControlKind::Bluetooth => entry.label.clone(),
                         ControlKind::Volume => {
                             let icon = if entry.enabled {
-                                "\u{f6a9}" // fa-volume-mute
+                                "\u{f026}" // fa-volume-off (muted)
                             } else {
                                 "\u{f028}" // fa-volume-up
                             };
@@ -977,6 +1147,60 @@ impl SystemUiState {
                     items,
                     selected: (!entries.is_empty()).then(|| selected - start),
                     hint: "Enter  activate    d  dismiss    c  clear all    Esc  close".into(),
+                }
+            }
+            Self::WifiPicker {
+                entries,
+                selected,
+                passphrase,
+                message,
+            } => {
+                let mut items: Vec<String> = if entries.is_empty() {
+                    vec![format!(
+                        "  {}",
+                        if message.is_empty() {
+                            "No networks in range"
+                        } else {
+                            message
+                        }
+                    )]
+                } else {
+                    let start = selected.saturating_sub(11);
+                    entries
+                        .iter()
+                        .skip(start)
+                        .take(12)
+                        .map(|entry| entry.row.clone())
+                        .collect()
+                };
+                if let Some(typed) = passphrase {
+                    items.push(String::new());
+                    // Name the network: the selection highlight is dropped
+                    // while prompting, so the row alone would not say which
+                    // passphrase is being asked for.
+                    let ssid = entries
+                        .get(*selected)
+                        .map_or("network", |entry| entry.ssid.as_str());
+                    items.push(format!(
+                        "\u{f084}  Passphrase for {ssid}  {}",
+                        "*".repeat(typed.chars().count())
+                    ));
+                } else if !message.is_empty() && !entries.is_empty() {
+                    items.push(String::new());
+                    items.push(format!("  {message}"));
+                }
+                let hint = if passphrase.is_some() {
+                    "Enter  join    Esc  cancel".to_string()
+                } else {
+                    "Enter  join    \u{f062}/\u{f063}  select    Esc  close".to_string()
+                };
+                OverlayParts {
+                    title: "\u{f1eb}  WI-FI".into(),
+                    query: None,
+                    selected: (!entries.is_empty() && passphrase.is_none())
+                        .then(|| selected - selected.saturating_sub(11)),
+                    items,
+                    hint,
                 }
             }
             Self::SessionMenu {
@@ -1117,6 +1341,7 @@ impl SystemUiState {
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::NotificationCenter { .. }
+            | Self::WifiPicker { .. }
             | Self::SessionMenu { .. } => {}
         }
     }

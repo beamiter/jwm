@@ -268,18 +268,40 @@ impl Jwm {
                     }
                 }
                 ControlKind::Network => {
-                    if activate {
-                        let enabled = !self
-                            .features
-                            .connectivity
-                            .network
-                            .as_ref()
-                            .is_some_and(|state| state.wifi_enabled);
-                        if crate::jwm::features::connectivity::set_wifi(enabled) {
+                    use crate::jwm::features::connectivity::{self, NetworkRowAction};
+
+                    let radio_on = self
+                        .features
+                        .connectivity
+                        .network
+                        .as_ref()
+                        .is_some_and(|state| state.wifi_enabled);
+                    match connectivity::plan_network_row(radio_on, activate, slider_delta.is_some())
+                    {
+                        NetworkRowAction::OpenPicker => {
+                            if let Some(scan) = connectivity::start_scan() {
+                                self.features.wifi_scan = Some(scan);
+                                self.features.system_ui =
+                                    crate::jwm::features::SystemUiState::wifi_picker(
+                                        "Scanning\u{2026}",
+                                    );
+                                self.sync_system_ui(backend);
+                                return;
+                            }
+                        }
+                        NetworkRowAction::EnableRadio => {
                             // Re-read rather than assume: the radio may be
                             // hard-blocked and refuse to come back on.
-                            self.refresh_connectivity();
+                            if connectivity::set_wifi(true) {
+                                self.refresh_connectivity();
+                            }
                         }
+                        NetworkRowAction::SetRadio(enabled) => {
+                            if connectivity::set_wifi(enabled) {
+                                self.refresh_connectivity();
+                            }
+                        }
+                        NetworkRowAction::Nothing => {}
                     }
                 }
                 ControlKind::Bluetooth => {
@@ -408,6 +430,39 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
+    /// Key handling while the Wi-Fi picker is open: Up/Down select, Return
+    /// joins (prompting for a passphrase first when one is needed), `r`
+    /// rescans, and typing feeds the prompt.
+    fn handle_wifi_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32, mods: Mods) {
+        let prompting = self.features.system_ui.is_prompting_wifi_passphrase();
+
+        if keysym == keys::KEY_Return {
+            self.join_selected_wifi(backend);
+            return;
+        }
+        if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
+            self.features.system_ui.backspace();
+        } else if !prompting && (keysym == keys::KEY_Up) {
+            self.features.system_ui.move_selection(-1);
+        } else if !prompting && (keysym == keys::KEY_Down || keysym == keys::KEY_Tab) {
+            self.features.system_ui.move_selection(1);
+        } else if !prompting && keysym == keys::KEY_r {
+            match crate::jwm::features::connectivity::start_scan() {
+                Some(scan) => {
+                    self.features.wifi_scan = Some(scan);
+                    self.features.system_ui.set_wifi_message("Scanning\u{2026}");
+                }
+                None => self
+                    .features
+                    .system_ui
+                    .set_wifi_message("nmcli is not available"),
+            }
+        } else if prompting && let Some(ch) = Self::system_ui_char(keysym, mods) {
+            self.features.system_ui.push_char(ch);
+        }
+        self.sync_system_ui(backend);
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -425,6 +480,12 @@ impl Jwm {
         // shared by X11rb, XCB and Wayland-udev, keeping behavior identical.
         if self.features.system_ui.is_active() {
             let locked = self.features.system_ui.is_locked();
+            // Escape backs out of the passphrase prompt before it closes the
+            // picker, so a typo does not cost the whole scan.
+            if keysym == keys::KEY_Escape && self.features.system_ui.cancel_wifi_passphrase() {
+                self.sync_system_ui(backend);
+                return Ok(());
+            }
             if keysym == keys::KEY_Escape && !locked {
                 self.features.system_ui.cancel();
                 backend.compositor_set_system_ui(None);
@@ -522,6 +583,10 @@ impl Jwm {
             }
             if self.features.system_ui.is_session_menu() {
                 self.handle_session_menu_key(backend, keysym);
+                return Ok(());
+            }
+            if self.features.system_ui.is_wifi_picker() {
+                self.handle_wifi_picker_key(backend, keysym, clean_state);
                 return Ok(());
             }
             if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {

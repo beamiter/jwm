@@ -167,7 +167,8 @@ pub fn parse_rfkill_blocked(output: &str) -> Option<bool> {
 #[must_use]
 pub fn wifi_icon(state: &NetworkState) -> &'static str {
     match state.kind {
-        LinkKind::Wired => "\u{f6ff}",          // fa-network-wired
+        // fa-sitemap: fa-network-wired is an f6xx codepoint many fonts lack.
+        LinkKind::Wired => "\u{f0e8}",
         _ if !state.wifi_enabled => "\u{f05e}", // fa-ban
         _ => "\u{f1eb}",                        // fa-wifi
     }
@@ -370,6 +371,300 @@ pub fn set_bluetooth(enabled: bool) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scanning and joining
+// ---------------------------------------------------------------------------
+
+/// One access point from a scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub ssid: String,
+    pub signal: u8,
+    /// Empty for an open network; otherwise the flags nmcli reports, e.g.
+    /// `WPA2` or `WPA1 WPA2`.
+    pub security: String,
+    /// Whether this is the network currently in use.
+    pub in_use: bool,
+}
+
+impl WifiNetwork {
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.security.trim().is_empty()
+    }
+}
+
+/// Work handed to a worker thread, because doing it inline would freeze the
+/// compositor: nmcli's first `dev wifi list` after boot triggers a scan and
+/// takes seconds, and joining a network takes seconds more.
+///
+/// The result is picked up by polling from the frame tick — jwm's event loop
+/// owns all state, so nothing but the finished value crosses the boundary.
+#[derive(Debug)]
+pub struct BackgroundJob<T> {
+    slot: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+}
+
+impl<T: Send + 'static> BackgroundJob<T> {
+    pub fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handle = std::sync::Arc::clone(&slot);
+        std::thread::spawn(move || {
+            let value = work();
+            if let Ok(mut guard) = handle.lock() {
+                *guard = Some(value);
+            }
+        });
+        Self { slot }
+    }
+
+    /// The finished value, once. Returns `None` while the work is still
+    /// running, and never blocks the caller: a contended lock simply reads as
+    /// "not ready yet" and is retried on the next frame.
+    #[must_use]
+    pub fn take(&self) -> Option<T> {
+        self.slot.try_lock().ok()?.take()
+    }
+}
+
+/// Parse `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list`.
+///
+/// The same SSID appears once per access point and band; the strongest
+/// reading wins so the list is one row per network. Hidden networks report an
+/// empty SSID and are dropped — there is nothing to show or select.
+#[must_use]
+pub fn parse_networks(output: &str) -> Vec<WifiNetwork> {
+    let mut networks: Vec<WifiNetwork> = Vec::new();
+    for line in output.lines() {
+        let fields = split_nmcli_fields(line);
+        let (Some(in_use), Some(ssid), Some(signal)) =
+            (fields.first(), fields.get(1), fields.get(2))
+        else {
+            continue;
+        };
+        let ssid = ssid.trim();
+        if ssid.is_empty() {
+            continue;
+        }
+        let signal = signal.trim().parse::<u8>().unwrap_or(0).min(100);
+        let network = WifiNetwork {
+            ssid: ssid.to_string(),
+            signal,
+            security: fields
+                .get(3)
+                .cloned()
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            in_use: in_use.trim() == "*",
+        };
+        match networks.iter_mut().find(|other| other.ssid == network.ssid) {
+            // Keep the strongest reading, but never lose the fact that one of
+            // this network's access points is the one in use.
+            Some(existing) => {
+                existing.in_use |= network.in_use;
+                if network.signal > existing.signal {
+                    existing.signal = network.signal;
+                    existing.security = network.security;
+                }
+            }
+            None => networks.push(network),
+        }
+    }
+    networks.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
+    networks
+}
+
+/// Signal glyph.
+///
+/// Two tiers, not four: the per-level `fa-signal-N` glyphs are
+/// FontAwesome-5-era `f6xx` codepoints that common Nerd Font builds do not
+/// carry, and a missing glyph renders as a hollow box. Everything the shell
+/// draws sticks to the FontAwesome-4 range for that reason; the exact
+/// strength is on the row as a percentage anyway.
+#[must_use]
+pub fn signal_icon(signal: u8) -> &'static str {
+    if signal >= 50 {
+        "\u{f1eb}" // fa-wifi
+    } else {
+        "\u{f012}" // fa-signal
+    }
+}
+
+/// One picker row: signal, SSID, a lock for secured networks, and a marker
+/// for the network already in use.
+#[must_use]
+pub fn picker_row(network: &WifiNetwork) -> String {
+    let lock = if network.is_open() {
+        " "
+    } else {
+        "\u{f023}" // fa-lock
+    };
+    let marker = if network.in_use { "\u{f00c}" } else { " " };
+    format!(
+        "{} {marker} {:<32} {lock}  {:>3}%",
+        signal_icon(network.signal),
+        network.ssid,
+        network.signal
+    )
+}
+
+/// What joining a network requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectPlan {
+    /// `NetworkManager` already has a profile: bring it up, no passphrase.
+    UseSaved,
+    /// Open network, nothing to ask for.
+    Open,
+    /// Secured and unknown: the picker must prompt before it can proceed.
+    NeedsPassphrase,
+    /// Secured, with the passphrase the user just typed.
+    WithPassphrase,
+}
+
+/// Decide how to join `network`. Pure so the branch that decides whether to
+/// prompt is testable without `NetworkManager`.
+#[must_use]
+pub fn plan_connect(network: &WifiNetwork, saved: bool, passphrase: Option<&str>) -> ConnectPlan {
+    if let Some(passphrase) = passphrase
+        && !passphrase.is_empty()
+    {
+        return ConnectPlan::WithPassphrase;
+    }
+    if saved {
+        return ConnectPlan::UseSaved;
+    }
+    if network.is_open() {
+        return ConnectPlan::Open;
+    }
+    ConnectPlan::NeedsPassphrase
+}
+
+/// What activating the control center's Network row should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkRowAction {
+    /// Show the list of networks in range.
+    OpenPicker,
+    /// Switch the radio on; there is nothing to pick while it is off.
+    EnableRadio,
+    /// Switch the radio the other way (explicit Left/Right).
+    SetRadio(bool),
+    Nothing,
+}
+
+/// Decide what the Network row does, given the radio state and which key was
+/// pressed.
+///
+/// `Enter` must never switch a working radio *off*: the row is the way into
+/// the picker, and an accidental keypress that drops the user's network — and
+/// with it anything running over it — is not an acceptable cost for a
+/// shortcut. Turning the radio off is only ever explicit, via Left/Right or
+/// the `toggle_wifi` action.
+#[must_use]
+pub fn plan_network_row(radio_on: bool, activate: bool, adjust: bool) -> NetworkRowAction {
+    if adjust {
+        return NetworkRowAction::SetRadio(!radio_on);
+    }
+    if !activate {
+        return NetworkRowAction::Nothing;
+    }
+    if radio_on {
+        NetworkRowAction::OpenPicker
+    } else {
+        NetworkRowAction::EnableRadio
+    }
+}
+
+/// Whether `NetworkManager` already stores a profile named `ssid`.
+#[must_use]
+pub fn has_saved_profile(ssid: &str) -> bool {
+    let Some(output) = run("nmcli", &["-t", "-f", "NAME", "connection", "show"]) else {
+        return false;
+    };
+    output.lines().any(|line| {
+        split_nmcli_fields(line)
+            .first()
+            .is_some_and(|name| name == ssid)
+    })
+}
+
+/// Start a scan on a worker thread. `None` when there is no nmcli to scan
+/// with — the picker then reports that instead of showing an empty list.
+#[must_use]
+pub fn start_scan() -> Option<BackgroundJob<Vec<WifiNetwork>>> {
+    if wifi_tool() != Some(WifiTool::Nmcli) {
+        return None;
+    }
+    Some(BackgroundJob::spawn(|| {
+        run(
+            "nmcli",
+            &[
+                "-t",
+                "-f",
+                "IN-USE,SSID,SIGNAL,SECURITY",
+                "dev",
+                "wifi",
+                "list",
+            ],
+        )
+        .map(|output| parse_networks(&output))
+        .unwrap_or_default()
+    }))
+}
+
+/// Join a network on a worker thread, reporting what happened.
+///
+/// The passphrase is moved into the thread and dropped there; it is never
+/// stored in the panel once this is called.
+#[must_use]
+pub fn start_connect(
+    ssid: &str,
+    plan: &ConnectPlan,
+    passphrase: Option<String>,
+) -> BackgroundJob<Result<String, String>> {
+    let ssid = ssid.to_string();
+    let plan = plan.clone();
+    BackgroundJob::spawn(move || {
+        let output = match plan {
+            ConnectPlan::UseSaved => Command::new("nmcli")
+                .args(["connection", "up", "id", &ssid])
+                .output(),
+            ConnectPlan::Open | ConnectPlan::NeedsPassphrase => Command::new("nmcli")
+                .args(["device", "wifi", "connect", &ssid])
+                .output(),
+            ConnectPlan::WithPassphrase => Command::new("nmcli")
+                .args([
+                    "device",
+                    "wifi",
+                    "connect",
+                    &ssid,
+                    "password",
+                    passphrase.as_deref().unwrap_or(""),
+                ])
+                .output(),
+        };
+        match output {
+            Ok(output) if output.status.success() => Ok(ssid),
+            Ok(output) => Err(summarize_nmcli_error(&String::from_utf8_lossy(
+                &output.stderr,
+            ))),
+            Err(error) => Err(format!("could not run nmcli: {error}")),
+        }
+    })
+}
+
+/// Condense nmcli's stderr into one line the panel can show.
+#[must_use]
+pub fn summarize_nmcli_error(stderr: &str) -> String {
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("connection failed");
+    let line = line.strip_prefix("Error:").map_or(line, str::trim);
+    line.chars().take(72).collect()
+}
+
 impl crate::jwm::Jwm {
     /// Re-read Wi-Fi and Bluetooth and refresh an open control center.
     /// Called after a toggle and on the hardware poll.
@@ -548,7 +843,233 @@ mod tests {
         };
         let row = network_row(&state);
         assert!(row.contains("Wired connection 1"));
-        assert!(row.contains('\u{f6ff}'));
+        assert!(row.contains('\u{f0e8}'));
+    }
+
+    fn network(ssid: &str, signal: u8, security: &str) -> WifiNetwork {
+        WifiNetwork {
+            ssid: ssid.to_string(),
+            signal,
+            security: security.to_string(),
+            in_use: false,
+        }
+    }
+
+    #[test]
+    fn a_scan_collapses_access_points_to_one_row_per_network() {
+        // Real output: the same SSID appears once per AP and band.
+        let output = " :ENGINEAI:80:WPA2\n :ENGINEAI-Guest:79:WPA2\n*:ENGINEAI:72:WPA2\n :ENGINEAI:64:WPA2\n";
+        let networks = parse_networks(output);
+
+        assert_eq!(networks.len(), 2);
+        assert_eq!(networks[0].ssid, "ENGINEAI");
+        assert_eq!(networks[0].signal, 80, "strongest reading wins");
+        assert!(
+            networks[0].in_use,
+            "a weaker access point being in use must not be lost"
+        );
+        assert_eq!(networks[1].ssid, "ENGINEAI-Guest");
+    }
+
+    #[test]
+    fn scans_sort_by_signal_then_name() {
+        let output = " :Bravo:40:WPA2\n :Alpha:90:WPA2\n :Charlie:40:WPA2\n";
+        let names: Vec<String> = parse_networks(output)
+            .into_iter()
+            .map(|network| network.ssid)
+            .collect();
+        assert_eq!(names, ["Alpha", "Bravo", "Charlie"]);
+    }
+
+    #[test]
+    fn hidden_networks_are_dropped() {
+        // A hidden AP reports an empty SSID; there is nothing to select.
+        assert!(parse_networks(" ::70:WPA2\n").is_empty());
+        assert!(parse_networks("").is_empty());
+    }
+
+    #[test]
+    fn open_networks_are_recognized() {
+        let output = " :FreeWifi:55:\n :Secured:60:WPA2\n";
+        let networks = parse_networks(output);
+        assert!(
+            networks
+                .iter()
+                .find(|n| n.ssid == "FreeWifi")
+                .unwrap()
+                .is_open()
+        );
+        assert!(
+            !networks
+                .iter()
+                .find(|n| n.ssid == "Secured")
+                .unwrap()
+                .is_open()
+        );
+    }
+
+    #[test]
+    fn multi_word_security_flags_survive() {
+        let networks = parse_networks(" :Mixed:70:WPA1 WPA2\n");
+        assert_eq!(networks[0].security, "WPA1 WPA2");
+        assert!(!networks[0].is_open());
+    }
+
+    #[test]
+    fn picker_rows_carry_signal_lock_and_in_use_markers() {
+        let mut connected = network("ENGINEAI", 72, "WPA2");
+        connected.in_use = true;
+        let row = picker_row(&connected);
+        assert!(row.contains("ENGINEAI"));
+        assert!(row.contains("72%"));
+        assert!(row.contains('\u{f023}'), "secured networks show a lock");
+        assert!(row.contains('\u{f00c}'), "the network in use is marked");
+
+        let open = picker_row(&network("FreeWifi", 30, ""));
+        assert!(!open.contains('\u{f023}'));
+        assert!(!open.contains('\u{f00c}'));
+    }
+
+    #[test]
+    fn signal_icons_distinguish_weak_from_strong() {
+        assert_eq!(signal_icon(10), signal_icon(49));
+        assert_eq!(signal_icon(50), signal_icon(90));
+        assert_ne!(signal_icon(49), signal_icon(50));
+    }
+
+    #[test]
+    fn every_glyph_stays_in_the_widely_available_range() {
+        // FontAwesome-5-era f6xx codepoints are absent from common Nerd Font
+        // builds and render as a hollow box; the shell sticks to FA4.
+        let rows = [
+            picker_row(&network("Net", 80, "WPA2")),
+            picker_row(&network("Open", 20, "")),
+            network_row(&NetworkState {
+                wifi_enabled: false,
+                connection: Some("Wired".into()),
+                kind: LinkKind::Wired,
+                signal: None,
+            }),
+            network_row(&NetworkState::default()),
+            bluetooth_row(&BluetoothState {
+                present: true,
+                powered: true,
+            }),
+        ];
+        for row in rows {
+            for ch in row
+                .chars()
+                .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+            {
+                assert!(
+                    (ch as u32) < 0xf600,
+                    "{ch:?} (U+{:04X}) is outside the FontAwesome-4 range",
+                    ch as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enter_on_a_working_radio_opens_the_picker_and_never_switches_it_off() {
+        // The regression this guards: Enter used to toggle, so selecting the
+        // row on a connected machine dropped the network.
+        assert_eq!(
+            plan_network_row(true, true, false),
+            NetworkRowAction::OpenPicker
+        );
+        for radio_on in [true, false] {
+            let action = plan_network_row(radio_on, true, false);
+            assert_ne!(action, NetworkRowAction::SetRadio(false));
+        }
+    }
+
+    #[test]
+    fn enter_switches_a_disabled_radio_on() {
+        // With the radio off there is nothing to pick, so Enter enables it.
+        assert_eq!(
+            plan_network_row(false, true, false),
+            NetworkRowAction::EnableRadio
+        );
+    }
+
+    #[test]
+    fn switching_the_radio_off_takes_an_explicit_left_or_right() {
+        assert_eq!(
+            plan_network_row(true, false, true),
+            NetworkRowAction::SetRadio(false)
+        );
+        assert_eq!(
+            plan_network_row(false, false, true),
+            NetworkRowAction::SetRadio(true)
+        );
+    }
+
+    #[test]
+    fn other_keys_leave_the_radio_alone() {
+        assert_eq!(
+            plan_network_row(true, false, false),
+            NetworkRowAction::Nothing
+        );
+    }
+
+    #[test]
+    fn a_saved_network_joins_without_asking_for_a_passphrase() {
+        let secured = network("ENGINEAI", 72, "WPA2");
+        assert_eq!(plan_connect(&secured, true, None), ConnectPlan::UseSaved);
+    }
+
+    #[test]
+    fn an_unknown_secured_network_must_prompt_first() {
+        let secured = network("Neighbour", 60, "WPA2");
+        assert_eq!(
+            plan_connect(&secured, false, None),
+            ConnectPlan::NeedsPassphrase
+        );
+        assert_eq!(
+            plan_connect(&secured, false, Some("hunter2")),
+            ConnectPlan::WithPassphrase
+        );
+        // An empty prompt is not an answer; keep asking.
+        assert_eq!(
+            plan_connect(&secured, false, Some("")),
+            ConnectPlan::NeedsPassphrase
+        );
+    }
+
+    #[test]
+    fn an_open_network_joins_directly() {
+        assert_eq!(
+            plan_connect(&network("FreeWifi", 40, ""), false, None),
+            ConnectPlan::Open
+        );
+    }
+
+    #[test]
+    fn nmcli_errors_are_condensed_to_one_line() {
+        let stderr = "Error: Connection activation failed: (7) Secrets were required, but not provided.\nmore noise\n";
+        let message = summarize_nmcli_error(stderr);
+        assert!(message.starts_with("Connection activation failed"));
+        assert!(!message.contains('\n'));
+        assert!(message.chars().count() <= 72);
+
+        assert_eq!(summarize_nmcli_error(""), "connection failed");
+    }
+
+    #[test]
+    fn a_background_job_hands_its_result_back_once() {
+        let job = BackgroundJob::spawn(|| 42_u32);
+        let mut value = None;
+        for _ in 0..200 {
+            if let Some(result) = job.take() {
+                value = Some(result);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(value, Some(42));
+        // Taken once: a second poll must not repeat the work's result.
+        assert_eq!(job.take(), None);
     }
 
     #[test]

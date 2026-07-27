@@ -123,6 +123,12 @@ impl Jwm {
             }
         }
 
+        // The Wi-Fi picker's scan and connect run on worker threads; adopt
+        // their results here rather than blocking a frame on nmcli.
+        if backend.has_compositor() {
+            self.poll_wifi_jobs(backend);
+        }
+
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {

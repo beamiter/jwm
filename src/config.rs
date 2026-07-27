@@ -1652,6 +1652,12 @@ impl Config {
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "F12".to_string(),
+                function: "wifi_picker".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "Escape".to_string(),
                 function: "session_menu".to_string(),
@@ -2578,6 +2584,7 @@ impl Config {
             "session_menu" => Some(Jwm::session_menu),
             "toggle_night_light" => Some(Jwm::toggle_night_light),
             "toggle_wifi" => Some(Jwm::toggle_wifi),
+            "wifi_picker" => Some(Jwm::wifi_picker),
             "toggle_bluetooth" => Some(Jwm::toggle_bluetooth),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),

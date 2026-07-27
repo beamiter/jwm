@@ -66,7 +66,9 @@ impl ActiveOsd {
                 };
                 (icon, format!("{}%", self.percent))
             }
-            OsdKind::VolumeMuted => ("\u{f6a9}", "muted".into()), // fa-volume-mute
+            // fa-volume-off: fa-volume-mute is an f6xx codepoint that common
+            // Nerd Font builds lack, and it rendered as a hollow box.
+            OsdKind::VolumeMuted => ("\u{f026}", "muted".into()),
             OsdKind::Brightness => ("\u{f185}", format!("{}%", self.percent)), // fa-sun
             OsdKind::Media => (
                 "\u{f001}", // fa-music

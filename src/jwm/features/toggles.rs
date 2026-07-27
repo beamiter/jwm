@@ -278,6 +278,134 @@ impl Jwm {
         }
     }
 
+    /// Open the Wi-Fi picker and start a scan on a worker thread.
+    pub(crate) fn wifi_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("Wi-Fi picker requires the JWM compositor".into());
+        }
+        let Some(scan) = crate::jwm::features::connectivity::start_scan() else {
+            return Err("no NetworkManager to scan with (nmcli not available)".into());
+        };
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the Wi-Fi picker".into());
+            }
+        }
+        self.features.wifi_scan = Some(scan);
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::wifi_picker("Scanning\u{2026}");
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Adopt a finished scan or connection attempt. Called from the frame
+    /// tick; does nothing unless the picker is open with work outstanding.
+    pub(crate) fn poll_wifi_jobs(&mut self, backend: &mut dyn Backend) {
+        if !self.features.system_ui.is_wifi_picker() {
+            // The panel was closed while the work was still running; drop the
+            // handles so a later picker does not adopt a stale result.
+            self.features.wifi_scan = None;
+            self.features.wifi_connect = None;
+            return;
+        }
+        let mut changed = false;
+
+        if let Some(networks) = self
+            .features
+            .wifi_scan
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        {
+            self.features.wifi_scan = None;
+            self.features.system_ui.set_wifi_networks(&networks);
+            changed = true;
+        }
+
+        if let Some(result) = self
+            .features
+            .wifi_connect
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        {
+            self.features.wifi_connect = None;
+            match result {
+                Ok(ssid) => {
+                    log::info!("Wi-Fi: joined {ssid}");
+                    self.refresh_connectivity();
+                    self.close_system_ui(backend);
+                    return;
+                }
+                Err(error) => {
+                    log::warn!("Wi-Fi: {error}");
+                    self.features.system_ui.set_wifi_message(error);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.sync_system_ui(backend);
+        }
+    }
+
+    /// Act on the selected network: join it, or ask for its passphrase first.
+    pub(crate) fn join_selected_wifi(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::connectivity::{self, ConnectPlan};
+
+        let Some(entry) = self.features.system_ui.selected_wifi() else {
+            return;
+        };
+        let ssid = entry.ssid.clone();
+        let secured = entry.secured;
+        let mut passphrase = self.features.system_ui.take_wifi_passphrase();
+
+        // `plan_connect` only needs to know whether the network is secured.
+        let network = connectivity::WifiNetwork {
+            ssid: ssid.clone(),
+            signal: 0,
+            security: if secured {
+                "WPA2".to_string()
+            } else {
+                String::new()
+            },
+            in_use: false,
+        };
+        let saved = connectivity::has_saved_profile(&ssid);
+        let plan = connectivity::plan_connect(&network, saved, passphrase.as_deref());
+
+        if plan == ConnectPlan::NeedsPassphrase {
+            self.features.system_ui.prompt_wifi_passphrase();
+            self.sync_system_ui(backend);
+            return;
+        }
+
+        self.features
+            .system_ui
+            .set_wifi_message(format!("Connecting to {ssid}\u{2026}"));
+        self.features.wifi_connect = Some(connectivity::start_connect(
+            &ssid,
+            &plan,
+            passphrase.clone(),
+        ));
+        if let Some(secret) = passphrase.as_mut() {
+            // The worker owns its own copy; wipe ours rather than dropping it.
+            unsafe { secret.as_bytes_mut().fill(0) };
+        }
+        self.sync_system_ui(backend);
+    }
+
     /// Toggle the Wi-Fi radio.
     pub(crate) fn toggle_wifi(
         &mut self,

@@ -35,7 +35,7 @@ pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use capture_plan::{
     CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,
 };
-pub use connectivity::{BluetoothState, ConnectivityState, LinkKind, NetworkState};
+pub use connectivity::{BluetoothState, ConnectivityState, LinkKind, NetworkState, WifiNetwork};
 pub use expose_plan::ExposeAction;
 pub use magnifier::MagnifierState;
 pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
@@ -67,6 +67,10 @@ pub struct FeatureStates {
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,
+    /// Scan running for an open Wi-Fi picker, if any.
+    pub wifi_scan: Option<connectivity::BackgroundJob<Vec<WifiNetwork>>>,
+    /// Connection attempt running for an open Wi-Fi picker, if any.
+    pub wifi_connect: Option<connectivity::BackgroundJob<Result<String, String>>>,
     /// Which low-battery warning has already been posted.
     pub low_battery: LowBatteryWarner,
     /// Bounded history behind the notification center. Not a mode: it
