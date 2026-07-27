@@ -775,6 +775,10 @@ pub struct BehaviorConfig {
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
+    /// Directory the wallpaper picker lists. Empty means "beside the current
+    /// wallpaper", then ~/Pictures/Wallpapers, then ~/Pictures.
+    #[serde(default)]
+    pub wallpaper_dir: String,
     /// Per-monitor wallpaper overrides. Each entry specifies a monitor index and its wallpaper.
     /// Monitor index 0 is the primary monitor, 1 is the second, etc.
     /// Monitors without an entry fall back to the global `wallpaper` setting.
@@ -1425,6 +1429,7 @@ impl Default for Config {
                     night_light_start: default_night_light_start(),
                     night_light_end: default_night_light_end(),
                     night_light_transition_mins: default_night_light_transition(),
+                    wallpaper_dir: String::new(),
                     suspend_command: default_suspend_command(),
                     hibernate_command: default_hibernate_command(),
                     reboot_command: default_reboot_command(),
@@ -1667,6 +1672,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string()],
                 key: "F9".to_string(),
                 function: "calendar".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "w".to_string(),
+                function: "wallpaper_picker".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2599,6 +2610,7 @@ impl Config {
             "wifi_picker" => Some(Jwm::wifi_picker),
             "bluetooth_picker" => Some(Jwm::bluetooth_picker),
             "calendar" => Some(Jwm::calendar),
+            "wallpaper_picker" => Some(Jwm::wallpaper_picker),
             "toggle_bluetooth" => Some(Jwm::toggle_bluetooth),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
@@ -3006,6 +3018,17 @@ impl Config {
                 }
                 self.inner.behavior.blur_strength = v;
             }
+            "behavior.wallpaper" => self.inner.behavior.wallpaper = as_string()?,
+            "behavior.wallpaper_mode" => {
+                let mode = as_string()?;
+                if !["fill", "fit", "stretch", "center"].contains(&mode.as_str()) {
+                    return Err(format!(
+                        "behavior.wallpaper_mode={mode:?} (expected fill, fit, stretch, or center)"
+                    ));
+                }
+                self.inner.behavior.wallpaper_mode = mode;
+            }
+            "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,

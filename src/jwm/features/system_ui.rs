@@ -100,6 +100,13 @@ pub enum SystemUiState {
         /// Status line: scanning, connecting, or why it failed.
         message: String,
     },
+    WallpaperPicker {
+        /// Absolute paths, and the rendered row for each.
+        entries: Vec<WallpaperEntry>,
+        selected: usize,
+        /// Directory being listed, shown when it turns up empty.
+        directory: String,
+    },
     Calendar {
         view: crate::jwm::features::CalendarView,
         /// The clock line above the grid, captured when the card opened.
@@ -130,6 +137,13 @@ pub struct NotificationEntry {
     pub row: String,
     /// Action key the sender marked as default, invoked on Return.
     pub default_action: Option<String>,
+}
+
+/// One wallpaper picker row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WallpaperEntry {
+    pub path: String,
+    pub row: String,
 }
 
 /// One Bluetooth picker row.
@@ -314,6 +328,15 @@ impl Clone for SystemUiState {
                 selected: *selected,
                 passphrase: passphrase.as_ref().map(|_| String::new()),
                 message: message.clone(),
+            },
+            Self::WallpaperPicker {
+                entries,
+                selected,
+                directory,
+            } => Self::WallpaperPicker {
+                entries: entries.clone(),
+                selected: *selected,
+                directory: directory.clone(),
             },
             Self::Calendar { view, clock } => Self::Calendar {
                 view: *view,
@@ -518,6 +541,43 @@ impl SystemUiState {
             entries.clear();
             *selected = 0;
         }
+    }
+
+    /// Build the wallpaper picker from a directory listing.
+    pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
+        let entries: Vec<WallpaperEntry> = paths
+            .iter()
+            .map(|path| WallpaperEntry {
+                path: path.to_string_lossy().into_owned(),
+                row: crate::jwm::features::wallpaper::picker_row(path, current),
+            })
+            .collect();
+        // Start on the wallpaper already in use, so Escape-ing out of the
+        // panel and reopening does not lose the user's place.
+        let selected = entries
+            .iter()
+            .position(|entry| entry.path == current)
+            .unwrap_or(0);
+        Self::WallpaperPicker {
+            entries,
+            selected,
+            directory: directory.to_string(),
+        }
+    }
+
+    pub fn is_wallpaper_picker(&self) -> bool {
+        matches!(self, Self::WallpaperPicker { .. })
+    }
+
+    /// The wallpaper the selection rests on.
+    pub fn selected_wallpaper(&self) -> Option<&str> {
+        let Self::WallpaperPicker {
+            entries, selected, ..
+        } = self
+        else {
+            return None;
+        };
+        entries.get(*selected).map(|entry| entry.path.as_str())
     }
 
     /// Open the calendar card on the month containing `today`.
@@ -1100,6 +1160,7 @@ impl SystemUiState {
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
             | Self::Calendar { .. }
+            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1130,6 +1191,7 @@ impl SystemUiState {
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
             | Self::Calendar { .. }
+            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1166,6 +1228,15 @@ impl SystemUiState {
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
         } else if let Self::NotificationCenter { entries, selected } = self {
+            if entries.is_empty() {
+                *selected = 0;
+                return;
+            }
+            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+        } else if let Self::WallpaperPicker {
+            entries, selected, ..
+        } = self
+        {
             if entries.is_empty() {
                 *selected = 0;
                 return;
@@ -1420,6 +1491,30 @@ impl SystemUiState {
                     hint,
                 }
             }
+            Self::WallpaperPicker {
+                entries,
+                selected,
+                directory,
+            } => {
+                let items: Vec<String> = if entries.is_empty() {
+                    vec![format!("  No images in {directory}")]
+                } else {
+                    let start = selected.saturating_sub(11);
+                    entries
+                        .iter()
+                        .skip(start)
+                        .take(12)
+                        .map(|entry| entry.row.clone())
+                        .collect()
+                };
+                OverlayParts {
+                    title: "\u{f03e}  WALLPAPER".into(),
+                    query: None,
+                    selected: (!entries.is_empty()).then(|| selected - selected.saturating_sub(11)),
+                    items,
+                    hint: "Enter  apply    \u{f062}/\u{f063}  select    Esc  close".into(),
+                }
+            }
             Self::Calendar { view, clock } => {
                 let mut items = vec![clock.clone(), String::new()];
                 items.extend(crate::jwm::features::calendar::month_grid(view));
@@ -1608,6 +1703,7 @@ impl SystemUiState {
             | Self::WifiPicker { .. }
             | Self::BluetoothPicker { .. }
             | Self::Calendar { .. }
+            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => {}
         }
     }

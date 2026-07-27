@@ -30,6 +30,7 @@ pub mod session;
 pub mod system_controls;
 pub mod system_ui;
 pub mod toggles;
+pub mod wallpaper;
 
 pub use audio_recording::AudioRecordingState;
 pub use calendar::CalendarView;

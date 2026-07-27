@@ -310,6 +310,79 @@ impl Jwm {
         Ok(())
     }
 
+    /// Open the wallpaper picker on the configured (or inferred) directory.
+    pub(crate) fn wallpaper_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::jwm::features::wallpaper;
+
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("wallpaper picker requires the JWM compositor".into());
+        }
+        let (current, directory) = {
+            let cfg = CONFIG.load();
+            let behavior = cfg.behavior();
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+            (
+                behavior.wallpaper.clone(),
+                wallpaper::resolve_directory(&behavior.wallpaper_dir, &behavior.wallpaper, &home),
+            )
+        };
+        let paths = wallpaper::list_wallpapers(&directory);
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the wallpaper picker".into());
+            }
+        }
+        self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
+            &paths,
+            &current,
+            &directory.to_string_lossy(),
+        );
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Apply the selected wallpaper through the same configuration path a
+    /// `set_config` takes, so both compositors pick it up on their next
+    /// `apply_config` exactly as they would from a reload.
+    pub(crate) fn apply_selected_wallpaper(&mut self, backend: &mut dyn Backend) {
+        let Some(path) = self
+            .features
+            .system_ui
+            .selected_wallpaper()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let mut updated = (**CONFIG.load()).clone();
+        if let Err(error) = updated.set_value(
+            "behavior.wallpaper",
+            &serde_json::Value::String(path.clone()),
+        ) {
+            error!("Wallpaper: {error}");
+            return;
+        }
+        CONFIG.store(std::sync::Arc::new(updated));
+        self.apply_config_changes(backend);
+        info!("Wallpaper: {path}");
+        self.broadcast_ipc_event(
+            "config/changed",
+            serde_json::json!({ "key": "behavior.wallpaper", "value": path }),
+        );
+        self.close_system_ui(backend);
+    }
+
     /// Open the calendar card on the current month.
     pub(crate) fn calendar(
         &mut self,

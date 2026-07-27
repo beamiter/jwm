@@ -48,7 +48,7 @@ impl CalendarView {
     /// Step by whole months, rolling the year over.
     pub fn shift_month(&mut self, delta: i32) {
         // Work in months-since-year-0 so December + 1 lands on January.
-        let total = self.year * 12 + (self.month as i32 - 1) + delta;
+        let total = self.year * 12 + i32::try_from(self.month).unwrap_or(1) - 1 + delta;
         self.year = total.div_euclid(12);
         self.month = (total.rem_euclid(12) + 1) as u32;
     }
@@ -84,7 +84,9 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     let first = NaiveDate::from_ymd_opt(year, month, 1);
     let next_first = NaiveDate::from_ymd_opt(next_year, next_month, 1);
     match (first, next_first) {
-        (Some(first), Some(next)) => next.signed_duration_since(first).num_days() as u32,
+        (Some(first), Some(next)) => {
+            u32::try_from(next.signed_duration_since(first).num_days()).unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -114,14 +116,15 @@ pub fn month_grid(view: &CalendarView) -> Vec<String> {
         week.push_str("    ");
     }
     for day in 1..=days {
+        use std::fmt::Write as _;
         if today_here && day == view.today.day() {
-            week.push_str(&format!("[{day:>2}]"));
+            let _ = write!(week, "[{day:>2}]");
         } else {
-            week.push_str(&format!(" {day:>2} "));
+            let _ = write!(week, " {day:>2} ");
         }
         // Seven cells to a row; the header already sits above them.
         let filled = leading_blanks(view.year, view.month) + day as usize;
-        if filled % 7 == 0 {
+        if filled.is_multiple_of(7) {
             rows.push(std::mem::take(&mut week));
         }
     }
