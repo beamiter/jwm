@@ -216,6 +216,40 @@ jobs:
         working-directory: portal
         run: cargo check --locked --all-targets
 
+  bridge:
+    name: Bridge (freedesktop notifications and MPRIS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      # zbus speaks the D-Bus wire protocol over a socket, so unlike the
+      # portal this crate needs no system libraries beyond the toolchain.
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+
+      # The root `cargo fmt --all` does not reach this crate: it is a
+      # separate package, not a workspace member.
+      - name: Check formatting
+        working-directory: bridge
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        working-directory: bridge
+        run: cargo clippy --locked --all-targets --no-deps
+
+      - name: Test
+        working-directory: bridge
+        run: cargo test --locked --all-targets
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
