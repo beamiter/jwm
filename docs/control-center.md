@@ -11,6 +11,8 @@ controls.
 | Row | Appears when | Keys |
 | --- | --- | --- |
 | Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause |
+| Network | A wireless radio exists (`nmcli` or `rfkill`) | `Enter` toggles the radio |
+| Bluetooth | A controller exists (`bluetoothctl` or `rfkill`) | `Enter` toggles power |
 | Volume | `wpctl`, `pactl`, or `amixer` works | `Left`/`Right` adjust, `Enter`/`m` mute |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
@@ -23,6 +25,27 @@ controls.
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
 selection stays put (clamped if a row disappeared).
+
+## Network and Bluetooth
+
+`nmcli` is preferred and falls back to `rfkill`; whichever answers first is
+cached for the session. With NetworkManager the row names the active
+connection and its signal strength; with only `rfkill` it can honestly report
+just the radio switch, so it says on/off without claiming to know the network.
+
+A wired link is reported when there is no wireless one, and keeps its own icon
+even while the Wi-Fi radio is off — an Ethernet cable is still the connection.
+Bridges, tunnels, and loopback are never treated as "connected".
+
+Bluetooth uses `bluetoothctl show`, falling back to `rfkill`. Without a
+controller the row is hidden rather than shown dead.
+
+Both toggles re-read the hardware afterwards instead of assuming success: a
+hard-blocked radio (a physical switch) refuses to come back on, and the row
+must show that.
+
+`toggle_wifi` and `toggle_bluetooth` are also bindable and dispatchable over
+IPC; they report which tools were missing rather than failing silently.
 
 ## Battery
 
@@ -58,9 +81,12 @@ rather than what was requested.
 ```sh
 jwm-msg '{"query": "get_power_status"}'
 jwm-msg '{"command": "set_power_profile", "args": {"profile": "power-saver"}}'
+jwm-msg '{"query": "get_connectivity"}'
+jwm-msg '{"command": "toggle_wifi"}'
 ```
 
 `get_power_status` reports the battery and the available/active profiles.
 `set_power_profile` rejects a name the driver does not offer, listing what it
 does. The `power` subscription topic carries `power/battery` (only when the
-reading actually changed) and `power/profile`.
+reading actually changed) and `power/profile`; the `network` topic carries
+`network/status`, likewise only on a real change.

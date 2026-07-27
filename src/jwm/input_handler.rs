@@ -267,6 +267,29 @@ impl Jwm {
                         }
                     }
                 }
+                ControlKind::Network => {
+                    if activate {
+                        let enabled = !self
+                            .features
+                            .connectivity
+                            .network
+                            .as_ref()
+                            .is_some_and(|state| state.wifi_enabled);
+                        if crate::jwm::features::connectivity::set_wifi(enabled) {
+                            // Re-read rather than assume: the radio may be
+                            // hard-blocked and refuse to come back on.
+                            self.refresh_connectivity();
+                        }
+                    }
+                }
+                ControlKind::Bluetooth => {
+                    if activate {
+                        let enabled = !self.features.connectivity.bluetooth.powered;
+                        if crate::jwm::features::connectivity::set_bluetooth(enabled) {
+                            self.refresh_connectivity();
+                        }
+                    }
+                }
                 ControlKind::Battery => {
                     // Read-only: the row is information, not a control.
                 }

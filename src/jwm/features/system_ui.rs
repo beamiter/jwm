@@ -114,6 +114,10 @@ pub enum ControlKind {
     /// Transport row for the active MPRIS player: Left/Right skip, Return
     /// toggles playback.
     Media,
+    /// Wi-Fi radio toggle; the label carries the connection and signal.
+    Network,
+    /// Bluetooth controller toggle.
+    Bluetooth,
     Volume,
     Brightness,
     /// Read-only battery readout; no interaction.
@@ -123,7 +127,7 @@ pub enum ControlKind {
     NightLight,
     DoNotDisturb,
     LockScreen,
-    /// Opens the session menu, the way LockScreen opens the lock overlay.
+    /// Opens the session menu, the way `LockScreen` opens the lock overlay.
     Session,
 }
 
@@ -135,7 +139,8 @@ pub struct ControlEntry {
     /// Mute state for Volume, on/off for DoNotDisturb; unused otherwise.
     pub enabled: bool,
     /// Pre-rendered text for rows whose content is not derived from
-    /// `percent`/`enabled` — currently the media row.
+    /// `percent`/`enabled`: media, network, Bluetooth, battery, and the
+    /// power profile.
     pub label: String,
 }
 
@@ -149,6 +154,10 @@ pub struct ControlCenterInputs<'a> {
     pub volume: Option<(u8, bool)>,
     pub brightness: Option<u8>,
     pub battery: Option<&'a crate::jwm::features::BatteryState>,
+    /// Wi-Fi state, when this machine has a radio to report on.
+    pub network: Option<&'a crate::jwm::features::NetworkState>,
+    /// Bluetooth state; the row is hidden without a controller.
+    pub bluetooth: Option<&'a crate::jwm::features::BluetoothState>,
     /// Name of the active power profile, when this machine has profiles.
     pub power_profile: Option<&'a str>,
     pub night_light: bool,
@@ -292,6 +301,8 @@ impl SystemUiState {
             volume,
             brightness,
             battery,
+            network,
+            bluetooth,
             power_profile,
             night_light,
             do_not_disturb,
@@ -314,6 +325,22 @@ impl SystemUiState {
                 percent,
                 false,
             ));
+        }
+        if let Some(network) = network {
+            entries.push(ControlEntry {
+                kind: ControlKind::Network,
+                percent: network.signal.unwrap_or(0),
+                enabled: network.wifi_enabled,
+                label: crate::jwm::features::connectivity::network_row(network),
+            });
+        }
+        if let Some(bluetooth) = bluetooth.filter(|state| state.present) {
+            entries.push(ControlEntry {
+                kind: ControlKind::Bluetooth,
+                percent: 0,
+                enabled: bluetooth.powered,
+                label: crate::jwm::features::connectivity::bluetooth_row(bluetooth),
+            });
         }
         if let Some(battery) = battery {
             entries.push(ControlEntry {
@@ -885,9 +912,11 @@ impl SystemUiState {
                 let items = entries
                     .iter()
                     .map(|entry| match entry.kind {
-                        ControlKind::Media | ControlKind::Battery | ControlKind::PowerProfile => {
-                            entry.label.clone()
-                        }
+                        ControlKind::Media
+                        | ControlKind::Battery
+                        | ControlKind::PowerProfile
+                        | ControlKind::Network
+                        | ControlKind::Bluetooth => entry.label.clone(),
                         ControlKind::Volume => {
                             let icon = if entry.enabled {
                                 "\u{f6a9}" // fa-volume-mute
@@ -1643,6 +1672,45 @@ mod tests {
         assert_eq!(menu.activate_session_entry(), None);
         menu.move_selection(1);
         assert!(menu.is_session_menu());
+    }
+
+    #[test]
+    fn connectivity_rows_appear_only_with_the_hardware() {
+        let network = crate::jwm::features::NetworkState {
+            wifi_enabled: true,
+            connection: Some("ENGINEAI".to_string()),
+            kind: crate::jwm::features::LinkKind::Wireless,
+            signal: Some(72),
+        };
+        let bluetooth = crate::jwm::features::BluetoothState {
+            present: true,
+            powered: true,
+        };
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            network: Some(&network),
+            bluetooth: Some(&bluetooth),
+            ..Default::default()
+        });
+        let parts = state.overlay_parts();
+
+        assert_eq!(state.selected_control(), Some(ControlKind::Network));
+        assert!(parts.items[0].contains("ENGINEAI"));
+        assert!(parts.items[0].contains("72%"));
+        assert!(parts.items[1].contains("Bluetooth"));
+
+        // A controller-less machine hides the Bluetooth row entirely.
+        let no_controller = SystemUiState::control_center(&ControlCenterInputs {
+            network: Some(&network),
+            bluetooth: Some(&crate::jwm::features::BluetoothState::default()),
+            ..Default::default()
+        });
+        assert!(
+            !no_controller
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("Bluetooth"))
+        );
     }
 
     #[test]

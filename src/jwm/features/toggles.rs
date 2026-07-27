@@ -155,6 +155,7 @@ impl Jwm {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
+        self.features.connectivity = crate::jwm::features::connectivity::read_state();
         let profiles = crate::jwm::features::power::profiles();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
             &crate::jwm::features::ControlCenterInputs {
@@ -162,6 +163,8 @@ impl Jwm {
                 volume,
                 brightness,
                 battery: self.features.battery.as_ref(),
+                network: self.features.connectivity.network.as_ref(),
+                bluetooth: Some(&self.features.connectivity.bluetooth),
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
@@ -194,6 +197,8 @@ impl Jwm {
                 volume,
                 brightness,
                 battery: self.features.battery.as_ref(),
+                network: self.features.connectivity.network.as_ref(),
+                bluetooth: Some(&self.features.connectivity.bluetooth),
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
@@ -271,6 +276,39 @@ impl Jwm {
             Ok(_) => Ok(()),
             Err(error) => Err(format!("could not run {command:?}: {error}").into()),
         }
+    }
+
+    /// Toggle the Wi-Fi radio.
+    pub(crate) fn toggle_wifi(
+        &mut self,
+        _backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let enabled = !self
+            .features
+            .connectivity
+            .network
+            .as_ref()
+            .is_some_and(|state| state.wifi_enabled);
+        if !crate::jwm::features::connectivity::set_wifi(enabled) {
+            return Err("no working Wi-Fi control (nmcli or rfkill)".into());
+        }
+        self.refresh_connectivity();
+        Ok(())
+    }
+
+    /// Toggle the Bluetooth controller.
+    pub(crate) fn toggle_bluetooth(
+        &mut self,
+        _backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let enabled = !self.features.connectivity.bluetooth.powered;
+        if !crate::jwm::features::connectivity::set_bluetooth(enabled) {
+            return Err("no working Bluetooth control (bluetoothctl or rfkill)".into());
+        }
+        self.refresh_connectivity();
+        Ok(())
     }
 
     /// Toggle night light on top of its schedule. The override sticks until

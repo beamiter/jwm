@@ -1363,6 +1363,7 @@ impl Jwm {
             "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
+            "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;

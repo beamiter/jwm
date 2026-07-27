@@ -14,6 +14,7 @@
 pub mod audio_recording;
 pub mod capture;
 pub mod capture_plan;
+pub mod connectivity;
 pub mod expose_plan;
 pub mod magnifier;
 pub mod media;
@@ -34,6 +35,7 @@ pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use capture_plan::{
     CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,
 };
+pub use connectivity::{BluetoothState, ConnectivityState, LinkKind, NetworkState};
 pub use expose_plan::ExposeAction;
 pub use magnifier::MagnifierState;
 pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
@@ -62,6 +64,9 @@ pub struct FeatureStates {
     pub media: MediaStatus,
     /// Latest battery reading, refreshed by the poll in `tick_animations`.
     pub battery: Option<BatteryState>,
+    /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
+    /// whenever the control center opens.
+    pub connectivity: ConnectivityState,
     /// Which low-battery warning has already been posted.
     pub low_battery: LowBatteryWarner,
     /// Bounded history behind the notification center. Not a mode: it

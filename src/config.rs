@@ -2577,6 +2577,8 @@ impl Config {
             "media_stop" => Some(Jwm::media_stop),
             "session_menu" => Some(Jwm::session_menu),
             "toggle_night_light" => Some(Jwm::toggle_night_light),
+            "toggle_wifi" => Some(Jwm::toggle_wifi),
+            "toggle_bluetooth" => Some(Jwm::toggle_bluetooth),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
             "toggle_audio_recording" => Some(Jwm::toggle_audio_recording),
 

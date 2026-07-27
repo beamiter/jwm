@@ -119,6 +119,7 @@ impl Jwm {
             if should_poll {
                 self.last_battery_poll = Some(Instant::now());
                 self.poll_battery(backend);
+                self.refresh_connectivity();
             }
         }
 
