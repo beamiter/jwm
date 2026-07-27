@@ -12,6 +12,7 @@
 //!   Commands run on `spawn_blocking` with bounded socket timeouts.
 
 mod jwm_ipc;
+mod mpris;
 mod notifications;
 
 use jwm_ipc::JwmIpc;
@@ -34,17 +35,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    let (events_tx, events_rx) = tokio::sync::mpsc::unbounded_channel();
-    jwm_ipc::subscribe(ipc.clone(), &["notification"], events_tx);
+    // One subscription per consumer keeps the two features independent: a
+    // stalled MPRIS call cannot delay a notification signal.
+    let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
+    jwm_ipc::subscribe(ipc.clone(), &["notification"], notify_tx);
+    let (media_tx, media_rx) = tokio::sync::mpsc::unbounded_channel();
+    jwm_ipc::subscribe(ipc.clone(), &["media"], media_tx);
 
     let connection = zbus::connection::Builder::session()?
         .name(notifications::NAME)?
-        .serve_at(notifications::PATH, notifications::Notifications::new(ipc))?
+        .serve_at(
+            notifications::PATH,
+            notifications::Notifications::new(ipc.clone()),
+        )?
         .build()
         .await?;
     log::info!("D-Bus service registered as {}", notifications::NAME);
 
-    notifications::pump_signals(connection, events_rx).await;
+    tokio::spawn(mpris::run(connection.clone(), ipc, media_rx));
+
+    notifications::pump_signals(connection, notify_rx).await;
     log::warn!("jwm-bridge event pump ended");
     Ok(())
 }

@@ -171,7 +171,8 @@ fn socket_path() -> PathBuf {
     match runtime {
         Some(runtime) => runtime.join("jwm-ipc.sock"),
         // SAFETY: geteuid has no preconditions and cannot fail.
-        None => PathBuf::from(format!("/tmp/jwm-{}", unsafe { libc::geteuid() }))
-            .join("jwm-ipc.sock"),
+        None => {
+            PathBuf::from(format!("/tmp/jwm-{}", unsafe { libc::geteuid() })).join("jwm-ipc.sock")
+        }
     }
 }

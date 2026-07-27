@@ -247,13 +247,16 @@ pub struct SystemUiOverlay {
     pub locked: bool,
 }
 
-/// What the volume/brightness OSD card depicts. Unlike toasts the OSD is a
-/// single replace-in-place card at the bottom center of the primary output.
+/// What the OSD card depicts. Unlike toasts the OSD is a single
+/// replace-in-place card at the bottom center of the primary output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OsdKind {
     Volume,
     VolumeMuted,
     Brightness,
+    /// Track label on media-key presses and track changes; drawn without a
+    /// progress bar, on a wider card.
+    Media,
 }
 
 /// One transient notification card the compositor stacks in the top-right
@@ -1351,6 +1354,8 @@ pub trait CompositorWorkspaceEffects: Send {
 
     /// Show (or refresh in place) the volume/brightness OSD card.
     fn compositor_show_osd(&mut self, _kind: OsdKind, _percent: u8) {}
+    /// Show the media OSD card with a track label instead of a value bar.
+    fn compositor_show_media_osd(&mut self, _label: &str) {}
     fn compositor_notify_tag_switch(
         &mut self,
         _duration: std::time::Duration,

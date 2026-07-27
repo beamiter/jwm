@@ -15,11 +15,21 @@ const OSD_FADE_OUT: f32 = 0.25;
 /// Fade-in length when the card first appears.
 const OSD_FADE_IN: f32 = 0.12;
 
+/// Card width for the slider kinds: a fixed geometry so the bar does not
+/// jump as digits change.
+const SLIDER_CARD_WIDTH: f32 = 360.0;
+/// Media cards carry a track title instead of a bar, so they are wider.
+const MEDIA_CARD_WIDTH: f32 = 520.0;
+/// Longest track label drawn; the renderer does not wrap.
+const MAX_MEDIA_LABEL_CHARS: usize = 48;
+
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveOsd {
     pub(crate) kind: OsdKind,
     /// 0..=100 for the bar; volume above 100% still clamps the bar full.
     pub(crate) percent: u8,
+    /// Free text for kinds that show a label instead of a value, i.e. media.
+    label: Option<String>,
     /// When the OSD first became visible (drives fade-in only).
     appeared: Instant,
     /// When the most recent event arrived (drives hold + fade-out).
@@ -58,17 +68,46 @@ impl ActiveOsd {
             }
             OsdKind::VolumeMuted => ("\u{f6a9}", "muted".into()), // fa-volume-mute
             OsdKind::Brightness => ("\u{f185}", format!("{}%", self.percent)), // fa-sun
+            OsdKind::Media => (
+                "\u{f001}", // fa-music
+                self.label.clone().unwrap_or_default(),
+            ),
         }
     }
 
-    /// Bar fill fraction (muted renders an empty bar).
-    pub(crate) fn fill(&self) -> f32 {
-        if matches!(self.kind, OsdKind::VolumeMuted) {
-            0.0
-        } else {
-            f32::from(self.percent.min(100)) / 100.0
+    /// Bar fill fraction, or `None` for kinds that draw no bar. Muted renders
+    /// an empty bar rather than no bar, so the card keeps its shape.
+    pub(crate) fn fill(&self) -> Option<f32> {
+        match self.kind {
+            OsdKind::Media => None,
+            OsdKind::VolumeMuted => Some(0.0),
+            _ => Some(f32::from(self.percent.min(100)) / 100.0),
         }
     }
+
+    /// Card width for this kind. Lives here so both compositors lay the card
+    /// out identically.
+    pub(crate) fn card_width(&self) -> f32 {
+        match self.kind {
+            OsdKind::Media => MEDIA_CARD_WIDTH,
+            _ => SLIDER_CARD_WIDTH,
+        }
+    }
+}
+
+/// Collapse whitespace, drop control characters, and ellipsize a track label.
+fn sanitize_label(label: &str) -> String {
+    let cleaned: String = label
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= MAX_MEDIA_LABEL_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX_MEDIA_LABEL_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
 }
 
 /// Single-slot OSD holder used by both compositors.
@@ -81,16 +120,28 @@ impl OsdSlot {
     /// Show or refresh the OSD. A card already on screen keeps its fade-in
     /// origin so updating it does not flicker.
     pub(crate) fn show(&mut self, kind: OsdKind, percent: u8, now: Instant) {
+        self.show_labeled(kind, percent, None, now);
+    }
+
+    /// Show a media card: the track label replaces the value, and the card
+    /// carries no bar.
+    pub(crate) fn show_media(&mut self, label: &str, now: Instant) {
+        self.show_labeled(OsdKind::Media, 0, Some(sanitize_label(label)), now);
+    }
+
+    fn show_labeled(&mut self, kind: OsdKind, percent: u8, label: Option<String>, now: Instant) {
         match &mut self.active {
             Some(osd) if !osd.expired(now) => {
                 osd.kind = kind;
                 osd.percent = percent;
+                osd.label = label;
                 osd.refreshed = now;
             }
             _ => {
                 self.active = Some(ActiveOsd {
                     kind,
                     percent,
+                    label,
                     appeared: now,
                     refreshed: now,
                 });
@@ -148,14 +199,51 @@ mod tests {
         slot.show(OsdKind::Volume, 45, now);
         let osd = slot.get().unwrap();
         assert_eq!(osd.icon_and_label().1, "45%");
-        assert!((osd.fill() - 0.45).abs() < 1e-6);
+        assert!((osd.fill().unwrap() - 0.45).abs() < 1e-6);
 
         slot.show(OsdKind::VolumeMuted, 45, now);
         let osd = slot.get().unwrap();
         assert_eq!(osd.icon_and_label().1, "muted");
-        assert_eq!(osd.fill(), 0.0);
+        assert_eq!(osd.fill(), Some(0.0));
 
         slot.show(OsdKind::Brightness, 130, now);
-        assert_eq!(slot.get().unwrap().fill(), 1.0);
+        assert_eq!(slot.get().unwrap().fill(), Some(1.0));
+    }
+
+    #[test]
+    fn a_media_card_carries_a_label_and_no_bar() {
+        let now = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show_media("Blue in Green \u{2014} Miles Davis", now);
+        let osd = slot.get().unwrap();
+
+        assert_eq!(osd.icon_and_label().1, "Blue in Green \u{2014} Miles Davis");
+        assert_eq!(osd.fill(), None);
+        assert!(osd.card_width() > SLIDER_CARD_WIDTH);
+    }
+
+    #[test]
+    fn media_labels_are_sanitized_and_ellipsized() {
+        let now = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show_media(&format!("  line\nbreak {}", "x".repeat(80)), now);
+        let label = slot.get().unwrap().icon_and_label().1;
+
+        assert!(label.starts_with("line break"));
+        assert_eq!(label.chars().count(), MAX_MEDIA_LABEL_CHARS);
+        assert!(label.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_slider_card_replaces_a_media_card_in_place() {
+        let now = Instant::now();
+        let mut slot = OsdSlot::default();
+        slot.show_media("Some Track", now);
+        slot.show(OsdKind::Volume, 30, now + Duration::from_millis(100));
+        let osd = slot.get().unwrap();
+
+        // The stale label must not survive onto the volume card.
+        assert_eq!(osd.icon_and_label().1, "30%");
+        assert_eq!(osd.card_width(), SLIDER_CARD_WIDTH);
     }
 }

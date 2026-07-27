@@ -48,8 +48,9 @@ in-memory only and does not survive a restart.
 
 `bridge/` is a small separate crate implementing `org.freedesktop.Notifications`
 (`Notify`, `CloseNotification`, `GetCapabilities`, `GetServerInformation`, and
-the `NotificationClosed` / `ActionInvoked` signals). Build and install it, then
-let D-Bus activate it:
+the `NotificationClosed` / `ActionInvoked` signals). The same process also
+watches MPRIS players for the shell's [media controls](media-controls.md).
+Build and install it, then let D-Bus activate it:
 
 ```sh
 cd bridge && cargo build --release

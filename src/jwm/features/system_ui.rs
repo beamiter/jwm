@@ -104,19 +104,36 @@ pub struct NotificationEntry {
 /// actions to Return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlKind {
+    /// Transport row for the active MPRIS player: Left/Right skip, Return
+    /// toggles playback.
+    Media,
     Volume,
     Brightness,
     DoNotDisturb,
     LockScreen,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlEntry {
     pub kind: ControlKind,
     /// Slider position for Volume/Brightness; unused for toggles.
     pub percent: u8,
     /// Mute state for Volume, on/off for DoNotDisturb; unused otherwise.
     pub enabled: bool,
+    /// Pre-rendered text for rows whose content is not derived from
+    /// `percent`/`enabled` — currently the media row.
+    pub label: String,
+}
+
+impl ControlEntry {
+    fn simple(kind: ControlKind, percent: u8, enabled: bool) -> Self {
+        Self {
+            kind,
+            percent,
+            enabled,
+            label: String::new(),
+        }
+    }
 }
 
 /// Render a 20-cell slider bar, e.g. `█████████░░░░░░░░░░░`.
@@ -231,35 +248,36 @@ impl SystemUiState {
     /// Build the control center from the currently available controls.
     /// Volume/brightness rows appear only when a working control exists.
     pub fn control_center(
+        media: Option<&crate::jwm::features::MediaState>,
         volume: Option<(u8, bool)>,
         brightness: Option<u8>,
         do_not_disturb: bool,
     ) -> Self {
         let mut entries = Vec::new();
-        if let Some((percent, muted)) = volume {
+        if let Some(media) = media {
             entries.push(ControlEntry {
-                kind: ControlKind::Volume,
-                percent,
-                enabled: muted,
+                kind: ControlKind::Media,
+                percent: 0,
+                enabled: media.status == crate::jwm::features::PlaybackStatus::Playing,
+                label: crate::jwm::features::media::control_row(media),
             });
+        }
+        if let Some((percent, muted)) = volume {
+            entries.push(ControlEntry::simple(ControlKind::Volume, percent, muted));
         }
         if let Some(percent) = brightness {
-            entries.push(ControlEntry {
-                kind: ControlKind::Brightness,
+            entries.push(ControlEntry::simple(
+                ControlKind::Brightness,
                 percent,
-                enabled: false,
-            });
+                false,
+            ));
         }
-        entries.push(ControlEntry {
-            kind: ControlKind::DoNotDisturb,
-            percent: 0,
-            enabled: do_not_disturb,
-        });
-        entries.push(ControlEntry {
-            kind: ControlKind::LockScreen,
-            percent: 0,
-            enabled: false,
-        });
+        entries.push(ControlEntry::simple(
+            ControlKind::DoNotDisturb,
+            0,
+            do_not_disturb,
+        ));
+        entries.push(ControlEntry::simple(ControlKind::LockScreen, 0, false));
         Self::ControlCenter {
             entries,
             selected: 0,
@@ -315,6 +333,14 @@ impl SystemUiState {
         if let Self::NotificationCenter { entries, selected } = self {
             entries.clear();
             *selected = 0;
+        }
+    }
+
+    /// Put the selection back on a rebuilt control center, clamped in case the
+    /// row count shrank (a player that went away drops the media row).
+    pub fn restore_control_selection(&mut self, previous: usize) {
+        if let Self::ControlCenter { entries, selected } = self {
+            *selected = previous.min(entries.len().saturating_sub(1));
         }
     }
 
@@ -742,6 +768,7 @@ impl SystemUiState {
                 let items = entries
                     .iter()
                     .map(|entry| match entry.kind {
+                        ControlKind::Media => entry.label.clone(),
                         ControlKind::Volume => {
                             let icon = if entry.enabled {
                                 "\u{f6a9}" // fa-volume-mute
@@ -1382,7 +1409,7 @@ mod tests {
     #[test]
     fn control_center_builds_rows_for_available_controls() {
         // Volume and brightness present.
-        let state = SystemUiState::control_center(Some((45, false)), Some(60), true);
+        let state = SystemUiState::control_center(None, Some((45, false)), Some(60), true);
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));
         let parts = state.overlay_parts();
         assert_eq!(parts.items.len(), 4);
@@ -1391,14 +1418,42 @@ mod tests {
         assert!(parts.items[2].contains("[ on ]"));
 
         // No audio, no backlight: only the toggles remain.
-        let state = SystemUiState::control_center(None, None, false);
+        let state = SystemUiState::control_center(None, None, None, false);
         assert_eq!(state.selected_control(), Some(ControlKind::DoNotDisturb));
         assert_eq!(state.overlay_parts().items.len(), 2);
     }
 
     #[test]
+    fn a_running_player_adds_the_media_row_on_top() {
+        let media = crate::jwm::features::MediaState {
+            player: "spotify".into(),
+            identity: "Spotify".into(),
+            status: crate::jwm::features::PlaybackStatus::Playing,
+            title: "Blue in Green".into(),
+            artist: "Miles Davis".into(),
+            can_go_next: true,
+            can_go_previous: true,
+        };
+        let state = SystemUiState::control_center(Some(&media), Some((45, false)), None, false);
+
+        assert_eq!(state.selected_control(), Some(ControlKind::Media));
+        let parts = state.overlay_parts();
+        assert!(parts.items[0].contains("Blue in Green"));
+        assert!(parts.items[1].contains("45%"));
+    }
+
+    #[test]
+    fn restoring_the_selection_clamps_when_rows_disappear() {
+        // Selection sat on the lock row of a five-row panel; rebuilt without
+        // the media row it must not point past the end.
+        let mut rebuilt = SystemUiState::control_center(None, None, None, false);
+        rebuilt.restore_control_selection(4);
+        assert_eq!(rebuilt.selected_control(), Some(ControlKind::LockScreen));
+    }
+
+    #[test]
     fn control_center_selection_wraps_and_updates_write_back() {
-        let mut state = SystemUiState::control_center(Some((45, false)), Some(60), false);
+        let mut state = SystemUiState::control_center(None, Some((45, false)), Some(60), false);
         state.move_selection(-1);
         assert_eq!(state.selected_control(), Some(ControlKind::LockScreen));
         state.move_selection(1);
@@ -1423,7 +1478,7 @@ mod tests {
 
     #[test]
     fn control_center_ignores_text_input() {
-        let mut state = SystemUiState::control_center(Some((45, false)), None, false);
+        let mut state = SystemUiState::control_center(None, Some((45, false)), None, false);
         state.push_char('x');
         state.backspace();
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));

@@ -16,6 +16,7 @@ pub mod capture;
 pub mod capture_plan;
 pub mod expose_plan;
 pub mod magnifier;
+pub mod media;
 pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
@@ -33,6 +34,7 @@ pub use capture_plan::{
 };
 pub use expose_plan::ExposeAction;
 pub use magnifier::MagnifierState;
+pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;
@@ -50,6 +52,8 @@ pub struct FeatureStates {
     pub overview: OverviewState,
     pub recording: RecordingState,
     pub magnifier: MagnifierState,
+    /// Last known MPRIS player, pushed in by the bridge. Not a mode.
+    pub media: MediaStatus,
     /// Bounded history behind the notification center. Not a mode: it
     /// survives `disable_all` and never counts as an active feature.
     pub notifications: NotificationCenter,

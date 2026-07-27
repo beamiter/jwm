@@ -1059,6 +1059,31 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "cleared": cleared })));
         }
 
+        // Special command: set_media_status — the bridge's MPRIS push. An
+        // absent/null player clears the state.
+        if name == "set_media_status" {
+            let state = crate::jwm::features::media::parse_state_args(args);
+            let active = state.is_some();
+            self.set_media_status(backend, state);
+            return IpcResponse::ok(Some(serde_json::json!({ "active": active })));
+        }
+
+        // Special command: media_control — drive the active player.
+        if name == "media_control" {
+            let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
+                return IpcResponse::err("media_control: expected string field 'action'");
+            };
+            let Some(command) = crate::jwm::features::MediaCommand::from_name(action) else {
+                return IpcResponse::err(format!(
+                    "media_control: unknown action {action:?} (play_pause, next, previous, stop)"
+                ));
+            };
+            return match self.send_media_command(command) {
+                Ok(()) => IpcResponse::ok(None),
+                Err(error) => IpcResponse::err(error),
+            };
+        }
+
         // Special command: benchmark (requires mutable backend)
         if name == "benchmark" {
             return self.handle_benchmark_command(backend, args);
@@ -1314,6 +1339,7 @@ impl Jwm {
                 "enabled": self.do_not_disturb,
             }))),
             "get_notifications" => IpcResponse::ok(Some(self.notifications_json())),
+            "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;

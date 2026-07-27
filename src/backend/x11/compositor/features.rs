@@ -31,6 +31,11 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
+    pub(crate) fn show_media_osd(&mut self, label: &str) {
+        self.osd_slot.show_media(label, std::time::Instant::now());
+        self.needs_render = true;
+    }
+
     pub(crate) fn free_toast_textures(&mut self, ids: &[u64]) {
         for id in ids {
             if let Some(slots) = self.toast_textures.remove(id) {

@@ -271,6 +271,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_show_media_osd(&mut self, label: &str) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.show_media_osd(label);
+                }
+            }
+
             fn compositor_notify_tag_switch(
                 &mut self,
                 duration: std::time::Duration,

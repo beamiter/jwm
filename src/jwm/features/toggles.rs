@@ -78,6 +78,57 @@ impl Jwm {
         backend.compositor_show_osd(kind, state.percent);
     }
 
+    /// Toggle playback on the active MPRIS player.
+    pub(crate) fn media_play_pause(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.dispatch_media(backend, crate::jwm::features::MediaCommand::PlayPause)
+    }
+
+    /// Skip to the next track on the active MPRIS player.
+    pub(crate) fn media_next(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.dispatch_media(backend, crate::jwm::features::MediaCommand::Next)
+    }
+
+    /// Skip to the previous track on the active MPRIS player.
+    pub(crate) fn media_previous(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.dispatch_media(backend, crate::jwm::features::MediaCommand::Previous)
+    }
+
+    /// Stop the active MPRIS player.
+    pub(crate) fn media_stop(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.dispatch_media(backend, crate::jwm::features::MediaCommand::Stop)
+    }
+
+    /// Broadcast a transport request and echo the current track on the OSD, so
+    /// a media key gives feedback even before the player answers.
+    fn dispatch_media(
+        &mut self,
+        backend: &mut dyn Backend,
+        command: crate::jwm::features::MediaCommand,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.send_media_command(command)?;
+        if let Some(state) = self.features.media.get() {
+            let label = state.osd_label();
+            backend.compositor_show_media_osd(&label);
+        }
+        Ok(())
+    }
+
     /// Open the DMS/Noctalia-style control center: volume/brightness sliders
     /// plus quick toggles, driven entirely by the keyboard.
     pub(crate) fn control_center(
@@ -105,12 +156,39 @@ impl Jwm {
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
+            self.features.media.get(),
             volume,
             brightness,
             self.do_not_disturb,
         );
         self.sync_system_ui(backend);
         Ok(())
+    }
+
+    /// Rebuild an open control center so a media push does not leave a stale
+    /// track on screen. Volume/brightness are re-read the same way.
+    pub(crate) fn refresh_open_control_center(&mut self) {
+        if !matches!(
+            self.features.system_ui,
+            crate::jwm::features::SystemUiState::ControlCenter { .. }
+        ) {
+            return;
+        }
+        let selected = match &self.features.system_ui {
+            crate::jwm::features::SystemUiState::ControlCenter { selected, .. } => *selected,
+            _ => 0,
+        };
+        let volume = crate::jwm::features::system_controls::volume_state()
+            .map(|state| (state.percent, state.muted));
+        let brightness = crate::jwm::features::system_controls::brightness_percent();
+        let mut rebuilt = crate::jwm::features::SystemUiState::control_center(
+            self.features.media.get(),
+            volume,
+            brightness,
+            self.do_not_disturb,
+        );
+        rebuilt.restore_control_selection(selected);
+        self.features.system_ui = rebuilt;
     }
 
     /// Open the notification center: the bounded history JWM kept while

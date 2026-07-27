@@ -90,6 +90,11 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    pub(crate) fn show_media_osd(&mut self, label: &str) {
+        self.osd_slot.show_media(label, std::time::Instant::now());
+        self.needs_render = true;
+    }
+
     pub(crate) fn has_system_ui(&self) -> bool {
         self.system_ui.is_some()
     }

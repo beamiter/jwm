@@ -3189,6 +3189,7 @@ impl WaylandCompositor {
         let a = osd.alpha(now);
         let (icon, label) = osd.icon_and_label();
         let fill = osd.fill();
+        let card_w = osd.card_width();
         let text = format!("{icon}  {label}");
         unsafe { self.update_osd_texture(gl, &text) };
         let Some((tex, text_w, text_h)) =
@@ -3197,7 +3198,6 @@ impl WaylandCompositor {
             return;
         };
 
-        let card_w = 360.0f32;
         let card_h = 64.0f32;
         let radius = 18.0;
         let pad = 24.0;
@@ -3240,30 +3240,33 @@ impl WaylandCompositor {
                 [0.075, 0.086, 0.118, 0.97 * a],
             );
 
-            // Progress bar: dim track + accent fill.
-            let bar_x = x + label_zone;
-            let bar_w = card_w - label_zone - pad;
-            let bar_h = 6.0;
-            let bar_y = y + (card_h - bar_h) / 2.0;
-            self.sysui_fill_rounded(
-                gl,
-                bar_x,
-                bar_y,
-                bar_w,
-                bar_h,
-                bar_h / 2.0,
-                [0.22, 0.25, 0.33, 0.9 * a],
-            );
-            if fill > 0.0 {
+            // Progress bar: dim track + accent fill. Label-only kinds (media)
+            // report no fill and give the whole card to the text.
+            if let Some(fill) = fill {
+                let bar_x = x + label_zone;
+                let bar_w = card_w - label_zone - pad;
+                let bar_h = 6.0;
+                let bar_y = y + (card_h - bar_h) / 2.0;
                 self.sysui_fill_rounded(
                     gl,
                     bar_x,
                     bar_y,
-                    (bar_w * fill).max(bar_h),
+                    bar_w,
                     bar_h,
                     bar_h / 2.0,
-                    [accent[0], accent[1], accent[2], 0.95 * a],
+                    [0.22, 0.25, 0.33, 0.9 * a],
                 );
+                if fill > 0.0 {
+                    self.sysui_fill_rounded(
+                        gl,
+                        bar_x,
+                        bar_y,
+                        (bar_w * fill).max(bar_h),
+                        bar_h,
+                        bar_h / 2.0,
+                        [accent[0], accent[1], accent[2], 0.95 * a],
+                    );
+                }
             }
 
             gl.UseProgram(self.sysui_text_program);

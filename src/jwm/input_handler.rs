@@ -221,6 +221,25 @@ impl Jwm {
             self.features.system_ui.move_selection(1);
         } else {
             match control {
+                ControlKind::Media => {
+                    // Left/Right skip tracks rather than adjusting a value;
+                    // the bridge pushes the new state back, which refreshes
+                    // this row.
+                    let command = if keysym == keys::KEY_Left {
+                        Some(crate::jwm::features::MediaCommand::Previous)
+                    } else if keysym == keys::KEY_Right {
+                        Some(crate::jwm::features::MediaCommand::Next)
+                    } else if activate {
+                        Some(crate::jwm::features::MediaCommand::PlayPause)
+                    } else {
+                        None
+                    };
+                    if let Some(command) = command
+                        && let Err(error) = self.send_media_command(command)
+                    {
+                        log::debug!("control center media: {error}");
+                    }
+                }
                 ControlKind::Volume => {
                     let state = if let Some(delta) = slider_delta {
                         system_controls::volume_adjust(delta)
