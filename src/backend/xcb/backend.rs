@@ -477,6 +477,7 @@ pub struct XcbBackend {
     compositor: Option<XcbSharedCompositor>,
     compositor_loop_signal: Option<calloop::LoopSignal>,
     systray: Option<XcbSystemTray>,
+    clipboard: Option<super::clipboard::Clipboard>,
     benchmark_auto_exit: bool,
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
 }
@@ -1043,9 +1044,17 @@ impl XcbBackend {
             compositor,
             compositor_loop_signal: None,
             systray: None,
+            clipboard: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
         };
+        // Watch CLIPBOARD on its own connection and thread. Failing here
+        // costs the clipboard history, not the session.
+        match super::clipboard::Clipboard::start() {
+            Ok(clipboard) => backend.clipboard = Some(clipboard),
+            Err(error) => log::warn!("clipboard: history unavailable: {error}"),
+        }
+
         backend.init_systray(screen_num as usize);
         backend.compositor_auto_configure_hdr();
         Ok(backend)
@@ -1748,15 +1757,17 @@ impl RenderScheduler for XcbBackend {
 }
 
 impl Backend for XcbBackend {
-    /// The clipboard history watches CLIPBOARD on the x11rb transport only so
-    /// far. Saying so keeps the picker honest — it reports that this backend
-    /// cannot set the clipboard instead of appearing to work.
-    fn set_clipboard_text(&mut self, _text: &str) -> bool {
-        false
+    fn set_clipboard_text(&mut self, text: &str) -> bool {
+        self.clipboard
+            .as_ref()
+            .is_some_and(|clipboard| clipboard.set_text(text))
     }
 
     fn drain_clipboard(&mut self) -> Vec<String> {
-        Vec::new()
+        self.clipboard
+            .as_ref()
+            .map(super::clipboard::Clipboard::drain_captured)
+            .unwrap_or_default()
     }
 
     fn capabilities(&self) -> Capabilities {

@@ -74,13 +74,14 @@ Support by backend:
 
 | Backend | Capture | Serve |
 | --- | --- | --- |
-| `x11rb` | yes | yes |
+| `x11rb`, `xcb` | yes | yes |
 | `wayland-udev`, `wayland-x11`, `wayland-winit` | yes | yes |
-| `xcb` | not yet | not yet |
 
-Where it is not wired, nothing is recorded and activating a row reports that
-the backend cannot set the clipboard rather than pretending to have done it.
-Entries can still arrive through `clipboard_record`.
+Every backend is wired. A backend that could not start its watcher logs the
+reason and runs without a history rather than failing the session; activating
+a row then reports that the backend cannot set the clipboard rather than
+pretending to have done it. Entries can still arrive through
+`clipboard_record`.
 
 ## IPC
 

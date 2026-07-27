@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod batch;
+pub mod clipboard;
 pub mod compositor_protocol;
 pub mod present;
 
