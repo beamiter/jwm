@@ -419,12 +419,7 @@ impl Jwm {
             self.features.system_ui.move_selection(1);
         } else if keysym == keys::KEY_c {
             self.clear_notifications();
-        } else if let Some((id, action)) = self
-            .features
-            .system_ui
-            .selected_notification()
-            .map(|entry| (entry.id, entry.default_action.clone()))
-        {
+        } else if let Some((id, action)) = self.features.system_ui.selected_notification() {
             if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                 match action {
                     // Without an action there is nothing to hand back to the

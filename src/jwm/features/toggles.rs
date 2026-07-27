@@ -494,11 +494,9 @@ impl Jwm {
 
     /// Connect or disconnect the selected device.
     pub(crate) fn activate_selected_bluetooth(&mut self, backend: &mut dyn Backend) {
-        let Some(entry) = self.features.system_ui.selected_bluetooth() else {
+        let Some((address, action)) = self.features.system_ui.selected_bluetooth() else {
             return;
         };
-        let address = entry.address.clone();
-        let action = entry.action;
         self.features
             .system_ui
             .set_bluetooth_message(format!("{action}ing\u{2026}"));
@@ -562,11 +560,9 @@ impl Jwm {
     pub(crate) fn join_selected_wifi(&mut self, backend: &mut dyn Backend) {
         use crate::jwm::features::connectivity::{self, ConnectPlan};
 
-        let Some(entry) = self.features.system_ui.selected_wifi() else {
+        let Some((ssid, secured)) = self.features.system_ui.selected_wifi() else {
             return;
         };
-        let ssid = entry.ssid.clone();
-        let secured = entry.secured;
         let mut passphrase = self.features.system_ui.take_wifi_passphrase();
 
         // `plan_connect` only needs to know whether the network is secured.

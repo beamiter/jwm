@@ -87,37 +87,25 @@ pub enum SystemUiState {
         /// selection disarms it.
         armed: bool,
     },
-    NotificationCenter {
-        entries: Vec<NotificationEntry>,
+    /// Notifications, Wi-Fi networks, Bluetooth devices, and wallpapers are
+    /// all the same panel: a scrolling list with a status line and an
+    /// optional masked prompt. Only what a row *means* differs, which is
+    /// what [`ListKind`] and [`RowData`] carry.
+    ListPanel {
+        kind: ListKind,
+        rows: Vec<ListRow>,
         selected: usize,
-    },
-    WifiPicker {
-        /// Rendered rows; empty while the scan is still running.
-        entries: Vec<WifiEntry>,
-        selected: usize,
-        /// `Some` while prompting for the selected network's passphrase.
-        passphrase: Option<String>,
-        /// Status line: scanning, connecting, or why it failed.
+        /// Status line: scanning, connecting, or why something failed.
         message: String,
-    },
-    WallpaperPicker {
-        /// Absolute paths, and the rendered row for each.
-        entries: Vec<WallpaperEntry>,
-        selected: usize,
-        /// Directory being listed, shown when it turns up empty.
-        directory: String,
+        /// Masked secret entry, while the panel is asking for one.
+        prompt: Option<String>,
+        /// Shown when the list is empty and there is no message.
+        empty: String,
     },
     Calendar {
         view: crate::jwm::features::CalendarView,
         /// The clock line above the grid, captured when the card opened.
         clock: String,
-    },
-    BluetoothPicker {
-        /// Rendered rows; empty while the list is still being read.
-        entries: Vec<BluetoothEntry>,
-        selected: usize,
-        /// Status line: scanning, connecting, or why it failed.
-        message: String,
     },
     SessionMenu {
         entries: Vec<crate::jwm::features::SessionAction>,
@@ -139,29 +127,75 @@ pub struct NotificationEntry {
     pub default_action: Option<String>,
 }
 
-/// One wallpaper picker row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WallpaperEntry {
-    pub path: String,
-    pub row: String,
+/// What a [`SystemUiState::ListPanel`] is listing. Decides the title, the
+/// hint, and how many rows fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListKind {
+    Notifications,
+    Wifi,
+    Bluetooth,
+    Wallpaper,
 }
 
-/// One Bluetooth picker row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BluetoothEntry {
-    pub address: String,
-    pub row: String,
-    /// `connect` or `disconnect`, decided when the list was built.
-    pub action: &'static str,
+impl ListKind {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Notifications => "\u{f0f3}  NOTIFICATIONS",
+            Self::Wifi => "\u{f1eb}  WI-FI",
+            Self::Bluetooth => "\u{f293}  BLUETOOTH",
+            Self::Wallpaper => "\u{f03e}  WALLPAPER",
+        }
+    }
+
+    fn hint(self, prompting: bool) -> &'static str {
+        if prompting {
+            return "Enter  join    Esc  cancel";
+        }
+        match self {
+            Self::Notifications => "Enter  activate    d  dismiss    c  clear all    Esc  close",
+            Self::Wifi => "Enter  join    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Bluetooth => "Enter  connect/disconnect    r  refresh    Esc  close",
+            Self::Wallpaper => "Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+        }
+    }
+
+    /// Rows drawn at once. Notifications get more because their history is
+    /// the one list users scroll rather than pick from.
+    fn window(self) -> usize {
+        match self {
+            Self::Notifications => 14,
+            _ => 12,
+        }
+    }
 }
 
-/// One Wi-Fi picker row: the rendered text plus what joining it needs.
+/// What activating a row does, per kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WifiEntry {
-    pub ssid: String,
-    pub row: String,
+pub enum RowData {
+    Notification {
+        id: u32,
+        /// Action key the sender marked as default, invoked on Return.
+        default_action: Option<String>,
+    },
     /// Whether the network is secured, i.e. may need a passphrase.
-    pub secured: bool,
+    Wifi {
+        secured: bool,
+    },
+    /// `connect` or `disconnect`, decided when the list was built.
+    Bluetooth {
+        action: &'static str,
+    },
+    Wallpaper,
+}
+
+/// One row of a list panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListRow {
+    /// Stable identity: the SSID, the device address, the wallpaper path.
+    /// Used to hold the selection steady across a refresh.
+    pub key: String,
+    pub text: String,
+    pub data: RowData,
 }
 
 /// One row of the control center: sliders react to Left/Right, toggles and
@@ -313,43 +347,25 @@ impl Clone for SystemUiState {
                 selected: *selected,
                 armed: *armed,
             },
-            Self::NotificationCenter { entries, selected } => Self::NotificationCenter {
-                entries: entries.clone(),
-                selected: *selected,
-            },
-            // Never duplicate a passphrase into another allocation.
-            Self::WifiPicker {
-                entries,
+            Self::ListPanel {
+                kind,
+                rows,
                 selected,
-                passphrase,
                 message,
-            } => Self::WifiPicker {
-                entries: entries.clone(),
+                prompt,
+                empty,
+            } => Self::ListPanel {
+                kind: *kind,
+                rows: rows.clone(),
                 selected: *selected,
-                passphrase: passphrase.as_ref().map(|_| String::new()),
                 message: message.clone(),
-            },
-            Self::WallpaperPicker {
-                entries,
-                selected,
-                directory,
-            } => Self::WallpaperPicker {
-                entries: entries.clone(),
-                selected: *selected,
-                directory: directory.clone(),
+                // Never duplicate a passphrase into another allocation.
+                prompt: prompt.as_ref().map(|_| String::new()),
+                empty: empty.clone(),
             },
             Self::Calendar { view, clock } => Self::Calendar {
                 view: *view,
                 clock: clock.clone(),
-            },
-            Self::BluetoothPicker {
-                entries,
-                selected,
-                message,
-            } => Self::BluetoothPicker {
-                entries: entries.clone(),
-                selected: *selected,
-                message: message.clone(),
             },
             Self::SessionMenu {
                 entries,
@@ -380,8 +396,8 @@ impl SystemUiState {
         // Keep the optimizer from eliding the overwrites before dropping.
         match self {
             Self::Locked { password, .. } => unsafe { password.as_bytes_mut().fill(0) },
-            Self::WifiPicker {
-                passphrase: Some(typed),
+            Self::ListPanel {
+                prompt: Some(typed),
                 ..
             } => unsafe { typed.as_bytes_mut().fill(0) },
             _ => {}
@@ -491,95 +507,6 @@ impl SystemUiState {
         }
     }
 
-    /// Build the notification center from the live history, newest first.
-    pub fn notification_center(
-        center: &crate::jwm::features::NotificationCenter,
-        now_unix_ms: u64,
-    ) -> Self {
-        let entries = center
-            .recent()
-            .map(|record| NotificationEntry {
-                id: record.id,
-                row: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
-                default_action: record.default_action.clone(),
-            })
-            .collect();
-        Self::NotificationCenter {
-            entries,
-            selected: 0,
-        }
-    }
-
-    pub fn is_notification_center(&self) -> bool {
-        matches!(self, Self::NotificationCenter { .. })
-    }
-
-    /// The notification the selection rests on, if the center is open.
-    pub fn selected_notification(&self) -> Option<&NotificationEntry> {
-        let Self::NotificationCenter { entries, selected } = self else {
-            return None;
-        };
-        entries.get(*selected)
-    }
-
-    /// Drop one row after its notification was dismissed, keeping the
-    /// selection on the row that slid into its place.
-    pub fn remove_notification(&mut self, id: u32) {
-        let Self::NotificationCenter { entries, selected } = self else {
-            return;
-        };
-        let Some(index) = entries.iter().position(|entry| entry.id == id) else {
-            return;
-        };
-        entries.remove(index);
-        *selected = (*selected).min(entries.len().saturating_sub(1));
-    }
-
-    /// Empty the open notification center after a clear-all.
-    pub fn clear_notifications(&mut self) {
-        if let Self::NotificationCenter { entries, selected } = self {
-            entries.clear();
-            *selected = 0;
-        }
-    }
-
-    /// Build the wallpaper picker from a directory listing.
-    pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
-        let entries: Vec<WallpaperEntry> = paths
-            .iter()
-            .map(|path| WallpaperEntry {
-                path: path.to_string_lossy().into_owned(),
-                row: crate::jwm::features::wallpaper::picker_row(path, current),
-            })
-            .collect();
-        // Start on the wallpaper already in use, so Escape-ing out of the
-        // panel and reopening does not lose the user's place.
-        let selected = entries
-            .iter()
-            .position(|entry| entry.path == current)
-            .unwrap_or(0);
-        Self::WallpaperPicker {
-            entries,
-            selected,
-            directory: directory.to_string(),
-        }
-    }
-
-    pub fn is_wallpaper_picker(&self) -> bool {
-        matches!(self, Self::WallpaperPicker { .. })
-    }
-
-    /// The wallpaper the selection rests on.
-    pub fn selected_wallpaper(&self) -> Option<&str> {
-        let Self::WallpaperPicker {
-            entries, selected, ..
-        } = self
-        else {
-            return None;
-        };
-        entries.get(*selected).map(|entry| entry.path.as_str())
-    }
-
     /// Open the calendar card on the month containing `today`.
     pub fn calendar(now: chrono::NaiveDateTime) -> Self {
         Self::Calendar {
@@ -608,125 +535,206 @@ impl SystemUiState {
         }
     }
 
-    /// Open the Bluetooth picker while its device list is being read.
-    pub fn bluetooth_picker(message: impl Into<String>) -> Self {
-        Self::BluetoothPicker {
-            entries: Vec::new(),
-            selected: 0,
-            message: message.into(),
-        }
-    }
+    // -----------------------------------------------------------------
+    // List panels
+    //
+    // Four panels share one representation; these keep the callers' names,
+    // so each still reads as "the Wi-Fi picker" or "the notification
+    // center" without four copies of the same state machine underneath.
+    // -----------------------------------------------------------------
 
-    pub fn is_bluetooth_picker(&self) -> bool {
-        matches!(self, Self::BluetoothPicker { .. })
-    }
-
-    /// Fill in a finished device list, keeping the selection on the same
-    /// device when it is still known.
-    pub fn set_bluetooth_devices(&mut self, devices: &[crate::jwm::features::BluetoothDevice]) {
-        let Self::BluetoothPicker {
-            entries,
+    fn list_panel(&self) -> Option<(ListKind, &[ListRow], usize)> {
+        let Self::ListPanel {
+            kind,
+            rows,
             selected,
-            message,
-        } = self
-        else {
-            return;
-        };
-        let previous = entries.get(*selected).map(|entry| entry.address.clone());
-        *entries = devices
-            .iter()
-            .map(|device| BluetoothEntry {
-                address: device.address.clone(),
-                row: crate::jwm::features::connectivity::device_row(device),
-                action: crate::jwm::features::connectivity::device_action(device),
-            })
-            .collect();
-        *selected = previous
-            .and_then(|address| entries.iter().position(|entry| entry.address == address))
-            .unwrap_or(0);
-        message.clear();
-    }
-
-    /// The device the selection rests on.
-    pub fn selected_bluetooth(&self) -> Option<&BluetoothEntry> {
-        let Self::BluetoothPicker {
-            entries, selected, ..
+            ..
         } = self
         else {
             return None;
         };
-        entries.get(*selected)
+        Some((*kind, rows.as_slice(), *selected))
     }
 
-    /// Replace the Bluetooth picker's status line.
-    pub fn set_bluetooth_message(&mut self, text: impl Into<String>) {
-        if let Self::BluetoothPicker { message, .. } = self {
+    fn is_list(&self, wanted: ListKind) -> bool {
+        matches!(self, Self::ListPanel { kind, .. } if *kind == wanted)
+    }
+
+    fn selected_row(&self, wanted: ListKind) -> Option<&ListRow> {
+        let (kind, rows, selected) = self.list_panel()?;
+        (kind == wanted).then(|| rows.get(selected)).flatten()
+    }
+
+    /// Replace a panel's rows, holding the selection on the same key when it
+    /// survived the refresh.
+    fn set_rows(&mut self, wanted: ListKind, next: Vec<ListRow>) {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            message,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *kind != wanted {
+            return;
+        }
+        let previous = rows.get(*selected).map(|row| row.key.clone());
+        *rows = next;
+        *selected = previous
+            .and_then(|key| rows.iter().position(|row| row.key == key))
+            .unwrap_or(0);
+        message.clear();
+    }
+
+    fn set_list_message(&mut self, wanted: ListKind, text: impl Into<String>) {
+        if let Self::ListPanel { kind, message, .. } = self
+            && *kind == wanted
+        {
             *message = text.into();
         }
     }
 
-    /// Open the Wi-Fi picker in its scanning state. The list arrives later:
-    /// nmcli's first scan takes seconds and must not block the compositor.
-    pub fn wifi_picker(message: impl Into<String>) -> Self {
-        Self::WifiPicker {
-            entries: Vec::new(),
+    fn open_list(kind: ListKind, message: impl Into<String>, empty: impl Into<String>) -> Self {
+        Self::ListPanel {
+            kind,
+            rows: Vec::new(),
             selected: 0,
-            passphrase: None,
             message: message.into(),
+            prompt: None,
+            empty: empty.into(),
         }
     }
 
+    // --- Notification center ---
+
+    /// Build the notification center from the live history, newest first.
+    pub fn notification_center(
+        center: &crate::jwm::features::NotificationCenter,
+        now_unix_ms: u64,
+    ) -> Self {
+        let rows = center
+            .recent()
+            .map(|record| ListRow {
+                key: record.id.to_string(),
+                text: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
+                data: RowData::Notification {
+                    id: record.id,
+                    default_action: record.default_action.clone(),
+                },
+            })
+            .collect();
+        Self::ListPanel {
+            kind: ListKind::Notifications,
+            rows,
+            selected: 0,
+            message: String::new(),
+            prompt: None,
+            empty: "No notifications".to_string(),
+        }
+    }
+
+    pub fn is_notification_center(&self) -> bool {
+        self.is_list(ListKind::Notifications)
+    }
+
+    /// The selected notification: its identifier and default action.
+    pub fn selected_notification(&self) -> Option<(u32, Option<String>)> {
+        match &self.selected_row(ListKind::Notifications)?.data {
+            RowData::Notification { id, default_action } => Some((*id, default_action.clone())),
+            _ => None,
+        }
+    }
+
+    /// Drop one row after its notification was dismissed, keeping the
+    /// selection on the row that slid into its place.
+    pub fn remove_notification(&mut self, id: u32) {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *kind != ListKind::Notifications {
+            return;
+        }
+        let Some(index) = rows.iter().position(
+            |row| matches!(&row.data, RowData::Notification { id: other, .. } if *other == id),
+        ) else {
+            return;
+        };
+        rows.remove(index);
+        *selected = (*selected).min(rows.len().saturating_sub(1));
+    }
+
+    /// Empty the open notification center after a clear-all.
+    pub fn clear_notifications(&mut self) {
+        if let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+            && *kind == ListKind::Notifications
+        {
+            rows.clear();
+            *selected = 0;
+        }
+    }
+
+    // --- Wi-Fi picker ---
+
+    /// Open the Wi-Fi picker in its scanning state. The list arrives later:
+    /// nmcli's first scan takes seconds and must not block the compositor.
+    pub fn wifi_picker(message: impl Into<String>) -> Self {
+        Self::open_list(ListKind::Wifi, message, "No networks in range")
+    }
+
     pub fn is_wifi_picker(&self) -> bool {
-        matches!(self, Self::WifiPicker { .. })
+        self.is_list(ListKind::Wifi)
     }
 
     /// Fill in a finished scan, keeping the selection on the same network
     /// when it is still in range.
     pub fn set_wifi_networks(&mut self, networks: &[crate::jwm::features::WifiNetwork]) {
-        let Self::WifiPicker {
-            entries,
-            selected,
-            message,
-            ..
-        } = self
-        else {
-            return;
-        };
-        let previous = entries.get(*selected).map(|entry| entry.ssid.clone());
-        *entries = networks
+        let rows = networks
             .iter()
-            .map(|network| WifiEntry {
-                ssid: network.ssid.clone(),
-                row: crate::jwm::features::connectivity::picker_row(network),
-                secured: !network.is_open(),
+            .map(|network| ListRow {
+                key: network.ssid.clone(),
+                text: crate::jwm::features::connectivity::picker_row(network),
+                data: RowData::Wifi {
+                    secured: !network.is_open(),
+                },
             })
             .collect();
-        *selected = previous
-            .and_then(|ssid| entries.iter().position(|entry| entry.ssid == ssid))
-            .unwrap_or(0);
-        message.clear();
+        self.set_rows(ListKind::Wifi, rows);
     }
 
-    /// The network the selection rests on.
-    pub fn selected_wifi(&self) -> Option<&WifiEntry> {
-        let Self::WifiPicker {
-            entries, selected, ..
-        } = self
-        else {
-            return None;
-        };
-        entries.get(*selected)
+    /// The selected network: its SSID and whether it is secured.
+    pub fn selected_wifi(&self) -> Option<(String, bool)> {
+        let row = self.selected_row(ListKind::Wifi)?;
+        match row.data {
+            RowData::Wifi { secured } => Some((row.key.clone(), secured)),
+            _ => None,
+        }
     }
 
     /// Start prompting for the selected network's passphrase.
     pub fn prompt_wifi_passphrase(&mut self) {
-        if let Self::WifiPicker {
-            passphrase,
+        if let Self::ListPanel {
+            kind,
+            prompt,
             message,
             ..
         } = self
+            && *kind == ListKind::Wifi
         {
-            *passphrase = Some(String::new());
+            *prompt = Some(String::new());
             message.clear();
         }
     }
@@ -735,8 +743,8 @@ impl SystemUiState {
     pub fn is_prompting_wifi_passphrase(&self) -> bool {
         matches!(
             self,
-            Self::WifiPicker {
-                passphrase: Some(_),
+            Self::ListPanel {
+                prompt: Some(_),
                 ..
             }
         )
@@ -745,18 +753,18 @@ impl SystemUiState {
     /// Take the typed passphrase, clearing the prompt. The caller owns the
     /// only copy afterwards and is responsible for wiping it.
     pub fn take_wifi_passphrase(&mut self) -> Option<String> {
-        let Self::WifiPicker { passphrase, .. } = self else {
+        let Self::ListPanel { prompt, .. } = self else {
             return None;
         };
-        passphrase.take()
+        prompt.take()
     }
 
     /// Abandon the passphrase prompt, wiping what was typed.
     pub fn cancel_wifi_passphrase(&mut self) -> bool {
-        let Self::WifiPicker { passphrase, .. } = self else {
+        let Self::ListPanel { prompt, .. } = self else {
             return false;
         };
-        let Some(mut typed) = passphrase.take() else {
+        let Some(mut typed) = prompt.take() else {
             return false;
         };
         // Keep the optimizer from eliding the overwrite before dropping.
@@ -764,11 +772,84 @@ impl SystemUiState {
         true
     }
 
-    /// Replace the picker's status line.
+    /// Replace the Wi-Fi picker's status line.
     pub fn set_wifi_message(&mut self, text: impl Into<String>) {
-        if let Self::WifiPicker { message, .. } = self {
-            *message = text.into();
+        self.set_list_message(ListKind::Wifi, text);
+    }
+
+    // --- Bluetooth picker ---
+
+    /// Open the Bluetooth picker while its device list is being read.
+    pub fn bluetooth_picker(message: impl Into<String>) -> Self {
+        Self::open_list(ListKind::Bluetooth, message, "No remembered devices")
+    }
+
+    pub fn is_bluetooth_picker(&self) -> bool {
+        self.is_list(ListKind::Bluetooth)
+    }
+
+    /// Fill in a finished device list, keeping the selection on the same
+    /// device when it is still known.
+    pub fn set_bluetooth_devices(&mut self, devices: &[crate::jwm::features::BluetoothDevice]) {
+        let rows = devices
+            .iter()
+            .map(|device| ListRow {
+                key: device.address.clone(),
+                text: crate::jwm::features::connectivity::device_row(device),
+                data: RowData::Bluetooth {
+                    action: crate::jwm::features::connectivity::device_action(device),
+                },
+            })
+            .collect();
+        self.set_rows(ListKind::Bluetooth, rows);
+    }
+
+    /// The selected device: its address and what activating it would do.
+    pub fn selected_bluetooth(&self) -> Option<(String, &'static str)> {
+        let row = self.selected_row(ListKind::Bluetooth)?;
+        match row.data {
+            RowData::Bluetooth { action } => Some((row.key.clone(), action)),
+            _ => None,
         }
+    }
+
+    /// Replace the Bluetooth picker's status line.
+    pub fn set_bluetooth_message(&mut self, text: impl Into<String>) {
+        self.set_list_message(ListKind::Bluetooth, text);
+    }
+
+    // --- Wallpaper picker ---
+
+    /// Build the wallpaper picker from a directory listing.
+    pub fn wallpaper_picker(paths: &[std::path::PathBuf], current: &str, directory: &str) -> Self {
+        let rows: Vec<ListRow> = paths
+            .iter()
+            .map(|path| ListRow {
+                key: path.to_string_lossy().into_owned(),
+                text: crate::jwm::features::wallpaper::picker_row(path, current),
+                data: RowData::Wallpaper,
+            })
+            .collect();
+        // Start on the wallpaper already in use, so Escape-ing out of the
+        // panel and reopening does not lose the user's place.
+        let selected = rows.iter().position(|row| row.key == current).unwrap_or(0);
+        Self::ListPanel {
+            kind: ListKind::Wallpaper,
+            rows,
+            selected,
+            message: String::new(),
+            prompt: None,
+            empty: format!("No images in {directory}"),
+        }
+    }
+
+    pub fn is_wallpaper_picker(&self) -> bool {
+        self.is_list(ListKind::Wallpaper)
+    }
+
+    /// The wallpaper the selection rests on.
+    pub fn selected_wallpaper(&self) -> Option<&str> {
+        Some(self.selected_row(ListKind::Wallpaper)?.key.as_str())
     }
 
     /// Build the session menu from what this machine can actually do.
@@ -1140,8 +1221,8 @@ impl SystemUiState {
     pub fn push_char(&mut self, ch: char) {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => query.push(ch),
-            Self::WifiPicker {
-                passphrase: Some(typed),
+            Self::ListPanel {
+                prompt: Some(typed),
                 message,
                 ..
             } => {
@@ -1156,11 +1237,8 @@ impl SystemUiState {
             Self::Inactive
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. }
-            | Self::WifiPicker { .. }
-            | Self::BluetoothPicker { .. }
+            | Self::ListPanel { .. }
             | Self::Calendar { .. }
-            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1171,8 +1249,8 @@ impl SystemUiState {
             Self::Launcher { query, .. } | Self::Info { query, .. } => {
                 query.pop();
             }
-            Self::WifiPicker {
-                passphrase: Some(typed),
+            Self::ListPanel {
+                prompt: Some(typed),
                 message,
                 ..
             } => {
@@ -1187,11 +1265,8 @@ impl SystemUiState {
             Self::Inactive
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. }
-            | Self::WifiPicker { .. }
-            | Self::BluetoothPicker { .. }
+            | Self::ListPanel { .. }
             | Self::Calendar { .. }
-            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => return,
         }
         self.refresh_matches();
@@ -1227,39 +1302,12 @@ impl SystemUiState {
                 return;
             }
             *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
-        } else if let Self::NotificationCenter { entries, selected } = self {
-            if entries.is_empty() {
+        } else if let Self::ListPanel { rows, selected, .. } = self {
+            if rows.is_empty() {
                 *selected = 0;
                 return;
             }
-            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
-        } else if let Self::WallpaperPicker {
-            entries, selected, ..
-        } = self
-        {
-            if entries.is_empty() {
-                *selected = 0;
-                return;
-            }
-            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
-        } else if let Self::BluetoothPicker {
-            entries, selected, ..
-        } = self
-        {
-            if entries.is_empty() {
-                *selected = 0;
-                return;
-            }
-            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
-        } else if let Self::WifiPicker {
-            entries, selected, ..
-        } = self
-        {
-            if entries.is_empty() {
-                *selected = 0;
-                return;
-            }
-            *selected = (*selected as isize + delta).rem_euclid(entries.len() as isize) as usize;
+            *selected = (*selected as isize + delta).rem_euclid(rows.len() as isize) as usize;
         } else if let Self::SessionMenu {
             entries,
             selected,
@@ -1416,103 +1464,53 @@ impl SystemUiState {
                     },
                 }
             }
-            Self::NotificationCenter { entries, selected } => {
-                // Long histories scroll with the selection, like the launcher.
-                let start = selected.saturating_sub(13);
-                let items: Vec<String> = if entries.is_empty() {
-                    vec!["  No notifications".into()]
-                } else {
-                    entries
-                        .iter()
-                        .skip(start)
-                        .take(14)
-                        .map(|entry| entry.row.clone())
-                        .collect()
-                };
-                OverlayParts {
-                    title: "\u{f0f3}  NOTIFICATIONS".into(),
-                    query: None,
-                    items,
-                    selected: (!entries.is_empty()).then(|| selected - start),
-                    hint: "Enter  activate    d  dismiss    c  clear all    Esc  close".into(),
-                }
-            }
-            Self::WifiPicker {
-                entries,
+            Self::ListPanel {
+                kind,
+                rows,
                 selected,
-                passphrase,
                 message,
+                prompt,
+                empty,
             } => {
-                let mut items: Vec<String> = if entries.is_empty() {
+                // One renderer for the notification center and the three
+                // pickers: a scrolling window over the rows, then the status
+                // line or the masked prompt underneath.
+                let window = kind.window();
+                let start = selected.saturating_sub(window.saturating_sub(1));
+                let mut items: Vec<String> = if rows.is_empty() {
                     vec![format!(
                         "  {}",
-                        if message.is_empty() {
-                            "No networks in range"
-                        } else {
-                            message
-                        }
+                        if message.is_empty() { empty } else { message }
                     )]
                 } else {
-                    let start = selected.saturating_sub(11);
-                    entries
-                        .iter()
+                    rows.iter()
                         .skip(start)
-                        .take(12)
-                        .map(|entry| entry.row.clone())
+                        .take(window)
+                        .map(|row| row.text.clone())
                         .collect()
                 };
-                if let Some(typed) = passphrase {
+                if let Some(typed) = prompt {
                     items.push(String::new());
                     // Name the network: the selection highlight is dropped
                     // while prompting, so the row alone would not say which
                     // passphrase is being asked for.
-                    let ssid = entries
+                    let subject = rows
                         .get(*selected)
-                        .map_or("network", |entry| entry.ssid.as_str());
+                        .map_or("network", |row| row.key.as_str());
                     items.push(format!(
-                        "\u{f084}  Passphrase for {ssid}  {}",
+                        "\u{f084}  Passphrase for {subject}  {}",
                         "*".repeat(typed.chars().count())
                     ));
-                } else if !message.is_empty() && !entries.is_empty() {
+                } else if !message.is_empty() && !rows.is_empty() {
                     items.push(String::new());
                     items.push(format!("  {message}"));
                 }
-                let hint = if passphrase.is_some() {
-                    "Enter  join    Esc  cancel".to_string()
-                } else {
-                    "Enter  join    \u{f062}/\u{f063}  select    Esc  close".to_string()
-                };
                 OverlayParts {
-                    title: "\u{f1eb}  WI-FI".into(),
+                    title: kind.title().to_string(),
                     query: None,
-                    selected: (!entries.is_empty() && passphrase.is_none())
-                        .then(|| selected - selected.saturating_sub(11)),
+                    selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
-                    hint,
-                }
-            }
-            Self::WallpaperPicker {
-                entries,
-                selected,
-                directory,
-            } => {
-                let items: Vec<String> = if entries.is_empty() {
-                    vec![format!("  No images in {directory}")]
-                } else {
-                    let start = selected.saturating_sub(11);
-                    entries
-                        .iter()
-                        .skip(start)
-                        .take(12)
-                        .map(|entry| entry.row.clone())
-                        .collect()
-                };
-                OverlayParts {
-                    title: "\u{f03e}  WALLPAPER".into(),
-                    query: None,
-                    selected: (!entries.is_empty()).then(|| selected - selected.saturating_sub(11)),
-                    items,
-                    hint: "Enter  apply    \u{f062}/\u{f063}  select    Esc  close".into(),
+                    hint: kind.hint(prompt.is_some()).to_string(),
                 }
             }
             Self::Calendar { view, clock } => {
@@ -1525,41 +1523,6 @@ impl SystemUiState {
                     selected: None,
                     hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    Esc  close"
                         .into(),
-                }
-            }
-            Self::BluetoothPicker {
-                entries,
-                selected,
-                message,
-            } => {
-                let mut items: Vec<String> = if entries.is_empty() {
-                    vec![format!(
-                        "  {}",
-                        if message.is_empty() {
-                            "No remembered devices"
-                        } else {
-                            message
-                        }
-                    )]
-                } else {
-                    let start = selected.saturating_sub(11);
-                    entries
-                        .iter()
-                        .skip(start)
-                        .take(12)
-                        .map(|entry| entry.row.clone())
-                        .collect()
-                };
-                if !message.is_empty() && !entries.is_empty() {
-                    items.push(String::new());
-                    items.push(format!("  {message}"));
-                }
-                OverlayParts {
-                    title: "\u{f293}  BLUETOOTH".into(),
-                    query: None,
-                    selected: (!entries.is_empty()).then(|| selected - selected.saturating_sub(11)),
-                    items,
-                    hint: "Enter  connect/disconnect    r  refresh    Esc  close".into(),
                 }
             }
             Self::SessionMenu {
@@ -1699,11 +1662,8 @@ impl SystemUiState {
             | Self::Locked { .. }
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
-            | Self::NotificationCenter { .. }
-            | Self::WifiPicker { .. }
-            | Self::BluetoothPicker { .. }
+            | Self::ListPanel { .. }
             | Self::Calendar { .. }
-            | Self::WallpaperPicker { .. }
             | Self::SessionMenu { .. } => {}
         }
     }
@@ -2259,6 +2219,143 @@ mod tests {
         assert_eq!(menu.activate_session_entry(), None);
         menu.move_selection(1);
         assert!(menu.is_session_menu());
+    }
+
+    fn wifi(ssid: &str, open: bool) -> crate::jwm::features::WifiNetwork {
+        crate::jwm::features::WifiNetwork {
+            ssid: ssid.to_string(),
+            signal: 70,
+            security: if open { String::new() } else { "WPA2".into() },
+            in_use: false,
+        }
+    }
+
+    #[test]
+    fn a_refresh_holds_the_selection_on_the_same_row() {
+        let mut panel = SystemUiState::wifi_picker("Scanning");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+        panel.move_selection(1);
+        assert_eq!(
+            panel.selected_wifi().map(|(ssid, _)| ssid).as_deref(),
+            Some("Beta")
+        );
+
+        // A rescan that reorders the list must not move the user's selection.
+        panel.set_wifi_networks(&[
+            wifi("Gamma", false),
+            wifi("Beta", false),
+            wifi("Alpha", false),
+        ]);
+        assert_eq!(
+            panel.selected_wifi().map(|(ssid, _)| ssid).as_deref(),
+            Some("Beta")
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_selected_row_falls_back_to_the_top() {
+        let mut panel = SystemUiState::wifi_picker("Scanning");
+        panel.set_wifi_networks(&[wifi("Alpha", false), wifi("Beta", false)]);
+        panel.move_selection(1);
+
+        panel.set_wifi_networks(&[wifi("Gamma", false)]);
+        assert_eq!(
+            panel.selected_wifi().map(|(ssid, _)| ssid).as_deref(),
+            Some("Gamma")
+        );
+    }
+
+    #[test]
+    fn the_shared_renderer_scrolls_to_keep_the_selection_visible() {
+        let mut panel = SystemUiState::wifi_picker("Scanning");
+        let networks: Vec<_> = (0..30)
+            .map(|i| wifi(&format!("net{i:02}"), false))
+            .collect();
+        panel.set_wifi_networks(&networks);
+        for _ in 0..20 {
+            panel.move_selection(1);
+        }
+        let parts = panel.overlay_parts();
+
+        // The window follows the selection rather than showing the top.
+        assert!(parts.items.iter().any(|row| row.contains("net20")));
+        assert!(!parts.items.iter().any(|row| row.contains("net00")));
+        // And the highlight points inside the window that was drawn.
+        assert!(
+            parts
+                .selected
+                .is_some_and(|index| index < parts.items.len())
+        );
+    }
+
+    #[test]
+    fn each_list_kind_keeps_its_own_title_and_hint() {
+        assert!(
+            SystemUiState::wifi_picker("")
+                .overlay_parts()
+                .title
+                .contains("WI-FI")
+        );
+        assert!(
+            SystemUiState::bluetooth_picker("")
+                .overlay_parts()
+                .hint
+                .contains("connect/disconnect")
+        );
+        assert!(
+            SystemUiState::wallpaper_picker(&[], "", "/walls")
+                .overlay_parts()
+                .items[0]
+                .contains("/walls")
+        );
+    }
+
+    #[test]
+    fn a_prompt_hides_the_row_highlight_and_masks_what_is_typed() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false)]);
+        panel.prompt_wifi_passphrase();
+        // Characters that cannot appear in the surrounding label, so the
+        // assertion below really is about the mask.
+        panel.push_char('x');
+        panel.push_char('q');
+        let parts = panel.overlay_parts();
+
+        assert!(parts.selected.is_none(), "no row highlight while prompting");
+        let prompt = parts.items.last().expect("prompt row");
+        assert!(prompt.contains("Alpha"), "the prompt names the network");
+        assert!(prompt.contains("**"));
+        assert!(
+            !prompt.contains('x') && !prompt.contains('q'),
+            "the passphrase itself is never drawn"
+        );
+
+        assert_eq!(panel.take_wifi_passphrase().as_deref(), Some("xq"));
+    }
+
+    #[test]
+    fn cancelling_a_prompt_keeps_the_list() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", false)]);
+        panel.prompt_wifi_passphrase();
+
+        assert!(panel.cancel_wifi_passphrase());
+        assert!(!panel.is_prompting_wifi_passphrase());
+        assert!(panel.is_wifi_picker(), "the picker stays open");
+        // Nothing to cancel the second time.
+        assert!(!panel.cancel_wifi_passphrase());
+    }
+
+    #[test]
+    fn a_list_panel_answers_only_to_its_own_kind() {
+        let panel = SystemUiState::wifi_picker("");
+        assert!(panel.is_wifi_picker());
+        assert!(!panel.is_bluetooth_picker());
+        assert!(!panel.is_notification_center());
+        assert!(!panel.is_wallpaper_picker());
+        assert!(panel.selected_bluetooth().is_none());
+        assert!(panel.selected_wallpaper().is_none());
+        assert!(panel.selected_notification().is_none());
     }
 
     #[test]
