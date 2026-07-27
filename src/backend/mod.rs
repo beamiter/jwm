@@ -2,6 +2,9 @@
 
 pub mod api;
 pub mod color_policy;
+// MIME-level clipboard judgments shared by every backend that captures a
+// selection; see the module for why they sit below the history.
+pub mod clipboard_offer;
 pub mod common_define;
 pub mod edid;
 pub mod error;

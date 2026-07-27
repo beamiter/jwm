@@ -17,23 +17,9 @@ use std::collections::VecDeque;
 pub const MAX_ENTRIES: usize = 50;
 /// Longest preview drawn in the picker.
 const MAX_PREVIEW_CHARS: usize = 72;
-/// Clipboard payloads larger than this are ignored: a copied image or a
-/// multi-megabyte log is not something the picker can usefully show, and
-/// holding fifty of them would be a real memory cost.
-pub const MAX_TEXT_BYTES: usize = 256 * 1024;
-
-/// MIME types by which an application asks clipboard managers not to store
-/// what it just copied.
-///
-/// `x-kde-passwordManagerHint` is the de-facto standard — password managers
-/// offer it alongside the text, and every clipboard manager that respects
-/// privacy checks for it. Honoring it is the difference between a history
-/// and a password leak.
-const SECRET_HINTS: [&str; 3] = [
-    "x-kde-passwordManagerHint",
-    "application/x-secret",
-    "x-secret",
-];
+/// What may be recorded and which type to ask for are judged from MIME names
+/// alone, so the backends share those rules rather than reimplementing them.
+pub use crate::backend::clipboard_offer::{MAX_TEXT_BYTES, is_secret, preferred_text_mime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardEntry {
@@ -119,44 +105,6 @@ impl ClipboardHistory {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
-}
-
-/// Whether an offer is marked as a secret and must not be recorded.
-///
-/// The comparison is case-insensitive and matches on a suffix, because the
-/// hint travels both bare and with a vendor prefix depending on the toolkit.
-#[must_use]
-pub fn is_secret(mime_types: &[String]) -> bool {
-    mime_types.iter().any(|mime| {
-        let mime = mime.to_ascii_lowercase();
-        SECRET_HINTS
-            .iter()
-            .any(|hint| mime.ends_with(&hint.to_ascii_lowercase()))
-    })
-}
-
-/// Pick the text-ish MIME type to ask for, preferring UTF-8.
-///
-/// Returns `None` when the offer holds nothing this history can store — an
-/// image or a file list is a legitimate clipboard payload the picker simply
-/// has no way to show.
-#[must_use]
-pub fn preferred_text_mime(mime_types: &[String]) -> Option<String> {
-    const PREFERRED: [&str; 4] = [
-        "text/plain;charset=utf-8",
-        "UTF8_STRING",
-        "text/plain",
-        "STRING",
-    ];
-    for wanted in PREFERRED {
-        if let Some(found) = mime_types
-            .iter()
-            .find(|mime| mime.eq_ignore_ascii_case(wanted))
-        {
-            return Some(found.clone());
-        }
-    }
-    None
 }
 
 /// One line, whitespace collapsed, ellipsized — clipboard text is routinely

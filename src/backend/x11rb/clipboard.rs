@@ -12,7 +12,7 @@
 //!   answering `SelectionRequest` for as long as JWM holds it.
 //!
 //! Policy (what counts as a secret, what counts as text) lives in
-//! [`crate::jwm::features::clipboard`] so both backends decide alike; this
+//! [`crate::backend::clipboard_offer`] so both backends decide alike; this
 //! module is only the X11 mechanics.
 //!
 //! It runs on **its own X connection and thread**, not the window manager's.
@@ -343,7 +343,7 @@ impl Watcher {
             .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
             .collect();
 
-        if crate::jwm::features::clipboard::is_secret(&names) {
+        if crate::backend::clipboard_offer::is_secret(&names) {
             log::debug!("clipboard: offer marked secret, not reading it");
             return;
         }
@@ -462,7 +462,7 @@ mod tests {
         // byte budget the history enforces.
         assert_eq!(
             MAX_PROPERTY_BYTES as usize,
-            crate::jwm::features::clipboard::MAX_TEXT_BYTES
+            crate::backend::clipboard_offer::MAX_TEXT_BYTES
         );
     }
 

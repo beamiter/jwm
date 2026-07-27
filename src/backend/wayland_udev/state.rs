@@ -3213,11 +3213,11 @@ impl JwmWaylandState {
         if !crate::config::CONFIG.load().behavior().clipboard_history {
             return;
         }
-        if crate::jwm::features::clipboard::is_secret(mime_types) {
+        if crate::backend::clipboard_offer::is_secret(mime_types) {
             debug!("clipboard: offer marked secret, not reading it");
             return;
         }
-        let Some(mime) = crate::jwm::features::clipboard::preferred_text_mime(mime_types) else {
+        let Some(mime) = crate::backend::clipboard_offer::preferred_text_mime(mime_types) else {
             return;
         };
         let (read, write) = match std::io::pipe() {
@@ -3241,7 +3241,7 @@ impl JwmWaylandState {
                 let reader = std::fs::File::from(std::os::fd::OwnedFd::from(read));
                 // Cap the read: the history refuses anything larger anyway,
                 // and a client could otherwise stream without end.
-                let limit = crate::jwm::features::clipboard::MAX_TEXT_BYTES as u64 + 1;
+                let limit = crate::backend::clipboard_offer::MAX_TEXT_BYTES as u64 + 1;
                 if reader.take(limit).read_to_end(&mut buffer).is_err() {
                     return;
                 }
