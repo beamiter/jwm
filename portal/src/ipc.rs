@@ -26,7 +26,10 @@ pub struct WindowInfo {
 fn socket_path() -> PathBuf {
     let runtime_dir =
         std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(runtime_dir).join("jwm.sock")
+    // Must match `jwm::ipc_server::socket_location`, which names the endpoint
+    // `jwm-ipc.sock`; the old `jwm.sock` never existed, so every window query
+    // failed to connect and silently fell back to the Wayland app_id.
+    PathBuf::from(runtime_dir).join("jwm-ipc.sock")
 }
 
 pub fn query_windows() -> std::io::Result<Vec<WindowInfo>> {
