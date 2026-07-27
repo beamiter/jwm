@@ -775,6 +775,11 @@ pub struct BehaviorConfig {
     /// Wallpaper display mode: "fill" (crop to fill), "fit" (letterbox), "stretch", "center".
     #[serde(default = "default_wallpaper_mode")]
     pub wallpaper_mode: String,
+    /// Remember what was copied, so the clipboard picker has something to
+    /// offer. Memory only: the history is never written to disk and does not
+    /// survive a restart. Offers marked as secrets are never recorded.
+    #[serde(default = "default_clipboard_history")]
+    pub clipboard_history: bool,
     /// Directory the wallpaper picker lists. Empty means "beside the current
     /// wallpaper", then ~/Pictures/Wallpapers, then ~/Pictures.
     #[serde(default)]
@@ -1007,6 +1012,9 @@ fn default_night_light_end() -> String {
 }
 fn default_night_light_transition() -> u32 {
     30
+}
+fn default_clipboard_history() -> bool {
+    true
 }
 fn default_suspend_command() -> String {
     "systemctl suspend".to_string()
@@ -1429,6 +1437,7 @@ impl Default for Config {
                     night_light_start: default_night_light_start(),
                     night_light_end: default_night_light_end(),
                     night_light_transition_mins: default_night_light_transition(),
+                    clipboard_history: default_clipboard_history(),
                     wallpaper_dir: String::new(),
                     suspend_command: default_suspend_command(),
                     hibernate_command: default_hibernate_command(),
@@ -1678,6 +1687,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string(), "Control".to_string()],
                 key: "w".to_string(),
                 function: "wallpaper_picker".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string(), "Control".to_string()],
+                key: "v".to_string(),
+                function: "clipboard_picker".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2610,6 +2625,7 @@ impl Config {
             "wifi_picker" => Some(Jwm::wifi_picker),
             "bluetooth_picker" => Some(Jwm::bluetooth_picker),
             "calendar" => Some(Jwm::calendar),
+            "clipboard_picker" => Some(Jwm::clipboard_picker),
             "wallpaper_picker" => Some(Jwm::wallpaper_picker),
             "toggle_bluetooth" => Some(Jwm::toggle_bluetooth),
             "adjust_recording_region" => Some(Jwm::adjust_recording_region),
@@ -3029,6 +3045,7 @@ impl Config {
                 self.inner.behavior.wallpaper_mode = mode;
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
+            "behavior.clipboard_history" => self.inner.behavior.clipboard_history = as_bool()?,
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
             "behavior.compositor" => self.inner.behavior.compositor = as_bool()?,

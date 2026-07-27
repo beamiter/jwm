@@ -1068,6 +1068,23 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "active": active })));
         }
 
+        // Special command: clipboard_record — how a backend helper or a
+        // script feeds the history. Offers marked secret must be dropped
+        // before calling this, not here.
+        if name == "clipboard_record" {
+            let Some(text) = args.get("text").and_then(|value| value.as_str()) else {
+                return IpcResponse::err("clipboard_record: expected string field 'text'");
+            };
+            let recorded = self.record_clipboard(text);
+            return IpcResponse::ok(Some(serde_json::json!({ "recorded": recorded })));
+        }
+
+        // Special command: clear_clipboard — forget everything copied.
+        if name == "clear_clipboard" {
+            let cleared = self.clear_clipboard_history();
+            return IpcResponse::ok(Some(serde_json::json!({ "cleared": cleared })));
+        }
+
         // Special command: set_power_profile — switch the platform profile.
         if name == "set_power_profile" {
             let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
@@ -1364,6 +1381,7 @@ impl Jwm {
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;

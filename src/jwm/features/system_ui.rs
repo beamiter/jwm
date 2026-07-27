@@ -132,6 +132,7 @@ pub struct NotificationEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListKind {
     Notifications,
+    Clipboard,
     Wifi,
     Bluetooth,
     Wallpaper,
@@ -141,6 +142,7 @@ impl ListKind {
     fn title(self) -> &'static str {
         match self {
             Self::Notifications => "\u{f0f3}  NOTIFICATIONS",
+            Self::Clipboard => "\u{f0ea}  CLIPBOARD",
             Self::Wifi => "\u{f1eb}  WI-FI",
             Self::Bluetooth => "\u{f293}  BLUETOOTH",
             Self::Wallpaper => "\u{f03e}  WALLPAPER",
@@ -153,6 +155,7 @@ impl ListKind {
         }
         match self {
             Self::Notifications => "Enter  activate    d  dismiss    c  clear all    Esc  close",
+            Self::Clipboard => "Enter  copy    d  forget    c  clear all    Esc  close",
             Self::Wifi => "Enter  join    \u{f062}/\u{f063}  select    Esc  close",
             Self::Bluetooth => "Enter  connect/disconnect    r  refresh    Esc  close",
             Self::Wallpaper => "Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
@@ -163,7 +166,7 @@ impl ListKind {
     /// the one list users scroll rather than pick from.
     fn window(self) -> usize {
         match self {
-            Self::Notifications => 14,
+            Self::Notifications | Self::Clipboard => 14,
             _ => 12,
         }
     }
@@ -176,6 +179,10 @@ pub enum RowData {
         id: u32,
         /// Action key the sender marked as default, invoked on Return.
         default_action: Option<String>,
+    },
+    /// Position in the history, which is what the caller acts on.
+    Clipboard {
+        index: usize,
     },
     /// Whether the network is secured, i.e. may need a passphrase.
     Wifi {
@@ -685,6 +692,58 @@ impl SystemUiState {
             rows.clear();
             *selected = 0;
         }
+    }
+
+    // --- Clipboard picker ---
+
+    fn clipboard_rows(history: &crate::jwm::features::ClipboardHistory) -> Vec<ListRow> {
+        history
+            .entries()
+            .enumerate()
+            .map(|(index, entry)| ListRow {
+                key: index.to_string(),
+                text: crate::jwm::features::clipboard::picker_row(entry, index),
+                data: RowData::Clipboard { index },
+            })
+            .collect()
+    }
+
+    /// Build the clipboard picker from the live history, newest first.
+    pub fn clipboard_picker(history: &crate::jwm::features::ClipboardHistory) -> Self {
+        Self::ListPanel {
+            kind: ListKind::Clipboard,
+            rows: Self::clipboard_rows(history),
+            selected: 0,
+            message: String::new(),
+            prompt: None,
+            empty: "Clipboard history is empty".to_string(),
+        }
+    }
+
+    pub fn is_clipboard_picker(&self) -> bool {
+        self.is_list(ListKind::Clipboard)
+    }
+
+    /// Position in the history of the selected entry.
+    pub fn selected_clipboard(&self) -> Option<usize> {
+        match self.selected_row(ListKind::Clipboard)?.data {
+            RowData::Clipboard { index } => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Rebuild the open clipboard picker after the history changed.
+    ///
+    /// Rows are keyed by position rather than content, so the selection stays
+    /// where the user put it instead of chasing an entry that just moved to
+    /// the top.
+    pub fn refresh_clipboard(&mut self, history: &crate::jwm::features::ClipboardHistory) {
+        self.set_rows(ListKind::Clipboard, Self::clipboard_rows(history));
+    }
+
+    /// Replace the clipboard picker's status line.
+    pub fn set_clipboard_message(&mut self, text: impl Into<String>) {
+        self.set_list_message(ListKind::Clipboard, text);
     }
 
     // --- Wi-Fi picker ---

@@ -383,6 +383,76 @@ impl Jwm {
         self.close_system_ui(backend);
     }
 
+    /// Open the clipboard picker.
+    pub(crate) fn clipboard_picker(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        if !backend.has_compositor() {
+            return Err("clipboard picker requires the JWM compositor".into());
+        }
+        if !CONFIG.load().behavior().clipboard_history {
+            return Err("clipboard history is disabled (behavior.clipboard_history)".into());
+        }
+        if let Some(root) = backend.root_window() {
+            backend.key_ops().grab_keyboard(root)?;
+            if !backend.input_ops().grab_pointer(
+                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                None,
+            )? {
+                let _ = backend.key_ops().ungrab_keyboard();
+                return Err("could not grab pointer for the clipboard picker".into());
+            }
+        }
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::clipboard_picker(&self.features.clipboard);
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Put the selected entry back on the clipboard and close the picker.
+    pub(crate) fn copy_selected_clipboard(&mut self, backend: &mut dyn Backend) {
+        let Some(index) = self.features.system_ui.selected_clipboard() else {
+            return;
+        };
+        let Some(text) = self
+            .features
+            .clipboard
+            .get(index)
+            .map(|entry| entry.text.clone())
+        else {
+            return;
+        };
+        if backend.set_clipboard_text(&text) {
+            // Copying an old entry makes it the most recent one, exactly as
+            // if the user had copied it again from the source.
+            self.record_clipboard(&text);
+            self.close_system_ui(backend);
+        } else {
+            self.features
+                .system_ui
+                .set_clipboard_message("this backend cannot set the clipboard");
+            self.sync_system_ui(backend);
+        }
+    }
+
+    /// Forget the selected entry.
+    pub(crate) fn forget_selected_clipboard(&mut self, backend: &mut dyn Backend) {
+        let Some(index) = self.features.system_ui.selected_clipboard() else {
+            return;
+        };
+        if self.features.clipboard.remove(index) {
+            self.features
+                .system_ui
+                .refresh_clipboard(&self.features.clipboard);
+            self.sync_system_ui(backend);
+        }
+    }
+
     /// Open the calendar card on the current month.
     pub(crate) fn calendar(
         &mut self,

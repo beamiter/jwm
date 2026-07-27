@@ -15,6 +15,7 @@ pub mod audio_recording;
 pub mod calendar;
 pub mod capture;
 pub mod capture_plan;
+pub mod clipboard;
 pub mod connectivity;
 pub mod expose_plan;
 pub mod magnifier;
@@ -38,6 +39,7 @@ pub use capture::{CaptureInteractionState, CaptureTarget};
 pub use capture_plan::{
     CaptureCompletion, CaptureExecution, CapturePlan, execute_capture_plan, plan_capture_completion,
 };
+pub use clipboard::{ClipboardEntry, ClipboardHistory};
 pub use connectivity::{
     BluetoothDevice, BluetoothState, ConnectivityState, LinkKind, NetworkState, WifiNetwork,
 };
@@ -69,6 +71,8 @@ pub struct FeatureStates {
     pub media: MediaStatus,
     /// Latest battery reading, refreshed by the poll in `tick_animations`.
     pub battery: Option<BatteryState>,
+    /// Clipboard history. Memory only, never written to disk.
+    pub clipboard: ClipboardHistory,
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,

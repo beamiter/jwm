@@ -651,6 +651,24 @@ impl Jwm {
                 self.handle_bluetooth_picker_key(backend, keysym);
                 return Ok(());
             }
+            if self.features.system_ui.is_clipboard_picker() {
+                if keysym == keys::KEY_Return || keysym == keys::KEY_space {
+                    self.copy_selected_clipboard(backend);
+                } else if keysym == keys::KEY_d || keysym == keys::KEY_Delete {
+                    self.forget_selected_clipboard(backend);
+                } else if keysym == keys::KEY_c {
+                    self.clear_clipboard_history();
+                    self.sync_system_ui(backend);
+                } else {
+                    if keysym == keys::KEY_Up {
+                        self.features.system_ui.move_selection(-1);
+                    } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
+                        self.features.system_ui.move_selection(1);
+                    }
+                    self.sync_system_ui(backend);
+                }
+                return Ok(());
+            }
             if self.features.system_ui.is_wallpaper_picker() {
                 if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                     self.apply_selected_wallpaper(backend);
