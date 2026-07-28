@@ -1,26 +1,26 @@
 name: Apply launcher composite command patch
 
 on:
-  push:
+  pull_request:
+    types: [opened, synchronize, reopened]
     branches:
-      - agent/launcher-composite-commands
-    paths:
-      - .github/agent-launcher-composite.patch
-      - .github/workflows/agent-apply-launcher-patch.yml
+      - master
 
 permissions:
   contents: write
 
 jobs:
   apply-and-validate:
-    if: ${{ !contains(github.event.head_commit.message, '[agent-applied]') }}
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'agent/launcher-composite-commands'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Check out branch
+      - name: Check out implementation branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref_name }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
       - name: Install build dependencies
@@ -47,6 +47,8 @@ jobs:
         run: cargo test --locked --lib --no-default-features launcher_ -- --nocapture
 
       - name: Commit implementation
+        env:
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           rm .github/agent-launcher-composite.patch
           rm .github/workflows/agent-apply-launcher-patch.yml
@@ -54,4 +56,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/jwm/features/system_ui.rs .github
           git commit -m "feat(launcher): support composite commands [agent-applied]"
-          git push origin HEAD:${{ github.ref_name }}
+          git push origin "HEAD:${HEAD_BRANCH}"
