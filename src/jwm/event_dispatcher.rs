@@ -1394,6 +1394,7 @@ impl EventHandler for Jwm {
                 y,
                 width,
                 height,
+                ..
             } => self.on_window_configured(backend, window, x, y, width, height),
             BackendEvent::MappingNotify => self.on_mapping_notify(backend),
 

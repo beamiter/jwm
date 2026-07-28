@@ -104,6 +104,22 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.needs_render || self.damage_render_pending || self.recording_active {
             return true;
         }
+        // A failed resize import must recover even when the client stops
+        // producing Damage. Both X11 event loops have a 20 ms maintenance
+        // timer, so only report a wall-clock retry once its deadline is due;
+        // reporting future retries here would turn the loop into a 1 ms spin.
+        // While fullscreen is manually unredirected there is nothing useful
+        // to refresh; redirection itself starts a fresh backing generation.
+        if self.unredirected_window.is_none() {
+            let now = std::time::Instant::now();
+            if self
+                .windows
+                .values()
+                .any(|wt| wt.pixmap_refresh.needs_refresh_at(now))
+            {
+                return true;
+            }
+        }
         // Also need render if any fade animations are in progress
         if self.fading {
             for wt in self.windows.values() {

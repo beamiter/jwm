@@ -2417,6 +2417,7 @@ mod event_source {
                     y: e.y as i32,
                     width: e.width as u32,
                     height: e.height as u32,
+                    border_width: e.border_width as u32,
                 }),
                 XEvent::EnterNotify(e) => {
                     let mode = match e.mode {

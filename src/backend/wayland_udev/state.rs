@@ -1291,6 +1291,7 @@ impl XwmHandler for JwmWaylandState {
                 y: new_y,
                 width: new_w,
                 height: new_h,
+                border_width: 0,
             });
         }
 
@@ -2876,6 +2877,7 @@ impl CompositorHandler for JwmWaylandState {
                                             y: geo.y,
                                             width: new_w,
                                             height: new_h,
+                                            border_width: 0,
                                         },
                                     );
                                 }
@@ -2978,6 +2980,7 @@ impl CompositorHandler for JwmWaylandState {
                                 y: new_geo.y,
                                 width: new_geo.w,
                                 height: new_geo.h,
+                                border_width: 0,
                             },
                         );
                     }

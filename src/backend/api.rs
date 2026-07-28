@@ -564,6 +564,7 @@ pub enum BackendEvent {
         y: i32,
         width: u32,
         height: u32,
+        border_width: u32,
     },
 
     ButtonPress {

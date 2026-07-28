@@ -486,7 +486,12 @@ macro_rules! delegate_compositor_capabilities {
                     compositor
                         .add_window(x11_window, geometry.x, geometry.y, geometry.w, geometry.h);
                     compositor.update_geometry(
-                        x11_window, geometry.x, geometry.y, geometry.w, geometry.h,
+                        x11_window,
+                        geometry.x,
+                        geometry.y,
+                        geometry.w,
+                        geometry.h,
+                        geometry.border,
                     );
                     if !class_name.is_empty() {
                         compositor.set_window_class(x11_window, &class_name);

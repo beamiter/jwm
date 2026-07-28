@@ -34,7 +34,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 y,
                 width,
                 height,
-            } => self.update_geometry(window, x, y, width, height),
+                border_width,
+            } => self.update_geometry(window, x, y, width, height, border_width),
             CompositorEventOp::SetFullscreen { window, fullscreen } => {
                 self.set_window_fullscreen(window, fullscreen);
             }

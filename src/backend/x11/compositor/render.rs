@@ -1820,6 +1820,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// into the overlay while the server still owns the client would otherwise
     /// produce a blank/frozen frame and lose the only handle needed to retry.
     fn restore_unredirected_window(&mut self, window: u32, reason: &str) -> bool {
+        let confirm_pixmap_on_damage = self.graphics.is_gles();
         let result = self
             .conn
             .redirect_window_manual(window)
@@ -1829,7 +1830,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 if let Some(wt) = self.windows.get_mut(&window) {
                     // The server allocated a new backing pixmap while the
                     // window was unredirected; the old TFP binding is stale.
-                    wt.needs_pixmap_refresh = true;
+                    wt.pixmap_refresh.backing_changed(confirm_pixmap_on_damage);
                 }
                 self.needs_render = true;
                 log::info!(
@@ -2384,8 +2385,17 @@ impl<C: CompositorConnection> Compositor<C> {
         // dirty, we can skip the entire GL render (unless screenshot pending or HUD active).
         // While scanning, also feed the precise dirty-rect tracker so we do not
         // walk the scene a second time later in the frame.
-        let mut has_dirty = false;
-        let mut needs_native_texture_sync = false;
+        let pixmap_refresh_now = std::time::Instant::now();
+        let pixmap_refresh_ready = self
+            .windows
+            .values()
+            .any(|wt| wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now));
+        // Refreshes are global rather than scene-local: an off-scene window
+        // with an expired retry deadline must still get one attempt, otherwise
+        // needs_render() would remain armed and spin without reaching
+        // refresh_pixmaps().
+        let mut has_dirty = pixmap_refresh_ready;
+        let mut needs_native_texture_sync = pixmap_refresh_ready;
         for &(win, _, _, _, _) in scene {
             let Some(wt) = self.windows.get(&win) else {
                 continue;
@@ -2394,10 +2404,12 @@ impl<C: CompositorConnection> Compositor<C> {
             // rendering to complete before sampling. The GLX extension has no
             // implicit X/GL synchronization; omitting this on NVIDIA can show
             // an older client frame (most visibly terminal cursor/text damage).
-            if (wt.dirty && wt.binding.is_some()) || wt.needs_pixmap_refresh {
+            if (wt.dirty && wt.binding.is_some())
+                || wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now)
+            {
                 needs_native_texture_sync = true;
             }
-            if wt.dirty || wt.needs_pixmap_refresh {
+            if wt.dirty || wt.pixmap_refresh.needs_refresh_at(pixmap_refresh_now) {
                 has_dirty = true;
                 let dirty_rect = DirtyRect::new(wt.x, wt.y, wt.w, wt.h);
                 self.dirty_region_tracker.mark_dirty(dirty_rect);
@@ -2520,7 +2532,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Refresh TFP textures for dirty windows with per-frame time budget.
         // Focused window always updates; others update within 3ms budget.
         // NOTE: We intentionally do NOT call glGetError() here.
-        // Genuine pixmap invalidation is handled by update_geometry → needs_pixmap_refresh.
+        // Genuine pixmap invalidation is handled by update_geometry → pixmap_refresh.
         let tfp_budget = std::time::Duration::from_micros(3000); // 3ms
         let tfp_start = std::time::Instant::now();
 

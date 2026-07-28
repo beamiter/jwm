@@ -86,6 +86,20 @@ another scene lookup pass. During resize bursts, the synchronization performed
 before pixmap import is reused by the ensuing texture refresh instead of issuing
 a second native round trip.
 
+XComposite allocates a new backing pixmap when the window size or X border
+width changes. JWM therefore lets the compositor observe every
+`ConfigureNotify`, even though the window manager still coalesces a burst to its
+final geometry. Replacement is transactional: a new named pixmap, GL texture,
+and EGLImage/GLXPixmap are constructed first, then committed together before the
+previous import is released. A transient failure keeps the last good texture
+visible and is retried with capped exponential backoff. Producer Damage can
+bring a retry forward, while a wall-clock deadline guarantees another attempt
+even if the resized client stops drawing. If the first post-resize Damage
+arrives after the initial Configure-driven import, it schedules one confirmation
+import; if it was already queued, the two operations are folded into one. This
+covers clients that rebuild a Vulkan swapchain asynchronously without adding
+continuous per-frame pixmap churn.
+
 Output enumeration reports refresh rates in millihertz, while compositor policy
 uses rounded whole Hz. Startup logs therefore show both the precise rate (for
 example `120.081Hz`) and the policy value (`120Hz`).

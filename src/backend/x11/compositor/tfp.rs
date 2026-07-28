@@ -1,5 +1,5 @@
 use super::Compositor;
-use super::{PixmapBinding, RippleState, WindowTexture};
+use super::{PixmapBinding, RippleState, WindowTexture, xcomposite_backing_changed};
 use crate::backend::compositor_common::window_glow::WindowGlowSettings;
 use glow::HasContext;
 
@@ -29,6 +29,35 @@ impl<C: CompositorConnection> Compositor<C> {
         let config = crate::config::CONFIG.load();
         let glow_margin = WindowGlowSettings::from_behavior(config.behavior()).damage_margin();
         shadow_margin.max(glow_margin)
+    }
+
+    fn create_window_gl_texture(&self) -> Result<glow::Texture, String> {
+        let texture = unsafe { self.gl.create_texture()? };
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::NEAREST as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::NEAREST as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+        Ok(texture)
     }
 
     // =====================================================================
@@ -71,6 +100,7 @@ impl<C: CompositorConnection> Compositor<C> {
         if w == 0 || h == 0 {
             return;
         }
+        let confirm_pixmap_on_damage = self.graphics.is_gles();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.fading_out {
                 // A client can remap the same XID before its unmap fade has
@@ -83,7 +113,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.w = w;
                 wt.h = h;
                 wt.anim_scale_target = 1.0;
-                wt.needs_pixmap_refresh = true;
+                wt.pixmap_refresh.backing_changed(confirm_pixmap_on_damage);
                 wt.dirty = true;
                 self.effect_tick_clock.reset();
                 self.ripple_active.retain(|r| r.x11_win != x11_win);
@@ -175,41 +205,15 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         let _ = self.conn.flush_x11();
 
-        let gl_texture = unsafe {
-            match self.gl.create_texture() {
-                Ok(texture) => texture,
-                Err(error) => {
-                    log::warn!("compositor: create_texture failed: {error}");
-                    let _ = self.conn.free_window_pixmap(pixmap);
-                    let _ = self.conn.destroy_window_damage(damage_id);
-                    return;
-                }
+        let gl_texture = match self.create_window_gl_texture() {
+            Ok(texture) => texture,
+            Err(error) => {
+                log::warn!("compositor: create_texture failed: {error}");
+                let _ = self.conn.free_window_pixmap(pixmap);
+                let _ = self.conn.destroy_window_damage(damage_id);
+                return;
             }
         };
-        unsafe {
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(gl_texture));
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                glow::NEAREST as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                glow::NEAREST as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, None);
-        }
 
         if let Err(error) = self.graphics.sync_x11() {
             log::warn!("compositor: native pixmap synchronization failed: {error}");
@@ -246,6 +250,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 y,
                 w,
                 h,
+                x_border_width: None,
                 damage: damage_id,
                 pixmap,
                 visual,
@@ -254,7 +259,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 gl_texture,
                 dirty: true,
                 has_rgba: use_rgba,
-                needs_pixmap_refresh: false,
+                pixmap_refresh: Default::default(),
                 x11_win,
                 fade_opacity: initial_fade,
                 fading_out: false,
@@ -496,14 +501,25 @@ impl<C: CompositorConnection> Compositor<C> {
         log::debug!("compositor: remove_window 0x{:x}", x11_win);
     }
 
-    pub(crate) fn update_geometry(&mut self, x11_win: u32, x: i32, y: i32, w: u32, h: u32) {
+    pub(crate) fn update_geometry(
+        &mut self,
+        x11_win: u32,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        border_width: u32,
+    ) {
         let expand = self.decoration_damage_margin();
+        let confirm_pixmap_on_damage = self.graphics.is_gles();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
-            let size_changed = wt.w != w || wt.h != h;
+            let backing_changed =
+                xcomposite_backing_changed((wt.w, wt.h), wt.x_border_width, (w, h), border_width);
             let moved = wt.x != x || wt.y != y;
             let (old_x, old_y, old_w, old_h) = (wt.x, wt.y, wt.w, wt.h);
             wt.x = x;
             wt.y = y;
+            wt.x_border_width = Some(border_width);
             self.needs_render = true;
 
             if moved {
@@ -523,12 +539,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
             }
 
-            if size_changed && w > 0 && h > 0 {
+            if backing_changed && w > 0 && h > 0 {
                 wt.w = w;
                 wt.h = h;
                 // Defer the heavy pixmap recreation to the next render_frame()
-                // call, so multiple resize events within a single frame are batched.
-                wt.needs_pixmap_refresh = true;
+                // call, so geometry bursts within a single frame are batched.
+                wt.pixmap_refresh.backing_changed(confirm_pixmap_on_damage);
             }
         }
     }
@@ -537,33 +553,17 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Called once per frame so resize bursts are coalesced.
     /// Returns whether the batch's native synchronization completed.
     pub(super) fn refresh_pixmaps(&mut self) -> bool {
+        let now = std::time::Instant::now();
         let mut refresh_wins = std::mem::take(&mut self.scratch_refresh_wins);
         refresh_wins.clear();
         refresh_wins.extend(
             self.windows
                 .iter()
-                .filter_map(|(&id, wt)| wt.needs_pixmap_refresh.then_some(id)),
+                .filter_map(|(&id, wt)| wt.pixmap_refresh.needs_refresh_at(now).then_some(id)),
         );
         if refresh_wins.is_empty() {
             self.scratch_refresh_wins = refresh_wins;
             return false;
-        }
-
-        for &win in &refresh_wins {
-            let (texture, binding, pixmap) = {
-                let wt = self
-                    .windows
-                    .get_mut(&win)
-                    .expect("tracked window disappeared");
-                (wt.gl_texture, wt.binding.take(), wt.pixmap)
-            };
-            if let Some(binding) = binding {
-                self.graphics
-                    .release_pixmap_binding(&self.gl, texture, binding);
-            }
-            if pixmap != 0 {
-                let _ = self.conn.free_window_pixmap(pixmap);
-            }
         }
 
         let mut new_pixmaps = std::mem::take(&mut self.scratch_new_pixmaps);
@@ -576,8 +576,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 Err(error) => {
                     log::warn!("compositor: resized pixmap XID allocation failed: {error}");
                     if let Some(wt) = self.windows.get_mut(&win) {
-                        wt.pixmap = 0;
-                        wt.needs_pixmap_refresh = false;
+                        wt.pixmap_refresh.refresh_failed();
                     }
                     continue;
                 }
@@ -585,13 +584,9 @@ impl<C: CompositorConnection> Compositor<C> {
             if let Err(error) = self.conn.name_window_pixmap(x11_win, pixmap) {
                 log::warn!("compositor: resized NameWindowPixmap failed: {error}");
                 if let Some(wt) = self.windows.get_mut(&win) {
-                    wt.pixmap = 0;
-                    wt.needs_pixmap_refresh = false;
+                    wt.pixmap_refresh.refresh_failed();
                 }
                 continue;
-            }
-            if let Some(wt) = self.windows.get_mut(&win) {
-                wt.pixmap = pixmap;
             }
             new_pixmaps.push((win, pixmap));
         }
@@ -604,11 +599,40 @@ impl<C: CompositorConnection> Compositor<C> {
                 false
             }
         };
+        if !native_sync_succeeded {
+            for (win, pixmap) in new_pixmaps.drain(..) {
+                let _ = self.conn.free_window_pixmap(pixmap);
+                if let Some(wt) = self.windows.get_mut(&win) {
+                    wt.pixmap_refresh.refresh_failed();
+                }
+            }
+            self.scratch_refresh_wins = refresh_wins;
+            self.scratch_new_pixmaps = new_pixmaps;
+            return false;
+        }
 
         for (win, pixmap) in new_pixmaps.drain(..) {
             let (texture, x11_win, visual, depth) = {
                 let wt = &self.windows[&win];
-                (wt.gl_texture, wt.x11_win, wt.visual, wt.depth)
+                (
+                    self.create_window_gl_texture(),
+                    wt.x11_win,
+                    wt.visual,
+                    wt.depth,
+                )
+            };
+            let texture = match texture {
+                Ok(texture) => texture,
+                Err(error) => {
+                    log::warn!(
+                        "compositor: resized GL texture allocation failed for 0x{x11_win:x}: {error}"
+                    );
+                    let _ = self.conn.free_window_pixmap(pixmap);
+                    if let Some(wt) = self.windows.get_mut(&win) {
+                        wt.pixmap_refresh.refresh_failed();
+                    }
+                    continue;
+                }
             };
             match self.graphics.import_pixmap(
                 &self.gl,
@@ -619,35 +643,50 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.hdr_enabled,
             ) {
                 Ok((binding, rgba)) => {
-                    let wt = self
-                        .windows
-                        .get_mut(&win)
-                        .expect("tracked window disappeared");
-                    wt.binding = Some(binding);
-                    wt.has_rgba = rgba;
-                    wt.dirty = true;
-                    wt.needs_pixmap_refresh = false;
+                    // Build the replacement completely before touching the
+                    // currently displayed resources. XComposite keeps an old
+                    // named pixmap alive until FreePixmap, so a transient
+                    // import failure can safely retain the last good frame.
+                    let (old_texture, old_binding, old_pixmap) = {
+                        let wt = self
+                            .windows
+                            .get_mut(&win)
+                            .expect("tracked window disappeared");
+                        let old_texture = std::mem::replace(&mut wt.gl_texture, texture);
+                        let old_binding = wt.binding.replace(binding);
+                        let old_pixmap = std::mem::replace(&mut wt.pixmap, pixmap);
+                        wt.has_rgba = rgba;
+                        wt.dirty = true;
+                        wt.pixmap_refresh.refresh_succeeded();
+                        (old_texture, old_binding, old_pixmap)
+                    };
+                    if let Some(old_binding) = old_binding {
+                        self.graphics
+                            .release_pixmap_binding(&self.gl, old_texture, old_binding);
+                    }
+                    unsafe {
+                        self.gl.delete_texture(old_texture);
+                    }
+                    if old_pixmap != 0 {
+                        let _ = self.conn.free_window_pixmap(old_pixmap);
+                    }
                 }
                 Err(error) => {
                     log::warn!(
                         "compositor: resized {} pixmap import failed for 0x{x11_win:x}: {error}",
                         self.graphics.api_name()
                     );
+                    unsafe {
+                        self.gl.delete_texture(texture);
+                    }
                     let _ = self.conn.free_window_pixmap(pixmap);
                     if let Some(wt) = self.windows.get_mut(&win) {
-                        wt.pixmap = 0;
-                        wt.binding = None;
-                        wt.needs_pixmap_refresh = false;
+                        wt.pixmap_refresh.refresh_failed();
                     }
                 }
             }
         }
 
-        for &win in &refresh_wins {
-            if let Some(wt) = self.windows.get_mut(&win) {
-                wt.needs_pixmap_refresh = false;
-            }
-        }
         self.scratch_refresh_wins = refresh_wins;
         self.scratch_new_pixmaps = new_pixmaps;
         native_sync_succeeded
@@ -657,6 +696,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let expand = self.decoration_damage_margin();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.dirty = true;
+            wt.pixmap_refresh.damaged();
             self.damage_render_pending = true;
             // Mark the window and every compositor-owned decoration dirty.
             self.damage_tracker.mark_region_dirty(

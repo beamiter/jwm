@@ -326,8 +326,9 @@ where
 
     fn name_window_pixmap(&self, window: u32, pixmap: u32) -> Result<(), String> {
         self.composite_name_window_pixmap(window, pixmap)
-            .map(|_| ())
-            .map_err(|e| format!("name_window_pixmap: {e}"))
+            .map_err(|e| format!("name_window_pixmap: {e}"))?
+            .check()
+            .map_err(|e| format!("name_window_pixmap check: {e}"))
     }
 
     fn free_window_pixmap(&self, pixmap: u32) -> Result<(), String> {

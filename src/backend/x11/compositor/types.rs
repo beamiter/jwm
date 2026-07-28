@@ -28,11 +28,123 @@ pub(super) enum PixmapBinding {
     Egl { image: *mut std::ffi::c_void },
 }
 
+pub(super) fn xcomposite_backing_changed(
+    old_size: (u32, u32),
+    old_border_width: Option<u32>,
+    new_size: (u32, u32),
+    new_border_width: u32,
+) -> bool {
+    old_size != new_size || old_border_width != Some(new_border_width)
+}
+
+/// Resize-driven native pixmap replacement state.
+///
+/// XComposite allocates a new backing pixmap whenever a window is resized.
+/// The first Damage can race the ConfigureNotify-driven import, so remember
+/// whether that Damage has been observed. Failed imports retry when either
+/// enough producer Damage arrives or a wall-clock deadline expires. The
+/// deadline is required for clients that stop drawing after their resize;
+/// exponential backoff avoids rebuilding an EGLImage every compositor frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PixmapRefreshState {
+    pending: bool,
+    confirm_on_damage: bool,
+    retry_after_damages: Option<u8>,
+    retry_deadline: Option<std::time::Instant>,
+    damage_backoff: u8,
+    time_backoff: std::time::Duration,
+}
+
+impl PixmapRefreshState {
+    const INITIAL_DAMAGE_BACKOFF: u8 = 1;
+    const MAX_DAMAGE_BACKOFF: u8 = 16;
+    const INITIAL_TIME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+    const MAX_TIME_BACKOFF: std::time::Duration = std::time::Duration::from_millis(1600);
+
+    pub(super) fn backing_changed(&mut self, confirm_on_damage: bool) {
+        self.pending = true;
+        self.confirm_on_damage = confirm_on_damage;
+        self.retry_after_damages = None;
+        self.retry_deadline = None;
+        self.damage_backoff = Self::INITIAL_DAMAGE_BACKOFF;
+        self.time_backoff = Self::INITIAL_TIME_BACKOFF;
+    }
+
+    pub(super) fn needs_refresh_at(self, now: std::time::Instant) -> bool {
+        self.pending || self.retry_deadline.is_some_and(|deadline| deadline <= now)
+    }
+
+    /// Fold a Damage event into an already-pending refresh when it arrived
+    /// before rendering, or schedule one confirmation import when it arrived
+    /// after the ConfigureNotify-driven import. During failure backoff, Damage
+    /// can bring the retry forward without being required for recovery.
+    pub(super) fn damaged(&mut self) {
+        if self.confirm_on_damage {
+            self.pending = true;
+            self.confirm_on_damage = false;
+            self.retry_after_damages = None;
+            self.retry_deadline = None;
+        } else if let Some(remaining) = self.retry_after_damages.as_mut() {
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.pending = true;
+                self.retry_after_damages = None;
+                self.retry_deadline = None;
+            }
+        }
+    }
+
+    pub(super) fn refresh_succeeded(&mut self) {
+        self.pending = false;
+        self.retry_after_damages = None;
+        self.retry_deadline = None;
+        self.damage_backoff = Self::INITIAL_DAMAGE_BACKOFF;
+        self.time_backoff = Self::INITIAL_TIME_BACKOFF;
+    }
+
+    /// Preserve the current texture and schedule another candidate. Producer
+    /// Damage may accelerate the retry, while the deadline guarantees progress
+    /// for a client that remains static after resizing.
+    pub(super) fn refresh_failed(&mut self) {
+        self.refresh_failed_at(std::time::Instant::now());
+    }
+
+    pub(super) fn refresh_failed_at(&mut self, now: std::time::Instant) {
+        self.pending = false;
+        self.retry_after_damages = Some(self.damage_backoff.max(1));
+        self.retry_deadline = Some(now + self.time_backoff);
+        self.damage_backoff = self
+            .damage_backoff
+            .saturating_mul(2)
+            .clamp(Self::INITIAL_DAMAGE_BACKOFF, Self::MAX_DAMAGE_BACKOFF);
+        self.time_backoff = self
+            .time_backoff
+            .saturating_mul(2)
+            .clamp(Self::INITIAL_TIME_BACKOFF, Self::MAX_TIME_BACKOFF);
+    }
+}
+
+impl Default for PixmapRefreshState {
+    fn default() -> Self {
+        Self {
+            pending: false,
+            confirm_on_damage: false,
+            retry_after_damages: None,
+            retry_deadline: None,
+            damage_backoff: Self::INITIAL_DAMAGE_BACKOFF,
+            time_backoff: Self::INITIAL_TIME_BACKOFF,
+        }
+    }
+}
+
 pub(super) struct WindowTexture {
     pub(super) x: i32,
     pub(super) y: i32,
     pub(super) w: u32,
     pub(super) h: u32,
+    /// Last server-reported X border width. The initial value is unknown
+    /// because add_window deliberately avoids another geometry round trip.
+    pub(super) x_border_width: Option<u32>,
     pub(super) damage: u32,
     pub(super) pixmap: u32,
     /// X11 window format is immutable for the lifetime of a window. Cache it
@@ -43,7 +155,7 @@ pub(super) struct WindowTexture {
     pub(super) gl_texture: glow::Texture,
     pub(super) dirty: bool,
     pub(super) has_rgba: bool,
-    pub(super) needs_pixmap_refresh: bool,
+    pub(super) pixmap_refresh: PixmapRefreshState,
     pub(super) x11_win: u32,
     pub(super) fade_opacity: f32,
     pub(super) fading_out: bool,
@@ -70,6 +182,161 @@ pub(super) struct WindowTexture {
     /// from `x/y` would intermittently duplicate or skip trail samples.
     pub(super) motion_trail_cursor: Option<(f32, f32)>,
     pub(super) audio_sync_target: Option<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PixmapRefreshState, xcomposite_backing_changed};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn xcomposite_backing_tracks_size_and_x_border_changes() {
+        assert!(xcomposite_backing_changed(
+            (800, 600),
+            Some(0),
+            (801, 600),
+            0
+        ));
+        assert!(xcomposite_backing_changed(
+            (800, 600),
+            Some(0),
+            (800, 600),
+            1
+        ));
+        assert!(xcomposite_backing_changed((800, 600), None, (800, 600), 0));
+        assert!(!xcomposite_backing_changed(
+            (800, 600),
+            Some(1),
+            (800, 600),
+            1
+        ));
+    }
+
+    #[test]
+    fn damage_before_the_first_refresh_is_folded_into_that_attempt() {
+        let now = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.damaged();
+        assert!(state.needs_refresh_at(now));
+
+        state.refresh_succeeded();
+        assert!(!state.needs_refresh_at(now));
+        state.damaged();
+        assert!(
+            !state.needs_refresh_at(now),
+            "pre-import Damage must not cause a redundant second import"
+        );
+    }
+
+    #[test]
+    fn damage_after_the_first_refresh_confirms_the_new_backing_once() {
+        let now = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.refresh_succeeded();
+        assert!(!state.needs_refresh_at(now));
+
+        state.damaged();
+        assert!(state.needs_refresh_at(now));
+        state.refresh_succeeded();
+        state.damaged();
+        assert!(
+            !state.needs_refresh_at(now),
+            "ordinary steady-state Damage must not rename the pixmap"
+        );
+    }
+
+    #[test]
+    fn failed_refreshes_retry_with_capped_damage_or_time_backoff() {
+        let start = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.damaged();
+
+        for (expected_damages, expected_millis) in [
+            (1, 100),
+            (2, 200),
+            (4, 400),
+            (8, 800),
+            (16, 1600),
+            (16, 1600),
+        ] {
+            state.refresh_failed_at(start);
+            assert!(!state.needs_refresh_at(start + Duration::from_millis(expected_millis - 1)));
+            assert!(state.needs_refresh_at(start + Duration::from_millis(expected_millis)));
+
+            for damage in 1..=expected_damages {
+                state.damaged();
+                assert_eq!(
+                    state.needs_refresh_at(start),
+                    damage == expected_damages,
+                    "retry interval diverged at backoff {expected_damages}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_resize_resets_both_retry_backoffs() {
+        let start = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.damaged();
+        for _ in 0..5 {
+            state.refresh_failed_at(start);
+            while !state.needs_refresh_at(start) {
+                state.damaged();
+            }
+        }
+
+        state.backing_changed(true);
+        state.refresh_failed_at(start);
+        assert!(!state.needs_refresh_at(start + Duration::from_millis(99)));
+        assert!(state.needs_refresh_at(start + Duration::from_millis(100)));
+
+        state.backing_changed(true);
+        state.refresh_failed_at(start);
+        state.damaged();
+        assert!(state.needs_refresh_at(start));
+    }
+
+    #[test]
+    fn a_static_client_retries_after_the_deadline() {
+        let start = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.damaged();
+        state.refresh_failed_at(start);
+
+        assert!(!state.needs_refresh_at(start + Duration::from_millis(99)));
+        assert!(state.needs_refresh_at(start + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn success_clears_a_scheduled_retry() {
+        let start = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(true);
+        state.damaged();
+        state.refresh_failed_at(start);
+        state.refresh_succeeded();
+
+        assert!(!state.needs_refresh_at(start + Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn confirmation_can_be_disabled_for_the_glx_path() {
+        let now = Instant::now();
+        let mut state = PixmapRefreshState::default();
+        state.backing_changed(false);
+        state.refresh_succeeded();
+        state.damaged();
+        assert!(
+            !state.needs_refresh_at(now),
+            "GLX must not pay for the EGL resize confirmation workaround"
+        );
+    }
 }
 
 pub(super) struct WindowUniforms {

@@ -803,6 +803,27 @@ struct XcbLoopData<'a> {
     should_exit: bool,
 }
 
+/// Expose every raw ConfigureNotify to XComposite while retaining only the
+/// final same-window event for the WM's heavier layout bookkeeping.
+fn observe_and_coalesce_configure(
+    pending: &mut Option<BackendEvent>,
+    event: BackendEvent,
+    mut observe: impl FnMut(&BackendEvent),
+) -> Option<BackendEvent> {
+    let BackendEvent::WindowConfigured { window, .. } = &event else {
+        unreachable!("configure coalescer received a non-configure event");
+    };
+    observe(&event);
+    let flushed = match pending {
+        Some(BackendEvent::WindowConfigured {
+            window: previous, ..
+        }) if previous != window => pending.take(),
+        _ => None,
+    };
+    *pending = Some(event);
+    flushed
+}
+
 impl XcbLoopData<'_> {
     fn dispatch_backend_event(
         &mut self,
@@ -825,18 +846,20 @@ impl XcbLoopData<'_> {
                 }
                 *pending_motion = Some(event);
             }
-            BackendEvent::WindowConfigured { window, .. } => {
+            BackendEvent::WindowConfigured { .. } => {
                 self.flush_pending_motion(pending_motion, context);
-                if let Some(BackendEvent::WindowConfigured {
-                    window: prev_window,
-                    ..
-                }) = pending_configure
-                {
-                    if prev_window != window {
-                        self.flush_pending_configure(pending_configure, context);
-                    }
+                // The WM only needs the final geometry in a same-window burst,
+                // but XComposite replaces the backing pixmap on *every*
+                // resize. Feed each ConfigureNotify to the compositor before
+                // coalescing so an A -> B -> A burst cannot hide that
+                // invalidation and leave an old EGLImage bound indefinitely.
+                let flushed =
+                    observe_and_coalesce_configure(pending_configure, event, |configure| {
+                        self.backend.compositor_handle_event(configure)
+                    });
+                if let Some(previous) = flushed {
+                    self.deliver_backend_event_after_compositor(previous, context);
                 }
-                *pending_configure = Some(event);
             }
             _ => {
                 self.flush_pending_motion(pending_motion, context);
@@ -858,16 +881,20 @@ impl XcbLoopData<'_> {
         context: &str,
     ) {
         if let Some(event) = pending_configure.take() {
-            self.deliver_backend_event(event, context);
+            self.deliver_backend_event_after_compositor(event, context);
         }
     }
 
     fn deliver_backend_event(&mut self, event: BackendEvent, context: &str) {
+        self.backend.compositor_handle_event(&event);
+        self.deliver_backend_event_after_compositor(event, context);
+    }
+
+    fn deliver_backend_event_after_compositor(&mut self, event: BackendEvent, context: &str) {
         let destroyed_window = match &event {
             BackendEvent::WindowDestroyed(win) => Some(*win),
             _ => None,
         };
-        self.backend.compositor_handle_event(&event);
         if self.backend.systray_handle_event(&event) {
             self.backend.cleanup_destroyed_window(destroyed_window);
             return;
@@ -1438,6 +1465,7 @@ impl XcbBackend {
                     y: ev.y() as i32,
                     width: ev.width() as u32,
                     height: ev.height() as u32,
+                    border_width: ev.border_width() as u32,
                 })
             }
             xcb::Event::X(x::Event::ButtonPress(ev)) => Some(BackendEvent::ButtonPress {
@@ -4956,6 +4984,9 @@ where
 
 #[cfg(test)]
 mod parity_tests {
+    use super::observe_and_coalesce_configure;
+    use crate::backend::api::BackendEvent;
+    use crate::backend::common_define::WindowId;
     use std::collections::BTreeSet;
 
     const X11RB_BACKEND_SRC: &str = include_str!("../x11rb/backend.rs");
@@ -5234,6 +5265,46 @@ mod parity_tests {
             body.contains("fn flush_pending_motion") && body.contains("fn flush_pending_configure"),
             "XCB dispatch must flush coalesced event types explicitly"
         );
+        assert!(
+            body.contains("self.backend.compositor_handle_event(&event)")
+                && body.contains("self.deliver_backend_event_after_compositor(event, context)"),
+            "every raw ConfigureNotify must reach the compositor before WM-side coalescing"
+        );
+    }
+
+    #[test]
+    fn xcb_configure_coalescing_preserves_every_backing_transition() {
+        let window = WindowId::from_raw(7);
+        let configured = |width| BackendEvent::WindowConfigured {
+            window,
+            x: 10,
+            y: 20,
+            width,
+            height: 600,
+            border_width: 0,
+        };
+        let mut pending = None;
+        let mut compositor_widths = Vec::new();
+
+        for width in [800, 900, 800] {
+            let flushed =
+                observe_and_coalesce_configure(&mut pending, configured(width), |event| {
+                    let BackendEvent::WindowConfigured { width, .. } = event else {
+                        unreachable!();
+                    };
+                    compositor_widths.push(*width);
+                });
+            assert!(
+                flushed.is_none(),
+                "same-window ConfigureNotify should stay coalesced for the WM"
+            );
+        }
+
+        assert_eq!(compositor_widths, [800, 900, 800]);
+        assert!(matches!(
+            pending,
+            Some(BackendEvent::WindowConfigured { width: 800, .. })
+        ));
     }
 
     #[test]
@@ -5429,8 +5500,8 @@ mod parity_tests {
             "shared X11 compositor render path should compute periodic frame checks once"
         );
         assert!(
-            render_impl.contains("let mut has_dirty = false")
-                && render_impl.contains("let mut needs_native_texture_sync = false")
+            render_impl.contains("let mut has_dirty = pixmap_refresh_ready")
+                && render_impl.contains("let mut needs_native_texture_sync = pixmap_refresh_ready")
                 && render_impl.contains("if needs_native_texture_sync && !pixmaps_native_synced",)
                 && !render_impl.contains("tfp_order.iter().any")
                 && render_impl.contains("self.dirty_region_tracker.mark_dirty(dirty_rect)")
@@ -5513,6 +5584,8 @@ mod parity_tests {
             X11_COMPOSITOR_TFP_SRC,
             "impl<C: CompositorConnection> Compositor<C>",
         );
+        let refresh_pixmaps_impl =
+            impl_body_after(X11_COMPOSITOR_TFP_SRC, "pub(super) fn refresh_pixmaps");
         assert!(
             compositor_struct.contains("scratch_refresh_wins: Vec<u32>")
                 && compositor_struct.contains("scratch_new_pixmaps: Vec<(u32, u32)>")
@@ -5531,9 +5604,19 @@ mod parity_tests {
         assert!(
             tfp_impl.matches("get_window_visual_and_depth").count() == 1
                 && tfp_impl.matches("get_window_depth").count() == 1
-                && tfp_impl.contains("wt.visual, wt.depth")
+                && tfp_impl.contains("wt.visual")
+                && tfp_impl.contains("wt.depth")
                 && !tfp_impl.contains("get_window_visual(x11_win)"),
             "window format should be queried once and reused across pixmap refreshes"
+        );
+        assert!(
+            refresh_pixmaps_impl.contains("self.create_window_gl_texture()")
+                && refresh_pixmaps_impl.contains("std::mem::replace(&mut wt.gl_texture, texture)")
+                && refresh_pixmaps_impl.contains("wt.binding.replace(binding)")
+                && refresh_pixmaps_impl.contains("std::mem::replace(&mut wt.pixmap, pixmap)")
+                && refresh_pixmaps_impl.find("std::mem::replace(&mut wt.gl_texture, texture)")
+                    < refresh_pixmaps_impl.find("release_pixmap_binding"),
+            "resize refresh must commit a complete candidate before releasing the old import"
         );
         assert!(
             !compositor_struct.contains("gpu_fence_sync_mgr")

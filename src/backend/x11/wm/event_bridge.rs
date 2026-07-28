@@ -36,6 +36,7 @@ pub enum CompositorEventOp {
         y: i32,
         width: u32,
         height: u32,
+        border_width: u32,
     },
     SetFullscreen {
         window: u32,
@@ -157,6 +158,7 @@ pub fn compositor_event_ops(
             y,
             width,
             height,
+            border_width,
         } => {
             if let Some(x11w) = (sources.resolve)(*window) {
                 if x11w != overlay {
@@ -166,6 +168,7 @@ pub fn compositor_event_ops(
                         y: *y,
                         width: *width,
                         height: *height,
+                        border_width: *border_width,
                     });
                 }
             }
@@ -401,6 +404,7 @@ mod tests {
             y: 2,
             width: 3,
             height: 4,
+            border_width: 5,
         };
         assert_eq!(
             compositor_event_ops(&configured(u64::from(OVERLAY)), ROOT, OVERLAY, &s),
@@ -415,7 +419,8 @@ mod tests {
                 x: 1,
                 y: 2,
                 width: 3,
-                height: 4
+                height: 4,
+                border_width: 5
             }]
         );
     }
