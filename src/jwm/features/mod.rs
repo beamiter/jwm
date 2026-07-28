@@ -32,6 +32,7 @@ pub mod system_controls;
 pub mod system_ui;
 pub mod toggles;
 pub mod wallpaper;
+pub mod wallpaper_colors;
 
 pub use audio_recording::AudioRecordingState;
 pub use calendar::CalendarView;
@@ -87,6 +88,16 @@ pub struct FeatureStates {
     pub bluetooth_scan: Option<connectivity::BackgroundJob<Vec<BluetoothDevice>>>,
     /// Connect/disconnect running for an open Bluetooth picker, if any.
     pub bluetooth_action: Option<connectivity::BackgroundJob<Result<String, String>>>,
+    /// Colour extraction running for a wallpaper, if any.
+    pub wallpaper_theme: Option<connectivity::BackgroundJob<Option<wallpaper_colors::Palette>>>,
+    /// The wallpaper the last extraction was started for, so a config apply
+    /// that changed something else does not decode the same picture again.
+    pub themed_wallpaper: String,
+    /// The palette in use and the wallpaper it came from, published over IPC
+    /// so the status bar can match it. The two travel together because a
+    /// wallpaper with no colour to take leaves the previous palette in place,
+    /// and reporting the new picture beside the old colours would be a lie.
+    pub wallpaper_palette: Option<(String, wallpaper_colors::Palette)>,
     /// Which low-battery warning has already been posted.
     pub low_battery: LowBatteryWarner,
     /// Bounded history behind the notification center. Not a mode: it

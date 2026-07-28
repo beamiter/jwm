@@ -1449,6 +1449,7 @@ impl Jwm {
             "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
             "get_audio_devices" => IpcResponse::ok(Some(self.audio_devices_json())),
+            "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_clipboard" => IpcResponse::ok(Some(self.clipboard_json())),
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();

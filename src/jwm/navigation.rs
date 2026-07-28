@@ -942,6 +942,10 @@ impl Jwm {
         let _ = self.focus(backend, None);
         let _ = self.update_ewmh_desktop(backend);
 
+        // Theme from the wallpaper the session starts on, not only from the
+        // next change. The decode runs on a worker thread.
+        self.refresh_wallpaper_theme();
+
         backend.window_ops().flush()?;
         Ok(())
     }

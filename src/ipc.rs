@@ -210,6 +210,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_tearing_hints",
         "get_tree",
         "get_version",
+        "get_wallpaper_colors",
         "get_waterlily_status",
         "get_wayland_status",
         "get_windows",
@@ -233,6 +234,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "recording",
         "scrolling",
         "tag",
+        "theme",
         "window",
     ],
 };

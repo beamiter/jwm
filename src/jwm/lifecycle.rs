@@ -563,6 +563,10 @@ impl Jwm {
                 let _ = self.update_client_decoration(backend, ck, is_sel);
             }
         }
+
+        // 7. A new wallpaper means new accent colours, when the user asked for
+        // them. The decode runs on a worker; the frame tick adopts the result.
+        self.refresh_wallpaper_theme();
     }
 }
 

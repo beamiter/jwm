@@ -136,6 +136,9 @@ impl Jwm {
             self.poll_bluetooth_jobs(backend);
         }
 
+        // Wallpaper colour extraction decodes an image; the same applies.
+        self.poll_wallpaper_theme(backend);
+
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {

@@ -784,6 +784,13 @@ pub struct BehaviorConfig {
     /// wallpaper", then ~/Pictures/Wallpapers, then ~/Pictures.
     #[serde(default)]
     pub wallpaper_dir: String,
+    /// Take the border, gradient and glow colours from the wallpaper whenever
+    /// it changes. Off by default: it overwrites colours the user chose, and
+    /// it should be their decision that the picture wins. The colours are
+    /// only overwritten in memory — the config file is never rewritten, so a
+    /// reload restores whatever is on disk.
+    #[serde(default)]
+    pub wallpaper_colors: bool,
     /// Per-monitor wallpaper overrides. Each entry specifies a monitor index and its wallpaper.
     /// Monitor index 0 is the primary monitor, 1 is the second, etc.
     /// Monitors without an entry fall back to the global `wallpaper` setting.
@@ -1439,6 +1446,7 @@ impl Default for Config {
                     night_light_transition_mins: default_night_light_transition(),
                     clipboard_history: default_clipboard_history(),
                     wallpaper_dir: String::new(),
+                    wallpaper_colors: false,
                     suspend_command: default_suspend_command(),
                     hibernate_command: default_hibernate_command(),
                     reboot_command: default_reboot_command(),
@@ -2994,6 +3002,24 @@ impl Config {
                 .map(str::to_string)
                 .ok_or_else(|| format!("expected string for '{key}'"))
         };
+        let as_rgba = || {
+            let items = value
+                .as_array()
+                .filter(|items| items.len() == 4)
+                .ok_or_else(|| format!("expected [r, g, b, a] for '{key}'"))?;
+            let mut rgba = [0.0f32; 4];
+            for (slot, item) in rgba.iter_mut().zip(items) {
+                let component = item
+                    .as_f64()
+                    .ok_or_else(|| format!("expected numbers in '{key}'"))?
+                    as f32;
+                if !(0.0..=1.0).contains(&component) {
+                    return Err(format!("{key}={component} out of [0, 1]"));
+                }
+                *slot = component;
+            }
+            Ok(rgba)
+        };
         match key {
             "appearance.border_px" => self.inner.appearance.border_px = as_u32()?,
             "appearance.gap_px" => self.inner.appearance.gap_px = as_u32()?,
@@ -3047,6 +3073,17 @@ impl Config {
                 self.inner.behavior.wallpaper_mode = mode;
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
+            "behavior.wallpaper_colors" => self.inner.behavior.wallpaper_colors = as_bool()?,
+            "behavior.border_color_focused" => {
+                self.inner.behavior.border_color_focused = as_rgba()?
+            }
+            "behavior.border_gradient_color_a" => {
+                self.inner.behavior.border_gradient_color_a = as_rgba()?
+            }
+            "behavior.border_gradient_color_b" => {
+                self.inner.behavior.border_gradient_color_b = as_rgba()?
+            }
+            "behavior.border_glow_color" => self.inner.behavior.border_glow_color = as_rgba()?,
             "behavior.clipboard_history" => self.inner.behavior.clipboard_history = as_bool()?,
             "behavior.blur_enabled" => self.inner.behavior.blur_enabled = as_bool()?,
             "behavior.shadow_enabled" => self.inner.behavior.shadow_enabled = as_bool()?,
