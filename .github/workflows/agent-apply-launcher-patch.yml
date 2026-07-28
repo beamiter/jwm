@@ -44,7 +44,7 @@ jobs:
           cargo fmt --all
 
       - name: Run focused launcher tests
-        run: cargo test --locked --lib --no-default-features launcher_ -- --nocapture
+        run: cargo test --locked --lib --no-default-features input_handler::tests -- --nocapture
 
       - name: Commit implementation
         env:
@@ -54,6 +54,6 @@ jobs:
           rm .github/workflows/agent-apply-launcher-patch.yml
           git config user.name "openai-agent"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/jwm/features/system_ui.rs .github
+          git add src/jwm/input_handler.rs .github
           git commit -m "feat(launcher): support composite commands [agent-applied]"
           git push origin "HEAD:${HEAD_BRANCH}"
