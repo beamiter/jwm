@@ -446,18 +446,35 @@ impl Jwm {
     fn handle_notification_center_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
         use crate::jwm::features::notifications::CloseReason;
 
+        use crate::jwm::features::notifications::MAX_ACTIONS;
+
+        // Up/Down move between rows, Left/Right within one — the same rule the
+        // control center and the calendar already follow.
         if keysym == keys::KEY_Up {
             self.features.system_ui.move_selection(-1);
         } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
             self.features.system_ui.move_selection(1);
+        } else if keysym == keys::KEY_Left {
+            self.features.system_ui.move_notification_action(-1);
+        } else if keysym == keys::KEY_Right {
+            self.features.system_ui.move_notification_action(1);
         } else if keysym == keys::KEY_c {
             self.clear_notifications();
+        } else if (keys::KEY_1..keys::KEY_1 + MAX_ACTIONS as u32).contains(&keysym) {
+            // The chips carry their numbers, so the mapping is on screen. A
+            // digit past what the row offers names nothing and does nothing.
+            let index = (keysym - keys::KEY_1) as usize;
+            if let Some((id, action)) = self.features.system_ui.notification_action_at(index) {
+                self.invoke_notification_action(id, &action);
+            }
         } else if let Some((id, action)) = self.features.system_ui.selected_notification() {
             if keysym == keys::KEY_Return || keysym == keys::KEY_space {
                 match action {
                     // Without an action there is nothing to hand back to the
                     // sender, so Return just dismisses like `d`.
-                    Some(action) => self.invoke_notification_action(id, &action),
+                    Some(action) => {
+                        self.invoke_notification_action(id, &action);
+                    }
                     None => {
                         self.close_notification(id, CloseReason::Dismissed);
                     }

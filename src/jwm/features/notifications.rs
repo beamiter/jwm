@@ -21,6 +21,27 @@ pub const MAX_HISTORY: usize = 64;
 /// Longest summary/body kept; the panel does not wrap.
 const MAX_TEXT_CHARS: usize = 96;
 
+/// Actions kept from a sender's list. The strip is one line and the card is
+/// as wide as its widest line, so a client offering a dozen buttons would
+/// otherwise stretch the panel off the screen.
+pub const MAX_ACTIONS: usize = 6;
+
+/// Longest action label kept, for the same reason.
+const MAX_LABEL_CHARS: usize = 20;
+
+/// The key the specification reserves for "the notification itself was
+/// activated", rather than one of its buttons.
+const DEFAULT_KEY: &str = "default";
+
+/// One button a sender offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationAction {
+    /// What goes back out over `ActionInvoked`; meaningful only to the sender.
+    pub key: String,
+    /// What the panel draws.
+    pub label: String,
+}
+
 /// Reason a notification left the history, matching the `NotificationClosed`
 /// reason codes in the freedesktop notification specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,9 +79,9 @@ pub struct NotificationRecord {
     /// True when Do-Not-Disturb suppressed the toast. The record is still
     /// kept so the notification center can show what was missed.
     pub suppressed: bool,
-    /// Key of the sender's default action, when it offered one. Activating
-    /// the row in the panel invokes it.
-    pub default_action: Option<String>,
+    /// The buttons the sender offered, in the order it offered them — the
+    /// specification requires that order to be the display order.
+    pub actions: Vec<NotificationAction>,
 }
 
 /// A posting request, before the center assigns an identifier.
@@ -73,7 +94,7 @@ pub struct NotificationRequest {
     /// Replace this identifier in place instead of appending, when it is still
     /// in the history. Zero means "new notification", per the specification.
     pub replaces_id: u32,
-    pub default_action: Option<String>,
+    pub actions: Vec<NotificationAction>,
 }
 
 /// Bounded, ordered notification history. Oldest record first.
@@ -95,6 +116,131 @@ fn sanitize(text: &str) -> String {
     let mut out: String = trimmed.chars().take(MAX_TEXT_CHARS - 1).collect();
     out.push('\u{2026}');
     out
+}
+
+/// Trim a sender's action list to what the panel can show and the user can
+/// act on.
+///
+/// An action with no key is dropped: invoking it would hand the sender back
+/// an empty string, which tells it nothing. A blank label falls back to the
+/// key, because a chip with no text is one the user cannot aim at. Repeated
+/// keys are kept, both of them: dropping one would shift every later label
+/// onto the wrong chip, and a sender that offered a duplicate cannot tell
+/// them apart anyway.
+fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
+    let mut kept: Vec<NotificationAction> = actions
+        .iter()
+        .filter(|action| !action.key.trim().is_empty())
+        .map(|action| {
+            let label = sanitize_label(&action.label);
+            NotificationAction {
+                key: action.key.trim().to_string(),
+                label: if label.is_empty() {
+                    action.key.trim().to_string()
+                } else {
+                    label
+                },
+            }
+        })
+        .collect();
+    if kept.len() > MAX_ACTIONS {
+        // The reserved key is the one Return runs, so it survives the cap
+        // even when the sender listed it last.
+        let reserved = kept.iter().position(|action| action.key == DEFAULT_KEY);
+        kept.truncate(MAX_ACTIONS);
+        if let Some(index) = reserved
+            && index >= MAX_ACTIONS
+        {
+            kept[MAX_ACTIONS - 1] = actions[index].clone();
+        }
+    }
+    kept
+}
+
+fn sanitize_label(text: &str) -> String {
+    let cleaned: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() <= MAX_LABEL_CHARS {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(MAX_LABEL_CHARS - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Decode the `actions` argument of a `notify` request.
+///
+/// D-Bus hands the list over flat — `[key, label, key, label, …]` — and this
+/// is the only place that layout is understood. A trailing key with no label
+/// is kept: a lone malformed `["open"]` must still be invokable.
+///
+/// Falls back to the older `default_action` string when no list is offered,
+/// so a `jwm-bridge` installed before this change keeps working: the bridge
+/// is installed separately from the compositor and mismatched pairs are
+/// normal.
+#[must_use]
+pub fn parse_action_args(args: &serde_json::Value) -> Vec<NotificationAction> {
+    let flat: Vec<String> = args
+        .get("actions")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| item.as_str().unwrap_or_default().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if flat.is_empty() {
+        return args
+            .get("default_action")
+            .and_then(serde_json::Value::as_str)
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| {
+                vec![NotificationAction {
+                    key: key.to_string(),
+                    label: String::new(),
+                }]
+            })
+            .unwrap_or_default();
+    }
+    flat.chunks(2)
+        .map(|pair| NotificationAction {
+            key: pair[0].clone(),
+            label: pair.get(1).cloned().unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Where a row's action cursor starts.
+///
+/// The reserved `default` key wherever it sits, else the first action. This
+/// is the whole of the rule the bridge used to apply before it threw the rest
+/// of the list away, so a notification offering one action, or offering an
+/// explicit `default`, behaves exactly as it did.
+#[must_use]
+pub fn default_action_index(actions: &[NotificationAction]) -> usize {
+    actions
+        .iter()
+        .position(|action| action.key == DEFAULT_KEY)
+        .unwrap_or(0)
+}
+
+/// The chip line drawn under the selected row: numbered labels, with the one
+/// under the cursor marked.
+#[must_use]
+pub fn action_strip(actions: &[NotificationAction], cursor: usize) -> String {
+    let chips: Vec<String> = actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            let marker = if index == cursor { "\u{f00c}" } else { " " };
+            format!("{marker}{} {}", index + 1, action.label)
+        })
+        .collect();
+    format!("      \u{f0a9} {}", chips.join("   "))
 }
 
 impl NotificationCenter {
@@ -137,7 +283,9 @@ impl NotificationCenter {
             existing.urgency = request.urgency.min(2);
             existing.posted_unix_ms = posted_unix_ms;
             existing.suppressed = suppressed;
-            existing.default_action = request.default_action.clone();
+            // Replacement overwrites the buttons too: a progress
+            // notification that stops offering Cancel stops showing it.
+            existing.actions = sanitize_actions(&request.actions);
             return existing.id;
         }
 
@@ -150,7 +298,7 @@ impl NotificationCenter {
             urgency: request.urgency.min(2),
             posted_unix_ms,
             suppressed,
-            default_action: request.default_action.clone(),
+            actions: sanitize_actions(&request.actions),
         });
         while self.records.len() > MAX_HISTORY {
             self.records.pop_front();
@@ -248,7 +396,14 @@ pub fn panel_row(record: &NotificationRecord, now_unix_ms: u64) -> String {
         format!("[{}] ", record.app)
     };
     let muted = if record.suppressed { " \u{f1f6}" } else { "" };
-    format!("{icon}  {app}{headline}{detail}{muted}   {age}")
+    // Before the age, so a row with buttons is discoverable without having to
+    // select it and see whether a strip appears.
+    let has_actions = if record.actions.is_empty() {
+        ""
+    } else {
+        " \u{f0a9}"
+    };
+    format!("{icon}  {app}{headline}{detail}{muted}{has_actions}   {age}")
 }
 
 /// Wall-clock milliseconds since the Unix epoch, saturating at zero if the
@@ -346,24 +501,52 @@ impl crate::jwm::Jwm {
         count
     }
 
-    /// Report a row activation so the sending application can run its default
-    /// action. The notification is closed the way the specification expects
-    /// once its action was invoked.
-    pub(crate) fn invoke_notification_action(&mut self, id: u32, action: &str) {
+    /// Report an action so the sending application can run it. The
+    /// notification is closed the way the specification expects once one of
+    /// its actions was invoked.
+    ///
+    /// Returns false for an identifier that is not in the history or a key
+    /// the record never offered: no client may be handed an `ActionInvoked`
+    /// for an action it did not register.
+    pub(crate) fn invoke_notification_action(&mut self, id: u32, action: &str) -> bool {
+        let offered = self
+            .features
+            .notifications
+            .get(id)
+            .is_some_and(|record| record.actions.iter().any(|entry| entry.key == action));
+        if !offered {
+            log::warn!("notification {id} was not offering the action {action:?}");
+            return false;
+        }
+        // `ActionInvoked` before `NotificationClosed`, which is the order the
+        // specification expects and the bridge's single event channel keeps.
         self.broadcast_ipc_event(
             "notification/action",
             serde_json::json!({ "id": id, "action": action }),
         );
         self.close_notification(id, CloseReason::Dismissed);
+        true
     }
 
-    /// Rebuild an open notification center against the live history.
+    /// Rebuild an open notification center against the live history, keeping
+    /// the user's place.
+    ///
+    /// A notification arriving mid-pick would otherwise reset the selection to
+    /// the newest row — moving the cursor from `Later` onto some other row's
+    /// `Restart now` between reading it and pressing Return.
     fn refresh_open_notification_center(&mut self) {
-        if self.features.system_ui.is_notification_center() {
-            self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
-                &self.features.notifications,
-                now_unix_ms(),
-            );
+        if !self.features.system_ui.is_notification_center() {
+            return;
+        }
+        let held = self.features.system_ui.selected_notification_cursor();
+        self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
+            &self.features.notifications,
+            now_unix_ms(),
+        );
+        if let Some((id, cursor)) = held {
+            self.features
+                .system_ui
+                .restore_notification_cursor(id, cursor);
         }
     }
 
@@ -384,7 +567,15 @@ impl crate::jwm::Jwm {
                     "posted_unix_ms": record.posted_unix_ms,
                     "age": format_age(now, record.posted_unix_ms),
                     "suppressed": record.suppressed,
-                    "default_action": record.default_action,
+                    "actions": record.actions.iter().map(|action| serde_json::json!({
+                        "key": action.key,
+                        "label": action.label,
+                    })).collect::<Vec<_>>(),
+                    // Derived, and kept so readers written against the old
+                    // single-action payload still find the key Return runs.
+                    "default_action": record.actions
+                        .get(default_action_index(&record.actions))
+                        .map(|action| action.key.clone()),
                 })
             })
             .collect();
@@ -408,8 +599,167 @@ mod tests {
             body: "body".into(),
             urgency: 1,
             replaces_id: 0,
-            default_action: None,
+            actions: Vec::new(),
         }
+    }
+
+    fn action(key: &str, label: &str) -> NotificationAction {
+        NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        }
+    }
+
+    #[test]
+    fn a_flat_list_pairs_up_in_the_order_it_was_sent() {
+        let args = serde_json::json!({
+            "actions": ["open", "Open folder", "later", "Later"]
+        });
+        assert_eq!(
+            parse_action_args(&args),
+            [action("open", "Open folder"), action("later", "Later")]
+        );
+    }
+
+    #[test]
+    fn a_trailing_key_without_a_label_is_still_invokable() {
+        let args = serde_json::json!({ "actions": ["open"] });
+        assert_eq!(parse_action_args(&args), [action("open", "")]);
+        // …and the center gives it the key as its own label, so the chip is
+        // something the user can aim at.
+        let mut center = NotificationCenter::new();
+        let id = center.push(
+            &NotificationRequest {
+                actions: parse_action_args(&args),
+                ..request("a")
+            },
+            1_000,
+            false,
+        );
+        assert_eq!(
+            center.get(id).expect("record").actions,
+            [action("open", "open")]
+        );
+    }
+
+    #[test]
+    fn an_older_bridge_that_sends_only_a_default_action_still_works() {
+        // The bridge is installed separately from the compositor, so a
+        // mismatched pair is normal and must keep working in both directions.
+        let legacy = serde_json::json!({ "default_action": "open" });
+        assert_eq!(parse_action_args(&legacy), [action("open", "")]);
+        // With both, the list wins and the legacy field is ignored rather
+        // than appended.
+        let both = serde_json::json!({
+            "actions": ["reply", "Reply"],
+            "default_action": "open"
+        });
+        assert_eq!(parse_action_args(&both), [action("reply", "Reply")]);
+        assert_eq!(parse_action_args(&serde_json::json!({})), []);
+    }
+
+    #[test]
+    fn an_action_with_no_key_is_dropped_and_duplicates_are_kept() {
+        let kept = sanitize_actions(&[
+            action("", "Nowhere"),
+            action("open", "Open"),
+            action("open", "Open again"),
+        ]);
+        // An empty key would send the sender back an empty string. A repeated
+        // key is kept twice: dropping one would slide every later label onto
+        // the wrong chip.
+        assert_eq!(kept, [action("open", "Open"), action("open", "Open again")]);
+    }
+
+    #[test]
+    fn a_label_cannot_break_the_strip_onto_a_second_line() {
+        let kept = sanitize_actions(&[action("k", "one\ntwo"), action("l", &"x".repeat(60))]);
+        assert!(!kept[0].label.contains('\n'));
+        assert!(kept[1].label.chars().count() <= MAX_LABEL_CHARS);
+    }
+
+    #[test]
+    fn the_reserved_key_survives_the_cap_and_starts_under_the_cursor() {
+        let many: Vec<NotificationAction> = (0..MAX_ACTIONS + 2)
+            .map(|index| action(&format!("k{index}"), &format!("Label {index}")))
+            .collect();
+        let mut with_default = many.clone();
+        with_default[MAX_ACTIONS + 1] = action("default", "Activate");
+
+        let kept = sanitize_actions(&with_default);
+        assert_eq!(kept.len(), MAX_ACTIONS);
+        assert!(
+            kept.iter().any(|entry| entry.key == "default"),
+            "the key Return runs was truncated away"
+        );
+        // The cursor starts on it wherever it ended up.
+        assert_eq!(kept[default_action_index(&kept)].key, "default");
+
+        // No reserved key: the cursor starts on the first action, which is
+        // the one deliberate behaviour change — safe because the strip shows
+        // which one is selected.
+        assert_eq!(default_action_index(&sanitize_actions(&many)), 0);
+        assert_eq!(default_action_index(&[]), 0);
+    }
+
+    #[test]
+    fn a_row_with_buttons_says_so_before_it_is_selected() {
+        let mut center = NotificationCenter::new();
+        let plain = center.push(&request("plain"), 1_000, false);
+        let with = center.push(
+            &NotificationRequest {
+                actions: vec![action("open", "Open")],
+                ..request("offered")
+            },
+            1_000,
+            false,
+        );
+        let marker = '\u{f0a9}';
+        let row = |id| panel_row(center.get(id).expect("record"), 1_000);
+        assert!(!row(plain).contains(marker));
+        assert!(row(with).contains(marker));
+        // The age stays last, which the panel's column alignment depends on.
+        assert!(row(with).ends_with("now"));
+    }
+
+    #[test]
+    fn the_strip_numbers_the_chips_and_marks_the_one_in_use() {
+        let strip = action_strip(&[action("a", "Reply"), action("b", "Later")], 1);
+        assert!(strip.contains("1 Reply") && strip.contains("2 Later"));
+        assert!(
+            strip.contains("\u{f00c}2 Later"),
+            "cursor not marked: {strip:?}"
+        );
+        for ch in strip
+            .chars()
+            .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+        {
+            assert!((ch as u32) < 0xf600, "{ch:?} is outside FontAwesome 4");
+        }
+    }
+
+    #[test]
+    fn replacing_a_notification_replaces_its_buttons_too() {
+        let mut center = NotificationCenter::new();
+        let id = center.push(
+            &NotificationRequest {
+                actions: vec![action("cancel", "Cancel")],
+                ..request("copying")
+            },
+            1_000,
+            false,
+        );
+        // The copy finished; there is nothing left to cancel.
+        center.push(
+            &NotificationRequest {
+                replaces_id: id,
+                actions: Vec::new(),
+                ..request("copied")
+            },
+            2_000,
+            false,
+        );
+        assert!(center.get(id).expect("record").actions.is_empty());
     }
 
     #[test]

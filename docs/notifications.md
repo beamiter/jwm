@@ -35,14 +35,57 @@ while notifications are muted.
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | move the selection |
-| `Enter` | invoke the sender's default action, then dismiss |
+| `Up` / `Down` | move between notifications |
+| `Left` / `Right` | move between the selected notification's buttons |
+| `1` - `6` | invoke that button directly |
+| `Enter` | invoke the button under the cursor, or dismiss when there is none |
 | `d` / `Delete` | dismiss the selected notification |
 | `c` | clear the whole history |
 | `Esc` | close the panel |
 
+`Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
+the highlighted one — the same rule the control center and the calendar follow.
+
 The history holds 64 records; the oldest is evicted beyond that. It is
 in-memory only and does not survive a restart.
+
+## Action buttons
+
+An application may offer actions with a notification — *Reply*, *Open folder*,
+*Restart now*. The selected row shows them as a numbered strip on the line
+beneath it, with a mark on the one `Enter` would invoke:
+
+```
+  [updater] Update ready — jwm 0.2.1 is available   now
+       1 Later   ✓2 Restart now   3 Release notes
+```
+
+Invoking one sends the sender `ActionInvoked` and then closes the notification,
+in that order, which is what the specification expects.
+
+Rules worth knowing, all unit tested:
+
+- **The cursor starts on the reserved `default` key** wherever the sender put
+  it, so a notification offering one action, or an explicit `default`, behaves
+  exactly as it did before buttons were drawn. Several actions with no
+  `default` start on the first — the one deliberate change, and safe only
+  because the strip shows which one is selected.
+- **Six buttons at most, twenty characters per label.** The card is as wide as
+  its widest line and the strip is one line; a client offering a dozen would
+  otherwise push the panel off the screen. A `default`-keyed action beyond the
+  cap displaces the last kept one rather than being dropped, since it is the
+  key `Enter` runs.
+- **An action with no key is dropped** — invoking it would hand the sender an
+  empty string, which tells it nothing. A blank label falls back to its key,
+  because a chip with no text cannot be aimed at. Repeated keys are kept, both
+  of them: dropping one would slide every later label onto the wrong chip.
+- **A digit beyond the offered count does nothing.**
+- **Replacing a notification replaces its buttons**, so a progress
+  notification that stops offering *Cancel* stops showing it.
+- jwm refuses to emit `ActionInvoked` for a key the record never offered.
+
+A notification arriving while you are choosing does not move your place: the
+panel rebuild keeps the selected row and its cursor.
 
 ## The D-Bus bridge
 
@@ -69,9 +112,12 @@ Mapping rules, all unit tested in `bridge/src/notifications.rs`:
   longest card jwm draws (30 s) while the record stays in the history;
 - `replaces_id` updates a record in place, so progress notifications stay one
   row and keep their identifier;
-- an action list yields a default action when it contains the reserved
-  `default` key, or when exactly one action is offered — activating a row
-  never guesses between several.
+- the whole action list is forwarded in the order it was sent, which the
+  specification requires to be the display order;
+- `default_action` is still sent beside it, carrying the reserved `default`
+  key or a lone action. It is what an older jwm reads: the bridge is installed
+  separately from the compositor, so a new bridge talking to an older jwm is a
+  real deployment, and a jwm new enough to read `actions` ignores the field.
 
 jwm owns the identifiers and every close, so a toast that expired, a row the
 user dismissed, and a `CloseNotification` call all emit exactly one
@@ -96,7 +142,10 @@ jwm-msg '{"command": "notify", "args": {
   stripe), `2` critical (red stripe). Defaults to `1`.
 - `timeout_ms` — display time, clamped to 800..30000; `0` selects the
   default 4000.
-- `app`, `replaces_id`, `default_action` — optional; what the bridge forwards.
+- `app`, `replaces_id` — optional; what the bridge forwards.
+- `actions` — optional; the flat `[key, label, key, label, …]` list D-Bus uses.
+- `default_action` — optional legacy single key, read only when `actions` is
+  absent.
 
 The response carries the identifier: `{"success": true, "data": {"id": 12}}`.
 

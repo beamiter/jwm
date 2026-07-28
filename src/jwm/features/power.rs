@@ -399,7 +399,7 @@ impl crate::jwm::Jwm {
                 // debates in the user's head: make it critical.
                 urgency: if threshold <= 5 { 2 } else { 1 },
                 replaces_id: 0,
-                default_action: None,
+                actions: Vec::new(),
             };
             self.post_notification(backend, &request, 0);
         }

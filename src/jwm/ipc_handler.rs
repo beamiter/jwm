@@ -1023,11 +1023,7 @@ impl Jwm {
                     .and_then(|value| value.as_u64())
                     .and_then(|value| u32::try_from(value).ok())
                     .unwrap_or(0),
-                default_action: args
-                    .get("default_action")
-                    .and_then(|value| value.as_str())
-                    .filter(|action| !action.is_empty())
-                    .map(str::to_string),
+                actions: crate::jwm::features::notifications::parse_action_args(args),
             };
             let id = self.post_notification(backend, &request, timeout_ms);
             return IpcResponse::ok(Some(serde_json::json!({ "id": id })));

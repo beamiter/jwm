@@ -129,12 +129,14 @@ fn urgency_from_hints(hints: &HashMap<String, OwnedValue>) -> u8 {
     level.min(2) as u8
 }
 
-/// The key the panel invokes when a row is activated.
+/// The key jwm falls back to when it is too old to read the whole list.
 ///
-/// `actions` is a flat `[key, label, key, label, ...]` list. The specification
-/// reserves `default` for "the notification itself was activated"; without it,
-/// a single offered action is unambiguous, but picking one of several would
-/// invoke something the user never chose.
+/// `actions` is a flat `[key, label, key, label, ...]` list, and the whole of
+/// it is now forwarded — the panel draws every button and lets the user pick.
+/// This field stays for one reason: the bridge is installed separately from
+/// the compositor, so a new bridge talking to an older jwm is a real
+/// deployment, and that jwm understands only a single key. It applies the old
+/// rule: the reserved `default`, else a lone action, else nothing.
 fn default_action(actions: &[String]) -> Option<String> {
     let keys: Vec<&String> = actions.iter().step_by(2).collect();
     if let Some(explicit) = keys.iter().find(|key| key.as_str() == "default") {
@@ -183,6 +185,10 @@ fn notify_args(
         "urgency": urgency,
         "replaces_id": replaces_id,
         "timeout_ms": toast_timeout_ms(expire_timeout),
+        // The whole list, in the order the sender offered it — the
+        // specification requires that to be the display order.
+        "actions": actions,
+        // Ignored by any jwm that understands `actions`; see above.
         "default_action": default_action(actions),
     })
 }
@@ -345,5 +351,20 @@ mod tests {
     fn no_default_action_serializes_as_null() {
         let args = notify_args("app", 0, "s", "b", &actions(&["a", "b"]), 1, -1);
         assert!(args["default_action"].is_null());
+    }
+
+    #[test]
+    fn the_whole_action_list_is_forwarded_in_order() {
+        // jwm draws a button per action, so the flat list has to arrive
+        // intact — `default_action` alone was throwing every other one away.
+        let list = actions(&["open", "later"]);
+        let args = notify_args("app", 0, "s", "b", &list, 1, -1);
+        assert_eq!(
+            args["actions"],
+            serde_json::json!(["open", "open label", "later", "later label"])
+        );
+        // A sender that offered none sends none, not null.
+        let args = notify_args("app", 0, "s", "b", &[], 1, -1);
+        assert_eq!(args["actions"], serde_json::json!([]));
     }
 }

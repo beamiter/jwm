@@ -132,17 +132,6 @@ pub enum SystemUiState {
     },
 }
 
-/// One notification-center row: the pre-rendered text plus what activating it
-/// needs. Rendering happens when the panel opens, so the compositor never
-/// reaches back into the history.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NotificationEntry {
-    pub id: u32,
-    pub row: String,
-    /// Action key the sender marked as default, invoked on Return.
-    pub default_action: Option<String>,
-}
-
 /// What a [`SystemUiState::ListPanel`] is listing. Decides the title, the
 /// hint, and how many rows fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +163,9 @@ impl ListKind {
             return "Enter  join    Esc  cancel";
         }
         match self {
-            Self::Notifications => "Enter  activate    d  dismiss    c  clear all    Esc  close",
+            Self::Notifications => {
+                "Enter  activate    \u{f060}/\u{f061} 1-6  action    d  dismiss    c  clear    Esc"
+            }
             Self::Clipboard => "Enter  copy    d  forget    c  clear all    Esc  close",
             Self::Wifi => "Enter  join    \u{f062}/\u{f063}  select    Esc  close",
             Self::Bluetooth => "Enter  connect/disconnect    r  refresh    Esc  close",
@@ -200,8 +191,11 @@ impl ListKind {
 pub enum RowData {
     Notification {
         id: u32,
-        /// Action key the sender marked as default, invoked on Return.
-        default_action: Option<String>,
+        /// The buttons the sender offered, in its order.
+        actions: Vec<crate::jwm::features::notifications::NotificationAction>,
+        /// Which of them Return would invoke. Per row rather than per panel,
+        /// so moving between rows does not lose where the user was.
+        cursor: usize,
     },
     /// Position in the history, which is what the caller acts on.
     Clipboard {
@@ -685,6 +679,22 @@ impl SystemUiState {
         (kind == wanted).then(|| rows.get(selected)).flatten()
     }
 
+    fn selected_row_mut(&mut self, wanted: ListKind) -> Option<&mut ListRow> {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if *kind != wanted {
+            return None;
+        }
+        rows.get_mut(*selected)
+    }
+
     /// Replace a panel's rows, holding the selection on the same key when it
     /// survived the refresh.
     fn set_rows(&mut self, wanted: ListKind, next: Vec<ListRow>) {
@@ -742,7 +752,10 @@ impl SystemUiState {
                 text: crate::jwm::features::notifications::panel_row(record, now_unix_ms),
                 data: RowData::Notification {
                     id: record.id,
-                    default_action: record.default_action.clone(),
+                    cursor: crate::jwm::features::notifications::default_action_index(
+                        &record.actions,
+                    ),
+                    actions: record.actions.clone(),
                 },
             })
             .collect();
@@ -760,10 +773,99 @@ impl SystemUiState {
         self.is_list(ListKind::Notifications)
     }
 
-    /// The selected notification: its identifier and default action.
+    /// The selected notification: its identifier and the action under its
+    /// cursor, if it offered any.
     pub fn selected_notification(&self) -> Option<(u32, Option<String>)> {
         match &self.selected_row(ListKind::Notifications)?.data {
-            RowData::Notification { id, default_action } => Some((*id, default_action.clone())),
+            RowData::Notification {
+                id,
+                actions,
+                cursor,
+            } => Some((*id, actions.get(*cursor).map(|action| action.key.clone()))),
+            _ => None,
+        }
+    }
+
+    /// Step the selected row's action cursor, wrapping. Does nothing on a row
+    /// with fewer than two actions — there is nowhere to move.
+    pub fn move_notification_action(&mut self, delta: isize) {
+        let Some(row) = self.selected_row_mut(ListKind::Notifications) else {
+            return;
+        };
+        let RowData::Notification {
+            actions, cursor, ..
+        } = &mut row.data
+        else {
+            return;
+        };
+        if actions.len() < 2 {
+            return;
+        }
+        let count = actions.len() as isize;
+        *cursor = (*cursor as isize + delta).rem_euclid(count) as usize;
+    }
+
+    /// The action a digit key names on the selected row, if the row offers
+    /// that many. A digit beyond the offered count names nothing.
+    pub fn notification_action_at(&self, index: usize) -> Option<(u32, String)> {
+        match &self.selected_row(ListKind::Notifications)?.data {
+            RowData::Notification { id, actions, .. } => {
+                Some((*id, actions.get(index)?.key.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Which notification is selected and where its action cursor sits, so a
+    /// rebuild can put the user back where they were.
+    pub fn selected_notification_cursor(&self) -> Option<(u32, usize)> {
+        match &self.selected_row(ListKind::Notifications)?.data {
+            RowData::Notification { id, cursor, .. } => Some((*id, *cursor)),
+            _ => None,
+        }
+    }
+
+    /// Select the row for `id` again and put its cursor back. Silently does
+    /// nothing when that notification is gone — it was closed while the panel
+    /// was being rebuilt, and the fresh selection is the right answer then.
+    pub fn restore_notification_cursor(&mut self, id: u32, cursor: usize) {
+        let Self::ListPanel {
+            kind,
+            rows,
+            selected,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *kind != ListKind::Notifications {
+            return;
+        }
+        let Some(index) = rows.iter().position(
+            |row| matches!(&row.data, RowData::Notification { id: other, .. } if *other == id),
+        ) else {
+            return;
+        };
+        *selected = index;
+        if let RowData::Notification {
+            actions,
+            cursor: at,
+            ..
+        } = &mut rows[index].data
+            && cursor < actions.len()
+        {
+            *at = cursor;
+        }
+    }
+
+    /// The strip drawn under the selected row, when it has buttons to show.
+    fn selected_action_strip(&self) -> Option<String> {
+        match &self.selected_row(ListKind::Notifications)?.data {
+            RowData::Notification {
+                actions, cursor, ..
+            } if !actions.is_empty() => Some(crate::jwm::features::notifications::action_strip(
+                actions, *cursor,
+            )),
             _ => None,
         }
     }
@@ -1838,6 +1940,17 @@ impl SystemUiState {
                     items.push(String::new());
                     items.push(format!("  {message}"));
                 }
+                // The selected notification's buttons go on the line *after*
+                // its row, so `selected` still indexes the row itself and the
+                // compositor's highlight does not slide onto the strip.
+                if prompt.is_none()
+                    && let Some(strip) = self.selected_action_strip()
+                {
+                    let under = selected - start + 1;
+                    if under <= items.len() {
+                        items.insert(under, strip);
+                    }
+                }
                 OverlayParts {
                     title: kind.title().to_string(),
                     query: None,
@@ -2867,6 +2980,129 @@ mod tests {
         let items = bare.overlay_parts().items;
         assert!(!items.iter().any(|row| row.contains("Battery")));
         assert!(!items.iter().any(|row| row.contains("Power Profile")));
+    }
+
+    fn center_with_actions() -> crate::jwm::features::NotificationCenter {
+        use crate::jwm::features::notifications::{NotificationAction, NotificationRequest};
+
+        let act = |key: &str, label: &str| NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        };
+        let mut center = crate::jwm::features::NotificationCenter::new();
+        center.push(
+            &NotificationRequest {
+                app: "backup".into(),
+                summary: "older".into(),
+                ..Default::default()
+            },
+            1_000,
+            false,
+        );
+        center.push(
+            &NotificationRequest {
+                app: "updater".into(),
+                summary: "Update ready".into(),
+                actions: vec![
+                    act("later", "Later"),
+                    act("default", "Restart now"),
+                    act("notes", "Release notes"),
+                ],
+                ..Default::default()
+            },
+            2_000,
+            false,
+        );
+        center
+    }
+
+    #[test]
+    fn the_action_strip_sits_under_the_row_without_moving_the_highlight() {
+        let mut panel = SystemUiState::notification_center(&center_with_actions(), 3_000);
+        let parts = panel.overlay_parts();
+
+        // The pill stays on the notification, and the chips are the line
+        // after it — the compositor indexes items by line.
+        assert_eq!(parts.selected, Some(0));
+        assert!(parts.items[0].contains("Update ready"));
+        assert!(parts.items[1].contains("Restart now"), "{:?}", parts.items);
+        assert!(!parts.items[0].contains("Restart now"));
+
+        // The cursor starts on the reserved key wherever the sender put it,
+        // which is what keeps today's Return behaviour.
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("default")
+        );
+
+        // Left and Right step within the row and wrap.
+        panel.move_notification_action(1);
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
+        panel.move_notification_action(1);
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("later")
+        );
+        panel.move_notification_action(-1);
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
+
+        // A digit names a chip by position; one past the end names nothing.
+        assert_eq!(
+            panel.notification_action_at(0).map(|(_, key)| key),
+            Some("later".to_string())
+        );
+        assert_eq!(panel.notification_action_at(3), None);
+    }
+
+    #[test]
+    fn a_row_without_actions_draws_no_strip_and_keeps_its_own_cursor() {
+        let mut panel = SystemUiState::notification_center(&center_with_actions(), 3_000);
+        panel.move_notification_action(1); // away from `default`
+        panel.move_selection(1); // onto the older, action-less row
+
+        let parts = panel.overlay_parts();
+        assert_eq!(parts.items.len(), 2, "no strip for a row with no actions");
+        assert_eq!(panel.selected_notification().expect("row").1, None);
+        // Moving the action cursor on a row that has none does nothing.
+        panel.move_notification_action(1);
+        assert_eq!(panel.selected_notification().expect("row").1, None);
+
+        // Back up: the other row kept the cursor the user left it on.
+        panel.move_selection(-1);
+        assert_eq!(
+            panel.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
+    }
+
+    #[test]
+    fn a_rebuild_puts_the_user_back_on_the_action_they_were_reading() {
+        let center = center_with_actions();
+        let mut panel = SystemUiState::notification_center(&center, 3_000);
+        panel.move_notification_action(1);
+        let held = panel.selected_notification_cursor().expect("held");
+
+        // A notification arriving mid-pick rebuilds the panel; without this
+        // the cursor would land on some other row's action.
+        let mut rebuilt = SystemUiState::notification_center(&center, 4_000);
+        rebuilt.restore_notification_cursor(held.0, held.1);
+        assert_eq!(
+            rebuilt.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
+
+        // A row that is gone by then leaves the fresh selection alone.
+        rebuilt.restore_notification_cursor(9999, 2);
+        assert_eq!(
+            rebuilt.selected_notification().expect("row").1.as_deref(),
+            Some("notes")
+        );
     }
 
     #[test]
