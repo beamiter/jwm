@@ -36,6 +36,10 @@ The EGL path requires:
 - `EGL_KHR_image_pixmap`;
 - `GL_OES_EGL_image` / `glEGLImageTargetTexture2DOES`.
 
+Native pixmaps are imported with `EGL_IMAGE_PRESERVED_KHR=EGL_TRUE`. JWM does
+not fall back to a non-preserved image because EGL permits the source pixmap's
+contents to become undefined in that mode.
+
 The implementation keeps X Damage, X Present, resize handling, animations,
 blur, screenshots, and HDR configuration in the shared compositor. GLSL 330
 sources are translated to GLSL ES 300 at compile time and use separate shader
@@ -73,10 +77,14 @@ bursts can recreate named pixmaps without synchronous `GetWindowAttributes` /
 `GetGeometry` requests. GLES only queries depth on first import; GLX sends both
 format requests before waiting for their replies. Damage refreshes also avoid
 creating per-window GL fences that are not consumed by a later rendering
-decision. The initial dirty-region scan also records whether native texture
-texture synchronization is needed, avoiding another scene lookup pass. During
-resize bursts, the synchronization performed before pixmap import is reused by
-the ensuing texture refresh instead of issuing a second native round trip.
+decision. On EGL, a Damage refresh re-specifies the existing EGLImage as the
+texture target. This forces stale-binding-prone drivers through their target
+definition path again without recreating the EGLImage or allocating another
+texture; producer synchronization remains separate. The initial dirty-region
+scan also records whether native texture synchronization is needed, avoiding
+another scene lookup pass. During resize bursts, the synchronization performed
+before pixmap import is reused by the ensuing texture refresh instead of issuing
+a second native round trip.
 
 Output enumeration reports refresh rates in millihertz, while compositor policy
 uses rounded whole Hz. Startup logs therefore show both the precise rate (for

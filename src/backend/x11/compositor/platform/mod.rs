@@ -345,10 +345,10 @@ impl GraphicsPlatform {
             (PlatformBackend::Glx(glx), PixmapBinding::Glx { drawable }) => {
                 glx.refresh_pixmap(self.xlib_display, gl, texture, *drawable)
             }
-            // EGLImages remain live siblings of the named X pixmap.  XSync +
-            // eglWaitNative in sync_x11() makes newly rendered pixels visible;
-            // no re-import is required for ordinary Damage events.
-            (PlatformBackend::Egl(_), PixmapBinding::Egl { .. }) => Ok(()),
+            (PlatformBackend::Egl(egl), PixmapBinding::Egl { image }) => {
+                egl.refresh_pixmap(gl, texture, *image);
+                Ok(())
+            }
             _ => Err("window pixmap binding belongs to a different graphics API".into()),
         }
     }

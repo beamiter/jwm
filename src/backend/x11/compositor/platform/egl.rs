@@ -463,9 +463,9 @@ impl EglPlatform {
         pixmap: u32,
         depth: u8,
     ) -> Result<(PixmapBinding, bool), String> {
-        let preserved = [EGL_IMAGE_PRESERVED_KHR, EGL_TRUE as EglInt, EGL_NONE];
+        let preserved = [EGL_IMAGE_PRESERVED_KHR, EGL_TRUE.cast_signed(), EGL_NONE];
         let client_buffer = pixmap as usize as EglClientBuffer;
-        let mut image = unsafe {
+        let image = unsafe {
             (self.create_image)(
                 self.display,
                 ptr::null_mut(),
@@ -475,38 +475,63 @@ impl EglPlatform {
             )
         };
         if image.is_null() {
-            image = unsafe {
-                (self.create_image)(
-                    self.display,
-                    ptr::null_mut(),
-                    EGL_NATIVE_PIXMAP_KHR,
-                    client_buffer,
-                    [EGL_NONE].as_ptr(),
-                )
-            };
-        }
-        if image.is_null() {
             return Err(egl_error(&format!(
-                "eglCreateImageKHR(native pixmap 0x{pixmap:x})"
+                "eglCreateImageKHR(preserved native pixmap 0x{pixmap:x})"
             )));
         }
 
+        if let Err(error) = self.bind_image_to_texture_checked(gl, texture, image) {
+            unsafe {
+                (self.destroy_image)(self.display, image);
+            }
+            return Err(error);
+        }
+
+        Ok((PixmapBinding::Egl { image }, depth == 32))
+    }
+
+    pub(super) fn refresh_pixmap(
+        &self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        image: EglImage,
+    ) {
+        // NVIDIA's X11 EGL path can keep sampling the first contents of a
+        // redirected GPU pixmap even though the EGLImage remains a live
+        // sibling. Re-specifying the texture target on Damage forces the
+        // driver through its target-definition path again, analogous to the
+        // GLX release/bind workaround. This is not a producer fence; native
+        // synchronization remains a separate step before this refresh.
         unsafe {
-            // Clear a stale error so the check below reports this import only.
+            // Keep Damage refresh free of glGetError: querying it can serialize
+            // a high-frequency producer/consumer hot path, and this exact
+            // texture/image pair was validated when it was imported.
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            (self.image_target_texture)(glow::TEXTURE_2D, image.cast_const());
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    fn bind_image_to_texture_checked(
+        &self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        image: EglImage,
+    ) -> Result<(), String> {
+        unsafe {
+            // Clear a stale error so the check below reports this binding only.
             while gl.get_error() != glow::NO_ERROR {}
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            (self.image_target_texture)(glow::TEXTURE_2D, image as *const c_void);
+            (self.image_target_texture)(glow::TEXTURE_2D, image.cast_const());
             gl.bind_texture(glow::TEXTURE_2D, None);
             let error = gl.get_error();
             if error != glow::NO_ERROR {
-                (self.destroy_image)(self.display, image);
                 return Err(format!(
                     "glEGLImageTargetTexture2DOES failed with GL error 0x{error:x}"
                 ));
             }
         }
-
-        Ok((PixmapBinding::Egl { image }, depth == 32))
+        Ok(())
     }
 
     pub(super) fn release_pixmap(&self, image: EglImage) {
@@ -689,8 +714,123 @@ fn egl_error(operation: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{append_egl_damage_rect, egl_damage_rect_count, has_egl_extension};
-    use crate::backend::x11::compositor::DirtyRect;
+    use super::{
+        EGL_IMAGE_PRESERVED_KHR, EGL_NONE, EGL_TRUE, EglBoolean, EglClientBuffer, EglContext,
+        EglCreateImage, EglDestroyImage, EglDisplay, EglEnum, EglImage, EglInt, EglPlatform,
+        EglSetDamageRegion, EglSwapBuffersWithDamage, GlEglImageTargetTexture2dOes,
+        append_egl_damage_rect, egl_damage_rect_count, has_egl_extension,
+    };
+    use crate::backend::x11::compositor::{DirtyRect, PixmapBinding};
+    use std::cell::Cell;
+    use std::ffi::c_void;
+    use std::num::NonZeroU32;
+    use std::ptr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, PoisonError};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum GlCall {
+        BindTexture { target: u32, texture: u32 },
+        BindImage { target: u32, image: usize },
+    }
+
+    static GL_CALLS: Mutex<Vec<GlCall>> = Mutex::new(Vec::new());
+    static CREATE_IMAGE_ARGS: Mutex<Option<(u32, usize, Vec<EglInt>)>> = Mutex::new(None);
+    static GL_ERROR_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "system" fn fake_gl_get_string(name: u32) -> *const u8 {
+        if name == glow::VERSION {
+            c"OpenGL ES 3.0".as_ptr().cast()
+        } else {
+            ptr::null()
+        }
+    }
+
+    unsafe extern "system" fn fake_gl_get_integer(_name: u32, value: *mut i32) {
+        unsafe {
+            *value = 0;
+        }
+    }
+
+    unsafe extern "system" fn fake_gl_bind_texture(target: u32, texture: u32) {
+        GL_CALLS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(GlCall::BindTexture { target, texture });
+    }
+
+    unsafe extern "system" fn fake_gl_get_error() -> u32 {
+        GL_ERROR_CALLS.fetch_add(1, Ordering::Relaxed);
+        glow::NO_ERROR
+    }
+
+    unsafe extern "C" fn fake_create_image(
+        _display: EglDisplay,
+        _context: EglContext,
+        target: EglEnum,
+        buffer: EglClientBuffer,
+        attributes: *const EglInt,
+    ) -> EglImage {
+        let mut attribute_values = Vec::new();
+        if !attributes.is_null() {
+            for index in 0..5 {
+                let value = unsafe { *attributes.add(index) };
+                attribute_values.push(value);
+                if value == EGL_NONE {
+                    break;
+                }
+            }
+        }
+        *CREATE_IMAGE_ARGS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Some((target, buffer as usize, attribute_values));
+        0x5678usize as EglImage
+    }
+
+    unsafe extern "C" fn fake_destroy_image(_display: EglDisplay, _image: EglImage) -> EglBoolean {
+        EGL_TRUE
+    }
+
+    unsafe extern "system" fn fake_bind_image(target: u32, image: *const c_void) {
+        GL_CALLS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(GlCall::BindImage {
+                target,
+                image: image as usize,
+            });
+    }
+
+    fn fake_gl_context() -> glow::Context {
+        unsafe {
+            glow::Context::from_loader_function(|name| match name {
+                "glBindTexture" => fake_gl_bind_texture as *const c_void,
+                "glGetError" => fake_gl_get_error as *const c_void,
+                "glGetIntegerv" => fake_gl_get_integer as *const c_void,
+                "glGetString" => fake_gl_get_string as *const c_void,
+                _ => ptr::null(),
+            })
+        }
+    }
+
+    fn fake_egl_platform() -> EglPlatform {
+        EglPlatform {
+            display: ptr::null_mut(),
+            context: ptr::null_mut(),
+            surface: ptr::null_mut(),
+            create_image: fake_create_image as EglCreateImage,
+            destroy_image: fake_destroy_image as EglDestroyImage,
+            image_target_texture: fake_bind_image as GlEglImageTargetTexture2dOes,
+            swap_buffers_with_damage: Cell::new(None::<EglSwapBuffersWithDamage>),
+            set_damage_region: Cell::new(None::<EglSetDamageRegion>),
+            buffer_age_supported: Cell::new(false),
+            ext_buffer_age_supported: false,
+            buffer_preserved: false,
+            gles_library: ptr::null_mut(),
+            output_is_10bit: false,
+        }
+    }
 
     #[test]
     fn counts_flattened_egl_damage_rectangles() {
@@ -722,5 +862,72 @@ mod tests {
         assert!(has_egl_extension(extensions, "EGL_KHR_partial_update"));
         assert!(!has_egl_extension(extensions, "EGL_KHR_image"));
         assert!(!has_egl_extension(extensions, "EGL_EXT_buffer"));
+    }
+
+    #[test]
+    fn imports_preserved_pixmap_and_rebinds_it_on_damage_without_error_query() {
+        GL_CALLS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        *CREATE_IMAGE_ARGS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        GL_ERROR_CALLS.store(0, Ordering::Relaxed);
+
+        let gl = fake_gl_context();
+        let egl = fake_egl_platform();
+        let texture = glow::NativeTexture(NonZeroU32::new(7).unwrap());
+        let pixmap = 0x1234;
+
+        let (binding, has_rgba) = egl
+            .import_pixmap(&gl, texture, pixmap, 32)
+            .expect("fake EGLImage import should succeed");
+        let PixmapBinding::Egl { image } = binding else {
+            panic!("EGL import returned a non-EGL binding");
+        };
+
+        assert!(has_rgba);
+        assert_eq!(
+            *CREATE_IMAGE_ARGS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Some((
+                super::EGL_NATIVE_PIXMAP_KHR,
+                pixmap as usize,
+                vec![EGL_IMAGE_PRESERVED_KHR, EGL_TRUE.cast_signed(), EGL_NONE],
+            ))
+        );
+
+        GL_CALLS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        GL_ERROR_CALLS.store(0, Ordering::Relaxed);
+
+        egl.refresh_pixmap(&gl, texture, image);
+
+        assert_eq!(
+            *GL_CALLS.lock().unwrap_or_else(PoisonError::into_inner),
+            [
+                GlCall::BindTexture {
+                    target: glow::TEXTURE_2D,
+                    texture: 7,
+                },
+                GlCall::BindImage {
+                    target: glow::TEXTURE_2D,
+                    image: image as usize,
+                },
+                GlCall::BindTexture {
+                    target: glow::TEXTURE_2D,
+                    texture: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            GL_ERROR_CALLS.load(Ordering::Relaxed),
+            0,
+            "Damage refresh must not serialize the hot path with glGetError"
+        );
     }
 }
