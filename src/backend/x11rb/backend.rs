@@ -32,6 +32,7 @@ use crate::backend::api::{
     EwmhFacade, InputOps, KeyOps, OutputOps, PropertyOps, RenderScheduler, VrrCapabilities,
     WindowOps,
 };
+use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
 
@@ -288,6 +289,10 @@ impl X11rbBackend {
             }
         } else {
             log::info!("Compositor disabled (set JWM_COMPOSITOR=1 to enable)");
+            if let Err(err) = conn.paint_root_solid_black(root_x11) {
+                log::warn!("Failed to paint non-composited root background black: {err}");
+            }
+            let _ = conn.flush();
             None
         };
 

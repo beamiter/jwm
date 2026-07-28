@@ -295,6 +295,33 @@ impl X11ConnectionOps for XcbCompositorProtocol<'_> {
         let reply = self.conn.wait_for_reply(cookie).ok()?;
         Some((reply.root_x(), reply.root_y()))
     }
+
+    fn paint_root_solid_black(&self, root: u32) -> Result<(), String> {
+        let black_pixel = self
+            .conn
+            .get_setup()
+            .roots()
+            .find(|screen| screen.root().resource_id() == root)
+            .map(|screen| screen.black_pixel())
+            .unwrap_or(0);
+        let root = x::Window::new(root);
+        self.conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: root,
+                value_list: &[x::Cw::BackPixel(black_pixel)],
+            })
+            .map_err(|e| format!("set black root background: {e}"))?;
+        self.conn
+            .send_and_check_request(&x::ClearArea {
+                exposures: false,
+                window: root,
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+            .map_err(|e| format!("clear root background: {e}"))
+    }
 }
 
 impl X11CompositeRedirectOps for XcbCompositorProtocol<'_> {
@@ -711,6 +738,11 @@ impl X11ConnectionOps for XcbSharedCompositorConnection {
     fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11ConnectionOps>::query_pointer_root(&protocol, root)
+    }
+
+    fn paint_root_solid_black(&self, root: u32) -> Result<(), String> {
+        let protocol = self.protocol();
+        <XcbCompositorProtocol<'_> as X11ConnectionOps>::paint_root_solid_black(&protocol, root)
     }
 }
 

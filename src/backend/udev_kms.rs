@@ -3551,14 +3551,15 @@ impl KmsState {
                     }
                 }
 
-                // Solid background LAST (back-most). Keep it opaque so we don't leak the previous
-                // framebuffer contents on tty (which can look like a solid blue screen).
+                // Solid background LAST (back-most). When the effects
+                // compositor is disabled there is no compositor-owned
+                // wallpaper, so keep the desktop predictably pure black.
                 let bg_geo = Rectangle::<i32, Physical>::from_size((out_w, out_h).into());
                 let bg = SolidColorRenderElement::new(
                     self.background_id.clone(),
                     bg_geo,
                     0usize,
-                    smithay::backend::renderer::Color32F::new(0.1, 0.15, 0.25, 1.0),
+                    smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0),
                     Kind::Unspecified,
                 );
                 elements.push(KmsRenderElement::Solid(bg));

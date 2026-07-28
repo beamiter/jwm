@@ -13,4 +13,8 @@ pub trait X11ConnectionOps {
     /// WM only receives motion events during grabs or over the root window,
     /// so interactive layers (WaterLily stylus) poll this per frame instead.
     fn query_pointer_root(&self, root: u32) -> Option<(i16, i16)>;
+    /// Replace any root-window wallpaper pixmap with the screen's solid black
+    /// pixel and repaint it. This is used before handing drawing back to the X
+    /// server when the compositor is disabled.
+    fn paint_root_solid_black(&self, root: u32) -> Result<(), String>;
 }

@@ -167,6 +167,24 @@ where
         let reply = self.query_pointer(root).ok()?.reply().ok()?;
         Some((reply.root_x, reply.root_y))
     }
+
+    fn paint_root_solid_black(&self, root: u32) -> Result<(), String> {
+        let black_pixel = self
+            .setup()
+            .roots
+            .iter()
+            .find(|screen| screen.root == root)
+            .map(|screen| screen.black_pixel)
+            .unwrap_or(0);
+        self.change_window_attributes(
+            root,
+            &xproto::ChangeWindowAttributesAux::new().background_pixel(black_pixel),
+        )
+        .map_err(|e| format!("set black root background: {e}"))?;
+        self.clear_area(false, root, 0, 0, 0, 0)
+            .map_err(|e| format!("clear root background: {e}"))?;
+        Ok(())
+    }
 }
 
 impl<T> X11CompositeRedirectOps for T

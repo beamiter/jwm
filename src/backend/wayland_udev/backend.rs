@@ -3895,6 +3895,9 @@ impl Backend for UdevBackend {
             Ok(false)
         } else if !enabled && self.compositor.is_some() {
             self.compositor = None;
+            // Force a KMS frame immediately so the compositor's last wallpaper
+            // framebuffer is replaced by the non-composited black background.
+            RenderScheduler::request_render(self);
             Ok(true)
         } else {
             Ok(false)

@@ -914,13 +914,13 @@ impl WaylandWinitBackend {
         }
         self.surfaces_on_output.clone_from(&visible_surfaces);
 
-        // Solid background LAST (back-most).
+        // No effects compositor owns a wallpaper on this path.
         let bg_geo = Rectangle::<i32, Physical>::from_size((out_w, out_h).into());
         let bg = SolidColorRenderElement::new(
             self.background_id.clone(),
             bg_geo,
             0usize,
-            Color32F::new(0.1, 0.15, 0.25, 1.0),
+            Color32F::new(0.0, 0.0, 0.0, 1.0),
             Kind::Unspecified,
         );
         elements.push(WinitRenderElement::Solid(bg));

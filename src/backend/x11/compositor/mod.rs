@@ -1016,6 +1016,12 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         }
         // Destroy the _NET_WM_CM_Sn selection owner window (releases ownership)
         let _ = self.conn.destroy_window_resource(self.cm_selection_owner);
+        // The compositor owns wallpaper rendering. Before exposing the native
+        // root again, discard any root pixmap left by the wallpaper path and
+        // repaint it solid black.
+        if let Err(err) = self.conn.paint_root_solid_black(self.root) {
+            log::warn!("compositor: failed to paint root background black: {err}");
+        }
         // Undo the MANUAL redirect so the X server renders windows normally again
         let _ = self.conn.unredirect_subwindows_manual(self.root);
         let _ = self.conn.release_overlay_window(self.overlay_window);

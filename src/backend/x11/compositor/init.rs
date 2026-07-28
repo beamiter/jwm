@@ -41,6 +41,7 @@ impl<C: CompositorConnection> Compositor<C> {
         impl<C: CompositorConnection> Drop for RedirectGuard<C> {
             fn drop(&mut self) {
                 if self.active {
+                    let _ = self.conn.paint_root_solid_black(self.root);
                     let _ = self.conn.unredirect_subwindows_manual(self.root);
                     if let Some(ow) = self.overlay {
                         let _ = self.conn.release_overlay_window(ow);

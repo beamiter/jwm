@@ -20,6 +20,7 @@ use crate::backend::common_define::{
     StdCursorKind, WindowId,
 };
 use crate::backend::error::{BackendContextExt, BackendError};
+use crate::backend::x11::compositor_common::X11ConnectionOps;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
@@ -1021,6 +1022,11 @@ impl XcbBackend {
             }
         } else {
             log::info!("XCB backend: compositor disabled (set JWM_COMPOSITOR=1 to enable)");
+            let protocol = XcbCompositorProtocol::new(conn.as_ref());
+            if let Err(err) = protocol.paint_root_solid_black(root.resource_id()) {
+                log::warn!("XCB backend: failed to paint non-composited root black: {err}");
+            }
+            let _ = conn.flush();
             None
         };
 
