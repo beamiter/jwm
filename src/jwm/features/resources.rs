@@ -427,7 +427,7 @@ fn read(path: &str) -> Option<String> {
 impl crate::jwm::Jwm {
     /// Re-read the machine's resources and keep an open control center
     /// current. Called from the frame tick; the interval gate is inside.
-    pub(crate) fn poll_resources(&mut self, backend: &mut dyn crate::backend::api::Backend) {
+    pub(crate) fn poll_resources(&mut self) {
         use crate::jwm::features::ControlKind;
 
         if !crate::config::CONFIG.load().behavior().resource_rows {
@@ -442,10 +442,10 @@ impl crate::jwm::Jwm {
             self.features.resources = ResourceState::default();
             self.features.resource_sampler = ResourceSampler::default();
             // A panel already on screen would otherwise keep three rows that
-            // no longer update — frozen numbers are worse than none.
+            // no longer update — frozen numbers are worse than none. The
+            // rebuild marks itself dirty; the tick pushes it.
             if self.features.system_ui.is_control_center() {
                 self.refresh_open_control_center();
-                self.sync_system_ui(backend);
             }
             return;
         }
@@ -473,10 +473,10 @@ impl crate::jwm::Jwm {
             ControlKind::NetworkThroughput,
             throughput_row(state.throughput),
         );
-        // Load-bearing: this is the only thing that pushes the rebuilt panel
-        // into the compositor, and without it the row only changes when the
-        // user happens to press a key.
-        self.sync_system_ui(backend);
+        // Load-bearing: without this the row only changes when the user
+        // happens to press a key. The push itself happens once at the end of
+        // the tick, so several polls in one frame cost one redraw.
+        self.mark_system_ui_dirty();
     }
 
     /// The machine's resources, for `get_resources`. Unanswered parts are

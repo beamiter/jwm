@@ -236,6 +236,10 @@ impl Jwm {
         );
         rebuilt.restore_control_selection(selected);
         self.features.system_ui = rebuilt;
+        // Rebuilt in memory only. Half this function's callers — a
+        // connectivity re-read, a battery poll — have no backend to push
+        // with, so the frame tick does it.
+        self.mark_system_ui_dirty();
     }
 
     /// Open the session menu: lock, suspend, hibernate, log out, restart,

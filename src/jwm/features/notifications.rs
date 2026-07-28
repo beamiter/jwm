@@ -556,6 +556,10 @@ impl crate::jwm::Jwm {
                 .system_ui
                 .restore_notification_cursor(id, cursor);
         }
+        // As with the control center: rebuilt here, pushed by the tick. A
+        // notification arriving while the center is open was otherwise
+        // invisible until the user pressed a key.
+        self.mark_system_ui_dirty();
     }
 
     /// JSON snapshot of the history for the `get_notifications` query.

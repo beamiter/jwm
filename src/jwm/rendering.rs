@@ -125,7 +125,7 @@ impl Jwm {
             // --- CPU / memory / network: a much faster interval, gated
             // inside the sampler because a rate has to divide by the gap it
             // actually waited rather than the one it meant to.
-            self.poll_resources(backend);
+            self.poll_resources();
         }
 
         // Clipboard capture runs on its own thread and connection; adopt what
@@ -146,6 +146,10 @@ impl Jwm {
 
         // Dim, lock, or blank a session nobody is at.
         self.poll_idle(backend);
+
+        // Everything above may have rebuilt an open panel. Push it once,
+        // after the last of them, so one tick costs at most one redraw.
+        self.flush_system_ui(backend);
 
         let composited = backend.has_compositor();
 

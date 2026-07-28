@@ -186,6 +186,12 @@ pub struct Jwm {
     /// Caffeine: hold the session awake regardless of the idle clock, until
     /// toggled back. Not a config value — it is a decision about right now.
     pub(crate) idle_inhibited: bool,
+    /// Set when a panel was rebuilt in memory and the compositor has not been
+    /// told yet. Rebuilding and pushing are separate because the places that
+    /// rebuild — a battery poll, an arriving notification, a connectivity
+    /// re-read — do not all have a backend to push with.
+    pub(crate) system_ui_dirty: bool,
+
     /// Whether the display server's competing blanking timer has been
     /// switched off. Done once, the first time the idle policy runs.
     pub(crate) server_saver_suppressed: bool,
@@ -599,6 +605,7 @@ impl Jwm {
             last_idle_poll: None,
             idle: crate::jwm::features::idle::IdleTracker::default(),
             idle_inhibited: false,
+            system_ui_dirty: false,
             server_saver_suppressed: false,
             features: FeatureStates::new(),
             event_coalescer:

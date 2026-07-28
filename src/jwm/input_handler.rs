@@ -15,7 +15,26 @@ use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
 
 impl Jwm {
-    pub(crate) fn sync_system_ui(&self, backend: &mut dyn Backend) {
+    /// Note that a panel changed in memory. The frame tick pushes it.
+    ///
+    /// Callers that already have a backend may sync directly instead; this
+    /// exists for the ones that do not, and for the ones several layers below
+    /// the event loop where threading a backend through would be worse than
+    /// the one-tick delay.
+    pub(crate) fn mark_system_ui_dirty(&mut self) {
+        self.system_ui_dirty = true;
+    }
+
+    /// Push a panel that was rebuilt since the last frame. Costs a boolean
+    /// test when nothing changed.
+    pub(crate) fn flush_system_ui(&mut self, backend: &mut dyn Backend) {
+        if self.system_ui_dirty {
+            self.sync_system_ui(backend);
+        }
+    }
+
+    pub(crate) fn sync_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
         backend.compositor_set_system_ui(active.then(|| {
             let parts = self.features.system_ui.overlay_parts();
