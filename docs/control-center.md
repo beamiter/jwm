@@ -18,6 +18,9 @@ controls.
 | Input | Same | `Enter` opens the input picker |
 | Brightness | `brightnessctl` or `/sys/class/backlight` | `Left`/`Right` adjust |
 | Battery | A `power_supply` device of type `Battery` exists | read-only |
+| CPU | `/proc/stat` is readable | read-only ([resource rows](resources.md)) |
+| Memory | `/proc/meminfo` is readable | read-only |
+| Network I/O | an interface worth counting exists in `/proc/net/dev` | read-only |
 | Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` cycle |
 | Night Light | always | `Enter` toggles |
 | Do Not Disturb | always | `Enter` toggles |

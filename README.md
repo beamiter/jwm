@@ -183,7 +183,8 @@ The built-in shell — the [control center](docs/control-center.md), native
 [media controls](docs/media-controls.md) driven from MPRIS, the
 [calendar](docs/calendar.md), the [application launcher](docs/launcher.md),
 the [wallpaper picker and its colour theming](docs/wallpaper.md),
-[clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md), and the
+[clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md),
+the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
 feature.
 Additional operational tools are documented in [tools/README.md](tools/README.md).

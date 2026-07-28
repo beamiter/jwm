@@ -366,7 +366,10 @@ impl Jwm {
                         }
                     }
                 }
-                ControlKind::Battery => {
+                ControlKind::Battery
+                | ControlKind::Cpu
+                | ControlKind::Memory
+                | ControlKind::NetworkThroughput => {
                     // Read-only: the row is information, not a control.
                 }
                 ControlKind::PowerProfile => {

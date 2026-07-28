@@ -15,6 +15,11 @@ use crate::jwm::types::WMArgEnum;
 use log::{error, info};
 use std::process::Command;
 
+/// Whether the control center should carry the machine's resource rows.
+fn cfg_resource_rows() -> bool {
+    CONFIG.load().behavior().resource_rows
+}
+
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
     /// (percentage points) and show the OSD with the result.
@@ -172,6 +177,9 @@ impl Jwm {
                     .audio_defaults
                     .name(crate::jwm::features::system_controls::AudioDirection::Input),
                 battery: self.features.battery.as_ref(),
+                // Gated here as well as in the poll: the rows must vanish the
+                // moment the key is switched off, not at the next sample.
+                resources: cfg_resource_rows().then_some(&self.features.resources),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
@@ -215,6 +223,9 @@ impl Jwm {
                     .audio_defaults
                     .name(crate::jwm::features::system_controls::AudioDirection::Input),
                 battery: self.features.battery.as_ref(),
+                // Gated here as well as in the poll: the rows must vanish the
+                // moment the key is switched off, not at the next sample.
+                resources: cfg_resource_rows().then_some(&self.features.resources),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),

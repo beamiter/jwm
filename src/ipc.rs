@@ -206,6 +206,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_notifications",
         "get_power_status",
         "get_recording_status",
+        "get_resources",
         "get_scrolling_status",
         "get_session_lock",
         "get_status",

@@ -28,6 +28,7 @@ pub mod overview_plan;
 pub mod power;
 pub mod recording;
 pub mod recording_plan;
+pub mod resources;
 pub mod screenshot;
 pub mod session;
 pub mod system_controls;
@@ -55,6 +56,7 @@ pub use overview_plan::CyclePlan;
 pub use power::{BatteryState, ChargeStatus, LowBatteryWarner};
 pub use recording::RecordingState;
 pub use recording_plan::FinalizationPlan;
+pub use resources::{MemoryUsage, ResourceState, Throughput};
 pub use screenshot::ScreenshotState;
 pub use session::SessionAction;
 pub use system_ui::{
@@ -74,6 +76,10 @@ pub struct FeatureStates {
     pub media: MediaStatus,
     /// Latest battery reading, refreshed by the poll in `tick_animations`.
     pub battery: Option<BatteryState>,
+    /// Latest CPU/memory/network reading, refreshed on its own interval by
+    /// the same tick.
+    pub resources: ResourceState,
+    pub resource_sampler: resources::ResourceSampler,
     /// Clipboard history. Memory only, never written to disk.
     pub clipboard: ClipboardHistory,
     /// Audio devices in use at both ends, refreshed when the control center

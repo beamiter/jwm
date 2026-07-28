@@ -249,6 +249,12 @@ pub enum ControlKind {
     AudioInput,
     /// Read-only battery readout; no interaction.
     Battery,
+    /// Read-only machine CPU load.
+    Cpu,
+    /// Read-only memory in use.
+    Memory,
+    /// Read-only network throughput.
+    NetworkThroughput,
     /// Power profile selector: Left/Right cycles the driver's profiles.
     PowerProfile,
     NightLight,
@@ -287,6 +293,9 @@ pub struct ControlCenterInputs<'a> {
     pub audio_output: Option<&'a str>,
     pub audio_input: Option<&'a str>,
     pub battery: Option<&'a crate::jwm::features::BatteryState>,
+    /// CPU, memory and throughput. Each row appears only when `/proc`
+    /// answered for that one.
+    pub resources: Option<&'a crate::jwm::features::ResourceState>,
     /// Wi-Fi state, when this machine has a radio to report on.
     pub network: Option<&'a crate::jwm::features::NetworkState>,
     /// Bluetooth state; the row is hidden without a controller.
@@ -487,6 +496,7 @@ impl SystemUiState {
             audio_output,
             audio_input,
             battery,
+            resources,
             network,
             bluetooth,
             power_profile,
@@ -555,6 +565,35 @@ impl SystemUiState {
                 enabled: matches!(battery.status, crate::jwm::features::ChargeStatus::Charging),
                 label: crate::jwm::features::power::control_row(battery),
             });
+        }
+        if let Some(resources) = resources {
+            use crate::jwm::features::resources as res;
+            if resources.cpu_present {
+                entries.push(ControlEntry {
+                    kind: ControlKind::Cpu,
+                    // Nothing draws a slider for these, and a value nobody
+                    // renders is a value that goes stale.
+                    percent: 0,
+                    enabled: false,
+                    label: res::cpu_row(resources.cpu_percent),
+                });
+            }
+            if let Some(memory) = resources.memory {
+                entries.push(ControlEntry {
+                    kind: ControlKind::Memory,
+                    percent: 0,
+                    enabled: false,
+                    label: res::memory_row(memory),
+                });
+            }
+            if resources.net_present {
+                entries.push(ControlEntry {
+                    kind: ControlKind::NetworkThroughput,
+                    percent: 0,
+                    enabled: false,
+                    label: res::throughput_row(resources.throughput),
+                });
+            }
         }
         if let Some(profile) = power_profile {
             entries.push(ControlEntry {
@@ -1116,6 +1155,9 @@ impl SystemUiState {
         match entry.kind {
             ControlKind::Media
             | ControlKind::Battery
+            | ControlKind::Cpu
+            | ControlKind::Memory
+            | ControlKind::NetworkThroughput
             | ControlKind::PowerProfile
             | ControlKind::Network
             | ControlKind::Bluetooth
@@ -1214,6 +1256,27 @@ impl SystemUiState {
                 entry.percent = percent;
                 entry.enabled = enabled;
             }
+        }
+    }
+
+    /// Whether the control center is the panel on screen.
+    #[must_use]
+    pub fn is_control_center(&self) -> bool {
+        matches!(self, Self::ControlCenter { .. })
+    }
+
+    /// Retype one row's pre-rendered label, leaving every other row alone.
+    ///
+    /// This is what makes a two-second refresh affordable: rebuilding the
+    /// panel would re-run `wpctl`, `brightnessctl` and `powerprofilesctl`,
+    /// three processes every two seconds for as long as the panel is open.
+    /// A row that is not there is not an error — the machine may have grown
+    /// an interface since the panel opened.
+    pub fn update_control_label(&mut self, kind: ControlKind, label: String) {
+        if let Self::ControlCenter { entries, .. } = self
+            && let Some(entry) = entries.iter_mut().find(|entry| entry.kind == kind)
+        {
+            entry.label = label;
         }
     }
 
@@ -2804,6 +2867,93 @@ mod tests {
         let items = bare.overlay_parts().items;
         assert!(!items.iter().any(|row| row.contains("Battery")));
         assert!(!items.iter().any(|row| row.contains("Power Profile")));
+    }
+
+    #[test]
+    fn resource_rows_appear_only_for_the_parts_proc_answered() {
+        use crate::jwm::features::resources::{MemoryUsage, Throughput};
+
+        let all = crate::jwm::features::ResourceState {
+            cpu_present: true,
+            cpu_percent: Some(37),
+            memory: Some(MemoryUsage {
+                total_kib: 32 * 1024 * 1024,
+                used_kib: 8 * 1024 * 1024,
+            }),
+            net_present: true,
+            throughput: Some(Throughput {
+                rx_bytes_per_sec: 1024 * 1024,
+                tx_bytes_per_sec: 0,
+            }),
+        };
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            resources: Some(&all),
+            ..Default::default()
+        });
+        let items = state.overlay_parts().items;
+        assert!(items[0].contains("CPU") && items[0].contains("37%"));
+        assert!(items[1].contains("Memory") && items[1].contains("25%"));
+        assert!(items[2].contains("Network I/O"));
+
+        // A container with no interface worth counting keeps the other two.
+        let contained = crate::jwm::features::ResourceState {
+            net_present: false,
+            throughput: None,
+            ..all
+        };
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            resources: Some(&contained),
+            ..Default::default()
+        });
+        let items = state.overlay_parts().items;
+        assert!(items.iter().any(|row| row.contains("CPU")));
+        assert!(!items.iter().any(|row| row.contains("Network I/O")));
+
+        // Nothing sampled yet: no rows at all, which is what keeps every
+        // other panel test's row indices where they were.
+        let bare = SystemUiState::control_center(&ControlCenterInputs::default());
+        let items = bare.overlay_parts().items;
+        assert!(!items.iter().any(|row| row.contains("CPU")));
+        assert!(!items.iter().any(|row| row.contains("Memory")));
+    }
+
+    #[test]
+    fn a_label_update_reaches_the_row_and_ignores_a_row_that_is_not_there() {
+        use crate::jwm::features::resources::{self, Throughput};
+
+        let present = crate::jwm::features::ResourceState {
+            net_present: true,
+            ..Default::default()
+        };
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            resources: Some(&present),
+            ..Default::default()
+        });
+        assert!(state.overlay_parts().items[0].contains(resources::UNKNOWN));
+
+        state.update_control_label(
+            ControlKind::NetworkThroughput,
+            resources::throughput_row(Some(Throughput {
+                rx_bytes_per_sec: 2 * 1024 * 1024,
+                tx_bytes_per_sec: 1024,
+            })),
+        );
+        let row = &state.overlay_parts().items[0];
+        assert!(
+            row.contains("2.0 MiB/s") && row.contains("1 KiB/s"),
+            "{row}"
+        );
+
+        // The CPU row was never built on this machine; retyping it must not
+        // panic or invent a row.
+        state.update_control_label(ControlKind::Cpu, resources::cpu_row(Some(99)));
+        assert!(
+            !state
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("99%"))
+        );
     }
 
     #[test]

@@ -121,6 +121,11 @@ impl Jwm {
                 self.poll_battery(backend);
                 self.refresh_connectivity();
             }
+
+            // --- CPU / memory / network: a much faster interval, gated
+            // inside the sampler because a rate has to divide by the gap it
+            // actually waited rather than the one it meant to.
+            self.poll_resources(backend);
         }
 
         // Clipboard capture runs on its own thread and connection; adopt what

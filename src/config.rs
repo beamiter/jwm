@@ -794,6 +794,12 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub idle_screen_on_command: String,
 
+    /// Show CPU, memory and network rows in the control center. Switching it
+    /// off also stops the sampling: without the rows there is nothing to read
+    /// `/proc` for.
+    #[serde(default = "default_true")]
+    pub resource_rows: bool,
+
     // --- Wallpaper ---
     /// Path to wallpaper image file (empty = solid black background).
     /// Used as the default wallpaper for all monitors unless overridden by wallpaper_monitors.
@@ -1484,6 +1490,7 @@ impl Default for Config {
                     idle_screen_off_secs: 0,
                     idle_screen_off_command: String::new(),
                     idle_screen_on_command: String::new(),
+                    resource_rows: true,
                     wallpaper_dir: String::new(),
                     wallpaper_colors: true,
                     suspend_command: default_suspend_command(),
@@ -3132,6 +3139,7 @@ impl Config {
             "behavior.idle_screen_on_command" => {
                 self.inner.behavior.idle_screen_on_command = as_string()?
             }
+            "behavior.resource_rows" => self.inner.behavior.resource_rows = as_bool()?,
             "behavior.border_color_focused" => {
                 self.inner.behavior.border_color_focused = as_rgba()?
             }
