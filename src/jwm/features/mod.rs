@@ -113,6 +113,9 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    /// The compositor was started only to render the current built-in system
+    /// UI. Closing the panel (or unlocking) returns to non-composited mode.
+    pub system_ui_temporary_compositor: bool,
     /// Peek 模式 (Boss Key) - 所有窗口淡出
     pub peek_active: bool,
     /// Expose / Mission Control 模式

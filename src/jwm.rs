@@ -1331,12 +1331,7 @@ impl Jwm {
         ));
         lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
 
-        if !backend.has_compositor() {
-            return Err("keybinding viewer requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-        }
+        self.prepare_system_ui(backend, "keybinding viewer", false)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::info("JWM KEYBINDINGS", lines);
         self.sync_system_ui(backend);

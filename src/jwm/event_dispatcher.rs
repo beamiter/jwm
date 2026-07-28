@@ -1054,6 +1054,7 @@ mod tests {
     use crate::core::animation::AnimationManager;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
+    use crate::jwm::types::WMArgEnum;
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
@@ -1069,6 +1070,9 @@ mod tests {
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
         rendered_frames: usize,
+        compositor_enabled: bool,
+        compositor_supported: bool,
+        compositor_transitions: Vec<bool>,
     }
 
     impl RenderSpyBackend {
@@ -1082,6 +1086,9 @@ mod tests {
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 rendered_frames: 0,
+                compositor_enabled: true,
+                compositor_supported: true,
+                compositor_transitions: Vec::new(),
             }
         }
     }
@@ -1097,7 +1104,7 @@ mod tests {
 
     impl RenderScheduler for RenderSpyBackend {
         fn has_compositor(&self) -> bool {
-            true
+            self.compositor_enabled
         }
 
         fn compositor_needs_render(&self) -> bool {
@@ -1164,6 +1171,15 @@ mod tests {
             _focused_window: Option<u64>,
         ) -> Result<bool, BackendError> {
             self.rendered_frames += 1;
+            Ok(true)
+        }
+
+        fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
+            self.compositor_transitions.push(enabled);
+            if !self.compositor_supported || self.compositor_enabled == enabled {
+                return Ok(false);
+            }
+            self.compositor_enabled = enabled;
             Ok(true)
         }
     }
@@ -1234,6 +1250,75 @@ mod tests {
         handler.render_compositor_immediate(&mut backend);
 
         assert_eq!(backend.rendered_frames, 1);
+    }
+
+    #[test]
+    fn launcher_and_lock_lease_a_disabled_compositor_then_restore_black_mode() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_active());
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert!(backend.compositor_enabled);
+        jwm.close_system_ui(&mut backend);
+        assert!(!backend.compositor_enabled);
+        assert!(!jwm.features.system_ui_temporary_compositor);
+
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_locked());
+        assert!(backend.compositor_enabled);
+        jwm.close_system_ui(&mut backend);
+
+        assert!(!backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [true, false, true, false]);
+    }
+
+    #[test]
+    fn persistent_compositor_stays_enabled_after_system_ui_closes() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.close_system_ui(&mut backend);
+
+        assert!(backend.compositor_enabled);
+        assert!(backend.compositor_transitions.is_empty());
+    }
+
+    #[test]
+    fn unavailable_compositor_never_enters_an_invisible_lock_state() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend.compositor_supported = false;
+
+        let error = jwm
+            .lock_screen(&mut backend, &WMArgEnum::Int(0))
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("could not start it"));
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(!jwm.features.system_ui_temporary_compositor);
+        assert!(!backend.compositor_enabled);
+    }
+
+    #[test]
+    fn compositor_disable_is_deferred_while_lock_screen_is_modal() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = crate::jwm::features::SystemUiState::lock();
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(backend.compositor_enabled);
+        assert!(jwm.features.system_ui_temporary_compositor);
+
+        jwm.close_system_ui(&mut backend);
+        assert!(!backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [false]);
     }
 
     #[test]

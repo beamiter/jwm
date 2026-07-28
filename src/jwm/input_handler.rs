@@ -614,11 +614,7 @@ impl Jwm {
                 return Ok(());
             }
             if keysym == keys::KEY_Escape && !locked {
-                self.features.system_ui.cancel();
-                backend.compositor_set_system_ui(None);
-                let _ = backend.key_ops().ungrab_keyboard();
-                let _ = backend.input_ops().ungrab_pointer();
-                backend.compositor_force_full_redraw();
+                self.close_system_ui(backend);
                 return Ok(());
             }
             if self.features.system_ui.is_monitor_layout() {
@@ -665,10 +661,7 @@ impl Jwm {
                     match std::process::Command::new("xrandr").args(&args).output() {
                         Ok(output) if output.status.success() => {
                             info!("Applied display layout with xrandr {args:?}");
-                            self.features.system_ui.cancel();
-                            backend.compositor_set_system_ui(None);
-                            let _ = backend.key_ops().ungrab_keyboard();
-                            let _ = backend.input_ops().ungrab_pointer();
+                            self.close_system_ui(backend);
                             backend.output_ops().invalidate_output_cache();
                             self.updategeom(backend);
                             backend.compositor_force_full_redraw();
@@ -792,11 +785,7 @@ impl Jwm {
                             crate::jwm::features::system_ui::authenticate_current_user(&password);
                         unsafe { password.as_bytes_mut().fill(0) };
                         if authenticated {
-                            self.features.system_ui.cancel();
-                            backend.compositor_set_system_ui(None);
-                            let _ = backend.key_ops().ungrab_keyboard();
-                            let _ = backend.input_ops().ungrab_pointer();
-                            backend.compositor_force_full_redraw();
+                            self.close_system_ui(backend);
                             return Ok(());
                         }
                         self.features.system_ui.authentication_failed();

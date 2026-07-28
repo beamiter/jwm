@@ -144,19 +144,7 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("control center requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for control center".into());
-            }
-        }
+        self.prepare_system_ui(backend, "control center", true)?;
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
@@ -252,19 +240,7 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("session menu requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for session menu".into());
-            }
-        }
+        self.prepare_system_ui(backend, "session menu", true)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::session_menu();
         self.sync_system_ui(backend);
         Ok(())
@@ -348,9 +324,6 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("audio device picker requires the JWM compositor".into());
-        }
         let devices = crate::jwm::features::system_controls::audio_devices(direction);
         if devices.is_empty() {
             return Err(format!(
@@ -359,16 +332,7 @@ impl Jwm {
             )
             .into());
         }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the audio device picker".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the audio device picker", true)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::audio_picker(direction, &devices);
         self.sync_system_ui(backend);
@@ -434,22 +398,10 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("Wi-Fi picker requires the JWM compositor".into());
-        }
         let Some(scan) = crate::jwm::features::connectivity::start_scan() else {
             return Err("no NetworkManager to scan with (nmcli not available)".into());
         };
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the Wi-Fi picker".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the Wi-Fi picker", true)?;
         self.features.wifi_scan = Some(scan);
         self.features.system_ui =
             crate::jwm::features::SystemUiState::wifi_picker("Scanning\u{2026}");
@@ -468,9 +420,6 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("wallpaper picker requires the JWM compositor".into());
-        }
         let (current, directory) = {
             let cfg = CONFIG.load();
             let behavior = cfg.behavior();
@@ -481,16 +430,7 @@ impl Jwm {
             )
         };
         let paths = wallpaper::list_wallpapers(&directory);
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the wallpaper picker".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the wallpaper picker", true)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
             &paths,
             &current,
@@ -539,22 +479,10 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("clipboard picker requires the JWM compositor".into());
-        }
         if !CONFIG.load().behavior().clipboard_history {
             return Err("clipboard history is disabled (behavior.clipboard_history)".into());
         }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the clipboard picker".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the clipboard picker", true)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::clipboard_picker(&self.features.clipboard);
         self.sync_system_ui(backend);
@@ -609,19 +537,7 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("calendar requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the calendar".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the calendar", true)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::calendar(chrono::Local::now().naive_local());
         self.sync_system_ui(backend);
@@ -637,22 +553,10 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("Bluetooth picker requires the JWM compositor".into());
-        }
         let Some(scan) = crate::jwm::features::connectivity::start_device_scan() else {
             return Err("no bluetoothctl to list devices with".into());
         };
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for the Bluetooth picker".into());
-            }
-        }
+        self.prepare_system_ui(backend, "the Bluetooth picker", true)?;
         self.features.bluetooth_scan = Some(scan);
         self.features.system_ui =
             crate::jwm::features::SystemUiState::bluetooth_picker("Reading devices\u{2026}");
@@ -896,13 +800,90 @@ impl Jwm {
         );
     }
 
-    /// Drop the panel and release its grabs.
+    /// Ensure the compositor needed to draw a built-in system UI is running,
+    /// then acquire the X11 modal input grabs. If JWM was deliberately running
+    /// without compositing, the compositor is leased only for the lifetime of
+    /// the panel and restored to off by [`Self::close_system_ui`].
+    pub(crate) fn prepare_system_ui(
+        &mut self,
+        backend: &mut dyn Backend,
+        label: &str,
+        grab_pointer: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !backend.has_compositor() {
+            match backend.set_compositor_enabled(true) {
+                Ok(true) if backend.has_compositor() => {
+                    self.features.system_ui_temporary_compositor = true;
+                    backend.compositor_apply_config();
+                    self.refresh_compositor_monitors(backend);
+                    log::info!("Temporarily enabled compositor for {label}");
+                }
+                Ok(_) => {
+                    return Err(format!(
+                        "{label} requires the JWM compositor, and this backend could not start it"
+                    )
+                    .into());
+                }
+                Err(error) => {
+                    return Err(format!("could not start compositor for {label}: {error}").into());
+                }
+            }
+        }
+
+        let Some(root) = backend.root_window() else {
+            return Ok(());
+        };
+        if let Err(error) = backend.key_ops().grab_keyboard(root) {
+            self.release_temporary_system_ui_compositor(backend, label);
+            return Err(error.into());
+        }
+        if !grab_pointer {
+            return Ok(());
+        }
+
+        match backend.input_ops().grab_pointer(
+            (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+            None,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                let _ = backend.key_ops().ungrab_keyboard();
+                self.release_temporary_system_ui_compositor(backend, label);
+                Err(format!("could not grab pointer for {label}").into())
+            }
+            Err(error) => {
+                let _ = backend.key_ops().ungrab_keyboard();
+                self.release_temporary_system_ui_compositor(backend, label);
+                Err(error.into())
+            }
+        }
+    }
+
+    fn release_temporary_system_ui_compositor(&mut self, backend: &mut dyn Backend, label: &str) {
+        if !std::mem::take(&mut self.features.system_ui_temporary_compositor) {
+            return;
+        }
+        match backend.set_compositor_enabled(false) {
+            Ok(true) => log::info!("Restored compositor to OFF after {label}"),
+            Ok(false) if !backend.has_compositor() => {}
+            Ok(false) => {
+                log::warn!("Could not restore compositor to OFF after {label}: state unchanged");
+            }
+            Err(error) => {
+                log::warn!("Could not restore compositor to OFF after {label}: {error}");
+            }
+        }
+    }
+
+    /// Drop the panel, release its grabs, and restore a temporarily enabled
+    /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
         let _ = backend.key_ops().ungrab_keyboard();
         let _ = backend.input_ops().ungrab_pointer();
         backend.compositor_force_full_redraw();
+        self.release_temporary_system_ui_compositor(backend, "system UI");
     }
 
     /// Open the notification center: the bounded history JWM kept while
@@ -915,19 +896,7 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("notification center requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for notification center".into());
-            }
-        }
+        self.prepare_system_ui(backend, "notification center", true)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
             &self.features.notifications,
             crate::jwm::features::notifications::now_unix_ms(),
@@ -944,19 +913,7 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("built-in launcher requires the JWM compositor".into());
-        }
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for application launcher".into());
-            }
-        }
+        self.prepare_system_ui(backend, "application launcher", true)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::open_launcher(self.launcher_window_snapshot());
         self.sync_system_ui(backend);
@@ -970,9 +927,6 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if self.features.system_ui.is_active() {
             return Ok(());
-        }
-        if !backend.has_compositor() {
-            return Err("display layout requires the JWM compositor".into());
         }
         #[allow(unused_mut)]
         let mut is_x11 = false;
@@ -1011,16 +965,7 @@ impl Jwm {
             return Err("display layout requires at least two active outputs".into());
         }
 
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for display layout".into());
-            }
-        }
+        self.prepare_system_ui(backend, "display layout", true)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::monitor_layout(entries);
         self.sync_system_ui(backend);
         Ok(())
@@ -1034,21 +979,9 @@ impl Jwm {
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        if !backend.has_compositor() {
-            return Err("built-in lock screen requires the JWM compositor".into());
-        }
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.
-        if let Some(root) = backend.root_window() {
-            backend.key_ops().grab_keyboard(root)?;
-            if !backend.input_ops().grab_pointer(
-                (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                None,
-            )? {
-                let _ = backend.key_ops().ungrab_keyboard();
-                return Err("could not grab pointer for lock screen".into());
-            }
-        }
+        self.prepare_system_ui(backend, "lock screen", true)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
         self.sync_system_ui(backend);
         Ok(())
@@ -1137,8 +1070,17 @@ impl Jwm {
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let enable = !backend.has_compositor();
+        if !enable && self.features.system_ui.is_active() {
+            // The system UI is compositor-rendered and modal. Removing its
+            // renderer here would leave an invisible keyboard/pointer grab or,
+            // worse, an invisible lock screen. Honor OFF as soon as it closes.
+            self.features.system_ui_temporary_compositor = true;
+            log::info!("Compositor disable deferred until the system UI closes");
+            return Ok(());
+        }
         match backend.set_compositor_enabled(enable) {
             Ok(true) => {
+                self.features.system_ui_temporary_compositor = false;
                 log::info!(
                     "Compositor toggled: now {}",
                     if enable { "ON" } else { "OFF" }

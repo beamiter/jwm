@@ -520,7 +520,19 @@ impl Jwm {
         // 5. Toggle compositor if config changed
         let compositor_wanted = cfg.compositor_enabled();
         let compositor_active = backend.has_compositor();
-        if compositor_wanted != compositor_active {
+        if compositor_wanted {
+            // A config change to ON converts any system-UI lease into the
+            // user's persistent compositor; closing the panel must keep it.
+            self.features.system_ui_temporary_compositor = false;
+        }
+        let defer_compositor_disable =
+            !compositor_wanted && compositor_active && self.features.system_ui.is_active();
+        if defer_compositor_disable {
+            // Never tear the renderer out from under a modal launcher or lock
+            // screen. The common close path applies the requested OFF state.
+            self.features.system_ui_temporary_compositor = true;
+            log::info!("Deferring compositor disable until the system UI closes");
+        } else if compositor_wanted != compositor_active {
             match backend.set_compositor_enabled(compositor_wanted) {
                 Ok(true) => log::info!(
                     "Compositor {}",
