@@ -85,6 +85,10 @@ pub struct X11rbBackend {
     /// Reused per-frame scratch buffer for the WindowId→x11 scene translation
     /// in `compositor_render_frame`, avoiding a Vec allocation every frame.
     scratch_x11_scene: Vec<(u32, i32, i32, u32, u32)>,
+
+    /// Whether the X server has the XScreenSaver extension, learned on the
+    /// first idle query and remembered: a server without it will not grow one.
+    screensaver: Option<bool>,
 }
 
 struct X11Interaction {
@@ -321,6 +325,7 @@ impl X11rbBackend {
             clipboard: None,
             benchmark_auto_exit: false,
             scratch_x11_scene: Vec::new(),
+            screensaver: None,
         };
 
         // Watch CLIPBOARD on its own connection and thread. Failing here
@@ -625,6 +630,50 @@ impl Backend for X11rbBackend {
             .as_ref()
             .map(super::clipboard::Clipboard::drain_captured)
             .unwrap_or_default()
+    }
+
+    fn idle_millis(&mut self) -> Option<u64> {
+        use x11rb::protocol::screensaver::ConnectionExt as _;
+
+        // The extension is what makes this answerable at all: the window
+        // manager only receives the events it grabbed, so a session spent
+        // typing into one client would otherwise look idle.
+        let present = *self.screensaver.get_or_insert_with(|| {
+            self.conn
+                .extension_information(x11rb::protocol::screensaver::X11_EXTENSION_NAME)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        if !present {
+            return None;
+        }
+        let info = self
+            .conn
+            .screensaver_query_info(self.root_x11)
+            .ok()?
+            .reply()
+            .ok()?;
+        Some(u64::from(info.ms_since_user_input))
+    }
+
+    fn suppress_server_screensaver(&mut self) -> bool {
+        use x11rb::protocol::xproto::{Blanking, ConnectionExt as _, Exposures};
+
+        // A zero timeout disables the server's blanker; the rest is left at
+        // whatever the server prefers.
+        let result = self
+            .conn
+            .set_screen_saver(0, 0, Blanking::DEFAULT, Exposures::DEFAULT)
+            .map_err(|error| error.to_string())
+            .and_then(|cookie| cookie.check().map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("idle: could not disable the X screen saver: {error}");
+                false
+            }
+        }
     }
 
     fn capabilities(&self) -> Capabilities {

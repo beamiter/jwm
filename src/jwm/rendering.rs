@@ -139,6 +139,9 @@ impl Jwm {
         // Wallpaper colour extraction decodes an image; the same applies.
         self.poll_wallpaper_theme(backend);
 
+        // Dim, lock, or blank a session nobody is at.
+        self.poll_idle(backend);
+
         let composited = backend.has_compositor();
 
         if !self.animations.has_active() {

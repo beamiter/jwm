@@ -1526,6 +1526,34 @@ pub trait Backend:
         Vec::new()
     }
 
+    /// Milliseconds since the last keyboard or pointer input anywhere in the
+    /// session, if this backend can tell.
+    ///
+    /// The window manager only sees the events it grabbed, so it cannot count
+    /// this itself: a session spent typing into one window looks idle from up
+    /// here. `None` means the backend has no idle clock, and the idle policy
+    /// stays out of the way rather than guessing.
+    fn idle_millis(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// Whether a client asked to be left awake — a video player holding an
+    /// idle inhibitor. Backends without the protocol never inhibit.
+    fn idle_inhibited_by_client(&self) -> bool {
+        false
+    }
+
+    /// Switch off the display server's own blanking timer, because this
+    /// session now has an idle policy of its own.
+    ///
+    /// On X11 the two do not merely overlap, they fight: when the server's
+    /// blanker fires it resets the idle clock this policy reads, so a lock
+    /// timeout longer than the server's blanking timeout would never arrive.
+    /// Returns whether anything was changed.
+    fn suppress_server_screensaver(&mut self) -> bool {
+        false
+    }
+
     // Ops Getters
     fn window_ops(&self) -> &dyn WindowOps;
     fn input_ops(&self) -> &dyn InputOps;

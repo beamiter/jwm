@@ -18,6 +18,7 @@ pub mod capture_plan;
 pub mod clipboard;
 pub mod connectivity;
 pub mod expose_plan;
+pub mod idle;
 pub mod magnifier;
 pub mod media;
 pub mod notifications;

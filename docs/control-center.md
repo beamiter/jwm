@@ -21,6 +21,7 @@ controls.
 | Power Profile | `powerprofilesctl` or ACPI `platform_profile` | `Left`/`Right` cycle |
 | Night Light | always | `Enter` toggles |
 | Do Not Disturb | always | `Enter` toggles |
+| Caffeine | always | `Enter` holds the session awake ([idle policy](idle.md)) |
 | Lock Screen | always | `Enter` locks |
 | Session… | always | `Enter` opens the [session menu](session-menu.md) |
 

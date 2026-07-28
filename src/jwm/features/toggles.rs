@@ -177,6 +177,7 @@ impl Jwm {
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
+                idle_inhibited: self.idle_inhibited,
             },
         );
         self.sync_system_ui(backend);
@@ -219,6 +220,7 @@ impl Jwm {
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
+                idle_inhibited: self.idle_inhibited,
             },
         );
         rebuilt.restore_control_selection(selected);

@@ -767,6 +767,33 @@ pub struct BehaviorConfig {
     #[serde(default = "default_audio_recording_channels")]
     pub audio_recording_channels: u16,
 
+    // --- Idle ---
+    /// Seconds of inactivity before the screen dims. 0 switches the stage off.
+    #[serde(default = "default_idle_dim_secs")]
+    pub idle_dim_secs: u64,
+    /// Fraction of normal brightness while dimmed.
+    #[serde(default = "default_idle_dim_level")]
+    pub idle_dim_level: f32,
+    /// Seconds of inactivity before the built-in lock screen appears. 0 (the
+    /// default) switches it off: unlocking needs PAM, and a session that
+    /// cannot reach PAM would be locked out of itself, so turning this on is
+    /// a decision only the user can make.
+    #[serde(default)]
+    pub idle_lock_secs: u64,
+    /// Seconds of inactivity before `idle_screen_off_command` runs. 0, or an
+    /// empty command, switches the stage off.
+    #[serde(default)]
+    pub idle_screen_off_secs: u64,
+    /// Command that powers the displays down, e.g. `xset dpms force off` or
+    /// `wlopm --off '*'`. JWM does not do this itself: which knob is right
+    /// depends on the session, and getting it wrong leaves a black screen.
+    #[serde(default)]
+    pub idle_screen_off_command: String,
+    /// Command that powers the displays back up on the next input. Needed
+    /// only for tools that do not restore themselves.
+    #[serde(default)]
+    pub idle_screen_on_command: String,
+
     // --- Wallpaper ---
     /// Path to wallpaper image file (empty = solid black background).
     /// Used as the default wallpaper for all monitors unless overridden by wallpaper_monitors.
@@ -1022,6 +1049,12 @@ fn default_night_light_transition() -> u32 {
 }
 fn default_clipboard_history() -> bool {
     true
+}
+fn default_idle_dim_secs() -> u64 {
+    120
+}
+fn default_idle_dim_level() -> f32 {
+    crate::jwm::features::idle::DEFAULT_DIM_LEVEL
 }
 fn default_suspend_command() -> String {
     "systemctl suspend".to_string()
@@ -1445,6 +1478,12 @@ impl Default for Config {
                     night_light_end: default_night_light_end(),
                     night_light_transition_mins: default_night_light_transition(),
                     clipboard_history: default_clipboard_history(),
+                    idle_dim_secs: default_idle_dim_secs(),
+                    idle_dim_level: default_idle_dim_level(),
+                    idle_lock_secs: 0,
+                    idle_screen_off_secs: 0,
+                    idle_screen_off_command: String::new(),
+                    idle_screen_on_command: String::new(),
                     wallpaper_dir: String::new(),
                     wallpaper_colors: true,
                     suspend_command: default_suspend_command(),
@@ -2629,6 +2668,7 @@ impl Config {
             "media_stop" => Some(Jwm::media_stop),
             "session_menu" => Some(Jwm::session_menu),
             "toggle_night_light" => Some(Jwm::toggle_night_light),
+            "toggle_idle_inhibit" => Some(Jwm::toggle_idle_inhibit),
             "toggle_wifi" => Some(Jwm::toggle_wifi),
             "wifi_picker" => Some(Jwm::wifi_picker),
             "audio_output_picker" => Some(Jwm::audio_output_picker),
@@ -3074,6 +3114,24 @@ impl Config {
             }
             "behavior.wallpaper_dir" => self.inner.behavior.wallpaper_dir = as_string()?,
             "behavior.wallpaper_colors" => self.inner.behavior.wallpaper_colors = as_bool()?,
+            "behavior.idle_dim_secs" => self.inner.behavior.idle_dim_secs = u64::from(as_u32()?),
+            "behavior.idle_dim_level" => {
+                let level = as_f32()?;
+                if !(0.0..=1.0).contains(&level) {
+                    return Err(format!("behavior.idle_dim_level={level} out of [0, 1]"));
+                }
+                self.inner.behavior.idle_dim_level = level;
+            }
+            "behavior.idle_lock_secs" => self.inner.behavior.idle_lock_secs = u64::from(as_u32()?),
+            "behavior.idle_screen_off_secs" => {
+                self.inner.behavior.idle_screen_off_secs = u64::from(as_u32()?)
+            }
+            "behavior.idle_screen_off_command" => {
+                self.inner.behavior.idle_screen_off_command = as_string()?
+            }
+            "behavior.idle_screen_on_command" => {
+                self.inner.behavior.idle_screen_on_command = as_string()?
+            }
             "behavior.border_color_focused" => {
                 self.inner.behavior.border_color_focused = as_rgba()?
             }

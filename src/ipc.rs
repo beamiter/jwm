@@ -134,6 +134,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_audio_recording",
         "toggle_bluetooth",
         "toggle_dnd",
+        "toggle_idle_inhibit",
         "toggle_magnifier",
         "toggle_night_light",
         "toggle_overview",
@@ -198,6 +199,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "get_effect_status",
         "get_gesture_status",
         "get_hdr_status",
+        "get_idle_status",
         "get_media_status",
         "get_metrics",
         "get_monitors",
@@ -224,6 +226,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "clipboard",
         "config",
         "dnd",
+        "idle",
         "layout",
         "media",
         "monitor",
@@ -529,6 +532,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "adjust_recording_region" => Ok((Jwm::adjust_recording_region, parse_int_arg(args, 0)?)),
         "toggle_audio_recording" => Ok((Jwm::toggle_audio_recording, parse_int_arg(args, 0)?)),
         "toggle_dnd" => Ok((Jwm::toggle_dnd, parse_int_arg(args, 0)?)),
+        "toggle_idle_inhibit" => Ok((Jwm::toggle_idle_inhibit, parse_int_arg(args, 0)?)),
 
         // --- Session ---
         "save_session" => Ok((Jwm::save_session, parse_int_arg(args, 0)?)),

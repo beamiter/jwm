@@ -901,6 +901,7 @@ impl XcbBackend {
                 xcb::Extension::Present,
                 xcb::Extension::XFixes,
                 xcb::Extension::Render,
+                xcb::Extension::ScreenSaver,
             ],
         )
         .map_err(xcb_err)?;
@@ -1768,6 +1769,35 @@ impl Backend for XcbBackend {
             .as_ref()
             .map(super::clipboard::Clipboard::drain_captured)
             .unwrap_or_default()
+    }
+
+    fn idle_millis(&mut self) -> Option<u64> {
+        // The extension is what makes this answerable at all: the window
+        // manager only receives the events it grabbed, so a session spent
+        // typing into one client would otherwise look idle. It is named at
+        // connect time; a server without it answers with an error here.
+        let cookie = self.conn.send_request(&xcb::screensaver::QueryInfo {
+            drawable: x::Drawable::Window(self.root),
+        });
+        let info = self.conn.wait_for_reply(cookie).ok()?;
+        Some(u64::from(info.ms_since_user_input()))
+    }
+
+    fn suppress_server_screensaver(&mut self) -> bool {
+        // A zero timeout disables the server's blanker; the rest is left at
+        // whatever the server prefers.
+        match self.conn.send_and_check_request(&x::SetScreenSaver {
+            timeout: 0,
+            interval: 0,
+            prefer_blanking: x::Blanking::Default,
+            allow_exposures: x::Exposures::Default,
+        }) {
+            Ok(()) => true,
+            Err(error) => {
+                log::warn!("idle: could not disable the X screen saver: {error}");
+                false
+            }
+        }
     }
 
     fn capabilities(&self) -> Capabilities {

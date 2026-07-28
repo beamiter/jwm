@@ -179,6 +179,16 @@ pub struct Jwm {
     pub(crate) night_light_override: Option<bool>,
     /// Last time the battery was re-read.
     pub(crate) last_battery_poll: Option<std::time::Instant>,
+    /// Last time the session's idle clock was read.
+    pub(crate) last_idle_poll: Option<std::time::Instant>,
+    /// What the idle policy has already done this idle period.
+    pub(crate) idle: crate::jwm::features::idle::IdleTracker,
+    /// Caffeine: hold the session awake regardless of the idle clock, until
+    /// toggled back. Not a config value — it is a decision about right now.
+    pub(crate) idle_inhibited: bool,
+    /// Whether the display server's competing blanking timer has been
+    /// switched off. Done once, the first time the idle policy runs.
+    pub(crate) server_saver_suppressed: bool,
 
     /// 所有特殊功能的状态（截图、overview、录制、放大镜等）
     pub features: FeatureStates,
@@ -586,6 +596,10 @@ impl Jwm {
             last_night_light_update: None,
             night_light_override: None,
             last_battery_poll: None,
+            last_idle_poll: None,
+            idle: crate::jwm::features::idle::IdleTracker::default(),
+            idle_inhibited: false,
+            server_saver_suppressed: false,
             features: FeatureStates::new(),
             event_coalescer:
                 crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),

@@ -567,6 +567,10 @@ impl Jwm {
         // 7. A new wallpaper means new accent colours, when the user asked for
         // them. The decode runs on a worker; the frame tick adopts the result.
         self.refresh_wallpaper_theme();
+
+        // 8. Step 6 re-sent the configured brightness, which would undo an
+        // idle dim that is still meant to be in effect.
+        self.reapply_idle_dim(backend);
     }
 }
 

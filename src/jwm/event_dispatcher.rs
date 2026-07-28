@@ -1210,6 +1210,10 @@ mod tests {
             last_night_light_update: None,
             night_light_override: None,
             last_battery_poll: None,
+            last_idle_poll: None,
+            idle: crate::jwm::features::idle::IdleTracker::default(),
+            idle_inhibited: false,
+            server_saver_suppressed: false,
             features: FeatureStates::new(),
             event_coalescer:
                 crate::backend::compositor_common::event_coalescer::EventCoalescer::new(),

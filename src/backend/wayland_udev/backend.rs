@@ -1673,6 +1673,7 @@ impl UdevBackend {
                 .insert_source(libinput_backend, move |event, _, state| {
                     // Notify idle tracker on any input activity
                     state.idle_notifier_state.notify_activity(&state.seat);
+                    state.last_input = std::time::Instant::now();
 
                     match event {
                         InputEvent::PointerMotion { event, .. } => {
@@ -3649,6 +3650,16 @@ impl Backend for UdevBackend {
 
     fn drain_clipboard(&mut self) -> Vec<String> {
         self.state.drain_clipboard_captured()
+    }
+
+    fn idle_millis(&mut self) -> Option<u64> {
+        // This compositor owns the input pipeline, so the clock is its own
+        // rather than an extension's.
+        Some(self.state.last_input.elapsed().as_millis() as u64)
+    }
+
+    fn idle_inhibited_by_client(&self) -> bool {
+        !self.state.idle_inhibiting_surfaces.is_empty()
     }
 
     fn capabilities(&self) -> Capabilities {

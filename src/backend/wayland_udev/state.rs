@@ -341,6 +341,9 @@ pub struct JwmWaylandState {
     pub kde_decoration_state: KdeDecorationState,
 
     pub idle_inhibiting_surfaces: HashSet<ObjectId>,
+    /// When input last arrived, for the session idle policy. Kept beside the
+    /// idle notifier because both are fed from the same libinput callback.
+    pub last_input: std::time::Instant,
     pub session_locked: bool,
     /// Per-output session lock surfaces. Key: Smithay output name.
     /// Populated on `SessionLockHandler::new_surface`, drained on unlock or
@@ -1832,6 +1835,7 @@ impl JwmWaylandState {
                 kde_decoration_state,
 
                 idle_inhibiting_surfaces: HashSet::new(),
+                last_input: std::time::Instant::now(),
                 session_locked: false,
                 lock_surfaces: HashMap::new(),
                 foreign_toplevel_handles: HashMap::new(),

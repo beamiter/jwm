@@ -237,6 +237,8 @@ pub enum ControlKind {
     PowerProfile,
     NightLight,
     DoNotDisturb,
+    /// Caffeine: hold the session awake, overriding the idle policy.
+    Caffeine,
     LockScreen,
     /// Opens the session menu, the way `LockScreen` opens the lock overlay.
     Session,
@@ -277,6 +279,8 @@ pub struct ControlCenterInputs<'a> {
     pub power_profile: Option<&'a str>,
     pub night_light: bool,
     pub do_not_disturb: bool,
+    /// Whether the idle policy is being held off.
+    pub idle_inhibited: bool,
 }
 
 /// Whether activating this row needs a second Enter to confirm.
@@ -462,6 +466,7 @@ impl SystemUiState {
             power_profile,
             night_light,
             do_not_disturb,
+            idle_inhibited,
         } = *inputs;
         let mut entries = Vec::new();
         if let Some(media) = media {
@@ -542,6 +547,11 @@ impl SystemUiState {
             ControlKind::DoNotDisturb,
             0,
             do_not_disturb,
+        ));
+        entries.push(ControlEntry::simple(
+            ControlKind::Caffeine,
+            0,
+            idle_inhibited,
         ));
         entries.push(ControlEntry::simple(ControlKind::LockScreen, 0, false));
         entries.push(ControlEntry::simple(ControlKind::Session, 0, false));
@@ -1112,6 +1122,10 @@ impl SystemUiState {
             ),
             ControlKind::DoNotDisturb => format!(
                 "\u{f1f6}  Do Not Disturb{:>23}",
+                if entry.enabled { "[ on ]" } else { "[ off ]" }
+            ),
+            ControlKind::Caffeine => format!(
+                "\u{f0f4}  Caffeine{:>29}",
                 if entry.enabled { "[ on ]" } else { "[ off ]" }
             ),
             ControlKind::LockScreen => "\u{f023}  Lock Screen".to_string(),
@@ -2335,17 +2349,18 @@ mod tests {
         });
         assert_eq!(state.selected_control(), Some(ControlKind::Volume));
         let parts = state.overlay_parts();
-        // volume, brightness, night light, DND, lock, session
-        assert_eq!(parts.items.len(), 6);
+        // volume, brightness, night light, DND, caffeine, lock, session
+        assert_eq!(parts.items.len(), 7);
         assert!(parts.items[0].contains("45%"));
         assert!(parts.items[1].contains("60%"));
         assert!(parts.items[2].contains("[ off ]"), "night light off");
         assert!(parts.items[3].contains("[ on ]"), "DND on");
+        assert!(parts.items[4].contains("[ off ]"), "caffeine off");
 
         // No audio, no backlight: only the toggles and actions remain.
         let state = SystemUiState::control_center(&ControlCenterInputs::default());
         assert_eq!(state.selected_control(), Some(ControlKind::NightLight));
-        assert_eq!(state.overlay_parts().items.len(), 4);
+        assert_eq!(state.overlay_parts().items.len(), 5);
     }
 
     #[test]
@@ -2611,6 +2626,7 @@ mod tests {
         for (kind, enabled) in [
             (ControlKind::NightLight, true),
             (ControlKind::DoNotDisturb, true),
+            (ControlKind::Caffeine, true),
             (ControlKind::LockScreen, false),
             (ControlKind::Session, false),
             (ControlKind::Volume, true),

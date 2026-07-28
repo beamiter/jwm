@@ -403,6 +403,17 @@ impl Jwm {
                         );
                     }
                 }
+                ControlKind::Caffeine => {
+                    if activate {
+                        // Through the toggle so the wake-up and the broadcast
+                        // happen here exactly as they do from a keybinding.
+                        let _ = self.toggle_idle_inhibit(backend, &WMArgEnum::Int(0));
+                        let enabled = self.idle_inhibited;
+                        self.features
+                            .system_ui
+                            .update_control(ControlKind::Caffeine, 0, enabled);
+                    }
+                }
                 ControlKind::Session => {
                     if activate {
                         // Swap the panel for the session menu; the grabs stay.
