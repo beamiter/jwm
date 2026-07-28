@@ -1,144 +1,108 @@
-diff --git a/src/jwm/features/system_ui.rs b/src/jwm/features/system_ui.rs
---- a/src/jwm/features/system_ui.rs
-+++ b/src/jwm/features/system_ui.rs
-@@ -1733,24 +1733,39 @@ impl SystemUiState {
-     /// A window row must never produce a launch: spawning a second browser
-     /// and promoting it in the frecency store is exactly what focusing the
-     /// first one exists to avoid.
-     pub fn selected_launch(&self) -> Option<LaunchChoice> {
-         let Self::Launcher {
-+            query,
-             entries,
-             matches,
-             selected,
-             ..
-         } = self
-         else {
-             return None;
-         };
--        let LauncherRow::App(index) = *matches.get(*selected)? else {
--            return None;
--        };
--        entries.get(index).map(|entry| LaunchChoice {
--            id: entry.name.clone(),
--            command: entry.command.clone(),
--            terminal: entry.terminal,
--        })
-+        match matches.get(*selected).copied() {
-+            Some(LauncherRow::App(index)) => entries.get(index).map(|entry| LaunchChoice {
-+                id: entry.name.clone(),
-+                command: entry.command.clone(),
-+                terminal: entry.terminal,
-+            }),
-+            Some(LauncherRow::Window(_)) => None,
-+            None if matches.is_empty() => {
-+                let command = direct_command(query, entries)?;
-+                Some(LaunchChoice {
-+                    // Keep arguments (which may contain private data) out of
-+                    // the frecency file; rank the executable itself instead.
-+                    id: command[0].clone(),
-+                    command,
-+                    terminal: false,
-+                })
-+            }
-+            None => None,
-+        }
-     }
-@@ -1850,6 +1865,10 @@ impl SystemUiState {
-                     crate::jwm::features::launcher::parse_query(query),
-                     crate::jwm::features::launcher::QueryMode::Windows(_)
-                 );
-+                let direct = (!windows_only && matches.is_empty())
-+                    .then(|| direct_command(query, entries))
-+                    .flatten();
-                 let start = selected.saturating_sub(11);
-                 let items: Vec<String> = if matches.is_empty() {
--                    vec![if windows_only {
-+                    vec![if direct.is_some() {
-+                        format!("\u{f120}  Run command  {}", query.trim())
-+                    } else if windows_only {
-                         "  No matching windows".into()
-                     } else {
-                         "  No matching applications".into()
-@@ -1877,16 +1896,27 @@ impl SystemUiState {
-                 };
-                 OverlayParts {
-                     title: if windows_only {
-                         "\u{f2d0}  WINDOWS".into()
-+                    } else if direct.is_some() {
-+                        "\u{f120}  COMMAND".into()
-                     } else {
-                         "\u{f135}  APPLICATIONS".into()
-                     },
-                     query: Some(query.clone()),
--                    selected: (!matches.is_empty()).then(|| selected - start),
-+                    selected: if direct.is_some() {
-+                        Some(0)
-+                    } else {
-+                        (!matches.is_empty()).then(|| selected - start)
-+                    },
-                     items,
-                     // `/` lists open windows; it cannot be arithmetic, so the
-                     // two modes never compete for the same query.
--                    hint: "Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
--                        .into(),
-+                    hint: if direct.is_some() {
-+                        "Enter  run command    Esc  close".into()
-+                    } else {
-+                        "Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
-+                            .into()
-+                    },
-                 }
-             }
-@@ -2465,6 +2495,56 @@ fn parse_exec(exec: &str) -> Vec<String> {
-         .filter(|arg| !arg.starts_with('%'))
-         .collect()
- }
-+
-+/// Turn launcher text into an argv only when it clearly names a runnable
-+/// program. No shell is involved: pipes, redirections and expansions remain
-+/// ordinary arguments instead of being interpreted by `/bin/sh`.
+--- a/src/jwm/input_handler.rs
++++ b/src/jwm/input_handler.rs
+@@ -14,6 +14,147 @@
+ use crate::jwm::types::{WMArgEnum, WMClickType};
+ use log::{error, info};
+ 
++/// Split one launcher command line into argv without involving a shell.
 +///
-+/// A normal query needs at least one argument after the executable, which
-+/// preserves regular multi-word application search. Prefixing with `>` makes
-+/// command mode explicit and also permits a single executable.
-+fn direct_command(query: &str, entries: &[LaunchEntry]) -> Option<Vec<String>> {
++/// Quotes and backslash escapes are handled so arguments can contain spaces,
++/// but operators such as `|`, `>`, `;` and `$()` remain ordinary characters.
++fn split_launcher_command_line(input: &str) -> Option<Vec<String>> {
++    let mut args = Vec::new();
++    let mut current = String::new();
++    let mut quote = None;
++    let mut escaped = false;
++    let mut token_started = false;
++
++    for ch in input.chars() {
++        if escaped {
++            current.push(ch);
++            escaped = false;
++            token_started = true;
++            continue;
++        }
++
++        if let Some(active_quote) = quote {
++            if ch == active_quote {
++                quote = None;
++                token_started = true;
++            } else if ch == '\\' && active_quote == '"' {
++                escaped = true;
++            } else {
++                current.push(ch);
++                token_started = true;
++            }
++            continue;
++        }
++
++        match ch {
++            '\'' | '"' => {
++                quote = Some(ch);
++                token_started = true;
++            }
++            '\\' => {
++                escaped = true;
++                token_started = true;
++            }
++            ch if ch.is_whitespace() => {
++                if token_started {
++                    args.push(std::mem::take(&mut current));
++                    token_started = false;
++                }
++            }
++            _ => {
++                current.push(ch);
++                token_started = true;
++            }
++        }
++    }
++
++    if escaped || quote.is_some() {
++        return None;
++    }
++    if token_started {
++        args.push(current);
++    }
++    Some(args)
++}
++
++/// Parse direct launcher input when it is unambiguously a command.
++///
++/// Normal input requires both a known executable and at least one argument,
++/// preserving multi-word application searches. Prefixing the input with `>`
++/// explicitly selects command mode and also permits a single executable.
++fn parse_direct_launcher_command(
++    query: &str,
++    executable_available: impl Fn(&str) -> bool,
++) -> Option<Vec<String>> {
 +    let trimmed = query.trim();
-+    let (explicit, text) = match trimmed.strip_prefix('>') {
++    let (explicit, command_line) = match trimmed.strip_prefix('>') {
 +        Some(rest) => (true, rest.trim_start()),
 +        None => (false, trimmed),
 +    };
-+    let command = parse_exec(text);
++
++    // `/` is the launcher's window-search prefix. An absolute path remains
++    // available through explicit command mode: `> /path/to/program arg`.
++    if command_line.is_empty() || (!explicit && command_line.starts_with('/')) {
++        return None;
++    }
++
++    let command = split_launcher_command_line(command_line)?;
 +    if command.is_empty() || (!explicit && command.len() < 2) {
 +        return None;
 +    }
-+
-+    let program = &command[0];
-+    let known = entries.iter().any(|entry| {
-+        entry.command.first().is_some_and(|candidate| {
-+            candidate == program
-+                || Path::new(candidate).file_name().and_then(|name| name.to_str())
-+                    == Some(program.as_str())
-+        })
-+    });
-+    if !known && !is_executable_path(program) {
-+        return None;
-+    }
-+    Some(command)
++    executable_available(&command[0]).then_some(command)
 +}
 +
-+fn is_executable_path(program: &str) -> bool {
-+    // Bare names are accepted only when application discovery found them on
-+    // PATH. Here we handle explicit relative/absolute executable paths.
-+    if !program.contains('/') {
-+        return false;
-+    }
-+    let Ok(metadata) = fs::metadata(program) else {
++fn is_executable_file(path: &std::path::Path) -> bool {
++    let Ok(metadata) = std::fs::metadata(path) else {
 +        return false;
 +    };
 +    if !metadata.is_file() {
 +        return false;
 +    }
++
 +    #[cfg(unix)]
 +    {
 +        use std::os::unix::fs::PermissionsExt;
@@ -149,60 +113,134 @@ diff --git a/src/jwm/features/system_ui.rs b/src/jwm/features/system_ui.rs
 +        true
 +    }
 +}
- 
- // Minimal dynamically-loaded PAM client. dlopen keeps builds working on
- // machines that have the PAM runtime (needed to log in) but not libpam headers.
-@@ -3309,6 +3389,43 @@ mod tests {
-             ["foo", "--name", "two words"]
-         );
++
++fn launcher_program_available(
++    program: &str,
++    entries: &[crate::jwm::features::system_ui::LaunchEntry],
++) -> bool {
++    if program.contains('/') {
++        return is_executable_file(std::path::Path::new(program));
++    }
++
++    entries.iter().any(|entry| {
++        entry.command.first().is_some_and(|candidate| {
++            candidate == program
++                || std::path::Path::new(candidate)
++                    .file_name()
++                    .and_then(|name| name.to_str())
++                    == Some(program)
++        })
++    })
++}
++
++fn direct_command_from_launcher(
++    state: &crate::jwm::features::SystemUiState,
++) -> Option<Vec<String>> {
++    let crate::jwm::features::SystemUiState::Launcher { query, entries, .. } = state else {
++        return None;
++    };
++
++    parse_direct_launcher_command(query, |program| {
++        launcher_program_available(program, entries)
++    })
++}
++
+ impl Jwm {
+     /// Note that a panel changed in memory. The frame tick pushes it.
+     ///
+@@ -37,7 +178,19 @@
+         self.system_ui_dirty = false;
+         let active = self.features.system_ui.is_active();
+         backend.compositor_set_system_ui(active.then(|| {
+-            let parts = self.features.system_ui.overlay_parts();
++            let mut parts = self.features.system_ui.overlay_parts();
++            if direct_command_from_launcher(&self.features.system_ui).is_some() {
++                let typed = parts
++                    .query
++                    .as_deref()
++                    .unwrap_or_default()
++                    .trim()
++                    .to_string();
++                parts.title = "\u{f120}  COMMAND".into();
++                parts.items = vec![format!("\u{f120}  Run command  {typed}")];
++                parts.selected = Some(0);
++                parts.hint = "Enter  run command    Esc  close".into();
++            }
+             SystemUiOverlay {
+                 title: parts.title,
+                 query: parts.query,
+@@ -816,6 +969,14 @@
+                         log::warn!("Launcher: could not focus window: {error}");
+                     }
+                     return Ok(());
++                } else if let Some(command) =
++                    direct_command_from_launcher(&self.features.system_ui)
++                {
++                    let id = command[0].clone();
++                    self.features.system_ui.note_launch(&id);
++                    log::info!("Launcher: running {id}");
++                    self.close_system_ui(backend);
++                    return self.spawn(backend, &WMArgEnum::StringVec(command));
+                 } else if let Some(choice) = self.features.system_ui.selected_launch() {
+                     self.features.system_ui.note_launch(&choice.id);
+                     let command = crate::jwm::features::launcher::launch_command(
+@@ -1711,3 +1872,59 @@
+         Ok(())
      }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{parse_direct_launcher_command, split_launcher_command_line};
 +
 +    #[test]
-+    fn launcher_runs_composite_commands_without_a_shell() {
-+        let mut state = launcher_with(&[("flameshot", false)], "");
-+        for ch in "flameshot gui --path '/tmp/capture area'".chars() {
-+            state.push_char(ch);
-+        }
-+
-+        let parts = state.overlay_parts();
-+        assert_eq!(parts.title, "\u{f120}  COMMAND");
-+        assert_eq!(parts.selected, Some(0));
-+        assert!(parts.items[0].contains("flameshot gui"));
-+
-+        let choice = state.selected_launch().expect("command candidate");
-+        assert_eq!(choice.id, "flameshot");
++    fn launcher_composite_command_preserves_quoted_arguments() {
 +        assert_eq!(
-+            choice.command,
-+            ["flameshot", "gui", "--path", "/tmp/capture area"]
++            parse_direct_launcher_command(
++                "flameshot gui --path '/tmp/capture area'",
++                |program| program == "flameshot",
++            ),
++            Some(vec![
++                "flameshot".into(),
++                "gui".into(),
++                "--path".into(),
++                "/tmp/capture area".into(),
++            ])
 +        );
-+        assert!(!choice.terminal);
 +    }
 +
 +    #[test]
-+    fn unknown_composite_text_stays_a_search() {
-+        let mut state = launcher_with(&[("flameshot", false)], "");
-+        for ch in "not-a-program gui".chars() {
-+            state.push_char(ch);
-+        }
-+
-+        assert!(state.selected_launch().is_none());
-+        let parts = state.overlay_parts();
-+        assert_eq!(parts.title, "\u{f135}  APPLICATIONS");
-+        assert_eq!(parts.selected, None);
-+        assert_eq!(parts.items, ["  No matching applications"]);
++    fn launcher_unknown_command_remains_a_search() {
++        assert_eq!(
++            parse_direct_launcher_command("not-a-program gui", |_| false),
++            None
++        );
 +    }
 +
 +    #[test]
-+    fn explicit_command_prefix_allows_a_single_program() {
-+        let entries = [LaunchEntry {
-+            name: "flameshot".into(),
-+            command: vec!["flameshot".into()],
-+            terminal: false,
-+            search: "flameshot".into(),
-+        }];
-+        assert_eq!(direct_command("> flameshot", &entries), Some(vec!["flameshot".into()]));
++    fn explicit_command_prefix_allows_one_program() {
++        assert_eq!(
++            parse_direct_launcher_command("> flameshot", |program| program == "flameshot"),
++            Some(vec!["flameshot".into()])
++        );
++        assert_eq!(
++            parse_direct_launcher_command("flameshot", |program| program == "flameshot"),
++            None
++        );
 +    }
 +
-     #[test]
-     fn launcher_overlay_parts_window_the_list_and_track_selection() {
-         let entries: Vec<LaunchEntry> = (0..20)
++    #[test]
++    fn launcher_does_not_interpret_shell_operators() {
++        assert_eq!(
++            split_launcher_command_line("flameshot gui | sh -c 'echo unsafe'"),
++            Some(vec![
++                "flameshot".into(),
++                "gui".into(),
++                "|".into(),
++                "sh".into(),
++                "-c".into(),
++                "echo unsafe".into(),
++            ])
++        );
++    }
++}
