@@ -117,6 +117,31 @@ impl X11rbBackend {
         })
     }
 
+    fn apply_compositor_window_metadata(
+        &self,
+        compositor: &mut super::compositor::Compositor<RustConnection>,
+        x11w: u32,
+        win: WindowId,
+    ) {
+        let (_, class) = self.property_ops.get_class(win);
+        if !class.is_empty() {
+            compositor.set_window_class(x11w, &class);
+        }
+        if self
+            .window_ops
+            .get_window_attributes(win)
+            .is_ok_and(|attributes| attributes.override_redirect)
+        {
+            compositor.set_window_override_redirect(x11w, true);
+        }
+        if let Some(value) = self.property_ops.get_bypass_compositor(win) {
+            compositor.set_window_bypass_compositor(x11w, value);
+        }
+        if self.property_ops.is_fullscreen(win) {
+            compositor.set_window_fullscreen(x11w, true);
+        }
+    }
+
     fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
         let systray = match self.systray.as_mut() {
             Some(s) => s,
@@ -391,6 +416,8 @@ impl X11rbBackend {
                     .get_window_attributes(win)
                     .is_ok_and(|attributes| attributes.override_redirect)
             },
+            bypass_compositor: &|win| property_ops.get_bypass_compositor(win).unwrap_or(0),
+            fullscreen: &|win| property_ops.is_fullscreen(win),
         };
         for op in compositor_event_ops(event, self.root_x11, overlay, &sources) {
             compositor.apply_event_op(self.root_x11, op);
@@ -737,10 +764,15 @@ impl Backend for X11rbBackend {
 
                         match batch.flush_and_collect() {
                             Ok(geometries) => {
-                                for (x11w, _) in windows {
+                                for (x11w, win) in windows {
                                     if let Some((x, y, w, h)) = geometries.get(&x11w) {
                                         compositor.add_window(
                                             x11w, *x as i32, *y as i32, *w as u32, *h as u32,
+                                        );
+                                        self.apply_compositor_window_metadata(
+                                            &mut compositor,
+                                            x11w,
+                                            win,
                                         );
                                     }
                                 }
@@ -761,6 +793,11 @@ impl Backend for X11rbBackend {
                                     }
                                     if let Ok(geom) = self.window_ops.get_geometry(wid) {
                                         compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
+                                        self.apply_compositor_window_metadata(
+                                            &mut compositor,
+                                            x11w,
+                                            wid,
+                                        );
                                     }
                                 }
                             }
@@ -2208,7 +2245,7 @@ mod event_source {
     use x11rb::rust_connection::RustConnection;
 
     use super::ids::X11IdRegistry;
-    use crate::backend::api::{BackendEvent, NetWmState};
+    use crate::backend::api::{BackendEvent, NetWmState, PropertyKind};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
     use crate::backend::x11::wm::{
@@ -2459,10 +2496,15 @@ mod event_source {
                     })
                 }
                 XEvent::PropertyNotify(e) => {
-                    if e.state == xproto::Property::DELETE.into() {
+                    let kind = property_kind_from_atom(e.atom, self.property_kind_atoms());
+                    // Most deleted properties have historically been ignored,
+                    // but a bypass request must be reset immediately or a
+                    // client can remain unredirected after withdrawing it.
+                    if e.state == xproto::Property::DELETE.into()
+                        && kind != PropertyKind::BypassCompositor
+                    {
                         return None;
                     }
-                    let kind = property_kind_from_atom(e.atom, self.property_kind_atoms());
                     Some(BackendEvent::PropertyChanged {
                         window: self.ids.intern(e.window),
                         kind,

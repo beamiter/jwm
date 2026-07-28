@@ -41,6 +41,10 @@ pub enum CompositorEventOp {
         window: u32,
         fullscreen: bool,
     },
+    SetBypassCompositor {
+        window: u32,
+        value: u32,
+    },
     MarkDamaged {
         window: u32,
     },
@@ -79,6 +83,11 @@ pub struct CompositorEventSources<'a> {
     pub class: &'a dyn Fn(WindowId) -> String,
     /// Whether the window is override-redirect.
     pub override_redirect: &'a dyn Fn(WindowId) -> bool,
+    /// Current EWMH `_NET_WM_BYPASS_COMPOSITOR` value. Missing properties
+    /// and transport errors are represented as the neutral value `0`.
+    pub bypass_compositor: &'a dyn Fn(WindowId) -> u32,
+    /// Whether `_NET_WM_STATE_FULLSCREEN` is currently present.
+    pub fullscreen: &'a dyn Fn(WindowId) -> bool,
 }
 
 /// Plan the compositor-facing effects of one backend event.
@@ -121,6 +130,19 @@ pub fn compositor_event_ops(
                     if (sources.override_redirect)(*win) {
                         ops.push(CompositorEventOp::SetOverrideRedirect { window: x11w });
                     }
+                    if (sources.fullscreen)(*win) {
+                        ops.push(CompositorEventOp::SetFullscreen {
+                            window: x11w,
+                            fullscreen: true,
+                        });
+                    }
+                    let bypass = (sources.bypass_compositor)(*win);
+                    if bypass != 0 {
+                        ops.push(CompositorEventOp::SetBypassCompositor {
+                            window: x11w,
+                            value: bypass,
+                        });
+                    }
                 }
             }
         }
@@ -156,7 +178,11 @@ pub fn compositor_event_ops(
             // Track fullscreen state changes for unredirect optimisation.
             if *state == NetWmState::Fullscreen {
                 if let Some(x11w) = (sources.resolve)(*window) {
-                    let fullscreen = matches!(action, NetWmAction::Add | NetWmAction::Toggle);
+                    let fullscreen = match action {
+                        NetWmAction::Add => true,
+                        NetWmAction::Remove => false,
+                        NetWmAction::Toggle => !(sources.fullscreen)(*window),
+                    };
                     ops.push(CompositorEventOp::SetFullscreen {
                         window: x11w,
                         fullscreen,
@@ -165,8 +191,8 @@ pub fn compositor_event_ops(
             }
         }
         BackendEvent::PropertyChanged { window, kind } => {
-            if matches!(kind, PropertyKind::Class) {
-                if let Some(x11w) = (sources.resolve)(*window) {
+            if let Some(x11w) = (sources.resolve)(*window) {
+                if matches!(kind, PropertyKind::Class) {
                     let class = (sources.class)(*window);
                     if !class.is_empty() {
                         ops.push(CompositorEventOp::SetWindowClass {
@@ -174,6 +200,13 @@ pub fn compositor_event_ops(
                             class,
                         });
                     }
+                } else if matches!(kind, PropertyKind::BypassCompositor) {
+                    // Query on every change, including property deletion. A
+                    // missing property maps back to the neutral value.
+                    ops.push(CompositorEventOp::SetBypassCompositor {
+                        window: x11w,
+                        value: (sources.bypass_compositor)(*window),
+                    });
                 }
             }
         }
@@ -255,6 +288,8 @@ mod tests {
             geometry: &|_| Some((10, 20, 300, 400)),
             class,
             override_redirect,
+            bypass_compositor: &|_| 0,
+            fullscreen: &|_| false,
         }
     }
 
@@ -279,6 +314,35 @@ mod tests {
                     class: "xterm".to_string()
                 },
                 CompositorEventOp::SetOverrideRedirect { window: 7 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_mapped_window_carries_an_existing_bypass_request() {
+        let s = CompositorEventSources {
+            resolve: &|w| Some(w.raw() as u32),
+            geometry: &|_| Some((10, 20, 300, 400)),
+            class: &|_| String::new(),
+            override_redirect: &|_| false,
+            bypass_compositor: &|_| 1,
+            fullscreen: &|_| false,
+        };
+        let ops = compositor_event_ops(&BackendEvent::WindowMapped(win(7)), ROOT, OVERLAY, &s);
+        assert_eq!(
+            ops,
+            vec![
+                CompositorEventOp::AddWindow {
+                    window: 7,
+                    x: 10,
+                    y: 20,
+                    width: 300,
+                    height: 400,
+                },
+                CompositorEventOp::SetBypassCompositor {
+                    window: 7,
+                    value: 1,
+                },
             ]
         );
     }
@@ -385,6 +449,35 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_toggle_uses_the_current_property_state() {
+        let s = CompositorEventSources {
+            resolve: &|w| Some(w.raw() as u32),
+            geometry: &|_| None,
+            class: &|_| String::new(),
+            override_redirect: &|_| false,
+            bypass_compositor: &|_| 0,
+            fullscreen: &|_| true,
+        };
+        let ops = compositor_event_ops(
+            &BackendEvent::WindowStateRequest {
+                window: win(5),
+                state: NetWmState::Fullscreen,
+                action: NetWmAction::Toggle,
+            },
+            ROOT,
+            OVERLAY,
+            &s,
+        );
+        assert_eq!(
+            ops,
+            vec![CompositorEventOp::SetFullscreen {
+                window: 5,
+                fullscreen: false,
+            }]
+        );
+    }
+
+    #[test]
     fn only_class_property_changes_update_the_class() {
         let s = sources(&|w| Some(w.raw() as u32), &|_| "mpv".to_string(), &|_| {
             false
@@ -408,6 +501,31 @@ mod tests {
             compositor_event_ops(&title_change, ROOT, OVERLAY, &s),
             vec![]
         );
+    }
+
+    #[test]
+    fn bypass_property_changes_are_forwarded_and_deletion_becomes_neutral() {
+        let event = BackendEvent::PropertyChanged {
+            window: win(5),
+            kind: PropertyKind::BypassCompositor,
+        };
+        for (value, expected) in [(1, 1), (2, 2), (0, 0)] {
+            let s = CompositorEventSources {
+                resolve: &|w| Some(w.raw() as u32),
+                geometry: &|_| None,
+                class: &|_| String::new(),
+                override_redirect: &|_| false,
+                bypass_compositor: &|_| value,
+                fullscreen: &|_| false,
+            };
+            assert_eq!(
+                compositor_event_ops(&event, ROOT, OVERLAY, &s),
+                vec![CompositorEventOp::SetBypassCompositor {
+                    window: 5,
+                    value: expected,
+                }]
+            );
+        }
     }
 
     #[test]

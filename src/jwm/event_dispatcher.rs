@@ -724,9 +724,10 @@ impl WMController for Jwm {
                 PropertyKind::GtkFrameExtents => {
                     self.handle_gtk_frame_extents_change(backend, client_key)
                 }
-                PropertyKind::BypassCompositor => {
-                    self.handle_bypass_compositor_change(backend, client_key)
-                }
+                // The X11 backend consumes this hint before dispatching the
+                // event to JWM, so no second synchronous property query is
+                // needed here.
+                PropertyKind::BypassCompositor => Ok(()),
                 _ => Ok(()),
             };
             if let Err(e) = res {

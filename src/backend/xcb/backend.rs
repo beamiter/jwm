@@ -1339,6 +1339,12 @@ impl XcbBackend {
         if override_redirect {
             compositor.set_window_override_redirect(x11w, true);
         }
+        if let Some(value) = self.property_ops.get_bypass_compositor(wid) {
+            compositor.set_window_bypass_compositor(x11w, value);
+        }
+        if self.property_ops.is_fullscreen(wid) {
+            compositor.set_window_fullscreen(x11w, true);
+        }
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
@@ -1364,6 +1370,8 @@ impl XcbBackend {
                     .get_window_attributes(win)
                     .is_ok_and(|attributes| attributes.override_redirect)
             },
+            bypass_compositor: &|win| property_ops.get_bypass_compositor(win).unwrap_or(0),
+            fullscreen: &|win| property_ops.is_fullscreen(win),
         };
         for op in compositor_event_ops(event, root, overlay, &sources) {
             compositor.apply_event_op(root, op);
@@ -1475,12 +1483,15 @@ impl XcbBackend {
                 window: self.ids.intern(ev.window()),
             }),
             xcb::Event::X(x::Event::PropertyNotify(ev)) => {
-                if ev.state() == x::Property::Delete {
+                let kind = self.property_kind(ev.atom());
+                // A deleted bypass hint means "no preference" and must reach
+                // the compositor so it can leave direct presentation safely.
+                if ev.state() == x::Property::Delete && kind != PropertyKind::BypassCompositor {
                     return None;
                 }
                 Some(BackendEvent::PropertyChanged {
                     window: self.ids.intern(ev.window()),
-                    kind: self.property_kind(ev.atom()),
+                    kind,
                 })
             }
             xcb::Event::X(x::Event::KeyPress(ev)) => Some(BackendEvent::KeyPress {

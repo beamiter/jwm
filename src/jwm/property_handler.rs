@@ -253,22 +253,6 @@ impl Jwm {
         Ok(())
     }
 
-    pub(crate) fn handle_bypass_compositor_change(
-        &mut self,
-        backend: &mut dyn Backend,
-        client_key: ClientKey,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let win = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|c| c.win)
-            .ok_or("Client not found")?;
-
-        let _bypass = backend.property_ops().get_bypass_compositor(win);
-        Ok(())
-    }
-
     pub(crate) fn apply_motif_hints(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         let win = match self.state.clients.get(client_key) {
             Some(c) => c.win,

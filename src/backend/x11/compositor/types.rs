@@ -50,6 +50,9 @@ pub(super) struct WindowTexture {
     pub(super) class_name: String,
     pub(super) opacity_override: Option<f32>,
     pub(super) is_fullscreen: bool,
+    /// Normalized `_NET_WM_BYPASS_COMPOSITOR`: 0 = neutral, 1 = prefer
+    /// direct presentation, 2 = require composition.
+    pub(super) bypass_compositor: u8,
     pub(super) corner_radius_override: Option<f32>,
     pub(super) scale: f32,
     pub(super) frame_extents: [u32; 4],

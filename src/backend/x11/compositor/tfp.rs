@@ -261,6 +261,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 class_name: String::new(),
                 opacity_override: None,
                 is_fullscreen: false,
+                bypass_compositor: 0,
                 corner_radius_override: None,
                 scale: 1.0,
                 frame_extents: [0; 4],
@@ -746,6 +747,24 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.is_fullscreen = fullscreen;
                 self.needs_render = true;
             }
+        }
+    }
+
+    /// Apply the EWMH compositor bypass preference.
+    ///
+    /// Reserved values are neutral per the specification. Marking the scene
+    /// dirty makes both directions immediate: request `1` can enter direct
+    /// presentation, while `2` or deletion (`0`) restores redirection.
+    pub(crate) fn set_window_bypass_compositor(&mut self, x11_win: u32, value: u32) {
+        let value = match value {
+            1 | 2 => value as u8,
+            _ => 0,
+        };
+        if let Some(wt) = self.windows.get_mut(&x11_win)
+            && wt.bypass_compositor != value
+        {
+            wt.bypass_compositor = value;
+            self.needs_render = true;
         }
     }
 }

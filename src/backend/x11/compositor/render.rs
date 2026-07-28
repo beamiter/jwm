@@ -259,6 +259,33 @@ fn rect_covers_output(x: i32, y: i32, width: u32, height: u32, sw: u32, sh: u32)
         && i64::from(y) + i64::from(height) >= i64::from(sh)
 }
 
+/// Whether a window's role permits direct X presentation.
+///
+/// Fullscreen windows retain the existing automatic optimization. EWMH value
+/// `1` additionally permits a non-fullscreen window that covers the output;
+/// value `2` explicitly inhibits bypass, including for fullscreen windows.
+fn window_prefers_direct_presentation(is_fullscreen: bool, bypass_compositor: u8) -> bool {
+    match bypass_compositor {
+        1 => true,
+        2 => false,
+        _ => is_fullscreen,
+    }
+}
+
+fn edge_effects_require_composition(
+    direct_candidate: bool,
+    is_fullscreen: bool,
+    shadow_enabled: bool,
+    border_enabled: bool,
+    border_width: f32,
+    corner_radius: f32,
+) -> bool {
+    !direct_candidate
+        && ((shadow_enabled && !is_fullscreen)
+            || (border_enabled && border_width > 0.0)
+            || corner_radius > 0.0)
+}
+
 /// Whether a window can safely hide every lower layer.
 ///
 /// This is intentionally conservative. A fullscreen source rectangle is not
@@ -1746,7 +1773,13 @@ impl<C: CompositorConnection> Compositor<C> {
         // fullscreen unredirect.
         scene.last().is_some_and(|&(win, _, _, _, _)| {
             self.windows.get(&win).is_some_and(|wt| {
-                let radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
+                let direct_candidate =
+                    window_prefers_direct_presentation(wt.is_fullscreen, wt.bypass_compositor);
+                let radius = if direct_candidate {
+                    0.0
+                } else {
+                    wt.corner_radius_override.unwrap_or(self.corner_radius)
+                };
                 let base_opacity = if focused == Some(win) {
                     self.active_opacity
                 } else {
@@ -1757,9 +1790,19 @@ impl<C: CompositorConnection> Compositor<C> {
                     * self.peek_opacity_for(&wt.class_name);
                 wt.has_rgba
                     || wt.is_frosted
-                    || (self.shadow_enabled && !wt.is_fullscreen)
-                    || (self.border_enabled && self.border_width > 0.0)
-                    || radius > 0.0
+                    || wt.is_shaped
+                    // Shadows, borders, and rounded corners live outside or
+                    // clip the edge of an output-covering performance window.
+                    // Suppress them for direct candidates so the composited
+                    // fallback (while an overlay is visible) matches bypass.
+                    || edge_effects_require_composition(
+                        direct_candidate,
+                        wt.is_fullscreen,
+                        self.shadow_enabled,
+                        self.border_enabled,
+                        self.border_width,
+                        radius,
+                    )
                     || opacity < 1.0
                     || (wt.scale - 1.0).abs() > 0.001
                     || (wt.anim_scale - 1.0).abs() > 0.001
@@ -1834,11 +1877,22 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             return false;
         }
-        // Only unredirect if the top (focused) window is fullscreen and opaque
+        // Only unredirect if the top, focused window is an opaque fullscreen
+        // client or explicitly carries `_NET_WM_BYPASS_COMPOSITOR = 1`.
         if let Some(focused_win) = focused {
-            if let Some(wt) = self.windows.get(&focused_win) {
-                if wt.is_fullscreen
-                    && !wt.has_rgba
+            if let Some((is_fullscreen, bypass_compositor, has_rgba, is_shaped)) =
+                self.windows.get(&focused_win).map(|wt| {
+                    (
+                        wt.is_fullscreen,
+                        wt.bypass_compositor,
+                        wt.has_rgba,
+                        wt.is_shaped,
+                    )
+                })
+            {
+                if window_prefers_direct_presentation(is_fullscreen, bypass_compositor)
+                    && !has_rgba
+                    && !is_shaped
                     && scene.last().is_some_and(|entry| entry.0 == focused_win)
                 {
                     // Check if it covers the full screen
@@ -1886,8 +1940,10 @@ impl<C: CompositorConnection> Compositor<C> {
                                         );
                                     } else {
                                         log::info!(
-                                            "compositor: unredirected fullscreen window 0x{:x}",
-                                            focused_win
+                                            "compositor: directly presenting window 0x{:x} (fullscreen={}, bypass_hint={})",
+                                            focused_win,
+                                            is_fullscreen,
+                                            bypass_compositor,
                                         );
                                     }
                                     return true;
@@ -1908,7 +1964,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        // Re-redirect if we had an unredirected window that's no longer fullscreen
+        // Re-redirect if the window no longer covers the output, loses focus,
+        // withdraws its bypass request, or explicitly inhibits bypass.
         if let Some(prev) = self.unredirected_window.take() {
             if !self.restore_unredirected_window(prev, "window no longer eligible") {
                 return true;
@@ -2128,7 +2185,13 @@ impl<C: CompositorConnection> Compositor<C> {
             scene_info.reserve(scene.len());
             scene_info.extend(scene.iter().filter_map(|&(win, x, y, w, h)| {
                 self.windows.get(&win).map(|wt| {
-                    let corner_radius = wt.corner_radius_override.unwrap_or(self.corner_radius);
+                    let direct_candidate =
+                        window_prefers_direct_presentation(wt.is_fullscreen, wt.bypass_compositor);
+                    let corner_radius = if direct_candidate {
+                        0.0
+                    } else {
+                        wt.corner_radius_override.unwrap_or(self.corner_radius)
+                    };
                     (
                         win,
                         WindowScanoutInfo {
@@ -2136,10 +2199,10 @@ impl<C: CompositorConnection> Compositor<C> {
                             y,
                             width: w,
                             height: h,
-                            is_fullscreen: wt.is_fullscreen,
+                            is_fullscreen: direct_candidate,
                             has_alpha: wt.has_rgba,
                             has_blur: wt.is_frosted,
-                            has_shadow: self.shadow_enabled,
+                            has_shadow: self.shadow_enabled && !direct_candidate,
                             has_corner_radius: corner_radius > 0.0,
                             opacity: wt.fade_opacity,
                         },
@@ -2562,13 +2625,19 @@ impl<C: CompositorConnection> Compositor<C> {
                 let layer_opacity = wt.opacity_override.unwrap_or(base_opacity)
                     * wt.fade_opacity
                     * self.peek_opacity_for(&wt.class_name);
-                let corner_radius = wt.corner_radius_override.unwrap_or_else(|| {
-                    if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
-                        0.0
-                    } else {
-                        self.corner_radius
-                    }
-                });
+                let direct_candidate =
+                    window_prefers_direct_presentation(wt.is_fullscreen, wt.bypass_compositor);
+                let corner_radius = if direct_candidate {
+                    0.0
+                } else {
+                    wt.corner_radius_override.unwrap_or_else(|| {
+                        if class_matches_exclude(&wt.class_name, &self.rounded_corners_exclude) {
+                            0.0
+                        } else {
+                            self.corner_radius
+                        }
+                    })
+                };
                 let geometry_deformation_active = (self.wobbly_windows && wt.wobbly.is_some())
                     || (self.window_tilt && is_focused && !is_statusbar);
 
@@ -2953,6 +3022,13 @@ impl<C: CompositorConnection> Compositor<C> {
                         Some(wt) => wt,
                         None => continue,
                     };
+                    // Fullscreen and explicitly bypassed clients must look
+                    // identical when an overlay temporarily re-enables
+                    // composition. Their shadow would also be entirely
+                    // outside an output-covering rectangle.
+                    if window_prefers_direct_presentation(wt.is_fullscreen, wt.bypass_compositor) {
+                        continue;
+                    }
                     // Skip shadow for statusbar
                     if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
                         continue;
@@ -3065,7 +3141,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     let fade = wt.fade_opacity * self.peek_opacity_for(&wt.class_name);
                     let Some(style) = glow_settings.style_for(WindowGlowTarget {
                         focused: focused == Some(win),
-                        fullscreen: wt.is_fullscreen,
+                        fullscreen: window_prefers_direct_presentation(
+                            wt.is_fullscreen,
+                            wt.bypass_compositor,
+                        ),
                         override_redirect: wt.is_override_redirect,
                         shaped: wt.is_shaped,
                         class_name: &wt.class_name,
@@ -3220,6 +3299,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     if fade <= 0.0 {
                         continue;
                     }
+                    let direct_candidate =
+                        window_prefers_direct_presentation(wt.is_fullscreen, wt.bypass_compositor);
                     let focus_highlight_active_for_win =
                         if let Some((hw, start)) = self.focus_highlight_start {
                             hw == win
@@ -3237,7 +3318,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     // Feature 3: Per-window corner radius
                     // Skip compositor rounding for override-redirect RGBA windows
                     // (popups, menus, tooltips) — they manage their own shape.
-                    let radius = if wt.is_override_redirect && wt.has_rgba {
+                    let radius = if direct_candidate || (wt.is_override_redirect && wt.has_rgba) {
                         0.0
                     } else {
                         wt.corner_radius_override.unwrap_or(
@@ -3789,8 +3870,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         &wt.class_name,
                         status_bar_name_main,
                         wt.is_override_redirect,
-                    ) && ((effective_border_enabled && base_border_width > 0.0)
-                        || has_special_border)
+                    ) && !direct_candidate
+                        && ((effective_border_enabled && base_border_width > 0.0)
+                            || has_special_border)
                     {
                         let focus_style = focus_highlight_active_for_win.then(|| {
                             let elapsed_ms =
@@ -3967,7 +4049,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     } else {
                         glow_settings.style_for(WindowGlowTarget {
                             focused: is_focused,
-                            fullscreen: wt.is_fullscreen,
+                            fullscreen: window_prefers_direct_presentation(
+                                wt.is_fullscreen,
+                                wt.bypass_compositor,
+                            ),
                             override_redirect: wt.is_override_redirect,
                             shaped: wt.is_shaped,
                             class_name: &wt.class_name,
@@ -5064,9 +5149,10 @@ mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
         blur_sampling_margin, counts_for_smart_borders, dirty_below_affects_backdrop,
-        dirty_below_requires_full_blur_redraw, focus_highlight_style, intersect_gl_scissors,
-        is_opaque_occluder, presented_scene_copy_plan, rect_covers_output,
-        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
+        dirty_below_requires_full_blur_redraw, edge_effects_require_composition,
+        focus_highlight_style, intersect_gl_scissors, is_opaque_occluder,
+        presented_scene_copy_plan, rect_covers_output, transformed_overlays_require_full_redraw,
+        transition_capture_plan, wallpaper_blend_plan, window_prefers_direct_presentation,
     };
 
     #[test]
@@ -5189,6 +5275,30 @@ mod tests {
             u32::MAX,
             u32::MAX - 1,
             u32::MAX - 1,
+        ));
+    }
+
+    #[test]
+    fn ewmh_bypass_policy_extends_and_can_inhibit_fullscreen_unredirect() {
+        assert!(window_prefers_direct_presentation(true, 0));
+        assert!(!window_prefers_direct_presentation(false, 0));
+        assert!(window_prefers_direct_presentation(false, 1));
+        assert!(!window_prefers_direct_presentation(true, 2));
+        // Reserved values are neutral.
+        assert!(window_prefers_direct_presentation(true, 9));
+        assert!(!window_prefers_direct_presentation(false, 9));
+    }
+
+    #[test]
+    fn default_edge_effects_do_not_make_fullscreen_unredirect_unreachable() {
+        assert!(edge_effects_require_composition(
+            false, false, true, true, 2.0, 12.0,
+        ));
+        assert!(!edge_effects_require_composition(
+            true, true, true, true, 2.0, 12.0,
+        ));
+        assert!(!edge_effects_require_composition(
+            true, false, true, true, 2.0, 12.0,
         ));
     }
 

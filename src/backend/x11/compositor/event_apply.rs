@@ -38,6 +38,9 @@ impl<C: CompositorConnection> Compositor<C> {
             CompositorEventOp::SetFullscreen { window, fullscreen } => {
                 self.set_window_fullscreen(window, fullscreen);
             }
+            CompositorEventOp::SetBypassCompositor { window, value } => {
+                self.set_window_bypass_compositor(window, value);
+            }
             CompositorEventOp::MarkDamaged { window } => self.mark_damaged(window),
             CompositorEventOp::PresentComplete {
                 window,
