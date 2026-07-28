@@ -46,25 +46,25 @@ anything else rather than silently falling back.
 
 ## Colours from the wallpaper
 
+Changing the wallpaper also retints what JWM draws in the accent colour: the
+focused window border, both ends of the gradient border, and the client glow —
+which are the same colours the launcher ring, the toasts, and the OSD progress
+bars read, so the whole shell follows the picture. This is on by default:
+
 ```toml
 [behavior]
-wallpaper_colors = true
+wallpaper_colors = false  # keep the colours set in this file
 ```
-
-With this on, changing the wallpaper also retints what JWM draws in the accent
-colour: the focused window border, both ends of the gradient border, and the
-client glow — which are the same colours the launcher ring, the toasts, and the
-OSD progress bars read, so the whole shell follows the picture.
 
 Each colour keeps its own alpha. The glow is deliberately translucent and the
 border deliberately opaque; that is a taste the wallpaper has no business
 overriding.
 
 Like every other runtime change, the retint is **in memory only** — the config
-file is never rewritten, so a reload puts your own colours back. That is also
-what turning the feature off does: it stops future wallpapers from retinting,
-and leaves the current colours alone until the next reload. Undoing a retint
-would mean remembering what you had, which the file already does.
+file is never rewritten, so setting `wallpaper_colors = false` and reloading
+puts your own colours back. Turning it off at runtime only stops *future*
+wallpapers from retinting and leaves the current colours alone: undoing a
+retint would mean remembering what you had, which the file already does.
 
 ### Which colours it picks
 

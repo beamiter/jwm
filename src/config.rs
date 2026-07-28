@@ -785,11 +785,11 @@ pub struct BehaviorConfig {
     #[serde(default)]
     pub wallpaper_dir: String,
     /// Take the border, gradient and glow colours from the wallpaper whenever
-    /// it changes. Off by default: it overwrites colours the user chose, and
-    /// it should be their decision that the picture wins. The colours are
-    /// only overwritten in memory — the config file is never rewritten, so a
-    /// reload restores whatever is on disk.
-    #[serde(default)]
+    /// it changes. On by default: a shell that matches the picture behind it
+    /// is what the wallpaper is for. The colours are only overwritten in
+    /// memory — the config file is never rewritten, so setting this to false
+    /// and reloading restores whatever is on disk.
+    #[serde(default = "default_true")]
     pub wallpaper_colors: bool,
     /// Per-monitor wallpaper overrides. Each entry specifies a monitor index and its wallpaper.
     /// Monitor index 0 is the primary monitor, 1 is the second, etc.
@@ -1446,7 +1446,7 @@ impl Default for Config {
                     night_light_transition_mins: default_night_light_transition(),
                     clipboard_history: default_clipboard_history(),
                     wallpaper_dir: String::new(),
-                    wallpaper_colors: false,
+                    wallpaper_colors: true,
                     suspend_command: default_suspend_command(),
                     hibernate_command: default_hibernate_command(),
                     reboot_command: default_reboot_command(),
