@@ -762,7 +762,28 @@ impl Jwm {
                         }
                         self.features.system_ui.authentication_failed();
                     }
-                } else if let Some(command) = self.features.system_ui.selected_command() {
+                } else if let Some(result) = self
+                    .features
+                    .system_ui
+                    .computed_result()
+                    .map(str::to_string)
+                {
+                    // An answer nobody can paste is half an answer.
+                    if backend.set_clipboard_text(&result) {
+                        self.record_clipboard(&result);
+                        log::info!("Launcher: copied {result}");
+                    } else {
+                        log::warn!("Launcher: this backend cannot set the clipboard");
+                    }
+                    self.close_system_ui(backend);
+                    return Ok(());
+                } else if let Some(choice) = self.features.system_ui.selected_launch() {
+                    self.features.system_ui.note_launch(&choice.id);
+                    let command = crate::jwm::features::launcher::launch_command(
+                        &crate::config::Config::get_termcmd(),
+                        &choice.command,
+                        choice.terminal,
+                    );
                     self.features.system_ui.cancel();
                     backend.compositor_set_system_ui(None);
                     let _ = backend.key_ops().ungrab_keyboard();

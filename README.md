@@ -181,9 +181,9 @@ JWM_PIPEWIRE_PREFIX=/opt/pipewire-1.2 scripts/install-portal.sh
 The built-in shell — the [control center](docs/control-center.md), native
 [notifications](docs/notifications.md) with a freedesktop D-Bus service,
 [media controls](docs/media-controls.md) driven from MPRIS, the
-[calendar](docs/calendar.md), the [wallpaper picker and its colour
-theming](docs/wallpaper.md), [clipboard history](docs/clipboard.md), the
-[idle policy](docs/idle.md), and the
+[calendar](docs/calendar.md), the [application launcher](docs/launcher.md),
+the [wallpaper picker and its colour theming](docs/wallpaper.md),
+[clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
 feature.
 Additional operational tools are documented in [tools/README.md](tools/README.md).

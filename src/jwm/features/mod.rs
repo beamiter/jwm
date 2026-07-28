@@ -19,6 +19,7 @@ pub mod clipboard;
 pub mod connectivity;
 pub mod expose_plan;
 pub mod idle;
+pub mod launcher;
 pub mod magnifier;
 pub mod media;
 pub mod notifications;

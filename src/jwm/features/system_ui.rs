@@ -11,7 +11,19 @@ use std::path::{Path, PathBuf};
 pub struct LaunchEntry {
     pub name: String,
     pub command: Vec<String>,
+    /// `Terminal=true` in the desktop entry: the program draws no window of
+    /// its own and has to be given one.
+    pub terminal: bool,
     search: String,
+}
+
+/// What activating a launcher row asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchChoice {
+    /// The name the usage ranking is kept under.
+    pub id: String,
+    pub command: Vec<String>,
+    pub terminal: bool,
 }
 
 /// Structured content of the modal system UI panel, consumed by the
@@ -61,6 +73,10 @@ pub enum SystemUiState {
         entries: Vec<LaunchEntry>,
         matches: Vec<usize>,
         selected: usize,
+        /// Launch history, so what the user actually runs is at the top.
+        usage: crate::jwm::features::launcher::UsageStore,
+        /// The query's value when it is arithmetic rather than a search.
+        computed: Option<String>,
     },
     Info {
         title: String,
@@ -331,11 +347,15 @@ impl Clone for SystemUiState {
                 entries,
                 matches,
                 selected,
+                usage,
+                computed,
             } => Self::Launcher {
                 query: query.clone(),
                 entries: entries.clone(),
                 matches: matches.clone(),
                 selected: *selected,
+                usage: usage.clone(),
+                computed: computed.clone(),
             },
             Self::Info {
                 title,
@@ -435,13 +455,19 @@ impl SystemUiState {
 
     pub fn open_launcher() -> Self {
         let entries = discover_applications();
-        let matches = (0..entries.len()).collect();
-        Self::Launcher {
+        let usage = crate::jwm::features::launcher::UsageStore::load();
+        let mut state = Self::Launcher {
             query: String::new(),
             entries,
-            matches,
+            matches: Vec::new(),
             selected: 0,
-        }
+            usage,
+            computed: None,
+        };
+        // An empty query is not "no ranking": it is the moment the ranking
+        // matters most, because the top row is one keystroke from launching.
+        state.refresh_matches();
+        state
     }
 
     pub fn lock() -> Self {
@@ -1527,7 +1553,8 @@ impl SystemUiState {
         }
     }
 
-    pub fn selected_command(&self) -> Option<Vec<String>> {
+    /// What the highlighted row would launch.
+    pub fn selected_launch(&self) -> Option<LaunchChoice> {
         let Self::Launcher {
             entries,
             matches,
@@ -1539,7 +1566,30 @@ impl SystemUiState {
         };
         entries
             .get(*matches.get(*selected)?)
-            .map(|entry| entry.command.clone())
+            .map(|entry| LaunchChoice {
+                id: entry.name.clone(),
+                command: entry.command.clone(),
+                terminal: entry.terminal,
+            })
+    }
+
+    /// The query's value when it is arithmetic rather than a search.
+    pub fn computed_result(&self) -> Option<&str> {
+        match self {
+            Self::Launcher { computed, .. } => computed.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Remember a launch, so the next time this panel opens it is nearer the
+    /// top. Writing here rather than on close keeps the ranking even if the
+    /// session ends abruptly.
+    pub fn note_launch(&mut self, id: &str) {
+        if let Self::Launcher { usage, .. } = self {
+            let now = crate::jwm::features::launcher::now_seconds();
+            usage.record(id, now);
+            usage.save(now);
+        }
     }
 
     pub fn take_password(&mut self) -> Option<String> {
@@ -1589,7 +1639,18 @@ impl SystemUiState {
                 entries,
                 matches,
                 selected,
+                computed,
+                ..
             } => {
+                if let Some(result) = computed {
+                    return OverlayParts {
+                        title: "\u{f1ec}  CALCULATOR".into(),
+                        query: Some(query.clone()),
+                        selected: Some(0),
+                        items: vec![format!("=  {result}")],
+                        hint: "Enter  copy    Esc  close".into(),
+                    };
+                }
                 let start = selected.saturating_sub(11);
                 let items: Vec<String> = if matches.is_empty() {
                     vec!["  No matching applications".into()]
@@ -1598,7 +1659,14 @@ impl SystemUiState {
                         .iter()
                         .skip(start)
                         .take(12)
-                        .map(|&index| entries[index].name.clone())
+                        .map(|&index| {
+                            let entry = &entries[index];
+                            if entry.terminal {
+                                format!("{}  \u{f120}", entry.name)
+                            } else {
+                                entry.name.clone()
+                            }
+                        })
                         .collect()
                 };
                 OverlayParts {
@@ -1828,18 +1896,44 @@ impl SystemUiState {
                 entries,
                 matches,
                 selected,
+                usage,
+                computed,
             } => {
+                use crate::jwm::features::launcher;
+
+                *selected = 0;
+                // Arithmetic replaces the list rather than sharing it. A
+                // query with an operator in it is a question, not a search,
+                // and one Enter with one meaning beats two rows competing for
+                // it.
+                *computed = launcher::evaluate(query).map(launcher::format_result);
+                if computed.is_some() {
+                    matches.clear();
+                    return;
+                }
                 let needle = query.to_lowercase();
-                let mut scored: Vec<(usize, usize)> = entries
+                let now = launcher::now_seconds();
+                let mut scored: Vec<(usize, usize, u32)> = entries
                     .iter()
                     .enumerate()
                     .filter_map(|(i, entry)| {
-                        fuzzy_score(&entry.search, &needle).map(|score| (i, score))
+                        fuzzy_score(&entry.search, &needle)
+                            .map(|score| (i, score, usage.score(&entry.name, now)))
                     })
                     .collect();
-                scored.sort_by_key(|&(i, score)| (Reverse(score), entries[i].name.to_lowercase()));
-                *matches = scored.into_iter().map(|(i, _)| i).collect();
-                *selected = 0;
+                // What was typed decides first and history breaks the tie:
+                // typing `fire` must not open the file manager because it was
+                // opened more often, but two equally good matches should be
+                // ordered by which one this user actually runs. With an empty
+                // query every entry ties, so the whole list is ranked by use.
+                scored.sort_by_key(|&(i, score, used)| {
+                    (
+                        Reverse(score),
+                        Reverse(used),
+                        entries[i].name.to_lowercase(),
+                    )
+                });
+                *matches = scored.into_iter().map(|(i, _, _)| i).collect();
             }
             Self::Info {
                 query,
@@ -2109,6 +2203,9 @@ fn discover_applications() -> Vec<LaunchEntry> {
                     search: name.to_lowercase(),
                     name: name.clone(),
                     command: vec![name],
+                    // A bare executable on PATH declares nothing, so it is
+                    // launched as-is rather than guessed at.
+                    terminal: false,
                 });
             }
         }
@@ -2137,6 +2234,7 @@ fn scan_desktop_dir(root: &Path, entries: &mut Vec<LaunchEntry>, seen: &mut Hash
         let mut name = None;
         let mut exec = None;
         let mut hidden = false;
+        let mut terminal = false;
         for line in body.lines() {
             if line.starts_with('[') {
                 in_entry = line == "[Desktop Entry]";
@@ -2154,6 +2252,9 @@ fn scan_desktop_dir(root: &Path, entries: &mut Vec<LaunchEntry>, seen: &mut Hash
             if matches!(line, "Hidden=true" | "NoDisplay=true") {
                 hidden = true;
             }
+            if line == "Terminal=true" {
+                terminal = true;
+            }
         }
         let (Some(name), Some(exec)) = (name, exec) else {
             continue;
@@ -2169,6 +2270,7 @@ fn scan_desktop_dir(root: &Path, entries: &mut Vec<LaunchEntry>, seen: &mut Hash
             search: format!("{} {}", name.to_lowercase(), exec.to_lowercase()),
             name,
             command,
+            terminal,
         });
     }
 }
@@ -2807,6 +2909,7 @@ mod tests {
             .map(|i| LaunchEntry {
                 name: format!("app{i:02}"),
                 command: vec![format!("app{i:02}")],
+                terminal: false,
                 search: format!("app{i:02}"),
             })
             .collect();
@@ -2816,6 +2919,8 @@ mod tests {
             entries,
             matches,
             selected: 0,
+            usage: crate::jwm::features::launcher::UsageStore::default(),
+            computed: None,
         };
 
         let parts = state.overlay_parts();
@@ -2836,6 +2941,96 @@ mod tests {
         assert_eq!(parts.items[0], "app03");
         assert_eq!(parts.selected, Some(11));
         assert_eq!(parts.items[11], "app14");
+    }
+
+    fn launcher_with(names: &[(&str, bool)], usage: &str) -> SystemUiState {
+        let entries: Vec<LaunchEntry> = names
+            .iter()
+            .map(|(name, terminal)| LaunchEntry {
+                name: (*name).to_string(),
+                command: vec![(*name).to_string()],
+                terminal: *terminal,
+                search: name.to_lowercase(),
+            })
+            .collect();
+        let mut state = SystemUiState::Launcher {
+            query: String::new(),
+            entries,
+            matches: Vec::new(),
+            selected: 0,
+            usage: crate::jwm::features::launcher::UsageStore::parse(usage),
+            computed: None,
+        };
+        state.refresh_matches();
+        state
+    }
+
+    #[test]
+    fn what_the_user_actually_launches_comes_first() {
+        let now = crate::jwm::features::launcher::now_seconds();
+        // Alphabetically "archive" wins; by use, "terminal" does.
+        let state = launcher_with(
+            &[("archive manager", false), ("terminal", false)],
+            &format!("6 {now} terminal\n"),
+        );
+        assert_eq!(state.overlay_parts().items[0], "terminal");
+
+        // With no history at all the order is alphabetical, as before.
+        let state = launcher_with(&[("archive manager", false), ("terminal", false)], "");
+        assert_eq!(state.overlay_parts().items[0], "archive manager");
+    }
+
+    #[test]
+    fn typing_still_outranks_history() {
+        // History decides between equally good matches; it must never pull a
+        // worse match above a better one, or the launcher stops obeying what
+        // was typed.
+        let now = crate::jwm::features::launcher::now_seconds();
+        let mut state = launcher_with(
+            &[("firefox", false), ("files", false)],
+            &format!("40 {now} files\n"),
+        );
+        for ch in "firef".chars() {
+            state.push_char(ch);
+        }
+        assert_eq!(state.overlay_parts().items[0], "firefox");
+    }
+
+    #[test]
+    fn an_arithmetic_query_answers_instead_of_searching() {
+        let mut state = launcher_with(&[("firefox", false)], "");
+        for ch in "1920*0.6".chars() {
+            state.push_char(ch);
+        }
+        let parts = state.overlay_parts();
+        assert_eq!(parts.title, "\u{f1ec}  CALCULATOR");
+        assert_eq!(parts.items, ["=  1152"]);
+        assert!(parts.hint.contains("copy"));
+        assert_eq!(state.computed_result(), Some("1152"));
+        // Enter must not launch anything while an answer is showing.
+        assert_eq!(state.selected_launch(), None);
+
+        // Backspacing past the operator returns to the application list.
+        for _ in 0..4 {
+            state.backspace();
+        }
+        assert_eq!(state.computed_result(), None);
+        assert_eq!(state.overlay_parts().title, "\u{f135}  APPLICATIONS");
+    }
+
+    #[test]
+    fn a_terminal_application_is_marked_in_the_list() {
+        let state = launcher_with(&[("htop", true), ("firefox", false)], "");
+        let items = state.overlay_parts().items;
+        assert!(
+            items
+                .iter()
+                .any(|row| row.starts_with("htop") && row.contains('\u{f120}'))
+        );
+        assert!(items.iter().any(|row| row == "firefox"));
+        let choice = state.selected_launch().expect("a row");
+        assert_eq!(choice.id, "firefox", "alphabetical without history");
+        assert!(!choice.terminal);
     }
 
     #[test]
