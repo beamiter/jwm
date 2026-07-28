@@ -953,7 +953,8 @@ impl Jwm {
                 return Err("could not grab pointer for application launcher".into());
             }
         }
-        self.features.system_ui = crate::jwm::features::SystemUiState::open_launcher();
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::open_launcher(self.launcher_window_snapshot());
         self.sync_system_ui(backend);
         Ok(())
     }

@@ -797,6 +797,17 @@ impl Jwm {
                     }
                     self.close_system_ui(backend);
                     return Ok(());
+                } else if let Some(window) = self.features.system_ui.selected_window() {
+                    // Focusing what already exists rather than starting a
+                    // second copy of it.
+                    self.close_system_ui(backend);
+                    if let Err(error) = self.reveal_and_focus(
+                        backend,
+                        crate::backend::common_define::WindowId::from_raw(window),
+                    ) {
+                        log::warn!("Launcher: could not focus window: {error}");
+                    }
+                    return Ok(());
                 } else if let Some(choice) = self.features.system_ui.selected_launch() {
                     self.features.system_ui.note_launch(&choice.id);
                     let command = crate::jwm::features::launcher::launch_command(
@@ -804,11 +815,7 @@ impl Jwm {
                         &choice.command,
                         choice.terminal,
                     );
-                    self.features.system_ui.cancel();
-                    backend.compositor_set_system_ui(None);
-                    let _ = backend.key_ops().ungrab_keyboard();
-                    let _ = backend.input_ops().ungrab_pointer();
-                    backend.compositor_force_full_redraw();
+                    self.close_system_ui(backend);
                     return self.spawn(backend, &WMArgEnum::StringVec(command));
                 }
             } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {

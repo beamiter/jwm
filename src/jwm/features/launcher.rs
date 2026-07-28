@@ -6,6 +6,7 @@
 //! over usage counts, one over the query itself — so both live here, pure and
 //! tested, rather than tangled into the panel that draws them.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 /// Where the usage counts live, under the user's data directory.
@@ -207,6 +208,250 @@ pub fn format_result(value: f64) -> String {
 }
 
 // -------------------------------------------------------------------------
+// Windows
+// -------------------------------------------------------------------------
+
+/// Longest window title shown. The card sizes itself to its widest line, so
+/// one pathological title would otherwise push the panel off the screen.
+const MAX_TITLE_CHARS: usize = 52;
+
+/// The prefix that asks for windows and nothing else.
+///
+/// A leading slash cannot collide with the calculator: `evaluate` parses no
+/// expression that begins with an operator, so `/1+1` filters windows rather
+/// than computing two.
+pub const WINDOWS_PREFIX: char = '/';
+
+/// One already-open window, flattened out of the window manager's client
+/// table so the ranking is a unit test rather than a live session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowEntry {
+    /// The handle a focus takes.
+    pub id: u64,
+    pub title: String,
+    pub class: String,
+    pub instance: String,
+    /// Zero-based tag index; `None` for a sticky window, which is on all of
+    /// them.
+    pub tag: Option<usize>,
+    pub monitor: i32,
+    /// On a tag the user is looking at, on the monitor they are on.
+    pub visible: bool,
+    pub minimized: bool,
+}
+
+/// What the ranker needs about one application, borrowed rather than copied.
+#[derive(Debug, Clone, Copy)]
+pub struct AppCandidate<'a> {
+    /// Lowercased name and command, the haystack the entry already keeps.
+    pub search: &'a str,
+    pub name: &'a str,
+    /// This entry's frecency, looked up by the caller.
+    pub usage: u32,
+}
+
+/// A row of the merged list: an index into the windows, or into the
+/// applications.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherRow {
+    Window(usize),
+    App(usize),
+}
+
+/// What the query is asking for, decided once so the panel and the ranker
+/// cannot disagree about which mode is showing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryMode {
+    /// Arithmetic: the answer replaces the list.
+    Answer(f64),
+    /// A leading slash: open windows only, matched on the rest.
+    Windows(String),
+    /// Applications, joined by open windows once something is typed.
+    Search(String),
+}
+
+/// Read the query.
+#[must_use]
+pub fn parse_query(query: &str) -> QueryMode {
+    if let Some(value) = evaluate(query) {
+        return QueryMode::Answer(value);
+    }
+    match query.trim_start().strip_prefix(WINDOWS_PREFIX) {
+        Some(rest) => QueryMode::Windows(rest.trim().to_lowercase()),
+        None => QueryMode::Search(query.trim().to_lowercase()),
+    }
+}
+
+/// How well a window matches, taking the best of its title, class and
+/// instance.
+///
+/// The three are scored separately and never concatenated: a haystack of
+/// `"github firefox"` would let `foxgithub` match something that is in
+/// neither field.
+fn window_score(entry: &WindowEntry, needle: &str) -> Option<usize> {
+    [&entry.title, &entry.class, &entry.instance]
+        .into_iter()
+        .filter_map(|field| fuzzy_score(&field.to_lowercase(), needle))
+        .max()
+}
+
+/// Rank open windows and applications into one list.
+///
+/// The rules, in the order they apply:
+///
+/// 1. What was typed decides. This already held among applications; it now
+///    holds across both kinds, so a better-matching application still beats a
+///    worse-matching window.
+/// 2. On an equal score the window comes first. Focusing something that
+///    already exists is one keystroke to undo; a second copy of a browser or
+///    an IDE may not be.
+/// 3. Windows keep the order they were given, which the caller makes
+///    most-recently-focused first.
+/// 4. Applications keep their frecency then their name, exactly as before.
+///
+/// An empty query lists applications only. The launcher's promise is that the
+/// top row is one Enter from the application you use most, and a list of
+/// windows on top of it would take that away.
+#[must_use]
+pub fn rank_rows(
+    mode: &QueryMode,
+    apps: &[AppCandidate<'_>],
+    windows: &[WindowEntry],
+) -> Vec<LauncherRow> {
+    let (needle, want_apps, want_windows) = match mode {
+        QueryMode::Answer(_) => return Vec::new(),
+        QueryMode::Windows(needle) => (needle.as_str(), false, true),
+        QueryMode::Search(needle) => (needle.as_str(), true, !needle.is_empty()),
+    };
+
+    let mut ranked_windows: Vec<(usize, usize)> = if want_windows {
+        windows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| window_score(entry, needle).map(|score| (index, score)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // A stable sort, so equal scores keep the caller's order.
+    ranked_windows.sort_by_key(|&(_, score)| Reverse(score));
+
+    let mut ranked_apps: Vec<(usize, usize)> = if want_apps {
+        apps.iter()
+            .enumerate()
+            .filter_map(|(index, app)| fuzzy_score(app.search, needle).map(|score| (index, score)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    ranked_apps.sort_by_key(|&(index, score)| {
+        (
+            Reverse(score),
+            Reverse(apps[index].usage),
+            apps[index].name.to_lowercase(),
+        )
+    });
+
+    let mut rows = Vec::with_capacity(ranked_windows.len() + ranked_apps.len());
+    let (mut window_at, mut app_at) = (0, 0);
+    while window_at < ranked_windows.len() || app_at < ranked_apps.len() {
+        let window = ranked_windows.get(window_at);
+        let app = ranked_apps.get(app_at);
+        let take_window = match (window, app) {
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            // Ties go to the window: rule 2.
+            (Some((_, window_score)), Some((_, app_score))) => window_score >= app_score,
+            (None, None) => break,
+        };
+        if take_window {
+            rows.push(LauncherRow::Window(ranked_windows[window_at].0));
+            window_at += 1;
+        } else {
+            rows.push(LauncherRow::App(ranked_apps[app_at].0));
+            app_at += 1;
+        }
+    }
+    rows
+}
+
+/// One window row: a marker, what the window calls itself, and where it is
+/// when that is not "right here".
+///
+/// The row answers "will Enter move me somewhere" before it is pressed.
+#[must_use]
+pub fn window_row(entry: &WindowEntry) -> String {
+    let name = if entry.title.trim().is_empty() {
+        entry.class.clone()
+    } else {
+        entry.title.clone()
+    };
+    let name = ellipsize(name.trim(), MAX_TITLE_CHARS);
+    // The class is worth showing only when the title does not already say it.
+    let class = if entry.class.trim().is_empty()
+        || name.to_lowercase().contains(&entry.class.to_lowercase())
+    {
+        String::new()
+    } else {
+        format!("  \u{2014}  {}", entry.class)
+    };
+    let mut where_it_is = Vec::new();
+    if entry.minimized {
+        where_it_is.push("minimised".to_string());
+    }
+    if !entry.visible && !entry.minimized {
+        match entry.tag {
+            Some(tag) => where_it_is.push(format!("tag {}", tag + 1)),
+            None => where_it_is.push("hidden".to_string()),
+        }
+    }
+    let elsewhere = if where_it_is.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", where_it_is.join(", "))
+    };
+    // fa-window-maximize, inside FontAwesome 4.7.
+    format!("\u{f2d0}  {name}{class}{elsewhere}")
+}
+
+fn ellipsize(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(limit - 1).collect();
+    out.push('\u{2026}');
+    out
+}
+
+// -------------------------------------------------------------------------
+// Matching
+// -------------------------------------------------------------------------
+
+/// How well `needle` matches `haystack`, higher being better.
+///
+/// A substring match beats every subsequence match, and an earlier one beats
+/// a later one, so typing the start of a name puts it on top. Failing that,
+/// the characters must appear in order — which is what makes `vsc` find
+/// Visual Studio Code.
+#[must_use]
+pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if let Some(pos) = haystack.find(needle) {
+        return Some(10_000 - pos);
+    }
+    let mut at = 0;
+    let mut score = 0;
+    for ch in needle.chars() {
+        let rel = haystack[at..].find(ch)?;
+        at += rel + ch.len_utf8();
+        score += 100usize.saturating_sub(rel);
+    }
+    Some(score)
+}
+
+// -------------------------------------------------------------------------
 // Terminal applications
 // -------------------------------------------------------------------------
 
@@ -349,6 +594,75 @@ impl Parser {
     }
 }
 
+// -------------------------------------------------------------------------
+// The window manager's half
+// -------------------------------------------------------------------------
+
+impl crate::jwm::Jwm {
+    /// Flatten the open windows for the launcher, most-recently-focused first
+    /// on the monitor the user is looking at.
+    ///
+    /// A snapshot rather than a live view: the panel holds it for as long as
+    /// it is open, and a window that closes meanwhile is a quiet no-op when
+    /// its row is activated.
+    pub(crate) fn launcher_window_snapshot(&self) -> Vec<WindowEntry> {
+        let cfg = crate::config::CONFIG.load();
+        let tag_count = cfg.tags_length();
+        let mut ordered: Vec<crate::core::models::MonitorKey> = Vec::new();
+        // The monitor in front of the user first, so its windows rank ahead
+        // of the ones on the other screen.
+        ordered.extend(self.state.sel_mon);
+        ordered.extend(
+            self.state
+                .monitor_order
+                .iter()
+                .copied()
+                .filter(|key| Some(*key) != self.state.sel_mon),
+        );
+
+        let mut entries = Vec::new();
+        for monitor_key in ordered {
+            let Some(monitor) = self.state.monitors.get(monitor_key) else {
+                continue;
+            };
+            let active = monitor.get_active_tags();
+            let Some(stack) = self.state.monitor_stack.get(monitor_key) else {
+                continue;
+            };
+            for &client_key in stack {
+                let Some(client) = self.state.clients.get(client_key) else {
+                    continue;
+                };
+                // A swallowed terminal is standing in for its child, and a
+                // scratchpad parked on no tag at all cannot be revealed
+                // without duplicating the scratchpad's own show logic.
+                if client.state.is_swallowed || (client.state.tags == 0 && !client.state.is_sticky)
+                {
+                    continue;
+                }
+                let tag = if client.state.is_sticky {
+                    None
+                } else {
+                    (0..tag_count).find(|index| client.state.tags & (1 << index) != 0)
+                };
+                entries.push(WindowEntry {
+                    id: client.win.raw(),
+                    title: client.name.clone(),
+                    class: client.class.clone(),
+                    instance: client.instance.clone(),
+                    tag,
+                    monitor: monitor.num,
+                    visible: !client.state.is_hidden
+                        && (client.state.is_sticky || client.state.tags & active != 0)
+                        && Some(monitor_key) == self.state.sel_mon,
+                    minimized: client.state.is_hidden,
+                });
+            }
+        }
+        entries
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -439,6 +753,203 @@ mod tests {
             "the freshest entry was dropped"
         );
         assert_eq!(kept.score("app0509", NOW), 0, "the stalest entry was kept");
+    }
+
+    fn window(id: u64, title: &str, class: &str) -> WindowEntry {
+        WindowEntry {
+            id,
+            title: title.into(),
+            class: class.into(),
+            instance: class.to_lowercase(),
+            tag: Some(0),
+            monitor: 0,
+            visible: true,
+            minimized: false,
+        }
+    }
+
+    fn app<'a>(search: &'a str, name: &'a str, usage: u32) -> AppCandidate<'a> {
+        AppCandidate {
+            search,
+            name,
+            usage,
+        }
+    }
+
+    #[test]
+    fn an_empty_query_lists_applications_only() {
+        // The launcher's promise is that the top row is one Enter from the
+        // application you use most; a window list on top of it would take
+        // that away.
+        let rows = rank_rows(
+            &parse_query(""),
+            &[app("firefox", "Firefox", 0)],
+            &[window(1, "GitHub", "firefox")],
+        );
+        assert_eq!(rows, [LauncherRow::App(0)]);
+    }
+
+    #[test]
+    fn typing_brings_the_open_windows_in() {
+        let rows = rank_rows(
+            &parse_query("fire"),
+            &[app("firefox", "Firefox", 0)],
+            &[window(1, "GitHub", "firefox")],
+        );
+        // Both match `fire` equally well through their class, and the window
+        // wins the tie: focusing what exists is one keystroke to undo.
+        assert_eq!(rows, [LauncherRow::Window(0), LauncherRow::App(0)]);
+    }
+
+    #[test]
+    fn what_was_typed_still_decides_across_both_kinds() {
+        // The application matches at position 0, the window only as a
+        // subsequence; a worse-matching window must not jump the queue.
+        let rows = rank_rows(
+            &parse_query("gimp"),
+            &[app("gimp image editor", "GIMP", 0)],
+            &[window(1, "graphics import", "xterm")],
+        );
+        assert_eq!(rows.first(), Some(&LauncherRow::App(0)));
+    }
+
+    #[test]
+    fn a_window_matches_by_class_and_never_across_two_fields() {
+        let entry = window(1, "GitHub", "firefox");
+        assert!(window_score(&entry, "firefox").is_some(), "class");
+        assert!(window_score(&entry, "github").is_some(), "title");
+        // Concatenating the fields into one haystack would invent this match.
+        assert!(window_score(&entry, "foxgithub").is_none());
+    }
+
+    #[test]
+    fn equally_matching_windows_keep_the_order_they_were_given() {
+        // The caller hands them over most-recently-focused first.
+        let windows = [
+            window(7, "one", "term"),
+            window(8, "two", "term"),
+            window(9, "three", "term"),
+        ];
+        let rows = rank_rows(&parse_query("term"), &[], &windows);
+        assert_eq!(
+            rows,
+            [
+                LauncherRow::Window(0),
+                LauncherRow::Window(1),
+                LauncherRow::Window(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_leading_slash_asks_for_windows_and_nothing_else() {
+        let apps = [app("firefox", "Firefox", 99)];
+        let windows = [window(1, "GitHub", "firefox")];
+        // Even with nothing after it: that is the on-demand window list.
+        assert_eq!(parse_query("/"), QueryMode::Windows(String::new()));
+        assert_eq!(
+            rank_rows(&parse_query("/"), &apps, &windows),
+            [LauncherRow::Window(0)]
+        );
+        assert_eq!(
+            rank_rows(&parse_query("/git"), &apps, &windows),
+            [LauncherRow::Window(0)]
+        );
+        assert!(rank_rows(&parse_query("/zzz"), &apps, &windows).is_empty());
+    }
+
+    #[test]
+    fn the_slash_prefix_and_the_calculator_cannot_fight() {
+        // `evaluate` parses nothing that starts with an operator, so a
+        // leading slash is always a window filter.
+        assert_eq!(parse_query("/1+1"), QueryMode::Windows("1+1".into()));
+        assert!(matches!(parse_query("1920*0.6"), QueryMode::Answer(_)));
+        // Arithmetic replaces the list entirely: no window, no application.
+        assert!(
+            rank_rows(
+                &parse_query("1+1"),
+                &[app("firefox", "Firefox", 0)],
+                &[window(1, "GitHub", "firefox")]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_row_says_where_the_window_is_only_when_it_is_not_here() {
+        let here = window(1, "GitHub", "firefox");
+        let row = window_row(&here);
+        assert!(row.contains("GitHub") && row.contains("firefox"));
+        assert!(
+            !row.contains('['),
+            "a visible window needs no location: {row}"
+        );
+
+        let elsewhere = WindowEntry {
+            visible: false,
+            tag: Some(3),
+            ..here.clone()
+        };
+        assert!(
+            window_row(&elsewhere).contains("tag 4"),
+            "tags are 1-based on screen"
+        );
+
+        let hidden = WindowEntry {
+            visible: false,
+            minimized: true,
+            ..here.clone()
+        };
+        let row = window_row(&hidden);
+        assert!(row.contains("minimised") && !row.contains("tag"));
+
+        // Sticky: on every tag, so there is no one tag to name.
+        let sticky = WindowEntry {
+            visible: false,
+            tag: None,
+            ..here.clone()
+        };
+        assert!(window_row(&sticky).contains("hidden"));
+    }
+
+    #[test]
+    fn a_row_does_not_repeat_the_class_the_title_already_says() {
+        let entry = window(1, "Firefox — GitHub", "Firefox");
+        let row = window_row(&entry);
+        assert_eq!(row.matches("Firefox").count(), 1, "{row}");
+    }
+
+    #[test]
+    fn a_pathological_title_cannot_widen_the_card_without_limit() {
+        let entry = window(1, &"x".repeat(400), "term");
+        let row = window_row(&entry);
+        assert!(row.chars().count() < MAX_TITLE_CHARS + 40, "{}", row.len());
+        assert!(row.contains('\u{2026}'));
+    }
+
+    #[test]
+    fn a_window_row_uses_only_widely_available_glyphs() {
+        for entry in [
+            window(1, "a", "b"),
+            WindowEntry {
+                visible: false,
+                minimized: true,
+                ..window(2, "c", "d")
+            },
+        ] {
+            for ch in window_row(&entry)
+                .chars()
+                .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+            {
+                assert!((ch as u32) < 0xf600, "{ch:?} is outside FontAwesome 4");
+            }
+        }
+    }
+
+    #[test]
+    fn fuzzy_matching() {
+        assert!(fuzzy_score("visual studio code", "vsc").is_some());
+        assert!(fuzzy_score("firefox", "zzz").is_none());
     }
 
     #[test]

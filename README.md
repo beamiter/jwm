@@ -136,7 +136,7 @@ The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 | Binding | Action |
 | --- | --- |
 | Alt+Shift+Return | Launch terminal |
-| Alt+R | Application launcher |
+| Alt+R | Application launcher (type `/` for open windows) |
 | Alt+Control+Escape | Lock screen |
 | Alt+Control+O | Display layout |
 | Alt+S / Alt+Shift+S | Interactive / immediate desktop screenshot |

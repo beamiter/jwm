@@ -1,5 +1,6 @@
 //! Backend-independent modal system UI state.
 
+use crate::jwm::features::launcher::LauncherRow;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -71,7 +72,11 @@ pub enum SystemUiState {
     Launcher {
         query: String,
         entries: Vec<LaunchEntry>,
-        matches: Vec<usize>,
+        /// Windows open when the panel was opened. A snapshot: a window can
+        /// close while the panel is up, which the focus path treats as a
+        /// quiet no-op.
+        windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        matches: Vec<crate::jwm::features::launcher::LauncherRow>,
         selected: usize,
         /// Launch history, so what the user actually runs is at the top.
         usage: crate::jwm::features::launcher::UsageStore,
@@ -348,6 +353,7 @@ impl Clone for SystemUiState {
             Self::Launcher {
                 query,
                 entries,
+                windows,
                 matches,
                 selected,
                 usage,
@@ -355,6 +361,7 @@ impl Clone for SystemUiState {
             } => Self::Launcher {
                 query: query.clone(),
                 entries: entries.clone(),
+                windows: windows.clone(),
                 matches: matches.clone(),
                 selected: *selected,
                 usage: usage.clone(),
@@ -456,12 +463,13 @@ impl SystemUiState {
         *self = Self::Inactive;
     }
 
-    pub fn open_launcher() -> Self {
+    pub fn open_launcher(windows: Vec<crate::jwm::features::launcher::WindowEntry>) -> Self {
         let entries = discover_applications();
         let usage = crate::jwm::features::launcher::UsageStore::load();
         let mut state = Self::Launcher {
             query: String::new(),
             entries,
+            windows,
             matches: Vec::new(),
             selected: 0,
             usage,
@@ -1718,7 +1726,11 @@ impl SystemUiState {
         }
     }
 
-    /// What the highlighted row would launch.
+    /// What the highlighted row would launch, or `None` when it is a window.
+    ///
+    /// A window row must never produce a launch: spawning a second browser
+    /// and promoting it in the frecency store is exactly what focusing the
+    /// first one exists to avoid.
     pub fn selected_launch(&self) -> Option<LaunchChoice> {
         let Self::Launcher {
             entries,
@@ -1729,13 +1741,31 @@ impl SystemUiState {
         else {
             return None;
         };
-        entries
-            .get(*matches.get(*selected)?)
-            .map(|entry| LaunchChoice {
-                id: entry.name.clone(),
-                command: entry.command.clone(),
-                terminal: entry.terminal,
-            })
+        let LauncherRow::App(index) = *matches.get(*selected)? else {
+            return None;
+        };
+        entries.get(index).map(|entry| LaunchChoice {
+            id: entry.name.clone(),
+            command: entry.command.clone(),
+            terminal: entry.terminal,
+        })
+    }
+
+    /// The window the highlighted row would focus, if it is a window row.
+    pub fn selected_window(&self) -> Option<u64> {
+        let Self::Launcher {
+            windows,
+            matches,
+            selected,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let LauncherRow::Window(index) = *matches.get(*selected)? else {
+            return None;
+        };
+        windows.get(index).map(|entry| entry.id)
     }
 
     /// The query's value when it is arithmetic rather than a search.
@@ -1802,6 +1832,7 @@ impl SystemUiState {
             Self::Launcher {
                 query,
                 entries,
+                windows,
                 matches,
                 selected,
                 computed,
@@ -1816,30 +1847,49 @@ impl SystemUiState {
                         hint: "Enter  copy    Esc  close".into(),
                     };
                 }
+                let windows_only = matches!(
+                    crate::jwm::features::launcher::parse_query(query),
+                    crate::jwm::features::launcher::QueryMode::Windows(_)
+                );
                 let start = selected.saturating_sub(11);
                 let items: Vec<String> = if matches.is_empty() {
-                    vec!["  No matching applications".into()]
+                    vec![if windows_only {
+                        "  No matching windows".into()
+                    } else {
+                        "  No matching applications".into()
+                    }]
                 } else {
                     matches
                         .iter()
                         .skip(start)
                         .take(12)
-                        .map(|&index| {
-                            let entry = &entries[index];
-                            if entry.terminal {
-                                format!("{}  \u{f120}", entry.name)
-                            } else {
-                                entry.name.clone()
+                        .map(|row| match row {
+                            LauncherRow::Window(index) => {
+                                crate::jwm::features::launcher::window_row(&windows[*index])
+                            }
+                            LauncherRow::App(index) => {
+                                let entry = &entries[*index];
+                                if entry.terminal {
+                                    format!("{}  \u{f120}", entry.name)
+                                } else {
+                                    entry.name.clone()
+                                }
                             }
                         })
                         .collect()
                 };
                 OverlayParts {
-                    title: "\u{f135}  APPLICATIONS".into(),
+                    title: if windows_only {
+                        "\u{f2d0}  WINDOWS".into()
+                    } else {
+                        "\u{f135}  APPLICATIONS".into()
+                    },
                     query: Some(query.clone()),
                     selected: (!matches.is_empty()).then(|| selected - start),
                     items,
-                    hint: "\u{f2f6} Enter  launch    Esc  close    \u{f062}/\u{f063}  select"
+                    // `/` lists open windows; it cannot be arithmetic, so the
+                    // two modes never compete for the same query.
+                    hint: "Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
                         .into(),
                 }
             }
@@ -2070,6 +2120,7 @@ impl SystemUiState {
             Self::Launcher {
                 query,
                 entries,
+                windows,
                 matches,
                 selected,
                 usage,
@@ -2078,38 +2129,28 @@ impl SystemUiState {
                 use crate::jwm::features::launcher;
 
                 *selected = 0;
+                let mode = launcher::parse_query(query);
                 // Arithmetic replaces the list rather than sharing it. A
                 // query with an operator in it is a question, not a search,
                 // and one Enter with one meaning beats two rows competing for
                 // it.
-                *computed = launcher::evaluate(query).map(launcher::format_result);
-                if computed.is_some() {
-                    matches.clear();
-                    return;
-                }
-                let needle = query.to_lowercase();
+                *computed = match &mode {
+                    launcher::QueryMode::Answer(value) => Some(launcher::format_result(*value)),
+                    _ => None,
+                };
                 let now = launcher::now_seconds();
-                let mut scored: Vec<(usize, usize, u32)> = entries
+                let candidates: Vec<launcher::AppCandidate<'_>> = entries
                     .iter()
-                    .enumerate()
-                    .filter_map(|(i, entry)| {
-                        fuzzy_score(&entry.search, &needle)
-                            .map(|score| (i, score, usage.score(&entry.name, now)))
+                    .map(|entry| launcher::AppCandidate {
+                        search: &entry.search,
+                        name: &entry.name,
+                        usage: usage.score(&entry.name, now),
                     })
                     .collect();
-                // What was typed decides first and history breaks the tie:
-                // typing `fire` must not open the file manager because it was
-                // opened more often, but two equally good matches should be
-                // ordered by which one this user actually runs. With an empty
-                // query every entry ties, so the whole list is ranked by use.
-                scored.sort_by_key(|&(i, score, used)| {
-                    (
-                        Reverse(score),
-                        Reverse(used),
-                        entries[i].name.to_lowercase(),
-                    )
-                });
-                *matches = scored.into_iter().map(|(i, _, _)| i).collect();
+                // Every ordering rule — what was typed first, then windows
+                // before applications on a tie, then history — lives in the
+                // ranker, where it is a unit test rather than a live session.
+                *matches = launcher::rank_rows(&mode, &candidates, windows);
             }
             Self::Info {
                 query,
@@ -2123,7 +2164,8 @@ impl SystemUiState {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, line)| {
-                        fuzzy_score(&line.to_lowercase(), &needle).map(|score| (i, score))
+                        crate::jwm::features::launcher::fuzzy_score(&line.to_lowercase(), &needle)
+                            .map(|score| (i, score))
                     })
                     .collect();
                 scored.sort_by_key(|&(i, score)| (Reverse(score), i));
@@ -2319,23 +2361,6 @@ fn scale_preview(value: i32, max: i32, extent: usize) -> usize {
     let max = u64::try_from(max.max(1)).unwrap_or(1);
     let extent_max_u64 = u64::try_from(extent_max).unwrap_or(u64::MAX);
     usize::try_from(value.saturating_mul(extent_max_u64) / max).unwrap_or(extent_max)
-}
-
-fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if let Some(pos) = haystack.find(needle) {
-        return Some(10_000 - pos);
-    }
-    let mut at = 0;
-    let mut score = 0;
-    for ch in needle.chars() {
-        let rel = haystack[at..].find(ch)?;
-        at += rel + ch.len_utf8();
-        score += 100usize.saturating_sub(rel);
-    }
-    Some(score)
 }
 
 fn discover_applications() -> Vec<LaunchEntry> {
@@ -3284,12 +3309,6 @@ mod tests {
         );
     }
     #[test]
-    fn fuzzy_matching() {
-        assert!(fuzzy_score("visual studio code", "vsc").is_some());
-        assert!(fuzzy_score("firefox", "zzz").is_none());
-    }
-
-    #[test]
     fn launcher_overlay_parts_window_the_list_and_track_selection() {
         let entries: Vec<LaunchEntry> = (0..20)
             .map(|i| LaunchEntry {
@@ -3299,15 +3318,16 @@ mod tests {
                 search: format!("app{i:02}"),
             })
             .collect();
-        let matches = (0..entries.len()).collect();
         let mut state = SystemUiState::Launcher {
             query: String::new(),
             entries,
-            matches,
+            windows: Vec::new(),
+            matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::default(),
             computed: None,
         };
+        state.refresh_matches();
 
         let parts = state.overlay_parts();
         assert_eq!(parts.title, "\u{f135}  APPLICATIONS");
@@ -3330,6 +3350,14 @@ mod tests {
     }
 
     fn launcher_with(names: &[(&str, bool)], usage: &str) -> SystemUiState {
+        launcher_with_windows(names, &[], usage)
+    }
+
+    fn launcher_with_windows(
+        names: &[(&str, bool)],
+        windows: &[crate::jwm::features::launcher::WindowEntry],
+        usage: &str,
+    ) -> SystemUiState {
         let entries: Vec<LaunchEntry> = names
             .iter()
             .map(|(name, terminal)| LaunchEntry {
@@ -3342,6 +3370,7 @@ mod tests {
         let mut state = SystemUiState::Launcher {
             query: String::new(),
             entries,
+            windows: windows.to_vec(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::parse(usage),
@@ -3380,6 +3409,68 @@ mod tests {
             state.push_char(ch);
         }
         assert_eq!(state.overlay_parts().items[0], "firefox");
+    }
+
+    fn test_window(title: &str, class: &str) -> crate::jwm::features::launcher::WindowEntry {
+        crate::jwm::features::launcher::WindowEntry {
+            id: 42,
+            title: title.into(),
+            class: class.into(),
+            instance: class.to_lowercase(),
+            tag: Some(0),
+            monitor: 0,
+            visible: true,
+            minimized: false,
+        }
+    }
+
+    #[test]
+    fn a_window_row_focuses_and_never_launches() {
+        let mut state = launcher_with_windows(
+            &[("firefox", false)],
+            &[test_window("GitHub", "firefox")],
+            "",
+        );
+        // Nothing typed: applications only, so the documented promise about
+        // the first row survives.
+        assert!(
+            state
+                .overlay_parts()
+                .items
+                .iter()
+                .all(|row| !row.contains("GitHub")),
+            "windows must stay out of the empty query"
+        );
+
+        for ch in "git".chars() {
+            state.push_char(ch);
+        }
+        assert!(state.overlay_parts().items[0].contains("GitHub"));
+        // The important half: activating a window row must not spawn a second
+        // browser or promote it in the frecency store.
+        assert_eq!(state.selected_launch(), None);
+        assert_eq!(state.selected_window(), Some(42));
+    }
+
+    #[test]
+    fn a_slash_lists_windows_only_and_says_so() {
+        let mut state = launcher_with_windows(
+            &[("firefox", false)],
+            &[test_window("GitHub", "firefox")],
+            "",
+        );
+        state.push_char('/');
+        let parts = state.overlay_parts();
+        assert_eq!(parts.title, "\u{f2d0}  WINDOWS");
+        assert_eq!(parts.items.len(), 1);
+        assert!(parts.items[0].contains("GitHub"));
+        assert_eq!(state.selected_window(), Some(42));
+
+        // A slash query that matches nothing says windows, not applications.
+        for ch in "zzz".chars() {
+            state.push_char(ch);
+        }
+        assert!(state.overlay_parts().items[0].contains("No matching windows"));
     }
 
     #[test]

@@ -52,6 +52,60 @@ division by zero shows nothing rather than `inf`.
 While an answer is showing it replaces the application list, so `Enter` has
 exactly one meaning. Backspacing past the operator brings the list back.
 
+## Open windows
+
+Once you type something, the list also matches the windows that are already
+open, marked with a  glyph:
+
+```
+  Beta window — xmessage
+  Alpha window — xmessage  [tag 1]
+ xmessage
+```
+
+`Enter` on one of those **focuses** it rather than starting a second copy:
+JWM moves to its monitor, switches to its tag, un-minimises it if it was
+minimised, and raises it. Nothing is spawned and the launch ranking is not
+touched — focusing Firefox must not promote the Firefox application row.
+
+`/` on its own lists open windows and no applications at all, which is the
+window switcher when you want one:
+
+```
+/            every window
+/git         windows matching "git" by title, class or instance
+```
+
+The prefix cannot collide with the calculator, because no expression starts
+with an operator: `/1+1` filters windows and does not compute 2.
+
+### How the two kinds are ordered
+
+1. **What you typed decides**, across both kinds. A better-matching
+   application still beats a worse-matching window.
+2. **On an equal score the window comes first.** Focusing something that
+   already exists is one keystroke to undo; a second copy of a browser or an
+   IDE may not be.
+3. **Windows keep most-recently-focused order**, and the monitor you are
+   looking at comes before the other one.
+4. **Applications keep their frecency**, exactly as before.
+
+With an **empty query the list is applications only**. The promise that the
+top row is one `Enter` from the application you use most is worth more than a
+window list you did not ask for; one keystroke brings the windows in.
+
+A row says where its window is only when that is somewhere else — `[tag 3]`,
+`[minimised]` — so it answers "will `Enter` move me somewhere" before you
+press it. A window matches on its title, its class **or** its instance, but
+never across two of them: `foxgithub` finds nothing, because a match spanning
+`GitHub` and `firefox` is a match in neither.
+
+Two kinds of window are deliberately absent: one hidden by the scratchpad
+(it sits on no tag at all, and revealing it means duplicating the
+scratchpad's own logic) and a terminal that has been
+[swallowed](../README.md) by its child, which is standing in for that child
+rather than being a window of its own.
+
 ## Terminal applications
 
 A desktop entry with `Terminal=true` — an editor, a system monitor, a package

@@ -225,15 +225,96 @@ impl Jwm {
             _ => return Err("focus_window requires a window id".into()),
         };
         info!("[focus_window] id={}", win_id);
-        let win = WindowId::from_raw(win_id);
-        let client_key = self
-            .wintoclient(win)
-            .ok_or_else(|| format!("window {} not found", win_id))?;
+        if !self.reveal_and_focus(backend, WindowId::from_raw(win_id))? {
+            return Err(format!("window {win_id} not found").into());
+        }
+        Ok(())
+    }
+
+    /// Bring a window to the front of the session and focus it: its monitor,
+    /// then its tag, then un-minimised, then focused and restacked.
+    ///
+    /// `focus()` on its own cannot do this. When the requested client is not
+    /// visible it silently redirects to whichever one is, so "focus that
+    /// window" quietly focused a *different* window whenever the target sat
+    /// on a hidden tag or another monitor. Every caller that means "show me
+    /// that window" goes through here, so the keybinding, the launcher and
+    /// the IPC command cannot drift apart.
+    ///
+    /// Returns false when the window is gone — a launcher row can outlive the
+    /// window it names, and that is a no-op rather than an error.
+    pub(crate) fn reveal_and_focus(
+        &mut self,
+        backend: &mut dyn Backend,
+        win: WindowId,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(client_key) = self.wintoclient(win) else {
+            log::debug!("[reveal_and_focus] window {win:?} is gone");
+            return Ok(false);
+        };
+
+        // Un-minimise first: a hidden client is invisible on every tag, so
+        // neither the tag switch below nor `focus` would reach it.
+        let was_hidden = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.is_hidden);
+        if was_hidden {
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.is_hidden = false;
+            }
+            let _ = backend.property_ops().set_net_wm_state_flag(
+                win,
+                crate::backend::api::NetWmState::Hidden,
+                false,
+            );
+        }
+
+        // The monitor has to move before the tag does: `view` acts on the
+        // selected monitor.
+        let client_monitor = self
+            .state
+            .clients
+            .get(client_key)
+            .and_then(|client| client.mon);
+        if let Some(monitor_key) = client_monitor
+            && Some(monitor_key) != self.state.sel_mon
+        {
+            self.switch_to_monitor(backend, monitor_key)?;
+        }
+
+        if let Some(target) = self.tags_to_reveal(client_key) {
+            self.view(backend, &WMArgEnum::UInt(target))?;
+        }
+
         self.focus(backend, Some(client_key))?;
         if let Some(mon_key) = self.state.sel_mon {
             self.restack(backend, Some(mon_key))?;
         }
-        Ok(())
+        if was_hidden {
+            // The inverse of the minimise order: arrange establishes the live
+            // geometry first, then the compositor rebuilds its entry.
+            let _ = self.arrange(backend, self.state.sel_mon);
+            backend.compositor_set_window_minimized(win, false);
+        }
+        Ok(true)
+    }
+
+    /// The tag mask to switch to so `client_key` becomes visible, or `None`
+    /// when it already is. A sticky window is on every tag and never needs
+    /// one.
+    fn tags_to_reveal(&self, client_key: ClientKey) -> Option<u32> {
+        let client = self.state.clients.get(client_key)?;
+        if client.state.is_sticky {
+            return None;
+        }
+        let monitor = self.state.monitors.get(client.mon?)?;
+        if client.state.tags & monitor.get_active_tags() != 0 {
+            return None;
+        }
+        let wanted = client.state.tags & CONFIG.load().tagmask();
+        (wanted != 0).then_some(wanted)
     }
 
     /// 获取标签组信息（当前未实现）
