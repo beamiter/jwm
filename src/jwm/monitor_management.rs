@@ -180,17 +180,36 @@ impl Jwm {
         // Create unique shared memory path for this monitor
         let shared_path = format!("/dev/shm/jwm_bar_mon_{}", monitor_id);
 
-        // Create shared memory
-        let ring_buffer = match SharedRingBufferOptions::new().create(&shared_path) {
+        // JWM is the single supervisor for per-monitor bar buffers. Reclaim a
+        // mapping whose creator died before Drop could unlink its flink, then
+        // atomically create a replacement.
+        let ring_buffer = match SharedRingBufferOptions::new()
+            .reclaim_stale(true)
+            .open_or_create(&shared_path)
+        {
             Ok(rb) => rb,
             Err(e) => {
+                let reason = format!("shared-memory setup failed: {e}");
                 error!(
-                    "Failed to create shared memory for monitor {}: {}",
+                    "Failed to prepare shared memory for monitor {}: {}",
                     monitor_id, e
                 );
+                self.note_secondary_bar_failure(monitor_id, now, &reason);
                 return;
             }
         };
+
+        // open_or_create only returns a non-creator when another live
+        // supervisor still owns this monitor's buffer. Do not attach a second
+        // bar to it; wait for the normal retry path instead.
+        if !ring_buffer.is_creator() {
+            let reason = format!(
+                "shared memory is owned by live creator process {}",
+                ring_buffer.creator_pid()
+            );
+            self.note_secondary_bar_failure(monitor_id, now, &reason);
+            return;
+        }
 
         // Prepare command
         let cfg = CONFIG.load();
@@ -263,10 +282,12 @@ impl Jwm {
                 self.secondary_bars.insert(monitor_id, bar_instance);
             }
             Err(e) => {
+                let reason = format!("process spawn failed: {e}");
                 error!(
                     "Failed to spawn secondary bar for monitor {}: {}",
                     monitor_id, e
                 );
+                self.note_secondary_bar_failure(monitor_id, now, &reason);
             }
         }
     }
