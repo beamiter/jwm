@@ -3420,6 +3420,7 @@ mod tests {
             tag: Some(0),
             monitor: 0,
             visible: true,
+            on_selected_monitor: true,
             minimized: false,
         }
     }

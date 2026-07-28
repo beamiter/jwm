@@ -122,7 +122,12 @@ pub fn parse_cpu_times(stat: &str) -> Option<CpuTimes> {
         return None;
     }
     Some(CpuTimes {
-        total: buckets.iter().copied().sum(),
+        // The first eight buckets only. The kernel adds a guest tick to
+        // `user` (or `nice`) *and* to `guest`, so columns nine and ten are a
+        // subset of the first two; summing all ten inflates both the total
+        // and the busy share on any machine running virtual machines. `top`
+        // subtracts guest for the same reason.
+        total: buckets.iter().take(8).sum(),
         idle: buckets[3] + buckets[4],
     })
 }
@@ -185,6 +190,13 @@ pub fn parse_meminfo(meminfo: &str) -> Option<MemoryUsage> {
 pub fn counts_toward_throughput(interface: &str) -> bool {
     const CARRIES_TRAFFIC: [&str; 6] = ["en", "eth", "wl", "ww", "ppp", "usb"];
     let name = interface.trim();
+    // A VLAN device is named after the link beneath it — `enp2s0.100` — and
+    // the kernel counts the same frames on both. Summing the pair would
+    // report exactly twice the real rate, which is the failure the allowlist
+    // exists to avoid.
+    if name.contains('.') {
+        return false;
+    }
     CARRIES_TRAFFIC
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -419,10 +431,22 @@ impl crate::jwm::Jwm {
         use crate::jwm::features::ControlKind;
 
         if !crate::config::CONFIG.load().behavior().resource_rows {
-            // Switched off: stop sampling, and forget what was sampled. A
-            // stale reading answered over IPC while the feature is off would
-            // be a number nobody is keeping true.
+            if self.features.resources == ResourceState::default() {
+                return;
+            }
+            // Switched off: forget what was sampled, because a stale reading
+            // answered over IPC while the feature is off is a number nobody
+            // is keeping true. The sampler goes with it, so switching back on
+            // reads `/proc` at once instead of sitting out the rest of the
+            // interval and leaving the rows missing.
             self.features.resources = ResourceState::default();
+            self.features.resource_sampler = ResourceSampler::default();
+            // A panel already on screen would otherwise keep three rows that
+            // no longer update — frozen numbers are worse than none.
+            if self.features.system_ui.is_control_center() {
+                self.refresh_open_control_center();
+                self.sync_system_ui(backend);
+            }
             return;
         }
         if !self.features.resource_sampler.maybe_sample() {
@@ -529,6 +553,17 @@ docker0:       0       0    0    0    0     0          0         0        0     
     }
 
     #[test]
+    fn guest_time_is_not_counted_twice() {
+        // The kernel adds a guest tick to `user` as well as to `guest`, so a
+        // KVM host that spent 100 jiffies in a guest and 800 idle is 11% busy,
+        // not 20% — summing all ten columns would count those ticks twice.
+        let idle_only = parse_cpu_times("cpu  0 0 0 0 0 0 0 0 0 0\n").expect("times");
+        let with_guest = parse_cpu_times("cpu  100 0 0 800 0 0 0 0 100 0\n").expect("times");
+        assert_eq!(with_guest.total, 900);
+        assert_eq!(cpu_busy_percent(idle_only, with_guest), Some(11));
+    }
+
+    #[test]
     fn cpu_load_needs_two_samples_that_moved_forwards() {
         let first = CpuTimes {
             total: 1_000,
@@ -616,9 +651,27 @@ docker0:       0       0    0    0    0     0          0         0        0     
             "tailscale0",
             "bond0",
             "dummy0",
+            // VLAN children are named after the link beneath them, and the
+            // kernel counts the same frames on both.
+            "enp2s0.100",
+            "eth0.4094",
         ] {
             assert!(!counts_toward_throughput(plumbing), "{plumbing}");
         }
+    }
+
+    #[test]
+    fn a_vlan_is_not_counted_on_top_of_the_link_beneath_it() {
+        let tagged = "\
+Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo: 10 1 0 0 0 0 0 0 10 1 0 0 0 0 0 0
+enp2s0: 1000000 100 0 0 0 0 0 0 500000 50 0 0 0 0 0 0
+enp2s0.100: 1000000 100 0 0 0 0 0 0 500000 50 0 0 0 0 0 0
+";
+        let counters = parse_net_dev(tagged).expect("counters");
+        assert_eq!(counters.rx_bytes, 1_000_000, "the VLAN doubled the rate");
+        assert_eq!(counters.tx_bytes, 500_000);
     }
 
     #[test]

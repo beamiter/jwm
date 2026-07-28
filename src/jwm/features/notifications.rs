@@ -146,12 +146,20 @@ fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
     if kept.len() > MAX_ACTIONS {
         // The reserved key is the one Return runs, so it survives the cap
         // even when the sender listed it last.
-        let reserved = kept.iter().position(|action| action.key == DEFAULT_KEY);
+        //
+        // Rescued out of `kept` rather than out of the caller's list: an
+        // action with no key was already dropped, so the two stopped sharing
+        // indices, and only `kept`'s copy has been through `sanitize_label`.
+        // Indexing the raw list here would both promote the wrong action and
+        // smuggle an uncapped, possibly multi-line label onto the strip.
+        let rescued = kept
+            .iter()
+            .position(|action| action.key == DEFAULT_KEY)
+            .filter(|index| *index >= MAX_ACTIONS)
+            .map(|index| kept[index].clone());
         kept.truncate(MAX_ACTIONS);
-        if let Some(index) = reserved
-            && index >= MAX_ACTIONS
-        {
-            kept[MAX_ACTIONS - 1] = actions[index].clone();
+        if let Some(action) = rescued {
+            kept[MAX_ACTIONS - 1] = action;
         }
     }
     kept
@@ -700,6 +708,34 @@ mod tests {
         // which one is selected.
         assert_eq!(default_action_index(&sanitize_actions(&many)), 0);
         assert_eq!(default_action_index(&[]), 0);
+    }
+
+    #[test]
+    fn the_rescued_key_is_the_sanitized_one_even_after_an_entry_was_dropped() {
+        // Two traps in one input: an unkeyed action ahead of the rest, which
+        // shifts the filtered list out of step with the sender's, and a
+        // `default` whose label is both too long and multi-line. Rescuing by
+        // the sender's index would promote the wrong action *and* put an
+        // uncapped, two-line label on a one-line strip.
+        let mut offered = vec![action("", "dropped")];
+        offered.extend(
+            (0..MAX_ACTIONS + 1)
+                .map(|index| action(&format!("k{index}"), &format!("Label {index}"))),
+        );
+        offered.push(action("default", &format!("Restart\n{}", "x".repeat(60))));
+
+        let kept = sanitize_actions(&offered);
+        assert_eq!(kept.len(), MAX_ACTIONS);
+        let rescued = &kept[MAX_ACTIONS - 1];
+        assert_eq!(rescued.key, "default", "the wrong action was promoted");
+        assert!(rescued.label.chars().count() <= MAX_LABEL_CHARS);
+        assert!(
+            !rescued.label.contains('\n'),
+            "a two-line label reached the strip"
+        );
+        assert_eq!(kept[default_action_index(&kept)].key, "default");
+        // Nothing was duplicated into the freed slot.
+        assert_eq!(kept[MAX_ACTIONS - 2].key, "k4");
     }
 
     #[test]

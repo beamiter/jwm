@@ -215,6 +215,10 @@ pub fn format_result(value: f64) -> String {
 /// one pathological title would otherwise push the panel off the screen.
 const MAX_TITLE_CHARS: usize = 52;
 
+/// Longest class shown beside a title, for the same reason: `WM_CLASS` is
+/// the client's to set and the X server hands over up to a kilobyte of it.
+const MAX_CLASS_CHARS: usize = 24;
+
 /// The prefix that asks for windows and nothing else.
 ///
 /// A leading slash cannot collide with the calculator: `evaluate` parses no
@@ -235,8 +239,13 @@ pub struct WindowEntry {
     /// them.
     pub tag: Option<usize>,
     pub monitor: i32,
-    /// On a tag the user is looking at, on the monitor they are on.
+    /// Showing on its own monitor: on one of that monitor's active tags, and
+    /// not minimised. Deliberately not "on the screen the user is looking
+    /// at" — a window can be plainly visible on the other head, and calling
+    /// that hidden is what made rows claim a tag the user was already on.
     pub visible: bool,
+    /// On the monitor the user is looking at.
+    pub on_selected_monitor: bool,
     pub minimized: bool,
 }
 
@@ -381,29 +390,32 @@ pub fn rank_rows(
 /// The row answers "will Enter move me somewhere" before it is pressed.
 #[must_use]
 pub fn window_row(entry: &WindowEntry) -> String {
-    let name = if entry.title.trim().is_empty() {
-        entry.class.clone()
-    } else {
-        entry.title.clone()
-    };
-    let name = ellipsize(name.trim(), MAX_TITLE_CHARS);
-    // The class is worth showing only when the title does not already say it.
-    let class = if entry.class.trim().is_empty()
-        || name.to_lowercase().contains(&entry.class.to_lowercase())
-    {
+    let title = one_line(&entry.title);
+    let class = one_line(&entry.class);
+    let name = ellipsize(
+        if title.is_empty() { &class } else { &title },
+        MAX_TITLE_CHARS,
+    );
+    // The class is worth showing only when the title does not already say it,
+    // and it is capped like the title: a client controls its own WM_CLASS,
+    // and a thousand-character one would widen the card without limit.
+    let class = if class.is_empty() || name.to_lowercase().contains(&class.to_lowercase()) {
         String::new()
     } else {
-        format!("  \u{2014}  {}", entry.class)
+        format!("  \u{2014}  {}", ellipsize(&class, MAX_CLASS_CHARS))
     };
     let mut where_it_is = Vec::new();
     if entry.minimized {
         where_it_is.push("minimised".to_string());
-    }
-    if !entry.visible && !entry.minimized {
+    } else if !entry.visible {
         match entry.tag {
             Some(tag) => where_it_is.push(format!("tag {}", tag + 1)),
             None => where_it_is.push("hidden".to_string()),
         }
+    } else if !entry.on_selected_monitor {
+        // Visible, but on the other head. Naming its tag would name the one
+        // the user is already looking at.
+        where_it_is.push(format!("screen {}", entry.monitor));
     }
     let elsewhere = if where_it_is.is_empty() {
         String::new()
@@ -412,6 +424,22 @@ pub fn window_row(entry: &WindowEntry) -> String {
     };
     // fa-window-maximize, inside FontAwesome 4.7.
     format!("\u{f2d0}  {name}{class}{elsewhere}")
+}
+
+/// Collapse a client-controlled string onto one line.
+///
+/// A window title comes straight from `_NET_WM_NAME` and may contain
+/// anything. The panel's contract is one item per visual line — the
+/// compositor divides the card's height by the item count to place the
+/// selection highlight — so a title with a newline in it would put the
+/// highlight on a different row than the one Enter activates. The
+/// notifications module collapses control characters for the same reason.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn ellipsize(text: &str, limit: usize) -> String {
@@ -653,8 +681,8 @@ impl crate::jwm::Jwm {
                     tag,
                     monitor: monitor.num,
                     visible: !client.state.is_hidden
-                        && (client.state.is_sticky || client.state.tags & active != 0)
-                        && Some(monitor_key) == self.state.sel_mon,
+                        && (client.state.is_sticky || client.state.tags & active != 0),
+                    on_selected_monitor: Some(monitor_key) == self.state.sel_mon,
                     minimized: client.state.is_hidden,
                 });
             }
@@ -764,6 +792,7 @@ mod tests {
             tag: Some(0),
             monitor: 0,
             visible: true,
+            on_selected_monitor: true,
             minimized: false,
         }
     }
@@ -920,11 +949,57 @@ mod tests {
     }
 
     #[test]
-    fn a_pathological_title_cannot_widen_the_card_without_limit() {
-        let entry = window(1, &"x".repeat(400), "term");
+    fn a_pathological_title_or_class_cannot_widen_the_card_without_limit() {
+        // Both are the client's to set: the title comes from _NET_WM_NAME and
+        // the class from WM_CLASS, of which the X server hands over up to a
+        // kilobyte.
+        for entry in [
+            window(1, &"x".repeat(400), "term"),
+            window(2, "short", &"y".repeat(400)),
+        ] {
+            let row = window_row(&entry);
+            assert!(
+                row.chars().count() < MAX_TITLE_CHARS + MAX_CLASS_CHARS + 16,
+                "{} chars: {row}",
+                row.chars().count()
+            );
+            assert!(row.contains('\u{2026}'));
+        }
+    }
+
+    #[test]
+    fn a_title_with_a_newline_in_it_stays_one_row() {
+        // The panel's contract is one item per visual line — the compositor
+        // divides the card by the item count to place the highlight — so a
+        // two-line title would put the highlight on a different row than the
+        // one Enter activates.
+        let entry = window(1, "GitHub\nPull requests\r\tmore", "term");
         let row = window_row(&entry);
-        assert!(row.chars().count() < MAX_TITLE_CHARS + 40, "{}", row.len());
-        assert!(row.contains('\u{2026}'));
+        assert_eq!(row.lines().count(), 1, "{row:?}");
+        assert!(row.contains("GitHub Pull requests"));
+    }
+
+    #[test]
+    fn a_window_on_the_other_screen_is_not_called_hidden() {
+        // It is plainly visible over there; naming its tag would name the one
+        // the user is already looking at, and calling a sticky window hidden
+        // is simply false.
+        let elsewhere = WindowEntry {
+            on_selected_monitor: false,
+            monitor: 1,
+            ..window(1, "Firefox", "firefox")
+        };
+        let row = window_row(&elsewhere);
+        assert!(row.contains("screen 1"), "{row}");
+        assert!(!row.contains("tag") && !row.contains("hidden"));
+
+        // Off-tag on its own monitor still names the tag.
+        let off_tag = WindowEntry {
+            visible: false,
+            tag: Some(2),
+            ..elsewhere.clone()
+        };
+        assert!(window_row(&off_tag).contains("tag 3"));
     }
 
     #[test]

@@ -95,7 +95,8 @@ top row is one `Enter` from the application you use most is worth more than a
 window list you did not ask for; one keystroke brings the windows in.
 
 A row says where its window is only when that is somewhere else — `[tag 3]`,
-`[minimised]` — so it answers "will `Enter` move me somewhere" before you
+`[minimised]`, `[screen 1]` for one that is on the other monitor and plainly
+visible there — so it answers "will `Enter` move me somewhere" before you
 press it. A window matches on its title, its class **or** its instance, but
 never across two of them: `foxgithub` finds nothing, because a match spanning
 `GitHub` and `firefox` is a match in neither.
