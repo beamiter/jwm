@@ -570,7 +570,7 @@ impl X11rbBackend {
     fn query_primary_randr_output(&self) -> Option<u32> {
         let resources = self
             .conn
-            .randr_get_screen_resources(self.root_x11)
+            .randr_get_screen_resources_current(self.root_x11)
             .ok()?
             .reply()
             .ok()?;
@@ -3580,7 +3580,7 @@ mod output_ops {
                                 // Pre-fetch screen resources for mode info lookup
                                 let modes: Vec<randr::ModeInfo> = self
                                     .conn
-                                    .randr_get_screen_resources(self.root)
+                                    .randr_get_screen_resources_current(self.root)
                                     .ok()
                                     .and_then(|c| c.reply().ok())
                                     .map(|r| r.modes)
@@ -3688,7 +3688,7 @@ mod output_ops {
             }
 
             // Fallback: RandR 1.2 CRTC enumeration
-            if let Ok(cookie) = self.conn.randr_get_screen_resources(self.root) {
+            if let Ok(cookie) = self.conn.randr_get_screen_resources_current(self.root) {
                 if let Ok(resources) = cookie.reply() {
                     let modes = &resources.modes;
                     let mut out = Vec::with_capacity(4);
@@ -3804,7 +3804,7 @@ mod output_ops {
         fn output_to_crtc(&self, output_id: u32) -> Option<u32> {
             let resources = self
                 .conn
-                .randr_get_screen_resources(self.root)
+                .randr_get_screen_resources_current(self.root)
                 .ok()?
                 .reply()
                 .ok()?;

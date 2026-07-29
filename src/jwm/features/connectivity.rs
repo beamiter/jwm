@@ -861,11 +861,42 @@ pub fn summarize_nmcli_error(stderr: &str) -> String {
     line.chars().take(72).collect()
 }
 
+/// Read Wi-Fi and Bluetooth state on a worker thread.
+///
+/// `read_state` shells out to nmcli/bluetoothctl, and nmcli can block for
+/// seconds while NetworkManager is mid-scan. Run on the event loop that wait
+/// froze the entire desktop (compositing and input both stop; only the
+/// hardware cursor keeps moving), so the read must never happen inline.
+#[must_use]
+pub fn start_state_read() -> BackgroundJob<ConnectivityState> {
+    BackgroundJob::spawn(read_state)
+}
+
 impl crate::jwm::Jwm {
-    /// Re-read Wi-Fi and Bluetooth and refresh an open control center.
+    /// Kick off a background re-read of Wi-Fi and Bluetooth. The result is
+    /// adopted from the frame tick by [`Self::poll_connectivity_job`].
     /// Called after a toggle and on the hardware poll.
+    ///
+    /// A toggle wants the post-toggle state, so a still-running read is
+    /// replaced; its thread finishes on its own and the stale result is
+    /// dropped with the handle.
     pub(crate) fn refresh_connectivity(&mut self) {
-        let state = read_state();
+        self.features.connectivity_poll = Some(start_state_read());
+    }
+
+    /// Adopt a finished background connectivity read and refresh an open
+    /// control center. Called from the frame tick; does nothing while the
+    /// read is still running.
+    pub(crate) fn poll_connectivity_job(&mut self) {
+        let Some(state) = self
+            .features
+            .connectivity_poll
+            .as_ref()
+            .and_then(BackgroundJob::take)
+        else {
+            return;
+        };
+        self.features.connectivity_poll = None;
         if state == self.features.connectivity {
             return;
         }

@@ -119,8 +119,15 @@ impl Jwm {
             if should_poll {
                 self.last_battery_poll = Some(Instant::now());
                 self.poll_battery(backend);
-                self.refresh_connectivity();
+                // Periodic re-read; skip while one is in flight so a hung
+                // nmcli cannot pile up worker threads.
+                if self.features.connectivity_poll.is_none() {
+                    self.refresh_connectivity();
+                }
             }
+            // Adopt whatever background connectivity read has finished,
+            // whether the periodic one above or one kicked off by a toggle.
+            self.poll_connectivity_job();
 
             // --- CPU / memory / network: a much faster interval, gated
             // inside the sampler because a rate has to divide by the gap it

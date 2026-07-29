@@ -88,6 +88,9 @@ pub struct FeatureStates {
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,
+    /// Background Wi-Fi/Bluetooth state read, if one is in flight. nmcli can
+    /// block for seconds, so the poll never runs on the event loop.
+    pub connectivity_poll: Option<connectivity::BackgroundJob<ConnectivityState>>,
     /// Scan running for an open Wi-Fi picker, if any.
     pub wifi_scan: Option<connectivity::BackgroundJob<Vec<WifiNetwork>>>,
     /// Connection attempt running for an open Wi-Fi picker, if any.

@@ -149,7 +149,10 @@ impl Jwm {
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
         self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
-        self.features.connectivity = crate::jwm::features::connectivity::read_state();
+        // Open with the cached connectivity reading — read_state() shells out
+        // to nmcli and can block for seconds — and re-read in the background;
+        // the rows update in place once the fresh state is adopted.
+        self.refresh_connectivity();
         let profiles = crate::jwm::features::power::profiles();
         self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
             &crate::jwm::features::ControlCenterInputs {

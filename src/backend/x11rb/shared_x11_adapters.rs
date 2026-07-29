@@ -405,7 +405,7 @@ where
         }
     }
 
-    if let Ok(res_cookie) = conn.randr_get_screen_resources(root) {
+    if let Ok(res_cookie) = conn.randr_get_screen_resources_current(root) {
         if let Ok(resources) = res_cookie.reply() {
             for (idx, crtc_id) in resources.crtcs.iter().enumerate() {
                 if let Ok(info_cookie) = conn.randr_get_crtc_info(*crtc_id, 0) {
@@ -440,7 +440,7 @@ where
     if let Ok(ver_cookie) = conn.randr_query_version(1, 5) {
         if let Ok(ver) = ver_cookie.reply() {
             if ver.major_version > 1 || (ver.major_version == 1 && ver.minor_version >= 5) {
-                if let Ok(res_cookie) = conn.randr_get_screen_resources(root) {
+                if let Ok(res_cookie) = conn.randr_get_screen_resources_current(root) {
                     if let Ok(resources) = res_cookie.reply() {
                         let modes = resources.modes;
 
@@ -487,7 +487,7 @@ where
         }
     }
 
-    if let Ok(res_cookie) = conn.randr_get_screen_resources(root) {
+    if let Ok(res_cookie) = conn.randr_get_screen_resources_current(root) {
         if let Ok(resources) = res_cookie.reply() {
             let modes = resources.modes;
             for (idx, crtc_id) in resources.crtcs.iter().enumerate() {

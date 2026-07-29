@@ -471,9 +471,12 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
             }
         }
 
+        // GetScreenResourcesCurrent: the probing variant re-reads every EDID
+        // over DDC and re-probes offload GPU outputs, blocking the X server
+        // (and thus the whole desktop) for up to seconds on hybrid setups.
         let res_cookie = self
             .conn
-            .send_request(&xcb::randr::GetScreenResources { window: root });
+            .send_request(&xcb::randr::GetScreenResourcesCurrent { window: root });
         if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
             for (idx, crtc_id) in resources.crtcs().iter().enumerate() {
                 let info_cookie = self.conn.send_request(&xcb::randr::GetCrtcInfo {
@@ -509,7 +512,7 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
             if ver.major_version() > 1 || (ver.major_version() == 1 && ver.minor_version() >= 5) {
                 let res_cookie = self
                     .conn
-                    .send_request(&xcb::randr::GetScreenResources { window: root });
+                    .send_request(&xcb::randr::GetScreenResourcesCurrent { window: root });
                 if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
                     let modes = resources.modes();
                     let mon_cookie = self.conn.send_request(&xcb::randr::GetMonitors {
@@ -556,7 +559,7 @@ impl X11RandrOps for XcbCompositorProtocol<'_> {
 
         let res_cookie = self
             .conn
-            .send_request(&xcb::randr::GetScreenResources { window: root });
+            .send_request(&xcb::randr::GetScreenResourcesCurrent { window: root });
         if let Ok(resources) = self.conn.wait_for_reply(res_cookie) {
             let modes = resources.modes();
             for (idx, crtc_id) in resources.crtcs().iter().enumerate() {
