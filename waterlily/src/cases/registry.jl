@@ -6,8 +6,10 @@ const CASE_REGISTRY = Dict{String,Function}(
     "tandem" => build_tandem_case,
     "diamond" => build_diamond_case,
     "orbit" => build_orbit_case,
+    "puddle" => build_puddle_case,
     "rain" => build_rain_case,
     "stylus" => build_stylus_case,
+    "turbulence" => build_turbulence_case,
     "waltz" => build_waltz_case,
     "wander" => build_wander_case,
 )

@@ -18,7 +18,10 @@ public `AutoBody` and `Simulation` APIs:
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
+| `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
+| `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
 | `stylus` | Cylinder chasing the mouse pointer through quiescent fluid on a critically damped spring, so every cursor stroke writes vorticity onto the canvas | fluent rainbow |
+| `turbulence` | Free two-dimensional turbulence: random seeded vortices merge and strain into filaments while pointer strokes stir new dipoles in and an ambient reseed keeps the canvas alive | fluent rainbow |
 | `waltz` | Cylinder following the mouse pointer through a uniform stream with dance's transverse heave riding the chase spring, trailing the braided wake from the cursor | mica teal/amethyst |
 | `wander` | Cylinder roaming quiescent fluid on a smooth non-repeating Lissajous path, trailing its wake across the whole canvas (default) | aurora teal/magenta |
 

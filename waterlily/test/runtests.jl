@@ -97,9 +97,11 @@ end
         "flap",
         "hover",
         "orbit",
+        "puddle",
         "rain",
         "stylus",
         "tandem",
+        "turbulence",
         "waltz",
         "wander",
     ]
@@ -324,10 +326,13 @@ end
     end
 end
 
-# The rain case is a host-side particle model with translucent output and no
-# immersed body, so it has its own testset below instead of the fluid smoke.
+# The rain and puddle cases are host-side models with translucent output, so
+# they have their own testsets below instead of the fluid smoke.
 @testset "CPU simulation smoke: $name" for name in
-                                           filter(!=("rain"), available_cases())
+                                           filter(
+    n -> !(n in ("rain", "puddle")),
+    available_cases(),
+)
     simulation_case = build_case(name, (64, 64); memory=Array)
     JwmWaterLily.advance!(simulation_case, 0.01)
     rgba = render_rgba(simulation_case)
@@ -345,12 +350,79 @@ end
     @test scratch_rgba === scratch.rgba
     @test scratch_rgba == rgba
 
+    # Bodiless cases (turbulence) advertise no bounds; every case with a body
+    # must keep it inside them.
     bounds = JwmWaterLily.body_bounds(simulation_case, pose_time)
-    @test bounds !== nothing
-    xmin, xmax, ymin, ymax = bounds
-    center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
-    @test JwmWaterLily.body_distance(simulation_case, center_x, center_y, pose_time) <
-          (xmax - xmin)
+    if bounds !== nothing
+        xmin, xmax, ymin, ymax = bounds
+        center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
+        @test JwmWaterLily.body_distance(simulation_case, center_x, center_y, pose_time) <
+              (xmax - xmin)
+    end
+end
+
+@testset "puddle ripples spread, foam, and follow the pointer" begin
+    case = build_case("puddle", (128, 96); memory=Array)
+    @test JwmWaterLily.case_palette_name(case) == "ocean"
+    @test case.grid == (64, 48)
+
+    # A splash disturbs the surface and the ring spreads outward over time.
+    JwmWaterLily.splash!(case, 32.0, 24.0, 2.5, 4.0)
+    JwmWaterLily.advance!(case, 0.2)
+    @test JwmWaterLily.simulation_time(case) ≈ 0.2
+    disturbed = maximum(abs, case.height)
+    @test disturbed > 0
+
+    # Render while the ring is still inside the small test pond — it crosses
+    # the open boundaries and gets absorbed within another half second.
+    rgba = render_rgba(case)
+    @test length(rgba) == 128 * 96 * 4
+    # The whole pond is a water lens: every pixel stays translucent.
+    @test all(<(0xf7), @view rgba[4:4:end])
+    @test length(unique(Iterators.partition(rgba, 4))) > 2
+
+    far_before = abs(case.height[56, 24])
+    JwmWaterLily.advance!(case, 0.25)
+    @test abs(case.height[56, 24]) != far_before
+
+    # Pointer wakes only start once a previous event defines the stroke;
+    # splashes stamp the surface height directly.
+    energy_before = sum(abs2, case.height)
+    JwmWaterLily.handle_pointer!(case, 0.3, 0.5)
+    @test sum(abs2, case.height) ≈ energy_before
+    JwmWaterLily.handle_pointer!(case, 0.6, 0.5)
+    @test sum(abs2, case.height) > energy_before
+
+    achieved = JwmWaterLily.advance_budgeted!(
+        case,
+        0.1,
+        time_ns() + UInt64(30_000_000_000),
+    )
+    @test achieved ≈ 0.1
+end
+
+@testset "turbulence seeds vortices and stirs along strokes" begin
+    case = build_case("turbulence", (64, 64); memory=Array)
+    @test JwmWaterLily.case_palette_name(case) == "fluent"
+    @test JwmWaterLily.body_bounds(case, 0.0) === nothing
+
+    # The seeded field starts alive.
+    @test sum(abs2, case.simulation.flow.u) > 0
+
+    # The first pointer event only anchors the stroke; the second stirs a
+    # dipole in along the motion.
+    energy_before = sum(abs2, case.simulation.flow.u)
+    JwmWaterLily.handle_pointer!(case, 0.3, 0.5)
+    @test sum(abs2, case.simulation.flow.u) ≈ energy_before
+    JwmWaterLily.handle_pointer!(case, 0.7, 0.5)
+    @test sum(abs2, case.simulation.flow.u) > energy_before
+
+    # The ambient reseed fires once its deadline passes.
+    case.reseed_time = -1.0
+    energy_before = sum(abs2, case.simulation.flow.u)
+    JwmWaterLily.frame_tick!(case)
+    @test sum(abs2, case.simulation.flow.u) != energy_before
+    @test case.reseed_time > JwmWaterLily.simulation_time(case)
 end
 
 @testset "rain drops pin, run, and wipe the mist" begin
