@@ -1,6 +1,7 @@
 //! Backend-independent modal system UI state.
 
 use crate::jwm::features::launcher::LauncherRow;
+use crate::jwm::features::shell_hub::ShellHubRoute;
 use std::cmp::Reverse;
 use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -107,6 +108,10 @@ pub enum SystemUiState {
         /// rows whose "off" state the user cannot recover from. Moving the
         /// selection disarms it.
         armed: bool,
+        /// The full Shell Hub adds navigation routes, grouped sections and a
+        /// scrolling viewport. Tests and compact callers can retain the legacy
+        /// flat control list by leaving this false.
+        shell_hub: bool,
     },
     /// Notifications, Wi-Fi networks, Bluetooth devices, and wallpapers are
     /// all the same panel: a scrolling list with a status line and an
@@ -233,6 +238,8 @@ pub struct ListRow {
 /// actions to Return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlKind {
+    /// A route from the shell's home surface to another native panel.
+    Shell(ShellHubRoute),
     /// Transport row for the active MPRIS player: Left/Right skip, Return
     /// toggles playback.
     Media,
@@ -283,6 +290,14 @@ pub struct ControlEntry {
 /// mis-ordered bool would silently light the wrong toggle.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ControlCenterInputs<'a> {
+    /// Enable the Quickshell-inspired home surface. Kept opt-in at this pure
+    /// constructor so focused unit tests can still build the legacy flat list.
+    pub shell_hub: bool,
+    pub notification_count: usize,
+    /// `None` hides the route because clipboard history is disabled.
+    pub clipboard_count: Option<usize>,
+    /// Current wallpaper path, copied into a compact file-name status.
+    pub wallpaper: Option<&'a str>,
     pub media: Option<&'a crate::jwm::features::MediaState>,
     /// Percentage and mute state, when a working audio control exists.
     pub volume: Option<(u8, bool)>,
@@ -305,6 +320,108 @@ pub struct ControlCenterInputs<'a> {
     pub do_not_disturb: bool,
     /// Whether the idle policy is being held off.
     pub idle_inhibited: bool,
+}
+
+const SHELL_HUB_VISIBLE_LINES: usize = 18;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlSection {
+    Shell,
+    NowPlaying,
+    QuickSettings,
+    SoundDisplay,
+    System,
+    Session,
+}
+
+impl ControlSection {
+    const fn order(self) -> u8 {
+        match self {
+            Self::Shell => 0,
+            Self::NowPlaying => 1,
+            Self::QuickSettings => 2,
+            Self::SoundDisplay => 3,
+            Self::System => 4,
+            Self::Session => 5,
+        }
+    }
+
+    const fn heading(self) -> &'static str {
+        match self {
+            Self::Shell => "  \u{2500}\u{2500} SHELL",
+            Self::NowPlaying => "  \u{2500}\u{2500} NOW PLAYING",
+            Self::QuickSettings => "  \u{2500}\u{2500} QUICK SETTINGS",
+            Self::SoundDisplay => "  \u{2500}\u{2500} SOUND & DISPLAY",
+            Self::System => "  \u{2500}\u{2500} SYSTEM",
+            Self::Session => "  \u{2500}\u{2500} SESSION",
+        }
+    }
+}
+
+fn control_section(kind: ControlKind) -> ControlSection {
+    match kind {
+        ControlKind::Shell(_) => ControlSection::Shell,
+        ControlKind::Media => ControlSection::NowPlaying,
+        ControlKind::Network
+        | ControlKind::Bluetooth
+        | ControlKind::NightLight
+        | ControlKind::DoNotDisturb
+        | ControlKind::Caffeine => ControlSection::QuickSettings,
+        ControlKind::Volume
+        | ControlKind::Brightness
+        | ControlKind::AudioOutput
+        | ControlKind::AudioInput => ControlSection::SoundDisplay,
+        ControlKind::Battery
+        | ControlKind::Cpu
+        | ControlKind::Memory
+        | ControlKind::NetworkThroughput
+        | ControlKind::PowerProfile => ControlSection::System,
+        ControlKind::LockScreen | ControlKind::Session => ControlSection::Session,
+    }
+}
+
+fn shell_hub_rows(
+    entries: &[ControlEntry],
+    selected: usize,
+    armed: bool,
+) -> (Vec<String>, Option<usize>) {
+    if entries.is_empty() {
+        return (Vec::new(), None);
+    }
+
+    let selected = selected.min(entries.len() - 1);
+    let mut all = Vec::with_capacity(entries.len() + 6);
+    let mut previous_section = None;
+    let mut selected_visual = 0;
+
+    for (index, entry) in entries.iter().enumerate() {
+        let section = control_section(entry.kind);
+        if previous_section != Some(section) {
+            all.push(section.heading().to_string());
+            previous_section = Some(section);
+        }
+
+        if index == selected {
+            selected_visual = all.len();
+        }
+        let row = SystemUiState::control_row_text(entry);
+        all.push(if armed && index == selected {
+            format!("{row}   \u{2190} Enter to confirm")
+        } else {
+            row
+        });
+    }
+
+    let max_start = all.len().saturating_sub(SHELL_HUB_VISIBLE_LINES);
+    let start = selected_visual
+        .saturating_sub(SHELL_HUB_VISIBLE_LINES / 2)
+        .min(max_start);
+    let items = all
+        .into_iter()
+        .skip(start)
+        .take(SHELL_HUB_VISIBLE_LINES)
+        .collect();
+    (items, Some(selected_visual - start))
 }
 
 /// Whether activating this row needs a second Enter to confirm.
@@ -400,10 +517,12 @@ impl Clone for SystemUiState {
                 entries,
                 selected,
                 armed,
+                shell_hub,
             } => Self::ControlCenter {
                 entries: entries.clone(),
                 selected: *selected,
                 armed: *armed,
+                shell_hub: *shell_hub,
             },
             Self::ListPanel {
                 kind,
@@ -492,6 +611,10 @@ impl SystemUiState {
     /// Volume/brightness rows appear only when a working control exists.
     pub fn control_center(inputs: &ControlCenterInputs<'_>) -> Self {
         let ControlCenterInputs {
+            shell_hub,
+            notification_count,
+            clipboard_count,
+            wallpaper,
             media,
             volume,
             brightness,
@@ -507,6 +630,40 @@ impl SystemUiState {
             idle_inhibited,
         } = *inputs;
         let mut entries = Vec::new();
+        if shell_hub {
+            entries.push(ControlEntry {
+                kind: ControlKind::Shell(ShellHubRoute::Applications),
+                percent: 0,
+                enabled: false,
+                label: ShellHubRoute::Applications.row(None, None),
+            });
+            entries.push(ControlEntry {
+                kind: ControlKind::Shell(ShellHubRoute::Notifications),
+                percent: 0,
+                enabled: false,
+                label: ShellHubRoute::Notifications.row(Some(notification_count), None),
+            });
+            if let Some(count) = clipboard_count {
+                entries.push(ControlEntry {
+                    kind: ControlKind::Shell(ShellHubRoute::Clipboard),
+                    percent: 0,
+                    enabled: false,
+                    label: ShellHubRoute::Clipboard.row(Some(count), None),
+                });
+            }
+            entries.push(ControlEntry {
+                kind: ControlKind::Shell(ShellHubRoute::Calendar),
+                percent: 0,
+                enabled: false,
+                label: ShellHubRoute::Calendar.row(None, None),
+            });
+            entries.push(ControlEntry {
+                kind: ControlKind::Shell(ShellHubRoute::Wallpaper),
+                percent: 0,
+                enabled: false,
+                label: ShellHubRoute::Wallpaper.row(None, wallpaper),
+            });
+        }
         if let Some(media) = media {
             entries.push(ControlEntry {
                 kind: ControlKind::Media,
@@ -622,10 +779,16 @@ impl SystemUiState {
         ));
         entries.push(ControlEntry::simple(ControlKind::LockScreen, 0, false));
         entries.push(ControlEntry::simple(ControlKind::Session, 0, false));
+        if shell_hub {
+            // A stable section sort keeps hardware-dependent rows grouped
+            // without changing their order inside a group.
+            entries.sort_by_key(|entry| control_section(entry.kind).order());
+        }
         Self::ControlCenter {
             entries,
             selected: 0,
             armed: false,
+            shell_hub,
         }
     }
 
@@ -1263,7 +1426,8 @@ impl SystemUiState {
     /// `percent`/`enabled` carry it pre-rendered in `label`.
     fn control_row_text(entry: &ControlEntry) -> String {
         match entry.kind {
-            ControlKind::Media
+            ControlKind::Shell(_)
+            | ControlKind::Media
             | ControlKind::Battery
             | ControlKind::Cpu
             | ControlKind::Memory
@@ -1319,6 +1483,7 @@ impl SystemUiState {
             entries,
             selected,
             armed,
+            ..
         } = self
         else {
             return None;
@@ -1693,6 +1858,7 @@ impl SystemUiState {
             entries,
             selected,
             armed,
+            ..
         } = self
         {
             // Moving off an armed row cancels the confirmation: it belonged to
@@ -1924,26 +2090,41 @@ impl SystemUiState {
                 entries,
                 selected,
                 armed,
+                shell_hub,
             } => {
-                let items = entries
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| {
-                        let row = Self::control_row_text(entry);
-                        if *armed && index == *selected {
-                            format!("{row}   \u{2190} Enter to confirm")
-                        } else {
-                            row
-                        }
-                    })
-                    .collect();
+                let (items, visual_selection) = if *shell_hub {
+                    shell_hub_rows(entries, *selected, *armed)
+                } else {
+                    (
+                        entries
+                            .iter()
+                            .enumerate()
+                            .map(|(index, entry)| {
+                                let row = Self::control_row_text(entry);
+                                if *armed && index == *selected {
+                                    format!("{row}   \u{2190} Enter to confirm")
+                                } else {
+                                    row
+                                }
+                            })
+                            .collect(),
+                        Some((*selected).min(entries.len().saturating_sub(1))),
+                    )
+                };
                 OverlayParts {
-                    title: "\u{f1de}  CONTROL CENTER".into(),
+                    title: if *shell_hub {
+                        "\u{f1de}  JWM SHELL".into()
+                    } else {
+                        "\u{f1de}  CONTROL CENTER".into()
+                    },
                     query: None,
                     items,
-                    selected: Some((*selected).min(entries.len().saturating_sub(1))),
+                    selected: visual_selection,
                     hint: if *armed {
-                        "Enter  confirm    Esc  close".into()
+                        "Enter  confirm    Esc  back".into()
+                    } else if *shell_hub {
+                        "A apps  N notices  C clipboard  D calendar  W wallpaper    \u{f062}/\u{f063} move  Enter  Esc"
+                            .into()
                     } else {
                         "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into()
                     },
@@ -3127,6 +3308,80 @@ mod tests {
         assert_eq!(
             rebuilt.selected_notification().expect("row").1.as_deref(),
             Some("notes")
+        );
+    }
+
+    #[test]
+    fn shell_hub_groups_routes_and_maps_selection_past_headers() {
+        let network = crate::jwm::features::NetworkState {
+            wifi_enabled: true,
+            ..Default::default()
+        };
+        let state = SystemUiState::control_center(&ControlCenterInputs {
+            shell_hub: true,
+            notification_count: 3,
+            clipboard_count: Some(8),
+            wallpaper: Some("/home/test/Pictures/aurora.png"),
+            volume: Some((45, false)),
+            network: Some(&network),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            state.selected_control(),
+            Some(ControlKind::Shell(ShellHubRoute::Applications))
+        );
+        let parts = state.overlay_parts();
+        assert_eq!(parts.title, "\u{f1de}  JWM SHELL");
+        let selected = parts.selected.expect("hub selection");
+        assert!(parts.items[selected].contains("Applications"));
+        assert!(
+            parts
+                .items
+                .iter()
+                .any(|row| row.contains("\u{2500}\u{2500} SHELL"))
+        );
+        assert!(parts.items.iter().any(|row| row.contains("3 waiting")));
+        assert!(parts.items.iter().any(|row| row.contains("8 saved")));
+        assert!(parts.items.iter().any(|row| row.contains("aurora.png")));
+    }
+
+    #[test]
+    fn shell_hub_viewport_keeps_late_sections_visible() {
+        let resources = crate::jwm::features::ResourceState {
+            cpu_present: true,
+            memory: Some(crate::jwm::features::MemoryUsage {
+                total_kib: 1024,
+                used_kib: 512,
+            }),
+            net_present: true,
+            ..Default::default()
+        };
+        let mut state = SystemUiState::control_center(&ControlCenterInputs {
+            shell_hub: true,
+            clipboard_count: Some(1),
+            resources: Some(&resources),
+            volume: Some((20, false)),
+            brightness: Some(70),
+            ..Default::default()
+        });
+
+        for _ in 0..32 {
+            if state.selected_control() == Some(ControlKind::Session) {
+                break;
+            }
+            state.move_selection(1);
+        }
+        assert_eq!(state.selected_control(), Some(ControlKind::Session));
+        let parts = state.overlay_parts();
+        assert!(parts.items.len() <= SHELL_HUB_VISIBLE_LINES);
+        let selected = parts.selected.expect("selection");
+        assert!(parts.items[selected].contains("Session"));
+        assert!(
+            parts
+                .items
+                .iter()
+                .any(|row| row.contains("\u{2500}\u{2500} SESSION"))
         );
     }
 

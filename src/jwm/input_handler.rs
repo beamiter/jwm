@@ -377,8 +377,21 @@ impl Jwm {
         backend: &mut dyn Backend,
         control: crate::jwm::features::ControlKind,
         keysym: u32,
+        mods: Mods,
     ) {
-        use crate::jwm::features::{ControlKind, system_controls};
+        use crate::jwm::features::{ControlKind, ShellHubRoute, system_controls};
+
+        let command_mods = Mods::CONTROL | Mods::ALT | Mods::SUPER;
+        let route = (!mods.intersects(command_mods))
+            .then(|| Self::system_ui_char(keysym, mods))
+            .flatten()
+            .and_then(ShellHubRoute::from_shortcut);
+        if let Some(route) = route {
+            if let Err(error) = self.open_shell_hub_route(backend, route) {
+                log::debug!("shell hub route {}: {error}", route.label());
+            }
+            return;
+        }
 
         let slider_delta = match keysym {
             keys::KEY_Left => Some(-5),
@@ -393,6 +406,14 @@ impl Jwm {
             self.features.system_ui.move_selection(1);
         } else {
             match control {
+                ControlKind::Shell(route) => {
+                    if activate {
+                        if let Err(error) = self.open_shell_hub_route(backend, route) {
+                            log::debug!("shell hub route {}: {error}", route.label());
+                        }
+                        return;
+                    }
+                }
                 ControlKind::Media => {
                     // Left/Right skip tracks rather than adjusting a value;
                     // the bridge pushes the new state back, which refreshes
@@ -453,6 +474,7 @@ impl Jwm {
                         NetworkRowAction::OpenPicker => {
                             if let Some(scan) = connectivity::start_scan() {
                                 self.features.wifi_scan = Some(scan);
+                                self.features.system_ui_return_to_hub = true;
                                 self.features.system_ui =
                                     crate::jwm::features::SystemUiState::wifi_picker(
                                         "Scanning\u{2026}",
@@ -488,6 +510,7 @@ impl Jwm {
                         BluetoothRowAction::OpenPicker => {
                             if let Some(scan) = connectivity::start_device_scan() {
                                 self.features.bluetooth_scan = Some(scan);
+                                self.features.system_ui_return_to_hub = true;
                                 self.features.system_ui =
                                     crate::jwm::features::SystemUiState::bluetooth_picker(
                                         "Reading devices\u{2026}",
@@ -529,6 +552,7 @@ impl Jwm {
                         let devices = system_controls::audio_devices(direction);
                         if !devices.is_empty() {
                             // Swap the panel for the picker; the grabs stay.
+                            self.features.system_ui_return_to_hub = true;
                             self.features.system_ui =
                                 crate::jwm::features::SystemUiState::audio_picker(
                                     direction, &devices,
@@ -592,6 +616,7 @@ impl Jwm {
                 ControlKind::Session => {
                     if activate {
                         // Swap the panel for the session menu; the grabs stay.
+                        self.features.system_ui_return_to_hub = true;
                         self.features.system_ui =
                             crate::jwm::features::SystemUiState::session_menu();
                         self.sync_system_ui(backend);
@@ -600,6 +625,8 @@ impl Jwm {
                 }
                 ControlKind::LockScreen => {
                     if activate {
+                        // A lock is terminal rather than a child page.
+                        self.features.system_ui_return_to_hub = false;
                         // Swap the panel for the lock overlay; the keyboard and
                         // pointer grabs stay in place for the lock screen.
                         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
@@ -767,7 +794,11 @@ impl Jwm {
                 return Ok(());
             }
             if keysym == keys::KEY_Escape && !locked {
-                self.close_system_ui(backend);
+                if self.features.system_ui_return_to_hub {
+                    self.return_to_shell_hub(backend);
+                } else {
+                    self.close_system_ui(backend);
+                }
                 return Ok(());
             }
             if self.features.system_ui.is_monitor_layout() {
@@ -847,7 +878,7 @@ impl Jwm {
                 return Ok(());
             }
             if let Some(control) = self.features.system_ui.selected_control() {
-                self.handle_control_center_key(backend, control, keysym);
+                self.handle_control_center_key(backend, control, keysym, clean_state);
                 return Ok(());
             }
             if self.features.system_ui.is_notification_center() {

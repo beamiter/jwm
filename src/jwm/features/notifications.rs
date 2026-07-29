@@ -472,6 +472,7 @@ impl crate::jwm::Jwm {
         // A center left open while a notification arrives would otherwise show
         // a stale list.
         self.refresh_open_notification_center();
+        self.refresh_open_control_center();
         id
     }
 
@@ -486,6 +487,7 @@ impl crate::jwm::Jwm {
             serde_json::json!({ "id": id, "reason": reason.code() }),
         );
         self.features.system_ui.remove_notification(id);
+        self.refresh_open_control_center();
         true
     }
 
@@ -506,6 +508,7 @@ impl crate::jwm::Jwm {
             );
         }
         self.features.system_ui.clear_notifications();
+        self.refresh_open_control_center();
         count
     }
 

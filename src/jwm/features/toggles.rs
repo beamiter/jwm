@@ -15,11 +15,6 @@ use crate::jwm::types::WMArgEnum;
 use log::{error, info};
 use std::process::Command;
 
-/// Whether the control center should carry the machine's resource rows.
-fn cfg_resource_rows() -> bool {
-    CONFIG.load().behavior().resource_rows
-}
-
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
     /// (percentage points) and show the OSD with the result.
@@ -134,28 +129,22 @@ impl Jwm {
         Ok(())
     }
 
-    /// Open the DMS/Noctalia-style control center: volume/brightness sliders
-    /// plus quick toggles, driven entirely by the keyboard.
-    pub(crate) fn control_center(
-        &mut self,
-        backend: &mut dyn Backend,
-        _arg: &WMArgEnum,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
-            return Ok(());
-        }
-        self.prepare_system_ui(backend, "control center", true)?;
+    fn build_shell_hub_state(&self) -> crate::jwm::features::SystemUiState {
         let volume = crate::jwm::features::system_controls::volume_state()
             .map(|state| (state.percent, state.muted));
         let brightness = crate::jwm::features::system_controls::brightness_percent();
-        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
-        // Open with the cached connectivity reading — read_state() shells out
-        // to nmcli and can block for seconds — and re-read in the background;
-        // the rows update in place once the fresh state is adopted.
-        self.refresh_connectivity();
         let profiles = crate::jwm::features::power::profiles();
-        self.features.system_ui = crate::jwm::features::SystemUiState::control_center(
+        let cfg = CONFIG.load();
+        let behavior = cfg.behavior();
+        crate::jwm::features::SystemUiState::control_center(
             &crate::jwm::features::ControlCenterInputs {
+                shell_hub: true,
+                notification_count: self.features.notifications.len(),
+                clipboard_count: behavior
+                    .clipboard_history
+                    .then_some(self.features.clipboard.len()),
+                wallpaper: (!behavior.wallpaper.trim().is_empty())
+                    .then_some(behavior.wallpaper.as_str()),
                 media: self.features.media.get(),
                 volume,
                 brightness,
@@ -168,9 +157,7 @@ impl Jwm {
                     .audio_defaults
                     .name(crate::jwm::features::system_controls::AudioDirection::Input),
                 battery: self.features.battery.as_ref(),
-                // Gated here as well as in the poll: the rows must vanish the
-                // moment the key is switched off, not at the next sample.
-                resources: cfg_resource_rows().then_some(&self.features.resources),
+                resources: behavior.resource_rows.then_some(&self.features.resources),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
                 power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
@@ -178,7 +165,89 @@ impl Jwm {
                 do_not_disturb: self.do_not_disturb,
                 idle_inhibited: self.idle_inhibited,
             },
-        );
+        )
+    }
+
+    fn wallpaper_picker_state() -> crate::jwm::features::SystemUiState {
+        use crate::jwm::features::wallpaper;
+
+        let (current, directory) = {
+            let cfg = CONFIG.load();
+            let behavior = cfg.behavior();
+            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+            (
+                behavior.wallpaper.clone(),
+                wallpaper::resolve_directory(&behavior.wallpaper_dir, &behavior.wallpaper, &home),
+            )
+        };
+        let paths = wallpaper::list_wallpapers(&directory);
+        crate::jwm::features::SystemUiState::wallpaper_picker(
+            &paths,
+            &current,
+            &directory.to_string_lossy(),
+        )
+    }
+
+    /// Swap from the shell home page to one of its native child pages while
+    /// retaining the keyboard/pointer grabs. Escape returns to the hub.
+    pub(crate) fn open_shell_hub_route(
+        &mut self,
+        backend: &mut dyn Backend,
+        route: crate::jwm::features::ShellHubRoute,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::jwm::features::{ShellHubRoute, SystemUiState};
+
+        let next = match route {
+            ShellHubRoute::Applications => {
+                SystemUiState::open_launcher(self.launcher_window_snapshot())
+            }
+            ShellHubRoute::Notifications => SystemUiState::notification_center(
+                &self.features.notifications,
+                crate::jwm::features::notifications::now_unix_ms(),
+            ),
+            ShellHubRoute::Clipboard => {
+                if !CONFIG.load().behavior().clipboard_history {
+                    return Err("clipboard history is disabled (behavior.clipboard_history)".into());
+                }
+                SystemUiState::clipboard_picker(&self.features.clipboard)
+            }
+            ShellHubRoute::Calendar => SystemUiState::calendar(chrono::Local::now().naive_local()),
+            ShellHubRoute::Wallpaper => Self::wallpaper_picker_state(),
+        };
+
+        self.features.system_ui_return_to_hub = true;
+        self.features.system_ui = next;
+        self.sync_system_ui(backend);
+        Ok(())
+    }
+
+    /// Rebuild the shell home page after leaving a child page. This path does
+    /// not reacquire grabs or toggle the compositor.
+    pub(crate) fn return_to_shell_hub(&mut self, backend: &mut dyn Backend) {
+        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
+        self.features.system_ui_return_to_hub = false;
+        self.features.system_ui = self.build_shell_hub_state();
+        self.sync_system_ui(backend);
+    }
+
+    /// Open the Quickshell-inspired Shell Hub: native routes, live badges,
+    /// grouped quick settings and system status in one keyboard-driven surface.
+    pub(crate) fn control_center(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            return Ok(());
+        }
+        self.prepare_system_ui(backend, "control center", true)?;
+        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
+        // Open with the cached connectivity reading — read_state() shells out
+        // to nmcli and can block for seconds — and re-read in the background;
+        // the rows update in place once the fresh state is adopted.
+        self.refresh_connectivity();
+        self.features.system_ui_return_to_hub = false;
+        self.features.system_ui = self.build_shell_hub_state();
         self.sync_system_ui(backend);
         Ok(())
     }
@@ -196,35 +265,7 @@ impl Jwm {
             crate::jwm::features::SystemUiState::ControlCenter { selected, .. } => *selected,
             _ => 0,
         };
-        let volume = crate::jwm::features::system_controls::volume_state()
-            .map(|state| (state.percent, state.muted));
-        let brightness = crate::jwm::features::system_controls::brightness_percent();
-        let profiles = crate::jwm::features::power::profiles();
-        let mut rebuilt = crate::jwm::features::SystemUiState::control_center(
-            &crate::jwm::features::ControlCenterInputs {
-                media: self.features.media.get(),
-                volume,
-                brightness,
-                audio_output: self
-                    .features
-                    .audio_defaults
-                    .name(crate::jwm::features::system_controls::AudioDirection::Output),
-                audio_input: self
-                    .features
-                    .audio_defaults
-                    .name(crate::jwm::features::system_controls::AudioDirection::Input),
-                battery: self.features.battery.as_ref(),
-                // Gated here as well as in the poll: the rows must vanish the
-                // moment the key is switched off, not at the next sample.
-                resources: cfg_resource_rows().then_some(&self.features.resources),
-                network: self.features.connectivity.network.as_ref(),
-                bluetooth: Some(&self.features.connectivity.bluetooth),
-                power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
-                night_light: self.night_light_active(),
-                do_not_disturb: self.do_not_disturb,
-                idle_inhibited: self.idle_inhibited,
-            },
-        );
+        let mut rebuilt = self.build_shell_hub_state();
         rebuilt.restore_control_selection(selected);
         self.features.system_ui = rebuilt;
         // Rebuilt in memory only. Half this function's callers — a
@@ -418,27 +459,13 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::jwm::features::wallpaper;
-
         if self.features.system_ui.is_active() {
             return Ok(());
         }
-        let (current, directory) = {
-            let cfg = CONFIG.load();
-            let behavior = cfg.behavior();
-            let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
-            (
-                behavior.wallpaper.clone(),
-                wallpaper::resolve_directory(&behavior.wallpaper_dir, &behavior.wallpaper, &home),
-            )
-        };
-        let paths = wallpaper::list_wallpapers(&directory);
+        let next = Self::wallpaper_picker_state();
         self.prepare_system_ui(backend, "the wallpaper picker", true)?;
-        self.features.system_ui = crate::jwm::features::SystemUiState::wallpaper_picker(
-            &paths,
-            &current,
-            &directory.to_string_lossy(),
-        );
+        self.features.system_ui_return_to_hub = false;
+        self.features.system_ui = next;
         self.sync_system_ui(backend);
         Ok(())
     }
@@ -881,6 +908,7 @@ impl Jwm {
     /// Drop the panel, release its grabs, and restore a temporarily enabled
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        self.features.system_ui_return_to_hub = false;
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
         let _ = backend.key_ops().ungrab_keyboard();

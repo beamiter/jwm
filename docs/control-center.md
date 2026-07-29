@@ -1,8 +1,29 @@
-# Control center
+# JWM Shell Hub and control center
 
-`Alt+F10` (`control_center`) opens the shell's quick-settings card. It is
-keyboard-driven: `Up`/`Down` move between rows, `Left`/`Right` adjust,
-`Enter` toggles or activates, `Esc` closes.
+`Alt+F10` (`control_center`) opens JWM's native Shell Hub. Its interaction
+follows the single-surface model popularised by modern Quickshell desktops,
+but the implementation stays inside JWM's Rust state machine and works on the
+same X11 and Wayland backends as every other system UI panel.
+
+The first section routes to the shell's pages:
+
+| Key | Page | Live status |
+| --- | --- | --- |
+| `A` | Applications and open-window search | launcher history and command mode |
+| `N` | Notifications | number retained in history |
+| `C` | Clipboard | number of memory-only entries; hidden when history is disabled |
+| `D` | Calendar | current month |
+| `W` | Wallpaper | current image name |
+
+`Up`/`Down` move between selectable rows, `Left`/`Right` adjust a setting,
+and `Enter` opens or toggles it. A page opened from the Hub keeps the modal
+grabs; `Esc` returns to the Hub, and a second `Esc` closes it. Directly opened
+pages still close with one `Esc`.
+
+The remaining rows are grouped into **Now Playing**, **Quick Settings**,
+**Sound & Display**, **System**, and **Session** sections. The viewport follows
+the selected row, so machines exposing every optional control do not grow a
+panel taller than the monitor.
 
 Rows appear only when the machine can back them, so a desktop with no
 battery, no backlight, and no player shows a short panel rather than dead
