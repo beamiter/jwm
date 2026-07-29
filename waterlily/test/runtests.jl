@@ -21,6 +21,8 @@ using Test
     @test options.requested_size == (320, 200)
     @test options.simulation_size == (320, 208)
     @test normalize_size((128, 128)) == (128, 128)
+    # CUDA is the default backend; CPU and auto remain explicit opt-ins.
+    @test parse_cli(String[]).device == :cuda
     @test_throws ArgumentError parse_cli(["--case", "../../arbitrary.jl"])
     @test_throws ArgumentError parse_cli(["--device", "metal"])
     @test_throws ArgumentError parse_cli(["--unknown", "value"])
@@ -96,6 +98,7 @@ end
         "diamond",
         "flap",
         "hover",
+        "jelly",
         "orbit",
         "puddle",
         "rain",
@@ -326,11 +329,13 @@ end
     end
 end
 
-# The rain and puddle cases are host-side models with translucent output, so
-# they have their own testsets below instead of the fluid smoke.
+# The rain and puddle cases are host-side models with translucent output,
+# and the 3D jelly tank needs real spin-up time before its projection shows
+# structure, so they have their own testsets below instead of the fluid
+# smoke.
 @testset "CPU simulation smoke: $name" for name in
                                            filter(
-    n -> !(n in ("rain", "puddle")),
+    n -> !(n in ("rain", "puddle", "jelly")),
     available_cases(),
 )
     simulation_case = build_case(name, (64, 64); memory=Array)
@@ -359,6 +364,26 @@ end
         @test JwmWaterLily.body_distance(simulation_case, center_x, center_y, pose_time) <
               (xmax - xmin)
     end
+end
+
+@testset "jelly smack pulses in a 3D tank" begin
+    case = build_case("jelly", (64, 64); memory=Array)
+    @test JwmWaterLily.case_palette_name(case) == "violet"
+    # The tank derives from the canvas: multiples of 16, display aspect.
+    @test case.domain == (32, 16, 32)
+    @test JwmWaterLily.body_bounds(case, 0.0) === nothing
+
+    JwmWaterLily.advance!(case, 0.3)
+    @test JwmWaterLily.simulation_time(case) >= 0.3
+    rgba = render_rgba(case)
+    @test length(rgba) == 64 * 64 * 4
+    @test all(==(0xff), @view rgba[4:4:end])
+    @test length(unique(Iterators.partition(rgba, 4))) > 2
+
+    # The pulsing bells shed measurable vorticity, and the projection stays
+    # inside the deterministic sub-autoscale band.
+    @test maximum(case.projected) > 0
+    @test maximum(case.projected) < 0.35
 end
 
 @testset "puddle ripples spread, foam, and follow the pointer" begin

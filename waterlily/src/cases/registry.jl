@@ -1,5 +1,6 @@
 const CASE_REGISTRY = Dict{String,Function}(
     "hover" => build_hover_case,
+    "jelly" => build_jelly_case,
     "cylinder" => build_cylinder_case,
     "dance" => build_dance_case,
     "flap" => build_flap_case,

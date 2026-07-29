@@ -7,6 +7,7 @@ using WaterLily
 include("protocol.jl")
 include("cases/common.jl")
 include("cases/hover.jl")
+include("cases/jelly.jl")
 include("cases/cylinder.jl")
 include("cases/dance.jl")
 include("cases/flap.jl")
@@ -67,7 +68,7 @@ function usage(io::IO=stdout)
         usage: julia --project=waterlily waterlily/runner.jl [options]
 
           --case NAME          registered case ($cases; default: wander)
-          --device DEVICE      auto, cpu, cuda, or rocm (default: auto)
+          --device DEVICE      auto, cpu, cuda, or rocm (default: cuda)
           --fps FPS            publication rate, 1..240 (default: 30)
           --socket PATH        compositor wakeup Unix socket
           --frame-file PATH    private double-buffer frame file
@@ -144,7 +145,7 @@ function parse_cli(args::AbstractVector{<:AbstractString})
 
     values = Dict(
         "--case" => "wander",
-        "--device" => "auto",
+        "--device" => "cuda",
         "--fps" => string(DEFAULT_FPS),
         "--socket" => default_socket_path(),
         "--frame-file" => default_frame_path(),
@@ -261,8 +262,10 @@ function select_backend(requested::Symbol)
     requested == :cpu && return load_backend(:cpu)
 
     if requested in (:cuda, :rocm)
-        probe_backend(requested) ||
-            error("requested $(requested) backend is unavailable or not functional")
+        # Load directly instead of probing in a subprocess: the probe's
+        # timeout can false-negative while a GPU runtime precompiles, and a
+        # direct request should surface the real load error — pass
+        # `--device auto` or `cpu` to fall back gracefully instead.
         return load_backend(requested)
     end
 

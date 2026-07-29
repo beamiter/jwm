@@ -4,6 +4,7 @@
 /video-demo/generated
 /video-demo/tmp
 /waterlily/Manifest.toml
+/waterlily/LocalPreferences.toml
 __pycache__/
 **/*.rs.bk
 *.pdb

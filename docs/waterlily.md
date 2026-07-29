@@ -17,6 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
+| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing bell shells holding station against a downstream current, rendered by projecting the vorticity magnitude through the tank depth | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -143,9 +144,10 @@ test. Start JWM before the worker so the wakeup socket exists.
 The `--device` option accepts:
 
 - `cpu`: ordinary Julia `Array` storage.
-- `cuda`: NVIDIA execution using `CUDA.CuArray`.
+- `cuda`: NVIDIA execution using `CUDA.CuArray` (default). Loaded directly;
+  if CUDA is missing or not functional the worker exits with the load error.
 - `rocm`: AMD execution using `AMDGPU.ROCArray`.
-- `auto`: select an available accelerator and otherwise use the CPU.
+- `auto`: probe for an available accelerator and otherwise use the CPU.
 
 CUDA or ROCm requires a working vendor driver and its Julia package to already
 be available in the project. The runner does not install packages at runtime.
