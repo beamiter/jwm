@@ -43,8 +43,7 @@ mod legacy_shaders;
 mod waterlily_shader;
 pub mod shaders {
     pub use super::legacy_shaders::*;
-    pub const WATERLILY_FRAGMENT_SHADER: &str =
-        super::waterlily_shader::WATERLILY_FRAGMENT_SHADER;
+    pub const WATERLILY_FRAGMENT_SHADER: &str = super::waterlily_shader::WATERLILY_FRAGMENT_SHADER;
 }
 
 pub mod subpixel_integration;
