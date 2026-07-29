@@ -97,6 +97,7 @@ end
         "flap",
         "hover",
         "orbit",
+        "rain",
         "stylus",
         "tandem",
         "waltz",
@@ -323,7 +324,10 @@ end
     end
 end
 
-@testset "CPU simulation smoke: $name" for name in available_cases()
+# The rain case is a host-side particle model with translucent output and no
+# immersed body, so it has its own testset below instead of the fluid smoke.
+@testset "CPU simulation smoke: $name" for name in
+                                           filter(!=("rain"), available_cases())
     simulation_case = build_case(name, (64, 64); memory=Array)
     JwmWaterLily.advance!(simulation_case, 0.01)
     rgba = render_rgba(simulation_case)
@@ -347,4 +351,48 @@ end
     center_x, center_y = (xmin + xmax) / 2, (ymin + ymax) / 2
     @test JwmWaterLily.body_distance(simulation_case, center_x, center_y, pose_time) <
           (xmax - xmin)
+end
+
+@testset "rain drops pin, run, and wipe the mist" begin
+    case = build_case("rain", (128, 96); memory=Array)
+    @test JwmWaterLily.case_palette_name(case) == "glacier"
+    @test !isempty(case.drops)
+
+    JwmWaterLily.advance!(case, 2.0)
+    @test JwmWaterLily.simulation_time(case) ≈ 2.0
+
+    rgba = render_rgba(case)
+    @test length(rgba) == 128 * 96 * 4
+    @test length(unique(Iterators.partition(rgba, 4))) > 2
+    # Drop interiors and wet film are translucent so the sharp scene behind
+    # the canvas shows through them; the mist itself stays opaque key-white.
+    @test any(<(0xff), @view rgba[4:4:end])
+    @test any(==(0xff), @view rgba[4:4:end])
+
+    # The budgeted advance reaches a full step under a generous deadline and
+    # still makes progress under an expired one.
+    full = JwmWaterLily.advance_budgeted!(case, 0.5, time_ns() + UInt64(30_000_000_000))
+    @test full ≈ 0.5
+    partial = JwmWaterLily.advance_budgeted!(case, 10.0, time_ns())
+    @test 0 < partial < 10.0
+
+    # A forced runner sheds a wet trail as it slides.
+    runner = JwmWaterLily.rain_stuck_drop(64.0, 10.0, 0.0, case.unit)
+    runner.radius = runner.release_radius * 1.2f0
+    runner.sliding = true
+    push!(case.drops, runner)
+    JwmWaterLily.advance!(case, 1.0)
+    trail = maximum(
+        @view case.wetness[:, 10:min(96, round(Int, 10 + runner.speed + 3))]
+    )
+    @test trail > 0.5
+
+    # The pointer wipes the mist clear and sweeps drops out of the swath;
+    # the fog then re-forms on its own.
+    JwmWaterLily.handle_pointer!(case, 0.5, 0.5)
+    @test case.wetness[64, 48] ≈ 1.0
+    wipe = 0.055f0 * 96
+    @test all(d -> hypot(d.x - 64, d.y - 48) > wipe, case.drops)
+    JwmWaterLily.advance!(case, 5.0)
+    @test case.wetness[64, 48] < 1.0
 end

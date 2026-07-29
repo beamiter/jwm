@@ -605,6 +605,15 @@ fn waterlily_shader_keys_white_to_translucent_scene_and_preserves_color() {
             1,
             "WaterLily colored flow",
         );
+        // A translucent pixel is a water lens: on a flat alpha field the
+        // refraction offset is zero, so the sharp scene shows through tinted
+        // by the producer color at its alpha, and the output is opaque.
+        assert_pixel(
+            render([100, 120, 140, 60]),
+            [54, 89, 125, 255],
+            2,
+            "WaterLily water lens",
+        );
 
         gl.delete_texture(scene_tex);
         gl.delete_program(prog);

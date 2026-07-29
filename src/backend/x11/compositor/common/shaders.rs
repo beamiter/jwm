@@ -858,6 +858,31 @@ vec4 sample_simulation(vec2 uv) {
 void main() {
     vec4 simulation = sample_simulation(v_uv);
 
+    // Translucent pixels are water lenses: the producer encodes optical
+    // thickness in alpha (thin film ≈ 1, thick drop core ≈ 0), so the alpha
+    // gradient doubles as the lens surface normal. Refract the *sharp* scene
+    // snapshot through it and tint with the producer color. Opaque pixels —
+    // everything the v1 fluid cases emit — never reach this branch.
+    if (u_scene_available == 1 && simulation.a < 0.97) {
+        vec2 texel = 1.0 / vec2(textureSize(u_texture, 0));
+        float left = texture(u_texture, v_uv - vec2(texel.x, 0.0)).a;
+        float right = texture(u_texture, v_uv + vec2(texel.x, 0.0)).a;
+        float above = texture(u_texture, v_uv - vec2(0.0, texel.y)).a;
+        float below = texture(u_texture, v_uv + vec2(0.0, texel.y)).a;
+        float thickness = 1.0 - simulation.a;
+        // Producer rows run top-to-bottom while the framebuffer runs
+        // bottom-up, so the vertical component flips.
+        vec2 slope = vec2(right - left, above - below);
+        vec2 screen_uv = gl_FragCoord.xy / u_screen_size;
+        vec2 offset = slope * (0.02 + 0.06 * thickness);
+        vec3 refracted =
+            texture(u_scene_texture, clamp(screen_uv + offset, 0.0, 1.0)).rgb;
+        float layer_opacity = clamp(u_opacity, 0.0, 1.0);
+        vec3 lens = mix(refracted, simulation.rgb, simulation.a);
+        frag_color = vec4(lens * layer_opacity, layer_opacity);
+        return;
+    }
+
     // The v1 producer emits an opaque, nearly-white simulation background.
     // Key only bright, low-chroma pixels so pale blue/red flow details remain.
     float high = max(simulation.r, max(simulation.g, simulation.b));
