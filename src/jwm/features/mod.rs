@@ -31,6 +31,7 @@ pub mod recording_plan;
 pub mod resources;
 pub mod screenshot;
 pub mod session;
+pub mod shell_hub;
 pub mod system_controls;
 pub mod system_ui;
 pub mod toggles;
@@ -59,6 +60,7 @@ pub use recording_plan::FinalizationPlan;
 pub use resources::{MemoryUsage, ResourceState, Throughput};
 pub use screenshot::ScreenshotState;
 pub use session::SessionAction;
+pub use shell_hub::ShellHubRoute;
 pub use system_ui::{
     ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState,
 };
@@ -116,6 +118,9 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    /// A page opened from the Shell Hub returns there on Escape. Directly
+    /// opened panels still close normally.
+    pub system_ui_return_to_hub: bool,
     /// The compositor was started only to render the current built-in system
     /// UI. Closing the panel (or unlocking) returns to non-composited mode.
     pub system_ui_temporary_compositor: bool,
@@ -153,6 +158,7 @@ impl FeatureStates {
         self.screenshot.cancel();
         self.capture = CaptureInteractionState::default();
         self.system_ui.cancel();
+        self.system_ui_return_to_hub = false;
         self.overview.deactivate();
         self.recording.cancel();
         let _ = self.audio_recording.stop();

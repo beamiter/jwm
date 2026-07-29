@@ -160,6 +160,7 @@ impl crate::jwm::Jwm {
                 "clipboard/changed",
                 serde_json::json!({ "count": self.features.clipboard.len() }),
             );
+            self.refresh_open_control_center();
         }
         changed
     }
@@ -175,6 +176,7 @@ impl crate::jwm::Jwm {
                 "clipboard/changed",
                 serde_json::json!({ "count": 0, "cleared": cleared }),
             );
+            self.refresh_open_control_center();
         }
         cleared
     }
