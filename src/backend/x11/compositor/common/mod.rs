@@ -34,7 +34,19 @@ pub mod render_batcher;
 pub mod render_stats;
 pub mod rules;
 pub mod shader_cache;
-pub mod shaders;
+
+// Keep the large legacy shader bundle untouched.  The wrapper preserves every
+// public constant while explicitly selecting the separately testable, physically
+// based WaterLily shader over the legacy single-sample implementation.
+#[path = "shaders.rs"]
+mod legacy_shaders;
+mod waterlily_shader;
+pub mod shaders {
+    pub use super::legacy_shaders::*;
+    pub const WATERLILY_FRAGMENT_SHADER: &str =
+        super::waterlily_shader::WATERLILY_FRAGMENT_SHADER;
+}
+
 pub mod subpixel_integration;
 pub mod subpixel_render;
 pub mod texture_pool;
