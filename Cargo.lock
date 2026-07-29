@@ -1557,7 +1557,7 @@ dependencies = [
  "winit 0.30.13",
  "x11",
  "x11rb 0.14.0",
- "x11rb-protocol 0.13.2",
+ "x11rb-protocol 0.14.0",
  "xbar_core",
  "xcb",
  "xcursor",
