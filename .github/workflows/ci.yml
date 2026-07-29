@@ -206,7 +206,7 @@ jobs:
           workspaces: portal
 
       - name: Cache the PipeWire prefix
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/jwm/pipewire-prefix
           key: pipewire-prefix-${{ runner.os }}-1.2.7
