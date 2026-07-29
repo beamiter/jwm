@@ -1220,7 +1220,10 @@ impl WaylandX11Backend {
         // instead of smithay's hardcoded 1280x800. (On a multi-monitor X server
         // this is the combined virtual screen size.)
         let (screen_w, screen_h) = {
-            use x11rb::connection::Connection as _;
+            // The connection comes from smithay, so the trait must too: the
+            // crate's direct x11rb dependency tracks a newer major whose
+            // `Connection` is a different trait for these types.
+            use smithay::reexports::x11rb::connection::Connection as _;
             let conn = handle.connection();
             let setup = conn.setup();
             let screen = &setup.roots[handle.screen()];
