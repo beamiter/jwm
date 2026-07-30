@@ -179,8 +179,11 @@ pub struct WaterlilyStatus {
     /// True while a WaterLily worker holds the wake socket.
     pub worker_connected: bool,
     /// Dimensions of the last uploaded frame, or zero before the first one.
+    /// A depth above one means the worker publishes volumetric frames and the
+    /// compositor is ray-marching them natively in 3D.
     pub frame_width: u32,
     pub frame_height: u32,
+    pub frame_depth: u32,
     /// Sequence number of the last uploaded frame, or zero before the first.
     pub frame_sequence: u64,
 }

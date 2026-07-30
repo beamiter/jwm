@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing bell shells holding station against a downstream current, rendered by projecting the vorticity magnitude through the tank depth | violet purple/green |
+| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing bell shells holding station against a downstream current, published as a native RGBA volume that the compositor ray-marches in true 3D through a slowly orbiting perspective camera | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -40,10 +40,23 @@ Julia WaterLily worker
   CPU Array / CUDA CuArray / AMDGPU ROCArray
               |
               | RGBA8 double-buffer file + Unix socket wakeups
+              | (version 1: planar frame; version 2: RGBA voxel volume)
               v
 JWM X11 compositor
-  upload texture -> full-screen, frosted, input-transparent canvas layer
+  planar frame -> upload TEXTURE_2D -> full-screen frosted canvas layer
+  volume frame -> upload TEXTURE_3D -> perspective ray-marched 3D tank
 ```
+
+Planar cases publish a display-shaped 2D frame exactly as before. Cases with
+a true 3D solve (currently `jelly`) publish their tank as an RGBA8 voxel
+volume instead; the compositor uploads it as a 3D texture and ray-marches it
+natively with an orbiting perspective camera, front-to-back emission and
+absorption compositing, per-pixel deterministic jitter, and depth cues
+(surface light falloff and view-path haze). The camera pose derives from the
+frame timestamp, so re-rendering an unchanged frame is bit-stable for damage
+tracking while each new simulation frame advances the orbit. Empty tank
+water reveals the same frosted desktop backdrop the planar shader keys out,
+so both paths keep one glass look.
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
@@ -216,6 +229,7 @@ The following environment variables are read when the integration starts:
 | `JWM_WATERLILY_FRAME_FILE` | Shared double-buffer frame file |
 | `JWM_WATERLILY_ENABLED` | Initial enabled state (`1`/`true` enables it) |
 | `JWM_WATERLILY_OPACITY` | Layer blend opacity, clamped to `0..1` |
+| `JWM_WATERLILY_PLANAR` | Worker-side: force volumetric cases through their planar 2D projection (version-1 frames), for consumers without volumetric support |
 
 The socket and frame-file values supplied to JWM and the worker must match.
 The published simulation frame is stretched to cover the display, so the
@@ -229,16 +243,18 @@ dilates into smooth slow motion instead of stuttering. The worker logs the
 sustained simulation speed when it stays below real time; reduce
 `--sim-size` for real-time playback.
 
-## Version 1 frame-file protocol
+## Frame-file protocol
 
-The frame file begins with a fixed 64-byte little-endian header. Two equally
-sized pixel slots follow it.
+The frame file begins with a fixed little-endian header. Two equally sized
+pixel slots follow it. Version 1 describes a planar frame with a 64-byte
+header; version 2 describes a voxel volume with a 96-byte header whose first
+64 bytes are the version-1 prefix byte-for-byte.
 
 | Offset | Size | Type | Field and required value |
 | ---: | ---: | --- | --- |
 | 0 | 8 | bytes | magic `JWMLILY\0` |
-| 8 | 4 | `u32` LE | version, `1` |
-| 12 | 4 | `u32` LE | header length, `64` |
+| 8 | 4 | `u32` LE | version, `1` planar or `2` volumetric |
+| 12 | 4 | `u32` LE | header length, `64` (v1) or `96` (v2) |
 | 16 | 4 | `u32` LE | width in pixels |
 | 20 | 4 | `u32` LE | height in pixels |
 | 24 | 4 | `u32` LE | row stride in bytes |
@@ -249,21 +265,31 @@ sized pixel slots follow it.
 | 44 | 4 | `u32` LE | published slot, `0` or `1` |
 | 48 | 8 | `u64` LE | monotonically increasing sequence |
 | 56 | 8 | `u64` LE | producer timestamp in nanoseconds |
+| 64 | 4 | `u32` LE | (v2 only) depth in slices, at least `1` |
+| 68 | 28 | bytes | (v2 only) reserved, zero |
 
-For a slot size `S = stride * height`, the byte ranges are:
+For a header length `H`, a slot size `S = stride * height * depth` (depth is
+`1` in version 1), the byte ranges are:
 
 ```text
-header: [0, 64)
-slot 0: [64, 64 + S)
-slot 1: [64 + S, 64 + 2*S)
-total file length: 64 + 2*S
+header: [0, H)
+slot 0: [H, H + S)
+slot 1: [H + S, H + 2*S)
+total file length: H + 2*S
 ```
 
-Version 1 uses top-to-bottom rows and R, G, B, A byte order. `stride` must be at
-least `width * 4`; the built-in worker writes tight rows with equality. Alpha is
-opaque, so producers should write `255` in every alpha byte. Width, height,
-stride, slot, checked slot offsets, and total file length must all validate
-before JWM uploads a frame.
+Both versions use top-to-bottom rows and R, G, B, A byte order. `stride` must
+be at least `width * 4`; the built-in worker writes tight rows with equality.
+Width, height, depth, stride, slot, checked slot offsets, and total file
+length must all validate before JWM uploads a frame.
+
+In version 1 alpha carries per-case semantics over an opaque contract (the
+rain case encodes optical height in inverted alpha; plain cases write `255`).
+A version-2 slot is a stack of `depth` planar slices ordered front (nearest
+the resting camera) to back, each laid out exactly like a version-1 frame;
+voxel RGB is emission color and voxel alpha is the opacity a ray accumulates
+crossing one voxel straight through, which the compositor renormalizes by its
+actual ray-march step length.
 
 The producer takes an exclusive advisory file lock, writes a complete
 non-published slot, publishes its slot, sequence, and timestamp, and then
@@ -280,7 +306,10 @@ silently choosing a different simulation. An adapter is responsible for:
 
 1. constructing its WaterLily simulation for the selected memory device;
 2. advancing the solver independently of display refresh;
-3. reducing a 3D field to a 2D view when necessary;
+3. either reducing a 3D field to a 2D view, or advertising a volumetric
+   `frame_geometry` and colorizing the 3D field with `render_volume!` so the
+   compositor ray-marches it natively (keep a planar path too — it serves the
+   `JWM_WATERLILY_PLANAR` fallback);
 4. applying the case's intended color map and producing RGBA8;
 5. publishing only complete frames through the common writer.
 

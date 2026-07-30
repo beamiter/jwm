@@ -549,6 +549,9 @@ where
     // --- WaterLily simulation layer ---
     waterlily_program: glow::Program,
     waterlily_uniforms: WaterlilyUniforms,
+    /// Ray-marching program for volumetric (version-2) frames.
+    waterlily_volume_program: glow::Program,
+    waterlily_volume_uniforms: WaterlilyVolumeUniforms,
     /// Private scene snapshot used only by the WaterLily frosted backdrop.
     waterlily_scene_fbo: Option<(glow::Framebuffer, glow::Texture)>,
     waterlily_ipc: Option<WaterlilyIpc>,
@@ -896,6 +899,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.gradient_border_program);
             self.gl.delete_program(self.postprocess_program);
             self.gl.delete_program(self.waterlily_program);
+            self.gl.delete_program(self.waterlily_volume_program);
             self.gl.delete_program(self.hud_program);
             self.gl.delete_program(self.hud_text_program);
             self.gl.delete_program(self.annotation_line_program);

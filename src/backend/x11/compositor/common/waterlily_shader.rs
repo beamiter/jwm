@@ -1,11 +1,12 @@
-//! High-quality WaterLily rain-on-glass optics.
+//! High-quality WaterLily rain-on-glass optics and the volumetric tank.
 //!
 //! Kept separate from the legacy shader bundle so the physically based rain path
 //! can evolve without destabilising unrelated compositor effects.  The producer
 //! still sends the version-1 RGBA8 frame contract: inverted alpha is optical
-//! height and RGB remains the authored material/contact tint.
+//! height and RGB remains the authored material/contact tint.  Version-2
+//! volumetric frames render through the dedicated ray-marching shader below.
 
-pub const WATERLILY_FRAGMENT_SHADER: &str = r#"#version 330 core
+pub(super) const WATERLILY_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler2D u_texture;
 uniform sampler2D u_scene_texture;
@@ -319,6 +320,159 @@ void main() {
                        + backdrop * backdrop_alpha * (1.0 - simulation_alpha);
     float alpha = simulation_alpha + backdrop_alpha * (1.0 - simulation_alpha);
 
+    float layer_opacity = clamp(u_opacity, 0.0, 1.0);
+    frag_color = vec4(premultiplied * layer_opacity, alpha * layer_opacity);
+}
+"#;
+
+/// Native 3D display of version-2 volumetric frames: a perspective camera
+/// ray-marches the RGBA volume with front-to-back emission/absorption
+/// compositing, so a true 3D solve (the jellyfish smack) shows real parallax,
+/// occlusion, and depth instead of a baked planar projection.
+///
+/// World conventions shared with the producer contract and the CPU-side
+/// camera: the volume box is centered at the origin; +X is screen right and
+/// maps to the frame width, +Y is up and maps to the per-slice rows (flipped,
+/// rows are top-left), and +Z runs front (slice 0, nearest the resting
+/// camera) to back. Voxel alpha is authored as the opacity a ray accumulates
+/// crossing one voxel, so the marcher renormalizes it by its actual step
+/// length and the image stays invariant under sample-count changes.
+pub(super) const WATERLILY_VOLUME_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler3D u_volume;
+uniform sampler2D u_scene_texture;
+uniform int u_scene_available;
+uniform vec2 u_screen_size;
+uniform float u_opacity;
+uniform vec3 u_camera_position;
+uniform vec3 u_camera_right;
+uniform vec3 u_camera_up;
+uniform vec3 u_camera_forward;
+uniform float u_tan_half_fov;
+uniform vec3 u_box_half_extents;
+
+in vec2 v_uv;
+out vec4 frag_color;
+
+const int MAX_STEPS = 96;
+// Matches the planar shader's quiescent-water keying: empty tank water shows
+// the frosted desktop at the same strength as a near-white 2D frame.
+const float FROST_ALPHA = 0.58;
+
+vec2 clamp_scene_uv(vec2 uv) {
+    vec2 guard_uv = 0.5 / max(u_screen_size, vec2(1.0));
+    return clamp(uv, guard_uv, vec2(1.0) - guard_uv);
+}
+
+vec3 frosted_scene(vec2 uv) {
+    // Same broad transmission lobe as the planar WaterLily backdrop so
+    // switching between planar and volumetric cases keeps one glass look.
+    vec2 step_uv = vec2(2.75) / max(u_screen_size, vec2(1.0));
+    vec3 sum = vec3(0.0);
+    float total = 0.0;
+    for (int y = -4; y <= 4; ++y) {
+        for (int x = -4; x <= 4; ++x) {
+            vec2 p = vec2(float(x), float(y));
+            float weight = exp(-dot(p, p) * 0.18);
+            sum += texture(u_scene_texture, clamp_scene_uv(uv + p * step_uv)).rgb * weight;
+            total += weight;
+        }
+    }
+    return sum / max(total, 1e-5);
+}
+
+// Deterministic per-pixel start jitter (interleaved gradient noise) trades
+// banding for imperceptible high-frequency noise. It depends only on the
+// pixel position, so re-rendering the same frame stays bit-stable and damage
+// tracking keeps its "same inputs, same output" contract.
+float start_jitter(vec2 pixel) {
+    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+}
+
+// Slab intersection with the volume box. IEEE infinities from axis-parallel
+// rays flow through min/max correctly.
+vec2 box_span(vec3 origin, vec3 direction) {
+    vec3 inverse = 1.0 / direction;
+    vec3 near = (-u_box_half_extents - origin) * inverse;
+    vec3 far = (u_box_half_extents - origin) * inverse;
+    vec3 lower = min(near, far);
+    vec3 upper = max(near, far);
+    return vec2(
+        max(max(lower.x, lower.y), lower.z),
+        min(min(upper.x, upper.y), upper.z)
+    );
+}
+
+void main() {
+    vec2 ndc = vec2(v_uv.x * 2.0 - 1.0, 1.0 - v_uv.y * 2.0);
+    float aspect = u_screen_size.x / max(u_screen_size.y, 1.0);
+    vec3 ray = normalize(
+        u_camera_forward
+        + ndc.x * u_tan_half_fov * aspect * u_camera_right
+        + ndc.y * u_tan_half_fov * u_camera_up
+    );
+
+    vec3 accumulated = vec3(0.0);
+    float coverage = 0.0;
+
+    vec2 span = box_span(u_camera_position, ray);
+    float entry = max(span.x, 0.0);
+    if (span.y > entry) {
+        float diagonal = 2.0 * length(u_box_half_extents);
+        float chord = span.y - entry;
+        int steps = int(clamp(
+            chord / diagonal * float(MAX_STEPS),
+            12.0,
+            float(MAX_STEPS)
+        ));
+        float step_length = chord / float(steps);
+        // One voxel of straight-through travel is the producer's opacity
+        // reference length; voxels are cubic, so any axis gives it.
+        float reference = 2.0 * u_box_half_extents.x
+                        / float(textureSize(u_volume, 0).x);
+        float t = entry + step_length * start_jitter(gl_FragCoord.xy);
+
+        for (int i = 0; i < MAX_STEPS; ++i) {
+            if (i >= steps || coverage > 0.985) {
+                break;
+            }
+            vec3 position = u_camera_position + ray * t;
+            vec3 tex = position / (2.0 * u_box_half_extents) + 0.5;
+            tex.y = 1.0 - tex.y;
+            vec4 voxel = texture(u_volume, clamp(tex, vec3(0.0), vec3(1.0)));
+            float alpha = 1.0 - pow(
+                max(1.0 - voxel.a, 0.0),
+                step_length / reference
+            );
+
+            // Two physical depth cues: sunlight fades with depth below the
+            // surface, and water haze mutes emission along the view path.
+            float depth_light = mix(
+                0.82,
+                1.06,
+                clamp(position.y / (2.0 * u_box_half_extents.y) + 0.5, 0.0, 1.0)
+            );
+            float haze = exp(-0.9 * (t - entry) / diagonal);
+            vec3 emission = voxel.rgb * depth_light * mix(0.68, 1.0, haze);
+
+            accumulated += (1.0 - coverage) * alpha * emission;
+            coverage += (1.0 - coverage) * alpha;
+            t += step_length;
+        }
+    }
+
+    // The tank sits in front of the frosted desktop exactly like quiescent
+    // planar water: the marched fluid occludes it, empty water reveals it.
+    vec3 frost = vec3(0.0);
+    float frost_alpha = 0.0;
+    if (u_scene_available == 1) {
+        vec2 screen_uv = gl_FragCoord.xy / max(u_screen_size, vec2(1.0));
+        frost = frosted_scene(screen_uv) * FROST_ALPHA;
+        frost_alpha = FROST_ALPHA;
+    }
+
+    vec3 premultiplied = accumulated + (1.0 - coverage) * frost;
+    float alpha = coverage + (1.0 - coverage) * frost_alpha;
     float layer_opacity = clamp(u_opacity, 0.0, 1.0);
     frag_color = vec4(premultiplied * layer_opacity, alpha * layer_opacity);
 }

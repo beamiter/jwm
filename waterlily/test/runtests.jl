@@ -67,6 +67,46 @@ end
     end
 end
 
+@testset "volumetric frame protocol" begin
+    mktempdir() do directory
+        path = joinpath(directory, "frame")
+        publisher = FramePublisher(path, 2, 2; depth=2)
+        front = UInt8[repeat([0x11, 0x22, 0x33, 0x40], 4)...]
+        back = UInt8[repeat([0x44, 0x55, 0x66, 0x80], 4)...]
+        voxels = vcat(front, back)
+        @test publish!(publisher, voxels, 789) == 1
+        close(publisher)
+
+        bytes = read(path)
+        @test bytes[1:8] == UInt8[codeunits("JWMLILY\0")...]
+        # Version 2 with the 96-byte extended header carrying the depth.
+        @test read_u32_le(bytes, 8) == 2
+        @test read_u32_le(bytes, 12) == 96
+        @test read_u32_le(bytes, 16) == 2
+        @test read_u32_le(bytes, 20) == 2
+        @test read_u32_le(bytes, 24) == 8
+        @test read_u32_le(bytes, 64) == 2
+        @test read_u32_le(bytes, 44) == 0
+        @test read_u64_le(bytes, 48) == 1
+        @test read_u64_le(bytes, 56) == 789
+        # The published slot sits straight behind the extended header and
+        # holds both slices front to back.
+        @test bytes[97:128] == voxels
+        @test length(bytes) == 96 + 2 * 32
+
+        # A geometry switch replaces the file and seeds the next publisher
+        # with the previous sequence, so the consumer's monotonic view
+        # survives the swap and the next publication continues the count.
+        replacement = FramePublisher(path, 2, 2; start_sequence=UInt64(1))
+        @test publish!(replacement, UInt8[repeat([0x01, 0x02, 0x03, 0xff], 4)...], 5) == 2
+        close(replacement)
+        replaced = read(path)
+        @test read_u32_le(replaced, 8) == 1
+        @test read_u32_le(replaced, 12) == 64
+        @test read_u64_le(replaced, 48) == 2
+    end
+end
+
 @testset "RGBA renderer helpers" begin
     @test JwmWaterLily.seismic_color(-1, 1) !=
           JwmWaterLily.seismic_color(1, 1)
@@ -387,6 +427,42 @@ end
     # inside the deterministic sub-autoscale band.
     @test maximum(case.projected) > 0
     @test maximum(case.projected) < 0.35
+
+    # Native volume publication: tank-shaped geometry (width, vertical
+    # extent, front-to-back slices) and a colorized RGBA volume.
+    @test JwmWaterLily.frame_geometry(case) == (32, 32, 16)
+    volume = JwmWaterLily.render_volume!(case)
+    @test volume === case.volume_rgba
+    @test length(volume) == 4 * 32 * 32 * 16
+    alphas = @view volume[4:4:end]
+    # The bells shed vorticity above the wake floor, and the soft knee caps
+    # per-voxel opacity below the 217/255 transfer ceiling.
+    @test maximum(alphas) > 0x00
+    @test maximum(alphas) <= 0xd9
+    # Quiescent water stays fully transparent so the compositor's ray-marcher
+    # reveals the frosted desktop through the empty tank.
+    @test count(==(0x00), alphas) > length(alphas) ÷ 2
+    # Transparent voxels still carry the palette's keyed near-white midpoint.
+    quiet = findfirst(==(0x00), alphas)
+    @test quiet !== nothing
+    quiet_base = 4 * (quiet - 1)
+    @test all(>=(0xf0), volume[quiet_base + 1:quiet_base + 3])
+end
+
+@testset "publish geometry honors the planar override" begin
+    @test !JwmWaterLily.planar_frames_forced()
+    withenv("JWM_WATERLILY_PLANAR" => "1") do
+        @test JwmWaterLily.planar_frames_forced()
+    end
+    withenv("JWM_WATERLILY_PLANAR" => "off") do
+        @test !JwmWaterLily.planar_frames_forced()
+    end
+    case = build_case("jelly", (64, 64); memory=Array)
+    @test JwmWaterLily.publish_geometry(case, false) == (32, 32, 16)
+    @test JwmWaterLily.publish_geometry(case, true) == (64, 64, 1)
+    planar_case = build_case("cylinder", (64, 64); memory=Array)
+    @test JwmWaterLily.publish_geometry(planar_case, false) == (64, 64, 1)
+    @test JwmWaterLily.publish_geometry(planar_case, true) == (64, 64, 1)
 end
 
 @testset "puddle ripples spread, foam, and follow the pointer" begin

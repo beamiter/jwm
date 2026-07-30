@@ -232,10 +232,118 @@ impl Drop for WaterlilyIpc {
 
 pub(super) struct WaterlilyTexture {
     pub(super) texture: glow::Texture,
+    /// GL binding target: `TEXTURE_2D` for planar frames, `TEXTURE_3D` for
+    /// volumetric frames that the compositor ray-marches natively.
+    pub(super) target: u32,
     pub(super) width: u32,
     pub(super) height: u32,
+    /// Depth slices; one for planar frames.
+    pub(super) depth: u32,
     pub(super) sequence: u64,
     pub(super) timestamp_ns: u64,
+}
+
+impl WaterlilyTexture {
+    pub(super) fn is_volume(&self) -> bool {
+        self.target == glow::TEXTURE_3D
+    }
+}
+
+/// CPU side of the volumetric camera: an orbiting perspective eye whose basis
+/// vectors feed the ray-marching shader. Derived deterministically from the
+/// frame timestamp so re-rendering the same frame (say, for unrelated damage)
+/// reproduces the exact same image, keeping damage tracking honest, while
+/// every new simulation frame advances the orbit.
+struct VolumeCamera {
+    position: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    forward: [f32; 3],
+    tan_half_fov: f32,
+    box_half_extents: [f32; 3],
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalize(v: [f32; 3]) -> [f32; 3] {
+    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
+    [v[0] / length, v[1] / length, v[2] / length]
+}
+
+/// Wrap a monotonic timestamp into a `[0, 1)` phase of `period_s` seconds.
+/// The modulo runs in integer nanoseconds so the phase keeps full precision
+/// no matter how large the raw timestamp grows.
+fn timestamp_phase(timestamp_ns: u64, period_s: f64) -> f64 {
+    let period_ns = (period_s * 1e9) as u64;
+    (timestamp_ns % period_ns.max(1)) as f64 / period_ns.max(1) as f64
+}
+
+fn volume_camera(
+    width: u32,
+    height: u32,
+    depth: u32,
+    screen_w: u32,
+    screen_h: u32,
+    timestamp_ns: u64,
+) -> VolumeCamera {
+    // One slow lap around the tank sells the parallax; the gentle elevation
+    // bob keeps the top and mouth planes of the bells in view alternately.
+    const ORBIT_PERIOD_S: f64 = 75.0;
+    const BOB_PERIOD_S: f64 = 33.0;
+    const BASE_ELEVATION_RAD: f64 = 0.20;
+    const BOB_AMPLITUDE_RAD: f64 = 0.09;
+    // 38 degrees of vertical field of view.
+    const TAN_HALF_FOV: f64 = 0.344_327_6;
+
+    // Simulation voxels are cubes, so the box proportions are the voxel
+    // counts; normalize them so camera distances stay resolution-invariant.
+    let longest = width.max(height).max(depth).max(1) as f64;
+    let half = [
+        0.5 * width as f64 / longest,
+        0.5 * height as f64 / longest,
+        0.5 * depth as f64 / longest,
+    ];
+
+    let azimuth = std::f64::consts::TAU * timestamp_phase(timestamp_ns, ORBIT_PERIOD_S);
+    let bob = std::f64::consts::TAU * timestamp_phase(timestamp_ns, BOB_PERIOD_S);
+    let elevation = BASE_ELEVATION_RAD + BOB_AMPLITUDE_RAD * bob.sin();
+
+    // Fit the orbit against both screen axes: the box's worst-case apparent
+    // height (tilted by the elevation) and its worst-case apparent width
+    // (the horizontal diagonal at a 45-degree azimuth).
+    let aspect = (screen_w.max(1) as f64 / screen_h.max(1) as f64).max(0.5);
+    let apparent_vertical = half[1] + 0.35 * half[0].max(half[2]);
+    let apparent_horizontal = (half[0] * half[0] + half[2] * half[2]).sqrt();
+    let distance = 1.18
+        * (apparent_vertical / TAN_HALF_FOV).max(apparent_horizontal / (TAN_HALF_FOV * aspect));
+
+    let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+    let (sin_elevation, cos_elevation) = elevation.sin_cos();
+    let position = [
+        (distance * cos_elevation * sin_azimuth) as f32,
+        (distance * sin_elevation) as f32,
+        (-distance * cos_elevation * cos_azimuth) as f32,
+    ];
+    let forward = normalize([-position[0], -position[1], -position[2]]);
+    // `up x forward` keeps world +X on screen right at the resting azimuth,
+    // matching the planar projection the volumetric path replaces.
+    let right = normalize(cross([0.0, 1.0, 0.0], forward));
+    let up = cross(forward, right);
+
+    VolumeCamera {
+        position,
+        right,
+        up,
+        forward,
+        tan_half_fov: TAN_HALF_FOV as f32,
+        box_half_extents: [half[0] as f32, half[1] as f32, half[2] as f32],
+    }
 }
 
 impl<C: CompositorConnection> Compositor<C> {
@@ -354,11 +462,16 @@ impl<C: CompositorConnection> Compositor<C> {
             .waterlily_ipc
             .as_ref()
             .is_some_and(|ipc| ipc.connected());
-        let (frame_width, frame_height, frame_sequence) = self
+        let (frame_width, frame_height, frame_depth, frame_sequence) = self
             .waterlily_texture
             .as_ref()
-            .map_or((0, 0, 0), |texture| {
-                (texture.width, texture.height, texture.sequence)
+            .map_or((0, 0, 0, 0), |texture| {
+                (
+                    texture.width,
+                    texture.height,
+                    texture.depth,
+                    texture.sequence,
+                )
             });
         crate::backend::api::WaterlilyStatus {
             enabled: self.waterlily_effect_enabled,
@@ -366,6 +479,7 @@ impl<C: CompositorConnection> Compositor<C> {
             worker_connected: connected,
             frame_width,
             frame_height,
+            frame_depth,
             frame_sequence,
         }
     }
@@ -541,7 +655,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Draw the latest worker frame as a full-screen canvas: the simulation is
     /// stretched to cover the entire output, so its quiescent near-white fluid
     /// becomes a frosted backdrop across the whole display while the wandering
-    /// body's wake ripples through it. The Composite Overlay Window remains
+    /// body's wake ripples through it. Volumetric frames instead ray-march the
+    /// 3D field through an orbiting perspective camera, showing the solve with
+    /// real parallax and occlusion. The Composite Overlay Window remains
     /// input transparent; only this visual quad is added above clients.
     pub(super) fn render_waterlily_layer(
         &mut self,
@@ -554,6 +670,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(frame) = self.waterlily_texture.as_ref() else {
             return;
         };
+        if frame.is_volume() {
+            self.render_waterlily_volume(projection, backdrop_texture);
+            return;
+        }
         let texture = frame.texture;
         let (x, y) = (0.0_f32, 0.0_f32);
         let (width, height) = (self.screen_w, self.screen_h);
@@ -605,6 +725,102 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Ray-march a volumetric frame: a perspective camera orbits the tank,
+    /// compositing per-voxel emission and opacity front to back over the same
+    /// frosted-desktop backdrop the planar path uses for quiescent water.
+    fn render_waterlily_volume(
+        &mut self,
+        projection: &[f32; 16],
+        backdrop_texture: Option<glow::Texture>,
+    ) {
+        let Some(frame) = self.waterlily_texture.as_ref() else {
+            return;
+        };
+        debug_assert!(frame.is_volume());
+        let texture = frame.texture;
+        let camera = volume_camera(
+            frame.width,
+            frame.height,
+            frame.depth,
+            self.screen_w,
+            self.screen_h,
+            frame.timestamp_ns,
+        );
+        let uniforms = &self.waterlily_volume_uniforms;
+
+        unsafe {
+            self.gl_state_tracker
+                .use_program(&self.gl, Some(self.waterlily_volume_program));
+            self.gl
+                .uniform_matrix_4_f32_slice(uniforms.projection.as_ref(), false, projection);
+            self.gl.uniform_4_f32(
+                uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl.uniform_1_i32(uniforms.volume.as_ref(), 0);
+            self.gl.uniform_1_i32(uniforms.scene_texture.as_ref(), 1);
+            self.gl.uniform_1_i32(
+                uniforms.scene_available.as_ref(),
+                i32::from(backdrop_texture.is_some()),
+            );
+            self.gl.uniform_2_f32(
+                uniforms.screen_size.as_ref(),
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl
+                .uniform_1_f32(uniforms.opacity.as_ref(), self.waterlily_opacity);
+            self.gl.uniform_3_f32(
+                uniforms.camera_position.as_ref(),
+                camera.position[0],
+                camera.position[1],
+                camera.position[2],
+            );
+            self.gl.uniform_3_f32(
+                uniforms.camera_right.as_ref(),
+                camera.right[0],
+                camera.right[1],
+                camera.right[2],
+            );
+            self.gl.uniform_3_f32(
+                uniforms.camera_up.as_ref(),
+                camera.up[0],
+                camera.up[1],
+                camera.up[2],
+            );
+            self.gl.uniform_3_f32(
+                uniforms.camera_forward.as_ref(),
+                camera.forward[0],
+                camera.forward[1],
+                camera.forward[2],
+            );
+            self.gl
+                .uniform_1_f32(uniforms.tan_half_fov.as_ref(), camera.tan_half_fov);
+            self.gl.uniform_3_f32(
+                uniforms.box_half_extents.as_ref(),
+                camera.box_half_extents[0],
+                camera.box_half_extents[1],
+                camera.box_half_extents[2],
+            );
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, backdrop_texture);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_3D, Some(texture));
+            self.gl_state_tracker
+                .bind_vertex_array(&self.gl, Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl_state_tracker.bind_vertex_array(&self.gl, None);
+            self.gl_state_tracker.use_program(&self.gl, None);
+            self.gl.active_texture(glow::TEXTURE1);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_3D, None);
+        }
+    }
+
     /// The stretched canvas covers the whole output, so any frame update
     /// damages the full screen.
     fn waterlily_damage_rect(&self) -> Option<DirtyRect> {
@@ -621,25 +837,38 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     fn upload_waterlily_frame(&mut self, frame: WaterlilyFrame) -> bool {
-        let max_texture_size =
-            unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) }.max(0) as u32;
+        let target = if frame.depth > 1 {
+            glow::TEXTURE_3D
+        } else {
+            glow::TEXTURE_2D
+        };
+        let limit_parameter = if target == glow::TEXTURE_3D {
+            glow::MAX_3D_TEXTURE_SIZE
+        } else {
+            glow::MAX_TEXTURE_SIZE
+        };
+        let max_texture_size = unsafe { self.gl.get_parameter_i32(limit_parameter) }.max(0) as u32;
         if max_texture_size == 0
             || frame.width > max_texture_size
             || frame.height > max_texture_size
+            || frame.depth > max_texture_size
         {
             log::warn!(
-                "compositor: rejected WaterLily texture {}x{} (GPU limit {})",
+                "compositor: rejected WaterLily texture {}x{}x{} (GPU limit {})",
                 frame.width,
                 frame.height,
+                frame.depth,
                 max_texture_size
             );
             return false;
         }
 
-        let recreate = self
-            .waterlily_texture
-            .as_ref()
-            .is_none_or(|current| current.width != frame.width || current.height != frame.height);
+        let recreate = self.waterlily_texture.as_ref().is_none_or(|current| {
+            current.width != frame.width
+                || current.height != frame.height
+                || current.depth != frame.depth
+                || current.target != target
+        });
         if recreate {
             unsafe {
                 let texture = match self.gl.create_texture() {
@@ -657,27 +886,49 @@ impl<C: CompositorConnection> Compositor<C> {
                         break;
                     }
                 }
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                self.gl.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA8 as i32,
-                    frame.width as i32,
-                    frame.height as i32,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(&frame.rgba)),
-                );
+                self.gl.bind_texture(target, Some(texture));
+                if target == glow::TEXTURE_3D {
+                    self.gl.tex_image_3d(
+                        glow::TEXTURE_3D,
+                        0,
+                        glow::RGBA8 as i32,
+                        frame.width as i32,
+                        frame.height as i32,
+                        frame.depth as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&frame.rgba)),
+                    );
+                } else {
+                    self.gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA8 as i32,
+                        frame.width as i32,
+                        frame.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&frame.rgba)),
+                    );
+                }
                 for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
                     self.gl
-                        .tex_parameter_i32(glow::TEXTURE_2D, filter, glow::LINEAR as i32);
+                        .tex_parameter_i32(target, filter, glow::LINEAR as i32);
                 }
-                for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                // The ray-marcher clamps its sample coordinates, and edge
+                // clamping keeps boundary voxels from wrapping around the
+                // tank on all three axes.
+                let mut wraps = vec![glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T];
+                if target == glow::TEXTURE_3D {
+                    wraps.push(glow::TEXTURE_WRAP_R);
+                }
+                for wrap in wraps {
                     self.gl
-                        .tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+                        .tex_parameter_i32(target, wrap, glow::CLAMP_TO_EDGE as i32);
                 }
-                self.gl.bind_texture(glow::TEXTURE_2D, None);
+                self.gl.bind_texture(target, None);
                 let allocation_error = self.gl.get_error();
                 if allocation_error != glow::NO_ERROR {
                     self.gl.delete_texture(texture);
@@ -689,8 +940,10 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 let replacement = WaterlilyTexture {
                     texture,
+                    target,
                     width: frame.width,
                     height: frame.height,
+                    depth: frame.depth,
                     sequence: frame.sequence,
                     timestamp_ns: frame.timestamp_ns,
                 };
@@ -706,14 +959,26 @@ impl<C: CompositorConnection> Compositor<C> {
                 MAX_WATERLILY_PBO_BYTES,
             );
             let uploaded = unsafe {
-                self.pbo_uploader.upload_texture(
-                    &self.gl,
-                    texture,
-                    frame.width,
-                    frame.height,
-                    glow::RGBA,
-                    &frame.rgba,
-                )
+                if target == glow::TEXTURE_3D {
+                    self.pbo_uploader.upload_texture_3d(
+                        &self.gl,
+                        texture,
+                        frame.width,
+                        frame.height,
+                        frame.depth,
+                        glow::RGBA,
+                        &frame.rgba,
+                    )
+                } else {
+                    self.pbo_uploader.upload_texture(
+                        &self.gl,
+                        texture,
+                        frame.width,
+                        frame.height,
+                        glow::RGBA,
+                        &frame.rgba,
+                    )
+                }
             };
             if !uploaded {
                 return false;
@@ -829,6 +1094,46 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn volume_camera_is_deterministic_and_orthonormal() {
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+        for timestamp in [0_u64, 1_000_000_000, 987_654_321_012, u64::MAX / 3] {
+            let camera = super::volume_camera(96, 64, 32, 1920, 1080, timestamp);
+            let again = super::volume_camera(96, 64, 32, 1920, 1080, timestamp);
+            // Same frame timestamp, same camera: unrelated damage can force a
+            // re-render of an unchanged frame and must reproduce it exactly.
+            assert_eq!(camera.position, again.position);
+            assert_eq!(camera.forward, again.forward);
+
+            assert!(dot(camera.forward, camera.forward).abs() - 1.0 < 1e-4);
+            assert!(dot(camera.right, camera.right).abs() - 1.0 < 1e-4);
+            assert!(dot(camera.forward, camera.right).abs() < 1e-4);
+            assert!(dot(camera.forward, camera.up).abs() < 1e-4);
+            assert!(dot(camera.right, camera.up).abs() < 1e-4);
+            // The eye always looks at the box center.
+            let to_center = super::normalize([
+                -camera.position[0],
+                -camera.position[1],
+                -camera.position[2],
+            ]);
+            assert!(dot(to_center, camera.forward) > 0.999);
+            // Orbit stays level: screen right never rolls off the horizon.
+            assert!(camera.right[1].abs() < 1e-4);
+        }
+
+        // At the resting azimuth the camera sits on the front (-Z) side with
+        // world +X on screen right, matching the planar view it replaces.
+        let resting = super::volume_camera(96, 64, 32, 1920, 1080, 0);
+        assert!(resting.position[2] < 0.0);
+        assert!(resting.position[0].abs() < 1e-4);
+        assert!(resting.right[0] > 0.999);
+        // The box proportions follow the voxel counts.
+        assert_eq!(resting.box_half_extents[0], 0.5);
+        assert!((resting.box_half_extents[1] - 64.0 / 96.0 / 2.0).abs() < 1e-6);
+        assert!((resting.box_half_extents[2] - 32.0 / 96.0 / 2.0).abs() < 1e-6);
+    }
+
     #[test]
     fn command_stream_reaches_a_connected_worker() {
         use std::io::{BufRead, BufReader};

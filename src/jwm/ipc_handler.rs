@@ -1653,6 +1653,7 @@ impl Jwm {
                     "worker_connected": status.worker_connected,
                     "frame_width": status.frame_width,
                     "frame_height": status.frame_height,
+                    "frame_depth": status.frame_depth,
                     "frame_sequence": status.frame_sequence,
                 }))),
                 None => IpcResponse::err("compositor not active".to_string()),

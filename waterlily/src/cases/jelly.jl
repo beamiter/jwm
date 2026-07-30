@@ -6,12 +6,15 @@ spherical shell with its mouth cut off by a plane, breathing through the
 swimming so the smack holds station. Several jellies share the tank at
 different positions, sizes and pulse phases.
 
-The display pipeline stays two-dimensional: the case picks a 3D domain from
-the canvas aspect ratio, computes the vorticity magnitude, and projects it
-to the view plane by maximum-intensity projection like the upstream `:mip`
-visualization. The magnitude feeds the positive half of the diverging
-palettes: quiescent water stays on the keyed white midpoint and frosts out,
-while the bells and their shed rings deepen into the palette's warm side.
+The display pipeline is natively three-dimensional: the case picks a 3D
+domain from the canvas aspect ratio, colorizes the vorticity magnitude
+voxel-by-voxel, and publishes the RGBA volume; the compositor ray-marches
+it through an orbiting perspective camera. The magnitude feeds the positive
+half of the diverging palettes: quiescent water stays on the keyed white
+midpoint and frosts out, while the bells and their shed rings deepen into
+the palette's warm side. A planar fallback (`JWM_WATERLILY_PLANAR`) keeps
+the historical line-integral projection for consumers without volumetric
+support.
 """
 struct JellyCase{S} <: AbstractWaterLilyCase
     simulation::S
@@ -21,8 +24,11 @@ struct JellyCase{S} <: AbstractWaterLilyCase
     # projection runs after one bulk download instead of scalar reads.
     sigma_host::Array{Float32,3}
     # Maximum-intensity projection of vorticity magnitude along depth,
-    # (nx, nz).
+    # (nx, nz). Only used by the planar fallback path.
     projected::Matrix{Float32}
+    # Version-2 volume scratch: nx * nz * ny RGBA voxels, slices front to
+    # back, reused every frame to keep the publish loop garbage-free.
+    volume_rgba::Vector{UInt8}
 end
 
 const JELLY_REYNOLDS = 500.0
@@ -117,6 +123,7 @@ function build_jelly_case(
         domain,
         Array{Float32,3}(undef, nx + 2, ny + 2, nz + 2),
         Matrix{Float32}(undef, nx, nz),
+        Vector{UInt8}(undef, 4 * nx * nz * ny),
     )
 end
 
@@ -125,21 +132,77 @@ case_palette_name(::JellyCase) = "violet"
 # The bells render through the vorticity they shed, not as a painted body.
 body_distance(::JellyCase, ::Real, ::Real, ::Real) = Inf
 
+# The tank publishes as a native volume: frame width spans the tank, frame
+# height is the vertical extent (top-left rows, like every planar frame),
+# and the ny tank layers become front-to-back depth slices.
+frame_geometry(case::JellyCase) = (case.domain[1], case.domain[3], case.domain[2])
+
+# Ambient-wake floor shared by the volume transfer function and the planar
+# projection; only shells and coherent shed rings contribute.
+const JELLY_WAKE_FLOOR = 0.6f0
+
 """
-Fill the 2D vorticity scratch from the 3D solve: evaluate the vorticity
-magnitude on the device, download once, take the maximum along each depth
-ray, and upsample it bilinearly to the display grid. The default renderer
-then colors it exactly like a native 2D case, using the palette's positive
-half.
+Evaluate the vorticity magnitude on the device and download it once into the
+host scratch. Both display paths (native volume and planar projection) start
+from this field.
 """
-function compute_vorticity!(scratch::RenderScratch, case::JellyCase)
+function download_vorticity_magnitude!(case::JellyCase)
     simulation = case.simulation
     u = simulation.flow.u
     σ = simulation.flow.σ
     scale = eltype(σ)(simulation.L / simulation.U)
     WaterLily.@inside σ[I] = WaterLily.ω_mag(I, u) * scale
     copyto!(case.sigma_host, σ)
+    return case.sigma_host
+end
 
+"""
+Colorize the vorticity magnitude voxel-by-voxel into the version-2 volume
+buffer. Emission runs through the palette's positive half — quiescent water
+stays on the keyed near-white midpoint — while opacity follows a soft
+rational knee of the wake strength, so bell shells read as translucent
+membranes whose tangent chords brighten into rims, exactly the depth cue the
+old line-integral projection faked in 2D and the compositor's ray-marcher
+now produces for real.
+"""
+function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
+    sigma = download_vorticity_magnitude!(case)
+    nx, ny, nz = case.domain
+    rgba = case.volume_rgba
+    Threads.@threads :static for y in 1:ny
+        @inbounds for row in 1:nz
+            z = nz - row + 1
+            output = 4 * ((y - 1) * nz + (row - 1)) * nx + 1
+            for x in 1:nx
+                value = sigma[x + 1, y + 1, z + 1]
+                wake = isfinite(value) ? max(value - JELLY_WAKE_FLOOR, 0.0f0) : 0.0f0
+                # Soft knee keeps the shell/wake dynamic range on the palette
+                # without clipping; the deterministic mapping avoids per-frame
+                # autoscale flicker in the marched image.
+                density = wake / (wake + 6.0f0)
+                color = palette_color(palette, density, 1.0)
+                rgba[output] = color[1]
+                rgba[output + 1] = color[2]
+                rgba[output + 2] = color[3]
+                # Per-voxel opacity for one straight-through voxel crossing;
+                # the shader renormalizes it by its actual step length.
+                rgba[output + 3] = round(UInt8, 217 * density)
+                output += 4
+            end
+        end
+    end
+    return rgba
+end
+
+"""
+Fill the 2D vorticity scratch from the 3D solve: evaluate the vorticity
+magnitude on the device, download once, take the maximum along each depth
+ray, and upsample it bilinearly to the display grid. The default renderer
+then colors it exactly like a native 2D case, using the palette's positive
+half. This is the planar fallback path (`JWM_WATERLILY_PLANAR`).
+"""
+function compute_vorticity!(scratch::RenderScratch, case::JellyCase)
+    download_vorticity_magnitude!(case)
     nx, ny, nz = case.domain
     sigma = case.sigma_host
     projected = case.projected
@@ -151,7 +214,7 @@ function compute_vorticity!(scratch::RenderScratch, case::JellyCase)
             # The per-cell floor keeps weak ambient wake from integrating
             # into a broad halo across the depth of the tank; only shells
             # and coherent shed rings contribute.
-            total += max(value - 0.6f0, 0.0f0)
+            total += max(value - JELLY_WAKE_FLOOR, 0.0f0)
         end
         # X-ray line integral instead of a max projection: rays grazing a
         # bell tangentially run a long chord through its shell while rays

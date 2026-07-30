@@ -234,6 +234,25 @@ fraction of the canvas.
 """
 body_bounds(::AbstractWaterLilyCase, ::Real) = nothing
 
+"""
+Frame geometry `(width, height, depth)` the case publishes. Planar cases
+publish their display-sized canvas as a depth-one frame — the classic
+version-1 contract. Cases with a true 3D solve override this with their tank
+dimensions (width, vertical extent, front-to-back slices) and implement
+[`render_volume!`](@ref); the compositor then ray-marches the volume
+natively instead of showing a baked projection.
+"""
+frame_geometry(case::AbstractWaterLilyCase) = (case.dimensions..., 1)
+
+"""
+Colorize the case's 3D field into its RGBA8 volume buffer and return it.
+The layout matches the version-2 frame contract: `depth` tightly packed
+`width x height` slices, ordered front (nearest the resting camera) to back,
+each slice with top-left rows exactly like a planar frame. Only cases whose
+[`frame_geometry`](@ref) advertises a depth above one must implement this.
+"""
+function render_volume! end
+
 simulation_time(case::AbstractWaterLilyCase) = WaterLily.sim_time(case.simulation)
 
 function advance!(case::AbstractWaterLilyCase, dimensionless_step::Real)

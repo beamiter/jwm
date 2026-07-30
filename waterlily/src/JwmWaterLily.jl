@@ -379,6 +379,22 @@ function parse_pointer_command(parts::AbstractVector{<:AbstractString})
     return (clamp(x, 0.0, 1.0), clamp(y, 0.0, 1.0))
 end
 
+"""
+True when `JWM_WATERLILY_PLANAR` forces every case through the planar
+version-1 frame path. This is the escape hatch for consumers without
+volumetric support: cases with a 3D solve then publish their historical
+2D projection instead of the native volume.
+"""
+planar_frames_forced() =
+    lowercase(get(ENV, "JWM_WATERLILY_PLANAR", "")) in ("1", "true", "yes", "on")
+
+"""
+The frame geometry `(width, height, depth)` the worker publishes for a case,
+honoring the planar override.
+"""
+publish_geometry(case, planar::Bool) =
+    planar ? (case.dimensions..., 1) : frame_geometry(case)
+
 function run_worker_with_backend(options::RunnerOptions, backend::SelectedBackend)
     options.requested_size != options.simulation_size &&
         @info "normalized simulation size for WaterLily multigrid" requested =
@@ -388,7 +404,15 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
 
     simulation_case =
         build_case(options.case_name, options.simulation_size; memory=backend.memory)
-    publisher = FramePublisher(options.frame_path, options.simulation_size...)
+    planar = planar_frames_forced()
+    geometry = publish_geometry(simulation_case, planar)
+    geometry[3] > 1 && @info "publishing native 3D volume frames" geometry
+    publisher = FramePublisher(
+        options.frame_path,
+        geometry[1],
+        geometry[2];
+        depth=geometry[3],
+    )
     wakeups = WakeClient(options.socket_path)
     cleaned = Ref(false)
 
@@ -422,11 +446,37 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
                     requested = resolve_case_name(String(parts[2]), current_case)
                     (requested === nothing || requested == current_case) && continue
                     try
-                        simulation_case = build_case(
+                        replacement_case = build_case(
                             requested,
                             options.simulation_size;
                             memory=backend.memory,
                         )
+                        # A geometry change (for example planar dance ->
+                        # volumetric jelly) needs a matching frame file. The
+                        # replacement seeds the old sequence so the consumer's
+                        # monotonic view survives, and the old handle is only
+                        # closed — never removed — because the new file
+                        # already owns the path. Nothing is committed until
+                        # every fallible step has succeeded, so a failed
+                        # switch can never strand the loop between the old
+                        # geometry and the new case.
+                        requested_geometry =
+                            publish_geometry(replacement_case, planar)
+                        if requested_geometry != geometry
+                            previous_publisher = publisher
+                            publisher = FramePublisher(
+                                options.frame_path,
+                                requested_geometry[1],
+                                requested_geometry[2];
+                                depth=requested_geometry[3],
+                                start_sequence=previous_publisher.sequence,
+                            )
+                            close(previous_publisher)
+                            geometry = requested_geometry
+                            geometry[3] > 1 &&
+                                @info "publishing native 3D volume frames" geometry
+                        end
+                        simulation_case = replacement_case
                         current_case = requested
                         @info "switched WaterLily case" case = requested
                     catch error
@@ -460,17 +510,28 @@ function run_worker_with_backend(options::RunnerOptions, backend::SelectedBacken
             # of the budget stepping toward the next state. Overlapping the
             # solver in a separate task measured slower — the threaded
             # colorize loop starves the task issuing device kernels.
-            pose_time = simulation_time(simulation_case)
-            compute_vorticity!(scratch, simulation_case)
             frame_palette = something(palette_override, case_palette_name(simulation_case))
-            rgba = render_rgba!(
-                scratch,
-                simulation_case,
-                pose_time;
-                palette=PALETTE_REGISTRY[frame_palette],
-                shimmer=palette_shimmer(frame_palette),
-            )
-            publish!(publisher, rgba, time_ns())
+            if geometry[3] > 1
+                # Native volume: the case colorizes its 3D field directly and
+                # the compositor's ray-marcher owns projection, lighting, and
+                # the shimmer-style view-dependent cues.
+                volume = render_volume!(
+                    simulation_case;
+                    palette=PALETTE_REGISTRY[frame_palette],
+                )
+                publish!(publisher, volume, time_ns())
+            else
+                pose_time = simulation_time(simulation_case)
+                compute_vorticity!(scratch, simulation_case)
+                rgba = render_rgba!(
+                    scratch,
+                    simulation_case,
+                    pose_time;
+                    palette=PALETTE_REGISTRY[frame_palette],
+                    shimmer=palette_shimmer(frame_palette),
+                )
+                publish!(publisher, rgba, time_ns())
+            end
             notify!(wakeups)
             frame_tick!(simulation_case)
             achieved_step = advance_budgeted!(

@@ -219,6 +219,115 @@ impl PBOUploader {
         true
     }
 
+    /// Upload volumetric texture data (TEXTURE_3D) through the same streaming
+    /// PBO pool as the 2D path. Volumes stream tightly packed slices, so the
+    /// transfer is one buffer write plus one async GPU-side copy per frame.
+    ///
+    /// Returns true if upload succeeded
+    ///
+    /// # Safety
+    /// Requires valid GL context bound
+    pub unsafe fn upload_texture_3d(
+        &mut self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: u32,
+        data: &[u8],
+    ) -> bool {
+        let required_size = (width as usize) * (height as usize) * (depth as usize) * 4;
+        if required_size > self.pbo_size {
+            log::warn!(
+                "pbo_uploader: volume {}x{}x{} ({} bytes) exceeds PBO size ({} bytes), using sync upload",
+                width,
+                height,
+                depth,
+                required_size,
+                self.pbo_size
+            );
+            return unsafe {
+                self.upload_texture_3d_sync(gl, texture, width, height, depth, format, data)
+            };
+        }
+
+        let mut pbo = match self.get_pbo(gl) {
+            Some(p) => p,
+            None => {
+                log::warn!("pbo_uploader: PBO allocation failed, falling back to sync upload");
+                return unsafe {
+                    self.upload_texture_3d_sync(gl, texture, width, height, depth, format, data)
+                };
+            }
+        };
+
+        unsafe { pbo.wait_fence(gl) };
+
+        if !unsafe { pbo.write_data(gl, data) } {
+            log::error!("pbo_uploader: failed to write {} bytes to PBO", data.len());
+            self.return_pbo(gl, pbo);
+            return false;
+        }
+
+        unsafe {
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(pbo.pbo));
+            gl.bind_texture(glow::TEXTURE_3D, Some(texture));
+            gl.tex_sub_image_3d(
+                glow::TEXTURE_3D,
+                0,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                depth as i32,
+                format,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::BufferOffset(0),
+            );
+            gl.bind_texture(glow::TEXTURE_3D, None);
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+
+            pbo.insert_fence(gl);
+        }
+
+        self.return_pbo(gl, pbo);
+
+        true
+    }
+
+    /// Synchronous fallback upload for volumes (no PBO)
+    unsafe fn upload_texture_3d_sync(
+        &self,
+        gl: &glow::Context,
+        texture: glow::Texture,
+        width: u32,
+        height: u32,
+        depth: u32,
+        format: u32,
+        data: &[u8],
+    ) -> bool {
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_3D, Some(texture));
+            gl.tex_sub_image_3d(
+                glow::TEXTURE_3D,
+                0,
+                0,
+                0,
+                0,
+                width as i32,
+                height as i32,
+                depth as i32,
+                format,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(data)),
+            );
+            gl.bind_texture(glow::TEXTURE_3D, None);
+        }
+        true
+    }
+
     /// Synchronous fallback upload (no PBO)
     unsafe fn upload_texture_sync(
         &self,

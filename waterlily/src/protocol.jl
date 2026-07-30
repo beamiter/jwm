@@ -1,6 +1,11 @@
 const FRAME_MAGIC = UInt8[codeunits("JWMLILY\0")...]
 const FRAME_VERSION = UInt32(1)
+# Version 2 publishes a volume: `depth` two-dimensional slices per slot,
+# stacked front (nearest the viewer) to back. Its header keeps the version-1
+# prefix byte-for-byte and appends the depth plus reserved space.
+const FRAME_VERSION_VOLUMETRIC = UInt32(2)
 const FRAME_HEADER_BYTES = 64
+const FRAME_VOLUME_HEADER_BYTES = 96
 const PIXEL_FORMAT_RGBA8 = UInt32(1)
 const COLOR_SPACE_SRGB = UInt32(1)
 const ALPHA_MODE_OPAQUE = UInt32(1)
@@ -13,7 +18,9 @@ mutable struct FramePublisher
     io::Base.Filesystem.File
     width::Int
     height::Int
+    depth::Int
     stride::Int
+    header_bytes::Int
     slot_bytes::Int
     slot::UInt32
     sequence::UInt64
@@ -28,12 +35,15 @@ function frame_header(
     stride::Integer,
     slot::Integer,
     sequence::Integer,
-    timestamp_ns::Integer,
+    timestamp_ns::Integer;
+    depth::Integer=1,
 )
-    buffer = IOBuffer(sizehint=FRAME_HEADER_BYTES)
+    volumetric = depth > 1
+    header_bytes = volumetric ? FRAME_VOLUME_HEADER_BYTES : FRAME_HEADER_BYTES
+    buffer = IOBuffer(sizehint=header_bytes)
     write(buffer, FRAME_MAGIC)
-    write(buffer, htol(FRAME_VERSION))
-    write(buffer, htol(UInt32(FRAME_HEADER_BYTES)))
+    write(buffer, htol(volumetric ? FRAME_VERSION_VOLUMETRIC : FRAME_VERSION))
+    write(buffer, htol(UInt32(header_bytes)))
     write(buffer, htol(UInt32(width)))
     write(buffer, htol(UInt32(height)))
     write(buffer, htol(UInt32(stride)))
@@ -44,8 +54,12 @@ function frame_header(
     write(buffer, htol(UInt32(slot)))
     write(buffer, htol(UInt64(sequence)))
     write(buffer, htol(UInt64(timestamp_ns)))
+    if volumetric
+        write(buffer, htol(UInt32(depth)))
+        write(buffer, zeros(UInt8, FRAME_VOLUME_HEADER_BYTES - FRAME_HEADER_BYTES - 4))
+    end
     header = take!(buffer)
-    length(header) == FRAME_HEADER_BYTES || error("internal frame header size mismatch")
+    length(header) == header_bytes || error("internal frame header size mismatch")
     return header
 end
 
@@ -77,16 +91,36 @@ function atomic_replace(source::AbstractString, destination::AbstractString)
         systemerror("rename", true)
 end
 
-function FramePublisher(path::AbstractString, width::Integer, height::Integer)
+"""
+Create a double-buffered frame file. `depth == 1` publishes the classic
+planar version-1 contract; `depth > 1` publishes version-2 volumes whose
+slots stack `depth` slices front to back. `start_sequence` seeds the
+publication counter so a worker replacing its frame file mid-session (for
+example on a case switch that changes the frame geometry) keeps the
+consumer's monotonic-sequence view intact.
+"""
+function FramePublisher(
+    path::AbstractString,
+    width::Integer,
+    height::Integer;
+    depth::Integer=1,
+    start_sequence::Integer=0,
+)
     width > 0 || throw(ArgumentError("frame width must be positive"))
     height > 0 || throw(ArgumentError("frame height must be positive"))
+    depth > 0 || throw(ArgumentError("frame depth must be positive"))
     width <= 16_384 || throw(ArgumentError("frame width exceeds protocol limit"))
     height <= 16_384 || throw(ArgumentError("frame height exceeds protocol limit"))
+    depth <= 16_384 || throw(ArgumentError("frame depth exceeds protocol limit"))
+    start_sequence >= 0 ||
+        throw(ArgumentError("start sequence must not be negative"))
     stride = Base.checked_mul(Int(width), 4)
-    slot_bytes = Base.checked_mul(stride, Int(height))
+    header_bytes = depth > 1 ? FRAME_VOLUME_HEADER_BYTES : FRAME_HEADER_BYTES
+    slot_bytes =
+        Base.checked_mul(Base.checked_mul(stride, Int(height)), Int(depth))
     slot_bytes <= 512 * 1024 * 1024 ||
         throw(ArgumentError("frame exceeds protocol size limit"))
-    total_bytes = Base.checked_add(FRAME_HEADER_BYTES, Base.checked_mul(slot_bytes, 2))
+    total_bytes = Base.checked_add(header_bytes, Base.checked_mul(slot_bytes, 2))
 
     final_path = abspath(String(path))
     temporary_path = tempname(dirname(final_path); cleanup=false)
@@ -103,10 +137,15 @@ function FramePublisher(path::AbstractString, width::Integer, height::Integer)
         lock_file(io)
         try
             seekstart(io)
-            # Sequence zero is intentionally unpublished. The compositor
-            # connects only after the first complete frame and never consumes
-            # this header.
-            write(io, frame_header(width, height, stride, 1, 0, 0))
+            # A fresh worker seeds sequence zero, which is intentionally
+            # unpublished: the compositor connects only after the first
+            # complete frame. A replacement publisher seeds the previous
+            # publisher's sequence, which an up-to-date consumer has already
+            # taken and therefore also never consumes.
+            write(
+                io,
+                frame_header(width, height, stride, 1, start_sequence, 0; depth),
+            )
             flush_file(io)
             atomic_replace(temporary_path, final_path)
         finally
@@ -123,10 +162,12 @@ function FramePublisher(path::AbstractString, width::Integer, height::Integer)
         io,
         Int(width),
         Int(height),
+        Int(depth),
         stride,
+        header_bytes,
         slot_bytes,
         UInt32(1),
-        UInt64(0),
+        UInt64(start_sequence),
         UInt64(identity.device),
         UInt64(identity.inode),
         false,
@@ -148,7 +189,7 @@ function publish!(
 
     slot = publisher.slot == 0 ? UInt32(1) : UInt32(0)
     sequence = Base.checked_add(publisher.sequence, UInt64(1))
-    offset = FRAME_HEADER_BYTES + Int(slot) * publisher.slot_bytes
+    offset = publisher.header_bytes + Int(slot) * publisher.slot_bytes
 
     lock_file(publisher.io)
     try
@@ -165,7 +206,8 @@ function publish!(
                 publisher.stride,
                 slot,
                 sequence,
-                timestamp_ns,
+                timestamp_ns;
+                depth=publisher.depth,
             ),
         )
         flush_file(publisher.io)

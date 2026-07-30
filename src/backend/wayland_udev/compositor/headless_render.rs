@@ -457,6 +457,11 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             s::ADVANCED_POSTPROCESS_FRAGMENT_SHADER,
         ),
         ("WATERLILY_FRAGMENT_SHADER", F, s::WATERLILY_FRAGMENT_SHADER),
+        (
+            "WATERLILY_VOLUME_FRAGMENT_SHADER",
+            F,
+            s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        ),
         ("TILT_VERTEX_SHADER", V, s::TILT_VERTEX_SHADER),
         ("TILT_FRAGMENT_SHADER", F, s::TILT_FRAGMENT_SHADER),
         ("WOBBLY_VERTEX_SHADER", V, s::WOBBLY_VERTEX_SHADER),
@@ -616,6 +621,156 @@ fn waterlily_shader_keys_white_to_translucent_scene_and_preserves_color() {
         );
 
         gl.delete_texture(scene_tex);
+        gl.delete_program(prog);
+    }
+}
+
+/// The volumetric WaterLily ray-marcher must composit front to back: a red
+/// front slice fully occludes a green back slice from the resting camera,
+/// and orbiting to the opposite side reverses which slice wins. This pins
+/// the protocol's front-to-back slice order, the camera basis convention,
+/// and the emission/absorption accumulation in one observable behavior.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_shader_occludes_front_to_back() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping waterlily_volume_shader_occludes_front_to_back"
+        );
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 16;
+    const H: i32 = 16;
+
+    unsafe {
+        let prog = link(gl, s::VERTEX_SHADER, s::WATERLILY_VOLUME_FRAGMENT_SHADER)
+            .expect("WaterLily volume shaders must link");
+
+        // 1x1x2 volume: opaque red front slice, opaque green back slice.
+        // NEAREST filtering keeps each half of the box a pure slice color.
+        let voxels: [u8; 8] = [255, 0, 0, 255, 0, 255, 0, 255];
+        let volume = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+        gl.tex_image_3d(
+            glow::TEXTURE_3D,
+            0,
+            glow::RGBA as i32,
+            1,
+            1,
+            2,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&voxels)),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::NEAREST as i32);
+        }
+        for wrap in [
+            glow::TEXTURE_WRAP_S,
+            glow::TEXTURE_WRAP_T,
+            glow::TEXTURE_WRAP_R,
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        let out_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            W,
+            H,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(out_tex),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "volume output FBO incomplete"
+        );
+
+        let (vao, vbo) = create_quad_vao(gl);
+        let mut render_from = |position: [f32; 3], forward: [f32; 3], right: [f32; 3]| -> [u8; 4] {
+            gl.viewport(0, 0, W, H);
+            gl.disable(glow::BLEND);
+            gl.use_program(Some(prog));
+            let u = |name: &str| gl.get_uniform_location(prog, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(u("u_volume").as_ref(), 0);
+            // Unit 1 even when unused: sharing unit 0 with the sampler3D
+            // would make the program invalid to draw with.
+            gl.uniform_1_i32(u("u_scene_texture").as_ref(), 1);
+            gl.uniform_1_i32(u("u_scene_available").as_ref(), 0);
+            gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+            gl.uniform_3_f32(
+                u("u_camera_position").as_ref(),
+                position[0],
+                position[1],
+                position[2],
+            );
+            gl.uniform_3_f32(u("u_camera_right").as_ref(), right[0], right[1], right[2]);
+            gl.uniform_3_f32(u("u_camera_up").as_ref(), 0.0, 1.0, 0.0);
+            gl.uniform_3_f32(
+                u("u_camera_forward").as_ref(),
+                forward[0],
+                forward[1],
+                forward[2],
+            );
+            gl.uniform_1_f32(u("u_tan_half_fov").as_ref(), 0.35);
+            gl.uniform_3_f32(u("u_box_half_extents").as_ref(), 0.5, 0.5, 0.5);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+            gl.bind_vertex_array(Some(vao));
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.finish();
+            read_center(gl, W, H)
+        };
+
+        // Resting camera on the front side: the red front slice owns the
+        // pixel; the green back slice is completely occluded.
+        let front_view = render_from([0.0, 0.0, -3.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
+        assert!(
+            front_view[0] > 200 && front_view[1] < 25 && front_view[3] == 255,
+            "front view must be opaque red, got {front_view:?}"
+        );
+
+        // Orbited behind the tank: the same volume now leads with green.
+        let back_view = render_from([0.0, 0.0, 3.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]);
+        assert!(
+            back_view[1] > 200 && back_view[0] < 25 && back_view[3] == 255,
+            "back view must be opaque green, got {back_view:?}"
+        );
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(fbo);
+        gl.delete_texture(out_tex);
+        gl.delete_texture(volume);
         gl.delete_program(prog);
     }
 }

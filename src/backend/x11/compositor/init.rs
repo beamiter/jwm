@@ -292,6 +292,37 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        // Volumetric WaterLily frames (a true 3D solve such as the jellyfish
+        // smack) ray-march through a perspective camera instead of stretching
+        // a pre-projected quad.
+        let waterlily_volume_program = shader_cache.get_or_compile(
+            &gl,
+            "waterlily_volume",
+            shaders::VERTEX_SHADER,
+            shaders::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        )?;
+        let waterlily_volume_uniforms = unsafe {
+            WaterlilyVolumeUniforms {
+                projection: gl.get_uniform_location(waterlily_volume_program, "u_projection"),
+                rect: gl.get_uniform_location(waterlily_volume_program, "u_rect"),
+                volume: gl.get_uniform_location(waterlily_volume_program, "u_volume"),
+                scene_texture: gl.get_uniform_location(waterlily_volume_program, "u_scene_texture"),
+                scene_available: gl
+                    .get_uniform_location(waterlily_volume_program, "u_scene_available"),
+                screen_size: gl.get_uniform_location(waterlily_volume_program, "u_screen_size"),
+                opacity: gl.get_uniform_location(waterlily_volume_program, "u_opacity"),
+                camera_position: gl
+                    .get_uniform_location(waterlily_volume_program, "u_camera_position"),
+                camera_right: gl.get_uniform_location(waterlily_volume_program, "u_camera_right"),
+                camera_up: gl.get_uniform_location(waterlily_volume_program, "u_camera_up"),
+                camera_forward: gl
+                    .get_uniform_location(waterlily_volume_program, "u_camera_forward"),
+                tan_half_fov: gl.get_uniform_location(waterlily_volume_program, "u_tan_half_fov"),
+                box_half_extents: gl
+                    .get_uniform_location(waterlily_volume_program, "u_box_half_extents"),
+            }
+        };
+
         // Compile HUD shader (feature 11)
         let hud_program = shader_cache.get_or_compile(
             &gl,
@@ -937,6 +968,8 @@ impl<C: CompositorConnection> Compositor<C> {
             // External WaterLily simulation layer
             waterlily_program,
             waterlily_uniforms,
+            waterlily_volume_program,
+            waterlily_volume_uniforms,
             waterlily_scene_fbo: None,
             waterlily_ipc,
             waterlily_loop_signal: None,
