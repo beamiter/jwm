@@ -218,6 +218,12 @@ pub fn compositor_event_ops(
                 if x11w != overlay {
                     ops.push(CompositorEventOp::MarkDamaged { window: x11w });
                 }
+            } else {
+                // A dropped damage event can never be subtracted, so a
+                // ReportLevel::NonEmpty object stops reporting permanently.
+                crate::backend::damage_diag::UNRESOLVED
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                log::warn!("compositor: damage event for unresolved window id {drawable:?}");
             }
         }
         BackendEvent::PresentComplete {

@@ -1537,6 +1537,7 @@ impl XcbBackend {
                 Some(BackendEvent::ScreenLayoutChanged)
             }
             xcb::Event::Damage(xcb::damage::Event::Notify(ev)) => {
+                crate::backend::damage_diag::RAW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Some(BackendEvent::DamageNotify {
                     // xcb's generated DAMAGE bindings keep `drawable` private because
                     // it is encoded as a Drawable union on the wire; read the raw

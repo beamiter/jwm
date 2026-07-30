@@ -2150,10 +2150,16 @@ impl<C: CompositorConnection> Compositor<C> {
             if now_ms - epoch >= 2000 {
                 let elapsed = (now_ms - epoch) as f64 / 1000.0;
                 log::info!(
-                    "[compositor::render_freq] {:.1} renders/sec (needs_render={}, focused={:?})",
+                    "[compositor::render_freq] {:.1} renders/sec (needs_render={}, focused={:?}, dmg raw={} marked={} unresolved={} untracked={})",
                     fc as f64 / elapsed,
                     self.needs_render,
                     focused,
+                    crate::backend::damage_diag::RAW.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::backend::damage_diag::MARKED.load(std::sync::atomic::Ordering::Relaxed),
+                    crate::backend::damage_diag::UNRESOLVED
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    crate::backend::damage_diag::UNTRACKED
+                        .load(std::sync::atomic::Ordering::Relaxed),
                 );
                 RENDER_FREQ_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
                 RENDER_FREQ_EPOCH.store(now_ms, std::sync::atomic::Ordering::Relaxed);

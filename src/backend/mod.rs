@@ -29,6 +29,24 @@ pub mod compositor_font;
 // Backend-independent process RSS + CPU sampler used by the debug HUD.
 pub mod sys_stats;
 
+/// Diagnostics for the X11 damage pipeline. Counters are bumped at each stage
+/// so the periodic render-frequency log line can show where DamageNotify
+/// events stop flowing (raw arrival → resolved → marked). A window whose
+/// NonEmpty damage object misses one subtract never reports again, so the
+/// stages that can drop an event also log a warning.
+pub mod damage_diag {
+    use std::sync::atomic::AtomicU64;
+    /// DamageNotify events decoded from the X event stream.
+    pub static RAW: AtomicU64 = AtomicU64::new(0);
+    /// Damage events dropped because the WindowId no longer resolves.
+    pub static UNRESOLVED: AtomicU64 = AtomicU64::new(0);
+    /// Damage marks applied to a tracked compositor window.
+    pub static MARKED: AtomicU64 = AtomicU64::new(0);
+    /// Damage events for windows the compositor does not track (these can
+    /// never be subtracted, so ReportLevel::NonEmpty stops firing for them).
+    pub static UNTRACKED: AtomicU64 = AtomicU64::new(0);
+}
+
 #[cfg(feature = "x11-backends")]
 #[cfg_attr(
     not(all(feature = "backend-x11rb", feature = "backend-xcb")),

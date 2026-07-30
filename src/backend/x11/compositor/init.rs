@@ -814,7 +814,19 @@ impl<C: CompositorConnection> Compositor<C> {
             // Feature 4: scale
             scale_rules,
             // Feature 6: damage tracking (tile-based, Phase 2.1)
-            partial_damage_enabled: true,
+            //
+            // Partial (buffer-age scissor) redraw is experimental and stays
+            // OFF by default, matching the `togglepartialdamage` docs. On
+            // NVIDIA's X11 EGL path the driver-reported buffer age does not
+            // always match its actual swap behaviour: on a quiet desktop,
+            // scissored repairs that were correctly drawn and submitted via
+            // eglSwapBuffersWithDamageKHR never reached the screen (windows
+            // froze at their import-time content), and under damage bursts the
+            // two recycled back buffers could alternate two stale frames
+            // ("crazy flicker" when dragging a terminal scrollbar). Disabling
+            // partial redraw restores correctness immediately; the IPC toggle
+            // remains for experiments.
+            partial_damage_enabled: false,
             damage_tracker: DamageTracker::new(screen_w, screen_h),
             // P5C: Rectangle-level dirty tracking
             dirty_region_tracker: DirtyRegionTracker::new(screen_w, screen_h),

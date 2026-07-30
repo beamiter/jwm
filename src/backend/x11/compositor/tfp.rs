@@ -695,6 +695,8 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {
         let expand = self.decoration_damage_margin();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
+            crate::backend::damage_diag::MARKED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             wt.dirty = true;
             wt.pixmap_refresh.damaged();
             self.damage_render_pending = true;
@@ -706,7 +708,18 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.h + expand as u32 * 2,
             );
             // Subtract damage so we get future notifications
-            let _ = self.conn.clear_window_damage(wt.damage);
+            if let Err(error) = self.conn.clear_window_damage(wt.damage) {
+                // A failed subtract permanently silences a NonEmpty damage
+                // object; this must never fail quietly.
+                log::warn!(
+                    "compositor: damage subtract failed for 0x{x11_win:x} (damage 0x{:x}): {error}",
+                    wt.damage
+                );
+            }
+        } else {
+            crate::backend::damage_diag::UNTRACKED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            log::warn!("compositor: damage event for untracked window 0x{x11_win:x}");
         }
     }
 
