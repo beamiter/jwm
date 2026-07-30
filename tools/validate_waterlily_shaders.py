@@ -12,7 +12,9 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = ROOT / "src/backend/x11/compositor/common/shaders.rs"
+DEFAULT_SOURCE = (
+    ROOT / "src/backend/x11/compositor/common/waterlily_shader.rs"
+)
 SHADER_NAMES = (
     "WATERLILY_FRAGMENT_SHADER",
 )
