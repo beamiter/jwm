@@ -372,6 +372,9 @@ end
     # The tank derives from the canvas: multiples of 16, display aspect.
     @test case.domain == (32, 16, 32)
     @test JwmWaterLily.body_bounds(case, 0.0) === nothing
+    # WaterLily passes the body into device kernels, so every captured value
+    # must remain plain isbits data even when this test runs on the CPU.
+    @test isbits(case.simulation.body)
 
     JwmWaterLily.advance!(case, 0.3)
     @test JwmWaterLily.simulation_time(case) >= 0.3

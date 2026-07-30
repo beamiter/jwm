@@ -155,6 +155,12 @@ Regardless of simulation device, the worker publishes the final visualization
 as tightly packed RGBA8. This preserves the example's color map rather than
 asking JWM to reconstruct color from pressure or velocity fields.
 
+When CUDA.jl is configured to use a local toolkit and
+`waterlily/.cuda-toolkit` exists, the worker automatically exposes that path
+as `CUDA_PATH`. Set `JWM_WATERLILY_CUDA_PATH` to use a local toolkit at a
+different path. This avoids downloading Julia's multi-gigabyte CUDA runtime
+artifact when a compatible toolkit is already installed elsewhere.
+
 To keep the checked-in CPU environment small, install a GPU backend in a named
 local Julia environment and develop the worker into it:
 

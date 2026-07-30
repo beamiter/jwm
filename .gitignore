@@ -5,6 +5,7 @@
 /video-demo/tmp
 /waterlily/Manifest.toml
 /waterlily/LocalPreferences.toml
+/waterlily/.cuda-toolkit/
 __pycache__/
 **/*.rs.bk
 *.pdb

@@ -79,14 +79,14 @@ function build_jelly_case(
         # forward-mode differentiation, so a `T(...)` around anything
         # time-dependent would reject the ForwardDiff duals.
         bell = WaterLily.AutoBody(
-            (x, t) -> abs(√sum(abs2, x) - R) - T(1),
+            (x, t) -> abs(√sum(abs2, x) - R) - 1.0f0,
             let px = px, py = py, phase = phase, ω = ω, R = R, h = h
                 function (x, t)
                     θ = ω * t + phase
                     squeeze = 1 .- SA[1, 1, 0] .* (cos(θ) / 10)
                     recoil = SA[0, 0, 1] .* ((cos(θ) - 1) * R / 4 - h)
                     heave = SA[0, 0, 1] .* (sin(θ) * R / 4)
-                    return squeeze .* (x - SA[px, py, T(0)]) + recoil + heave
+                    return squeeze .* (x - SA[px, py, 0.0f0]) + recoil + heave
                 end
             end,
         )

@@ -197,9 +197,23 @@ const CUDA_ID = Base.PkgId(Base.UUID("052768ef-5323-5732-b1bb-66c8b64840ba"), "C
 const AMDGPU_ID =
     Base.PkgId(Base.UUID("21141c5a-9bdb-4563-92ae-f87d6854732e"), "AMDGPU")
 
+function configure_cuda_path!()
+    haskey(ENV, "CUDA_PATH") && return ENV["CUDA_PATH"]
+    bundled = normpath(joinpath(@__DIR__, "..", ".cuda-toolkit"))
+    candidate = get(ENV, "JWM_WATERLILY_CUDA_PATH", bundled)
+    isdir(candidate) || return nothing
+    ENV["CUDA_PATH"] = candidate
+    return candidate
+end
+
 function probe_source(device::Symbol)
     if device == :cuda
-        return "import CUDA; exit(CUDA.functional() ? 0 : 1)"
+        return """
+        local_toolkit = get(ENV, "JWM_WATERLILY_CUDA_PATH", $(repr(normpath(joinpath(@__DIR__, "..", ".cuda-toolkit")))))
+        haskey(ENV, "CUDA_PATH") || !isdir(local_toolkit) || (ENV["CUDA_PATH"] = local_toolkit)
+        import CUDA
+        exit(CUDA.functional() ? 0 : 1)
+        """
     elseif device == :rocm
         return "import AMDGPU; exit(AMDGPU.functional() ? 0 : 1)"
     end
@@ -245,6 +259,7 @@ end
 
 function load_backend(device::Symbol)
     if device == :cuda
+        configure_cuda_path!()
         cuda = Base.require(CUDA_ID)
         Base.invokelatest(cuda.functional) || error("CUDA loaded but is not functional")
         return SelectedBackend(:cuda, cuda.CuArray)
