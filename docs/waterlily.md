@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing bell shells holding station against a downstream current, published as a native RGBA volume that the compositor ray-marches in true 3D through a slowly orbiting perspective camera | violet purple/green |
+| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes, curved trailing filaments, and their simulated wakes are published together as a native RGBA volume that the compositor ray-marches through a slowly orbiting perspective camera | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -50,13 +50,24 @@ JWM X11 compositor
 Planar cases publish a display-shaped 2D frame exactly as before. Cases with
 a true 3D solve (currently `jelly`) publish their tank as an RGBA8 voxel
 volume instead; the compositor uploads it as a 3D texture and ray-marches it
-natively with an orbiting perspective camera, front-to-back emission and
-absorption compositing, per-pixel deterministic jitter, and depth cues
-(surface light falloff and view-path haze). The camera pose derives from the
-frame timestamp, so re-rendering an unchanged frame is bit-stable for damage
-tracking while each new simulation frame advances the orbit. Empty tank
-water reveals the same frosted desktop backdrop the planar shader keys out,
-so both paths keep one glass look.
+natively with an orbiting perspective camera. The volume includes both the
+animated bell membranes, curved volumetric filaments, and the vorticity wakes
+from the 3D solve. The shader
+performs front-to-back emission/absorption compositing, reconstructs material
+normals from three-dimensional density gradients, traces short light rays for
+self-shadowing, and applies directional lighting, Fresnel highlights, depth
+haze, and scene refraction at the first coherent surface. Stable midpoint
+integration samples in voxel units, while a sub-voxel five-tap footprint in
+the camera plane prefilters thin vortex sheets before they are magnified to
+the desktop. Together they avoid both temporal glitter and the point-cloud
+salt-and-pepper pattern produced by infinitesimal rays through a coarse 3D
+field. The transfer function keeps turbulent wake less absorbing than bell
+tissue, and the shader floors multiple-scattered ambient light so stacked
+translucent layers cannot collapse to black. The camera pose
+derives from the frame timestamp, so re-rendering an unchanged frame is
+bit-stable for damage tracking while each new simulation frame advances the
+orbit. Empty tank water reveals the same frosted desktop backdrop the planar
+shader keys out, so both paths keep one glass look.
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.

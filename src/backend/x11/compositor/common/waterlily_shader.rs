@@ -326,9 +326,11 @@ void main() {
 "#;
 
 /// Native 3D display of version-2 volumetric frames: a perspective camera
-/// ray-marches the RGBA volume with front-to-back emission/absorption
-/// compositing, so a true 3D solve (the jellyfish smack) shows real parallax,
-/// occlusion, and depth instead of a baked planar projection.
+/// ray-marches the RGBA volume with front-to-back emission/absorption,
+/// reconstructs surface normals from the 3D density gradient, and applies
+/// lighting, self-shadowing, Fresnel response, and scene refraction.  A true
+/// 3D solve (the jellyfish smack) therefore shows parallax, occlusion, and
+/// view-dependent material depth instead of a baked planar projection.
 ///
 /// World conventions shared with the producer contract and the CPU-side
 /// camera: the volume box is centered at the origin; +X is screen right and
@@ -354,10 +356,12 @@ uniform vec3 u_box_half_extents;
 in vec2 v_uv;
 out vec4 frag_color;
 
-const int MAX_STEPS = 96;
+const int MAX_STEPS = 128;
+const int SHADOW_STEPS = 4;
 // Matches the planar shader's quiescent-water keying: empty tank water shows
 // the frosted desktop at the same strength as a near-white 2D frame.
 const float FROST_ALPHA = 0.58;
+const float WATER_F0 = 0.0203731878;
 
 vec2 clamp_scene_uv(vec2 uv) {
     vec2 guard_uv = 0.5 / max(u_screen_size, vec2(1.0));
@@ -381,14 +385,6 @@ vec3 frosted_scene(vec2 uv) {
     return sum / max(total, 1e-5);
 }
 
-// Deterministic per-pixel start jitter (interleaved gradient noise) trades
-// banding for imperceptible high-frequency noise. It depends only on the
-// pixel position, so re-rendering the same frame stays bit-stable and damage
-// tracking keeps its "same inputs, same output" contract.
-float start_jitter(vec2 pixel) {
-    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
-}
-
 // Slab intersection with the volume box. IEEE infinities from axis-parallel
 // rays flow through min/max correctly.
 vec2 box_span(vec3 origin, vec3 direction) {
@@ -403,6 +399,79 @@ vec2 box_span(vec3 origin, vec3 direction) {
     );
 }
 
+vec3 world_to_texture(vec3 position) {
+    vec3 tex = position / (2.0 * u_box_half_extents) + 0.5;
+    // Producer rows have a top-left origin while world +Y points upward.
+    tex.y = 1.0 - tex.y;
+    return tex;
+}
+
+bool inside_texture(vec3 tex) {
+    return all(greaterThanEqual(tex, vec3(0.0)))
+        && all(lessThanEqual(tex, vec3(1.0)));
+}
+
+float density_at(vec3 tex) {
+    return texture(u_volume, clamp(tex, vec3(0.0), vec3(1.0))).a;
+}
+
+// A screen pixel covers a finite cone in the tank, not an infinitesimal ray.
+// Filtering a small cross in the camera plane suppresses the point-cloud
+// aliasing produced when thin vortex sheets are magnified from a 96x64x32
+// simulation onto a multi-megapixel desktop.  The footprint remains below
+// one voxel, preserving bell and tentacle silhouettes.
+vec4 sample_volume_footprint(vec3 position, float radius) {
+    vec3 right = u_camera_right * radius;
+    vec3 up = u_camera_up * radius;
+    vec4 center = texture(
+        u_volume,
+        clamp(world_to_texture(position), vec3(0.0), vec3(1.0))
+    );
+    vec4 cross_sum =
+          texture(u_volume, clamp(world_to_texture(position + right), vec3(0.0), vec3(1.0)))
+        + texture(u_volume, clamp(world_to_texture(position - right), vec3(0.0), vec3(1.0)))
+        + texture(u_volume, clamp(world_to_texture(position + up), vec3(0.0), vec3(1.0)))
+        + texture(u_volume, clamp(world_to_texture(position - up), vec3(0.0), vec3(1.0)));
+    return center * 0.52 + cross_sum * 0.12;
+}
+
+bool finite_vec3(vec3 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+// Central differences reconstruct a real 3D density normal from six
+// neighbouring voxels.  All solver cells are cubic in world space; the Y
+// sign is inverted because texture rows run down while world Y runs up.
+vec3 density_gradient(vec3 tex) {
+    vec3 voxel = 1.0 / vec3(textureSize(u_volume, 0));
+    return vec3(
+        density_at(tex + vec3(voxel.x, 0.0, 0.0))
+            - density_at(tex - vec3(voxel.x, 0.0, 0.0)),
+        density_at(tex - vec3(0.0, voxel.y, 0.0))
+            - density_at(tex + vec3(0.0, voxel.y, 0.0)),
+        density_at(tex + vec3(0.0, 0.0, voxel.z))
+            - density_at(tex - vec3(0.0, 0.0, voxel.z))
+    );
+}
+
+// A short secondary march toward the key light supplies contact and
+// self-shadowing inside the bell.  It is evaluated only at density
+// boundaries, keeping empty-water and low-gradient wake samples cheap.
+float light_visibility(vec3 position, vec3 light_direction, float voxel_length) {
+    float optical_depth = 0.0;
+    vec3 p = position;
+    for (int i = 0; i < SHADOW_STEPS; ++i) {
+        p += light_direction * voxel_length * (1.35 + 0.35 * float(i));
+        vec3 tex = world_to_texture(p);
+        if (!inside_texture(tex)) {
+            break;
+        }
+        float alpha = density_at(tex);
+        optical_depth += -log(max(1.0 - alpha, 0.035));
+    }
+    return exp(-0.48 * optical_depth);
+}
+
 void main() {
     vec2 ndc = vec2(v_uv.x * 2.0 - 1.0, 1.0 - v_uv.y * 2.0);
     float aspect = u_screen_size.x / max(u_screen_size.y, 1.0);
@@ -414,63 +483,208 @@ void main() {
 
     vec3 accumulated = vec3(0.0);
     float coverage = 0.0;
+    vec3 front_normal_sum = vec3(0.0);
+    float front_surface_weight = 0.0;
+    float front_depth_sum = 0.0;
 
     vec2 span = box_span(u_camera_position, ray);
     float entry = max(span.x, 0.0);
     if (span.y > entry) {
         float diagonal = 2.0 * length(u_box_half_extents);
         float chord = span.y - entry;
+        // Sample in voxel units rather than as a fraction of the box
+        // diagonal.  A front view crosses the tank's short axis; the old
+        // formula gave it barely a dozen randomly offset samples and turned
+        // thin membranes into the black salt-and-pepper pattern visible in
+        // screenshots.  Midpoint integration is spatially coherent and 1.35
+        // samples per voxel resolves both membrane boundaries without noise.
+        float reference = 2.0 * u_box_half_extents.x
+                        / float(textureSize(u_volume, 0).x);
         int steps = int(clamp(
-            chord / diagonal * float(MAX_STEPS),
-            12.0,
+            ceil(chord / reference * 1.35),
+            16.0,
             float(MAX_STEPS)
         ));
         float step_length = chord / float(steps);
         // One voxel of straight-through travel is the producer's opacity
         // reference length; voxels are cubic, so any axis gives it.
-        float reference = 2.0 * u_box_half_extents.x
-                        / float(textureSize(u_volume, 0).x);
-        float t = entry + step_length * start_jitter(gl_FragCoord.xy);
+        float t = entry + 0.5 * step_length;
+        vec3 light_direction = normalize(vec3(-0.46, 0.78, -0.42));
+        vec3 view_direction = -ray;
 
         for (int i = 0; i < MAX_STEPS; ++i) {
             if (i >= steps || coverage > 0.985) {
                 break;
             }
             vec3 position = u_camera_position + ray * t;
-            vec3 tex = position / (2.0 * u_box_half_extents) + 0.5;
-            tex.y = 1.0 - tex.y;
-            vec4 voxel = texture(u_volume, clamp(tex, vec3(0.0), vec3(1.0)));
+            vec3 tex = world_to_texture(position);
+            vec4 voxel = sample_volume_footprint(position, reference * 0.42);
             float alpha = 1.0 - pow(
                 max(1.0 - voxel.a, 0.0),
                 step_length / reference
             );
 
-            // Two physical depth cues: sunlight fades with depth below the
-            // surface, and water haze mutes emission along the view path.
+            // Boundaries of the scalar field behave as translucent material
+            // surfaces.  Their 3D gradient supplies a view-dependent normal;
+            // homogeneous wake remains a softly scattering volume.
+            vec3 gradient = vec3(0.0);
+            float boundary = 0.0;
+            if (voxel.a > 0.015) {
+                gradient = density_gradient(tex);
+                boundary = smoothstep(0.018, 0.24, length(gradient));
+            }
+            vec3 normal = length(gradient) > 1e-5
+                ? -normalize(gradient)
+                : view_direction;
+            if (dot(normal, view_direction) < 0.0) {
+                normal = -normal;
+            }
+
+            float n_dot_v = max(dot(normal, view_direction), 0.0);
+            vec3 half_vector = light_direction + view_direction;
+            float half_length = length(half_vector);
+            vec3 half_direction = half_length > 1e-5
+                ? half_vector / half_length
+                : view_direction;
+            float n_dot_h = max(dot(normal, half_direction), 0.0);
+            float fresnel = WATER_F0
+                + (1.0 - WATER_F0) * pow(1.0 - n_dot_v, 5.0);
+            float specular = pow(n_dot_h, 54.0) * (0.22 + 1.8 * fresnel);
+            float raw_visibility = boundary > 0.08
+                ? light_visibility(position, light_direction, reference)
+                : 1.0;
+            // Jelly tissue is translucent and strongly forward scattering;
+            // self-shadowing modulates it but must never crush it to black.
+            float visibility = mix(1.0, max(raw_visibility, 0.52), 0.38);
+
+            // Sunlight fades with depth below the water surface and view-path
+            // haze desaturates distant layers.  Unlike the old emission-only
+            // path, the same voxel changes brightness as the camera orbits it.
             float depth_light = mix(
-                0.82,
-                1.06,
+                0.92,
+                1.08,
                 clamp(position.y / (2.0 * u_box_half_extents.y) + 0.5, 0.0, 1.0)
             );
             float haze = exp(-0.9 * (t - entry) / diagonal);
-            vec3 emission = voxel.rgb * depth_light * mix(0.68, 1.0, haze);
+            // Jelly tissue is a bright multiple-scattering dielectric, not a
+            // painted opaque solid.  Lift its albedo before integration so a
+            // long path through many translucent cells converges to luminous
+            // colour instead of multiplying into dark stipple on white UI.
+            vec3 tissue_color = mix(
+                vec3(0.88, 0.94, 1.0),
+                voxel.rgb,
+                0.62
+            );
+            vec3 volume_color = mix(
+                tissue_color * vec3(0.92, 0.95, 1.0),
+                tissue_color,
+                haze
+            );
+            // Wrapped, two-sided diffuse approximates subsurface transport
+            // through a thin wet membrane.  It removes the hard Lambertian
+            // terminator that previously drew concentric black rings.
+            float wrapped_light = clamp(
+                (dot(normal, light_direction) + 0.42) / 1.42,
+                0.0,
+                1.0
+            );
+            float back_light = pow(
+                max(dot(-normal, light_direction), 0.0),
+                2.0
+            );
+            float diffuse = 0.86
+                          + 0.18 * wrapped_light * visibility
+                          + 0.08 * back_light;
+            float rim = pow(1.0 - n_dot_v, 3.0) * boundary;
+            vec3 surface_color =
+                tissue_color * diffuse * depth_light
+                + vec3(0.88, 0.94, 1.0) * rim * 0.18
+                + vec3(1.0, 0.96, 0.90) * specular * visibility * 0.72;
+            vec3 emission = mix(
+                volume_color * depth_light * mix(0.64, 1.0, haze),
+                surface_color,
+                boundary
+            );
+            // Never let one undefined driver result (for example a degenerate
+            // half vector at an exact camera/light alignment) poison the
+            // complete ray through NaN propagation.  The brightness floor is
+            // multiple-scattered ambient light, and also prevents dense wake
+            // crossings from becoming charcoal on a white desktop.
+            if (!finite_vec3(emission)) {
+                emission = tissue_color;
+            }
+            emission = max(emission, vec3(0.66, 0.69, 0.74));
 
-            accumulated += (1.0 - coverage) * alpha * emission;
-            coverage += (1.0 - coverage) * alpha;
+            float contribution = (1.0 - coverage) * alpha;
+            accumulated += contribution * emission;
+            coverage += contribution;
+            // Capture the first reliable density boundary for refraction.
+            // Averaging the front and back sides of a translucent shell can
+            // cancel their opposing normals to an almost-zero vector; trying
+            // to normalize that vector produced NaN texture coordinates and
+            // the driver's black salt-and-pepper pixels.  First-hit state is
+            // also the physically correct interface for scene transmission.
+            if (front_surface_weight <= 1e-5
+                && boundary > 0.075
+                && contribution > 0.0005) {
+                front_normal_sum = normal;
+                front_depth_sum = (t - entry) / max(chord, 1e-5);
+                front_surface_weight = boundary * alpha;
+            }
             t += step_length;
         }
     }
 
-    // The tank sits in front of the frosted desktop exactly like quiescent
-    // planar water: the marched fluid occludes it, empty water reveals it.
+    // Refract the captured desktop through the foremost reconstructed 3D
+    // surface.  The bend changes with normal, view angle, and actual hit
+    // depth; a small Fresnel reflection remains at grazing angles.
     vec3 frost = vec3(0.0);
     float frost_alpha = 0.0;
     if (u_scene_available == 1) {
         vec2 screen_uv = gl_FragCoord.xy / max(u_screen_size, vec2(1.0));
-        frost = frosted_scene(screen_uv) * FROST_ALPHA;
+        vec2 refracted_uv = screen_uv;
+        float reflection_mix = 0.0;
+        vec2 normal_screen = vec2(0.0);
+        float front_normal_length = length(front_normal_sum);
+        if (front_surface_weight > 1e-4 && front_normal_length > 1e-4) {
+            // Explicit division stays finite on every GLSL implementation;
+            // the length guard above prevents normalize(vec3(0)).
+            vec3 front_normal = front_normal_sum / front_normal_length;
+            normal_screen = vec2(
+                dot(front_normal, u_camera_right),
+                dot(front_normal, u_camera_up)
+            );
+            float front_depth = front_depth_sum;
+            float n_dot_v = max(dot(front_normal, -ray), 0.0);
+            float bend_px = mix(5.0, 30.0, 1.0 - n_dot_v)
+                          * mix(1.0, 0.45, clamp(front_depth, 0.0, 1.0));
+            refracted_uv += normal_screen * bend_px
+                          / max(u_screen_size, vec2(1.0));
+            float fresnel = WATER_F0
+                + (1.0 - WATER_F0) * pow(1.0 - n_dot_v, 5.0);
+            reflection_mix = fresnel * smoothstep(
+                0.01,
+                0.28,
+                front_surface_weight
+            );
+        }
+        vec3 transmission = frosted_scene(refracted_uv);
+        vec3 reflection = texture(
+            u_scene_texture,
+            clamp_scene_uv(screen_uv - normal_screen * 0.012)
+        ).rgb;
+        frost = mix(transmission, reflection, reflection_mix * 0.72) * FROST_ALPHA;
         frost_alpha = FROST_ALPHA;
     }
 
+    coverage = clamp(coverage, 0.0, 1.0);
+    if (!finite_vec3(accumulated)) {
+        accumulated = coverage * vec3(0.78, 0.84, 0.92);
+    }
+    if (!finite_vec3(frost)) {
+        frost = vec3(0.0);
+        frost_alpha = 0.0;
+    }
     vec3 premultiplied = accumulated + (1.0 - coverage) * frost;
     float alpha = coverage + (1.0 - coverage) * frost_alpha;
     float layer_opacity = clamp(u_opacity, 0.0, 1.0);

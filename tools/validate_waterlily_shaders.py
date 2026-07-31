@@ -17,14 +17,23 @@ DEFAULT_SOURCE = (
 )
 SHADER_NAMES = (
     "WATERLILY_FRAGMENT_SHADER",
+    "WATERLILY_VOLUME_FRAGMENT_SHADER",
 )
 
 
 def extract_shader(source: str, name: str) -> str:
-    marker = f'pub const {name}: &str = r#"'
-    start = source.find(marker)
-    if start < 0:
+    markers = (
+        f'pub const {name}: &str = r#"',
+        f'pub(super) const {name}: &str = r#"',
+    )
+    located = [
+        (source.find(marker), marker)
+        for marker in markers
+        if source.find(marker) >= 0
+    ]
+    if not located:
         raise ValueError(f"could not find {name}")
+    start, marker = min(located)
     start += len(marker)
     end = source.find('"#;', start)
     if end < 0:

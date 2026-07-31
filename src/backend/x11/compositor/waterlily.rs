@@ -809,6 +809,10 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_texture(glow::TEXTURE_2D, backdrop_texture);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, Some(texture));
+            // The shader emits premultiplied RGBA.  Reassert the matching
+            // blend function here because optional overlay passes can switch
+            // to straight-alpha blending earlier in the frame.
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl_state_tracker
                 .bind_vertex_array(&self.gl, Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

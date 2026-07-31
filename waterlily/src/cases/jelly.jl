@@ -1,4 +1,19 @@
 """
+Plain-data description of one animated bell.  The WaterLily `AutoBody`
+closures below and the volume materializer both consume these same values,
+so the visible membrane cannot drift away from the obstacle that generated
+the flow.
+"""
+struct JellySpec
+    radius::Float32
+    x::Float32
+    depth::Float32
+    height::Float32
+    phase::Float32
+    angular_velocity::Float32
+end
+
+"""
 A smack of pulsing jellyfish in a true three-dimensional WaterLily solve,
 adapted from the upstream `ThreeD_Jelly` example: each bell is a thin
 spherical shell with its mouth cut off by a plane, breathing through the
@@ -7,12 +22,14 @@ swimming so the smack holds station. Several jellies share the tank at
 different positions, sizes and pulse phases.
 
 The display pipeline is natively three-dimensional: the case picks a 3D
-domain from the canvas aspect ratio, colorizes the vorticity magnitude
-voxel-by-voxel, and publishes the RGBA volume; the compositor ray-marches
-it through an orbiting perspective camera. The magnitude feeds the positive
-half of the diverging palettes: quiescent water stays on the keyed white
-midpoint and frosts out, while the bells and their shed rings deepen into
-the palette's warm side. A planar fallback (`JWM_WATERLILY_PLANAR`) keeps
+domain from the canvas aspect ratio, materializes the analytic bell
+membranes and curved trailing filaments together with the simulated
+vorticity wake voxel-by-voxel, and
+publishes the RGBA volume; the compositor ray-marches it through an orbiting
+perspective camera. The magnitude feeds the positive half of the diverging
+palettes: quiescent water stays transparent, while coherent translucent
+bells and their shed rings receive reconstructed 3D normals and
+view-dependent lighting. A planar fallback (`JWM_WATERLILY_PLANAR`) keeps
 the historical line-integral projection for consumers without volumetric
 support.
 """
@@ -20,6 +37,7 @@ struct JellyCase{S} <: AbstractWaterLilyCase
     simulation::S
     dimensions::Tuple{Int,Int}
     domain::NTuple{3,Int}
+    jellies::Vector{JellySpec}
     # Host-side copy of the solver's scalar field; on GPU backends the
     # projection runs after one bulk download instead of scalar reads.
     sigma_host::Array{Float32,3}
@@ -67,7 +85,7 @@ function build_jelly_case(
     radius = T(JELLY_RADIUS_FRACTION * nz)
     count = clamp(floor(Int, nx / (3.6 * radius)), 1, 4)
 
-    jellies = map(1:count) do index
+    specs = map(1:count) do index
         R = radius * (T(0.78) + T(0.35) * rand(T))
         # Station-keeping height near the top of the tank, with per-jelly
         # spread so the smack is staggered instead of a parade rank.
@@ -77,7 +95,16 @@ function build_jelly_case(
         py = T(ny) / 2 + (rand(T) - T(0.5)) * T(0.25) * ny
         phase = T(2pi) * rand(T)
         ω = 2U / R
+        JellySpec(R, px, py, h, phase, ω)
+    end
 
+    jellies = map(specs) do spec
+        R = spec.radius
+        px = spec.x
+        py = spec.depth
+        h = spec.height
+        phase = spec.phase
+        ω = spec.angular_velocity
         # The bell: a thin spherical shell breathing through the upstream
         # example's maps — radial squeeze `A`, recoil `B`, and heave `C` —
         # with the mouth plane sharing `C` so the cut rides the pulse. The
@@ -121,6 +148,7 @@ function build_jelly_case(
         simulation,
         dimensions,
         domain,
+        specs,
         Array{Float32,3}(undef, nx + 2, ny + 2, nz + 2),
         Matrix{Float32}(undef, nx, nz),
         Vector{UInt8}(undef, 4 * nx * nz * ny),
@@ -129,7 +157,8 @@ end
 
 case_palette_name(::JellyCase) = "violet"
 
-# The bells render through the vorticity they shed, not as a painted body.
+# Planar fallback still renders the projected vorticity rather than trying
+# to flatten the 3D membrane into the generic 2D body overlay.
 body_distance(::JellyCase, ::Real, ::Real, ::Real) = Inf
 
 # The tank publishes as a native volume: frame width spans the tank, frame
@@ -140,6 +169,115 @@ frame_geometry(case::JellyCase) = (case.domain[1], case.domain[3], case.domain[2
 # Ambient-wake floor shared by the volume transfer function and the planar
 # projection; only shells and coherent shed rings contribute.
 const JELLY_WAKE_FLOOR = 0.6f0
+
+"""
+Signed distance to one animated bell membrane at solver time `t`.
+
+This is the explicit form of the `AutoBody` construction in
+[`build_jelly_case`](@ref): an approximately one-cell-thick breathing sphere
+with its lower half removed at the moving mouth plane.  Keeping this
+calculation next to the volume transfer function gives the compositor real
+surface voxels to shade instead of asking it to infer a jelly body from the
+surrounding vorticity cloud.
+"""
+function jelly_signed_distance(
+    spec::JellySpec,
+    x::Real,
+    y::Real,
+    z::Real,
+    t::Real,
+)
+    θ = spec.angular_velocity * t + spec.phase
+    squeeze = 1.0f0 - cos(θ) / 10.0f0
+    local_x = squeeze * (x - spec.x)
+    local_y = squeeze * (y - spec.depth)
+    heave = sin(θ) * spec.radius / 4.0f0
+    local_z = z - spec.height + (cos(θ) - 1.0f0) * spec.radius / 4.0f0 + heave
+    shell = abs(sqrt(local_x^2 + local_y^2 + local_z^2) - spec.radius) - 1.0f0
+    mouth = z + heave - spec.height
+    # Set difference `bell - mouth`: retain the shell only above the mouth
+    # plane, exactly as WaterLily's body-composition operator does.
+    return max(shell, -mouth)
+end
+
+jelly_smoothstep(edge0::Float32, edge1::Float32, value::Real) = let
+    q = clamp((Float32(value) - edge0) / (edge1 - edge0), 0.0f0, 1.0f0)
+    q * q * (3.0f0 - 2.0f0 * q)
+end
+
+function jelly_tentacle_center(spec::JellySpec, strand::Integer, q::Real, t::Real)
+    theta = spec.angular_velocity * t + spec.phase
+    heave = sin(theta) * spec.radius / 4.0f0
+    fraction = Float32(q)
+    angle = Float32(2pi * strand / 5) + 0.18f0 * sin(theta)
+    anchor = 0.34f0 * spec.radius * (1.0f0 - 0.42f0 * fraction)
+    wave = theta + Float32(1.7pi) * fraction + Float32(1.9 * strand)
+    sway = spec.radius * (0.035f0 + 0.12f0 * fraction)
+    center_x = spec.x + anchor * cos(angle) + sway * sin(wave)
+    center_y = spec.depth + anchor * sin(angle) + sway * cos(0.83f0 * wave)
+    center_z = spec.height - heave - 2.35f0 * spec.radius * fraction
+    strand_radius = clamp(
+        0.12f0 * spec.radius * (1.0f0 - 0.52f0 * fraction),
+        0.30f0,
+        0.78f0,
+    )
+    return (center_x, center_y, center_z, strand_radius)
+end
+
+"""
+Coverage of the animated trailing filaments below one bell.  These strands
+are display material rather than solid solver obstacles: keeping them out of
+the `AutoBody` preserves the upstream propulsion model while giving the
+volumetric renderer the unmistakable silhouette and depth crossings of a
+jellyfish instead of a set of isolated spherical caps.
+"""
+function jelly_tentacle_coverage(
+    spec::JellySpec,
+    x::Real,
+    y::Real,
+    z::Real,
+    t::Real,
+)
+    theta = spec.angular_velocity * t + spec.phase
+    mouth_z = spec.height - sin(theta) * spec.radius / 4.0f0
+    length = 2.35f0 * spec.radius
+    q = (mouth_z - z) / length
+    (q < 0.0f0 || q > 1.0f0) && return 0.0f0
+
+    coverage = 0.0f0
+    for strand in 0:4
+        center_x, center_y, _, strand_radius =
+            jelly_tentacle_center(spec, strand, q, t)
+        radial_distance = hypot(x - center_x, y - center_y) - strand_radius
+        strand_coverage = clamp(0.5f0 - radial_distance, 0.0f0, 1.0f0)
+        # Taper both ends so the filaments join the mouth smoothly and fade
+        # before hitting the lower tank boundary.
+        end_fade = jelly_smoothstep(0.0f0, 0.08f0, q) *
+                   (1.0f0 - jelly_smoothstep(0.78f0, 1.0f0, q))
+        coverage = max(coverage, strand_coverage * end_fade)
+    end
+    return coverage
+end
+
+function jelly_material_coverage(case::JellyCase, x::Real, y::Real, z::Real, t::Real)
+    surface = 0.0f0
+    tentacles = 0.0f0
+    @inbounds for jelly in case.jellies
+        surface = max(
+            surface,
+            clamp(
+                0.5f0 - Float32(jelly_signed_distance(jelly, x, y, z, t)),
+                0.0f0,
+                1.0f0,
+            ),
+        )
+        tentacles = max(tentacles, jelly_tentacle_coverage(jelly, x, y, z, t))
+    end
+    return (surface, tentacles)
+end
+
+jelly_surface_coverage(case::JellyCase, x::Real, y::Real, z::Real, t::Real) =
+    first(jelly_material_coverage(case, x, y, z, t))
 
 """
 Evaluate the vorticity magnitude on the device and download it once into the
@@ -157,18 +295,23 @@ function download_vorticity_magnitude!(case::JellyCase)
 end
 
 """
-Colorize the vorticity magnitude voxel-by-voxel into the version-2 volume
-buffer. Emission runs through the palette's positive half — quiescent water
-stays on the keyed near-white midpoint — while opacity follows a soft
-rational knee of the wake strength, so bell shells read as translucent
-membranes whose tangent chords brighten into rims, exactly the depth cue the
-old line-integral projection faked in 2D and the compositor's ray-marcher
-now produces for real.
+Materialize the animated analytic membranes and colorize the vorticity
+magnitude voxel-by-voxel into the version-2 volume buffer. Emission runs
+through the palette's positive half while lavender membranes and trailing
+filaments give the compositor coherent surfaces from which to reconstruct 3D
+normals. Quiescent water remains transparent; opacity follows a soft rational
+knee for the wake and bounded translucent densities for the body material.
 """
 function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
     sigma = download_vorticity_magnitude!(case)
     nx, ny, nz = case.domain
     rgba = case.volume_rgba
+    τ = Float32(simulation_time(case))
+    # A lifted lavender reads as translucent tissue after several depth
+    # samples have accumulated.  The darker UI accent lavender is suitable
+    # for an opaque 2D body, but in a volume it turned dense shell crossings
+    # into charcoal dots over bright windows.
+    membrane_color = (UInt8(0xc4), UInt8(0xbe), UInt8(0xff))
     Threads.@threads :static for y in 1:ny
         @inbounds for row in 1:nz
             z = nz - row + 1
@@ -179,14 +322,45 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
                 # Soft knee keeps the shell/wake dynamic range on the palette
                 # without clipping; the deterministic mapping avoids per-frame
                 # autoscale flicker in the marched image.
-                density = wake / (wake + 6.0f0)
-                color = palette_color(palette, density, 1.0)
+                wake_density = wake / (wake + 6.0f0)
+                surface, tentacles = jelly_material_coverage(
+                    case,
+                    Float32(x) + 0.5f0,
+                    Float32(y) + 0.5f0,
+                    Float32(z) + 0.5f0,
+                    τ,
+                )
+                # All materials remain genuinely translucent.  A ray crosses
+                # many voxels, so modest per-cell absorption is enough to form
+                # a legible bell.  Keeping the turbulent wake below the tissue
+                # density prevents individual high-vorticity cells from
+                # becoming opaque pepper-like particles.
+                density = max(
+                    0.22f0 * wake_density,
+                    0.30f0 * surface,
+                    0.34f0 * tentacles,
+                )
+                # Reserve the palette's darkest positive endpoint for the
+                # planar plot.  Volumetric color is integrated repeatedly and
+                # therefore uses the luminous middle of the green ramp.
+                flow_color = palette_color(palette, 0.48f0 * wake_density, 1.0)
+                material = max(surface, 0.88f0 * tentacles)
+                surface_mix = clamp(
+                    material * (0.82f0 + 0.18f0 * (1.0f0 - wake_density)),
+                    0.0f0,
+                    1.0f0,
+                )
+                color = blend_color(
+                    flow_color,
+                    membrane_color,
+                    Float64(surface_mix),
+                )
                 rgba[output] = color[1]
                 rgba[output + 1] = color[2]
                 rgba[output + 2] = color[3]
                 # Per-voxel opacity for one straight-through voxel crossing;
                 # the shader renormalizes it by its actual step length.
-                rgba[output + 3] = round(UInt8, 217 * density)
+                rgba[output + 3] = round(UInt8, 160 * density)
                 output += 4
             end
         end

@@ -411,6 +411,8 @@ end
     @test JwmWaterLily.case_palette_name(case) == "violet"
     # The tank derives from the canvas: multiples of 16, display aspect.
     @test case.domain == (32, 16, 32)
+    @test !isempty(case.jellies)
+    @test all(isbits, case.jellies)
     @test JwmWaterLily.body_bounds(case, 0.0) === nothing
     # WaterLily passes the body into device kernels, so every captured value
     # must remain plain isbits data even when this test runs on the CPU.
@@ -435,10 +437,44 @@ end
     @test volume === case.volume_rgba
     @test length(volume) == 4 * 32 * 32 * 16
     alphas = @view volume[4:4:end]
-    # The bells shed vorticity above the wake floor, and the soft knee caps
-    # per-voxel opacity below the 217/255 transfer ceiling.
+    # The bells shed vorticity above the wake floor, while every cell remains
+    # lightly absorbing enough that a long ray cannot turn the wake opaque.
     @test maximum(alphas) > 0x00
-    @test maximum(alphas) <= 0xd9
+    @test maximum(alphas) <= 0x37
+    # The published material contains the analytic bell itself, not only its
+    # surrounding vorticity.  Sampling the animated crown lands inside the
+    # coherent membrane density used for 3D normal reconstruction.
+    jelly = first(case.jellies)
+    τ = Float32(JwmWaterLily.simulation_time(case))
+    θ = jelly.angular_velocity * τ + jelly.phase
+    heave = sin(θ) * jelly.radius / 4
+    crown_z =
+        jelly.height - (cos(θ) - 1) * jelly.radius / 4 - heave + jelly.radius
+    @test JwmWaterLily.jelly_signed_distance(
+        jelly,
+        jelly.x,
+        jelly.depth,
+        crown_z,
+        τ,
+    ) < 0
+    @test JwmWaterLily.jelly_surface_coverage(
+        case,
+        jelly.x,
+        jelly.depth,
+        crown_z,
+        τ,
+    ) > 0.5
+    # Five independently curved filaments trail through the depth volume;
+    # sampling the center of one strand must produce coherent material.
+    tentacle_x, tentacle_y, tentacle_z, _ =
+        JwmWaterLily.jelly_tentacle_center(jelly, 0, 0.45f0, τ)
+    @test JwmWaterLily.jelly_tentacle_coverage(
+        jelly,
+        tentacle_x,
+        tentacle_y,
+        tentacle_z,
+        τ,
+    ) > 0.5
     # Quiescent water stays fully transparent so the compositor's ray-marcher
     # reveals the frosted desktop through the empty tank.
     @test count(==(0x00), alphas) > length(alphas) ÷ 2

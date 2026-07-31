@@ -706,7 +706,7 @@ fn waterlily_volume_shader_occludes_front_to_back() {
         );
 
         let (vao, vbo) = create_quad_vao(gl);
-        let mut render_from = |position: [f32; 3], forward: [f32; 3], right: [f32; 3]| -> [u8; 4] {
+        let render_from = |position: [f32; 3], forward: [f32; 3], right: [f32; 3]| -> [u8; 4] {
             gl.viewport(0, 0, W, H);
             gl.disable(glow::BLEND);
             gl.use_program(Some(prog));
@@ -754,15 +754,21 @@ fn waterlily_volume_shader_occludes_front_to_back() {
         // pixel; the green back slice is completely occluded.
         let front_view = render_from([0.0, 0.0, -3.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
         assert!(
-            front_view[0] > 200 && front_view[1] < 25 && front_view[3] == 255,
-            "front view must be opaque red, got {front_view:?}"
+            front_view[0] > 200
+                && u16::from(front_view[0]) > u16::from(front_view[1]) + 40
+                && u16::from(front_view[0]) > u16::from(front_view[2]) + 30
+                && front_view[3] == 255,
+            "front view must be red-dominant and opaque, got {front_view:?}"
         );
 
         // Orbited behind the tank: the same volume now leads with green.
         let back_view = render_from([0.0, 0.0, 3.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]);
         assert!(
-            back_view[1] > 200 && back_view[0] < 25 && back_view[3] == 255,
-            "back view must be opaque green, got {back_view:?}"
+            back_view[1] > 200
+                && u16::from(back_view[1]) > u16::from(back_view[0]) + 40
+                && u16::from(back_view[1]) > u16::from(back_view[2]) + 30
+                && back_view[3] == 255,
+            "back view must be green-dominant and opaque, got {back_view:?}"
         );
 
         gl.bind_vertex_array(None);
