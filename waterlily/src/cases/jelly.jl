@@ -11,6 +11,12 @@ struct JellySpec
     height::Float32
     phase::Float32
     angular_velocity::Float32
+    sway_x::Float32
+    sway_depth::Float32
+    sway_phase_x::Float32
+    sway_phase_depth::Float32
+    sway_rate_x::Float32
+    sway_rate_depth::Float32
 end
 
 """
@@ -50,10 +56,35 @@ struct JellyCase{S} <: AbstractWaterLilyCase
 end
 
 const JELLY_REYNOLDS = 500.0
+const JELLY_COUNT = 5
 # Bell radius as a fraction of the tank height. Smaller than the upstream
-# example's ratio so the pulse wakes have room to decay before the floor —
-# at 0.175 the trailing columns filled the entire canvas.
-const JELLY_RADIUS_FRACTION = 0.13
+# example's ratio so five independently moving bells remain separated and
+# their pulse wakes have room to decay before the floor.
+const JELLY_RADIUS_FRACTION = 0.105
+
+"""
+Slow quasi-periodic drift shared by the solver body and display material.
+
+Two incommensurate harmonics per axis avoid synchronized pendulum motion,
+while the bounded amplitudes preserve each jelly's assigned spatial lane.
+The generic time argument intentionally supports ForwardDiff dual numbers
+used by `AutoBody` to derive body velocity.
+"""
+function jelly_lateral_center(spec::JellySpec, t::Real)
+    x_primary = sin(spec.sway_rate_x * t + spec.sway_phase_x)
+    x_secondary = sin(
+        1.71f0 * spec.sway_rate_x * t + spec.sway_phase_depth + 1.13f0,
+    )
+    depth_primary = sin(spec.sway_rate_depth * t + spec.sway_phase_depth)
+    depth_secondary = cos(
+        1.43f0 * spec.sway_rate_depth * t + spec.sway_phase_x + 0.67f0,
+    )
+    center_x = spec.x + spec.sway_x * (0.72f0 * x_primary + 0.28f0 * x_secondary)
+    center_depth = spec.depth +
+                   spec.sway_depth *
+                   (0.68f0 * depth_primary + 0.32f0 * depth_secondary)
+    return (center_x, center_depth)
+end
 
 """
 Pick the 3D tank from the canvas: the vertical resolution sets fidelity and
@@ -83,25 +114,58 @@ function build_jelly_case(
     nx, ny, nz = domain = jelly_domain(dimensions)
     U = T(1)
     radius = T(JELLY_RADIUS_FRACTION * nz)
-    count = clamp(floor(Int, nx / (3.6 * radius)), 1, 4)
+    count = JELLY_COUNT
+    lane_width = T(nx) / T(count)
 
     specs = map(1:count) do index
-        R = radius * (T(0.78) + T(0.35) * rand(T))
-        # Station-keeping height near the top of the tank, with per-jelly
-        # spread so the smack is staggered instead of a parade rank.
-        h = T(nz) - 2R - T(0.6) * radius * rand(T)
-        px = T(nx) * (T(index) - T(0.5)) / T(count) +
-             (rand(T) - T(0.5)) * T(0.3) * radius
-        py = T(ny) / 2 + (rand(T) - T(0.5)) * T(0.25) * ny
+        R = radius * (T(0.82) + T(0.25) * rand(T))
+        sway_x = min(T(0.42) * R, T(0.18) * lane_width) *
+                 (T(0.68) + T(0.32) * rand(T))
+        sway_depth = min(T(0.48) * R, T(0.11) * ny) *
+                     (T(0.65) + T(0.35) * rand(T))
+
+        # One stratified lane per jelly keeps the smack spread across the
+        # canvas.  Depth and height use different low-discrepancy strides, so
+        # neighbouring screen lanes do not also form a flat parade rank.
+        lane_center = (T(index) - T(0.5)) * lane_width
+        x_margin = min(R + sway_x + T(1), T(0.44) * nx)
+        px = clamp(
+            lane_center + (rand(T) - T(0.5)) * T(0.20) * lane_width,
+            x_margin,
+            T(nx) - x_margin,
+        )
+        depth_fraction = mod(T(0.14) + T(index - 1) * T(0.37), one(T))
+        depth_margin = min(R + sway_depth + T(1), T(0.36) * ny)
+        py = depth_margin + depth_fraction * (T(ny) - 2depth_margin)
+        height_fraction = mod(T(0.09) + T(index - 1) * T(0.43), one(T))
+        highest_mouth = T(nz) - T(1.45) * R
+        lowest_mouth = max(T(2.75) * R, highest_mouth - T(1.15) * R)
+        h = highest_mouth - height_fraction * (highest_mouth - lowest_mouth)
+
         phase = T(2pi) * rand(T)
         ω = 2U / R
-        JellySpec(R, px, py, h, phase, ω)
+        sway_phase_x = T(2pi) * rand(T)
+        sway_phase_depth = T(2pi) * rand(T)
+        sway_rate_x = ω * (T(0.20) + T(0.18) * rand(T))
+        sway_rate_depth = ω * (T(0.17) + T(0.22) * rand(T))
+        JellySpec(
+            R,
+            px,
+            py,
+            h,
+            phase,
+            ω,
+            sway_x,
+            sway_depth,
+            sway_phase_x,
+            sway_phase_depth,
+            sway_rate_x,
+            sway_rate_depth,
+        )
     end
 
     jellies = map(specs) do spec
         R = spec.radius
-        px = spec.x
-        py = spec.depth
         h = spec.height
         phase = spec.phase
         ω = spec.angular_velocity
@@ -113,13 +177,15 @@ function build_jelly_case(
         # time-dependent would reject the ForwardDiff duals.
         bell = WaterLily.AutoBody(
             (x, t) -> abs(√sum(abs2, x) - R) - 1.0f0,
-            let px = px, py = py, phase = phase, ω = ω, R = R, h = h
+            let spec = spec, phase = phase, ω = ω, R = R, h = h
                 function (x, t)
                     θ = ω * t + phase
+                    center_x, center_depth = jelly_lateral_center(spec, t)
                     squeeze = 1 .- SA[1, 1, 0] .* (cos(θ) / 10)
                     recoil = SA[0, 0, 1] .* ((cos(θ) - 1) * R / 4 - h)
                     heave = SA[0, 0, 1] .* (sin(θ) * R / 4)
-                    return squeeze .* (x - SA[px, py, 0.0f0]) + recoil + heave
+                    return squeeze .* (x - SA[center_x, center_depth, 0.0f0]) +
+                           recoil + heave
                 end
             end,
         )
@@ -189,8 +255,9 @@ function jelly_signed_distance(
 )
     θ = spec.angular_velocity * t + spec.phase
     squeeze = 1.0f0 - cos(θ) / 10.0f0
-    local_x = squeeze * (x - spec.x)
-    local_y = squeeze * (y - spec.depth)
+    center_x, center_depth = jelly_lateral_center(spec, t)
+    local_x = squeeze * (x - center_x)
+    local_y = squeeze * (y - center_depth)
     heave = sin(θ) * spec.radius / 4.0f0
     local_z = z - spec.height + (cos(θ) - 1.0f0) * spec.radius / 4.0f0 + heave
     shell = abs(sqrt(local_x^2 + local_y^2 + local_z^2) - spec.radius) - 1.0f0
@@ -207,14 +274,15 @@ end
 
 function jelly_tentacle_center(spec::JellySpec, strand::Integer, q::Real, t::Real)
     theta = spec.angular_velocity * t + spec.phase
+    jelly_x, jelly_depth = jelly_lateral_center(spec, t)
     heave = sin(theta) * spec.radius / 4.0f0
     fraction = Float32(q)
     angle = Float32(2pi * strand / 5) + 0.18f0 * sin(theta)
     anchor = 0.34f0 * spec.radius * (1.0f0 - 0.42f0 * fraction)
     wave = theta + Float32(1.7pi) * fraction + Float32(1.9 * strand)
     sway = spec.radius * (0.035f0 + 0.12f0 * fraction)
-    center_x = spec.x + anchor * cos(angle) + sway * sin(wave)
-    center_y = spec.depth + anchor * sin(angle) + sway * cos(0.83f0 * wave)
+    center_x = jelly_x + anchor * cos(angle) + sway * sin(wave)
+    center_y = jelly_depth + anchor * sin(angle) + sway * cos(0.83f0 * wave)
     center_z = spec.height - heave - 2.35f0 * spec.radius * fraction
     strand_radius = clamp(
         0.12f0 * spec.radius * (1.0f0 - 0.52f0 * fraction),

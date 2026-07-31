@@ -411,8 +411,19 @@ end
     @test JwmWaterLily.case_palette_name(case) == "violet"
     # The tank derives from the canvas: multiples of 16, display aspect.
     @test case.domain == (32, 16, 32)
-    @test !isempty(case.jellies)
+    @test length(case.jellies) == 5
     @test all(isbits, case.jellies)
+    # Five spatial lanes and independent quasi-periodic drift keep the smack
+    # distributed rather than converging into one central clump.
+    @test issorted(getfield.(case.jellies, :x))
+    @test case.jellies[end].x - case.jellies[1].x > 0.5 * case.domain[1]
+    centers_now = JwmWaterLily.jelly_lateral_center.(case.jellies, 0.0)
+    centers_later = JwmWaterLily.jelly_lateral_center.(case.jellies, 7.0)
+    @test all(!=(0.0), hypot.(
+        first.(centers_later) .- first.(centers_now),
+        last.(centers_later) .- last.(centers_now),
+    ))
+    @test length(unique(getfield.(case.jellies, :sway_rate_x))) == 5
     @test JwmWaterLily.body_bounds(case, 0.0) === nothing
     # WaterLily passes the body into device kernels, so every captured value
     # must remain plain isbits data even when this test runs on the CPU.
@@ -446,21 +457,22 @@ end
     # coherent membrane density used for 3D normal reconstruction.
     jelly = first(case.jellies)
     τ = Float32(JwmWaterLily.simulation_time(case))
+    jelly_x, jelly_depth = JwmWaterLily.jelly_lateral_center(jelly, τ)
     θ = jelly.angular_velocity * τ + jelly.phase
     heave = sin(θ) * jelly.radius / 4
     crown_z =
         jelly.height - (cos(θ) - 1) * jelly.radius / 4 - heave + jelly.radius
     @test JwmWaterLily.jelly_signed_distance(
         jelly,
-        jelly.x,
-        jelly.depth,
+        jelly_x,
+        jelly_depth,
         crown_z,
         τ,
     ) < 0
     @test JwmWaterLily.jelly_surface_coverage(
         case,
-        jelly.x,
-        jelly.depth,
+        jelly_x,
+        jelly_depth,
         crown_z,
         τ,
     ) > 0.5

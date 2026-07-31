@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | A smack of 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes, curved trailing filaments, and their simulated wakes are published together as a native RGBA volume that the compositor ray-marches through a slowly orbiting perspective camera | violet purple/green |
+| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: independently drifting and pulsing analytic bell membranes, curved trailing filaments, and their simulated wakes are published together as a native RGBA volume that the compositor ray-marches through a slowly orbiting perspective camera | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
