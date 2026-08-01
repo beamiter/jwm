@@ -413,17 +413,48 @@ end
     @test case.domain == (32, 16, 32)
     @test length(case.jellies) == 5
     @test all(isbits, case.jellies)
-    # Five spatial lanes and independent quasi-periodic drift keep the smack
-    # distributed rather than converging into one central clump.
+    # Five spatial lanes and independent smooth 3D paths keep the smack
+    # distributed rather than converging into one central clump. Base heights
+    # cover the safe water column instead of forming a row below the surface.
     @test issorted(getfield.(case.jellies, :x))
     @test case.jellies[end].x - case.jellies[1].x > 0.5 * case.domain[1]
-    centers_now = JwmWaterLily.jelly_lateral_center.(case.jellies, 0.0)
-    centers_later = JwmWaterLily.jelly_lateral_center.(case.jellies, 7.0)
-    @test all(!=(0.0), hypot.(
-        first.(centers_later) .- first.(centers_now),
-        last.(centers_later) .- last.(centers_now),
-    ))
+    @test maximum(getfield.(case.jellies, :height)) -
+          minimum(getfield.(case.jellies, :height)) > 0.15 * case.domain[3]
+    for (index, jelly) in enumerate(case.jellies)
+        lowest_center = 2.62f0 * jelly.radius + jelly.sway_height + 1.25f0
+        highest_center =
+            0.92f0 * case.domain[3] -
+            1.62f0 * jelly.radius -
+            jelly.sway_height -
+            1.25f0
+        height_fraction = mod(0.12f0 + (index - 1) * 0.618_034f0, 1.0f0)
+        @test isapprox(
+            jelly.height,
+            lowest_center + height_fraction * (highest_center - lowest_center);
+            atol=2eps(Float32),
+        )
+        # The bounded roaming path plus the full pulse envelope leaves the
+        # tentacle tip in the tank and the bell crown submerged below 0.92nz.
+        @test jelly.height - jelly.sway_height - 2.60f0 * jelly.radius > 0
+        @test jelly.height + jelly.sway_height + 1.604f0 * jelly.radius <
+              0.92f0 * case.domain[3]
+
+        samples = [JwmWaterLily.jelly_center(jelly, time) for time in 0.0:2.0:80.0]
+        ranges = ntuple(
+            axis -> maximum(center[axis] for center in samples) -
+                    minimum(center[axis] for center in samples),
+            3,
+        )
+        @test ranges[1] > 0.5 * jelly.sway_x
+        @test ranges[2] > 0.5 * jelly.sway_depth
+        @test ranges[3] > 0.5 * jelly.sway_height
+        center = JwmWaterLily.jelly_center(jelly, 7.0)
+        @test JwmWaterLily.jelly_lateral_center(jelly, 7.0) ==
+              (center[1], center[2])
+    end
     @test length(unique(getfield.(case.jellies, :sway_rate_x))) == 5
+    @test length(unique(getfield.(case.jellies, :sway_rate_depth))) == 5
+    @test length(unique(getfield.(case.jellies, :sway_rate_height))) == 5
     @test JwmWaterLily.body_bounds(case, 0.0) === nothing
     # WaterLily passes the body into device kernels, so every captured value
     # must remain plain isbits data even when this test runs on the CPU.
@@ -457,11 +488,87 @@ end
     # coherent membrane density used for 3D normal reconstruction.
     jelly = first(case.jellies)
     τ = Float32(JwmWaterLily.simulation_time(case))
-    jelly_x, jelly_depth = JwmWaterLily.jelly_lateral_center(jelly, τ)
+    jelly_x, jelly_depth, jelly_height = JwmWaterLily.jelly_center(jelly, τ)
+    # Published voxel coordinates must match WaterLily's physical cell
+    # centres, and the duplicated analytic distance must stay registered with
+    # the exact AutoBody union that generated the wake.
+    nx, ny, nz = case.domain
+    voxel_indices = [(1, 1, 1), (nx, ny, nz)]
+    append!(
+        voxel_indices,
+        map(case.jellies) do swimmer
+            center = JwmWaterLily.jelly_center(swimmer, τ)
+            return (
+                clamp(round(Int, center[1] + 0.5f0), 1, nx),
+                clamp(round(Int, center[2] + 0.5f0), 1, ny),
+                clamp(round(Int, center[3] + 0.5f0), 1, nz),
+            )
+        end,
+    )
+    for (x, y, z) in voxel_indices
+        storage_index = CartesianIndex(x + 1, y + 1, z + 1)
+        physical = JwmWaterLily.WaterLily.loc(0, storage_index, Float32)
+        expected = (
+            JwmWaterLily.jelly_voxel_center(x),
+            JwmWaterLily.jelly_voxel_center(y),
+            JwmWaterLily.jelly_voxel_center(z),
+        )
+        @test Tuple(physical) == expected
+        analytic_distance = minimum(
+            JwmWaterLily.jelly_signed_distance(
+                swimmer,
+                physical[1],
+                physical[2],
+                physical[3],
+                τ,
+            ) for swimmer in case.jellies
+        )
+        @test isapprox(
+            JwmWaterLily.WaterLily.sdf(case.simulation.body, physical, τ),
+            analytic_distance;
+            atol=2.0f-4,
+        )
+    end
+    # At the cut rim the mouth plane wins the set-difference measurement.
+    # Although its SDF depends only on Z, it must report the same lateral
+    # translation as the bell or the solver sees a stationary slit while the
+    # rendered rim swims sideways.
+    squeeze = 1.0f0 - cos(jelly.angular_velocity * τ + jelly.phase) / 10.0f0
+    heave = sin(jelly.angular_velocity * τ + jelly.phase) * jelly.radius / 4.0f0
+    local_z = (cos(jelly.angular_velocity * τ + jelly.phase) - 1.0f0) *
+              jelly.radius / 4.0f0
+    rim_radius = sqrt(jelly.radius^2 - local_z^2) / squeeze
+    rim_point = Float32[
+        jelly_x + rim_radius,
+        jelly_depth,
+        jelly_height - heave,
+    ]
+    _, _, rim_velocity = JwmWaterLily.WaterLily.measure(
+        case.simulation.body,
+        rim_point,
+        τ;
+        fastd²=Float32(Inf),
+    )
+    delta_t = 1.0f-3
+    center_before = JwmWaterLily.jelly_center(jelly, τ - delta_t)
+    center_after = JwmWaterLily.jelly_center(jelly, τ + delta_t)
+    center_velocity = ntuple(
+        axis -> (center_after[axis] - center_before[axis]) / (2delta_t),
+        3,
+    )
+    heave_velocity =
+        cos(jelly.angular_velocity * τ + jelly.phase) *
+        jelly.angular_velocity * jelly.radius / 4.0f0
+    expected_rim_velocity = (
+        center_velocity[1],
+        center_velocity[2],
+        center_velocity[3] - heave_velocity,
+    )
+    @test all(isapprox.(Tuple(rim_velocity), expected_rim_velocity; atol=2.0f-3))
     θ = jelly.angular_velocity * τ + jelly.phase
     heave = sin(θ) * jelly.radius / 4
     crown_z =
-        jelly.height - (cos(θ) - 1) * jelly.radius / 4 - heave + jelly.radius
+        jelly_height - (cos(θ) - 1) * jelly.radius / 4 - heave + jelly.radius
     @test JwmWaterLily.jelly_signed_distance(
         jelly,
         jelly_x,

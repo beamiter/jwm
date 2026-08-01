@@ -358,9 +358,14 @@ out vec4 frag_color;
 
 const int MAX_STEPS = 128;
 const int SHADOW_STEPS = 4;
-// Matches the planar shader's quiescent-water keying: empty tank water shows
-// the frosted desktop at the same strength as a near-white 2D frame.
-const float FROST_ALPHA = 0.58;
+// The aquarium is deliberately a little clearer than the full-screen planar
+// frost.  It now has a real projected silhouette, so water need not obscure
+// the desktop just to make the effect's extent legible.
+const float WATER_BACKDROP_ALPHA = 0.42;
+// World-space height of the open water surface.  Because the box is centred,
+// 0.88 leaves a narrow air gap (six percent of the full tank height) below the
+// top glass rim.
+const float WATER_LEVEL_RATIO = 0.88;
 const float WATER_F0 = 0.0203731878;
 
 vec2 clamp_scene_uv(vec2 uv) {
@@ -399,6 +404,53 @@ vec2 box_span(vec3 origin, vec3 direction) {
     );
 }
 
+// Intersect the already-clipped tank chord with the half-space below the
+// water surface.  Keeping this in world space means camera yaw/elevation do
+// not turn the top of the water into a screen-aligned special effect.
+vec2 water_span(
+    vec3 origin,
+    vec3 direction,
+    float tank_entry,
+    float tank_exit
+) {
+    float surface_y = u_box_half_extents.y * WATER_LEVEL_RATIO;
+    if (abs(direction.y) < 1e-6) {
+        float y = (origin + direction * tank_entry).y;
+        return y <= surface_y
+            ? vec2(tank_entry, tank_exit)
+            : vec2(tank_exit, tank_entry);
+    }
+    float surface_t = (surface_y - origin.y) / direction.y;
+    if (direction.y < 0.0) {
+        return vec2(max(tank_entry, surface_t), tank_exit);
+    }
+    return vec2(tank_entry, min(tank_exit, surface_t));
+}
+
+// Outward normal of the AABB face nearest a point on the box.  This drives
+// actual view-dependent glass Fresnel instead of a 2D rectangular border.
+vec3 box_face_normal(vec3 position) {
+    vec3 q = abs(position) / max(u_box_half_extents, vec3(1e-5));
+    if (q.x >= q.y && q.x >= q.z) {
+        return vec3(position.x < 0.0 ? -1.0 : 1.0, 0.0, 0.0);
+    }
+    if (q.y >= q.z) {
+        return vec3(0.0, position.y < 0.0 ? -1.0 : 1.0, 0.0);
+    }
+    return vec3(0.0, 0.0, position.z < 0.0 ? -1.0 : 1.0);
+}
+
+// Highlight the two tangent-axis boundaries of a hit face.  Evaluating this
+// at both entry and exit points exposes the front and back rim with correct
+// perspective, which is what makes the almost-full-screen box read as a 3D
+// aquarium rather than another translucent fullscreen filter.
+float box_edge_mask(vec3 position, vec3 face_normal) {
+    vec3 q = abs(position) / max(u_box_half_extents, vec3(1e-5));
+    vec3 tangent_q = q * (vec3(1.0) - abs(face_normal));
+    float edge = max(tangent_q.x, max(tangent_q.y, tangent_q.z));
+    return smoothstep(0.970, 0.996, edge);
+}
+
 vec3 world_to_texture(vec3 position) {
     vec3 tex = position / (2.0 * u_box_half_extents) + 0.5;
     // Producer rows have a top-left origin while world +Y points upward.
@@ -416,10 +468,9 @@ float density_at(vec3 tex) {
 }
 
 // A screen pixel covers a finite cone in the tank, not an infinitesimal ray.
-// Filtering a small cross in the camera plane suppresses the point-cloud
-// aliasing produced when thin vortex sheets are magnified from a 96x64x32
-// simulation onto a multi-megapixel desktop.  The footprint remains below
-// one voxel, preserving bell and tentacle silhouettes.
+// Keep most weight on the centre sample so the analytic bell membrane remains
+// crisp when a 64-cell-tall solve is enlarged to the desktop; the four small
+// neighbours only stabilise sub-voxel wake sheets.
 vec4 sample_volume_footprint(vec3 position, float radius) {
     vec3 right = u_camera_right * radius;
     vec3 up = u_camera_up * radius;
@@ -432,7 +483,7 @@ vec4 sample_volume_footprint(vec3 position, float radius) {
         + texture(u_volume, clamp(world_to_texture(position - right), vec3(0.0), vec3(1.0)))
         + texture(u_volume, clamp(world_to_texture(position + up), vec3(0.0), vec3(1.0)))
         + texture(u_volume, clamp(world_to_texture(position - up), vec3(0.0), vec3(1.0)));
-    return center * 0.52 + cross_sum * 0.12;
+    return center * 0.72 + cross_sum * 0.07;
 }
 
 bool finite_vec3(vec3 value) {
@@ -487,19 +538,43 @@ void main() {
     float front_surface_weight = 0.0;
     float front_depth_sum = 0.0;
 
-    vec2 span = box_span(u_camera_position, ray);
-    float entry = max(span.x, 0.0);
-    if (span.y > entry) {
-        float diagonal = 2.0 * length(u_box_half_extents);
-        float chord = span.y - entry;
+    vec2 tank_span = box_span(u_camera_position, ray);
+    float tank_entry = max(tank_span.x, 0.0);
+    float tank_exit = tank_span.y;
+    // The old path frosted every pixel even when its ray missed the volume.
+    // A transparent miss gives the aquarium a projected outline and leaves
+    // the desktop around it sharp.
+    if (tank_exit <= tank_entry) {
+        frag_color = vec4(0.0);
+        return;
+    }
+
+    vec3 tank_entry_position = u_camera_position + ray * tank_entry;
+    vec3 tank_exit_position = u_camera_position + ray * tank_exit;
+    vec3 tank_entry_normal = box_face_normal(tank_entry_position);
+    vec3 tank_exit_normal = box_face_normal(tank_exit_position);
+    float front_edge = box_edge_mask(tank_entry_position, tank_entry_normal);
+    float back_edge = box_edge_mask(tank_exit_position, tank_exit_normal);
+
+    vec2 wet_span = water_span(
+        u_camera_position,
+        ray,
+        tank_entry,
+        tank_exit
+    );
+    float entry = max(wet_span.x, tank_entry);
+    float exit = min(wet_span.y, tank_exit);
+    float diagonal = 2.0 * length(u_box_half_extents);
+    float chord = max(exit - entry, 0.0);
+    float reference = 2.0 * u_box_half_extents.x
+                    / float(textureSize(u_volume, 0).x);
+    if (chord > reference * 0.25) {
         // Sample in voxel units rather than as a fraction of the box
         // diagonal.  A front view crosses the tank's short axis; the old
         // formula gave it barely a dozen randomly offset samples and turned
         // thin membranes into the black salt-and-pepper pattern visible in
         // screenshots.  Midpoint integration is spatially coherent and 1.35
         // samples per voxel resolves both membrane boundaries without noise.
-        float reference = 2.0 * u_box_half_extents.x
-                        / float(textureSize(u_volume, 0).x);
         int steps = int(clamp(
             ceil(chord / reference * 1.35),
             16.0,
@@ -518,7 +593,7 @@ void main() {
             }
             vec3 position = u_camera_position + ray * t;
             vec3 tex = world_to_texture(position);
-            vec4 voxel = sample_volume_footprint(position, reference * 0.42);
+            vec4 voxel = sample_volume_footprint(position, reference * 0.26);
             float alpha = 1.0 - pow(
                 max(1.0 - voxel.a, 0.0),
                 step_length / reference
@@ -635,16 +710,21 @@ void main() {
         }
     }
 
-    // Refract the captured desktop through the foremost reconstructed 3D
-    // surface.  The bend changes with normal, view angle, and actual hit
-    // depth; a small Fresnel reflection remains at grazing angles.
-    vec3 frost = vec3(0.0);
-    float frost_alpha = 0.0;
-    if (u_scene_available == 1) {
-        vec2 screen_uv = gl_FragCoord.xy / max(u_screen_size, vec2(1.0));
+    // Refract the captured desktop only through the water actually crossed by
+    // this ray.  Beer-Lambert attenuation gives the tank a subtle cyan depth
+    // cue while preserving enough contrast for normal desktop work beneath it.
+    vec3 water_backdrop = vec3(0.0);
+    float water_backdrop_alpha = 0.0;
+    vec2 screen_uv = gl_FragCoord.xy / max(u_screen_size, vec2(1.0));
+    vec2 normal_screen = vec2(0.0);
+    float wet_fraction = clamp(
+        chord / max(tank_exit - tank_entry, 1e-5),
+        0.0,
+        1.0
+    );
+    if (u_scene_available == 1 && wet_fraction > 1e-4) {
         vec2 refracted_uv = screen_uv;
         float reflection_mix = 0.0;
-        vec2 normal_screen = vec2(0.0);
         float front_normal_length = length(front_normal_sum);
         if (front_surface_weight > 1e-4 && front_normal_length > 1e-4) {
             // Explicit division stays finite on every GLSL implementation;
@@ -656,8 +736,8 @@ void main() {
             );
             float front_depth = front_depth_sum;
             float n_dot_v = max(dot(front_normal, -ray), 0.0);
-            float bend_px = mix(5.0, 30.0, 1.0 - n_dot_v)
-                          * mix(1.0, 0.45, clamp(front_depth, 0.0, 1.0));
+            float bend_px = mix(4.0, 22.0, 1.0 - n_dot_v)
+                          * mix(1.0, 0.48, clamp(front_depth, 0.0, 1.0));
             refracted_uv += normal_screen * bend_px
                           / max(u_screen_size, vec2(1.0));
             float fresnel = WATER_F0
@@ -671,22 +751,105 @@ void main() {
         vec3 transmission = frosted_scene(refracted_uv);
         vec3 reflection = texture(
             u_scene_texture,
-            clamp_scene_uv(screen_uv - normal_screen * 0.012)
+            clamp_scene_uv(screen_uv - normal_screen * 0.010)
         ).rgb;
-        frost = mix(transmission, reflection, reflection_mix * 0.72) * FROST_ALPHA;
-        frost_alpha = FROST_ALPHA;
+        transmission = mix(transmission, reflection, reflection_mix * 0.68);
+
+        float optical_depth = clamp(chord / diagonal * 2.4, 0.0, 1.4);
+        vec3 transmittance = exp(
+            -vec3(0.24, 0.075, 0.026) * (0.28 + optical_depth)
+        );
+        vec3 deep_water = vec3(0.025, 0.145, 0.175);
+        transmission = transmission * transmittance
+                     + deep_water * (vec3(1.0) - transmittance);
+        // Fade continuously from the waterline.  Starting immediately at a
+        // fixed 72% opacity made a one-sample wet chord pop into a hard band.
+        water_backdrop_alpha = WATER_BACKDROP_ALPHA
+                             * smoothstep(0.0, 0.18, wet_fraction);
+        water_backdrop = transmission * water_backdrop_alpha;
+    } else if (wet_fraction > 1e-4) {
+        // A headless/no-snapshot consumer still gets a recognisable water
+        // volume rather than an otherwise invisible empty box.
+        water_backdrop_alpha = 0.16 * wet_fraction;
+        water_backdrop = vec3(0.018, 0.105, 0.135) * water_backdrop_alpha;
+    }
+
+    // The open water plane is real world-space geometry.  At grazing angles
+    // it catches a broad reflection; near its intersection with the four tank
+    // walls it becomes the clearly visible water line.
+    float surface_strength = 0.0;
+    if (abs(ray.y) > 1e-6) {
+        float surface_y = u_box_half_extents.y * WATER_LEVEL_RATIO;
+        float surface_t = (surface_y - u_camera_position.y) / ray.y;
+        if (surface_t >= tank_entry && surface_t <= tank_exit) {
+            vec3 surface_position = u_camera_position + ray * surface_t;
+            vec2 surface_q = abs(surface_position.xz)
+                           / max(u_box_half_extents.xz, vec2(1e-5));
+            if (all(lessThanEqual(surface_q, vec2(1.001)))) {
+                float surface_edge = smoothstep(
+                    0.955,
+                    0.996,
+                    max(surface_q.x, surface_q.y)
+                );
+                float surface_fresnel = WATER_F0
+                    + (1.0 - WATER_F0) * pow(1.0 - abs(ray.y), 5.0);
+                surface_strength = 0.018
+                                 + 0.12 * surface_fresnel
+                                 + 0.28 * surface_edge;
+            }
+        }
     }
 
     coverage = clamp(coverage, 0.0, 1.0);
     if (!finite_vec3(accumulated)) {
         accumulated = coverage * vec3(0.78, 0.84, 0.92);
     }
-    if (!finite_vec3(frost)) {
-        frost = vec3(0.0);
-        frost_alpha = 0.0;
+    if (!finite_vec3(water_backdrop)) {
+        water_backdrop = vec3(0.0);
+        water_backdrop_alpha = 0.0;
     }
-    vec3 premultiplied = accumulated + (1.0 - coverage) * frost;
-    float alpha = coverage + (1.0 - coverage) * frost_alpha;
+
+    // Back rim lies behind the volume and is naturally occluded by a jelly.
+    // The front pane/rim and water surface are then composited over it.  All
+    // terms remain premultiplied to match the compositor blend state.
+    float rear_glass_alpha = 0.20 * back_edge;
+    vec3 rear_glass_color = mix(
+        vec3(0.10, 0.55, 0.62),
+        vec3(0.78, 0.98, 1.0),
+        back_edge
+    );
+    vec3 behind = rear_glass_color * rear_glass_alpha
+                + (1.0 - rear_glass_alpha) * water_backdrop;
+    float behind_alpha = rear_glass_alpha
+                       + (1.0 - rear_glass_alpha) * water_backdrop_alpha;
+
+    vec3 premultiplied = accumulated + (1.0 - coverage) * behind;
+    float alpha = coverage + (1.0 - coverage) * behind_alpha;
+
+    float glass_n_dot_v = abs(dot(tank_entry_normal, -ray));
+    float glass_fresnel = WATER_F0
+        + (1.0 - WATER_F0) * pow(1.0 - glass_n_dot_v, 5.0);
+    float front_glass_alpha = clamp(
+        0.012 + 0.11 * glass_fresnel
+      + 0.46 * front_edge
+      + surface_strength,
+        0.0,
+        0.72
+    );
+    float glass_highlight = clamp(
+        0.18 + 0.82 * max(front_edge, surface_strength * 2.0),
+        0.0,
+        1.0
+    );
+    vec3 front_glass_color = mix(
+        vec3(0.10, 0.48, 0.56),
+        vec3(0.88, 1.0, 0.98),
+        glass_highlight
+    );
+    premultiplied = front_glass_color * front_glass_alpha
+                  + premultiplied * (1.0 - front_glass_alpha);
+    alpha = front_glass_alpha + alpha * (1.0 - front_glass_alpha);
+
     float layer_opacity = clamp(u_opacity, 0.0, 1.0);
     frag_color = vec4(premultiplied * layer_opacity, alpha * layer_opacity);
 }

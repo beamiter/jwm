@@ -249,11 +249,11 @@ impl WaterlilyTexture {
     }
 }
 
-/// CPU side of the volumetric camera: an orbiting perspective eye whose basis
+/// CPU side of the volumetric camera: a near-front perspective eye whose basis
 /// vectors feed the ray-marching shader. Derived deterministically from the
 /// frame timestamp so re-rendering the same frame (say, for unrelated damage)
 /// reproduces the exact same image, keeping damage tracking honest, while
-/// every new simulation frame advances the orbit.
+/// every new simulation frame advances the subtle parallax motion.
 struct VolumeCamera {
     position: [f32; 3],
     right: [f32; 3],
@@ -284,6 +284,43 @@ fn timestamp_phase(timestamp_ns: u64, period_s: f64) -> f64 {
     (timestamp_ns % period_ns.max(1)) as f64 / period_ns.max(1) as f64
 }
 
+/// Place the eye just far enough from the oriented box for every projected
+/// corner to remain inside `fill` of both viewport axes.  Camera-space depth
+/// for a corner is `distance + dot(corner, forward)`, so each perspective-fit
+/// inequality can be rearranged into a direct lower bound on `distance`.
+fn fitted_camera_distance(
+    half: [f64; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    forward: [f32; 3],
+    aspect: f64,
+    tan_half_fov: f64,
+    fill: f64,
+) -> f64 {
+    let mut distance = 0.0_f64;
+    for sx in [-1.0_f64, 1.0] {
+        for sy in [-1.0_f64, 1.0] {
+            for sz in [-1.0_f64, 1.0] {
+                let corner = [sx * half[0], sy * half[1], sz * half[2]];
+                let project = |axis: [f32; 3]| {
+                    corner[0] * f64::from(axis[0])
+                        + corner[1] * f64::from(axis[1])
+                        + corner[2] * f64::from(axis[2])
+                };
+                let corner_depth = project(forward);
+                let horizontal = project(right).abs();
+                let vertical = project(up).abs();
+                distance = distance.max(horizontal / (tan_half_fov * aspect * fill) - corner_depth);
+                distance = distance.max(vertical / (tan_half_fov * fill) - corner_depth);
+            }
+        }
+    }
+    // Leave a sub-pixel numerical guard after the f64 result is stored in the
+    // f32 camera uniforms.  This is far smaller than the intended screen
+    // margin and prevents a corner from landing barely outside the tank quad.
+    distance + 1e-4
+}
+
 fn volume_camera(
     width: u32,
     height: u32,
@@ -292,14 +329,23 @@ fn volume_camera(
     screen_h: u32,
     timestamp_ns: u64,
 ) -> VolumeCamera {
-    // One slow lap around the tank sells the parallax; the gentle elevation
-    // bob keeps the top and mouth planes of the bells in view alternately.
-    const ORBIT_PERIOD_S: f64 = 75.0;
-    const BOB_PERIOD_S: f64 = 33.0;
-    const BASE_ELEVATION_RAD: f64 = 0.20;
-    const BOB_AMPLITUDE_RAD: f64 = 0.09;
+    // Keep the aquarium facing the desktop instead of rotating it through a
+    // full orbit.  Small, slow yaw and elevation waves retain parallax without
+    // ever showing the tank from behind or making its footprint swing wildly.
+    const YAW_PERIOD_S: f64 = 47.0;
+    const ELEVATION_PERIOD_S: f64 = 31.0;
+    const YAW_AMPLITUDE_RAD: f64 = 0.11;
+    // Keep the eye just above the open water plane at every supported aspect
+    // ratio.  Besides exposing the tank's depth, this makes the water surface
+    // the first interface on every wet ray, matching the shader's front-pane
+    // source-over ordering.
+    const BASE_ELEVATION_RAD: f64 = 0.29;
+    const ELEVATION_AMPLITUDE_RAD: f64 = 0.025;
     // 38 degrees of vertical field of view.
     const TAN_HALF_FOV: f64 = 0.344_327_6;
+    // NDC spans -1..1, so 0.92 leaves about four percent of the viewport on
+    // each side of the limiting axis for a visible glass rim.
+    const VIEWPORT_FILL: f64 = 0.92;
 
     // Simulation voxels are cubes, so the box proportions are the voxel
     // counts; normalize them so camera distances stay resolution-invariant.
@@ -310,31 +356,38 @@ fn volume_camera(
         0.5 * depth as f64 / longest,
     ];
 
-    let azimuth = std::f64::consts::TAU * timestamp_phase(timestamp_ns, ORBIT_PERIOD_S);
-    let bob = std::f64::consts::TAU * timestamp_phase(timestamp_ns, BOB_PERIOD_S);
-    let elevation = BASE_ELEVATION_RAD + BOB_AMPLITUDE_RAD * bob.sin();
+    let yaw_phase = std::f64::consts::TAU * timestamp_phase(timestamp_ns, YAW_PERIOD_S);
+    let elevation_phase = std::f64::consts::TAU * timestamp_phase(timestamp_ns, ELEVATION_PERIOD_S);
+    let yaw = YAW_AMPLITUDE_RAD * yaw_phase.sin();
+    let elevation = BASE_ELEVATION_RAD + ELEVATION_AMPLITUDE_RAD * elevation_phase.sin();
 
-    // Fit the orbit against both screen axes: the box's worst-case apparent
-    // height (tilted by the elevation) and its worst-case apparent width
-    // (the horizontal diagonal at a 45-degree azimuth).
-    let aspect = (screen_w.max(1) as f64 / screen_h.max(1) as f64).max(0.5);
-    let apparent_vertical = half[1] + 0.35 * half[0].max(half[2]);
-    let apparent_horizontal = (half[0] * half[0] + half[2] * half[2]).sqrt();
-    let distance = 1.18
-        * (apparent_vertical / TAN_HALF_FOV).max(apparent_horizontal / (TAN_HALF_FOV * aspect));
-
-    let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+    let (sin_yaw, cos_yaw) = yaw.sin_cos();
     let (sin_elevation, cos_elevation) = elevation.sin_cos();
-    let position = [
-        (distance * cos_elevation * sin_azimuth) as f32,
-        (distance * sin_elevation) as f32,
-        (-distance * cos_elevation * cos_azimuth) as f32,
+    let eye_direction = [
+        (cos_elevation * sin_yaw) as f32,
+        sin_elevation as f32,
+        (-cos_elevation * cos_yaw) as f32,
     ];
-    let forward = normalize([-position[0], -position[1], -position[2]]);
+    let forward = normalize([-eye_direction[0], -eye_direction[1], -eye_direction[2]]);
     // `up x forward` keeps world +X on screen right at the resting azimuth,
     // matching the planar projection the volumetric path replaces.
     let right = normalize(cross([0.0, 1.0, 0.0], forward));
     let up = cross(forward, right);
+    let aspect = screen_w.max(1) as f64 / screen_h.max(1) as f64;
+    let distance = fitted_camera_distance(
+        half,
+        right,
+        up,
+        forward,
+        aspect,
+        TAN_HALF_FOV,
+        VIEWPORT_FILL,
+    );
+    let position = [
+        eye_direction[0] * distance as f32,
+        eye_direction[1] * distance as f32,
+        eye_direction[2] * distance as f32,
+    ];
 
     VolumeCamera {
         position,
@@ -1098,10 +1151,50 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
 
 #[cfg(test)]
 mod tests {
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn projected_box_fill(
+        camera: &super::VolumeCamera,
+        screen_w: u32,
+        screen_h: u32,
+    ) -> (f32, f32) {
+        let aspect = screen_w.max(1) as f32 / screen_h.max(1) as f32;
+        let mut max_x = 0.0_f32;
+        let mut max_y = 0.0_f32;
+        for sx in [-1.0_f32, 1.0] {
+            for sy in [-1.0_f32, 1.0] {
+                for sz in [-1.0_f32, 1.0] {
+                    let corner = [
+                        sx * camera.box_half_extents[0],
+                        sy * camera.box_half_extents[1],
+                        sz * camera.box_half_extents[2],
+                    ];
+                    let from_eye = [
+                        corner[0] - camera.position[0],
+                        corner[1] - camera.position[1],
+                        corner[2] - camera.position[2],
+                    ];
+                    let depth = dot(from_eye, camera.forward);
+                    assert!(
+                        depth > 0.0,
+                        "every aquarium corner must be in front of the eye"
+                    );
+                    max_x = max_x.max(
+                        (dot(from_eye, camera.right) / (depth * camera.tan_half_fov * aspect))
+                            .abs(),
+                    );
+                    max_y =
+                        max_y.max((dot(from_eye, camera.up) / (depth * camera.tan_half_fov)).abs());
+                }
+            }
+        }
+        (max_x, max_y)
+    }
+
     #[test]
     fn volume_camera_is_deterministic_and_orthonormal() {
-        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-
         for timestamp in [0_u64, 1_000_000_000, 987_654_321_012, u64::MAX / 3] {
             let camera = super::volume_camera(96, 64, 32, 1920, 1080, timestamp);
             let again = super::volume_camera(96, 64, 32, 1920, 1080, timestamp);
@@ -1110,8 +1203,9 @@ mod tests {
             assert_eq!(camera.position, again.position);
             assert_eq!(camera.forward, again.forward);
 
-            assert!(dot(camera.forward, camera.forward).abs() - 1.0 < 1e-4);
-            assert!(dot(camera.right, camera.right).abs() - 1.0 < 1e-4);
+            assert!((dot(camera.forward, camera.forward) - 1.0).abs() < 1e-4);
+            assert!((dot(camera.right, camera.right) - 1.0).abs() < 1e-4);
+            assert!((dot(camera.up, camera.up) - 1.0).abs() < 1e-4);
             assert!(dot(camera.forward, camera.right).abs() < 1e-4);
             assert!(dot(camera.forward, camera.up).abs() < 1e-4);
             assert!(dot(camera.right, camera.up).abs() < 1e-4);
@@ -1122,11 +1216,17 @@ mod tests {
                 -camera.position[2],
             ]);
             assert!(dot(to_center, camera.forward) > 0.999);
-            // Orbit stays level: screen right never rolls off the horizon.
+            // The aquarium remains in the front hemisphere throughout the
+            // motion, with only a small side-to-side reveal of its depth.
+            let horizontal_distance = camera.position[0].hypot(camera.position[2]);
+            assert!(camera.position[2] < 0.0);
+            assert!(-camera.position[2] / horizontal_distance > 0.99);
+            assert!(camera.position[0].abs() < -0.12 * camera.position[2]);
+            // Camera motion stays level: screen right never rolls off the horizon.
             assert!(camera.right[1].abs() < 1e-4);
         }
 
-        // At the resting azimuth the camera sits on the front (-Z) side with
+        // At the resting yaw the camera sits on the front (-Z) side with
         // world +X on screen right, matching the planar view it replaces.
         let resting = super::volume_camera(96, 64, 32, 1920, 1080, 0);
         assert!(resting.position[2] < 0.0);
@@ -1136,6 +1236,45 @@ mod tests {
         assert_eq!(resting.box_half_extents[0], 0.5);
         assert!((resting.box_half_extents[1] - 64.0 / 96.0 / 2.0).abs() < 1e-6);
         assert!((resting.box_half_extents[2] - 32.0 / 96.0 / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn volume_camera_fits_the_oriented_tank_near_fullscreen() {
+        for (screen_w, screen_h) in [(1920, 1080), (3440, 1440), (1080, 1920)] {
+            for timestamp in [0_u64, 7_000_000_000, 19_000_000_000, 43_000_000_000] {
+                let camera = super::volume_camera(96, 64, 32, screen_w, screen_h, timestamp);
+                let (fill_x, fill_y) = projected_box_fill(&camera, screen_w, screen_h);
+                let limiting_fill = fill_x.max(fill_y);
+                assert!(
+                    camera.position[1] > camera.box_half_extents[1] * 0.88,
+                    "camera must remain above the open water surface"
+                );
+                assert!(
+                    fill_x <= 0.921 && fill_y <= 0.921,
+                    "projected tank escaped viewport fit: {fill_x} x {fill_y}"
+                );
+                assert!(
+                    limiting_fill >= 0.915,
+                    "projected tank should fill about 92% of one axis, got {fill_x} x {fill_y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn volume_camera_motion_is_smooth() {
+        let mut previous = None;
+        for second in 0_u64..=120 {
+            let camera = super::volume_camera(96, 64, 32, 1920, 1080, second * 1_000_000_000);
+            let direction = super::normalize(camera.position);
+            if let Some(previous) = previous {
+                assert!(
+                    dot(previous, direction) > 0.999,
+                    "one-second camera motion must not jump"
+                );
+            }
+            previous = Some(direction);
+        }
     }
 
     #[test]

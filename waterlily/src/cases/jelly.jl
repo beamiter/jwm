@@ -13,10 +13,13 @@ struct JellySpec
     angular_velocity::Float32
     sway_x::Float32
     sway_depth::Float32
+    sway_height::Float32
     sway_phase_x::Float32
     sway_phase_depth::Float32
+    sway_phase_height::Float32
     sway_rate_x::Float32
     sway_rate_depth::Float32
+    sway_rate_height::Float32
 end
 
 """
@@ -24,8 +27,9 @@ A smack of pulsing jellyfish in a true three-dimensional WaterLily solve,
 adapted from the upstream `ThreeD_Jelly` example: each bell is a thin
 spherical shell with its mouth cut off by a plane, breathing through the
 `A`/`B`/`C` motion maps while a uniform downstream current balances its
-swimming so the smack holds station. Several jellies share the tank at
-different positions, sizes and pulse phases.
+swimming while smooth, independently seeded three-axis paths carry the smack
+through the tank. Several jellies share the water at different positions,
+sizes and pulse phases.
 
 The display pipeline is natively three-dimensional: the case picks a 3D
 domain from the canvas aspect ratio, materializes the analytic bell
@@ -63,14 +67,14 @@ const JELLY_COUNT = 5
 const JELLY_RADIUS_FRACTION = 0.105
 
 """
-Slow quasi-periodic drift shared by the solver body and display material.
+Smooth quasi-random roaming shared by the solver body and display material.
 
-Two incommensurate harmonics per axis avoid synchronized pendulum motion,
-while the bounded amplitudes preserve each jelly's assigned spatial lane.
-The generic time argument intentionally supports ForwardDiff dual numbers
-used by `AutoBody` to derive body velocity.
+Two incommensurate harmonics on each of the three tank axes avoid synchronized
+pendulum motion, while bounded amplitudes keep every bell, crown and trailing
+filament inside the tank. The generic time argument intentionally supports
+ForwardDiff dual numbers used by `AutoBody` to derive body velocity.
 """
-function jelly_lateral_center(spec::JellySpec, t::Real)
+function jelly_center(spec::JellySpec, t::Real)
     x_primary = sin(spec.sway_rate_x * t + spec.sway_phase_x)
     x_secondary = sin(
         1.71f0 * spec.sway_rate_x * t + spec.sway_phase_depth + 1.13f0,
@@ -79,10 +83,27 @@ function jelly_lateral_center(spec::JellySpec, t::Real)
     depth_secondary = cos(
         1.43f0 * spec.sway_rate_depth * t + spec.sway_phase_x + 0.67f0,
     )
+    height_primary = sin(spec.sway_rate_height * t + spec.sway_phase_height)
+    height_secondary = cos(
+        1.57f0 * spec.sway_rate_height * t +
+        spec.sway_phase_x -
+        spec.sway_phase_depth +
+        0.41f0,
+    )
     center_x = spec.x + spec.sway_x * (0.72f0 * x_primary + 0.28f0 * x_secondary)
     center_depth = spec.depth +
                    spec.sway_depth *
                    (0.68f0 * depth_primary + 0.32f0 * depth_secondary)
+    center_height = spec.height +
+                    spec.sway_height *
+                    (0.71f0 * height_primary + 0.29f0 * height_secondary)
+    return (center_x, center_depth, center_height)
+end
+
+# Retain the two-axis helper for callers that only need the horizontal tank
+# coordinates; all body and material transforms use `jelly_center` directly.
+function jelly_lateral_center(spec::JellySpec, t::Real)
+    center_x, center_depth, _ = jelly_center(spec, t)
     return (center_x, center_depth)
 end
 
@@ -119,35 +140,51 @@ function build_jelly_case(
 
     specs = map(1:count) do index
         R = radius * (T(0.82) + T(0.25) * rand(T))
-        sway_x = min(T(0.42) * R, T(0.18) * lane_width) *
+        sway_x = min(T(0.72) * R, T(0.24) * lane_width) *
                  (T(0.68) + T(0.32) * rand(T))
-        sway_depth = min(T(0.48) * R, T(0.11) * ny) *
+        sway_depth = min(T(0.62) * R, T(0.18) * ny) *
                      (T(0.65) + T(0.35) * rand(T))
+        sway_height = min(T(0.78) * R, T(0.10) * nz) *
+                      (T(0.65) + T(0.35) * rand(T))
 
         # One stratified lane per jelly keeps the smack spread across the
-        # canvas.  Depth and height use different low-discrepancy strides, so
-        # neighbouring screen lanes do not also form a flat parade rank.
+        # canvas. Depth and height use different low-discrepancy strides, so
+        # neighbouring screen lanes do not also form a flat parade rank. The
+        # The full one-cell shell radius grows by at most 1/0.9 under the
+        # pulse map; reserve that exact envelope as well as the roaming span.
+        expanded_shell_radius = (R + T(1)) / T(0.9)
         lane_center = (T(index) - T(0.5)) * lane_width
-        x_margin = min(R + sway_x + T(1), T(0.44) * nx)
+        x_margin = min(expanded_shell_radius + sway_x, T(0.48) * nx)
         px = clamp(
             lane_center + (rand(T) - T(0.5)) * T(0.20) * lane_width,
             x_margin,
             T(nx) - x_margin,
         )
         depth_fraction = mod(T(0.14) + T(index - 1) * T(0.37), one(T))
-        depth_margin = min(R + sway_depth + T(1), T(0.36) * ny)
+        depth_margin = min(expanded_shell_radius + sway_depth, T(0.48) * ny)
         py = depth_margin + depth_fraction * (T(ny) - 2depth_margin)
-        height_fraction = mod(T(0.09) + T(index - 1) * T(0.43), one(T))
-        highest_mouth = T(nz) - T(1.45) * R
-        lowest_mouth = max(T(2.75) * R, highest_mouth - T(1.15) * R)
-        h = highest_mouth - height_fraction * (highest_mouth - lowest_mouth)
+
+        # The pulse can lift the crown 1.604R above the roaming center, while
+        # the lowest tentacle tip reaches 2.60R below it. Reserve those full
+        # envelopes plus the roaming amplitude, then distribute base heights
+        # across the complete safe interval rather than clustering at the top.
+        height_fraction = mod(T(0.12) + T(index - 1) * T(0.618_034), one(T))
+        lowest_center = T(2.62) * R + sway_height + T(1.25)
+        # The compositor draws the water surface near 0.94nz. Keeping the
+        # complete crown below 0.92nz leaves a visible layer of water above
+        # every swimmer instead of letting bells break through the surface.
+        highest_center =
+            T(0.92) * T(nz) - T(1.62) * R - sway_height - T(1.25)
+        h = lowest_center + height_fraction * (highest_center - lowest_center)
 
         phase = T(2pi) * rand(T)
         ω = 2U / R
         sway_phase_x = T(2pi) * rand(T)
         sway_phase_depth = T(2pi) * rand(T)
+        sway_phase_height = T(2pi) * rand(T)
         sway_rate_x = ω * (T(0.20) + T(0.18) * rand(T))
         sway_rate_depth = ω * (T(0.17) + T(0.22) * rand(T))
+        sway_rate_height = ω * (T(0.13) + T(0.18) * rand(T))
         JellySpec(
             R,
             px,
@@ -157,16 +194,18 @@ function build_jelly_case(
             ω,
             sway_x,
             sway_depth,
+            sway_height,
             sway_phase_x,
             sway_phase_depth,
+            sway_phase_height,
             sway_rate_x,
             sway_rate_depth,
+            sway_rate_height,
         )
     end
 
     jellies = map(specs) do spec
         R = spec.radius
-        h = spec.height
         phase = spec.phase
         ω = spec.angular_velocity
         # The bell: a thin spherical shell breathing through the upstream
@@ -177,12 +216,13 @@ function build_jelly_case(
         # time-dependent would reject the ForwardDiff duals.
         bell = WaterLily.AutoBody(
             (x, t) -> abs(√sum(abs2, x) - R) - 1.0f0,
-            let spec = spec, phase = phase, ω = ω, R = R, h = h
+            let spec = spec, phase = phase, ω = ω, R = R
                 function (x, t)
                     θ = ω * t + phase
-                    center_x, center_depth = jelly_lateral_center(spec, t)
+                    center_x, center_depth, center_height = jelly_center(spec, t)
                     squeeze = 1 .- SA[1, 1, 0] .* (cos(θ) / 10)
-                    recoil = SA[0, 0, 1] .* ((cos(θ) - 1) * R / 4 - h)
+                    recoil =
+                        SA[0, 0, 1] .* ((cos(θ) - 1) * R / 4 - center_height)
                     heave = SA[0, 0, 1] .* (sin(θ) * R / 4)
                     return squeeze .* (x - SA[center_x, center_depth, 0.0f0]) +
                            recoil + heave
@@ -190,11 +230,17 @@ function build_jelly_case(
             end,
         )
         mouth = WaterLily.AutoBody(
-            let h = h
-                (x, t) -> x[3] - h
-            end,
-            let phase = phase, ω = ω, R = R
-                (x, t) -> x .+ SA[0, 0, 1] .* (sin(ω * t + phase) * R / 4)
+            (x, t) -> x[3],
+            let spec = spec, phase = phase, ω = ω, R = R
+                function (x, t)
+                    center_x, center_depth, center_height = jelly_center(spec, t)
+                    heave = sin(ω * t + phase) * R / 4
+                    # X/depth do not change this plane's SDF, but retaining
+                    # the complete inverse translation lets AutoBody derive
+                    # the same lateral rim velocity as the moving bell.
+                    return x .- SA[center_x, center_depth, center_height] +
+                           SA[0, 0, heave]
+                end
             end,
         )
         bell - mouth
@@ -255,13 +301,14 @@ function jelly_signed_distance(
 )
     θ = spec.angular_velocity * t + spec.phase
     squeeze = 1.0f0 - cos(θ) / 10.0f0
-    center_x, center_depth = jelly_lateral_center(spec, t)
+    center_x, center_depth, center_height = jelly_center(spec, t)
     local_x = squeeze * (x - center_x)
     local_y = squeeze * (y - center_depth)
     heave = sin(θ) * spec.radius / 4.0f0
-    local_z = z - spec.height + (cos(θ) - 1.0f0) * spec.radius / 4.0f0 + heave
+    local_z =
+        z - center_height + (cos(θ) - 1.0f0) * spec.radius / 4.0f0 + heave
     shell = abs(sqrt(local_x^2 + local_y^2 + local_z^2) - spec.radius) - 1.0f0
-    mouth = z + heave - spec.height
+    mouth = z + heave - center_height
     # Set difference `bell - mouth`: retain the shell only above the mouth
     # plane, exactly as WaterLily's body-composition operator does.
     return max(shell, -mouth)
@@ -274,7 +321,7 @@ end
 
 function jelly_tentacle_center(spec::JellySpec, strand::Integer, q::Real, t::Real)
     theta = spec.angular_velocity * t + spec.phase
-    jelly_x, jelly_depth = jelly_lateral_center(spec, t)
+    jelly_x, jelly_depth, jelly_height = jelly_center(spec, t)
     heave = sin(theta) * spec.radius / 4.0f0
     fraction = Float32(q)
     angle = Float32(2pi * strand / 5) + 0.18f0 * sin(theta)
@@ -283,7 +330,7 @@ function jelly_tentacle_center(spec::JellySpec, strand::Integer, q::Real, t::Rea
     sway = spec.radius * (0.035f0 + 0.12f0 * fraction)
     center_x = jelly_x + anchor * cos(angle) + sway * sin(wave)
     center_y = jelly_depth + anchor * sin(angle) + sway * cos(0.83f0 * wave)
-    center_z = spec.height - heave - 2.35f0 * spec.radius * fraction
+    center_z = jelly_height - heave - 2.35f0 * spec.radius * fraction
     strand_radius = clamp(
         0.12f0 * spec.radius * (1.0f0 - 0.52f0 * fraction),
         0.30f0,
@@ -307,7 +354,8 @@ function jelly_tentacle_coverage(
     t::Real,
 )
     theta = spec.angular_velocity * t + spec.phase
-    mouth_z = spec.height - sin(theta) * spec.radius / 4.0f0
+    _, _, jelly_height = jelly_center(spec, t)
+    mouth_z = jelly_height - sin(theta) * spec.radius / 4.0f0
     length = 2.35f0 * spec.radius
     q = (mouth_z - z) / length
     (q < 0.0f0 || q > 1.0f0) && return 0.0f0
@@ -346,6 +394,10 @@ end
 
 jelly_surface_coverage(case::JellyCase, x::Real, y::Real, z::Real, t::Real) =
     first(jelly_material_coverage(case, x, y, z, t))
+
+# A published voxel numbered `index` reads solver storage at `index + 1`;
+# WaterLily's staggered-grid convention places that cell centre at I - 1.5.
+@inline jelly_voxel_center(index::Integer) = Float32(index) - 0.5f0
 
 """
 Evaluate the vorticity magnitude on the device and download it once into the
@@ -393,9 +445,14 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
                 wake_density = wake / (wake + 6.0f0)
                 surface, tentacles = jelly_material_coverage(
                     case,
-                    Float32(x) + 0.5f0,
-                    Float32(y) + 0.5f0,
-                    Float32(z) + 0.5f0,
+                    # `sigma[x + 1, ...]` is WaterLily's first interior
+                    # cell, whose physical centre is `loc(0, I) = I - 1.5`.
+                    # Sample the analytic tissue at that exact point so its
+                    # bell/tentacles remain registered with the simulated
+                    # wake instead of being shifted by one voxel per axis.
+                    jelly_voxel_center(x),
+                    jelly_voxel_center(y),
+                    jelly_voxel_center(z),
                     τ,
                 )
                 # All materials remain genuinely translucent.  A ray crosses

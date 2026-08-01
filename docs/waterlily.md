@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: independently drifting and pulsing analytic bell membranes, curved trailing filaments, and their simulated wakes are published together as a native RGBA volume that the compositor ray-marches through a slowly orbiting perspective camera | violet purple/green |
+| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; their curved trailing filaments and simulated wakes are published with them as a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -44,40 +44,48 @@ Julia WaterLily worker
               v
 JWM X11 compositor
   planar frame -> upload TEXTURE_2D -> full-screen frosted canvas layer
-  volume frame -> upload TEXTURE_3D -> perspective ray-marched 3D tank
+  volume frame -> upload TEXTURE_3D -> near-full-screen perspective glass aquarium
 ```
 
 Planar cases publish a display-shaped 2D frame exactly as before. Cases with
 a true 3D solve (currently `jelly`) publish their tank as an RGBA8 voxel
-volume instead; the compositor uploads it as a 3D texture and ray-marches it
-natively with an orbiting perspective camera. The volume includes both the
-animated bell membranes, curved volumetric filaments, and the vorticity wakes
-from the 3D solve. The shader
-performs front-to-back emission/absorption compositing, reconstructs material
-normals from three-dimensional density gradients, traces short light rays for
-self-shadowing, and applies directional lighting, Fresnel highlights, depth
-haze, and scene refraction at the first coherent surface. Stable midpoint
-integration samples in voxel units, while a sub-voxel five-tap footprint in
-the camera plane prefilters thin vortex sheets before they are magnified to
-the desktop. Together they avoid both temporal glitter and the point-cloud
-salt-and-pepper pattern produced by infinitesimal rays through a coarse 3D
-field. The transfer function keeps turbulent wake less absorbing than bell
-tissue, and the shader floors multiple-scattered ambient light so stacked
-translucent layers cannot collapse to black. The camera pose
-derives from the frame timestamp, so re-rendering an unchanged frame is
+volume instead; the compositor uploads it as an OpenGL 3D texture and
+ray-marches it inside a projected glass aquarium that fills about 92% of the
+limiting viewport axis. The camera stays in front of the tank and adds small,
+slow yaw and elevation waves for parallax rather than orbiting behind it. Its
+pose derives from the frame timestamp, so re-rendering an unchanged frame is
 bit-stable for damage tracking while each new simulation frame advances the
-orbit. Empty tank water reveals the same frosted desktop backdrop the planar
-shader keys out, so both paths keep one glass look.
+parallax smoothly.
+
+The volume includes the animated bell membranes, curved volumetric filaments,
+and vorticity wakes from the 3D solve. The shader performs front-to-back
+emission/absorption compositing, reconstructs material normals from 3D density
+gradients, traces short light rays for self-shadowing, and applies directional
+lighting, Fresnel highlights, depth haze, and scene refraction at the first
+coherent surface. Voxel-unit midpoint integration, linear texture sampling,
+and a center-weighted sub-voxel five-tap footprint keep bell surfaces crisp
+while stabilizing thin wake sheets, avoiding temporal glitter and
+salt-and-pepper artifacts. The transfer function keeps turbulent wake less
+absorbing than bell tissue, and a multiple-scattered ambient floor prevents
+stacked translucent layers from collapsing to black.
+
+The aquarium has perspective-correct front and rear glass rims and a
+world-space open water surface below a narrow air gap. Rays through the water
+refract the frosted desktop and gain path-length-dependent Beer-Lambert cyan
+attenuation; the surface catches grazing reflections and forms a visible
+waterline. Rays that miss the projected tank stay transparent, leaving the
+desktop around its near-full-screen silhouette sharp.
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
-The worker frame is stretched to fill the entire output as a full-screen
-canvas: quiescent near-white fluid keys out to a frosted blur of the client
-scene across the whole display, while motion lives inside the simulation
-itself — the default `wander` case roams its body around the canvas and the
-wake ripples propagate everywhere it goes. Fluid has no reference geometry,
-so the stretch from the simulation aspect ratio to the display's is not
-visually objectionable. There is no per-window target.
+Planar worker frames are stretched to fill the entire output: quiescent
+near-white fluid keys out to a frosted blur of the client scene, while motion
+lives inside the simulation itself — the default `wander` case roams its body
+around the canvas and the wake ripples propagate everywhere it goes. Fluid has
+no reference geometry, so the stretch from the simulation aspect ratio to the
+display's is not visually objectionable. Volumetric frames instead use the
+full-output pass to project the fitted 3D aquarium described above. There is no
+per-window target.
 
 WaterLily is rendered in its own compositor pass after client post-processing,
 so it does not alter client texture sampling, blur, color/accessibility
@@ -243,10 +251,11 @@ The following environment variables are read when the integration starts:
 | `JWM_WATERLILY_PLANAR` | Worker-side: force volumetric cases through their planar 2D projection (version-1 frames), for consumers without volumetric support |
 
 The socket and frame-file values supplied to JWM and the worker must match.
-The published simulation frame is stretched to cover the display, so the
-`--sim-size` choice trades solver cost against on-screen sharpness; `640x400`
-reads well on common 16:9/16:10 outputs, and `1280x800` is comfortable on a
-discrete GPU. Start the worker with `--threads=auto` to keep the colorize loop parallel.
+Planar frames are stretched across the display, while volumetric frames are
+sampled inside the projected aquarium, so either way the `--sim-size` choice
+trades solver cost against on-screen sharpness; `640x400` reads well on common
+16:9/16:10 outputs, and `1280x800` is comfortable on a discrete GPU. Start the
+worker with `--threads=auto` to keep the colorize loop parallel.
 Publishing is paced against an absolute schedule and the solver advances
 under a per-frame time budget: when the simulation cannot reach real time
 within the budget, the publish cadence stays fixed and the simulation clock

@@ -760,6 +760,21 @@ fn waterlily_volume_shader_occludes_front_to_back() {
                 && front_view[3] == 255,
             "front view must be red-dominant and opaque, got {front_view:?}"
         );
+        let mut outside = [0_u8; 4];
+        gl.read_pixels(
+            0,
+            0,
+            1,
+            1,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut outside)),
+        );
+        assert_eq!(
+            outside,
+            [0, 0, 0, 0],
+            "a ray outside the projected aquarium must remain transparent"
+        );
 
         // Orbited behind the tank: the same volume now leads with green.
         let back_view = render_from([0.0, 0.0, 3.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]);
