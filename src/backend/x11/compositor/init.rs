@@ -320,6 +320,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 tan_half_fov: gl.get_uniform_location(waterlily_volume_program, "u_tan_half_fov"),
                 box_half_extents: gl
                     .get_uniform_location(waterlily_volume_program, "u_box_half_extents"),
+                time: gl.get_uniform_location(waterlily_volume_program, "u_time"),
             }
         };
 

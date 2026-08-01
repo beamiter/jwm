@@ -649,9 +649,13 @@ fn waterlily_volume_shader_occludes_front_to_back() {
         let prog = link(gl, s::VERTEX_SHADER, s::WATERLILY_VOLUME_FRAGMENT_SHADER)
             .expect("WaterLily volume shaders must link");
 
-        // 1x1x2 volume: opaque red front slice, opaque green back slice.
-        // NEAREST filtering keeps each half of the box a pure slice color.
-        let voxels: [u8; 8] = [255, 0, 0, 255, 0, 255, 0, 255];
+        // 1x1x4 volume: two opaque red front slices, two opaque green back
+        // slices. Two slices per color keep the pinned occlusion behavior
+        // independent of the reconstruction kernel's support so the first
+        // material sample lands in a pure-color region.
+        let voxels: [u8; 16] = [
+            255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255,
+        ];
         let volume = gl.create_texture().unwrap();
         gl.bind_texture(glow::TEXTURE_3D, Some(volume));
         gl.tex_image_3d(
@@ -660,7 +664,7 @@ fn waterlily_volume_shader_occludes_front_to_back() {
             glow::RGBA as i32,
             1,
             1,
-            2,
+            4,
             0,
             glow::RGBA,
             glow::UNSIGNED_BYTE,
@@ -777,13 +781,149 @@ fn waterlily_volume_shader_occludes_front_to_back() {
         );
 
         // Orbited behind the tank: the same volume now leads with green.
+        // The key light carries a front bias, so the back view is legally
+        // dimmer than the front one; the pinned contract is the occlusion
+        // order and the surviving hue, not matched brightness.
         let back_view = render_from([0.0, 0.0, 3.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]);
         assert!(
-            back_view[1] > 200
+            back_view[1] > 120
                 && u16::from(back_view[1]) > u16::from(back_view[0]) + 40
                 && u16::from(back_view[1]) > u16::from(back_view[2]) + 30
                 && back_view[3] == 255,
             "back view must be green-dominant and opaque, got {back_view:?}"
+        );
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(fbo);
+        gl.delete_texture(out_tex);
+        gl.delete_texture(volume);
+        gl.delete_program(prog);
+    }
+}
+
+/// A translucent low-alpha wake voxel must keep its authored palette hue on
+/// screen. This guards the volumetric transfer/lighting redesign: the old
+/// flat gray emission floor lifted every wake wisp to the same near-white,
+/// which read as cotton-wool fog around the jellyfish; the floor is now
+/// proportional to the voxel's own albedo, so a green vortex ring stays
+/// visibly green and clearly translucent.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_shader_preserves_wake_hue() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!("headless GL unavailable - skipping waterlily_volume_shader_preserves_wake_hue");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 16;
+    const H: i32 = 16;
+
+    unsafe {
+        let prog = link(gl, s::VERTEX_SHADER, s::WATERLILY_VOLUME_FRAGMENT_SHADER)
+            .expect("WaterLily volume shaders must link");
+
+        // A uniform green wake medium in the producer's low-alpha band.
+        let voxel: [u8; 4] = [60, 220, 80, 26];
+        let voxels: Vec<u8> = voxel.iter().copied().cycle().take(4 * 4).collect();
+        let volume = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+        gl.tex_image_3d(
+            glow::TEXTURE_3D,
+            0,
+            glow::RGBA as i32,
+            1,
+            1,
+            4,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&voxels)),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::NEAREST as i32);
+        }
+        for wrap in [
+            glow::TEXTURE_WRAP_S,
+            glow::TEXTURE_WRAP_T,
+            glow::TEXTURE_WRAP_R,
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        let out_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            W,
+            H,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(out_tex),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "wake hue output FBO incomplete"
+        );
+
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.viewport(0, 0, W, H);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(prog));
+        let u = |name: &str| gl.get_uniform_location(prog, name);
+        gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+        gl.uniform_matrix_4_f32_slice(
+            u("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_1_i32(u("u_volume").as_ref(), 0);
+        gl.uniform_1_i32(u("u_scene_texture").as_ref(), 1);
+        gl.uniform_1_i32(u("u_scene_available").as_ref(), 0);
+        gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+        gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+        gl.uniform_3_f32(u("u_camera_position").as_ref(), 0.0, 0.0, -3.0);
+        gl.uniform_3_f32(u("u_camera_right").as_ref(), 1.0, 0.0, 0.0);
+        gl.uniform_3_f32(u("u_camera_up").as_ref(), 0.0, 1.0, 0.0);
+        gl.uniform_3_f32(u("u_camera_forward").as_ref(), 0.0, 0.0, 1.0);
+        gl.uniform_1_f32(u("u_tan_half_fov").as_ref(), 0.35);
+        gl.uniform_3_f32(u("u_box_half_extents").as_ref(), 0.5, 0.5, 0.5);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+        gl.bind_vertex_array(Some(vao));
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+        let wake = read_center(gl, W, H);
+
+        assert!(
+            wake[1] > 18,
+            "the wake medium must remain visible, got {wake:?}"
+        );
+        assert!(
+            wake[1] >= wake[0] + 8 && wake[1] >= wake[2] + 4,
+            "the wake must keep its green hue instead of washing to gray, got {wake:?}"
+        );
+        assert!(
+            wake[3] > 30 && wake[3] < 140,
+            "a low-alpha wake column must stay clearly translucent, got {wake:?}"
         );
 
         gl.bind_vertex_array(None);

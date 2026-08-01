@@ -480,9 +480,11 @@ end
     @test length(volume) == 4 * 32 * 32 * 16
     alphas = @view volume[4:4:end]
     # The bells shed vorticity above the wake floor, while every cell remains
-    # lightly absorbing enough that a long ray cannot turn the wake opaque.
+    # translucent: the wake band stays far below the tissue band (the
+    # compositor's transfer function relies on that gap), and even the
+    # densest gonad voxel publishes well under half opacity.
     @test maximum(alphas) > 0x00
-    @test maximum(alphas) <= 0x37
+    @test maximum(alphas) <= 0x5a
     # The published material contains the analytic bell itself, not only its
     # surrounding vorticity.  Sampling the animated crown lands inside the
     # coherent membrane density used for 3D normal reconstruction.
@@ -594,6 +596,19 @@ end
         tentacle_z,
         τ,
     ) > 0.5
+    # The rose gonad crown sits inside the bell cavity and the four thick
+    # oral arms trail below the mouth; sampling their centers lands in
+    # coherent material distinct from the thin filaments.
+    organ_x, organ_y, organ_z = JwmWaterLily.jelly_organ_center(jelly, 0, τ)
+    @test JwmWaterLily.jelly_organ_coverage(
+        jelly,
+        organ_x,
+        organ_y,
+        organ_z,
+        τ,
+    ) > 0.5
+    arm_x, arm_y, arm_z, _ = JwmWaterLily.jelly_arm_center(jelly, 0, 0.4f0, τ)
+    @test JwmWaterLily.jelly_arm_coverage(jelly, arm_x, arm_y, arm_z, τ) > 0.5
     # Quiescent water stays fully transparent so the compositor's ray-marcher
     # reveals the frosted desktop through the empty tank.
     @test count(==(0x00), alphas) > length(alphas) ÷ 2

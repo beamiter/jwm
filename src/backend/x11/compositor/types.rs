@@ -559,6 +559,7 @@ pub(super) struct WaterlilyVolumeUniforms {
     pub(super) camera_forward: Option<glow::UniformLocation>,
     pub(super) tan_half_fov: Option<glow::UniformLocation>,
     pub(super) box_half_extents: Option<glow::UniformLocation>,
+    pub(super) time: Option<glow::UniformLocation>,
 }
 
 pub(super) struct ParticleUniforms {

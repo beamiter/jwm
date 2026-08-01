@@ -17,7 +17,7 @@ public `AutoBody` and `Simulation` APIs:
 | `flap` | Plate pitching about its leading edge, producing a thrust-type reverse Kármán wake | ember indigo/amber |
 | `tandem` | Two static cylinders in tandem with interfering, merging vortex streets | glacier azure/bronze |
 | `diamond` | Square prism rotated 45° whose sharp edges shed a wide, angular street | berry magenta/lime |
-| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; their curved trailing filaments and simulated wakes are published with them as a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
+| `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; the rose gonad crown inside each translucent bell, four thick curling oral arms, five thin trailing filaments, and the simulated wakes are published with them as a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
@@ -57,23 +57,38 @@ pose derives from the frame timestamp, so re-rendering an unchanged frame is
 bit-stable for damage tracking while each new simulation frame advances the
 parallax smoothly.
 
-The volume includes the animated bell membranes, curved volumetric filaments,
-and vorticity wakes from the 3D solve. The shader performs front-to-back
-emission/absorption compositing, reconstructs material normals from 3D density
-gradients, traces short light rays for self-shadowing, and applies directional
-lighting, Fresnel highlights, depth haze, and scene refraction at the first
-coherent surface. Voxel-unit midpoint integration, linear texture sampling,
-and a center-weighted sub-voxel five-tap footprint keep bell surfaces crisp
-while stabilizing thin wake sheets, avoiding temporal glitter and
-salt-and-pepper artifacts. The transfer function keeps turbulent wake less
-absorbing than bell tissue, and a multiple-scattered ambient floor prevents
-stacked translucent layers from collapsing to black.
+The volume includes the animated anatomy — bell membranes shaded from rim
+lavender to apex violet, the rose gonad crown visible through each
+translucent bell, four thick curling oral arms, and five thin trailing
+filaments — together with the vorticity wakes from the 3D solve. The shader
+performs front-to-back emission/absorption compositing with a one-tap
+trilinear probe that classifies each step as clear water or material, so
+the expensive work only runs inside the smack. Material steps resample the
+volume with a C2-continuous tricubic B-spline (eight hardware trilinear
+taps) and reconstruct surface normals from the analytic derivative of the
+tissue band alone — the rough turbulent wake is subtracted out before
+differentiation, so a bell swimming through its own wake keeps clean
+normals — then trace short light rays for self-shadowing and apply
+directional lighting,
+Fresnel highlights, depth haze, and scene refraction at the first tissue
+interface. Voxel opacity separates the producer's authored material bands:
+low-alpha turbulent wake shades as a forward-scattering medium
+(Henyey-Greenstein lobe) in its own palette hue, while high-alpha tissue is
+sharpened into crisp translucent surfaces with wrapped diffuse, subsurface
+backlight, and specular response. The ambient floor is proportional to each
+voxel's own albedo — never a flat gray — so stacked translucent layers
+converge to luminous color instead of white fog, and a deterministic
+per-pixel jitter of the voxel-unit midpoint integration decorrelates slab
+banding without temporal noise.
 
 The aquarium has perspective-correct front and rear glass rims and a
 world-space open water surface below a narrow air gap. Rays through the water
 refract the frosted desktop and gain path-length-dependent Beer-Lambert cyan
-attenuation; the surface catches grazing reflections and forms a visible
-waterline. Rays that miss the projected tank stay transparent, leaving the
+attenuation; the surface catches grazing reflections, carries a gentle
+traveling swell whose crests throw moving glints, and forms a visible
+waterline. Like the camera pose, the swell phase derives from the frame
+timestamp, so re-rendering an unchanged frame stays bit-stable for damage
+tracking. Rays that miss the projected tank stay transparent, leaving the
 desktop around its near-full-screen silhouette sharp.
 
 This implementation is currently limited to the shared X11 compositor used by
@@ -92,7 +107,10 @@ so it does not alter client texture sampling, blur, color/accessibility
 processing, or HDR processing. Bright low-chroma pixels from the worker's
 opaque background are replaced with a semi-transparent blurred snapshot of the
 client scene; colored flow details remain opaque. The blur uses a private
-WaterLily scene texture and does not reuse or invalidate client blur caches.
+WaterLily scene texture and does not reuse or invalidate client blur caches;
+the snapshot is mipmapped after each capture so the broad transmission taps
+sample a prefiltered level instead of aliasing photographic wallpaper grain
+or text into speckle.
 The X11 Composite Overlay Window keeps an empty input shape, making the layer
 click-through: pointer and keyboard control continue to target normal client
 windows. JWM-owned HUD, transition, and system UI layers remain above

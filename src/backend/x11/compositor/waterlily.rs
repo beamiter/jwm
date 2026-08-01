@@ -15,6 +15,11 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 const ACCEPT_RETRY: Duration = Duration::from_millis(20);
 const PRODUCER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_WATERLILY_PBO_BYTES: usize = 64 * 1024 * 1024;
+/// Loop length of the shader's open-water swell.  Prime seconds, so the
+/// surface animation never beats against the 47 s / 31 s camera waves; the
+/// shader receives the phase in `[0, 1)` and uses integer cycle counts, so
+/// the wrap is seamless.
+const WATER_WAVE_PERIOD_S: f64 = 97.0;
 
 pub(super) struct WaterlilyIpc {
     path: PathBuf,
@@ -334,7 +339,7 @@ fn volume_camera(
     // ever showing the tank from behind or making its footprint swing wildly.
     const YAW_PERIOD_S: f64 = 47.0;
     const ELEVATION_PERIOD_S: f64 = 31.0;
-    const YAW_AMPLITUDE_RAD: f64 = 0.11;
+    const YAW_AMPLITUDE_RAD: f64 = 0.15;
     // Keep the eye just above the open water plane at every supported aspect
     // ratio.  Besides exposing the tank's depth, this makes the water surface
     // the first interface on every wet ray, matching the shader's front-pane
@@ -696,6 +701,20 @@ impl<C: CompositorConnection> Compositor<C> {
                 glow::NEAREST,
             );
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            // Prefilter the snapshot: the frosted-backdrop shaders take
+            // sparse taps (about 2.75 px apart), which undersampled
+            // high-frequency desktop content — photographic wallpaper
+            // grain, text — into per-pixel speckle wherever water
+            // transmitted the scene.  Sampling a mip level at or below the
+            // tap spacing makes the broad transmission lobe alias-free.
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR_MIPMAP_LINEAR as i32,
+            );
+            self.gl.generate_mipmap(glow::TEXTURE_2D);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             if scissor_active {
@@ -858,6 +877,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 camera.box_half_extents[1],
                 camera.box_half_extents[2],
             );
+            // Same clock as the camera pose: the open-water swell animates
+            // with the simulation stream and re-rendering an unchanged frame
+            // reproduces the identical image for damage tracking.
+            self.gl.uniform_1_f32(
+                uniforms.time.as_ref(),
+                timestamp_phase(frame.timestamp_ns, WATER_WAVE_PERIOD_S) as f32,
+            );
             self.gl.active_texture(glow::TEXTURE1);
             self.gl.bind_texture(glow::TEXTURE_2D, backdrop_texture);
             self.gl.active_texture(glow::TEXTURE0);
@@ -866,9 +892,15 @@ impl<C: CompositorConnection> Compositor<C> {
             // blend function here because optional overlay passes can switch
             // to straight-alpha blending earlier in the frame.
             self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            // Hardware GL ignores dithering on 8-bit targets, but software
+            // rasterizers (llvmpipe in the nested Xephyr smoke sessions)
+            // stipple every smooth volume gradient with it, which polluted
+            // screenshot-based debugging of real shader noise.
+            self.gl.disable(glow::DITHER);
             self.gl_state_tracker
                 .bind_vertex_array(&self.gl, Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.enable(glow::DITHER);
             self.gl_state_tracker.bind_vertex_array(&self.gl, None);
             self.gl_state_tracker.use_program(&self.gl, None);
             self.gl.active_texture(glow::TEXTURE1);
@@ -1220,8 +1252,8 @@ mod tests {
             // motion, with only a small side-to-side reveal of its depth.
             let horizontal_distance = camera.position[0].hypot(camera.position[2]);
             assert!(camera.position[2] < 0.0);
-            assert!(-camera.position[2] / horizontal_distance > 0.99);
-            assert!(camera.position[0].abs() < -0.12 * camera.position[2]);
+            assert!(-camera.position[2] / horizontal_distance > 0.98);
+            assert!(camera.position[0].abs() < -0.16 * camera.position[2]);
             // Camera motion stays level: screen right never rolls off the horizon.
             assert!(camera.right[1].abs() < 1e-4);
         }
