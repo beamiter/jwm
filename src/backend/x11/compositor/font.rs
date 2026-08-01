@@ -1,6 +1,4 @@
 //! Re-exports the backend-independent bitmap text rasterizer.
 //!
 //! See [`crate::backend::compositor_font`] for the implementation and tests.
-pub(super) use crate::backend::compositor_font::{
-    FONT_6X10, GLYPH_H, GLYPH_W, render_text_to_rgba,
-};
+pub(super) use crate::backend::compositor_font::{FONT_6X10, GLYPH_H, GLYPH_W};

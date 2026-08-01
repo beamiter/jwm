@@ -622,7 +622,6 @@ impl<C: CompositorConnection> Compositor<C> {
                                     .get_uniform_location(new_program, "u_projection"),
                                 rect: self.gl.get_uniform_location(new_program, "u_rect"),
                                 bg_color: self.gl.get_uniform_location(new_program, "u_bg_color"),
-                                fg_color: self.gl.get_uniform_location(new_program, "u_fg_color"),
                                 size: self.gl.get_uniform_location(new_program, "u_size"),
                             };
                             let old_program = std::mem::replace(&mut self.hud_program, new_program);

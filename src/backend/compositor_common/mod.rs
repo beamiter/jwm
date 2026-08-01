@@ -1,6 +1,7 @@
 //! Protocol-independent compositor helpers shared by Wayland and X11 backends.
 
 pub mod capture;
+pub(crate) mod debug_hud;
 pub mod effects;
 pub mod event_coalescer;
 pub mod expose;

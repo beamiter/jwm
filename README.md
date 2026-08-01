@@ -187,6 +187,8 @@ the [wallpaper picker and its colour theming](docs/wallpaper.md),
 the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
 feature.
+The compositor's live counters are on `Alt+Shift+F12`; see
+[the debug HUD](docs/debug-hud.md).
 Additional operational tools are documented in [tools/README.md](tools/README.md).
 The external Julia simulation worker and frame protocol are documented in
 [docs/waterlily.md](docs/waterlily.md).

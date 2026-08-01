@@ -445,7 +445,8 @@ where
     hud_text_uniforms: HudTextUniforms,
     annotation_line_program: glow::Program,
     annotation_line_uniforms: LineUniforms,
-    hud_text_texture: Option<glow::Texture>,
+    /// Material HUD text sections: title, state chip, stat labels, stat values.
+    hud_textures: [Option<(glow::Texture, u32, u32)>; 4],
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(glow::Texture, u32, u32)>; 4],
     sysui_cache: String,
@@ -456,8 +457,6 @@ where
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
-    hud_text_width: u32,
-    hud_text_height: u32,
     hud_text_cache: String,
     system_ui: Option<crate::backend::api::SystemUiOverlay>,
     debug_hud: bool,
@@ -916,8 +915,10 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             if let Some((_, tex, _, _)) = self.osd_texture.take() {
                 self.gl.delete_texture(tex);
             }
-            if let Some(tex) = self.hud_text_texture.take() {
-                self.gl.delete_texture(tex);
+            for slot in &mut self.hud_textures {
+                if let Some((tex, _, _)) = slot.take() {
+                    self.gl.delete_texture(tex);
+                }
             }
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.cube_program);

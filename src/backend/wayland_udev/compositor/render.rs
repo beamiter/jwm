@@ -2,6 +2,7 @@
 #[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::capture::clip_region;
+use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
 
@@ -2331,9 +2332,10 @@ impl WaylandCompositor {
         }
 
         // =================================================================
-        // 19b. Extended Debug HUD
+        // 19b. Debug HUD — `debug_hud_extended` only adds sections to the
+        // card, so the basic HUD must draw on its own like it does on X11.
         // =================================================================
-        if self.debug_hud_enabled && self.debug_hud_extended {
+        if self.debug_hud_enabled {
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_debug_hud(gl, &projection);
@@ -2514,111 +2516,253 @@ impl WaylandCompositor {
         } else {
             0.0
         };
-        let mut hud_text = format!(
-            "JWM debug HUD (Alt+Shift+F12)\n\
-             Backend: wayland_udev\n\
-             FPS: {:.1}   Frame: {:.2} ms   Frames: {}\n\
-             Windows: {}   Monitors: {}   Uptime: {}s\n\
-             Memory: {:.1} MiB RSS\n\
-             CPU: {:.1} %\n\
-             VRR: {}   Blur reuse: {}/{}",
-            self.fps,
-            frame_ms,
-            self.frame_count,
-            self.windows.len(),
-            self.monitors.len(),
-            uptime,
-            self.sys_stats.rss_mib(),
-            self.sys_stats.cpu_pct(),
-            if self.vrr_active { "ON" } else { "off" },
-            self.temporal_blur_reuse_count,
-            self.temporal_blur_total_count,
+        let mut rows = hud::HudRows::default();
+        rows.section("Frame");
+        rows.stat("FPS", format!("{:.1}", self.fps));
+        rows.stat("Frame time", format!("{frame_ms:.2} ms"));
+        rows.stat("Frames", self.frame_count);
+        rows.stat("VRR", if self.vrr_active { "on" } else { "off" });
+        rows.section("Scene");
+        rows.stat("Windows", self.windows.len());
+        rows.stat("Monitors", self.monitors.len());
+        rows.stat(
+            "Blur reuse",
+            format!(
+                "{} / {}",
+                self.temporal_blur_reuse_count, self.temporal_blur_total_count
+            ),
         );
+        rows.section("System");
+        rows.stat("Memory", format!("{:.1} MiB RSS", self.sys_stats.rss_mib()));
+        rows.stat("CPU", format!("{:.1} %", self.sys_stats.cpu_pct()));
+        rows.stat("Uptime", format!("{uptime} s"));
 
         if self.debug_hud_extended {
-            use std::fmt::Write;
             let p95_ms = self.perf_metrics.frame_time_percentile(0.95).as_secs_f32() * 1000.0;
             let p99_ms = self.perf_metrics.frame_time_percentile(0.99).as_secs_f32() * 1000.0;
-            let _ = write!(
-                hud_text,
-                "\nFrame tail: p95={p95_ms:.2}ms p99={p99_ms:.2}ms\n--- Profiler (ms avg/min/max, last 120 frames) ---",
-            );
-            for (name, stats) in self.frame_profiler.all_zone_stats() {
-                let _ = write!(
-                    hud_text,
-                    "\n{:<8}: {:>5.2} / {:>5.2} / {:>5.2}  (n={})",
-                    name, stats.avg_ms, stats.min_ms, stats.max_ms, stats.sample_count,
-                );
-            }
-        }
-
-        if hud_text != self.hud_text_cache {
-            let (pixels, w, h) = font::render_text_to_rgba(&hud_text, 2, [255, 255, 255, 220]);
-            if w > 0 && h > 0 {
-                unsafe {
-                    // Delete old texture
-                    if let Some(old) = self.hud_text_texture.take() {
-                        gl.DeleteTextures(1, &old);
-                    }
-                    // Create and upload new texture
-                    let mut tex = 0u32;
-                    gl.GenTextures(1, &mut tex);
-                    gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.TexImage2D(
-                        ffi::TEXTURE_2D,
-                        0,
-                        ffi::RGBA as i32,
-                        w as i32,
-                        h as i32,
-                        0,
-                        ffi::RGBA,
-                        ffi::UNSIGNED_BYTE,
-                        pixels.as_ptr() as *const _,
+            rows.section("Frame tail");
+            rows.stat("p95 / p99", format!("{p95_ms:.2} / {p99_ms:.2} ms"));
+            let zones = self.frame_profiler.all_zone_stats();
+            if !zones.is_empty() {
+                rows.section("Profiler (avg / min / max ms, last 120 frames)");
+                for (name, stats) in zones {
+                    rows.stat(
+                        name,
+                        format!(
+                            "{:.2} / {:.2} / {:.2}  (n={})",
+                            stats.avg_ms, stats.min_ms, stats.max_ms, stats.sample_count
+                        ),
                     );
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-                    self.hud_text_texture = Some(tex);
-                    self.hud_text_width = w;
-                    self.hud_text_height = h;
                 }
             }
-            self.hud_text_cache = hud_text;
         }
 
-        // Draw the HUD texture in the top-left corner
-        if let Some(tex) = self.hud_text_texture {
-            unsafe {
-                gl.UseProgram(self.program);
-                self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
-                gl.Uniform1i(self.win_uniforms.texture, 0);
-                gl.Uniform1f(self.win_uniforms.opacity, 0.85);
-                gl.Uniform1f(self.win_uniforms.dim, 1.0);
-                gl.Uniform1f(self.win_uniforms.desat, 0.0);
-                gl.Uniform1f(self.win_uniforms.radius, 4.0);
-                gl.Uniform2f(
-                    self.win_uniforms.size,
-                    self.hud_text_width as f32,
-                    self.hud_text_height as f32,
-                );
-                self.set_rect_uniform(
-                    gl,
-                    self.win_uniforms.rect,
-                    10.0,
-                    10.0,
-                    self.hud_text_width as f32,
-                    self.hud_text_height as f32,
-                );
-                gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-                gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+        let title = format!("{}  JWM Compositor", hud::TITLE_ICON);
+        let chip = if self.debug_hud_extended {
+            "wayland · extended"
+        } else {
+            "wayland"
+        };
+        unsafe { self.update_hud_textures(gl, &title, chip, &rows) };
+        let target = self
+            .monitor_refresh_rates
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(60) as f32;
+        let (meter, tone) = hud::fps_meter(self.fps, target);
+        unsafe { self.render_debug_hud_card(gl, projection, meter, tone) };
+    }
 
-                gl.ActiveTexture(ffi::TEXTURE0);
-                gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.BindVertexArray(self.quad_vao);
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                gl.BindVertexArray(0);
-                gl.UseProgram(0);
+    /// Rasterize the four HUD text sections — title, state chip, stat labels,
+    /// stat values — each in its own Material tone. Skips the upload entirely
+    /// when nothing in the HUD changed since the previous frame.
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn update_hud_textures(
+        &mut self,
+        gl: &ffi::Gles2,
+        title: &str,
+        chip: &str,
+        rows: &hud::HudRows,
+    ) {
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let (labels, values) = rows.columns();
+        let cache_key = format!("{description}\0{size}\0{title}\0{chip}\0{labels}\0{values}");
+        if cache_key == self.hud_text_cache && self.hud_textures.iter().any(Option::is_some) {
+            return;
+        }
+        const COLORS: [[u8; 4]; 4] = [
+            hud::TITLE_INK,
+            hud::CHIP_INK,
+            hud::LABEL_INK,
+            hud::VALUE_INK,
+        ];
+        let texts = [title, chip, labels.as_str(), values.as_str()];
+        for (slot, text) in texts.into_iter().enumerate() {
+            if let Some((old, _, _)) = self.hud_textures[slot].take() {
+                gl.DeleteTextures(1, &old);
             }
+            if text.is_empty() {
+                continue;
+            }
+            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+                text,
+                description,
+                size,
+                COLORS[slot],
+            );
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let mut tex = 0u32;
+            gl.GenTextures(1, &mut tex);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.TexImage2D(
+                ffi::TEXTURE_2D,
+                0,
+                ffi::RGBA as i32,
+                w as i32,
+                h as i32,
+                0,
+                ffi::RGBA,
+                ffi::UNSIGNED_BYTE,
+                pixels.as_ptr() as *const _,
+            );
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_S,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.TexParameteri(
+                ffi::TEXTURE_2D,
+                ffi::TEXTURE_WRAP_T,
+                ffi::CLAMP_TO_EDGE as i32,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            self.hud_textures[slot] = Some((tex, w, h));
         }
+        self.hud_text_cache = cache_key;
+    }
+
+    /// Draw the Material HUD card: shadow, surface, state chip, frame-rate
+    /// meter, and the two-tone stat columns.
+    #[allow(unsafe_op_in_unsafe_fn)]
+    unsafe fn render_debug_hud_card(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        meter: f32,
+        tone: [f32; 4],
+    ) {
+        let dims = |slot: usize| -> (f32, f32) {
+            self.hud_textures[slot]
+                .map(|(_, w, h)| (w as f32, h as f32))
+                .unwrap_or((0.0, 0.0))
+        };
+        let layout = hud::HudLayout::new(
+            (hud::MARGIN, hud::MARGIN),
+            dims(0),
+            dims(1),
+            dims(2),
+            dims(3),
+            meter,
+        );
+
+        gl.BindVertexArray(self.quad_vao);
+
+        // Ambient shadow, the Material elevation cue.
+        gl.UseProgram(self.shadow_program);
+        self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+        let (sx, sy, sw, sh) = layout.shadow();
+        gl.Uniform1f(self.shadow_uniforms.spread, hud::SHADOW_SPREAD);
+        gl.Uniform4f(
+            self.shadow_uniforms.shadow_color,
+            hud::SHADOW[0],
+            hud::SHADOW[1],
+            hud::SHADOW[2],
+            hud::SHADOW[3],
+        );
+        gl.Uniform1f(self.shadow_uniforms.radius, hud::CARD_RADIUS);
+        gl.Uniform2f(self.shadow_uniforms.size, layout.card.2, layout.card.3);
+        self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
+        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+        // Surface, chip and meter share the border program's rounded-fill
+        // mode. The overlay draws onto the display-encoded output, so
+        // scene-linear conversion stays off.
+        gl.UseProgram(self.border_program);
+        self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+        gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+        let (cx, cy, cw, ch) = layout.card;
+        self.sysui_fill_rounded(gl, cx, cy, cw, ch, hud::CARD_RADIUS, hud::SURFACE);
+        if layout.chip_pill.2 > 0.0 {
+            let (px, py, pw, ph) = layout.chip_pill;
+            self.sysui_fill_rounded(gl, px, py, pw, ph, hud::CHIP_RADIUS, hud::SURFACE_CHIP);
+        }
+        let (tx, ty, tw, th) = layout.meter_track;
+        self.sysui_fill_rounded(gl, tx, ty, tw, th, th * 0.5, hud::METER_TRACK);
+        let (fx, fy, fw, fh) = layout.meter_fill;
+        self.sysui_fill_rounded(gl, fx, fy, fw, fh, fh * 0.5, tone);
+
+        // Hairline accent ring, matching the focused window's gradient.
+        gl.UseProgram(self.gradient_border_program);
+        self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
+        gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+        let ring = 1.0;
+        let [ar, ag, ab, aa] = self.border_gradient_color_a;
+        let [br, bg, bb, ba] = self.border_gradient_color_b;
+        gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
+        gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * 0.55);
+        gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * 0.55);
+        gl.Uniform1f(
+            self.gradient_border_uniforms.gradient_angle,
+            self.border_gradient_angle.to_radians(),
+        );
+        gl.Uniform1f(
+            self.gradient_border_uniforms.radius,
+            hud::CARD_RADIUS + ring,
+        );
+        gl.Uniform2f(
+            self.gradient_border_uniforms.size,
+            cw + 2.0 * ring,
+            ch + 2.0 * ring,
+        );
+        self.set_rect_uniform(
+            gl,
+            self.gradient_border_uniforms.rect,
+            cx - ring,
+            cy - ring,
+            cw + 2.0 * ring,
+            ch + 2.0 * ring,
+        );
+        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+        // Text sections.
+        let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+        let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+        let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+        let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+        gl.UseProgram(self.sysui_text_program);
+        gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+        gl.Uniform1i(text_tex, 0);
+        gl.Uniform1f(text_opacity, 1.0);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        let positions = [layout.title, layout.chip_text, layout.labels, layout.values];
+        for (slot, (px, py)) in positions.into_iter().enumerate() {
+            let Some((tex, w, h)) = self.hud_textures[slot] else {
+                continue;
+            };
+            gl.Uniform4f(text_rect, px, py, w as f32, h as f32);
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+
+        gl.BindVertexArray(0);
+        gl.UseProgram(0);
     }
 
     #[allow(unsafe_op_in_unsafe_fn)]

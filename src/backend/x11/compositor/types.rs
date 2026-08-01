@@ -455,7 +455,6 @@ pub(super) struct HudUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) bg_color: Option<glow::UniformLocation>,
-    pub(super) fg_color: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
 }
 

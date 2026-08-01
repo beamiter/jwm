@@ -633,7 +633,6 @@ pub const HUD_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
 uniform vec4  u_bg_color; // background color for HUD panel
-uniform vec4  u_fg_color; // foreground (text) color
 uniform vec2  u_size;     // panel size in pixels
 in vec2 v_uv;
 out vec4 frag_color;

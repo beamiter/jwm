@@ -15,7 +15,6 @@ mod direct_scanout;
 mod dirty_region;
 mod effects;
 mod expose;
-mod font;
 #[allow(dead_code, unreachable_pub)]
 mod frame_rate;
 #[allow(dead_code, unreachable_pub)]
@@ -940,7 +939,8 @@ pub(crate) struct WaylandCompositor {
 
     // --- Debug HUD extended ---
     debug_hud_extended: bool,
-    hud_text_texture: Option<u32>,
+    /// Material HUD text sections: title, state chip, stat labels, stat values.
+    hud_textures: [Option<(u32, u32, u32)>; 4],
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(u32, u32, u32)>; 4],
     sysui_cache: String,
@@ -954,8 +954,6 @@ pub(crate) struct WaylandCompositor {
     /// Toast ids evicted outside the render pass; their textures are freed
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
-    hud_text_width: u32,
-    hud_text_height: u32,
     hud_text_cache: String,
     system_ui: Option<crate::backend::api::SystemUiOverlay>,
     compositor_start_time: Instant,
@@ -1848,7 +1846,7 @@ impl WaylandCompositor {
 
                 // Debug HUD extended
                 debug_hud_extended: false,
-                hud_text_texture: None,
+                hud_textures: [None; 4],
                 sysui_textures: [None; 4],
                 sysui_cache: String::new(),
                 toast_stack: Default::default(),
@@ -1856,8 +1854,6 @@ impl WaylandCompositor {
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
                 osd_texture: None,
-                hud_text_width: 0,
-                hud_text_height: 0,
                 hud_text_cache: String::new(),
                 system_ui: None,
                 compositor_start_time: now,
