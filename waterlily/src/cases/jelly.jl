@@ -39,8 +39,10 @@ filaments — together with the simulated vorticity wake voxel-by-voxel, and
 publishes the RGBA volume; the compositor ray-marches it through an orbiting
 perspective camera. The magnitude feeds the positive half of the diverging
 palettes: quiescent water stays transparent, while coherent translucent
-tissue and shed vortex rings receive reconstructed 3D normals and
-view-dependent lighting. A planar fallback (`JWM_WATERLILY_PLANAR`) keeps
+tissue and shed vortex rings receive continuous volumetric illumination; the
+compositor uses a stable shallow-interface normal only for its subtle
+directional cue and scene refraction. A planar fallback
+(`JWM_WATERLILY_PLANAR`) keeps
 the historical line-integral projection for consumers without volumetric
 support.
 """
@@ -109,18 +111,24 @@ function jelly_lateral_center(spec::JellySpec, t::Real)
 end
 
 """
-Pick the 3D tank from the canvas: the vertical resolution sets fidelity and
-cost (32³·aspect cells at the test sizes, ~half a million at a full display),
-the width follows the display aspect so jellies stay round after the
-compositor stretch, and every extent is a multiple of 16 for the multigrid
-pressure solver.
+Pick the 3D tank from the canvas. Vertical resolution sets fidelity and cost,
+width follows the display aspect so jellies stay round after compositor
+projection, and every extent is a multiple of 16 for the multigrid pressure
+solver. CPU publication is capped at 64 vertical cells; accelerated backends
+use an 80-cell ceiling so a 1280x800 canvas rises from a 96x32x64 CPU domain
+to 128x48x80 on CUDA or ROCm.
 """
-function jelly_domain(dimensions::Tuple{Int,Int})
+function jelly_domain(
+    dimensions::Tuple{Int,Int};
+    accelerated::Bool=false,
+)
     width, height = dimensions
-    # Capped at 64 layers: the 80-layer tank measured ~190 ms per CPU frame,
-    # deep slow motion, while 64 keeps the smack near the pace of the other
-    # fluid cases. GPU backends can afford more via --sim-size upscaling.
-    nz = 16 * clamp(round(Int, height / 160), 2, 4)
+    # CPU stays capped at 64 layers: the 80-layer tank measured ~190 ms per
+    # frame there. CUDA/ROCm get an 80-layer ceiling, which raises a 1280x800
+    # publication from 96x64x32 to 128x80x48; the finer curved coverage is a
+    # direct spatial antialiasing improvement before compositor reconstruction.
+    layer_cap = accelerated ? 5 : 4
+    nz = 16 * clamp(round(Int, height / 160), 2, layer_cap)
     aspect = width / height
     nx = 16 * clamp(round(Int, nz * aspect / 16), 2, 12)
     ny = 16 * max(1, round(Int, nz * 0.6 / 16))
@@ -133,7 +141,10 @@ function build_jelly_case(
     reynolds::Real=JELLY_REYNOLDS,
 )
     T = Float32
-    nx, ny, nz = domain = jelly_domain(dimensions)
+    nx, ny, nz = domain = jelly_domain(
+        dimensions;
+        accelerated=memory !== Array,
+    )
     U = T(1)
     radius = T(JELLY_RADIUS_FRACTION * nz)
     count = JELLY_COUNT
@@ -278,6 +289,24 @@ body_distance(::JellyCase, ::Real, ::Real, ::Real) = Inf
 # height is the vertical extent (top-left rows, like every planar frame),
 # and the ny tank layers become front-to-back depth slices.
 frame_geometry(case::JellyCase) = (case.domain[1], case.domain[3], case.domain[2])
+
+"""
+Byte offset (one-based, pointing at R) of solver cell `(x, depth, vertical)`
+inside the published RGBA volume. Slices advance front-to-back in solver
+depth, while rows run top-to-bottom, hence the vertical-axis reversal. Keeping
+this mapping explicit makes the non-square transport contract independently
+testable instead of hiding it in a loop initializer.
+"""
+@inline function jelly_volume_offset(
+    nx::Integer,
+    nz::Integer,
+    x::Integer,
+    depth::Integer,
+    vertical::Integer,
+)
+    top_row = nz - vertical
+    return 4 * (((depth - 1) * nz + top_row) * nx + (x - 1)) + 1
+end
 
 # Ambient-wake floor shared by the volume transfer function and the planar
 # projection; only shells and coherent shed rings contribute.
@@ -532,17 +561,16 @@ function pose_material(pose::JellyPose, x::Float32, y::Float32, z::Float32)
     mouth = pose.mouth_z - z
     # Round the shell∩mouth corner of the displayed membrane: the exact
     # set-difference edge is a sharp circular lip whose voxelized coverage
-    # alternates cell by cell and drew a sawtooth fringe once the
-    # compositor sharpened it.  A ~one-voxel polynomial smooth-max recesses
+    # alternates cell by cell and drew a sawtooth fringe under the old
+    # high-contrast shading. A ~one-voxel polynomial smooth-max recesses
     # and rounds the lip; the solver keeps the exact AutoBody cut.
     lip_blend = clamp(0.5f0 + 0.5f0 * (shell - mouth) / 1.2f0, 0.0f0, 1.0f0)
     lip = mouth + (shell - mouth) * lip_blend +
           1.2f0 * lip_blend * (1.0f0 - lip_blend)
     # The coverage feather spans about 1.6 voxels: a one-voxel ramp beat
     # against the coarse grid along the curved dome and drew concentric
-    # moiré rings once the compositor's sharpened transfer function raised
-    # the contrast.  The wider analytic ramp reconstructs smoothly and the
-    # sharpening restores the crisp visible edge.
+    # moiré rings once the old high-contrast transfer raised them. The wider
+    # analytic ramp reconstructs smoothly while retaining a crisp silhouette.
     surface = clamp(0.5f0 - 0.62f0 * lip, 0.0f0, 1.0f0)
     polar = clamp(local_z / max(R, 1.0f-4), -1.0f0, 1.0f0)
     organs = 0.0f0
@@ -627,17 +655,51 @@ function download_vorticity_magnitude!(case::JellyCase)
     return case.sigma_host
 end
 
+@inline jelly_finite_vorticity(value::Real) =
+    isfinite(value) ? max(Float32(value), 0.0f0) : 0.0f0
+
 """
-Materialize the animated analytic anatomy and colorize the vorticity
+Compact isotropic reconstruction filter for the displayed wake. WaterLily's
+cell-centred vorticity is physically meaningful at solver resolution, but a
+single hot cell magnified across dozens of desktop pixels reads as stipple.
+The centre-heavy seven-point kernel attenuates that grid-scale mode while
+retaining coherent vortex sheets; anatomy is composited afterwards and stays
+analytic and crisp.
+"""
+@inline function jelly_filtered_vorticity(
+    sigma::AbstractArray{<:Real,3},
+    x::Integer,
+    y::Integer,
+    z::Integer,
+)
+    i = x + 1
+    j = y + 1
+    k = z + 1
+    # Weight before summing. Summing six individually finite Float32 maxima
+    # first overflows to Inf and makes the later rational wake knee evaluate
+    # Inf/Inf. This convex accumulation stays finite across the complete
+    # representable input range while preserving normalized DC gain to
+    # Float32 precision.
+    filtered = 0.52f0 * jelly_finite_vorticity(sigma[i, j, k])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i - 1, j, k])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i + 1, j, k])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i, j - 1, k])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i, j + 1, k])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i, j, k - 1])
+    filtered += 0.08f0 * jelly_finite_vorticity(sigma[i, j, k + 1])
+    return min(filtered, floatmax(Float32))
+end
+
+"""
+Materialize the animated analytic anatomy and colorize the filtered vorticity
 magnitude voxel-by-voxel into the version-2 volume buffer. Emission runs
 through the palette's positive half while the apex-to-rim shaded membranes,
-rose gonad crowns, blush oral arms, and lavender filaments give the
-compositor coherent, distinctly colored surfaces from which to reconstruct
-3D normals. Quiescent water remains transparent; opacity follows a soft
-rational knee for the wake and bounded translucent densities for the body
-material, and the deliberate gap between the wake band (below about 0.11)
-and the tissue band (0.28 and up) is what lets the compositor's transfer
-function sharpen tissue without touching the wake.
+rose gonad crowns, blush oral arms, and lavender filaments give the compositor
+coherent, distinctly colored surfaces and a stable front-interface normal.
+Quiescent water remains transparent; opacity follows a soft rational knee for
+the wake and bounded translucent coverage for the body. Wake opacity is capped
+below about 0.115, while anatomy feathers continuously from zero to its dense
+interior so the compositor can blend medium and tissue lighting smoothly.
 """
 function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
     sigma = download_vorticity_magnitude!(case)
@@ -654,10 +716,10 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
         @inbounds for row in 1:nz
             z = nz - row + 1
             voxel_z = jelly_voxel_center(z)
-            output = 4 * ((y - 1) * nz + (row - 1)) * nx + 1
+            output = jelly_volume_offset(nx, nz, 1, y, z)
             for x in 1:nx
-                value = sigma[x + 1, y + 1, z + 1]
-                wake = isfinite(value) ? max(value - JELLY_WAKE_FLOOR, 0.0f0) : 0.0f0
+                value = jelly_filtered_vorticity(sigma, x, y, z)
+                wake = max(value - JELLY_WAKE_FLOOR, 0.0f0)
                 # Soft knee keeps the shell/wake dynamic range on the palette
                 # without clipping; the deterministic mapping avoids per-frame
                 # autoscale flicker in the marched image.
@@ -678,12 +740,12 @@ function render_volume!(case::JellyCase; palette::Tuple=case_palette(case))
                     arms = max(arms, coverage[3])
                     organs = max(organs, coverage[4])
                 end
-                # All materials remain genuinely translucent.  A ray crosses
+                # All materials remain genuinely translucent. A ray crosses
                 # many voxels, so modest per-cell absorption is enough to form
-                # a legible bell.  Keeping the turbulent wake well below the
-                # tissue band prevents individual high-vorticity cells from
-                # becoming opaque pepper-like particles and preserves the
-                # band gap the compositor's transfer function relies on.
+                # a legible bell. Bounding the turbulent wake below the dense
+                # anatomy range prevents individual high-vorticity cells from
+                # becoming opaque pepper-like particles; the analytic anatomy
+                # feather itself remains continuous down to transparent.
                 density = max(
                     0.15f0 * wake_density,
                     max(

@@ -1,5 +1,5 @@
 use super::{Compositor, CompositorConnection, DirtyRect};
-use crate::backend::compositor_common::waterlily::WaterlilyFrame;
+use crate::backend::compositor_common::waterlily::{MAX_WATERLILY_VOLUME_BYTES, WaterlilyFrame};
 use glow::HasContext;
 use std::fs;
 use std::io::{self, Read};
@@ -14,7 +14,6 @@ use std::time::{Duration, Instant};
 const RECEIVE_TIMEOUT: Duration = Duration::from_millis(100);
 const ACCEPT_RETRY: Duration = Duration::from_millis(20);
 const PRODUCER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_WATERLILY_PBO_BYTES: usize = 64 * 1024 * 1024;
 /// Loop length of the shader's open-water swell.  Prime seconds, so the
 /// surface animation never beats against the 47 s / 31 s camera waves; the
 /// shader receives the phase in `[0, 1)` and uses integer cycle counts, so
@@ -237,6 +236,13 @@ impl Drop for WaterlilyIpc {
 
 pub(super) struct WaterlilyTexture {
     pub(super) texture: glow::Texture,
+    /// One-voxel Chebyshev dilation of non-zero volume alpha.  The volume
+    /// shader probes this support mask before its eight-tap B-spline, so empty
+    /// water stays a one-fetch path without confusing the reconstruction's
+    /// wider 4x4x4 support for empty space.
+    pub(super) occupancy_texture: Option<glow::Texture>,
+    occupancy: Vec<u8>,
+    occupancy_scratch: Vec<u8>,
     /// GL binding target: `TEXTURE_2D` for planar frames, `TEXTURE_3D` for
     /// volumetric frames that the compositor ray-marches natively.
     pub(super) target: u32,
@@ -252,6 +258,130 @@ impl WaterlilyTexture {
     pub(super) fn is_volume(&self) -> bool {
         self.target == glow::TEXTURE_3D
     }
+}
+
+/// Isolate a frame upload from render state left by an earlier compositor
+/// pass. Client-pointer texture uploads are interpreted as byte offsets when
+/// a `PIXEL_UNPACK_BUFFER` is bound, so merely relying on every other upload
+/// path to leave that binding at zero is unsafe. Tight volume rows also need a
+/// known unpack alignment. Texture bindings are restored as well, keeping the
+/// raw upload path from invalidating callers' assumptions about texture unit
+/// zero.
+struct PixelUnpackStateGuard<'a> {
+    gl: &'a glow::Context,
+    active_texture: u32,
+    texture_2d: Option<glow::Texture>,
+    texture_3d: Option<glow::Texture>,
+    pixel_unpack_buffer: Option<glow::Buffer>,
+    unpack_alignment: i32,
+}
+
+impl<'a> PixelUnpackStateGuard<'a> {
+    fn begin(gl: &'a glow::Context) -> Self {
+        unsafe {
+            let active_texture = gl.get_parameter_i32(glow::ACTIVE_TEXTURE) as u32;
+            let pixel_unpack_buffer = gl.get_parameter_buffer(glow::PIXEL_UNPACK_BUFFER_BINDING);
+            let unpack_alignment = gl.get_parameter_i32(glow::UNPACK_ALIGNMENT);
+            gl.active_texture(glow::TEXTURE0);
+            let texture_2d = gl.get_parameter_texture(glow::TEXTURE_BINDING_2D);
+            let texture_3d = gl.get_parameter_texture(glow::TEXTURE_BINDING_3D);
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+            Self {
+                gl,
+                active_texture,
+                texture_2d,
+                texture_3d,
+                pixel_unpack_buffer,
+                unpack_alignment,
+            }
+        }
+    }
+}
+
+impl Drop for PixelUnpackStateGuard<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl
+                .pixel_store_i32(glow::UNPACK_ALIGNMENT, self.unpack_alignment);
+            self.gl
+                .bind_buffer(glow::PIXEL_UNPACK_BUFFER, self.pixel_unpack_buffer);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, self.texture_2d);
+            self.gl.bind_texture(glow::TEXTURE_3D, self.texture_3d);
+            self.gl.active_texture(self.active_texture);
+        }
+    }
+}
+
+/// Build the conservative support mask consumed by the volume shader.
+///
+/// A cubic B-spline at one sample uses the two centre trilinear cells plus
+/// one control voxel on either side of every axis. Dilating every non-zero
+/// alpha voxel by one Chebyshev cell therefore makes an ordinary trilinear
+/// lookup conservative for the complete cubic support. Three separable
+/// binary max filters keep the per-frame CPU work linear in the volume size.
+fn fill_volume_occupancy(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    depth: usize,
+    occupancy: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
+) {
+    let voxel_count = width * height * depth;
+    debug_assert_eq!(rgba.len(), voxel_count * 4);
+    occupancy.resize(voxel_count, 0);
+    scratch.resize(voxel_count, 0);
+
+    for (value, voxel) in occupancy.iter_mut().zip(rgba.chunks_exact(4)) {
+        *value = if voxel[3] == 0 { 0 } else { u8::MAX };
+    }
+
+    let plane = width * height;
+    for z in 0..depth {
+        for y in 0..height {
+            let row = z * plane + y * width;
+            for x in 0..width {
+                let lo = x.saturating_sub(1);
+                let hi = (x + 1).min(width - 1);
+                scratch[row + x] = occupancy[row + lo..=row + hi]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+            }
+        }
+    }
+
+    for z in 0..depth {
+        for y in 0..height {
+            let lo = y.saturating_sub(1);
+            let hi = (y + 1).min(height - 1);
+            for x in 0..width {
+                let mut value = 0;
+                for source_y in lo..=hi {
+                    value = value.max(scratch[z * plane + source_y * width + x]);
+                }
+                occupancy[z * plane + y * width + x] = value;
+            }
+        }
+    }
+
+    for z in 0..depth {
+        let lo = z.saturating_sub(1);
+        let hi = (z + 1).min(depth - 1);
+        for y in 0..height {
+            for x in 0..width {
+                let mut value = 0;
+                for source_z in lo..=hi {
+                    value = value.max(occupancy[source_z * plane + y * width + x]);
+                }
+                scratch[z * plane + y * width + x] = value;
+            }
+        }
+    }
+    std::mem::swap(occupancy, scratch);
 }
 
 /// CPU side of the volumetric camera: a near-front perspective eye whose basis
@@ -833,6 +963,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.screen_h as f32,
             );
             self.gl.uniform_1_i32(uniforms.volume.as_ref(), 0);
+            self.gl.uniform_1_i32(uniforms.occupancy.as_ref(), 2);
             self.gl.uniform_1_i32(uniforms.scene_texture.as_ref(), 1);
             self.gl.uniform_1_i32(
                 uniforms.scene_available.as_ref(),
@@ -886,6 +1017,9 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl.active_texture(glow::TEXTURE1);
             self.gl.bind_texture(glow::TEXTURE_2D, backdrop_texture);
+            self.gl.active_texture(glow::TEXTURE2);
+            self.gl
+                .bind_texture(glow::TEXTURE_3D, frame.occupancy_texture);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, Some(texture));
             // The shader emits premultiplied RGBA.  Reassert the matching
@@ -896,15 +1030,22 @@ impl<C: CompositorConnection> Compositor<C> {
             // rasterizers (llvmpipe in the nested Xephyr smoke sessions)
             // stipple every smooth volume gradient with it, which polluted
             // screenshot-based debugging of real shader noise.
-            self.gl.disable(glow::DITHER);
+            let dither_was_enabled = self.gl.is_enabled(glow::DITHER);
+            if dither_was_enabled {
+                self.gl.disable(glow::DITHER);
+            }
             self.gl_state_tracker
                 .bind_vertex_array(&self.gl, Some(self.quad_vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            self.gl.enable(glow::DITHER);
+            if dither_was_enabled {
+                self.gl.enable(glow::DITHER);
+            }
             self.gl_state_tracker.bind_vertex_array(&self.gl, None);
             self.gl_state_tracker.use_program(&self.gl, None);
             self.gl.active_texture(glow::TEXTURE1);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.active_texture(glow::TEXTURE2);
+            self.gl.bind_texture(glow::TEXTURE_3D, None);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_texture(glow::TEXTURE_3D, None);
         }
@@ -931,6 +1072,19 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             glow::TEXTURE_2D
         };
+        // The shared reader already rejects padded volume slots above this
+        // limit before allocating them. Keep the tight-RGBA check here as
+        // defense in depth for directly constructed frames or future readers:
+        // a volume additionally needs two CPU occupancy buffers and a 3D R8
+        // texture. Current accelerated jelly domains are under 2 MiB RGBA.
+        if target == glow::TEXTURE_3D && frame.rgba.len() > MAX_WATERLILY_VOLUME_BYTES {
+            log::warn!(
+                "compositor: rejected {} MiB WaterLily volume (limit {} MiB)",
+                frame.rgba.len() / (1024 * 1024),
+                MAX_WATERLILY_VOLUME_BYTES / (1024 * 1024)
+            );
+            return false;
+        }
         let limit_parameter = if target == glow::TEXTURE_3D {
             glow::MAX_3D_TEXTURE_SIZE
         } else {
@@ -959,6 +1113,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 || current.target != target
         });
         if recreate {
+            let (mut occupancy, mut occupancy_scratch) = (Vec::new(), Vec::new());
+            if target == glow::TEXTURE_3D {
+                fill_volume_occupancy(
+                    &frame.rgba,
+                    frame.width as usize,
+                    frame.height as usize,
+                    frame.depth as usize,
+                    &mut occupancy,
+                    &mut occupancy_scratch,
+                );
+            }
             unsafe {
                 let texture = match self.gl.create_texture() {
                     Ok(texture) => texture,
@@ -967,6 +1132,22 @@ impl<C: CompositorConnection> Compositor<C> {
                         return false;
                     }
                 };
+                let occupancy_texture = if target == glow::TEXTURE_3D {
+                    match self.gl.create_texture() {
+                        Ok(texture) => Some(texture),
+                        Err(error) => {
+                            self.gl.delete_texture(texture);
+                            log::warn!(
+                                "compositor: WaterLily occupancy texture creation failed: {error}"
+                            );
+                            return false;
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                let unpack_state = PixelUnpackStateGuard::begin(&self.gl);
 
                 // Discard stale errors so allocation validation below pertains
                 // to this replacement texture.
@@ -1018,17 +1199,64 @@ impl<C: CompositorConnection> Compositor<C> {
                         .tex_parameter_i32(target, wrap, glow::CLAMP_TO_EDGE as i32);
                 }
                 self.gl.bind_texture(target, None);
+                if let Some(mask) = occupancy_texture {
+                    self.gl.bind_texture(glow::TEXTURE_3D, Some(mask));
+                    self.gl.tex_image_3d(
+                        glow::TEXTURE_3D,
+                        0,
+                        glow::R8 as i32,
+                        frame.width as i32,
+                        frame.height as i32,
+                        frame.depth as i32,
+                        0,
+                        glow::RED,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&occupancy)),
+                    );
+                    self.gl.tex_parameter_i32(
+                        glow::TEXTURE_3D,
+                        glow::TEXTURE_SWIZZLE_A,
+                        glow::RED as i32,
+                    );
+                    for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                        self.gl
+                            .tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
+                    }
+                    for wrap in [
+                        glow::TEXTURE_WRAP_S,
+                        glow::TEXTURE_WRAP_T,
+                        glow::TEXTURE_WRAP_R,
+                    ] {
+                        self.gl.tex_parameter_i32(
+                            glow::TEXTURE_3D,
+                            wrap,
+                            glow::CLAMP_TO_EDGE as i32,
+                        );
+                    }
+                    self.gl.bind_texture(glow::TEXTURE_3D, None);
+                }
                 let allocation_error = self.gl.get_error();
                 if allocation_error != glow::NO_ERROR {
                     self.gl.delete_texture(texture);
+                    if let Some(mask) = occupancy_texture {
+                        self.gl.delete_texture(mask);
+                    }
                     log::warn!(
                         "compositor: WaterLily texture allocation failed with GL error 0x{allocation_error:x}"
                     );
                     return false;
                 }
 
+                // Restore bindings before replacing and deleting the previous
+                // texture: a caller could legitimately have had that texture
+                // bound on unit zero when this upload began.
+                drop(unpack_state);
+
                 let replacement = WaterlilyTexture {
                     texture,
+                    occupancy_texture,
+                    occupancy,
+                    occupancy_scratch,
                     target,
                     width: frame.width,
                     height: frame.height,
@@ -1038,14 +1266,27 @@ impl<C: CompositorConnection> Compositor<C> {
                 };
                 if let Some(previous) = self.waterlily_texture.replace(replacement) {
                     self.gl.delete_texture(previous.texture);
+                    if let Some(mask) = previous.occupancy_texture {
+                        self.gl.delete_texture(mask);
+                    }
                 }
             }
         } else {
+            let unpack_state = PixelUnpackStateGuard::begin(&self.gl);
+            // Attribute any transfer failure below to this frame instead of
+            // inheriting a stale flag from an earlier render pass.
+            unsafe {
+                for _ in 0..8 {
+                    if self.gl.get_error() == glow::NO_ERROR {
+                        break;
+                    }
+                }
+            }
             let texture = self.waterlily_texture.as_ref().unwrap().texture;
             let _ = self.pbo_uploader.ensure_capacity(
                 &self.gl,
                 frame.rgba.len(),
-                MAX_WATERLILY_PBO_BYTES,
+                MAX_WATERLILY_VOLUME_BYTES,
             );
             let uploaded = unsafe {
                 if target == glow::TEXTURE_3D {
@@ -1070,6 +1311,57 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             };
             if !uploaded {
+                return false;
+            }
+            {
+                let current = self.waterlily_texture.as_mut().unwrap();
+                if let Some(mask) = current.occupancy_texture {
+                    fill_volume_occupancy(
+                        &frame.rgba,
+                        frame.width as usize,
+                        frame.height as usize,
+                        frame.depth as usize,
+                        &mut current.occupancy,
+                        &mut current.occupancy_scratch,
+                    );
+                    unsafe {
+                        self.gl.bind_texture(glow::TEXTURE_3D, Some(mask));
+                        self.gl.tex_sub_image_3d(
+                            glow::TEXTURE_3D,
+                            0,
+                            0,
+                            0,
+                            0,
+                            frame.width as i32,
+                            frame.height as i32,
+                            frame.depth as i32,
+                            glow::RED,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(Some(&current.occupancy)),
+                        );
+                        self.gl.bind_texture(glow::TEXTURE_3D, None);
+                    }
+                }
+            }
+
+            let transfer_error = unsafe { self.gl.get_error() };
+            drop(unpack_state);
+            if transfer_error != glow::NO_ERROR {
+                log::warn!(
+                    "compositor: WaterLily texture update failed with GL error 0x{transfer_error:x}"
+                );
+                // Main RGBA and occupancy are a coupled snapshot. If either
+                // transfer failed, retaining the pair could combine different
+                // frame generations and reintroduce holes. Hide this frame and
+                // recreate both textures on the next producer publication.
+                if let Some(failed) = self.waterlily_texture.take() {
+                    unsafe {
+                        self.gl.delete_texture(failed.texture);
+                        if let Some(mask) = failed.occupancy_texture {
+                            self.gl.delete_texture(mask);
+                        }
+                    }
+                }
                 return false;
             }
             let current = self.waterlily_texture.as_mut().unwrap();
@@ -1185,6 +1477,60 @@ fn peer_is_current_user(stream: &UnixStream) -> bool {
 mod tests {
     fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
         a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    #[test]
+    fn volume_occupancy_dilates_sparse_alpha_by_one_voxel() {
+        const N: usize = 5;
+        let mut rgba = vec![0_u8; N * N * N * 4];
+        let center = (2 * N * N + 2 * N + 2) * 4;
+        rgba[center + 3] = 1;
+        let mut occupancy = Vec::new();
+        let mut scratch = Vec::new();
+        super::fill_volume_occupancy(&rgba, N, N, N, &mut occupancy, &mut scratch);
+
+        for z in 0..N {
+            for y in 0..N {
+                for x in 0..N {
+                    let expected =
+                        (1..=3).contains(&x) && (1..=3).contains(&y) && (1..=3).contains(&z);
+                    assert_eq!(
+                        occupancy[z * N * N + y * N + x] != 0,
+                        expected,
+                        "unexpected support mask at ({x}, {y}, {z})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn volume_occupancy_clamps_dilation_at_edges() {
+        let mut rgba = vec![0_u8; 3 * 2 * 2 * 4];
+        rgba[3] = 255;
+        let mut occupancy = Vec::new();
+        let mut scratch = Vec::new();
+        super::fill_volume_occupancy(&rgba, 3, 2, 2, &mut occupancy, &mut scratch);
+        assert_eq!(occupancy.iter().filter(|&&value| value != 0).count(), 8);
+        assert_eq!(occupancy[2], 0, "dilation must not wrap across the X edge");
+    }
+
+    #[test]
+    fn volume_occupancy_reuse_clears_previous_frame_support() {
+        const N: usize = 4;
+        let mut rgba = vec![0_u8; N * N * N * 4];
+        rgba[((2 * N * N + 2 * N + 2) * 4) + 3] = 255;
+        let mut occupancy = Vec::new();
+        let mut scratch = Vec::new();
+        super::fill_volume_occupancy(&rgba, N, N, N, &mut occupancy, &mut scratch);
+        assert!(occupancy.iter().any(|&value| value != 0));
+
+        rgba.fill(0);
+        super::fill_volume_occupancy(&rgba, N, N, N, &mut occupancy, &mut scratch);
+        assert!(
+            occupancy.iter().all(|&value| value == 0),
+            "reused support buffers must not retain occupancy from an older frame"
+        );
     }
 
     fn projected_box_fill(

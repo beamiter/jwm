@@ -60,26 +60,43 @@ parallax smoothly.
 The volume includes the animated anatomy — bell membranes shaded from rim
 lavender to apex violet, the rose gonad crown visible through each
 translucent bell, four thick curling oral arms, and five thin trailing
-filaments — together with the vorticity wakes from the 3D solve. The shader
-performs front-to-back emission/absorption compositing with a one-tap
-trilinear probe that classifies each step as clear water or material, so
-the expensive work only runs inside the smack. Material steps resample the
-volume with a C2-continuous tricubic B-spline (eight hardware trilinear
-taps) and reconstruct surface normals from the analytic derivative of the
-tissue band alone — the rough turbulent wake is subtracted out before
-differentiation, so a bell swimming through its own wake keeps clean
-normals — then trace short light rays for self-shadowing and apply
-directional lighting,
-Fresnel highlights, depth haze, and scene refraction at the first tissue
-interface. Voxel opacity separates the producer's authored material bands:
-low-alpha turbulent wake shades as a forward-scattering medium
-(Henyey-Greenstein lobe) in its own palette hue, while high-alpha tissue is
-sharpened into crisp translucent surfaces with wrapped diffuse, subsurface
-backlight, and specular response. The ambient floor is proportional to each
-voxel's own albedo — never a flat gray — so stacked translucent layers
-converge to luminous color instead of white fog, and a deterministic
-per-pixel jitter of the voxel-unit midpoint integration decorrelates slab
-banding without temporal noise.
+filaments — together with the vorticity wakes from the 3D solve. Before
+publication, a centre-heavy isotropic seven-point filter (the cell plus its
+six axial neighbours) attenuates isolated solver-grid impulses in the displayed
+wake without blurring the analytic anatomy.
+
+The shader performs front-to-back emission/absorption compositing on a fixed,
+unjittered midpoint lattice at two samples per voxel. Each step first samples
+an R8 occupancy texture built as a one-voxel Chebyshev dilation of every
+non-zero source-alpha voxel. This is conservative for the complete 4x4x4
+control lattice of the C2-continuous tricubic B-spline, so empty water remains
+a one-fetch path without discarding the wider reconstructed tails of thin
+membranes, filaments, or vortex rings. Occupied steps reconstruct RGBA with
+eight hardware trilinear taps. The lattice keeps a fixed voxel-space phase,
+and its last fractional segment is integrated at its true length, so adjacent
+rays do not gain or lose a complete opacity slab as their box chord crosses a
+step boundary. The first tissue-interface normal comes from a
+smoothly wake-gated, one-voxel-scale density field and is evaluated only while
+capturing the shallow refracting surface; a bell swimming through its own rough
+wake therefore keeps stable desktop refraction without paying that cost along
+the rest of the ray.
+
+Low-alpha turbulent wake shades as a normalized Henyey-Greenstein
+forward-scattering medium in its own palette hue. As density rises, shading
+blends continuously into smooth participating-tissue illumination driven by
+authored apex-to-rim color, world height, and view-path depth. Deliberately not
+reapplying per-step Lambert, self-shadow, and narrow specular to the one-cell
+display shell prevents its voxel coverage from reappearing as concentric rings
+or salt-and-pepper highlights. Per-voxel opacity remains a strictly monotone
+transfer instead of flattening ranges into plateaus. The first tissue interface
+is accumulated over a shallow weighted band for stable scene refraction. A
+small confidence-gated directional cue is then applied once to that coherent
+front interface, rather than independently to every density layer. Refraction
+strength uses the same weight and normal-coherence confidence, so weak or
+opposing gradients fade continuously instead of snapping on. A
+display-referred exponential shoulder rolls off only accumulated volume
+highlights before premultiplication, preserving hue without remapping the
+transmitted desktop.
 
 The aquarium has perspective-correct front and rear glass rims and a
 world-space open water surface below a narrow air gap. Rays through the water
@@ -90,6 +107,31 @@ waterline. Like the camera pose, the swell phase derives from the frame
 timestamp, so re-rendering an unchanged frame stays bit-stable for damage
 tracking. Rays that miss the projected tank stay transparent, leaving the
 desktop around its near-full-screen silhouette sharp.
+
+The transmitted desktop is sampled from its mip pyramid with a nine-tap
+LOD-2.5 frost kernel. It preserves the broad low-frequency glass lobe of the
+former 81-tap pass while avoiding both its cost and full-resolution wallpaper
+grain leaking into the volume as speckle. All sampling and camera/swell phases
+are deterministic: an unchanged volume and timestamp render bit-identically,
+and the marcher deliberately uses no stochastic per-pixel depth jitter.
+
+Focused regressions protect these properties. Occupancy unit tests cover
+one-voxel dilation, edge clamping, and reuse without stale support; headless
+real-shader tests compare a sparse B-spline tail against a no-skip oracle,
+verify repeatability and premultiplied output, exercise a chord immediately
+around a fractional-step
+boundary, and render a curved analytic bell over a smooth scene texture to
+reject isolated dark holes, bright fireflies, and oscillating concentric luma
+bands. A paired test-only control with interface confidence disabled confirms
+that the scene-enabled regression receives a measurable contribution from the
+lighting/refraction path instead of merely drawing tissue over a backdrop.
+
+Volume upload also treats RGBA and occupancy as one coupled snapshot. It
+isolates and restores texture-unit, pixel-unpack-buffer, and unpack-alignment
+state around transfers; if either upload reports a GL error, both textures are
+discarded and rebuilt together on the next publication. A 64 MiB volumetric
+frame ceiling bounds the compositor-thread dilation buffers and GPU allocation;
+the default accelerated jelly volume remains below 2 MiB.
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
@@ -272,8 +314,12 @@ The socket and frame-file values supplied to JWM and the worker must match.
 Planar frames are stretched across the display, while volumetric frames are
 sampled inside the projected aquarium, so either way the `--sim-size` choice
 trades solver cost against on-screen sharpness; `640x400` reads well on common
-16:9/16:10 outputs, and `1280x800` is comfortable on a discrete GPU. Start the
-worker with `--threads=auto` to keep the colorize loop parallel.
+16:9/16:10 outputs, and `1280x800` is comfortable on a discrete GPU. At
+`1280x800`, the jelly CPU path caps its `(width, depth, height)` solve at
+`96x32x64`, while CUDA and ROCm use the finer `128x48x80` domain. The higher
+accelerator ceiling improves curved coverage before tricubic reconstruction;
+the CPU cap keeps publication latency practical. Start the worker with
+`--threads=auto` to keep the colorize loop parallel.
 Publishing is paced against an absolute schedule and the solver advances
 under a per-frame time budget: when the simulation cannot reach real time
 within the budget, the publish cadence stays fixed and the simulation clock
@@ -320,6 +366,10 @@ Both versions use top-to-bottom rows and R, G, B, A byte order. `stride` must
 be at least `width * 4`; the built-in worker writes tight rows with equality.
 Width, height, depth, stride, slot, checked slot offsets, and total file
 length must all validate before JWM uploads a frame.
+The generic planar transport permits slots up to 512 MiB. A frame with
+`depth > 1` has a stricter 64 MiB padded-slot ceiling, checked from the header
+before allocating either the tight RGBA result or a stride-compaction buffer;
+this bounds the additional occupancy and 3D-texture working set.
 
 In version 1 alpha carries per-case semantics over an opaque contract (the
 rain case encodes optical height in inverted alpha; plain cases write `255`).

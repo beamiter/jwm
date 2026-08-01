@@ -28,6 +28,11 @@ pub const WATERLILY_ORIGIN_TOP_LEFT: u32 = 1;
 const SLOT_COUNT: u64 = 2;
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_FRAME_BYTES: u64 = 512 * 1024 * 1024;
+/// Volumes also require occupancy working sets and GPU storage on the
+/// compositor thread. Keep their padded publication slot bounded before the
+/// reader allocates either its tight RGBA output or a stride-compaction
+/// buffer. Planar frames retain the broader transport limit above.
+pub const MAX_WATERLILY_VOLUME_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WaterlilyFrameHeader {
@@ -117,6 +122,11 @@ impl WaterlilyFrameHeader {
             .ok_or_else(|| invalid_data("WaterLily slot size overflow"))?;
         if slot_bytes > MAX_FRAME_BYTES {
             return Err(invalid_data("WaterLily frame exceeds the transport limit"));
+        }
+        if depth > 1 && slot_bytes > MAX_WATERLILY_VOLUME_BYTES as u64 {
+            return Err(invalid_data(
+                "WaterLily volume exceeds the compositor limit",
+            ));
         }
 
         Ok(Self {
@@ -456,6 +466,17 @@ mod tests {
         let mut short = volume_header(2, 3, 4, 8, 0, 1);
         short[12..16].copy_from_slice(&(WATERLILY_HEADER_BYTES as u32).to_le_bytes());
         assert!(WaterlilyFrameHeader::parse(&short).is_err());
+
+        // Reject an oversized padded volume while it is still only a header:
+        // its tight pixels are tiny, but accepting the advertised stride
+        // would otherwise allocate a >64 MiB compaction buffer before the X11
+        // upload layer gets a chance to apply its own defense-in-depth check.
+        let padded_stride = (MAX_WATERLILY_VOLUME_BYTES / 4 + 1) as u32;
+        assert!(WaterlilyFrameHeader::parse(&volume_header(1, 2, 2, padded_stride, 0, 1)).is_err());
+
+        // The volume ceiling is deliberately tighter than the generic planar
+        // transport ceiling because only volumes allocate occupancy data.
+        assert!(WaterlilyFrameHeader::parse(&header(1, 2, padded_stride, 0, 1)).is_ok());
     }
 
     #[test]

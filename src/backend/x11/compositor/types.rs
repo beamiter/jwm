@@ -549,6 +549,7 @@ pub(super) struct WaterlilyVolumeUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) volume: Option<glow::UniformLocation>,
+    pub(super) occupancy: Option<glow::UniformLocation>,
     pub(super) scene_texture: Option<glow::UniformLocation>,
     pub(super) scene_available: Option<glow::UniformLocation>,
     pub(super) screen_size: Option<glow::UniformLocation>,

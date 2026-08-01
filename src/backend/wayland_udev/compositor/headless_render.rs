@@ -351,6 +351,288 @@ fn render_quad(
     }
 }
 
+/// Render the real X11 WaterLily volume shader into an RGBA8 FBO and return
+/// every pixel in OpenGL's bottom-left row order.  The volume deliberately
+/// uses LINEAR filtering: the production texture uses the same sampler state,
+/// and the empty-space probe must agree with the wider tricubic B-spline
+/// reconstruction built on top of those hardware trilinear taps.
+#[cfg(feature = "x11-backends")]
+fn render_waterlily_volume_frame(
+    gl: &glow::Context,
+    fragment_shader: &str,
+    voxels: &[u8],
+    dimensions: [i32; 3],
+    output_size: [i32; 2],
+    box_half_extents: [f32; 3],
+    scene_available: bool,
+) -> Vec<u8> {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let [volume_w, volume_h, volume_d] = dimensions;
+    let [output_w, output_h] = output_size;
+    assert!(volume_w >= 1 && volume_h >= 1 && volume_d >= 1);
+    assert_eq!(
+        voxels.len(),
+        volume_w as usize * volume_h as usize * volume_d as usize * 4
+    );
+
+    unsafe {
+        let program = link(gl, s::VERTEX_SHADER, fragment_shader)
+            .expect("WaterLily volume shaders must link");
+
+        let volume = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+        let unpack_alignment = gl.get_parameter_i32(glow::UNPACK_ALIGNMENT);
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
+        gl.tex_image_3d(
+            glow::TEXTURE_3D,
+            0,
+            glow::RGBA as i32,
+            volume_w,
+            volume_h,
+            volume_d,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(voxels)),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
+        }
+        for wrap in [
+            glow::TEXTURE_WRAP_S,
+            glow::TEXTURE_WRAP_T,
+            glow::TEXTURE_WRAP_R,
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        let mut occupancy = vec![0_u8; (volume_w * volume_h * volume_d) as usize];
+        let plane = (volume_w * volume_h) as usize;
+        for z in 0..volume_d as usize {
+            for y in 0..volume_h as usize {
+                for x in 0..volume_w as usize {
+                    let source = (z * plane + y * volume_w as usize + x) * 4;
+                    if voxels[source + 3] == 0 {
+                        continue;
+                    }
+                    for target_z in z.saturating_sub(1)..=(z + 1).min(volume_d as usize - 1) {
+                        for target_y in y.saturating_sub(1)..=(y + 1).min(volume_h as usize - 1) {
+                            for target_x in x.saturating_sub(1)..=(x + 1).min(volume_w as usize - 1)
+                            {
+                                occupancy
+                                    [target_z * plane + target_y * volume_w as usize + target_x] =
+                                    u8::MAX;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let occupancy_texture = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE2);
+        gl.bind_texture(glow::TEXTURE_3D, Some(occupancy_texture));
+        gl.tex_image_3d(
+            glow::TEXTURE_3D,
+            0,
+            glow::R8 as i32,
+            volume_w,
+            volume_h,
+            volume_d,
+            0,
+            glow::RED,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&occupancy)),
+        );
+        gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, unpack_alignment);
+        gl.tex_parameter_i32(glow::TEXTURE_3D, glow::TEXTURE_SWIZZLE_A, glow::RED as i32);
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, filter, glow::LINEAR as i32);
+        }
+        for wrap in [
+            glow::TEXTURE_WRAP_S,
+            glow::TEXTURE_WRAP_T,
+            glow::TEXTURE_WRAP_R,
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_3D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        // A low-frequency two-axis gradient makes refraction observable
+        // without importing high-frequency checker noise into the firefly
+        // metric. Bind a valid 1x1 fallback even when the scene path is off:
+        // some drivers validate every active sampler across dynamic branches.
+        let scene_side = if scene_available { 32 } else { 1 };
+        let mut scene_pixels = Vec::with_capacity(scene_side * scene_side * 4);
+        for y in 0..scene_side {
+            for x in 0..scene_side {
+                scene_pixels.extend_from_slice(&[
+                    30 + (5 * x) as u8,
+                    42 + (4 * y) as u8,
+                    70 + (2 * (x + y)) as u8,
+                    255,
+                ]);
+            }
+        }
+        let scene = gl.create_texture().unwrap();
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(scene));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            scene_side as i32,
+            scene_side as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&scene_pixels)),
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            if scene_available {
+                glow::LINEAR_MIPMAP_LINEAR as i32
+            } else {
+                glow::NEAREST as i32
+            },
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            if scene_available {
+                glow::LINEAR as i32
+            } else {
+                glow::NEAREST as i32
+            },
+        );
+        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+        if scene_available {
+            gl.generate_mipmap(glow::TEXTURE_2D);
+        }
+
+        let output = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(output));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            output_w,
+            output_h,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        let framebuffer = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(output),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "WaterLily volume output FBO incomplete"
+        );
+
+        gl.viewport(0, 0, output_w, output_h);
+        let blend_was_enabled = gl.is_enabled(glow::BLEND);
+        let dither_was_enabled = gl.is_enabled(glow::DITHER);
+        if blend_was_enabled {
+            gl.disable(glow::BLEND);
+        }
+        if dither_was_enabled {
+            gl.disable(glow::DITHER);
+        }
+        gl.use_program(Some(program));
+        let uniform = |name: &str| gl.get_uniform_location(program, name);
+        gl.uniform_4_f32(
+            uniform("u_rect").as_ref(),
+            0.0,
+            0.0,
+            output_w as f32,
+            output_h as f32,
+        );
+        gl.uniform_matrix_4_f32_slice(
+            uniform("u_projection").as_ref(),
+            false,
+            &ortho(output_w as f32, output_h as f32),
+        );
+        gl.uniform_1_i32(uniform("u_volume").as_ref(), 0);
+        gl.uniform_1_i32(uniform("u_occupancy").as_ref(), 2);
+        gl.uniform_1_i32(uniform("u_scene_texture").as_ref(), 1);
+        gl.uniform_1_i32(
+            uniform("u_scene_available").as_ref(),
+            i32::from(scene_available),
+        );
+        gl.uniform_2_f32(
+            uniform("u_screen_size").as_ref(),
+            output_w as f32,
+            output_h as f32,
+        );
+        gl.uniform_1_f32(uniform("u_opacity").as_ref(), 1.0);
+        gl.uniform_3_f32(uniform("u_camera_position").as_ref(), 0.0, 0.0, -3.0);
+        gl.uniform_3_f32(uniform("u_camera_right").as_ref(), 1.0, 0.0, 0.0);
+        gl.uniform_3_f32(uniform("u_camera_up").as_ref(), 0.0, 1.0, 0.0);
+        gl.uniform_3_f32(uniform("u_camera_forward").as_ref(), 0.0, 0.0, 1.0);
+        gl.uniform_1_f32(uniform("u_tan_half_fov").as_ref(), 0.35);
+        gl.uniform_3_f32(
+            uniform("u_box_half_extents").as_ref(),
+            box_half_extents[0],
+            box_half_extents[1],
+            box_half_extents[2],
+        );
+        gl.uniform_1_f32(uniform("u_time").as_ref(), 0.0);
+
+        gl.active_texture(glow::TEXTURE1);
+        gl.bind_texture(glow::TEXTURE_2D, Some(scene));
+        gl.active_texture(glow::TEXTURE2);
+        gl.bind_texture(glow::TEXTURE_3D, Some(occupancy_texture));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_3D, Some(volume));
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.bind_vertex_array(Some(vao));
+        gl.clear_color(0.0, 0.0, 0.0, 0.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+
+        let mut pixels = vec![0_u8; output_w as usize * output_h as usize * 4];
+        gl.read_pixels(
+            0,
+            0,
+            output_w,
+            output_h,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut pixels)),
+        );
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(framebuffer);
+        gl.delete_texture(output);
+        gl.delete_texture(scene);
+        gl.delete_texture(occupancy_texture);
+        gl.delete_texture(volume);
+        gl.delete_program(program);
+        if blend_was_enabled {
+            gl.enable(glow::BLEND);
+        }
+        if dither_was_enabled {
+            gl.enable(glow::DITHER);
+        }
+        pixels
+    }
+}
+
 /// Every shader constant in the Wayland backend's `shaders` module, tagged with
 /// its pipeline stage. Keep in sync with the `pub const *_SHADER`/`*_VERTEX`/
 /// `*_FRAGMENT` declarations — a missing entry just isn't compile-checked.
@@ -934,6 +1216,550 @@ fn waterlily_volume_shader_preserves_wake_hue() {
         gl.delete_texture(volume);
         gl.delete_program(prog);
     }
+}
+
+/// Build a test-only reference variant of the volume shader which always
+/// evaluates the tricubic reconstruction. The production shader keeps its
+/// empty-space optimization; comparing it with this oracle makes probe/tail
+/// disagreement observable without pinning driver-specific absolute colors.
+#[cfg(feature = "x11-backends")]
+fn waterlily_volume_shader_without_empty_space_skip(source: &str) -> String {
+    let reconstruction_start = source
+        .find("            vec4 voxel = sample_volume_tricubic(tex);")
+        .expect("WaterLily tricubic reconstruction must remain discoverable");
+    let Some(probe_start) = source[..reconstruction_start].rfind("            if (") else {
+        return source.to_owned();
+    };
+    // With no pre-reconstruction empty-space skip, the nearest preceding
+    // branch is the loop's ordinary break guard. In that case the production
+    // shader already is the reference shader.
+    if !source[probe_start..reconstruction_start].contains("continue;") {
+        return source.to_owned();
+    }
+    let mut reference = String::with_capacity(source.len());
+    reference.push_str(&source[..probe_start]);
+    reference.push_str(&source[reconstruction_start..]);
+    reference
+}
+
+/// Build a test-only control which keeps the complete scene/backdrop path but
+/// zeros the confidence shared by front-interface lighting and refraction.
+/// Comparing it with production output proves the curved-shell regression is
+/// actually exercising that path rather than merely rendering over a scene.
+#[cfg(feature = "x11-backends")]
+fn waterlily_volume_shader_without_front_interface(source: &str) -> String {
+    const NEEDLE: &str = "float interface_confidence = smoothstep(";
+    assert_eq!(
+        source.matches(NEEDLE).count(),
+        1,
+        "front-interface confidence must remain uniquely discoverable"
+    );
+    source.replacen(NEEDLE, "float interface_confidence = 0.0 * smoothstep(", 1)
+}
+
+/// A low-alpha voxel column has a one-voxel-wide trilinear footprint but a
+/// two-voxel-wide cubic B-spline footprint. The cheap center probe must not
+/// punch black holes into that wider reconstructed tail. This is the exact
+/// failure mode that made isolated dark dots trace the jelly wake's rings.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_probe_preserves_sparse_bspline_tail() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping \
+             waterlily_volume_probe_preserves_sparse_bspline_tail"
+        );
+        return;
+    };
+    let gl = &h.gl;
+    const N: usize = 12;
+    const OUTPUT: i32 = 64;
+
+    // Four colored cells out of 12^3 form a short view-aligned wake column.
+    // Alpha 28/255 stays in the shader's low-alpha medium branch while being
+    // strong enough for its B-spline tail to survive RGBA8 readback.
+    let mut voxels = vec![0_u8; N * N * N * 4];
+    for z in 4..8 {
+        let base = ((z * N + 6) * N + 6) * 4;
+        voxels[base..base + 4].copy_from_slice(&[48, 224, 72, 28]);
+    }
+
+    let reference_shader =
+        waterlily_volume_shader_without_empty_space_skip(s::WATERLILY_VOLUME_FRAGMENT_SHADER);
+    // Exercise both non-default branches of the helper's state restoration:
+    // the focused render must not leak its blend/dither choices into the next
+    // test pass that shares this context.
+    unsafe {
+        gl.enable(glow::BLEND);
+        gl.disable(glow::DITHER);
+    }
+    let optimized = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT; 2],
+        [0.5; 3],
+        false,
+    );
+    unsafe {
+        assert!(gl.is_enabled(glow::BLEND));
+        assert!(!gl.is_enabled(glow::DITHER));
+    }
+    let repeated = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT; 2],
+        [0.5; 3],
+        false,
+    );
+    assert_eq!(
+        optimized, repeated,
+        "an unchanged volume and timestamp must render bit-identically"
+    );
+
+    let reference = render_waterlily_volume_frame(
+        gl,
+        &reference_shader,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT; 2],
+        [0.5; 3],
+        false,
+    );
+    let empty = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &vec![0_u8; N * N * N * 4],
+        [N as i32; 3],
+        [OUTPUT; 2],
+        [0.5; 3],
+        false,
+    );
+
+    let mut visible_reference_pixels = 0_usize;
+    let mut black_holes = 0_usize;
+    let mut max_alpha_loss = 0_i16;
+    let mut max_green_loss = 0_i16;
+    for ((got, want), clear) in optimized
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(4))
+        .zip(empty.chunks_exact(4))
+    {
+        let reference_alpha_gain = i16::from(want[3]) - i16::from(clear[3]);
+        if reference_alpha_gain >= 2 {
+            visible_reference_pixels += 1;
+            let alpha_loss = i16::from(want[3]) - i16::from(got[3]);
+            let green_loss = i16::from(want[1]) - i16::from(got[1]);
+            max_alpha_loss = max_alpha_loss.max(alpha_loss);
+            max_green_loss = max_green_loss.max(green_loss);
+            if alpha_loss >= 2 || green_loss >= 3 {
+                black_holes += 1;
+            }
+        }
+        assert!(
+            got[0] <= got[3].saturating_add(1)
+                && got[1] <= got[3].saturating_add(1)
+                && got[2] <= got[3].saturating_add(1),
+            "volume shader output must remain premultiplied, got {got:?}"
+        );
+    }
+
+    eprintln!(
+        "sparse B-spline tail: visible={visible_reference_pixels} \
+         black_holes={black_holes} max_alpha_loss={max_alpha_loss} \
+         max_green_loss={max_green_loss}"
+    );
+    assert!(
+        visible_reference_pixels >= 8,
+        "the synthetic sparse column must expose a measurable B-spline tail"
+    );
+    assert_eq!(
+        black_holes, 0,
+        "the center probe must not discard visibly reconstructed tail pixels \
+         (max alpha loss {max_alpha_loss}, max green loss {max_green_loss})"
+    );
+}
+
+/// A ray chord ending exactly around a half-step boundary must not gain or
+/// lose one complete opacity sample. The two boxes differ by only 0.00064 of
+/// a voxel in optical length, so RGBA8 output should remain within one code;
+/// the former midpoint cutoff jumped by roughly six alpha codes here.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_fractional_tail_is_continuous() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping \
+             waterlily_volume_fractional_tail_is_continuous"
+        );
+        return;
+    };
+    const N: usize = 8;
+    const HALF_STEP_BOUNDARY: f32 = 0.390_625;
+    const EPSILON: f32 = 0.000_02;
+    let voxels = [190_u8, 140, 220, 48]
+        .into_iter()
+        .cycle()
+        .take(N * N * N * 4)
+        .collect::<Vec<_>>();
+    let render = |half_depth| {
+        render_waterlily_volume_frame(
+            &h.gl,
+            s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+            &voxels,
+            [N as i32; 3],
+            [1, 1],
+            [0.5, 0.5, half_depth],
+            false,
+        )
+    };
+    let below = render(HALF_STEP_BOUNDARY - EPSILON);
+    let above = render(HALF_STEP_BOUNDARY + EPSILON);
+
+    assert!(below[3] > 20, "uniform volume must be visibly integrated");
+    for channel in 0..4 {
+        assert!(
+            below[channel].abs_diff(above[channel]) <= 1,
+            "fractional tail discontinuity in channel {channel}: \
+             below={below:?}, above={above:?}"
+        );
+    }
+}
+
+/// A producer-shaped bell membrane exercises a broad curved surface instead
+/// of one specially aligned voxel column.  The source follows Jelly's
+/// antialiased spherical-shell coverage, tissue opacity band, and
+/// apex-to-rim violet palette.  Rendering the complete frame through the
+/// production LINEAR volume and occupancy samplers makes both isolated
+/// probe holes and concentric transfer/shadow bands observable as spatial
+/// discontinuities without relying on driver-specific golden pixels.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn waterlily_volume_curved_shell_is_spatially_coherent() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!(
+            "headless GL unavailable - skipping \
+             waterlily_volume_curved_shell_is_spatially_coherent"
+        );
+        return;
+    };
+    let gl = &h.gl;
+    const N: usize = 32;
+    const OUTPUT: usize = 96;
+
+    // Reproduce the worker's analytic bell material at cell centres: an
+    // approximately two-cell spherical shell, smoothly cut at its mouth and
+    // feathered across about 1.6 cells. Quiescent volume RGB is the violet
+    // palette's white midpoint even where alpha is zero, just like the
+    // producer; this prevents straight-alpha reconstruction from inventing
+    // an artificial black fringe around the membrane.
+    let mut voxels = vec![0_u8; N * N * N * 4];
+    let center = (N as f32 - 1.0) * 0.5;
+    let radius = N as f32 * 0.31;
+    for voxel in voxels.chunks_exact_mut(4) {
+        voxel[..3].copy_from_slice(&[0xfa, 0xfa, 0xfd]);
+    }
+    for z in 0..N {
+        let depth = z as f32 - center;
+        for row in 0..N {
+            // Published volume rows are top-to-bottom while world +Y is up.
+            let height = center - row as f32;
+            for x in 0..N {
+                let lateral = x as f32 - center;
+                let shell = ((lateral * lateral + height * height + depth * depth).sqrt() - radius)
+                    .abs()
+                    - 1.0;
+                let mouth = -height;
+                let lip_blend = (0.5 + 0.5 * (shell - mouth) / 1.2).clamp(0.0, 1.0);
+                let lip = mouth + (shell - mouth) * lip_blend + 1.2 * lip_blend * (1.0 - lip_blend);
+                let surface = (0.5 - 0.62 * lip).clamp(0.0, 1.0);
+                if surface <= 0.0 {
+                    continue;
+                }
+
+                let polar = (height / radius).clamp(-1.0, 1.0);
+                let polar_t = ((polar + 0.35) / 1.20).clamp(0.0, 1.0);
+                let apex_mix = polar_t * polar_t * (3.0 - 2.0 * polar_t);
+                let rim = [216.0_f32, 212.0_f32, 255.0_f32];
+                let apex = [184.0_f32, 156.0_f32, 246.0_f32];
+                let membrane_mix = 0.95 * surface;
+                let base = ((z * N + row) * N + x) * 4;
+                for channel in 0..3 {
+                    let membrane = rim[channel] + (apex[channel] - rim[channel]) * apex_mix;
+                    voxels[base + channel] =
+                        (250.0 + (membrane - 250.0) * membrane_mix).round() as u8;
+                }
+                // Producer tissue density is 0.44 * coverage and is encoded
+                // with its 190/255 per-cell opacity range (max alpha ~= 0.33).
+                voxels[base + 3] = (190.0 * 0.44 * surface).round() as u8;
+            }
+        }
+    }
+
+    let frame = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT as i32; 2],
+        [0.5; 3],
+        true,
+    );
+    let repeated = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT as i32; 2],
+        [0.5; 3],
+        true,
+    );
+    assert_eq!(
+        frame, repeated,
+        "a fixed curved volume and timestamp must render bit-identically"
+    );
+
+    let no_interface_shader =
+        waterlily_volume_shader_without_front_interface(s::WATERLILY_VOLUME_FRAGMENT_SHADER);
+    let without_interface = render_waterlily_volume_frame(
+        gl,
+        &no_interface_shader,
+        &voxels,
+        [N as i32; 3],
+        [OUTPUT as i32; 2],
+        [0.5; 3],
+        true,
+    );
+
+    let mut clear_voxels = voxels.clone();
+    for voxel in clear_voxels.chunks_exact_mut(4) {
+        voxel[3] = 0;
+    }
+    let clear = render_waterlily_volume_frame(
+        gl,
+        s::WATERLILY_VOLUME_FRAGMENT_SHADER,
+        &clear_voxels,
+        [N as i32; 3],
+        [OUTPUT as i32; 2],
+        [0.5; 3],
+        true,
+    );
+
+    let luma = |pixel: &[u8]| -> i32 {
+        // Integer Rec.709 weights are sufficient for spatial comparisons and
+        // keep the metric deterministic across host floating-point modes.
+        (54 * i32::from(pixel[0]) + 183 * i32::from(pixel[1]) + 19 * i32::from(pixel[2]) + 128)
+            / 256
+    };
+    let mut shell_signal = vec![0_i32; OUTPUT * OUTPUT];
+    let mut alpha_gain = vec![0_i32; OUTPUT * OUTPUT];
+    let mut visible_pixels = 0_usize;
+    let mut bounds = [OUTPUT, OUTPUT, 0_usize, 0_usize];
+    for (index, (got, background)) in frame.chunks_exact(4).zip(clear.chunks_exact(4)).enumerate() {
+        assert!(
+            got[0] <= got[3].saturating_add(1)
+                && got[1] <= got[3].saturating_add(1)
+                && got[2] <= got[3].saturating_add(1),
+            "curved-shell output must remain premultiplied, got {got:?}"
+        );
+        shell_signal[index] = luma(got) - luma(background);
+        alpha_gain[index] = i32::from(got[3]) - i32::from(background[3]);
+        if alpha_gain[index] >= 4 {
+            visible_pixels += 1;
+            let x = index % OUTPUT;
+            let y = index / OUTPUT;
+            bounds[0] = bounds[0].min(x);
+            bounds[1] = bounds[1].min(y);
+            bounds[2] = bounds[2].max(x);
+            bounds[3] = bounds[3].max(y);
+        }
+    }
+    assert!(
+        visible_pixels >= 240,
+        "the synthetic bell must cover enough pixels for spatial analysis; \
+         got {visible_pixels}"
+    );
+
+    let mut interface_changed_pixels = 0_usize;
+    let mut max_interface_delta = 0_u8;
+    for (index, (got, control)) in frame
+        .chunks_exact(4)
+        .zip(without_interface.chunks_exact(4))
+        .enumerate()
+    {
+        if alpha_gain[index] < 4 {
+            continue;
+        }
+        let pixel_delta = (0..3)
+            .map(|channel| got[channel].abs_diff(control[channel]))
+            .max()
+            .unwrap_or(0);
+        max_interface_delta = max_interface_delta.max(pixel_delta);
+        if pixel_delta >= 1 {
+            interface_changed_pixels += 1;
+        }
+    }
+    eprintln!(
+        "front interface: changed={interface_changed_pixels} \
+         max_delta={max_interface_delta}"
+    );
+    assert!(
+        interface_changed_pixels >= 12 && max_interface_delta >= 1,
+        "the scene-enabled curved shell must measurably exercise its \
+         confidence-gated interface lighting/refraction; changed \
+         {interface_changed_pixels} pixels, max delta {max_interface_delta}"
+    );
+
+    // A skipped or invalid material sample becomes a dark singleton amid
+    // eight well-covered neighbours, while an unstable normal/specular term
+    // becomes an isolated bright firefly. Measure absolute output luma so
+    // both sides of that spatial discontinuity remain observable.
+    let mut interior_candidates = 0_usize;
+    let mut isolated_dark_holes = 0_usize;
+    let mut isolated_bright_fireflies = 0_usize;
+    let mut worst_local_deficit = 0_i32;
+    let mut worst_local_surplus = 0_i32;
+    for y in 1..OUTPUT - 1 {
+        for x in 1..OUTPUT - 1 {
+            let index = y * OUTPUT + x;
+            let mut neighbour_min = i32::MAX;
+            let mut neighbour_max = i32::MIN;
+            let mut surrounded = true;
+            for dy in -1_isize..=1 {
+                for dx in -1_isize..=1 {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let neighbour =
+                        (y.wrapping_add_signed(dy)) * OUTPUT + x.wrapping_add_signed(dx);
+                    surrounded &= alpha_gain[neighbour] >= 4;
+                    let neighbour_luma = luma(&frame[neighbour * 4..neighbour * 4 + 4]);
+                    neighbour_min = neighbour_min.min(neighbour_luma);
+                    neighbour_max = neighbour_max.max(neighbour_luma);
+                }
+            }
+            if surrounded {
+                interior_candidates += 1;
+                let center_luma = luma(&frame[index * 4..index * 4 + 4]);
+                let deficit = neighbour_min - center_luma;
+                let surplus = center_luma - neighbour_max;
+                worst_local_deficit = worst_local_deficit.max(deficit);
+                worst_local_surplus = worst_local_surplus.max(surplus);
+                if deficit >= 10 {
+                    isolated_dark_holes += 1;
+                }
+                if surplus >= 10 {
+                    isolated_bright_fireflies += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        interior_candidates >= 120,
+        "the shell must expose a substantial covered interior; got \
+         {interior_candidates} candidates within bounds {bounds:?}"
+    );
+    assert_eq!(
+        isolated_dark_holes, 0,
+        "the curved tissue interior must not contain isolated dark holes \
+         (worst neighbour deficit {worst_local_deficit})"
+    );
+    assert_eq!(
+        isolated_bright_fireflies, 0,
+        "the curved tissue interior must not contain isolated bright fireflies \
+         (worst neighbour surplus {worst_local_surplus})"
+    );
+
+    // Average concentric half-annuli through the dome's interior. Real
+    // lighting and shell chord length may turn once or twice, but alternating
+    // opacity/shadow isocontours produce repeated significant slope reversals.
+    const RADIAL_BINS: usize = 7;
+    let center_x = (OUTPUT as f32 - 1.0) * 0.5;
+    let center_y = (OUTPUT as f32 - 1.0) * 0.5;
+    let projected_radius =
+        ((bounds[2] as f32 - center_x).max(center_x - bounds[0] as f32)).max(1.0);
+    let mut radial_sum = [0_i64; RADIAL_BINS];
+    let mut radial_count = [0_usize; RADIAL_BINS];
+    for y in 0..OUTPUT {
+        for x in 0..OUTPUT {
+            // With OpenGL's bottom-left readback order, producer-world +Y
+            // (the retained dome) occupies the lower framebuffer half.
+            if y as f32 > center_y {
+                continue;
+            }
+            let dx = x as f32 - center_x;
+            let dy = center_y - y as f32;
+            let radius_fraction = (dx * dx + dy * dy).sqrt() / projected_radius;
+            if !(0.12..0.82).contains(&radius_fraction) {
+                continue;
+            }
+            let bin = (((radius_fraction - 0.12) / 0.70) * RADIAL_BINS as f32).floor() as usize;
+            let index = y * OUTPUT + x;
+            radial_sum[bin] += i64::from(shell_signal[index]);
+            radial_count[bin] += 1;
+        }
+    }
+    assert!(
+        radial_count.iter().all(|count| *count >= 6),
+        "every radial band must be sampled, got counts {radial_count:?}"
+    );
+    let radial_luma: Vec<f32> = radial_sum
+        .iter()
+        .zip(radial_count)
+        .map(|(sum, count)| *sum as f32 / count as f32)
+        .collect();
+    let mut slope_reversals = 0_usize;
+    let mut previous_direction = 0_i32;
+    let mut total_variation = 0.0_f32;
+    for pair in radial_luma.windows(2) {
+        let delta = pair[1] - pair[0];
+        total_variation += delta.abs();
+        let direction = if delta > 1.25 {
+            1
+        } else if delta < -1.25 {
+            -1
+        } else {
+            0
+        };
+        if direction != 0 {
+            if previous_direction != 0 && direction != previous_direction {
+                slope_reversals += 1;
+            }
+            previous_direction = direction;
+        }
+    }
+    let radial_min = radial_luma.iter().copied().fold(f32::INFINITY, f32::min);
+    let radial_max = radial_luma
+        .iter()
+        .copied()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let radial_span = radial_max - radial_min;
+    eprintln!(
+        "curved shell: visible={visible_pixels} bounds={bounds:?} \
+         interior={interior_candidates} worst_hole={worst_local_deficit} \
+         worst_firefly={worst_local_surplus} \
+         radial_luma={radial_luma:?} reversals={slope_reversals} \
+         variation={total_variation:.2} span={radial_span:.2}"
+    );
+    assert!(
+        slope_reversals <= 2,
+        "the bell must not develop concentric luma oscillations; radial \
+         profile {radial_luma:?} has {slope_reversals} significant reversals"
+    );
+    assert!(
+        total_variation <= 2.75 * radial_span + 6.0,
+        "radial luma variation is excessive for one smooth shell: profile \
+         {radial_luma:?}, variation {total_variation}, span {radial_span}"
+    );
 }
 
 #[test]

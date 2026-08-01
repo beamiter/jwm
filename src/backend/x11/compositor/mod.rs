@@ -962,6 +962,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             }
             if let Some(frame) = self.waterlily_texture.take() {
                 self.gl.delete_texture(frame.texture);
+                if let Some(texture) = frame.occupancy_texture {
+                    self.gl.delete_texture(texture);
+                }
             }
             if let Some((fbo, tex)) = self.transition_fbo.take() {
                 self.gl.delete_framebuffer(fbo);

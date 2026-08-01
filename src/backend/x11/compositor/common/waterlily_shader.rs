@@ -334,10 +334,10 @@ void main() {
 
 /// Native 3D display of version-2 volumetric frames: a perspective camera
 /// ray-marches the RGBA volume with front-to-back emission/absorption,
-/// reconstructs surface normals from the 3D density gradient, and applies
-/// lighting, self-shadowing, Fresnel response, and scene refraction.  A true
-/// 3D solve (the jellyfish smack) therefore shows parallax, occlusion, and
-/// view-dependent material depth instead of a baked planar projection.
+/// captures a stable front-interface normal, and applies continuous-medium
+/// lighting, glass Fresnel, and scene refraction. A true 3D solve (the
+/// jellyfish smack) therefore shows parallax, occlusion, and view-dependent
+/// material depth instead of a baked planar projection.
 ///
 /// World conventions shared with the producer contract and the CPU-side
 /// camera: the volume box is centered at the origin; +X is screen right and
@@ -347,22 +347,19 @@ void main() {
 /// crossing one voxel, so the marcher renormalizes it by its actual step
 /// length and the image stays invariant under sample-count changes.
 ///
-/// Reconstruction and shading: a one-tap trilinear probe classifies each
-/// step as clear water or material, so the expensive work only runs inside
-/// the smack.  Material steps resample the volume with a C2-continuous
-/// tricubic B-spline (eight hardware trilinear taps) and take its analytic
-/// derivative for the surface normal, replacing the old five-tap
-/// screen-space footprint whose direction-dependent blur smeared the bells
-/// into fog.  Voxel opacity splits the producer's authored material bands:
-/// low-alpha turbulent wake shades as a forward-scattering medium
-/// (Henyey-Greenstein lobe) in its own palette hue, while high-alpha tissue
-/// is sharpened into a crisp translucent surface with wrapped diffuse,
-/// subsurface backlight, Fresnel rim, and specular response.  The ambient
-/// floor is proportional to the voxel's own albedo, never a flat gray, so
-/// stacked layers converge to luminous color instead of white haze.
+/// Reconstruction and shading: a conservative dilated occupancy texture
+/// rejects only steps outside the complete cubic support. Material steps use
+/// a C2-continuous tricubic B-spline (eight hardware trilinear taps); a broad
+/// six-tap tissue gradient is evaluated only while capturing the first
+/// refracting interface. Low-alpha turbulent wake shades with a normalized
+/// Henyey-Greenstein lobe in its own palette hue. High-alpha anatomy uses
+/// smooth height/depth participating-medium illumination instead of exposing
+/// the producer's one-cell shell normal as rings or glitter. The ambient
+/// floor follows voxel albedo, so stacked layers retain their authored hue.
 pub(super) const WATERLILY_VOLUME_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform sampler3D u_volume;
+uniform sampler3D u_occupancy;
 uniform sampler2D u_scene_texture;
 uniform int u_scene_available;
 uniform vec2 u_screen_size;
@@ -383,16 +380,13 @@ uniform float u_time;
 in vec2 v_uv;
 out vec4 frag_color;
 
-const int MAX_STEPS = 176;
-const int SHADOW_STEPS = 4;
+const int MAX_STEPS = 240;
 const float TAU = 6.28318530717958647692;
 // Producer material bands, matching the jelly worker's authored voxel
 // opacities: turbulent wake publishes below ~0.10 while bell tissue, oral
-// arms, and gonads publish about 0.28-0.35.  The gap lets the transfer
-// function sharpen tissue into a translucent surface without touching the
-// wispy wake, and a fully opaque voxel still maps to full opacity.
-const float WAKE_ALPHA_CEILING = 0.10;
-const float TISSUE_ALPHA_KNEE = 0.30;
+// arms, and gonads publish about 0.28-0.35. The separation keeps turbulent
+// wake out of the front-interface normal used for refraction.
+const float WAKE_ALPHA_CEILING = 0.115;
 // The aquarium is deliberately a little clearer than the full-screen planar
 // frost.  It now has a real projected silhouette, so water need not obscure
 // the desktop just to make the effect's extent legible.
@@ -409,22 +403,24 @@ vec2 clamp_scene_uv(vec2 uv) {
 }
 
 vec3 frosted_scene(vec2 uv) {
-    // Same broad transmission lobe as the planar WaterLily backdrop so
-    // switching between planar and volumetric cases keeps one glass look.
-    vec2 step_uv = vec2(2.75) / max(u_screen_size, vec2(1.0));
+    // The snapshot already has a full mip pyramid. Nine wide LOD-2.5 taps
+    // integrate essentially the same low-frequency transmission lobe as the
+    // former 9x9 sparse convolution, without spending 81 unconditional scene
+    // fetches for every aquarium pixel after the volume march.
+    vec2 step_uv = vec2(6.0) / max(u_screen_size, vec2(1.0));
     vec3 sum = vec3(0.0);
     float total = 0.0;
-    for (int y = -4; y <= 4; ++y) {
-        for (int x = -4; x <= 4; ++x) {
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
             vec2 p = vec2(float(x), float(y));
-            float weight = exp(-dot(p, p) * 0.18);
+            float weight = exp(-dot(p, p) * 0.72);
             // Tap a prefiltered mip at the tap spacing: sparse taps of the
             // full-resolution scene aliased wallpaper grain and text into
             // per-pixel speckle wherever water transmitted the desktop.
             sum += textureLod(
                 u_scene_texture,
                 clamp_scene_uv(uv + p * step_uv),
-                2.0
+                2.5
             ).rgb * weight;
             total += weight;
         }
@@ -500,27 +496,44 @@ vec3 world_to_texture(vec3 position) {
     return tex;
 }
 
-bool inside_texture(vec3 tex) {
-    return all(greaterThanEqual(tex, vec3(0.0)))
-        && all(lessThanEqual(tex, vec3(1.0)));
-}
-
 float density_at(vec3 tex) {
     return texture(u_volume, clamp(tex, vec3(0.0), vec3(1.0))).a;
 }
 
-// Tissue-band density: raw opacity with the whole wake band subtracted
-// away.  Normals and self-shadowing must never see the turbulent wake: its
-// rough voxel field sits inside the reconstruction support of any tissue
-// that swims through its own wake, and letting it perturb the gradient
-// speckled the lighting of exactly those bells while bells in clear water
-// stayed clean.
+// Tissue-band density: raw opacity with the whole wake band subtracted away.
+// The front-interface normal must not see turbulent wake inside the cubic
+// support of a bell, or its refraction offset inherits the solver grid.
 float tissue_density_at(vec3 tex) {
-    return max(density_at(tex) - 0.14, 0.0);
+    float density = density_at(tex);
+    // Keep the vorticity band out of tissue normals without introducing a
+    // hard derivative kink at one alpha isosurface.  The producer's wake is
+    // bounded by 28.5/255; the smooth gate starts just above that ceiling and
+    // reaches full weight through the antialiased anatomy feather.
+    return density * smoothstep(WAKE_ALPHA_CEILING, 0.20, density);
 }
 
 bool finite_vec3(vec3 value) {
     return !any(isnan(value)) && !any(isinf(value));
+}
+
+float display_shoulder(float value) {
+    float x = max(value, 0.0);
+    if (x <= 0.78) {
+        return x;
+    }
+    // Unit-slope join followed by an exponential shoulder. Volume highlights
+    // are rendered after the compositor's client postprocess, so bounding
+    // them here avoids hard framebuffer clipping without remapping the live
+    // desktop transmission behind the aquarium.
+    return 0.78 + 0.22 * (1.0 - exp(-(x - 0.78) / 0.22));
+}
+
+vec3 display_shoulder(vec3 value) {
+    return vec3(
+        display_shoulder(value.r),
+        display_shoulder(value.g),
+        display_shoulder(value.b)
+    );
 }
 
 // One axis of the uniform cubic B-spline, folded into two linear lobes so
@@ -539,27 +552,9 @@ void bspline_value_lobes(float f, out vec2 lobe0, out vec2 lobe1) {
     lobe1 = vec2(s1, 1.0 + w3 / s1);
 }
 
-// Derivative weights of the same B-spline.  The left pair is negative and
-// the right pair positive over the whole cell, so each pair again folds
-// into one signed trilinear tap and the derivative stays exact.
-void bspline_derivative_lobes(float f, out vec2 lobe0, out vec2 lobe1) {
-    float g = 1.0 - f;
-    float d0 = -0.5 * g * g;
-    float d1 = (3.0 * f * f - 4.0 * f) * 0.5;
-    float d2 = (1.0 + 2.0 * f - 3.0 * f * f) * 0.5;
-    float d3 = 0.5 * f * f;
-    float s0 = d0 + d1;
-    float s1 = d2 + d3;
-    lobe0 = vec2(s0, -1.0 + d1 / s0);
-    lobe1 = vec2(s1, 1.0 + d3 / s1);
-}
-
 // C2-continuous tricubic resampling of the RGBA volume as eight hardware
 // trilinear taps.  Compared with the old five-tap screen-space footprint it
-// has no direction-dependent blur and no trilinear diamond artifacts, and
-// the reconstructed field is smooth enough to give the analytic gradient
-// below clean, glitter-free surface normals on a 64-cell-tall solve blown
-// up to the whole desktop.
+// has no direction-dependent blur or trilinear diamond artifacts.
 vec4 sample_volume_tricubic(vec3 tex) {
     vec3 size = vec3(textureSize(u_volume, 0));
     vec3 inv_size = 1.0 / size;
@@ -590,81 +585,22 @@ vec4 sample_volume_tricubic(vec3 tex) {
     return lz0.x * front + lz1.x * back;
 }
 
-// Analytic world-space gradient of the tricubic density field: derivative
-// lobes along one axis, value lobes along the other two, eight taps per
-// axis.  Solver cells are cubic in world space so per-texel derivatives are
-// a uniform scale of the world gradient; the Y sign flips because texture
-// rows run down while world +Y points up.
-vec3 tricubic_alpha_gradient(vec3 tex) {
-    vec3 size = vec3(textureSize(u_volume, 0));
-    vec3 inv_size = 1.0 / size;
-    vec3 coord = tex * size - 0.5;
-    vec3 base = floor(coord);
-    vec3 f = coord - base;
-    vec2 vx0; vec2 vx1; vec2 vy0; vec2 vy1; vec2 vz0; vec2 vz1;
-    bspline_value_lobes(f.x, vx0, vx1);
-    bspline_value_lobes(f.y, vy0, vy1);
-    bspline_value_lobes(f.z, vz0, vz1);
-    vec2 dx0; vec2 dx1; vec2 dy0; vec2 dy1; vec2 dz0; vec2 dz1;
-    bspline_derivative_lobes(f.x, dx0, dx1);
-    bspline_derivative_lobes(f.y, dy0, dy1);
-    bspline_derivative_lobes(f.z, dz0, dz1);
-    vec3 texel = base + 0.5;
-    float xv0 = (texel.x + vx0.y) * inv_size.x;
-    float xv1 = (texel.x + vx1.y) * inv_size.x;
-    float yv0 = (texel.y + vy0.y) * inv_size.y;
-    float yv1 = (texel.y + vy1.y) * inv_size.y;
-    float zv0 = (texel.z + vz0.y) * inv_size.z;
-    float zv1 = (texel.z + vz1.y) * inv_size.z;
-    float xd0 = (texel.x + dx0.y) * inv_size.x;
-    float xd1 = (texel.x + dx1.y) * inv_size.x;
-    float yd0 = (texel.y + dy0.y) * inv_size.y;
-    float yd1 = (texel.y + dy1.y) * inv_size.y;
-    float zd0 = (texel.z + dz0.y) * inv_size.z;
-    float zd1 = (texel.z + dz1.y) * inv_size.z;
-
-    float gx =
-          vz0.x * (vy0.x * (dx0.x * tissue_density_at(vec3(xd0, yv0, zv0))
-                          + dx1.x * tissue_density_at(vec3(xd1, yv0, zv0)))
-                 + vy1.x * (dx0.x * tissue_density_at(vec3(xd0, yv1, zv0))
-                          + dx1.x * tissue_density_at(vec3(xd1, yv1, zv0))))
-        + vz1.x * (vy0.x * (dx0.x * tissue_density_at(vec3(xd0, yv0, zv1))
-                          + dx1.x * tissue_density_at(vec3(xd1, yv0, zv1)))
-                 + vy1.x * (dx0.x * tissue_density_at(vec3(xd0, yv1, zv1))
-                          + dx1.x * tissue_density_at(vec3(xd1, yv1, zv1))));
-    float gy =
-          vz0.x * (dy0.x * (vx0.x * tissue_density_at(vec3(xv0, yd0, zv0))
-                          + vx1.x * tissue_density_at(vec3(xv1, yd0, zv0)))
-                 + dy1.x * (vx0.x * tissue_density_at(vec3(xv0, yd1, zv0))
-                          + vx1.x * tissue_density_at(vec3(xv1, yd1, zv0))))
-        + vz1.x * (dy0.x * (vx0.x * tissue_density_at(vec3(xv0, yd0, zv1))
-                          + vx1.x * tissue_density_at(vec3(xv1, yd0, zv1)))
-                 + dy1.x * (vx0.x * tissue_density_at(vec3(xv0, yd1, zv1))
-                          + vx1.x * tissue_density_at(vec3(xv1, yd1, zv1))));
-    float gz =
-          dz0.x * (vy0.x * (vx0.x * tissue_density_at(vec3(xv0, yv0, zd0))
-                          + vx1.x * tissue_density_at(vec3(xv1, yv0, zd0)))
-                 + vy1.x * (vx0.x * tissue_density_at(vec3(xv0, yv1, zd0))
-                          + vx1.x * tissue_density_at(vec3(xv1, yv1, zd0))))
-        + dz1.x * (vy0.x * (vx0.x * tissue_density_at(vec3(xv0, yv0, zd1))
-                          + vx1.x * tissue_density_at(vec3(xv1, yv0, zd1)))
-                 + vy1.x * (vx0.x * tissue_density_at(vec3(xv0, yv1, zd1))
-                          + vx1.x * tissue_density_at(vec3(xv1, yv1, zd1))));
+// A surface normal should describe the mesoscopic bell, not the one-cell
+// coverage pattern used to rasterize it into the producer volume. Central
+// differences across one complete voxel are the derivative of a continuous,
+// low-pass tissue field: the nonlinear wake rejection remains valid because
+// it happens before differencing, and six trilinear reads replace the 24 reads
+// of the exact cubic derivative. This is more stable under large desktop
+// magnification and runs only while capturing the shallow front interface.
+vec3 stable_tissue_gradient(vec3 tex) {
+    vec3 delta = 1.0 / vec3(textureSize(u_volume, 0));
+    float gx = tissue_density_at(tex + vec3(delta.x, 0.0, 0.0))
+             - tissue_density_at(tex - vec3(delta.x, 0.0, 0.0));
+    float gy = tissue_density_at(tex + vec3(0.0, delta.y, 0.0))
+             - tissue_density_at(tex - vec3(0.0, delta.y, 0.0));
+    float gz = tissue_density_at(tex + vec3(0.0, 0.0, delta.z))
+             - tissue_density_at(tex - vec3(0.0, 0.0, delta.z));
     return vec3(gx, -gy, gz);
-}
-
-// The producer separates material bands by voxel opacity.  Pass the wake
-// band through untouched, steepen the tissue coverage ramp so bells,
-// arms, and gonads read as crisp surfaces after desktop magnification, and
-// stay identity above the knee so a fully opaque voxel remains opaque.
-float shape_material_alpha(float raw) {
-    float sharpened = 0.34 * smoothstep(
-        WAKE_ALPHA_CEILING,
-        TISSUE_ALPHA_KNEE,
-        raw
-    );
-    float passthrough = raw * step(0.34, raw);
-    return max(min(raw, WAKE_ALPHA_CEILING), max(sharpened, passthrough));
 }
 
 // Henyey-Greenstein phase lobe for the turbulent wake: forward scattering
@@ -673,25 +609,11 @@ float shape_material_alpha(float raw) {
 float wake_phase(float cos_scatter) {
     float g = 0.55;
     float denom = 1.0 + g * g - 2.0 * g * cos_scatter;
-    return (1.0 - g * g) / max(denom * sqrt(denom), 1e-3);
-}
-
-// A short secondary march toward the key light supplies contact and
-// self-shadowing inside the bell.  It is evaluated only at density
-// boundaries, keeping empty-water and low-gradient wake samples cheap.
-float light_visibility(vec3 position, vec3 light_direction, float voxel_length) {
-    float optical_depth = 0.0;
-    vec3 p = position;
-    for (int i = 0; i < SHADOW_STEPS; ++i) {
-        p += light_direction * voxel_length * (1.35 + 0.35 * float(i));
-        vec3 tex = world_to_texture(p);
-        if (!inside_texture(tex)) {
-            break;
-        }
-        float alpha = tissue_density_at(tex);
-        optical_depth += -log(max(1.0 - alpha, 0.035));
-    }
-    return exp(-0.48 * optical_depth);
+    // Normalized Henyey-Greenstein phase function. Omitting 1/(4*pi) made
+    // the forward peak reach ~7.65, clipping wake layers to white and making
+    // every sampling discontinuity disproportionately obvious.
+    return 0.0795774715 * (1.0 - g * g)
+         / max(denom * sqrt(denom), 1e-3);
 }
 
 void main() {
@@ -739,74 +661,88 @@ void main() {
     float chord = max(exit - entry, 0.0);
     float reference = 2.0 * u_box_half_extents.x
                     / float(textureSize(u_volume, 0).x);
-    if (chord > reference * 0.25) {
+    if (chord > 1e-6) {
         // Sample in voxel units rather than as a fraction of the box
-        // diagonal, at 1.5 samples per voxel: the one-tap water probe below
-        // made material steps rare enough to afford both the higher rate and
-        // the larger step budget, which together resolve membrane boundaries
-        // without noise on long diagonal chords.
-        int steps = int(clamp(
-            ceil(chord / reference * 1.5),
-            16.0,
-            float(MAX_STEPS)
-        ));
-        float step_length = chord / float(steps);
+        // diagonal, at two samples per voxel. The conservative occupancy mask
+        // keeps empty steps cheap enough to resolve thin membranes and
+        // filaments above their axial Nyquist rate without stochastic jitter.
+        float target_step_length = reference * 0.5;
+        int requested_steps = int(ceil(chord / target_step_length));
+        int steps = clamp(requested_steps, 1, MAX_STEPS);
+        // Keep the sampling lattice at a fixed world/voxel spacing. Dividing
+        // every ray's chord by its rounded step count made all sample planes
+        // jump whenever ceil(chord/spacing) changed by one; adjacent pixels
+        // then alternated between catching and missing a thin shell. Only the
+        // exceptional MAX_STEPS fallback rescales the spacing so the complete
+        // chord remains covered.
+        float step_length = requested_steps > MAX_STEPS
+            ? chord / float(MAX_STEPS)
+            : target_step_length;
         // Spatially coherent midpoint integration, deliberately unjittered:
         // per-pixel sample-depth jitter was tried and reintroduced the
         // salt-and-pepper speckle on the voxel-rough wake field that the
         // coherent marcher had originally eliminated.  The C2 tricubic
         // reconstruction is smooth enough that slab banding is not visible
-        // at 1.5 samples per voxel.
+        // at two samples per voxel.
         // One voxel of straight-through travel is the producer's opacity
         // reference length; voxels are cubic, so any axis gives it.
-        float t = entry + 0.5 * step_length;
         vec3 light_direction = normalize(vec3(-0.46, 0.78, -0.42));
         vec3 view_direction = -ray;
         float forward_scatter = wake_phase(dot(-light_direction, ray));
 
         for (int i = 0; i < MAX_STEPS; ++i) {
-            if (i >= steps || coverage > 0.985) {
+            if (i >= steps) {
                 break;
             }
+            // Integrate the final fractional segment with its real length.
+            // Treating it as a full step (or dropping it when its midpoint
+            // crossed `exit`) made opacity pop as adjacent ray chords crossed
+            // the half-step boundary.
+            float segment_start = entry + float(i) * step_length;
+            float segment_end = min(segment_start + step_length, exit);
+            float segment_length = max(segment_end - segment_start, 0.0);
+            if (segment_length <= 1e-7) {
+                break;
+            }
+            float t = 0.5 * (segment_start + segment_end);
             vec3 position = u_camera_position + ray * t;
             vec3 tex = world_to_texture(position);
-            // Most of the tank is clear water and one trilinear tap decides
-            // that; the eight-tap reconstruction, the twenty-four-tap
-            // gradient, and the lighting only run inside material.  The
-            // threshold must stay BELOW half the producer's smallest
-            // nonzero byte (1/255): the probe is trilinear while shading is
-            // tricubic, so a higher cut skips samples whose tricubic value
-            // is far above it, and that skip/shade flip between adjacent
-            // rays accumulated into black speckle along the wake's vortex
-            // rings.  At 0.002 the probe only skips where every trilinear
-            // neighbour is zero, and the tricubic tail it can lose there is
-            // bounded by ~0.003 — invisible, and empty water still costs
-            // one tap.
-            if (texture(u_volume, tex).a < 0.002) {
-                t += step_length;
+            // The support mask is a one-voxel Chebyshev dilation of non-zero
+            // source alpha. Its cheap trilinear lookup is therefore
+            // conservative for the B-spline's complete 4^3 control lattice,
+            // unlike the old centre-alpha probe whose 2^3 support punched
+            // dotted holes through sparse curved anatomy and vortex rings.
+            if (texture(u_occupancy, tex).a <= 1e-6) {
                 continue;
             }
             vec4 voxel = sample_volume_tricubic(tex);
-            float shaped = shape_material_alpha(voxel.a);
+            if (voxel.a <= 1e-6) {
+                continue;
+            }
+            // Preserve physical per-voxel opacity without the former
+            // plateau-producing display transfer; normalize only by the
+            // segment's true travel length.
+            float shaped = clamp(voxel.a, 0.0, 1.0);
             float alpha = 1.0 - pow(
                 max(1.0 - shaped, 0.0),
-                step_length / reference
+                segment_length / reference
             );
 
             // Voxel opacity splits the authored material bands: low-alpha
-            // wake stays a scattering medium, high-alpha tissue shades as a
-            // translucent surface with a real reconstructed normal.  The
+            // wake stays a scattering medium, while high-alpha tissue keeps
+            // its authored translucent color. The
             // ramp starts strictly ABOVE the wake band's ceiling (the
             // producer publishes wake at 0.112 or less and the B-spline
             // reconstruction cannot overshoot): letting dense vortex cores
-            // lean into the surface-shaded branch lit them with normals
-            // from the rough vorticity field, and that per-pixel lighting
-            // jitter was the black speckle tracing every wake ring.
-            float material = smoothstep(0.16, 0.26, voxel.a);
+            // into the tissue branch would also admit them into the
+            // front-interface normal used for refraction.
+            float material = smoothstep(0.12, 0.28, voxel.a);
             vec3 normal = view_direction;
             float boundary = 0.0;
-            if (material > 0.02) {
-                vec3 gradient = tricubic_alpha_gradient(tex);
+            if (u_scene_available == 1
+                && front_surface_weight < 0.10
+                && material > 0.0) {
+                vec3 gradient = stable_tissue_gradient(tex);
                 float gradient_length = length(gradient);
                 boundary = smoothstep(0.012, 0.14, gradient_length);
                 if (gradient_length > 1e-5) {
@@ -816,34 +752,12 @@ void main() {
                     }
                     // A near-zero gradient (the flat middle of the shell
                     // profile) has a noisy direction; fade such normals
-                    // toward the view vector instead of letting them
-                    // speckle the lighting.  Both inputs are unit vectors
+                    // toward the view vector instead of making refraction
+                    // shimmer. Both inputs are unit vectors
                     // in the same hemisphere, so the mix cannot collapse.
                     normal = normalize(mix(view_direction, normal, boundary));
                 }
             }
-
-            float n_dot_v = max(dot(normal, view_direction), 0.0);
-            vec3 half_vector = light_direction + view_direction;
-            float half_length = length(half_vector);
-            vec3 half_direction = half_length > 1e-5
-                ? half_vector / half_length
-                : view_direction;
-            float n_dot_h = max(dot(normal, half_direction), 0.0);
-            float fresnel = WATER_F0
-                + (1.0 - WATER_F0) * pow(1.0 - n_dot_v, 5.0);
-            float specular = pow(n_dot_h, 54.0) * (0.22 + 1.8 * fresnel);
-            // Gate the shadow march on the alpha-derived material weight,
-            // which is uniform across the whole shell thickness.  Gating on
-            // the gradient-derived boundary shadowed only the two edge
-            // bands of the shell profile and painted concentric onion
-            // rings across every bell dome.
-            float raw_visibility = material > 0.25
-                ? light_visibility(position, light_direction, reference)
-                : 1.0;
-            // Jelly tissue is translucent and strongly forward scattering;
-            // self-shadowing modulates it but must never crush it to black.
-            float visibility = mix(1.0, max(raw_visibility, 0.52), 0.42);
 
             // Sunlight fades with depth below the water surface and
             // view-path haze softens distant layers, so the same voxel
@@ -862,31 +776,21 @@ void main() {
             // Wake: forward-scattering medium in its own palette hue, whose
             // shed rings glow when the ray runs with the key light.
             vec3 wake_emission = albedo * depth_light
-                * (0.38 + 0.60 * forward_scatter * mix(0.7, 1.0, haze));
+                * (0.62 + 0.72 * forward_scatter * mix(0.7, 1.0, haze));
 
-            // Tissue: wrapped two-sided diffuse with subsurface backlight,
-            // Fresnel rim, and a tight specular from the key light.
-            float wrapped_light = clamp(
-                (dot(normal, light_direction) + 0.5) / 1.5,
-                0.0,
-                1.0
-            );
-            float back_light = pow(
-                max(dot(-normal, light_direction), 0.0),
-                2.5
-            );
-            float rim = pow(1.0 - n_dot_v, 3.0) * boundary;
-            vec3 tissue_emission =
-                albedo * depth_light
-                    * (0.58 + 0.65 * wrapped_light * visibility
-                       + 0.35 * back_light)
-                + vec3(0.88, 0.94, 1.0) * rim * 0.30
-                + vec3(1.0, 0.97, 0.92) * specular * visibility * 0.85;
+            // Translucent tissue is lit as a smooth participating medium.
+            // Per-step Lambert/specular/self-shadow terms made the coarse
+            // one-cell shell's coverage normal visible as concentric rings
+            // and salt-and-pepper points. The producer's apex-to-rim albedo,
+            // world-height key and front-to-back haze still give coherent 3D
+            // form, while the reconstructed normal is reserved for the one
+            // actual front interface used by refraction below.
+            float tissue_fill = mix(0.88, 1.04, haze);
+            vec3 tissue_emission = albedo * depth_light * tissue_fill;
 
             vec3 emission = mix(wake_emission, tissue_emission, material);
-            // Never let one undefined driver result (for example a
-            // degenerate half vector at an exact camera/light alignment)
-            // poison the complete ray through NaN propagation.
+            // Never let one undefined producer/driver value poison the
+            // complete ray through NaN propagation.
             if (!finite_vec3(emission)) {
                 emission = albedo;
             }
@@ -903,16 +807,52 @@ void main() {
             // transmission, and it avoids averaging the opposing normals of
             // a translucent shell into a degenerate vector whose
             // normalization produced NaN texture coordinates.
-            if (front_surface_weight <= 1e-5
-                && material > 0.25
-                && boundary > 0.05
-                && contribution > 0.0005) {
-                front_normal_sum = normal;
-                front_depth_sum = (t - entry) / max(chord, 1e-5);
-                front_surface_weight = boundary * alpha;
+            float interface_weight = material * boundary * contribution;
+            float accepted_interface_weight = min(
+                interface_weight,
+                max(0.10 - front_surface_weight, 0.0)
+            );
+            if (accepted_interface_weight > 1e-5) {
+                // Integrate only the shallow front-interface band. A single
+                // threshold-crossing sample made refraction jump by one march
+                // slab between adjacent pixels. Cap the accepted final sample
+                // exactly at the band limit so neighbouring rays cannot add
+                // either a whole step or nothing around the cutoff.
+                front_normal_sum += normal * accepted_interface_weight;
+                front_depth_sum += (t - entry) / max(chord, 1e-5)
+                                 * accepted_interface_weight;
+                front_surface_weight += accepted_interface_weight;
             }
-            t += step_length;
         }
+    }
+
+    // Shade tissue once from the same shallow front interface used for
+    // refraction. Unlike per-step shell lighting, this cannot expose the
+    // opposing layers or density isocontours as rings. The deliberately small
+    // range restores a directional 3D cue without amplifying residual normal
+    // reconstruction error.
+    float front_normal_length = length(front_normal_sum);
+    vec3 front_normal = -ray;
+    float front_normal_coherence = clamp(
+        front_normal_length / max(front_surface_weight, 1e-5),
+        0.0,
+        1.0
+    );
+    float interface_confidence = smoothstep(
+        0.005,
+        0.08,
+        front_surface_weight
+    ) * smoothstep(0.35, 0.85, front_normal_coherence);
+    if (front_surface_weight > 1e-4 && front_normal_length > 1e-4) {
+        front_normal = front_normal_sum / front_normal_length;
+        vec3 surface_light_direction = normalize(vec3(-0.46, 0.78, -0.42));
+        float surface_key = smoothstep(
+            -0.55,
+            0.75,
+            dot(front_normal, surface_light_direction)
+        );
+        float surface_light = mix(0.96, 1.06, surface_key);
+        accumulated *= mix(1.0, surface_light, interface_confidence);
     }
 
     // Refract the captured desktop only through the water actually crossed by
@@ -930,38 +870,43 @@ void main() {
     if (u_scene_available == 1 && wet_fraction > 1e-4) {
         vec2 refracted_uv = screen_uv;
         float reflection_mix = 0.0;
-        float front_normal_length = length(front_normal_sum);
         if (front_surface_weight > 1e-4 && front_normal_length > 1e-4) {
-            // Explicit division stays finite on every GLSL implementation;
-            // the length guard above prevents normalize(vec3(0)).
-            vec3 front_normal = front_normal_sum / front_normal_length;
             normal_screen = vec2(
                 dot(front_normal, u_camera_right),
                 dot(front_normal, u_camera_up)
             );
-            float front_depth = front_depth_sum;
+            float front_depth = front_depth_sum
+                              / max(front_surface_weight, 1e-5);
             float n_dot_v = max(dot(front_normal, -ray), 0.0);
             float bend_px = mix(4.0, 22.0, 1.0 - n_dot_v)
                           * mix(1.0, 0.48, clamp(front_depth, 0.0, 1.0));
-            refracted_uv += normal_screen * bend_px
+            refracted_uv += normal_screen * bend_px * interface_confidence
                           / max(u_screen_size, vec2(1.0));
             float fresnel = WATER_F0
                 + (1.0 - WATER_F0) * pow(1.0 - n_dot_v, 5.0);
-            reflection_mix = fresnel * smoothstep(
+            reflection_mix = fresnel * interface_confidence * smoothstep(
                 0.01,
-                0.28,
+                0.10,
                 front_surface_weight
             );
         }
         vec3 transmission = frosted_scene(refracted_uv);
-        // A gently prefiltered tap: a full-resolution one re-imported the
-        // desktop's pixel-level texture as noise on every tissue surface.
-        vec3 reflection = textureLod(
-            u_scene_texture,
-            clamp_scene_uv(screen_uv - normal_screen * 0.010),
-            1.5
-        ).rgb;
-        transmission = mix(transmission, reflection, reflection_mix * 0.68);
+        if (reflection_mix > 0.0) {
+            // A gently prefiltered tap: a full-resolution one re-imported the
+            // desktop's pixel-level texture as noise on every tissue surface.
+            // Keep it behind the confidence gate so clear water and wake-only
+            // rays do not pay for a sample whose blend weight is exactly zero.
+            vec3 reflection = textureLod(
+                u_scene_texture,
+                clamp_scene_uv(screen_uv - normal_screen * 0.010),
+                1.5
+            ).rgb;
+            transmission = mix(
+                transmission,
+                reflection,
+                reflection_mix * 0.68
+            );
+        }
 
         float optical_depth = clamp(chord / diagonal * 2.4, 0.0, 1.4);
         vec3 transmittance = exp(
@@ -1027,6 +972,9 @@ void main() {
     coverage = clamp(coverage, 0.0, 1.0);
     if (!finite_vec3(accumulated)) {
         accumulated = coverage * vec3(0.78, 0.84, 0.92);
+    } else if (coverage > 1e-5) {
+        vec3 straight_radiance = accumulated / coverage;
+        accumulated = coverage * display_shoulder(straight_radiance);
     }
     if (!finite_vec3(water_backdrop)) {
         water_backdrop = vec3(0.0);

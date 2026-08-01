@@ -406,11 +406,54 @@ end
     end
 end
 
+@testset "jelly wake display filter attenuates grid impulses conservatively" begin
+    sigma = zeros(Float32, 5, 5, 5)
+    sigma[3, 3, 3] = 1.0f0
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 2) == 0.52f0
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 1, 2, 2) == 0.08f0
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 1, 2) == 0.08f0
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 1) == 0.08f0
+    sigma[3, 3, 3] = Float32(NaN)
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 2) == 0.0f0
+
+    # The normalized kernel preserves a constant field and remains finite at
+    # the edge of Float32; summing the six neighbours before weighting would
+    # overflow here and feed NaN into the wake opacity knee.
+    fill!(sigma, 2.5f0)
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 2) ≈ 2.5f0
+    fill!(sigma, floatmax(Float32))
+    extreme = JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 2)
+    @test isfinite(extreme)
+    @test 0.0f0 < extreme <= floatmax(Float32)
+
+    fill!(sigma, 0.0f0)
+    sigma[3, 3, 3] = Float32(Inf)
+    sigma[2, 3, 3] = Float32(-Inf)
+    sigma[4, 3, 3] = -1.0f0
+    @test JwmWaterLily.jelly_filtered_vorticity(sigma, 2, 2, 2) == 0.0f0
+end
+
 @testset "jelly smack pulses in a 3D tank" begin
     case = build_case("jelly", (64, 64); memory=Array)
     @test JwmWaterLily.case_palette_name(case) == "violet"
     # The tank derives from the canvas: multiples of 16, display aspect.
     @test case.domain == (32, 16, 32)
+    @test JwmWaterLily.jelly_domain((1280, 800)) == (96, 32, 64)
+    @test JwmWaterLily.jelly_domain((1280, 800); accelerated=true) ==
+          (128, 48, 80)
+    # Keep the transport's (width, vertical, depth) order observable on a
+    # non-square domain; the main 64x64 fixture has nx == nz and cannot catch
+    # an accidental width/height swap by itself.
+    rectangular_case = build_case("jelly", (128, 64); memory=Array)
+    @test rectangular_case.domain == (64, 16, 32)
+    @test JwmWaterLily.frame_geometry(rectangular_case) == (64, 32, 16)
+    @test length(rectangular_case.volume_rgba) == 4 * 64 * 32 * 16
+    @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 32) == 1
+    @test JwmWaterLily.jelly_volume_offset(64, 32, 64, 1, 32) == 4 * 63 + 1
+    @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 1, 1) ==
+          4 * 64 * 31 + 1
+    @test JwmWaterLily.jelly_volume_offset(64, 32, 1, 2, 32) ==
+          4 * 64 * 32 + 1
     @test length(case.jellies) == 5
     @test all(isbits, case.jellies)
     # Five spatial lanes and independent smooth 3D paths keep the smack
@@ -479,15 +522,16 @@ end
     @test volume === case.volume_rgba
     @test length(volume) == 4 * 32 * 32 * 16
     alphas = @view volume[4:4:end]
-    # The bells shed vorticity above the wake floor, while every cell remains
-    # translucent: the wake band stays far below the tissue band (the
-    # compositor's transfer function relies on that gap), and even the
-    # densest gonad voxel publishes well under half opacity.
+    # The bells shed vorticity above the wake floor while every cell remains
+    # translucent. Wake opacity is bounded below the dense anatomy range, the
+    # analytic tissue feather remains continuous, and even the densest gonad
+    # voxel publishes well under half opacity.
     @test maximum(alphas) > 0x00
     @test maximum(alphas) <= 0x5a
     # The published material contains the analytic bell itself, not only its
     # surrounding vorticity.  Sampling the animated crown lands inside the
-    # coherent membrane density used for 3D normal reconstruction.
+    # coherent membrane density used for the stable shallow-interface cue and
+    # scene refraction.
     jelly = first(case.jellies)
     τ = Float32(JwmWaterLily.simulation_time(case))
     jelly_x, jelly_depth, jelly_height = JwmWaterLily.jelly_center(jelly, τ)
