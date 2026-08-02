@@ -25,7 +25,8 @@ use log::{debug, warn};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeSchedule, RuntimeUpdate, TagId, ThemeMode, TransportRecoveryConfig, UserAction,
+    RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig,
+    UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -75,6 +76,7 @@ const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
 const ICON_M0: &str = "\u{F02DA}";
 const ICON_M1: &str = "\u{F02DB}";
+const ICON_SHELL: &str = "\u{F0F2A}";
 const ICON_SUN: &str = "\u{F0599}";
 const ICON_MOON: &str = "\u{F0594}";
 
@@ -801,6 +803,27 @@ fn volume_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     ))
 }
 
+/// Entry point into JWM's own shell surface.
+///
+/// One pill is enough: it opens the hub, and the hub itself is the page that
+/// routes to applications, notifications, clipboard, calendar and wallpaper.
+/// The bar renders none of that — it only names the page.
+fn shell_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
+    let accent = if state.runtime.view().wm_available {
+        state.theme.teal
+    } else {
+        state.theme.subtle
+    };
+    let inner = label(ICON_SHELL.to_string())
+        .text_size(PILL_FONT_SIZE)
+        .color(accent);
+    flat(button(inner, |s: &mut XilemBar| {
+        // dispatch_wm, not dispatch: the shell lives in the window manager, so
+        // a click with no WM projection has nowhere to go.
+        s.dispatch_wm(UserAction::OpenShellHub(ShellRoute::Hub));
+    }))
+}
+
 fn screenshot_pill_view(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
     let inner = label(ICON_SHOT.to_string())
         .text_size(PILL_FONT_SIZE)
@@ -915,6 +938,8 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
                 volume_pill_view(state),
             ),
             (
+                FlexSpacer::Fixed(Length::px(RIGHT_SECTION_GAP)),
+                shell_pill_view(state),
                 FlexSpacer::Fixed(Length::px(RIGHT_SECTION_GAP)),
                 screenshot_pill_view(state),
                 FlexSpacer::Fixed(Length::px(RIGHT_SECTION_GAP)),
