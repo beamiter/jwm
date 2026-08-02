@@ -235,7 +235,7 @@ pub struct BehaviorConfig {
     #[serde(default = "default_active_opacity")]
     pub active_opacity: f32,
     /// Enable background blur behind translucent windows.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub blur_enabled: bool,
     /// Blur strength / number of passes (1..5). Higher = more blur.
     #[serde(default = "default_blur_strength")]
@@ -244,7 +244,7 @@ pub struct BehaviorConfig {
     #[serde(default = "default_true")]
     pub blur_quality_auto: bool,
     /// Enable fade-in/fade-out when windows map/unmap.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub fading: bool,
     /// Fade-in step per frame (0.0..1.0). Higher = faster fade-in.
     #[serde(default = "default_fade_step")]
@@ -376,7 +376,7 @@ pub struct BehaviorConfig {
 
     // --- Client window border glow ---
     /// Enable the compositor-drawn directional outer glow around client windows.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub border_glow_enabled: bool,
     /// Restrict the glow to the focused client window.
     #[serde(default = "default_true")]
@@ -547,7 +547,7 @@ pub struct BehaviorConfig {
     pub edge_glow_width: f32,
 
     // --- Attention animation (urgent pulse) ---
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub attention_animation: bool,
     #[serde(default = "default_attention_color")]
     pub attention_color: [f32; 4],
@@ -658,7 +658,7 @@ pub struct BehaviorConfig {
     pub peek_exclude: Vec<String>,
 
     // --- Window Tabs ---
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub window_tabs: bool,
     #[serde(default = "default_tab_bar_height")]
     pub tab_bar_height: f32,
@@ -669,7 +669,7 @@ pub struct BehaviorConfig {
 
     // --- Motion trail (drag ghosting) ---
     /// Enable motion trail ghost copies when dragging windows.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub motion_trail: bool,
     /// Number of ghost frames in the motion trail.
     #[serde(default = "default_motion_trail_frames")]
@@ -680,7 +680,7 @@ pub struct BehaviorConfig {
 
     // --- Genie minimize animation ---
     /// Enable genie/magic lamp minimize animation.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub genie_minimize: bool,
     /// Duration of the genie animation in milliseconds.
     #[serde(default = "default_genie_duration")]
@@ -699,7 +699,7 @@ pub struct BehaviorConfig {
 
     // --- Focus switch highlight ---
     /// Enable a smooth border highlight on focus change.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub focus_highlight: bool,
     /// Focus highlight border color [r, g, b, a].
     #[serde(default = "default_focus_highlight_color")]
@@ -860,7 +860,7 @@ pub struct BehaviorConfig {
     // --- Window swallowing ---
     /// Hide a terminal window when a child process opens its own window
     /// (X11 only — relies on _NET_WM_PID + /proc walk).
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub swallow_enabled: bool,
     /// Class names of terminals that may be swallowed. Empty = no swallowing.
     /// Match is case-insensitive against both class and instance.
@@ -1016,7 +1016,7 @@ fn default_shadow_bottom_extra() -> f32 {
     4.0
 }
 fn default_transition_mode() -> String {
-    "none".to_string()
+    "coverflow".to_string()
 }
 fn default_compositor_api() -> String {
     "egl".to_string()
@@ -1424,14 +1424,14 @@ impl Default for Config {
                     shadow_inactive_opacity: default_shadow_inactive_opacity(),
                     inactive_opacity: default_inactive_opacity(),
                     active_opacity: default_active_opacity(),
-                    blur_enabled: false,
+                    blur_enabled: true,
                     blur_strength: default_blur_strength(),
                     blur_quality_auto: true,
                     blur_temporal_enabled: default_true(),
                     blur_temporal_mix_ratio: default_temporal_blur_ratio(),
                     blur_strength_by_hz: default_blur_strength_by_hz(),
                     blur_quality_by_monitor: default_blur_quality_by_monitor(),
-                    fading: false,
+                    fading: true,
                     fade_in_step: default_fade_step(),
                     fade_out_step: default_fade_step(),
                     shadow_exclude: Vec::new(),
@@ -1463,7 +1463,7 @@ impl Default for Config {
                     border_width: default_border_width(),
                     border_color_focused: default_border_color_focused(),
                     border_color_unfocused: default_border_color_unfocused(),
-                    border_glow_enabled: false,
+                    border_glow_enabled: true,
                     border_glow_focused_only: true,
                     border_glow_radius: default_border_glow_radius(),
                     border_glow_intensity: default_border_glow_intensity(),
@@ -1503,7 +1503,7 @@ impl Default for Config {
                     edge_glow: false,
                     edge_glow_color: default_edge_glow_color(),
                     edge_glow_width: default_edge_glow_width(),
-                    attention_animation: false,
+                    attention_animation: true,
                     attention_color: default_attention_color(),
                     pip_border_color: default_pip_border_color(),
                     pip_border_width: default_pip_border_width(),
@@ -1555,20 +1555,20 @@ impl Default for Config {
                     snap_animation_duration_ms: default_snap_animation_duration_ms(),
                     peek_enabled: default_true(),
                     peek_exclude: Vec::new(),
-                    window_tabs: false,
+                    window_tabs: true,
                     tab_bar_height: default_tab_bar_height(),
                     tab_bar_color: default_tab_bar_color(),
                     tab_active_color: default_tab_active_color(),
                     // Phase 3: Visual effects
-                    motion_trail: false,
+                    motion_trail: true,
                     motion_trail_frames: default_motion_trail_frames(),
                     motion_trail_opacity: default_motion_trail_opacity(),
-                    genie_minimize: false,
+                    genie_minimize: true,
                     genie_duration_ms: default_genie_duration(),
                     ripple_on_open: false,
                     ripple_duration: default_ripple_duration(),
                     ripple_amplitude: default_ripple_amplitude(),
-                    focus_highlight: false,
+                    focus_highlight: true,
                     focus_highlight_color: default_focus_highlight_color(),
                     focus_highlight_duration_ms: default_focus_highlight_duration(),
                     wallpaper_crossfade: default_true(),
@@ -1582,7 +1582,7 @@ impl Default for Config {
                     wallpaper_mode: default_wallpaper_mode(),
                     wallpaper_monitors: Vec::new(),
                     wallpaper_tags: Vec::new(),
-                    swallow_enabled: false,
+                    swallow_enabled: true,
                     swallow_terminals: Vec::new(),
                     swallow_exceptions: Vec::new(),
                     scrolling_column_width_rules: Vec::new(),
@@ -1975,6 +1975,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "c".to_string(),
                 function: "killclient".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "n".to_string(),
+                function: "minimize".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
