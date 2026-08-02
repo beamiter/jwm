@@ -161,9 +161,10 @@ impl Jwm {
 
     /// Put back the layout that was current when the picker opened.
     pub(crate) fn cancel_layout_picker(&mut self, backend: &mut dyn Backend) {
-        let restore = self.features.system_ui.layout_picker().and_then(|picker| {
-            (picker.selected != picker.origin).then(|| picker.origin_layout())
-        });
+        let restore =
+            self.features.system_ui.layout_picker().and_then(|picker| {
+                (picker.selected != picker.origin).then(|| picker.origin_layout())
+            });
         if let Some(layout) = restore {
             self.apply_picked_layout(backend, layout);
         }
@@ -227,7 +228,10 @@ impl Jwm {
             Ok(next)
         });
         if let Err(error) = result {
-            info!("[layout_picker] could not apply {}: {error}", layout.label());
+            info!(
+                "[layout_picker] could not apply {}: {error}",
+                layout.label()
+            );
         }
     }
 }

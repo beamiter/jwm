@@ -826,7 +826,11 @@ impl Jwm {
                         self.layout_picker(backend, &WMArgEnum::Int(1))?
                     }
                     keys::KEY_space => {
-                        let delta = if clean_state.contains(Mods::SHIFT) { -1 } else { 1 };
+                        let delta = if clean_state.contains(Mods::SHIFT) {
+                            -1
+                        } else {
+                            1
+                        };
                         self.layout_picker(backend, &WMArgEnum::Int(delta))?
                     }
                     _ => {}

@@ -214,8 +214,14 @@ mod tests {
             let [px, py, pw, ph] = g.panel;
             for cell in &g.cells {
                 let [x, y, w, h] = cell.cell;
-                assert!(x >= px && x + w <= px + pw + 0.5, "count={count} cell escapes panel");
-                assert!(y >= py && y + h <= py + ph + 0.5, "count={count} cell escapes panel");
+                assert!(
+                    x >= px && x + w <= px + pw + 0.5,
+                    "count={count} cell escapes panel"
+                );
+                assert!(
+                    y >= py && y + h <= py + ph + 0.5,
+                    "count={count} cell escapes panel"
+                );
                 let [fx, fy, fw, fh] = cell.frame;
                 assert!(fx >= x && fx + fw <= x + w + 0.01);
                 assert!(fy >= y && fy + fh <= y + h + 0.01);
@@ -230,11 +236,22 @@ mod tests {
 
     #[test]
     fn panel_fits_the_screen_even_with_every_layout() {
-        for (w, h) in [(1024.0, 768.0), (1366.0, 768.0), (1920.0, 1080.0), (3840.0, 2160.0)] {
+        for (w, h) in [
+            (1024.0, 768.0),
+            (1366.0, 768.0),
+            (1920.0, 1080.0),
+            (3840.0, 2160.0),
+        ] {
             let g = strip_geometry(w, h, 13);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");
-            assert!(g.panel[0] + g.panel[2] <= w + 0.5, "{w}x{h}: panel runs off the right");
-            assert!(g.panel[1] + g.panel[3] <= h + 0.5, "{w}x{h}: panel runs off the bottom");
+            assert!(
+                g.panel[0] + g.panel[2] <= w + 0.5,
+                "{w}x{h}: panel runs off the right"
+            );
+            assert!(
+                g.panel[1] + g.panel[3] <= h + 0.5,
+                "{w}x{h}: panel runs off the bottom"
+            );
         }
     }
 
@@ -246,7 +263,11 @@ mod tests {
             assert_eq!(cell_at(&g, x, y), Some(index));
         }
         let [px, py, _, _] = g.panel;
-        assert_eq!(cell_at(&g, px + 1.0, py + 1.0), None, "the title band is not a cell");
+        assert_eq!(
+            cell_at(&g, px + 1.0, py + 1.0),
+            None,
+            "the title band is not a cell"
+        );
     }
 
     #[test]
@@ -254,7 +275,11 @@ mod tests {
         let g = geom(6);
         assert!(!g.sprockets.is_empty());
         let [sx, sy, sw, sh] = g.strip;
-        let top = g.sprockets.iter().filter(|hole| hole[1] < sy + sh * 0.5).count();
+        let top = g
+            .sprockets
+            .iter()
+            .filter(|hole| hole[1] < sy + sh * 0.5)
+            .count();
         let bottom = g.sprockets.len() - top;
         assert_eq!(top, bottom, "perforation is symmetric");
         for hole in &g.sprockets {

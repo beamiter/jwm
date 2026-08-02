@@ -384,7 +384,12 @@ impl Jwm {
         }
     }
 
-    pub(crate) fn set_new_layout(&mut self, sel_mon_key: MonitorKey, layout: &Rc<LayoutEnum>, cur_tag: usize) {
+    pub(crate) fn set_new_layout(
+        &mut self,
+        sel_mon_key: MonitorKey,
+        layout: &Rc<LayoutEnum>,
+        cur_tag: usize,
+    ) {
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
             let sel_lt = monitor.sel_lt;
             if let Some(ref mut pertag) = monitor.pertag {

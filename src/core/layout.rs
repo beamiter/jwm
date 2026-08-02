@@ -385,12 +385,7 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
                     let i = i as i32;
                     LayoutResult {
                         key: i as usize,
-                        rect: Rect::new(
-                            GAP + i * step,
-                            GAP + i * step,
-                            W / 2,
-                            (H * 5) / 9,
-                        ),
+                        rect: Rect::new(GAP + i * step, GAP + i * step, W / 2, (H * 5) / 9),
                     }
                 })
                 .collect()
@@ -2135,4 +2130,3 @@ mod tests {
         assert_eq!(focused.x, 200);
     }
 }
-
