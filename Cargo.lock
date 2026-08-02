@@ -3002,7 +3002,7 @@ dependencies = [
 [[package]]
 name = "shared_structures"
 version = "0.3.0"
-source = "git+https://github.com/beamiter/shared_structures.git#165facf85136d8d053adb5bfc5f04e79011d23b1"
+source = "git+https://github.com/beamiter/shared_structures.git#4eff3a2e7b39e0dee80f83830cfda37147b89ee4"
 dependencies = [
  "libc 0.2.189",
  "log",
@@ -4492,8 +4492,8 @@ checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xbar_core"
-version = "0.7.1"
-source = "git+https://github.com/beamiter/xbar_core.git?tag=v0.7.1#ef6c083d03652706cd93b155d9eda13e7935a93d"
+version = "0.8.0"
+source = "git+https://github.com/beamiter/xbar_core.git?tag=v0.8.0#d38c51ae05930509d73e67343dd79e2ad07848b1"
 dependencies = [
  "anyhow",
  "flexi_logger",

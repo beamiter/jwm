@@ -186,7 +186,11 @@ the [wallpaper picker and its colour theming](docs/wallpaper.md),
 [clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md),
 the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
-feature.
+feature. Every status bar in `submodules/` carries an entry that opens the
+same [Shell Hub](docs/control-center.md#opening-the-shell-from-a-status-bar),
+so a pointer-driven session reaches it without `Alt+F10`.
+The Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition are both
+the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
 The compositor's live counters are on `Alt+Shift+F12`; see
 [the debug HUD](docs/debug-hud.md).
 Additional operational tools are documented in [tools/README.md](tools/README.md).

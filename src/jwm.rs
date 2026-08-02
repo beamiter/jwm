@@ -1236,6 +1236,18 @@ impl Jwm {
                     let arg = WMArgEnum::Layout(Rc::new(LayoutEnum::from(cmd.parameter)));
                     let _ = self.setlayout(backend, &arg);
                 }
+                CommandType::ShellHub => {
+                    // The command type is ShellHub here, so the route always
+                    // parses; the default only guards a corrupt queue entry.
+                    let page = shell_page_for(cmd.shell_hub_route().unwrap_or_default());
+                    info!(
+                        "[process_commands] ShellHub command received: {}",
+                        page.map_or("hub", crate::jwm::features::ShellHubRoute::label)
+                    );
+                    if let Err(error) = self.open_shell_from_status_bar(backend, page) {
+                        warn!("[process_commands] could not open the shell: {error}");
+                    }
+                }
                 CommandType::None => {}
             }
         }
@@ -1548,5 +1560,66 @@ impl Jwm {
         } else {
             String::new()
         }
+    }
+}
+
+/// Translate a bar's wire route into the shell page JWM owns.
+///
+/// `None` is the hub home page: the protocol gives it a route of its own,
+/// while JWM models it as "no child page selected". An unknown code has
+/// already degraded to `Hub` inside the protocol crate, so a bar newer than
+/// the running JWM lands on the hub instead of having its click dropped.
+fn shell_page_for(
+    route: xbar_core::shared_structures::ShellHubRoute,
+) -> Option<crate::jwm::features::ShellHubRoute> {
+    use crate::jwm::features::ShellHubRoute;
+    use xbar_core::shared_structures::ShellHubRoute as Wire;
+
+    match route {
+        Wire::Hub => None,
+        Wire::Applications => Some(ShellHubRoute::Applications),
+        Wire::Notifications => Some(ShellHubRoute::Notifications),
+        Wire::Clipboard => Some(ShellHubRoute::Clipboard),
+        Wire::Calendar => Some(ShellHubRoute::Calendar),
+        Wire::Wallpaper => Some(ShellHubRoute::Wallpaper),
+    }
+}
+
+#[cfg(test)]
+mod shell_hub_command_tests {
+    use super::*;
+    use crate::jwm::features::ShellHubRoute;
+    use xbar_core::shared_structures::ShellHubRoute as Wire;
+
+    #[test]
+    fn every_wire_route_maps_to_a_page_or_the_hub() {
+        let cases = [
+            (Wire::Hub, None),
+            (Wire::Applications, Some(ShellHubRoute::Applications)),
+            (Wire::Notifications, Some(ShellHubRoute::Notifications)),
+            (Wire::Clipboard, Some(ShellHubRoute::Clipboard)),
+            (Wire::Calendar, Some(ShellHubRoute::Calendar)),
+            (Wire::Wallpaper, Some(ShellHubRoute::Wallpaper)),
+        ];
+        assert_eq!(
+            cases.len(),
+            Wire::ALL.len(),
+            "a new wire route needs a page here"
+        );
+        for (wire, expected) in cases {
+            assert_eq!(shell_page_for(wire), expected);
+        }
+    }
+
+    #[test]
+    fn a_shell_command_round_trips_from_the_bar_to_a_page() {
+        let command = SharedCommand::shell_hub(Wire::Clipboard, 2);
+        assert_eq!(command.get_command_type(), CommandType::ShellHub);
+        assert_eq!(
+            command.shell_hub_route().map(shell_page_for),
+            Some(Some(ShellHubRoute::Clipboard))
+        );
+        // Commands from the tag/layout paths never look like shell requests.
+        assert_eq!(SharedCommand::view_tag(1, 0).shell_hub_route(), None);
     }
 }

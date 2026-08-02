@@ -221,6 +221,47 @@ impl Jwm {
         Ok(())
     }
 
+    /// Open the shell from a status bar rather than from a key binding.
+    ///
+    /// `None` opens the hub home page; a route opens that page directly with
+    /// Escape returning to the hub, matching what the keyboard path does. This
+    /// is the only shell entry point that starts from an unfocused surface, so
+    /// unlike [`Self::open_shell_hub_route`] it has to acquire the grabs first
+    /// and hand them back if the requested page turns out to be unavailable.
+    pub(crate) fn open_shell_from_status_bar(
+        &mut self,
+        backend: &mut dyn Backend,
+        route: Option<crate::jwm::features::ShellHubRoute>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.features.system_ui.is_active() {
+            // The user is already in the shell. Re-opening would steal the
+            // grabs and throw away the page they are on, so a stray click on
+            // the bar does nothing instead.
+            return Ok(());
+        }
+
+        let label = route.map_or("shell hub (status bar)", |_| "shell page (status bar)");
+        self.prepare_system_ui(backend, label, true)?;
+        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
+
+        let Some(route) = route else {
+            // Same as the key-bound control center: open on the cached
+            // connectivity reading and let the background re-read update the
+            // rows in place, because nmcli can block for seconds.
+            self.refresh_connectivity();
+            self.features.system_ui_return_to_hub = false;
+            self.features.system_ui = self.build_shell_hub_state();
+            self.sync_system_ui(backend);
+            return Ok(());
+        };
+
+        self.open_shell_hub_route(backend, route).inspect_err(|_| {
+            // A disabled route (clipboard history switched off, say) must not
+            // leave the keyboard grabbed with nothing on screen.
+            self.close_system_ui(backend);
+        })
+    }
+
     /// Rebuild the shell home page after leaving a child page. This path does
     /// not reacquire grabs or toggle the compositor.
     pub(crate) fn return_to_shell_hub(&mut self, backend: &mut dyn Backend) {

@@ -53,6 +53,40 @@ The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
 selection stays put (clamped if a row disappeared).
 
+## Opening the shell from a status bar
+
+The Hub is not only reachable from the keyboard. Every bar in `submodules/`
+carries an entry that asks JWM to open it, so a pointer-driven session gets
+the same surface as `Alt+F10`.
+
+The bar sends one `CommandType::ShellHub` command over the existing shared
+ring buffer, with the page in `parameter`:
+
+| `parameter` | Page opened |
+| --- | --- |
+| `0` | Hub home |
+| `1` | Applications |
+| `2` | Notifications |
+| `3` | Clipboard |
+| `4` | Calendar |
+| `5` | Wallpaper |
+
+JWM handles it exactly like the key-bound paths, which is what makes the two
+entry points behave identically:
+
+- A request that names a page opens it with `Esc` returning to the Hub, the
+  same as selecting the row from the Hub itself.
+- A request arriving while the shell is already open is **ignored**. Stealing
+  the grabs and throwing away the page the user is on is worse than dropping a
+  stray click on the bar.
+- A page the configuration disables — clipboard history switched off, say —
+  fails without leaving the keyboard grabbed and nothing on screen.
+- An unknown page number from a bar newer than JWM opens the Hub instead of
+  being dropped.
+
+The bars gray their entry out while the transport is closed, so the button
+looks unavailable rather than swallowing clicks when JWM is not running.
+
 ## Network and Bluetooth
 
 `nmcli` is preferred and falls back to `rfkill`; whichever answers first is
