@@ -387,23 +387,6 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        // Compile cube transition shader
-        let cube_program = shader_cache.get_or_compile(
-            &gl,
-            "cube",
-            shaders::CUBE_VERTEX_SHADER,
-            shaders::CUBE_FRAGMENT_SHADER,
-        )?;
-        let cube_uniforms = unsafe {
-            CubeUniforms {
-                mvp: gl.get_uniform_location(cube_program, "u_mvp"),
-                aspect: gl.get_uniform_location(cube_program, "u_aspect"),
-                texture: gl.get_uniform_location(cube_program, "u_texture"),
-                brightness: gl.get_uniform_location(cube_program, "u_brightness"),
-                uv_rect: gl.get_uniform_location(cube_program, "u_uv_rect"),
-            }
-        };
-
         // Compile portal transition shader
         let portal_program = shader_cache.get_or_compile(
             &gl,
@@ -500,6 +483,56 @@ impl<C: CompositorConnection> Compositor<C> {
                 projection: gl.get_uniform_location(overview_bg_program, "u_projection"),
                 rect: gl.get_uniform_location(overview_bg_program, "u_rect"),
                 opacity: gl.get_uniform_location(overview_bg_program, "u_opacity"),
+                angle: gl.get_uniform_location(overview_bg_program, "u_angle"),
+                time: gl.get_uniform_location(overview_bg_program, "u_time"),
+                ground: gl.get_uniform_location(overview_bg_program, "u_ground"),
+                accent: gl.get_uniform_location(overview_bg_program, "u_accent"),
+            }
+        };
+
+        // Compile the prism shaders shared by the overview and the cube
+        // transition: lit faces and polygon caps.
+        let overview_face_program = shader_cache.get_or_compile(
+            &gl,
+            "overview_face",
+            shaders::OVERVIEW_FACE_VERTEX_SHADER,
+            shaders::OVERVIEW_FACE_FRAGMENT_SHADER,
+        )?;
+        let overview_face_uniforms = unsafe {
+            OverviewFaceUniforms {
+                mvp: gl.get_uniform_location(overview_face_program, "u_mvp"),
+                model: gl.get_uniform_location(overview_face_program, "u_model"),
+                aspect: gl.get_uniform_location(overview_face_program, "u_aspect"),
+                texture: gl.get_uniform_location(overview_face_program, "u_texture"),
+                uv_rect: gl.get_uniform_location(overview_face_program, "u_uv_rect"),
+                camera: gl.get_uniform_location(overview_face_program, "u_camera"),
+                accent: gl.get_uniform_location(overview_face_program, "u_accent"),
+                brightness: gl.get_uniform_location(overview_face_program, "u_brightness"),
+                alpha: gl.get_uniform_location(overview_face_program, "u_alpha"),
+                desat: gl.get_uniform_location(overview_face_program, "u_desat"),
+                reflect: gl.get_uniform_location(overview_face_program, "u_reflect"),
+                glass: gl.get_uniform_location(overview_face_program, "u_glass"),
+                edge: gl.get_uniform_location(overview_face_program, "u_edge"),
+                time: gl.get_uniform_location(overview_face_program, "u_time"),
+            }
+        };
+
+        let overview_cap_program = shader_cache.get_or_compile(
+            &gl,
+            "overview_cap",
+            shaders::OVERVIEW_CAP_VERTEX_SHADER,
+            shaders::OVERVIEW_CAP_FRAGMENT_SHADER,
+        )?;
+        let overview_cap_uniforms = unsafe {
+            OverviewCapUniforms {
+                mvp: gl.get_uniform_location(overview_cap_program, "u_mvp"),
+                radius: gl.get_uniform_location(overview_cap_program, "u_radius"),
+                y: gl.get_uniform_location(overview_cap_program, "u_y"),
+                sides: gl.get_uniform_location(overview_cap_program, "u_sides"),
+                color: gl.get_uniform_location(overview_cap_program, "u_color"),
+                accent: gl.get_uniform_location(overview_cap_program, "u_accent"),
+                time: gl.get_uniform_location(overview_cap_program, "u_time"),
+                reflect: gl.get_uniform_location(overview_cap_program, "u_reflect"),
             }
         };
 
@@ -928,9 +961,7 @@ impl<C: CompositorConnection> Compositor<C> {
             transition_mon_w: screen_w,
             transition_mon_h: screen_h,
             transition_mode: TransitionMode::from_name_or_none(behavior.transition_mode.as_str()),
-            // Cube transition
-            cube_program,
-            cube_uniforms,
+            transition_new_ready: false,
             transition_new_fbo: None,
             // Portal transition
             portal_program,
@@ -1007,10 +1038,16 @@ impl<C: CompositorConnection> Compositor<C> {
             overview_opacity: 0.0,
             overview_bg_program,
             overview_bg_uniforms,
+            overview_face_program,
+            overview_face_uniforms,
+            overview_cap_program,
+            overview_cap_uniforms,
             // Overview prism state
             overview_prism_target_angle: 0.0,
             overview_prism_current_angle: 0.0,
             overview_prism_last_tick: None,
+            overview_prism_sides: 4,
+            overview_prism_spin: 0.0,
             overview_slide_offset: 0,
             overview_total_clients: 0,
             overview_mon_x: 0,

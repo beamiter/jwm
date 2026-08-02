@@ -6,6 +6,7 @@ mod overview;
 mod pipeline;
 mod platform;
 mod postprocess;
+mod prism;
 mod tfp;
 mod transitions;
 mod types;
@@ -498,9 +499,10 @@ where
     /// Transition animation mode (slide or cube).
     transition_mode: TransitionMode,
 
-    // --- Cube transition ---
-    cube_program: glow::Program,
-    cube_uniforms: CubeUniforms,
+    /// Whether `transition_new_fbo` already holds this transition's
+    /// destination workspace. The capture happens on the first animated frame,
+    /// once, not every frame.
+    transition_new_ready: bool,
     /// FBO + texture holding a snapshot of the new scene (for cube mode).
     transition_new_fbo: Option<(glow::Framebuffer, glow::Texture)>,
 
@@ -595,10 +597,19 @@ where
     overview_opacity: f32,
     overview_bg_program: glow::Program,
     overview_bg_uniforms: OverviewBgUniforms,
+    overview_face_program: glow::Program,
+    overview_face_uniforms: OverviewFaceUniforms,
+    overview_cap_program: glow::Program,
+    overview_cap_uniforms: OverviewCapUniforms,
     // --- Overview prism state ---
     overview_prism_target_angle: f32,
     overview_prism_current_angle: f32,
     overview_prism_last_tick: Option<std::time::Instant>,
+    /// Number of prism sides, derived from the window count (3..=6).
+    overview_prism_sides: usize,
+    /// Smoothed 0..1 spin energy: drives the see-through cube, the zoom-out
+    /// and the extra tilt while the prism is turning.
+    overview_prism_spin: f32,
     overview_slide_offset: usize,
     overview_total_clients: usize,
     // Monitor bounds for overview (multi-monitor)
@@ -921,12 +932,13 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 }
             }
             self.gl.delete_program(self.transition_program);
-            self.gl.delete_program(self.cube_program);
             self.gl.delete_program(self.portal_program);
             self.gl.delete_program(self.edge_glow_program);
             self.gl.delete_program(self.tilt_program);
             self.gl.delete_program(self.wobbly_program);
             self.gl.delete_program(self.overview_bg_program);
+            self.gl.delete_program(self.overview_face_program);
+            self.gl.delete_program(self.overview_cap_program);
             self.gl.delete_program(self.particle_program);
             self.gl.delete_program(self.genie_program);
             self.gl.delete_buffer(self.particle_vbo);

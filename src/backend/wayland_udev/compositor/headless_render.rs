@@ -724,8 +724,6 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
-        ("CUBE_VERTEX_SHADER", V, s::CUBE_VERTEX_SHADER),
-        ("CUBE_FRAGMENT_SHADER", F, s::CUBE_FRAGMENT_SHADER),
         ("PORTAL_FRAGMENT_SHADER", F, s::PORTAL_FRAGMENT_SHADER),
         (
             "TRANSITION_FRAGMENT_SHADER",
@@ -753,6 +751,26 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             "OVERVIEW_BG_FRAGMENT_SHADER",
             F,
             s::OVERVIEW_BG_FRAGMENT_SHADER,
+        ),
+        (
+            "OVERVIEW_FACE_VERTEX_SHADER",
+            V,
+            s::OVERVIEW_FACE_VERTEX_SHADER,
+        ),
+        (
+            "OVERVIEW_FACE_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_FACE_FRAGMENT_SHADER,
+        ),
+        (
+            "OVERVIEW_CAP_VERTEX_SHADER",
+            V,
+            s::OVERVIEW_CAP_VERTEX_SHADER,
+        ),
+        (
+            "OVERVIEW_CAP_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_CAP_FRAGMENT_SHADER,
         ),
         ("GENIE_VERTEX_SHADER", V, s::GENIE_VERTEX_SHADER),
         ("TEMPORAL_BLUR_MIX_VERTEX", V, s::TEMPORAL_BLUR_MIX_VERTEX),

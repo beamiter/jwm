@@ -384,14 +384,6 @@ pub(super) struct TransitionUniforms {
     pub(super) uv_rect: Option<glow::UniformLocation>,
 }
 
-pub(super) struct CubeUniforms {
-    pub(super) mvp: Option<glow::UniformLocation>,
-    pub(super) aspect: Option<glow::UniformLocation>,
-    pub(super) texture: Option<glow::UniformLocation>,
-    pub(super) brightness: Option<glow::UniformLocation>,
-    pub(super) uv_rect: Option<glow::UniformLocation>,
-}
-
 pub(super) struct PortalUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
@@ -523,6 +515,38 @@ pub(super) struct OverviewBgUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) opacity: Option<glow::UniformLocation>,
+    pub(super) angle: Option<glow::UniformLocation>,
+    pub(super) time: Option<glow::UniformLocation>,
+    pub(super) ground: Option<glow::UniformLocation>,
+    pub(super) accent: Option<glow::UniformLocation>,
+}
+
+pub(super) struct OverviewFaceUniforms {
+    pub(super) mvp: Option<glow::UniformLocation>,
+    pub(super) model: Option<glow::UniformLocation>,
+    pub(super) aspect: Option<glow::UniformLocation>,
+    pub(super) texture: Option<glow::UniformLocation>,
+    pub(super) uv_rect: Option<glow::UniformLocation>,
+    pub(super) camera: Option<glow::UniformLocation>,
+    pub(super) accent: Option<glow::UniformLocation>,
+    pub(super) brightness: Option<glow::UniformLocation>,
+    pub(super) alpha: Option<glow::UniformLocation>,
+    pub(super) desat: Option<glow::UniformLocation>,
+    pub(super) reflect: Option<glow::UniformLocation>,
+    pub(super) glass: Option<glow::UniformLocation>,
+    pub(super) edge: Option<glow::UniformLocation>,
+    pub(super) time: Option<glow::UniformLocation>,
+}
+
+pub(super) struct OverviewCapUniforms {
+    pub(super) mvp: Option<glow::UniformLocation>,
+    pub(super) radius: Option<glow::UniformLocation>,
+    pub(super) y: Option<glow::UniformLocation>,
+    pub(super) sides: Option<glow::UniformLocation>,
+    pub(super) color: Option<glow::UniformLocation>,
+    pub(super) accent: Option<glow::UniformLocation>,
+    pub(super) time: Option<glow::UniformLocation>,
+    pub(super) reflect: Option<glow::UniformLocation>,
 }
 
 pub(super) struct MagnifierUniforms {

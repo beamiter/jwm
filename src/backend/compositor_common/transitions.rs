@@ -63,11 +63,27 @@ impl TransitionMode {
 
     /// Whether the X11 renderer must preallocate a second scene target.
     ///
-    /// Dedicated transition renderers now composite the old snapshot over the
-    /// already-rendered destination workspace, so none of them require an
-    /// additional monitor-sized texture before the transition starts.
+    /// Most transition renderers composite the old snapshot over the
+    /// already-rendered destination workspace. `Cube` is the exception: it maps
+    /// the destination onto a second face of a solid cube, so it needs that
+    /// workspace as a texture rather than as the layer underneath.
     pub const fn needs_new_scene_fbo(self) -> bool {
-        false
+        matches!(self, Self::Cube)
+    }
+
+    /// Stretch the configured animation duration for this mode.
+    ///
+    /// Flat wipes read best when they are quick. A rotating solid needs long
+    /// enough for the eye to follow the object around — at 150ms a cube is a
+    /// flicker, not a rotation — so the cube family takes a longer slice of
+    /// time from the same configuration.
+    pub fn stretch_duration(self, base: Duration) -> Duration {
+        let scale = match self {
+            Self::Cube | Self::Helix => 1.8,
+            Self::Flip | Self::CoverFlow => 1.4,
+            _ => 1.0,
+        };
+        base.mul_f32(scale)
     }
 
     /// Apply a mode-appropriate, refresh-rate-independent easing curve.
@@ -192,10 +208,38 @@ mod tests {
     }
 
     #[test]
-    fn transition_renderers_do_not_preallocate_a_destination_scene() {
+    fn only_the_cube_preallocates_a_destination_scene() {
+        // Every other renderer draws the old snapshot over the live
+        // destination, so allocating a second monitor-sized texture for them
+        // would be wasted VRAM.
         for mode in MODES {
-            assert!(!mode.needs_new_scene_fbo(), "{}", mode.canonical_name());
+            assert_eq!(
+                mode.needs_new_scene_fbo(),
+                mode == TransitionMode::Cube,
+                "{}",
+                mode.canonical_name()
+            );
         }
+    }
+
+    #[test]
+    fn solid_modes_get_a_longer_slice_of_the_configured_duration() {
+        let base = Duration::from_millis(250);
+        assert_eq!(TransitionMode::Slide.stretch_duration(base), base);
+        assert_eq!(TransitionMode::Fade.stretch_duration(base), base);
+        for mode in [TransitionMode::Cube, TransitionMode::Flip] {
+            assert!(
+                mode.stretch_duration(base) > base,
+                "{}",
+                mode.canonical_name()
+            );
+        }
+        // A zero duration still means "no animation", whatever the mode.
+        assert!(
+            TransitionMode::Cube
+                .stretch_duration(Duration::ZERO)
+                .is_zero()
+        );
     }
 
     #[test]

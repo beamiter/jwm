@@ -16,4 +16,7 @@ __pycache__/
 *.swo
 /submodules/
 
+# Local GPU capability probe output.
+gpu.log
+
 # `Cargo.lock` is committed for reproducible JWM application builds.

@@ -462,38 +462,6 @@ void main() {
 // Tag-switch transition shader
 // ---------------------------------------------------------------------------
 
-/// Draws a snapshot texture for workspace transitions. The sampled source area
-/// can be cropped so persistent UI such as the status bar is excluded.
-pub const CUBE_VERTEX_SHADER: &str = r#"#version 330 core
-
-uniform mat4 u_mvp;
-uniform float u_aspect; // screen_w / workspace_h
-out vec2 v_uv;
-
-void main() {
-    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
-    v_uv = pos;
-    // Face quad spans [-aspect, -1] to [+aspect, +1] in model space
-    vec3 vert = vec3((pos.x * 2.0 - 1.0) * u_aspect, pos.y * 2.0 - 1.0, 0.0);
-    gl_Position = u_mvp * vec4(vert, 1.0);
-}
-"#;
-
-pub const CUBE_FRAGMENT_SHADER: &str = r#"#version 330 core
-
-uniform sampler2D u_texture;
-uniform float u_brightness; // face lighting (1.0 = fully lit)
-uniform vec4 u_uv_rect;     // x, y, w, h in texture UV space
-in vec2 v_uv;
-out vec4 frag_color;
-
-void main() {
-    vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
-    vec4 texel = texture(u_texture, uv);
-    frag_color = vec4(texel.rgb * u_brightness, texel.a * u_brightness);
-}
-"#;
-
 // ---------------------------------------------------------------------------
 // Portal (iris wipe) transition shader
 // ---------------------------------------------------------------------------
@@ -1001,26 +969,261 @@ void main() {
 "#;
 
 // ---------------------------------------------------------------------------
-// Overview background shader (semi-transparent dark overlay)
+// Overview skydome: the backdrop the prism spins inside of
 // ---------------------------------------------------------------------------
 
+/// Compiz-style skydome. The sky pans horizontally with the prism so the
+/// rotation reads as the *world* turning, and a matching floor half carries the
+/// light pool that the mirrored prism is reflected into.
 pub const OVERVIEW_BG_FRAGMENT_SHADER: &str = r#"#version 330 core
 
 uniform float u_opacity;
+uniform float u_angle;  // prism rotation in radians (drives the sky parallax)
+uniform float u_time;   // seconds since compositor start
+uniform vec2  u_ground; // x = horizon line, y = where the prism meets the floor
+uniform vec3  u_accent; // accent color shared with the prism edges
+uniform vec4  u_rect;   // monitor rect in pixels (shared with the vertex stage)
 in vec2 v_uv;
 out vec4 frag_color;
 
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+/// One parallax layer of stars: a jittered point per cell, softly twinkling.
+float star_layer(vec2 uv, float density, float seed) {
+    vec2 grid = uv * density;
+    vec2 cell = floor(grid);
+    vec2 local = fract(grid);
+    float pick = hash21(cell + seed);
+    if (pick < 0.90) {
+        return 0.0;
+    }
+    vec2 center = vec2(hash21(cell + seed + 3.1), hash21(cell + seed + 7.7));
+    float dist = length(local - center);
+    float twinkle = 0.65 + 0.35 * sin(u_time * 2.0 + pick * 40.0);
+    return smoothstep(0.07, 0.0, dist) * twinkle;
+}
+
 void main() {
-    vec2 centered = v_uv - vec2(0.5);
-    float dist = length(centered * vec2(1.0, 0.85));
-    float vignette = smoothstep(0.1, 0.85, dist);
-    vec3 top_tint = vec3(0.10, 0.12, 0.16);
-    vec3 bottom_tint = vec3(0.03, 0.04, 0.06);
-    vec3 color = mix(top_tint, bottom_tint, clamp(v_uv.y * 1.15, 0.0, 1.0));
-    // Semi-transparent dark tint so the wallpaper is visible underneath.
-    // Windows on this monitor are already skipped during overview, so we
-    // only need enough opacity to give the 3D prism a clean dark backdrop.
-    float alpha = (0.78 + vignette * 0.12) * u_opacity;
+    float aspect = max(u_rect.z, 1.0) / max(u_rect.w, 1.0);
+    vec2 centered = (v_uv - vec2(0.5)) * vec2(aspect, 1.0);
+    float horizon = clamp(u_ground.x, 0.02, 0.98);
+
+    // Height above / depth below the horizon, both normalized to their half.
+    float above = clamp((horizon - v_uv.y) / max(horizon, 0.001), 0.0, 1.0);
+    float below = clamp((v_uv.y - horizon) / max(1.0 - horizon, 0.001), 0.0, 1.0);
+
+    vec3 zenith = vec3(0.026, 0.036, 0.068);
+    vec3 haze = vec3(0.062, 0.086, 0.140);
+    vec3 color = mix(haze, zenith, pow(above, 0.7));
+
+    // Two star layers at different parallax speeds sell the depth.
+    float pan = u_angle * 0.16;
+    float stars = star_layer(vec2(v_uv.x * aspect + pan, v_uv.y), 26.0, 0.0)
+                + star_layer(vec2(v_uv.x * aspect + pan * 1.9, v_uv.y), 46.0, 11.0) * 0.55;
+    color += vec3(0.82, 0.88, 1.0) * stars * above * 0.85;
+
+    // Floor half: darker, and lit by the pool the prism stands in. The pool is
+    // an ellipse flattened by the viewing angle, centered where the prism meets
+    // the floor.
+    vec3 floor_color = mix(vec3(0.040, 0.050, 0.074), vec3(0.008, 0.011, 0.018),
+                           pow(below, 0.55));
+    vec2 pool_delta = vec2(centered.x, (v_uv.y - u_ground.y) * 2.4);
+    float pool = exp(-dot(pool_delta, pool_delta) * 2.6);
+    floor_color += u_accent * pool * 0.26;
+    // Wide, soft ground fog so the horizon does not read as a wall.
+    color = mix(color, floor_color, smoothstep(horizon - 0.06, horizon + 0.10, v_uv.y));
+
+    // Glow band straddling the horizon, applied last so it survives the mix.
+    float band = exp(-pow((v_uv.y - horizon) * 9.0, 2.0));
+    color += u_accent * band * 0.22;
+
+    float vignette = smoothstep(0.92, 0.24, length(centered));
+    color *= mix(0.52, 1.0, vignette);
+
+    // Nearly opaque: the skydome is the lighting environment the prism lives
+    // in, so the wallpaper may only glow faintly through the corners.
+    float alpha = (0.90 + (1.0 - vignette) * 0.08) * u_opacity;
+    frag_color = vec4(color * alpha, alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Overview prism: lit faces + polygon caps (Compiz cube / cubereflex look)
+// ---------------------------------------------------------------------------
+
+/// Face of the overview prism. `u_model` is handed over separately from the MVP
+/// so the fragment stage can do real world-space lighting (a per-face constant
+/// brightness cannot produce a highlight that sweeps across the surface).
+pub const OVERVIEW_FACE_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform mat4 u_mvp;
+uniform mat4 u_model;
+uniform float u_aspect; // face half-width; half-height is always 1.0
+
+out vec2 v_uv;
+out vec3 v_world;
+out vec3 v_normal;
+
+void main() {
+    vec2 pos = vec2(float(gl_VertexID & 1), float((gl_VertexID >> 1) & 1));
+    v_uv = pos;
+    vec3 vert = vec3((pos.x * 2.0 - 1.0) * u_aspect, pos.y * 2.0 - 1.0, 0.0);
+    v_world = (u_model * vec4(vert, 1.0)).xyz;
+    v_normal = normalize(mat3(u_model) * vec3(0.0, 0.0, 1.0));
+    gl_Position = u_mvp * vec4(vert, 1.0);
+}
+"#;
+
+pub const OVERVIEW_FACE_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform sampler2D u_texture;
+uniform vec4 u_uv_rect;
+uniform vec3 u_camera;     // camera position in world space
+uniform vec4 u_accent;     // rgb accent, a = selection strength (0..1)
+uniform float u_aspect;
+uniform float u_brightness;
+uniform float u_alpha;     // face opacity (drops while the prism spins)
+uniform float u_desat;     // 0 = full color, 1 = grayscale
+uniform float u_reflect;   // 1 = mirrored copy below the floor plane
+uniform float u_glass;     // 1 = empty slot, drawn as a tinted glass panel
+uniform float u_edge;      // 0 = square, flush card; 1 = full rounded bevel
+uniform float u_time;
+
+in vec2 v_uv;
+in vec3 v_world;
+in vec3 v_normal;
+out vec4 frag_color;
+
+const float CORNER_RADIUS = 0.06; // in face-local units (half-height = 1.0)
+
+float rounded_box(vec2 p, vec2 half_size, float radius) {
+    vec2 d = abs(p) - half_size + vec2(radius);
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+}
+
+void main() {
+    vec2 uv = v_uv;
+    // Reflections ripple gently, as if the floor were not perfectly still.
+    if (u_reflect > 0.5) {
+        uv.x += sin(v_uv.y * 24.0 - u_time * 1.5) * 0.004 * (1.0 - v_uv.y);
+    }
+    uv = clamp(uv, vec2(0.0), vec2(1.0));
+    vec4 texel = texture(u_texture, u_uv_rect.xy + uv * u_uv_rect.zw);
+
+    // Window textures are premultiplied; composite them over an opaque card so
+    // translucent clients still read as a solid face of a solid object.
+    vec3 backing = vec3(0.055, 0.065, 0.085);
+    vec3 base = texel.rgb + backing * (1.0 - clamp(texel.a, 0.0, 1.0));
+    // Empty prism slots become tinted glass instead of a hole in the cube.
+    vec3 glass = mix(vec3(0.10, 0.13, 0.19), vec3(0.04, 0.05, 0.08), v_uv.y)
+               + u_accent.rgb * 0.10;
+    base = mix(base, glass, u_glass);
+
+    vec3 normal = normalize(v_normal);
+    vec3 view = normalize(u_camera - v_world);
+    // Back faces are seen from behind while the prism is see-through; flipping
+    // the normal keeps their shading plausible instead of pitch black.
+    normal *= sign(dot(normal, view) + 1e-4);
+
+    vec3 light = normalize(vec3(-0.35, 0.85, 0.55));
+    float diffuse = 0.78 + 0.22 * clamp(dot(normal, light), 0.0, 1.0);
+    vec3 half_vec = normalize(light + view);
+    float specular = pow(clamp(dot(normal, half_vec), 0.0, 1.0), 40.0) * 0.55;
+    float fresnel = pow(1.0 - clamp(dot(normal, view), 0.0, 1.0), 3.5);
+
+    vec3 color = base * u_brightness * diffuse;
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(color, vec3(luma), clamp(u_desat, 0.0, 1.0));
+    color += vec3(1.0) * specular * (1.0 - u_desat * 0.5) * (1.0 - u_glass * 0.4);
+    // Grazing faces catch the environment. Keep it mostly white: a pure accent
+    // rim turns the whole silhouette blue when several faces are edge-on.
+    color += mix(u_accent.rgb, vec3(1.0), 0.4) * fresnel * 0.17;
+
+    // Rounded corners plus a beveled rim, so adjacent faces meet in a lit edge.
+    // Both fade out with u_edge: a transition that ends square to the camera
+    // has to hand back a workspace with its corners intact.
+    float edge = clamp(u_edge, 0.0, 1.0);
+    vec2 half_size = vec2(u_aspect, 1.0);
+    vec2 local = (v_uv * 2.0 - 1.0) * half_size;
+    float dist = rounded_box(local, half_size, CORNER_RADIUS * edge);
+    float aa = max(fwidth(dist), 1.0e-4);
+    float mask = 1.0 - smoothstep(-aa, aa, dist);
+    // Narrow lit edge, plus a wider inner falloff that reads as the selection
+    // marker on the face the camera is pointed at.
+    float bevel = 1.0 - smoothstep(0.0, 0.014, -dist);
+    float halo = 1.0 - smoothstep(0.0, 0.10, -dist);
+    color += (u_accent.rgb * 0.45 + vec3(0.16)) * bevel * (0.35 + 0.65 * u_accent.a) * edge;
+    color += u_accent.rgb * halo * u_accent.a * 0.20 * edge;
+
+    float alpha = clamp(u_alpha, 0.0, 1.0) * mask;
+    if (u_reflect > 0.5) {
+        // v_uv.y == 0 is the edge touching the floor plane after mirroring;
+        // the fade has to reach zero before the bottom of the monitor.
+        alpha *= pow(clamp(1.0 - v_uv.y, 0.0, 1.0), 2.2) * 0.62;
+        color = mix(color, vec3(0.05, 0.06, 0.09), 0.20) * 0.92;
+    }
+    frag_color = vec4(color * alpha, alpha);
+}
+"#;
+
+/// Top/bottom cap of the prism, drawn attributeless as a triangle fan. Vertex 0
+/// is the center; the rim vertices are offset by half a step so the polygon
+/// edges line up exactly with the face seams.
+pub const OVERVIEW_CAP_VERTEX_SHADER: &str = r#"#version 330 core
+
+uniform mat4 u_mvp;
+uniform float u_radius; // circumradius of the polygon
+uniform float u_y;      // cap height in model space (+1 top, -1 bottom)
+uniform float u_sides;  // number of prism sides
+
+out vec2 v_local; // unit-circle position, for the angular sheen
+out float v_edge; // 0 at the center, 1 on the polygon boundary
+
+void main() {
+    float sides = max(u_sides, 3.0);
+    vec2 offset = vec2(0.0);
+    v_edge = 0.0;
+    if (gl_VertexID > 0) {
+        float step_angle = 6.28318530718 / sides;
+        float angle = (float(gl_VertexID - 1) + 0.5) * step_angle;
+        offset = vec2(sin(angle), cos(angle));
+        v_edge = 1.0;
+    }
+    v_local = offset;
+    gl_Position = u_mvp * vec4(offset.x * u_radius, u_y, offset.y * u_radius, 1.0);
+}
+"#;
+
+pub const OVERVIEW_CAP_FRAGMENT_SHADER: &str = r#"#version 330 core
+
+uniform vec4 u_color;   // cap base color, a = opacity
+uniform vec3 u_accent;
+uniform float u_time;
+uniform float u_reflect; // 1 = mirrored copy
+
+in vec2 v_local;
+in float v_edge;
+out vec4 frag_color;
+
+void main() {
+    float edge = clamp(v_edge, 0.0, 1.0);
+    vec3 color = mix(u_color.rgb * 1.45, u_color.rgb * 0.42, smoothstep(0.0, 1.0, edge));
+
+    // Brushed sheen slowly sweeping around the cap.
+    float angle = atan(v_local.y, v_local.x);
+    float sheen = 0.5 + 0.5 * sin(angle * 2.0 + u_time * 0.5);
+    color += u_accent * sheen * 0.10 * (1.0 - edge * 0.6);
+
+    // Lit rim where the cap meets the faces.
+    float rim = smoothstep(0.80, 1.0, edge);
+    color += u_accent * rim * 0.55;
+
+    color = mix(color, vec3(0.05, 0.06, 0.09), u_reflect * 0.35);
+    float alpha = clamp(u_color.a, 0.0, 1.0);
     frag_color = vec4(color * alpha, alpha);
 }
 "#;

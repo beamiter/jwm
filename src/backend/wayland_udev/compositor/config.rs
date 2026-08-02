@@ -1156,7 +1156,9 @@ impl WaylandCompositor {
         self.transition_active = true;
         self.transition_snapshot_pending = true;
         self.transition_start = Some(std::time::Instant::now());
-        self.transition_duration = duration;
+        // Solid-object modes need more time than a flat wipe to read, exactly
+        // as on the X11 compositor.
+        self.transition_duration = self.transition_mode.stretch_duration(duration);
         self.transition_direction = if direction < 0 { -1 } else { 1 };
         self.needs_render = true;
     }

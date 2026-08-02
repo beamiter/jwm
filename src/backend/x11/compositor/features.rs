@@ -1,6 +1,7 @@
 // Feature control methods
 #[allow(unused_imports)]
 use super::math::ortho;
+use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
 #[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
@@ -215,6 +216,10 @@ impl<C: CompositorConnection> Compositor<C> {
         self.overview_active = active;
         self.overview_closing = false;
         let n = windows.len();
+        // The prism takes the shape of the window count: 4 windows really do
+        // give a cube. Fewer than three sides has no volume, more than six
+        // makes the front face too small to read.
+        let sides = n.clamp(MIN_PRISM_SIDES, MAX_PRISM_SIDES);
         let face_w = self.screen_w as f32 * 0.8;
         let face_h = self.screen_h as f32 * 0.8;
         self.overview_windows = windows
@@ -228,14 +233,25 @@ impl<C: CompositorConnection> Compositor<C> {
                 snapshot_texture: None,
                 title,
                 title_texture: None,
-                face_index: i.min(5),
+                face_index: i % sides,
             })
             .collect();
+        self.overview_prism_sides = sides;
         self.overview_total_clients = n;
         self.overview_slide_offset = 0;
-        self.overview_prism_target_angle = 0.0;
-        self.overview_prism_current_angle = 0.0;
+        // Face the selected window straight away. The prism used to always
+        // start at face 0, which pointed the camera at the wrong window
+        // whenever the focused client was not the first one in the layout.
+        let selected_face = self
+            .overview_windows
+            .iter()
+            .find(|entry| entry.is_selected)
+            .map_or(0, |entry| entry.face_index);
+        let facing = -(selected_face as f32) * std::f32::consts::TAU / sides as f32;
+        self.overview_prism_target_angle = facing;
+        self.overview_prism_current_angle = facing;
         self.overview_prism_last_tick = None;
+        self.overview_prism_spin = 0.0;
         if active {
             self.refresh_overview_snapshots();
             self.create_overview_title_textures();
@@ -260,7 +276,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         // Rotate prism so selected face faces the camera.
-        let new_target = -(selected_face as f32) * std::f32::consts::FRAC_PI_3;
+        let sides = self.overview_prism_sides.max(MIN_PRISM_SIDES) as f32;
+        let new_target = -(selected_face as f32) * std::f32::consts::TAU / sides;
         // Normalize angular difference to shortest path (within -PI..PI).
         let mut diff = new_target - self.overview_prism_target_angle;
         while diff > std::f32::consts::PI {
@@ -445,7 +462,6 @@ impl<C: CompositorConnection> Compositor<C> {
             "hud" => (shaders::VERTEX_SHADER, file_content.as_str()),
             "hud_text" => (shaders::VERTEX_SHADER, file_content.as_str()),
             "transition" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
-            "cube" => (shaders::CUBE_VERTEX_SHADER, file_content.as_str()),
             "portal" => (shaders::BLUR_DOWN_VERTEX, file_content.as_str()),
             "edge_glow" => (shaders::VERTEX_SHADER, file_content.as_str()),
             "tilt" => (shaders::TILT_VERTEX_SHADER, file_content.as_str()),
@@ -453,6 +469,8 @@ impl<C: CompositorConnection> Compositor<C> {
             "particle" => (shaders::PARTICLE_VERTEX_SHADER, file_content.as_str()),
             "genie" => (shaders::GENIE_VERTEX_SHADER, file_content.as_str()),
             "overview_bg" => (shaders::VERTEX_SHADER, file_content.as_str()),
+            "overview_face" => (shaders::OVERVIEW_FACE_VERTEX_SHADER, file_content.as_str()),
+            "overview_cap" => (shaders::OVERVIEW_CAP_VERTEX_SHADER, file_content.as_str()),
             _ if name.ends_with("_vs") => {
                 log::warn!(
                     "compositor: shader reload requires both vertex and fragment shaders to be specified"
@@ -657,21 +675,6 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.transition_uniforms = uniforms;
                             self.gl.delete_program(old_program);
                         }
-                        "cube" => {
-                            let uniforms = CubeUniforms {
-                                mvp: self.gl.get_uniform_location(new_program, "u_mvp"),
-                                aspect: self.gl.get_uniform_location(new_program, "u_aspect"),
-                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
-                                brightness: self
-                                    .gl
-                                    .get_uniform_location(new_program, "u_brightness"),
-                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
-                            };
-                            let old_program =
-                                std::mem::replace(&mut self.cube_program, new_program);
-                            self.cube_uniforms = uniforms;
-                            self.gl.delete_program(old_program);
-                        }
                         "portal" => {
                             let uniforms = PortalUniforms {
                                 projection: self
@@ -800,10 +803,54 @@ impl<C: CompositorConnection> Compositor<C> {
                                     .get_uniform_location(new_program, "u_projection"),
                                 rect: self.gl.get_uniform_location(new_program, "u_rect"),
                                 opacity: self.gl.get_uniform_location(new_program, "u_opacity"),
+                                angle: self.gl.get_uniform_location(new_program, "u_angle"),
+                                time: self.gl.get_uniform_location(new_program, "u_time"),
+                                ground: self.gl.get_uniform_location(new_program, "u_ground"),
+                                accent: self.gl.get_uniform_location(new_program, "u_accent"),
                             };
                             let old_program =
                                 std::mem::replace(&mut self.overview_bg_program, new_program);
                             self.overview_bg_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
+                        }
+                        "overview_face" => {
+                            let uniforms = OverviewFaceUniforms {
+                                mvp: self.gl.get_uniform_location(new_program, "u_mvp"),
+                                model: self.gl.get_uniform_location(new_program, "u_model"),
+                                aspect: self.gl.get_uniform_location(new_program, "u_aspect"),
+                                texture: self.gl.get_uniform_location(new_program, "u_texture"),
+                                uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
+                                camera: self.gl.get_uniform_location(new_program, "u_camera"),
+                                accent: self.gl.get_uniform_location(new_program, "u_accent"),
+                                brightness: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_brightness"),
+                                alpha: self.gl.get_uniform_location(new_program, "u_alpha"),
+                                desat: self.gl.get_uniform_location(new_program, "u_desat"),
+                                reflect: self.gl.get_uniform_location(new_program, "u_reflect"),
+                                glass: self.gl.get_uniform_location(new_program, "u_glass"),
+                                edge: self.gl.get_uniform_location(new_program, "u_edge"),
+                                time: self.gl.get_uniform_location(new_program, "u_time"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.overview_face_program, new_program);
+                            self.overview_face_uniforms = uniforms;
+                            self.gl.delete_program(old_program);
+                        }
+                        "overview_cap" => {
+                            let uniforms = OverviewCapUniforms {
+                                mvp: self.gl.get_uniform_location(new_program, "u_mvp"),
+                                radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                y: self.gl.get_uniform_location(new_program, "u_y"),
+                                sides: self.gl.get_uniform_location(new_program, "u_sides"),
+                                color: self.gl.get_uniform_location(new_program, "u_color"),
+                                accent: self.gl.get_uniform_location(new_program, "u_accent"),
+                                time: self.gl.get_uniform_location(new_program, "u_time"),
+                                reflect: self.gl.get_uniform_location(new_program, "u_reflect"),
+                            };
+                            let old_program =
+                                std::mem::replace(&mut self.overview_cap_program, new_program);
+                            self.overview_cap_uniforms = uniforms;
                             self.gl.delete_program(old_program);
                         }
                         _ => {
@@ -860,7 +907,6 @@ impl<C: CompositorConnection> Compositor<C> {
             "hud",
             "hud_text",
             "transition",
-            "cube",
             "portal",
             "edge_glow",
             "tilt",
@@ -868,6 +914,8 @@ impl<C: CompositorConnection> Compositor<C> {
             "particle",
             "genie",
             "overview_bg",
+            "overview_face",
+            "overview_cap",
         ];
 
         let dir = std::path::PathBuf::from(&self.shader_dir);

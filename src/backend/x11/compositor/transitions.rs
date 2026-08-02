@@ -1,11 +1,13 @@
 use super::Compositor;
 use super::CompositorConnection;
 use super::compute_wallpaper_rect;
-use super::math::{
-    mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
-};
+use super::math::{mat4_mul, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix};
+use super::prism::{PrismCamera, PrismFace, PrismPass, build_prism_pieces, mirror_matrix};
 use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
 use glow::HasContext;
+
+/// A tag switch is always a quarter turn between two neighbouring faces.
+const CUBE_SIDES: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct TransitionWorkspace {
@@ -89,33 +91,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 workspace.workspace_h as i32,
             );
             self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-            self.gl.use_program(Some(self.cube_program));
-            self.gl
-                .uniform_1_f32(self.cube_uniforms.aspect.as_ref(), workspace.aspect);
-            self.gl
-                .uniform_1_i32(self.cube_uniforms.texture.as_ref(), 0);
-            self.gl.uniform_4_f32(
-                self.cube_uniforms.uv_rect.as_ref(),
-                workspace.uv_rect[0],
-                workspace.uv_rect[1],
-                workspace.uv_rect[2],
-                workspace.uv_rect[3],
-            );
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
-        }
-    }
-
-    fn draw_3d_transition_face(&self, texture: glow::Texture, mvp: &[f32; 16], brightness: f32) {
-        unsafe {
-            self.gl
-                .uniform_matrix_4_f32_slice(self.cube_uniforms.mvp.as_ref(), false, mvp);
-            self.gl.uniform_1_f32(
-                self.cube_uniforms.brightness.as_ref(),
-                brightness.clamp(0.0, 1.0),
-            );
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
     }
 
@@ -264,40 +241,159 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    /// Rotate the old workspace away as one face of a cube. The destination
-    /// workspace is already present underneath, avoiding a per-frame FBO copy.
-    pub(crate) fn render_cube_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
-        let Some(texture) = self.old_transition_texture() else {
+    /// Build mipmaps for a transition snapshot.
+    ///
+    /// The 3D modes minify these hard — a card seen nearly edge-on samples one
+    /// texel column in ten — so without a mipmap chain they alias into stripes.
+    /// One chain per capture, not per frame.
+    pub(super) fn build_transition_mipmaps(&self, texture: glow::Texture) {
+        unsafe {
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.generate_mipmap(glow::TEXTURE_2D);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+    }
+
+    /// Grab the destination workspace once per transition.
+    ///
+    /// The compositor has already composited it into the back buffer by the
+    /// time the transition overlay runs, so one blit per transition — not per
+    /// frame — is enough to map it onto a cube face.
+    fn transition_destination_texture(&mut self) -> Option<glow::Texture> {
+        let (fbo, texture) = self.transition_new_fbo?;
+        if !self.transition_new_ready {
+            if !self.capture_transition_scene_from(
+                None,
+                fbo,
+                self.transition_mon_x,
+                self.transition_mon_y,
+                self.transition_mon_w,
+                self.transition_mon_h,
+            ) {
+                return None;
+            }
+            self.build_transition_mipmaps(texture);
+            self.transition_new_ready = true;
+        }
+        Some(texture)
+    }
+
+    /// Turn both workspaces on a solid cube, Compiz style.
+    ///
+    /// The outgoing tag is one face and the incoming tag the neighbouring one,
+    /// so the switch is a single rotation of one object rather than a card
+    /// flipping over a backdrop. The camera starts square to the front face —
+    /// which makes the first and last frame pixel-identical to the flat
+    /// workspace — then pulls back, tips down and returns.
+    pub(crate) fn render_cube_transition(&mut self, progress: f32, ortho_proj: &[f32; 16]) {
+        let Some(old_texture) = self.old_transition_texture() else {
             return;
         };
         let Some(workspace) = self.transition_workspace() else {
             return;
         };
+        let new_texture = self.transition_destination_texture();
 
         let t = progress.clamp(0.0, 1.0);
-        let half_pi = std::f32::consts::FRAC_PI_2;
+        // Symmetric envelope: zero at both ends, so the cube grows out of the
+        // flat workspace and settles back into it.
+        let pulse = (t * std::f32::consts::PI).sin();
         let direction = self.transition_direction;
-        let depth = workspace.aspect;
-        let zoom = 1.0 + 0.22 * (t * std::f32::consts::PI).sin();
-        let camera_z = (1.0 + depth) * zoom;
-        let perspective = perspective_matrix(half_pi, workspace.aspect, 0.1, camera_z * 4.0);
-        let view = translate_matrix(0.0, 0.0, -camera_z);
-        let angle = direction * t * half_pi;
-        let tilt = rotate_x_matrix(-0.055 * (t * std::f32::consts::PI).sin());
-        let model = mat4_mul(
-            &rotate_y_matrix(angle),
-            &mat4_mul(&tilt, &translate_matrix(0.0, 0.0, depth)),
+        let time = self.compositor_start_time.elapsed().as_secs_f32();
+
+        let camera = PrismCamera::frame(
+            workspace.aspect,
+            CUBE_SIDES,
+            1.0 - 0.34 * pulse,
+            0.30 * pulse,
+            0.0,
         );
-        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
-        let brightness = 0.22 + 0.78 * angle.cos().abs();
+        let angle = direction * t * std::f32::consts::FRAC_PI_2;
+        let lift = camera.lift_for_base_line(0.86) * pulse;
+        let base_model = mat4_mul(&translate_matrix(0.0, lift, 0.0), &rotate_y_matrix(angle));
+        let floor_y = lift - 1.0;
+        let ground = camera
+            .project(&translate_matrix(0.0, 0.0, 0.0), [0.0, floor_y, 0.0])
+            .1;
+
+        // The face that has to be square to the camera at the end is the one
+        // the rotation brings to the front.
+        let incoming = if direction > 0.0 { CUBE_SIDES - 1 } else { 1 };
+        let mut faces = vec![PrismFace::default(); CUBE_SIDES];
+        faces[0] = PrismFace {
+            texture: Some(old_texture),
+            uv_rect: workspace.uv_rect,
+            edge: pulse,
+            mipmapped: true,
+            ..PrismFace::default()
+        };
+        faces[incoming] = PrismFace {
+            texture: new_texture,
+            uv_rect: workspace.uv_rect,
+            edge: pulse,
+            mipmapped: true,
+            ..PrismFace::default()
+        };
+        let filler = Some(old_texture);
+
+        // Skydome only during the rotation, so the flat workspace is untouched
+        // at both ends of the animation. It is drawn flat, in screen space, so
+        // it needs the workspace scissor but not the 3D viewport — and the
+        // scissor has to be set explicitly: earlier passes leave their own
+        // damage rectangle behind.
+        unsafe {
+            self.gl.enable(glow::SCISSOR_TEST);
+            self.gl.scissor(
+                workspace.mon_x,
+                workspace.scissor_gl_y,
+                workspace.mon_w as i32,
+                workspace.workspace_h as i32,
+            );
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        }
+        self.draw_prism_skydome(
+            ortho_proj,
+            workspace.draw_rect,
+            &camera,
+            ground,
+            angle,
+            pulse,
+            time,
+        );
 
         self.begin_3d_transition(workspace);
-        self.draw_3d_transition_face(texture, &mvp, brightness);
+        self.bind_prism_programs(&camera, time);
+        let pass = |reflect| PrismPass {
+            fade: 1.0,
+            // A tag switch keeps its faces opaque: the two neighbouring
+            // workspaces are the whole story, and the empty faces behind them
+            // have nothing worth showing through.
+            spin: 0.0,
+            floor_y,
+            reflect,
+        };
+        let mirrored = mat4_mul(&mirror_matrix(floor_y), &base_model);
+        self.draw_prism_pass(
+            &camera,
+            &build_prism_pieces(&camera, &mirrored, CUBE_SIDES),
+            &faces,
+            filler,
+            &pass(true),
+        );
+        self.draw_prism_pass(
+            &camera,
+            &build_prism_pieces(&camera, &base_model, CUBE_SIDES),
+            &faces,
+            filler,
+            &pass(false),
+        );
         self.end_3d_transition();
     }
 
-    /// Flip the old workspace away like a card. A small midpoint zoom and tilt
-    /// keep the silhouette legible while the destination is revealed beneath.
+    /// Flip the old workspace away like a card, lit by the same shader the
+    /// cube uses so its edges catch the light as it turns.
     pub(crate) fn render_flip_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
         let Some(texture) = self.old_transition_texture() else {
             return;
@@ -307,13 +403,12 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let t = progress.clamp(0.0, 1.0);
-        let half_pi = std::f32::consts::FRAC_PI_2;
         let direction = self.transition_direction;
         let pulse = (t * std::f32::consts::PI).sin();
-        let camera_z = 1.0 + 0.16 * pulse;
-        let perspective = perspective_matrix(half_pi, workspace.aspect, 0.1, 6.0);
-        let view = translate_matrix(0.0, 0.0, -camera_z);
-        let angle = direction * t * half_pi;
+        let time = self.compositor_start_time.elapsed().as_secs_f32();
+
+        let camera = PrismCamera::card(workspace.aspect, 1.0 - 0.14 * pulse, 0.0);
+        let angle = direction * t * std::f32::consts::FRAC_PI_2;
         let model = mat4_mul(
             &rotate_y_matrix(angle),
             &mat4_mul(
@@ -321,11 +416,26 @@ impl<C: CompositorConnection> Compositor<C> {
                 &scale_matrix(1.0 - 0.06 * pulse, 1.0 - 0.06 * pulse, 1.0),
             ),
         );
-        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
-        let brightness = 0.18 + 0.82 * angle.cos().abs();
+        let brightness = 0.30 + 0.70 * angle.cos().abs();
 
         self.begin_3d_transition(workspace);
-        self.draw_3d_transition_face(texture, &mvp, brightness);
+        self.bind_prism_programs(&camera, time);
+        self.draw_prism_face(
+            &camera.mvp(&model),
+            &model,
+            &PrismFace {
+                texture: Some(texture),
+                uv_rect: workspace.uv_rect,
+                edge: pulse,
+                mipmapped: true,
+                ..PrismFace::default()
+            },
+            texture,
+            brightness,
+            1.0,
+            0.0,
+            false,
+        );
         self.end_3d_transition();
     }
 
@@ -394,7 +504,8 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Move the old workspace into a tilted side-card position, exposing the
-    /// new workspace with a CoverFlow-like depth cue.
+    /// new workspace with a CoverFlow-like depth cue — reflection included, the
+    /// way the album art it is named after always had one.
     pub(crate) fn render_coverflow_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
         let Some(texture) = self.old_transition_texture() else {
             return;
@@ -405,28 +516,57 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let t = progress.clamp(0.0, 1.0);
         let direction = self.transition_direction;
+        let time = self.compositor_start_time.elapsed().as_secs_f32();
+
+        let camera = PrismCamera::card(workspace.aspect, 1.0, 0.10 * t);
         let angle = direction * t * 72.0f32.to_radians();
         let scale = 1.0 - 0.2 * t;
-        let x = -direction * t * workspace.aspect * 0.92;
-        let y = -0.06 * (t * std::f32::consts::PI).sin();
-        let z = -0.48 * t;
-        let perspective =
-            perspective_matrix(std::f32::consts::FRAC_PI_2, workspace.aspect, 0.1, 8.0);
-        let view = translate_matrix(0.0, 0.0, -1.0);
-        let model = mat4_mul(
-            &translate_matrix(x, y, z),
+        let placement = mat4_mul(
+            &translate_matrix(
+                -direction * t * workspace.aspect * 0.92,
+                -0.06 * (t * std::f32::consts::PI).sin(),
+                -0.48 * t,
+            ),
             &mat4_mul(&rotate_y_matrix(angle), &scale_matrix(scale, scale, 1.0)),
         );
-        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
-        let brightness = (1.0 - 0.58 * t).max(0.28);
+        let brightness = (1.0 - 0.48 * t).max(0.34);
+        let face = PrismFace {
+            texture: Some(texture),
+            uv_rect: workspace.uv_rect,
+            mipmapped: true,
+            ..PrismFace::default()
+        };
 
         self.begin_3d_transition(workspace);
-        self.draw_3d_transition_face(texture, &mvp, brightness);
+        self.bind_prism_programs(&camera, time);
+        // The card slides across a floor at its own bottom edge.
+        let floor_y = -scale;
+        let mirrored = mat4_mul(&mirror_matrix(floor_y), &placement);
+        self.draw_prism_face(
+            &camera.mvp(&mirrored),
+            &mirrored,
+            &face,
+            texture,
+            brightness,
+            1.0,
+            0.25,
+            true,
+        );
+        self.draw_prism_face(
+            &camera.mvp(&placement),
+            &placement,
+            &face,
+            texture,
+            brightness,
+            1.0,
+            0.25 * t,
+            false,
+        );
         self.end_3d_transition();
     }
 
-    /// Spiral the old workspace away while applying the scale that the former
-    /// implementation calculated but never used.
+    /// Spiral the old workspace away, tumbling out of frame with the lit-card
+    /// shading the other 3D transitions use.
     pub(crate) fn render_helix_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
         let Some(texture) = self.old_transition_texture() else {
             return;
@@ -437,17 +577,18 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let t = progress.clamp(0.0, 1.0);
         let direction = self.transition_direction;
+        let time = self.compositor_start_time.elapsed().as_secs_f32();
+
+        let camera = PrismCamera::card(workspace.aspect, 1.0, 0.14 * t);
         let theta = direction * t * std::f32::consts::PI * 1.25;
         let radius = workspace.aspect * 0.58;
-        let x = radius * theta.sin();
-        let y = -0.34 * t + 0.08 * (t * std::f32::consts::PI * 2.0).sin();
-        let z = -radius * (1.0 - theta.cos().abs()) - 0.22 * t;
         let scale = (1.0 - 0.44 * t).max(0.5);
-        let perspective =
-            perspective_matrix(std::f32::consts::FRAC_PI_2, workspace.aspect, 0.1, 10.0);
-        let view = translate_matrix(0.0, 0.0, -1.0);
         let model = mat4_mul(
-            &translate_matrix(x, y, z),
+            &translate_matrix(
+                radius * theta.sin(),
+                -0.34 * t + 0.08 * (t * std::f32::consts::PI * 2.0).sin(),
+                -radius * (1.0 - theta.cos().abs()) - 0.22 * t,
+            ),
             &mat4_mul(
                 &rotate_y_matrix(theta),
                 &mat4_mul(
@@ -456,11 +597,27 @@ impl<C: CompositorConnection> Compositor<C> {
                 ),
             ),
         );
-        let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
-        let brightness = (1.0 - 0.68 * t).max(0.2);
+        let brightness = (1.0 - 0.58 * t).max(0.26);
 
         self.begin_3d_transition(workspace);
-        self.draw_3d_transition_face(texture, &mvp, brightness);
+        self.bind_prism_programs(&camera, time);
+        self.draw_prism_face(
+            &camera.mvp(&model),
+            &model,
+            &PrismFace {
+                texture: Some(texture),
+                uv_rect: workspace.uv_rect,
+                mipmapped: true,
+                ..PrismFace::default()
+            },
+            texture,
+            brightness,
+            // Fade the card out as it tumbles away instead of leaving it to
+            // pop off at the end of the animation.
+            (1.0 - t * 0.55).clamp(0.0, 1.0),
+            0.4 * t,
+            false,
+        );
         self.end_3d_transition();
     }
 

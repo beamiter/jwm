@@ -499,8 +499,9 @@ impl<C: CompositorConnection> Compositor<C> {
         self.transition_mon_w = mon_w;
         self.transition_mon_h = mon_h;
 
-        if let Some((snap_fbo, _)) = &self.transition_fbo {
+        if let Some((snap_fbo, snap_tex)) = &self.transition_fbo {
             let snap_fbo = *snap_fbo;
+            let snap_tex = *snap_tex;
             self.transition_exclude_top = exclude_top.min(mon_h.saturating_sub(1));
             if !self.capture_transition_scene_from(
                 Some(source_fbo),
@@ -518,8 +519,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 return;
             }
+            self.build_transition_mipmaps(snap_tex);
             self.transition_start = Some(std::time::Instant::now());
-            self.transition_duration = duration;
+            // Solid-object modes need more time than a flat wipe to read.
+            self.transition_duration = self.transition_mode.stretch_duration(duration);
+            self.transition_new_ready = false;
             self.transition_direction = if direction >= 0 { 1.0 } else { -1.0 };
             // Tag switch can radically change visible scene; force a full redraw
             // to avoid stale pixels from partial-damage scissor regions.
@@ -549,7 +553,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.capture_transition_scene_from(None, dst_fbo, mon_x, mon_y, mon_w, mon_h)
     }
 
-    fn capture_transition_scene_from(
+    pub(super) fn capture_transition_scene_from(
         &self,
         source_fbo: Option<glow::Framebuffer>,
         dst_fbo: glow::Framebuffer,
