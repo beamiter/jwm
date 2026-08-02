@@ -28,12 +28,23 @@
 
 ## 引入
 
-从本地工作区使用：
+按 git tag 依赖某个已发布版本（推荐；tag 不会移动，构建可复现）：
 
 ```toml
 [dependencies]
+shared_structures = { git = "https://github.com/beamiter/shared_structures", tag = "v0.3.0" }
+```
+
+跟随开发分支或从本地工作区使用：
+
+```toml
+[dependencies]
+shared_structures = { git = "https://github.com/beamiter/shared_structures", branch = "master" }
+# 或
 shared_structures = { path = "../shared_structures" }
 ```
+
+同一映射的两端必须使用协议兼容的版本，实践中即同一个 tag——共享内存协议的不兼容变化见 [CHANGELOG](CHANGELOG.md)。
 
 默认编译 Futex、Semaphore 和 EventFd 三种后端。若只需要一种后端，可关闭默认 feature；详见[后端与 feature](#后端与-feature)。
 

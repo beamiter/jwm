@@ -2,10 +2,11 @@
 
 本项目的显著变更记录在此。0.x 阶段仍可能调整公共 API；共享内存协议的不兼容变化会单独标明。
 
-## [0.3.0] - 2026-07-25
+## [0.3.0] - 2026-08-02
 
 ### Added
 
+- 新增 `CommandType::ShellHub` 与 `ShellHubRoute`：状态栏可以请求窗口管理器打开自带的 shell 页面（Hub、Applications、Notifications、Clipboard、Calendar、Wallpaper），路由编号复用既有的 `parameter` 字段。`SharedCommand` 布局不变，因此新旧两端双向兼容：旧窗口管理器忽略未知 `cmd_type`，`ShellHubRoute::from_raw_or_hub` 把未知路由退化为 Hub；需要严格解析时用 `from_raw`。
 - 声明 MIT OR Apache-2.0 双许可（`LICENSE-MIT`、`LICENSE-APACHE`）；CI 恢复 cargo-deny 的完整 licenses 门禁。
 
 - 类型指纹：header 记录消息/命令槽位类型指纹（`WireSafe::fingerprint`，默认哈希类型名，可覆写），打开时校验，拒绝"槽大小相同但类型不同"的错配打开。
