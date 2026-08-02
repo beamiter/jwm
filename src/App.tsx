@@ -51,6 +51,26 @@ interface FrontendEnvelope {
   partition_changes?: number;
 }
 
+type ShellRoute =
+  | "hub"
+  | "applications"
+  | "notifications"
+  | "clipboard"
+  | "calendar"
+  | "wallpaper";
+
+// Pages of JWM's own shell surface, in the order the hub itself lists them.
+// Every entry is one request to the window manager: the bar renders no shell
+// content and keeps no shell state.
+const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
+  { route: "hub", icon: "\u{F0F2A}", label: "Shell Hub" },
+  { route: "applications", icon: "\u{F0D22}", label: "Applications" },
+  { route: "notifications", icon: "\u{F009A}", label: "Notifications" },
+  { route: "clipboard", icon: "\u{F0192}", label: "Clipboard" },
+  { route: "calendar", icon: "\u{F00ED}", label: "Calendar" },
+  { route: "wallpaper", icon: "\u{F02E9}", label: "Wallpaper" },
+];
+
 type ActionRequest =
   | { action: "view_tag_on"; tag_index: number; monitor_id: number }
   | { action: "toggle_layout_selector" }
@@ -59,7 +79,8 @@ type ActionRequest =
   | { action: "toggle_mute" }
   | { action: "adjust_volume"; delta: number }
   | { action: "adjust_brightness"; delta: number }
-  | { action: "screenshot" };
+  | { action: "screenshot" }
+  | { action: "open_shell_hub"; route: ShellRoute };
 
 const dispatchAction = (request: ActionRequest): Promise<void> =>
   invoke("dispatch_action", { request });
@@ -173,6 +194,14 @@ function App() {
       layout_id: layoutId,
       monitor_id: monitor,
     }).catch(console.error);
+
+  // Availability is passed in: the snapshot only exists inside the <Show>
+  // render prop, and the shell lives in the window manager, so a click with no
+  // projection has nowhere to go.
+  const openShell = (route: ShellRoute, available: boolean) => {
+    if (!available) return;
+    dispatchAction({ action: "open_shell_hub", route }).catch(console.error);
+  };
 
   const takeScreenshot = async () => {
     if (isTaking()) return;
@@ -352,6 +381,33 @@ function App() {
               >
                 <span class="nf-icon">{volumeIcon(current().audio_device)}</span>{" "}
                 {current().audio_device ? `${current().audio_device!.volume}%` : "--"}
+              </div>
+
+              <div class="shell-menu">
+                <div
+                  class={`pill shell-pill ${
+                    current().wm_available ? "" : "shell-pill-offline"
+                  }`}
+                  onClick={() => openShell("hub", current().wm_available)}
+                  title="JWM shell"
+                >
+                  <span class="nf-icon">{SHELL_ROUTES[0].icon}</span>
+                </div>
+                <Show when={current().wm_available}>
+                  <div class="shell-dropdown">
+                    <For each={SHELL_ROUTES}>
+                      {(entry) => (
+                        <div
+                          class="shell-route"
+                          onClick={() => openShell(entry.route, current().wm_available)}
+                        >
+                          <span class="nf-icon">{entry.icon}</span>
+                          <span>{entry.label}</span>
+                        </div>
+                      )}
+                    </For>
+                  </div>
+                </Show>
               </div>
 
               <div
