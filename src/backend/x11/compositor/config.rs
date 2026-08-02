@@ -424,8 +424,15 @@ impl<C: CompositorConnection> Compositor<C> {
         self.blur_quality_auto = behavior.blur_quality_auto;
 
         // --- Blur (may need FBO rebuild) ---
+        // The frosted-glass UI theme samples the same chain, so a theme switch
+        // has to be able to bring it up (and a switch away to tear it down when
+        // window blur does not want it).
+        let wants_blur_chain = behavior.blur_enabled
+            || crate::backend::compositor_common::ui_theme::theme().needs_backdrop();
+        let chain_present = !self.blur_fbos.is_empty();
         let blur_changed = self.blur_enabled != behavior.blur_enabled
-            || self.blur_strength != behavior.blur_strength;
+            || self.blur_strength != behavior.blur_strength
+            || wants_blur_chain != chain_present;
         if blur_changed {
             self.clear_window_blur_caches();
             // Tear down old blur FBOs
@@ -444,7 +451,7 @@ impl<C: CompositorConnection> Compositor<C> {
             // Recreate both the filter chain and its full-size capture target.
             // Previously a false -> true hot reload created only blur_fbos, so
             // blur stayed unavailable until the compositor restarted.
-            if self.blur_enabled {
+            if wants_blur_chain {
                 self.blur_fbos = unsafe {
                     Self::create_blur_fbos(
                         &self.gl,
@@ -456,7 +463,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.scene_fbo =
                     unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok() };
             }
-        } else if self.blur_enabled && self.scene_fbo.is_none() {
+        } else if wants_blur_chain && self.scene_fbo.is_none() {
             self.scene_fbo =
                 unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h).ok() };
         }

@@ -439,6 +439,14 @@ where
     hdr_peak_nits: f32,
     tone_mapping_method: i32, // 0=none, 1=Reinhard, 2=ACES
 
+    // --- Frosted-glass surfaces (appearance.ui_theme = "glass") ---
+    glass_program: glow::Program,
+    glass_uniforms: GlassUniforms,
+    /// Blurred copy of the frame, captured once per frame just before the
+    /// self-drawn panels so each of them can sample what it covers. `None`
+    /// under the Material theme, or when no blur chain is available.
+    glass_backdrop: Option<glow::Texture>,
+
     // --- Feature 11: Debug HUD ---
     hud_program: glow::Program,
     hud_uniforms: HudUniforms,

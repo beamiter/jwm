@@ -474,6 +474,138 @@ void main() {
 }
 "#;
 
+/// Frosted-glass surface (mirrors the X11 backend's copy) for JWM's own panels under `appearance.ui_theme =
+/// "glass"` / `"glass-dark"`.
+///
+/// The quad samples `u_backdrop` — a Kawase-blurred copy of the frame captured
+/// just before the overlays are drawn — in screen space, so the sheet shows the
+/// desktop behind it rather than an opaque fill. Everything else here exists to
+/// make that read as a *thick pane of glass* rather than a translucent
+/// rectangle, which is the whole difference between Apple's material and a
+/// plain backdrop blur:
+///
+/// * **Continuous corners.** The mask is a superellipse, not a circular
+///   rounded rect, so curvature eases into the straight edges.
+/// * **Edge refraction.** A beveled band drags the backdrop outward along the
+///   surface normal, squeezing what lies beyond the panel into its rim.
+/// * **Rim hairline + inner glow.** The bevel glows softly and terminates in a
+///   specular line that runs the whole perimeter, brightest on the two edges
+///   aligned with the light.
+/// * **Chroma lift and sheen.** A blur averages color toward gray, so
+///   saturation is pushed back up, and a broad diagonal sheen lights the face.
+///
+/// A little hash grain keeps the wide, smooth gradients from banding on 8-bit
+/// outputs. Output is premultiplied, matching every other overlay program.
+pub const GLASS_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+uniform sampler2D u_backdrop;      // blurred scene, full screen, GL-oriented
+uniform vec2  u_screen_size;       // framebuffer size in pixels
+uniform vec4  u_tint;              // veil over the backdrop: rgb + coverage
+uniform vec2  u_size;              // sheet size in pixels
+uniform float u_radius;            // corner radius in pixels
+uniform float u_corner_exp;        // 2 = circular, ~4 = continuous (squircle)
+uniform float u_saturation;        // chroma multiplier on the backdrop
+uniform float u_luminance;         // brightness multiplier on the backdrop
+uniform float u_bevel_width;       // beveled band inside the edge, pixels
+uniform float u_refraction;        // how far the bevel drags the backdrop, px
+uniform float u_rim_width;         // specular hairline width, pixels
+uniform float u_rim_intensity;     // hairline strength
+uniform vec3  u_rim_tint;          // hairline color
+uniform float u_sheen;             // broad diagonal sheen across the face
+uniform float u_edge_shade;        // bottom contact-shade strength
+uniform float u_grain;             // dither amplitude
+uniform float u_alpha;             // fade envelope (toasts/OSD)
+uniform int   u_scene_linear;
+in vec2 v_uv;
+out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+// Superellipse |x|^n + |y|^n = r^n in the corner quadrant. n == 2 reduces to
+// the circular rounded rect every other program uses; higher n bulges the
+// corner outward into Apple's continuous curvature, where the arc eases into
+// the straight edge instead of meeting it at a visible tangent point.
+float squircle_sdf(vec2 p, vec2 half_size, float r, float n) {
+    vec2 d = abs(p) - half_size + vec2(r);
+    vec2 m = max(d, 0.0);
+    float corner = pow(pow(m.x, n) + pow(m.y, n), 1.0 / n);
+    return corner + min(max(d.x, d.y), 0.0) - r;
+}
+
+void main() {
+    vec2 half_size = u_size * 0.5;
+    float dist = squircle_sdf(v_uv * u_size - half_size, half_size, u_radius,
+                              max(u_corner_exp, 2.0));
+
+    // Derivatives must be taken before any discard: once part of a quad is
+    // killed, the neighbours' values are undefined.
+    vec2 gradient = vec2(dFdx(dist), dFdy(dist));
+    float gradient_len = length(gradient);
+    // Outward surface normal in gl_FragCoord space (y up).
+    vec2 normal = gradient_len > 1e-4 ? gradient / gradient_len : vec2(0.0);
+    // fwidth keeps the antialiased band one screen pixel wide whatever the
+    // sheet's size, exactly like the window and border programs.
+    float aa_w = max(fwidth(dist), 0.5);
+
+    float mask = 1.0 - smoothstep(-aa_w, aa_w, dist);
+    if (mask <= 0.0) {
+        discard;
+    }
+
+    // Bevel: 0 deep inside the sheet, 1 at the very edge. Squaring it keeps
+    // the lensing concentrated in the last few pixels, the way the curvature
+    // of a real chamfer does.
+    float bevel = smoothstep(-max(u_bevel_width, 1.0), 0.0, dist);
+    float lens = bevel * bevel;
+
+    // Refraction: walk the sample point outward along the normal so content
+    // from beyond the edge is squeezed into the bevel. This is what stops the
+    // panel reading as a decal pasted onto the desktop.
+    vec2 sample_px = gl_FragCoord.xy + normal * lens * u_refraction;
+    // The Kawase chain hands its result back vertically mirrored: every
+    // down/up pass renders through a Y-flipping ortho, and the chain always
+    // runs an odd number of them (N down + N-1 up). Flip Y back here so the
+    // sheet samples the pixels it actually covers.
+    vec2 backdrop_uv = vec2(sample_px.x, u_screen_size.y - sample_px.y)
+                     / max(u_screen_size, vec2(1.0));
+    vec3 backdrop = texture(u_backdrop, clamp(backdrop_uv, 0.0, 1.0)).rgb;
+    float luma = dot(backdrop, vec3(0.2126, 0.7152, 0.0722));
+    backdrop = clamp(mix(vec3(luma), backdrop, u_saturation) * u_luminance, 0.0, 1.0);
+
+    vec3 color = mix(backdrop, (u_scene_linear == 1 ? srgb_inverse(u_tint.rgb) : u_tint.rgb), clamp(u_tint.a, 0.0, 1.0));
+
+    // Broad sheen: the face is brightest toward the top-left, as if lit from
+    // over the user's shoulder.
+    color += vec3(u_sheen * (1.0 - clamp((v_uv.x + v_uv.y) * 0.5, 0.0, 1.0)));
+
+    // The bevel is thicker glass, so it carries a soft inner glow.
+    color += u_rim_tint * (lens * u_rim_intensity * 0.30);
+
+    // Rim hairline around the whole perimeter. Taking |dot| with the light
+    // direction lights both the edge facing the light and the one facing away
+    // from it — the two opposed highlights that read unmistakably as a pane.
+    float rim = smoothstep(-max(u_rim_width, 0.5), 0.0, dist);
+    rim *= rim;
+    float facing = abs(dot(normal, normalize(vec2(-0.55, 0.83))));
+    color += u_rim_tint * (rim * u_rim_intensity * (0.45 + 0.55 * facing));
+
+    // Contact shade along the bottom edge keeps the sheet seated.
+    color -= vec3(u_edge_shade * bevel * v_uv.y);
+
+    // Cheap hash dither; ±half a step is enough to break up banding.
+    float noise = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+    color += vec3((noise - 0.5) * u_grain);
+
+    float a = clamp(u_alpha, 0.0, 1.0) * mask;
+    frag_color = vec4(clamp(color, 0.0, 1.0) * a, a);
+}
+"#;
+
 // ---------------------------------------------------------------------------
 // SOTA #2 Phase 2.2: scene-linear encode pass
 // ---------------------------------------------------------------------------

@@ -1,27 +1,20 @@
-//! Backend-neutral Material styling for the debug HUD.
+//! Backend-neutral styling for the debug HUD.
 //!
 //! The HUD used to be a black box of green bitmap text glued to the top-left
 //! corner. It now reads as the same design as the system-UI card and the
-//! toasts: an elevated surface with a drop shadow, a title row with an accent
-//! icon and a state chip, a linear progress meter for the frame rate, and a
-//! two-tone label/value stat list. Everything that is not GL — tones, metrics,
-//! the row model and the layout arithmetic — lives here so the X11 and Wayland
-//! compositors cannot drift apart.
+//! toasts: a surface with a drop shadow, a title row with an accent icon and a
+//! state chip, a linear progress meter for the frame rate, and a two-tone
+//! label/value stat list. Everything that is not GL — the row model and the
+//! layout arithmetic — lives here so the X11 and Wayland compositors cannot
+//! drift apart.
+//!
+//! Tones and metrics come from the active [`UiPalette`], so the same layout
+//! serves both the Material and the frosted-glass theme.
+
+use crate::backend::compositor_common::ui_theme::UiPalette;
 
 /// `(x, y, w, h)` in surface pixels, top-left origin.
 pub(crate) type Rect = (f32, f32, f32, f32);
-
-// --- Material tones, shared with the system-UI card ---
-
-/// Card surface. Slightly translucent so the desktop still shows through,
-/// which is what keeps a debug overlay from feeling like a modal.
-pub(crate) const SURFACE: [f32; 4] = [0.071, 0.082, 0.114, 0.94];
-/// Raised fill for the state chip.
-pub(crate) const SURFACE_CHIP: [f32; 4] = [0.108, 0.122, 0.165, 1.0];
-/// Unfilled part of the frame-rate meter.
-pub(crate) const METER_TRACK: [f32; 4] = [1.0, 1.0, 1.0, 0.10];
-/// Ambient shadow under the card.
-pub(crate) const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 
 /// Meter fill at or above [`METER_GOOD`] of the refresh target.
 pub(crate) const TONE_GOOD: [f32; 4] = [0.31, 0.85, 0.55, 0.95];
@@ -33,25 +26,6 @@ pub(crate) const TONE_BAD: [f32; 4] = [0.95, 0.42, 0.45, 0.95];
 const METER_GOOD: f32 = 0.90;
 const METER_WARN: f32 = 0.60;
 
-// --- Text tones, brightest first ---
-
-pub(crate) const TITLE_INK: [u8; 4] = [214, 228, 255, 255];
-pub(crate) const CHIP_INK: [u8; 4] = [150, 162, 186, 255];
-pub(crate) const LABEL_INK: [u8; 4] = [136, 148, 172, 255];
-pub(crate) const VALUE_INK: [u8; 4] = [232, 238, 250, 255];
-
-// --- Metrics (8dp grid) ---
-
-/// Distance from the screen corner to the card.
-pub(crate) const MARGIN: f32 = 24.0;
-pub(crate) const CARD_RADIUS: f32 = 16.0;
-pub(crate) const CHIP_RADIUS: f32 = 9.0;
-pub(crate) const PAD: f32 = 18.0;
-pub(crate) const GAP: f32 = 12.0;
-/// Space between the label column and the value column.
-pub(crate) const GUTTER: f32 = 18.0;
-pub(crate) const METER_H: f32 = 4.0;
-pub(crate) const SHADOW_SPREAD: f32 = 36.0;
 /// Narrowest card, so short stat lists still look like a panel.
 const MIN_CONTENT_W: f32 = 260.0;
 
@@ -136,12 +110,17 @@ pub(crate) struct HudLayout {
     pub(crate) meter_fill: Rect,
     pub(crate) labels: (f32, f32),
     pub(crate) values: (f32, f32),
+    /// Spread of the card's ambient shadow, kept so [`HudLayout::shadow`] does
+    /// not need the palette a second time.
+    spread: f32,
 }
 
 impl HudLayout {
-    /// Lay the card out at `origin`, sized around the four text textures.
-    /// `meter` is the 0..=1 fill fraction from [`fps_meter`].
+    /// Lay the card out at `origin`, sized around the four text textures, on
+    /// `ui`'s padding grid. `meter` is the 0..=1 fill fraction from
+    /// [`fps_meter`].
     pub(crate) fn new(
+        ui: &UiPalette,
         origin: (f32, f32),
         title: (f32, f32),
         chip: (f32, f32),
@@ -149,6 +128,7 @@ impl HudLayout {
         values: (f32, f32),
         meter: f32,
     ) -> Self {
+        let (pad, gap, gutter, meter_h) = (ui.pad, ui.gap, ui.gutter, ui.meter_h);
         let (x, y) = origin;
         let (chip_pill_w, chip_pill_h) = if chip.0 > 0.0 && chip.1 > 0.0 {
             (chip.0 + 18.0, chip.1 + 8.0)
@@ -158,40 +138,40 @@ impl HudLayout {
         let header_h = title.1.max(chip_pill_h);
         let header_w = title.0
             + if chip_pill_w > 0.0 {
-                chip_pill_w + GAP
+                chip_pill_w + gap
             } else {
                 0.0
             };
         let body_h = labels.1.max(values.1);
         let body_w = labels.0
             + if values.0 > 0.0 {
-                GUTTER + values.0
+                gutter + values.0
             } else {
                 0.0
             };
 
         let content_w = header_w.max(body_w).max(MIN_CONTENT_W);
-        let mut content_h = header_h + GAP + METER_H;
+        let mut content_h = header_h + gap + meter_h;
         if body_h > 0.0 {
-            content_h += GAP + body_h;
+            content_h += gap + body_h;
         }
 
-        let card = (x, y, content_w + 2.0 * PAD, content_h + 2.0 * PAD);
-        let title_pos = (x + PAD, y + PAD + (header_h - title.1) * 0.5);
+        let card = (x, y, content_w + 2.0 * pad, content_h + 2.0 * pad);
+        let title_pos = (x + pad, y + pad + (header_h - title.1) * 0.5);
         let chip_pill = (
-            x + card.2 - PAD - chip_pill_w,
-            y + PAD + (header_h - chip_pill_h) * 0.5,
+            x + card.2 - pad - chip_pill_w,
+            y + pad + (header_h - chip_pill_h) * 0.5,
             chip_pill_w,
             chip_pill_h,
         );
         let chip_text = (chip_pill.0 + 9.0, chip_pill.1 + 4.0);
-        let meter_y = y + PAD + header_h + GAP;
-        let meter_track = (x + PAD, meter_y, content_w, METER_H);
+        let meter_y = y + pad + header_h + gap;
+        let meter_track = (x + pad, meter_y, content_w, meter_h);
         // A rounded fill narrower than its own diameter renders as a sliver;
         // hold the minimum at one dot so a stalled compositor still shows one.
-        let fill_w = (content_w * meter.clamp(0.0, 1.0)).max(METER_H);
-        let meter_fill = (x + PAD, meter_y, fill_w, METER_H);
-        let body_y = meter_y + METER_H + GAP;
+        let fill_w = (content_w * meter.clamp(0.0, 1.0)).max(meter_h);
+        let meter_fill = (x + pad, meter_y, fill_w, meter_h);
+        let body_y = meter_y + meter_h + gap;
 
         Self {
             card,
@@ -200,19 +180,26 @@ impl HudLayout {
             chip_text,
             meter_track,
             meter_fill,
-            labels: (x + PAD, body_y),
-            values: (x + PAD + labels.0 + GUTTER, body_y),
+            labels: (x + pad, body_y),
+            values: (x + pad + labels.0 + gutter, body_y),
+            spread: ui.shadow_spread,
         }
     }
 
-    /// Shadow rect for the card, offset downward like a Material elevation.
+    /// Spread the card's ambient shadow was laid out with.
+    pub(crate) fn shadow_spread(&self) -> f32 {
+        self.spread
+    }
+
+    /// Shadow rect for the card, offset downward so the card reads as lifted.
     pub(crate) fn shadow(&self) -> Rect {
         let (x, y, w, h) = self.card;
+        let spread = self.spread;
         (
-            x - SHADOW_SPREAD,
-            y - SHADOW_SPREAD + 10.0,
-            w + 2.0 * SHADOW_SPREAD,
-            h + 2.0 * SHADOW_SPREAD,
+            x - spread,
+            y - spread + 10.0,
+            w + 2.0 * spread,
+            h + 2.0 * spread,
         )
     }
 }
@@ -252,7 +239,9 @@ mod tests {
 
     #[test]
     fn layout_grows_with_the_stat_list() {
+        let ui = &crate::backend::compositor_common::ui_theme::MATERIAL;
         let short = HudLayout::new(
+            ui,
             (24.0, 24.0),
             (200.0, 22.0),
             (60.0, 16.0),
@@ -261,6 +250,7 @@ mod tests {
             1.0,
         );
         let tall = HudLayout::new(
+            ui,
             (24.0, 24.0),
             (200.0, 22.0),
             (60.0, 16.0),
@@ -270,9 +260,38 @@ mod tests {
         );
         assert!(tall.card.3 > short.card.3);
         // The value column sits right of the label column, past the gutter.
-        assert!((tall.values.0 - tall.labels.0 - (120.0 + GUTTER)).abs() < 1e-6);
+        assert!((tall.values.0 - tall.labels.0 - (120.0 + ui.gutter)).abs() < 1e-6);
         // The chip is right-aligned inside the card padding.
         let chip_right = tall.chip_pill.0 + tall.chip_pill.2;
-        assert!((chip_right - (tall.card.0 + tall.card.2 - PAD)).abs() < 1e-6);
+        assert!((chip_right - (tall.card.0 + tall.card.2 - ui.pad)).abs() < 1e-6);
+    }
+
+    /// The glass theme is roomier, so the same content must produce a larger
+    /// card — proof the layout reads the palette instead of baked constants.
+    #[test]
+    fn glass_lays_the_same_content_out_more_generously() {
+        use crate::backend::compositor_common::ui_theme::{GLASS, MATERIAL};
+        let sizes = ((200.0, 22.0), (60.0, 16.0), (120.0, 180.0), (90.0, 180.0));
+        let material = HudLayout::new(
+            &MATERIAL,
+            (24.0, 24.0),
+            sizes.0,
+            sizes.1,
+            sizes.2,
+            sizes.3,
+            1.0,
+        );
+        let glass = HudLayout::new(
+            &GLASS,
+            (24.0, 24.0),
+            sizes.0,
+            sizes.1,
+            sizes.2,
+            sizes.3,
+            1.0,
+        );
+        assert!(glass.card.2 > material.card.2);
+        assert!(glass.card.3 > material.card.3);
+        assert!(glass.shadow_spread() > material.shadow_spread());
     }
 }

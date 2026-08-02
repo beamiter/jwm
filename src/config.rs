@@ -177,6 +177,22 @@ pub struct AppearanceConfig {
     /// 0 = defer to the `XCURSOR_SIZE` environment variable and then to 24.
     #[serde(default)]
     pub cursor_size: u32,
+    /// Design language for the surfaces JWM draws itself — the debug HUD, the
+    /// modal system-UI card, toasts and the volume/brightness OSD.
+    ///
+    /// * `"material"` (default) — opaque elevated cards with a drop shadow.
+    /// * `"glass"` — Apple's light frosted glass: each card samples a blurred
+    ///   copy of the desktop behind it through a squircle mask, refracts it at
+    ///   the bevel, and lifts it under a white veil with a rim hairline.
+    /// * `"glass-dark"` — the same optics under a graphite veil, for a dark UI.
+    ///
+    /// The compositor keeps its blur chain alive for the glass themes even
+    /// when `blur_enabled` is off; without a usable chain the cards fall back
+    /// to flat translucent fills.
+    ///
+    /// Only affects JWM's own overlays; client windows are unchanged.
+    #[serde(default = "default_ui_theme")]
+    pub ui_theme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -946,6 +962,11 @@ fn default_active_opacity() -> f32 {
 fn default_blur_strength() -> u32 {
     3
 }
+/// Material stays the default so an untouched config keeps the look it had
+/// before `appearance.ui_theme` existed.
+fn default_ui_theme() -> String {
+    "material".to_string()
+}
 fn default_fade_step() -> f32 {
     0.03
 }
@@ -1380,6 +1401,7 @@ impl Default for Config {
                     status_bar_height: 42,
                     cursor_theme: String::new(),
                     cursor_size: 0,
+                    ui_theme: default_ui_theme(),
                 },
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
@@ -2282,6 +2304,11 @@ impl Config {
         self.inner.appearance.cursor_size
     }
 
+    /// Design language for JWM's own overlays: `"material"` or `"glass"`.
+    pub fn ui_theme(&self) -> &str {
+        &self.inner.appearance.ui_theme
+    }
+
     /// Resolve the effective cursor theme/size a rendering backend should use.
     ///
     /// Precedence: the `[appearance]` config values win when set; otherwise the
@@ -3078,6 +3105,16 @@ impl Config {
                     return Err(format!("appearance.cursor_size={v} out of [0, 512]"));
                 }
                 self.inner.appearance.cursor_size = v;
+            }
+            "appearance.ui_theme" => {
+                let v = as_string()?;
+                let normalized = v.trim().to_ascii_lowercase();
+                if !matches!(normalized.as_str(), "material" | "glass" | "glass-dark") {
+                    return Err(format!(
+                        "appearance.ui_theme={v} is not one of: material, glass, glass-dark"
+                    ));
+                }
+                self.inner.appearance.ui_theme = normalized;
             }
             "layout.m_fact" => {
                 let v = as_f32()?;
@@ -3971,6 +4008,36 @@ mod tests {
         let (theme, size) = cfg.resolved_cursor();
         assert_eq!(theme, "Bibata-Modern-Ice");
         assert_eq!(size, 48);
+    }
+
+    #[test]
+    fn ui_theme_defaults_to_material_and_only_accepts_known_themes() {
+        let mut cfg = Config::default();
+        // An untouched config keeps the look it had before the key existed.
+        assert_eq!(cfg.ui_theme(), "material");
+
+        cfg.set_value("appearance.ui_theme", &serde_json::json!("Glass"))
+            .expect("a known theme is accepted, case-insensitively");
+        assert_eq!(cfg.ui_theme(), "glass");
+
+        cfg.set_value("appearance.ui_theme", &serde_json::json!("neumorphic"))
+            .expect_err("an unknown theme is rejected instead of silently applied");
+        // The rejected write leaves the previous theme in place.
+        assert_eq!(cfg.ui_theme(), "glass");
+    }
+
+    #[test]
+    fn config_files_without_a_ui_theme_key_still_parse() {
+        // Configs written before the key existed must still load.
+        let cfg = Config::default();
+        let serialized = toml::to_string(&cfg.inner).unwrap();
+        let stripped = serialized
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("ui_theme"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
+        assert_eq!(parsed.appearance.ui_theme, "material");
     }
 
     #[test]

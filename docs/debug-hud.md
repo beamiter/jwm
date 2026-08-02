@@ -29,13 +29,13 @@ machine's, which is what the status bar's resource rows show. See
 
 ## Styling
 
-The card uses the same material tones, radii and elevation as the system-UI
-launcher, the notification toasts and the OSD, and its text is rasterized with
-the configured `appearance.system_ui_font` rather than the built-in bitmap
-face. Everything that is not GL — tones, metrics, the row model and the layout
-arithmetic — lives in `src/backend/compositor_common/debug_hud.rs`, shared by
-both compositors; each backend only rasterizes the four text sections and
-issues the draws.
+The card uses the same tones, radii and elevation as the system-UI launcher,
+the notification toasts and the OSD — all four follow `appearance.ui_theme`,
+see [ui-theme.md](ui-theme.md) — and its text is rasterized with the configured
+`appearance.system_ui_font` rather than the built-in bitmap face. Everything
+that is not GL — the row model and the layout arithmetic — lives in
+`src/backend/compositor_common/debug_hud.rs`, shared by both compositors; each
+backend only rasterizes the four text sections and issues the draws.
 
 A proportional UI font makes the profiler's `avg / min / max` triples ragged
 because nothing pads them into columns. The default

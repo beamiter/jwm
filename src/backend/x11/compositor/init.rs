@@ -325,6 +325,39 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
+        // Compile the frosted-glass surface shader used by the self-drawn
+        // panels under `appearance.ui_theme = "glass"`. Compiled unconditionally
+        // so switching themes at runtime never has to touch the GL context.
+        let glass_program = shader_cache.get_or_compile(
+            &gl,
+            "glass_surface",
+            shaders::VERTEX_SHADER,
+            shaders::GLASS_FRAGMENT_SHADER,
+        )?;
+        let glass_uniforms = unsafe {
+            GlassUniforms {
+                projection: gl.get_uniform_location(glass_program, "u_projection"),
+                rect: gl.get_uniform_location(glass_program, "u_rect"),
+                backdrop: gl.get_uniform_location(glass_program, "u_backdrop"),
+                screen_size: gl.get_uniform_location(glass_program, "u_screen_size"),
+                tint: gl.get_uniform_location(glass_program, "u_tint"),
+                size: gl.get_uniform_location(glass_program, "u_size"),
+                radius: gl.get_uniform_location(glass_program, "u_radius"),
+                corner_exp: gl.get_uniform_location(glass_program, "u_corner_exp"),
+                saturation: gl.get_uniform_location(glass_program, "u_saturation"),
+                luminance: gl.get_uniform_location(glass_program, "u_luminance"),
+                bevel_width: gl.get_uniform_location(glass_program, "u_bevel_width"),
+                refraction: gl.get_uniform_location(glass_program, "u_refraction"),
+                rim_width: gl.get_uniform_location(glass_program, "u_rim_width"),
+                rim_intensity: gl.get_uniform_location(glass_program, "u_rim_intensity"),
+                rim_tint: gl.get_uniform_location(glass_program, "u_rim_tint"),
+                sheen: gl.get_uniform_location(glass_program, "u_sheen"),
+                edge_shade: gl.get_uniform_location(glass_program, "u_edge_shade"),
+                grain: gl.get_uniform_location(glass_program, "u_grain"),
+                alpha: gl.get_uniform_location(glass_program, "u_alpha"),
+            }
+        };
+
         // Compile HUD shader (feature 11)
         let hud_program = shader_cache.get_or_compile(
             &gl,
@@ -681,15 +714,19 @@ impl<C: CompositorConnection> Compositor<C> {
         let corner_radius_rules = parse_corner_radius_rules(&behavior.corner_radius_rules);
         let scale_rules = parse_scale_rules(&behavior.scale_rules);
 
-        // Create blur FBOs if blur is enabled
-        let blur_fbos = if behavior.blur_enabled {
+        // Blur FBOs serve two consumers: per-window frost, and the frosted-glass
+        // UI theme, whose panels sample a blurred backdrop. The chain therefore
+        // has to exist when either one asks for it.
+        let ui_theme = crate::backend::compositor_common::ui_theme::theme();
+        let wants_blur_chain = behavior.blur_enabled || ui_theme.needs_backdrop();
+        let blur_fbos = if wants_blur_chain {
             unsafe { Self::create_blur_fbos(&gl, screen_w, screen_h, behavior.blur_strength) }
         } else {
             Vec::new()
         };
 
         // Create scene capture FBO for blur source
-        let scene_fbo = if behavior.blur_enabled {
+        let scene_fbo = if wants_blur_chain {
             unsafe { Self::create_scene_fbo(&gl, screen_w, screen_h).ok() }
         } else {
             None
@@ -919,6 +956,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 _ => 0, // "none" or unknown
             },
             // Feature 11: debug HUD
+            glass_program,
+            glass_uniforms,
+            glass_backdrop: None,
             hud_program,
             hud_uniforms,
             hud_text_program,

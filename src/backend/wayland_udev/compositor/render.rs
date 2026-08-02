@@ -3,6 +3,7 @@
 use super::*;
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
+use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
 
@@ -675,6 +676,9 @@ impl WaylandCompositor {
         shader_encode_tf: i32,
         shader_encode_gamma: f32,
     ) -> bool {
+        // Last frame's frosted-glass backdrop describes a framebuffer that is
+        // about to be overwritten; the first panel that needs one recaptures.
+        self.glass_backdrop = None;
         // A calm desktop must be cheap even when the backend asks us to check
         // for a frame.  Do this before profiler/fence/hot-reload bookkeeping:
         // those are useful only when a frame can actually be produced.  The
@@ -2575,8 +2579,8 @@ impl WaylandCompositor {
     }
 
     /// Rasterize the four HUD text sections — title, state chip, stat labels,
-    /// stat values — each in its own Material tone. Skips the upload entirely
-    /// when nothing in the HUD changed since the previous frame.
+    /// stat values — each in its own tone. Skips the upload entirely when
+    /// nothing in the HUD changed since the previous frame.
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn update_hud_textures(
         &mut self,
@@ -2588,17 +2592,18 @@ impl WaylandCompositor {
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let ui = ui_theme::palette();
         let (labels, values) = rows.columns();
-        let cache_key = format!("{description}\0{size}\0{title}\0{chip}\0{labels}\0{values}");
+        // The theme is part of the key: glass inks are brighter, so a live
+        // theme switch has to re-rasterize even when the text is unchanged.
+        let cache_key = format!(
+            "{description}\0{size}\0{:?}\0{title}\0{chip}\0{labels}\0{values}",
+            ui.title_ink
+        );
         if cache_key == self.hud_text_cache && self.hud_textures.iter().any(Option::is_some) {
             return;
         }
-        const COLORS: [[u8; 4]; 4] = [
-            hud::TITLE_INK,
-            hud::CHIP_INK,
-            hud::LABEL_INK,
-            hud::VALUE_INK,
-        ];
+        let colors: [[u8; 4]; 4] = [ui.title_ink, ui.chip_ink, ui.label_ink, ui.value_ink];
         let texts = [title, chip, labels.as_str(), values.as_str()];
         for (slot, text) in texts.into_iter().enumerate() {
             if let Some((old, _, _)) = self.hud_textures[slot].take() {
@@ -2611,7 +2616,7 @@ impl WaylandCompositor {
                 text,
                 description,
                 size,
-                COLORS[slot],
+                colors[slot],
             );
             if w == 0 || h == 0 {
                 continue;
@@ -2648,8 +2653,8 @@ impl WaylandCompositor {
         self.hud_text_cache = cache_key;
     }
 
-    /// Draw the Material HUD card: shadow, surface, state chip, frame-rate
-    /// meter, and the two-tone stat columns.
+    /// Draw the HUD card: shadow, surface, state chip, frame-rate meter, and
+    /// the two-tone stat columns, in the active theme's tones.
     #[allow(unsafe_op_in_unsafe_fn)]
     unsafe fn render_debug_hud_card(
         &mut self,
@@ -2658,13 +2663,16 @@ impl WaylandCompositor {
         meter: f32,
         tone: [f32; 4],
     ) {
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(gl, ui, projection);
         let dims = |slot: usize| -> (f32, f32) {
             self.hud_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))
                 .unwrap_or((0.0, 0.0))
         };
         let layout = hud::HudLayout::new(
-            (hud::MARGIN, hud::MARGIN),
+            ui,
+            (ui.margin, ui.margin),
             dims(0),
             dims(1),
             dims(2),
@@ -2674,72 +2682,94 @@ impl WaylandCompositor {
 
         gl.BindVertexArray(self.quad_vao);
 
-        // Ambient shadow, the Material elevation cue.
+        // Ambient shadow: an elevation cue under Material, a diffuse occlusion
+        // pool under glass.
         gl.UseProgram(self.shadow_program);
         self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
         let (sx, sy, sw, sh) = layout.shadow();
-        gl.Uniform1f(self.shadow_uniforms.spread, hud::SHADOW_SPREAD);
+        gl.Uniform1f(self.shadow_uniforms.spread, layout.shadow_spread());
         gl.Uniform4f(
             self.shadow_uniforms.shadow_color,
-            hud::SHADOW[0],
-            hud::SHADOW[1],
-            hud::SHADOW[2],
-            hud::SHADOW[3],
+            ui.shadow[0],
+            ui.shadow[1],
+            ui.shadow[2],
+            ui.shadow[3],
         );
-        gl.Uniform1f(self.shadow_uniforms.radius, hud::CARD_RADIUS);
+        gl.Uniform1f(self.shadow_uniforms.radius, ui.card_radius);
         gl.Uniform2f(self.shadow_uniforms.size, layout.card.2, layout.card.3);
         self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-        // Surface, chip and meter share the border program's rounded-fill
-        // mode. The overlay draws onto the display-encoded output, so
-        // scene-linear conversion stays off.
-        gl.UseProgram(self.border_program);
-        self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-        gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+        // Card surface, then chip and meter on the border program's
+        // rounded-fill mode. The overlay draws onto the display-encoded
+        // output, so scene-linear conversion stays off.
         let (cx, cy, cw, ch) = layout.card;
-        self.sysui_fill_rounded(gl, cx, cy, cw, ch, hud::CARD_RADIUS, hud::SURFACE);
+        self.ui_fill_surface(
+            gl,
+            projection,
+            ui,
+            cx,
+            cy,
+            cw,
+            ch,
+            ui.card_radius,
+            ui.card,
+            1.0,
+        );
         if layout.chip_pill.2 > 0.0 {
             let (px, py, pw, ph) = layout.chip_pill;
-            self.sysui_fill_rounded(gl, px, py, pw, ph, hud::CHIP_RADIUS, hud::SURFACE_CHIP);
+            self.sysui_fill_rounded(gl, px, py, pw, ph, ui.chip_radius, ui.chip);
         }
         let (tx, ty, tw, th) = layout.meter_track;
-        self.sysui_fill_rounded(gl, tx, ty, tw, th, th * 0.5, hud::METER_TRACK);
+        self.sysui_fill_rounded(gl, tx, ty, tw, th, th * 0.5, ui.track);
         let (fx, fy, fw, fh) = layout.meter_fill;
         self.sysui_fill_rounded(gl, fx, fy, fw, fh, fh * 0.5, tone);
 
-        // Hairline accent ring, matching the focused window's gradient.
-        gl.UseProgram(self.gradient_border_program);
-        self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
-        gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
-        let ring = 1.0;
-        let [ar, ag, ab, aa] = self.border_gradient_color_a;
-        let [br, bg, bb, ba] = self.border_gradient_color_b;
-        gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
-        gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * 0.55);
-        gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * 0.55);
-        gl.Uniform1f(
-            self.gradient_border_uniforms.gradient_angle,
-            self.border_gradient_angle.to_radians(),
-        );
-        gl.Uniform1f(
-            self.gradient_border_uniforms.radius,
-            hud::CARD_RADIUS + ring,
-        );
-        gl.Uniform2f(
-            self.gradient_border_uniforms.size,
-            cw + 2.0 * ring,
-            ch + 2.0 * ring,
-        );
-        self.set_rect_uniform(
-            gl,
-            self.gradient_border_uniforms.rect,
-            cx - ring,
-            cy - ring,
-            cw + 2.0 * ring,
-            ch + 2.0 * ring,
-        );
-        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        // The ring is a circular rounded rect, so a theme whose surfaces are
+        // squircles asks for none of it and relies on the shader's own rim.
+        if ui.ring_alpha > 0.0 {
+            // Hairline accent ring, matching the focused window's gradient.
+            gl.UseProgram(self.gradient_border_program);
+            self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
+            gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+            let ring = ui.ring_width;
+            let [ar, ag, ab, aa] = self.border_gradient_color_a;
+            let [br, bg, bb, ba] = self.border_gradient_color_b;
+            gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
+            gl.Uniform4f(
+                self.gradient_border_uniforms.color_a,
+                ar,
+                ag,
+                ab,
+                aa * ui.ring_alpha,
+            );
+            gl.Uniform4f(
+                self.gradient_border_uniforms.color_b,
+                br,
+                bg,
+                bb,
+                ba * ui.ring_alpha,
+            );
+            gl.Uniform1f(
+                self.gradient_border_uniforms.gradient_angle,
+                self.border_gradient_angle.to_radians(),
+            );
+            gl.Uniform1f(self.gradient_border_uniforms.radius, ui.card_radius + ring);
+            gl.Uniform2f(
+                self.gradient_border_uniforms.size,
+                cw + 2.0 * ring,
+                ch + 2.0 * ring,
+            );
+            self.set_rect_uniform(
+                gl,
+                self.gradient_border_uniforms.rect,
+                cx - ring,
+                cy - ring,
+                cw + 2.0 * ring,
+                ch + 2.0 * ring,
+            );
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
 
         // Text sections.
         let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
@@ -2777,10 +2807,12 @@ impl WaylandCompositor {
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let ui = ui_theme::palette();
         let query_text = overlay.query.as_ref().map(|q| format!("\u{f002}  {q}_"));
         let items_text = overlay.items.join("\n");
         let cache_key = format!(
-            "{description}\0{size}\0{}\0{}\0{}\0{}",
+            "{description}\0{size}\0{:?}\0{}\0{}\0{}\0{}",
+            ui.panel_title_ink,
             overlay.title,
             query_text.as_deref().unwrap_or("\u{1}"),
             items_text,
@@ -2789,12 +2821,8 @@ impl WaylandCompositor {
         if cache_key == self.sysui_cache && self.sysui_textures.iter().any(Option::is_some) {
             return;
         }
-        const COLORS: [[u8; 4]; 4] = [
-            [205, 224, 255, 255], // title: bright cool white
-            [238, 242, 252, 255], // query: primary
-            [216, 224, 240, 255], // items: body
-            [140, 150, 172, 255], // hint: dim
-        ];
+        // Title, query, list body, footer hint — brightest first.
+        let colors: [[u8; 4]; 4] = [ui.panel_title_ink, ui.query_ink, ui.item_ink, ui.hint_ink];
         let texts: [Option<&str>; 4] = [
             (!overlay.title.is_empty()).then_some(overlay.title.as_str()),
             query_text.as_deref(),
@@ -2810,7 +2838,7 @@ impl WaylandCompositor {
                 text,
                 description,
                 size,
-                COLORS[slot],
+                colors[slot],
             );
             if w == 0 || h == 0 {
                 continue;
@@ -2840,6 +2868,136 @@ impl WaylandCompositor {
 
     /// Filled rounded rectangle through the border program (a border wider
     /// than the rect fills it). The program and projection must be bound.
+    /// Capture a blurred copy of the frame for the frosted-glass panels to
+    /// sample.
+    ///
+    /// Reads `output_fbo`, i.e. the composited scene as it will be scanned out,
+    /// so the glass shows the desktop the user sees. No blur chain (a driver
+    /// that refused the FBOs) leaves the backdrop unset and the panels fall
+    /// back to flat translucent fills.
+    fn capture_glass_backdrop(&mut self, gl: &ffi::Gles2, palette: &UiPalette, proj: &[f32; 16]) {
+        self.glass_backdrop = None;
+        if palette.glass.is_none() || self.blur_fbos.is_empty() || self.scene_fbo == 0 {
+            return;
+        }
+        self.blit_fbo(
+            gl,
+            self.output_fbo,
+            self.scene_fbo,
+            self.screen_w,
+            self.screen_h,
+        );
+        self.run_blur_passes(gl, self.scene_texture, proj, BlurQuality::Full);
+        self.glass_backdrop = Some(self.blur_fbos[0].texture);
+        // run_blur_passes leaves its last level bound; overlays keep drawing
+        // into the output.
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+    }
+
+    /// Capture the backdrop unless this frame already has one. Panels drawn
+    /// back to back share a single capture: re-blurring the whole screen per
+    /// card would cost more than the parallax it buys, and the only thing the
+    /// later cards miss is the earlier cards themselves.
+    fn ensure_glass_backdrop(&mut self, gl: &ffi::Gles2, palette: &UiPalette, proj: &[f32; 16]) {
+        if self.glass_backdrop.is_none() {
+            self.capture_glass_backdrop(gl, palette, proj);
+        }
+    }
+
+    /// Draw one frosted-glass surface. Binds its own program, so callers that
+    /// follow up with flat fills must re-bind the border program afterwards.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn glass_fill_rounded(
+        &self,
+        gl: &ffi::Gles2,
+        proj: &[f32; 16],
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        tint: [f32; 4],
+        alpha: f32,
+        params: &crate::backend::compositor_common::ui_theme::GlassParams,
+    ) {
+        let Some(backdrop) = self.glass_backdrop else {
+            return;
+        };
+        unsafe {
+            let u = &self.glass_uniforms;
+            gl.UseProgram(self.glass_program);
+            self.set_projection_uniform(gl, u.projection, proj);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, backdrop);
+            gl.Uniform1i(u.backdrop, 0);
+            gl.Uniform2f(u.screen_size, self.screen_w as f32, self.screen_h as f32);
+            gl.Uniform4f(u.tint, tint[0], tint[1], tint[2], tint[3]);
+            gl.Uniform2f(u.size, w, h);
+            gl.Uniform1f(u.radius, r);
+            gl.Uniform1f(u.corner_exp, params.corner_exponent);
+            gl.Uniform1f(u.saturation, params.saturation);
+            gl.Uniform1f(u.luminance, params.luminance);
+            gl.Uniform1f(u.bevel_width, params.bevel_width);
+            gl.Uniform1f(u.refraction, params.refraction);
+            gl.Uniform1f(u.rim_width, params.rim_width);
+            gl.Uniform1f(u.rim_intensity, params.rim_intensity);
+            gl.Uniform3f(
+                u.rim_tint,
+                params.rim_tint[0],
+                params.rim_tint[1],
+                params.rim_tint[2],
+            );
+            gl.Uniform1f(u.sheen, params.sheen);
+            gl.Uniform1f(u.edge_shade, params.edge_shade);
+            gl.Uniform1f(u.grain, params.grain);
+            gl.Uniform1f(u.alpha, alpha.clamp(0.0, 1.0));
+            // Overlays draw onto the display-encoded output, so scene-linear
+            // conversion stays off — matching the border programs.
+            gl.Uniform1i(u.scene_linear, 0);
+            self.set_rect_uniform(gl, u.rect, x, y, w, h);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Card base fill for a self-drawn panel: frosted glass when the theme asks
+    /// for it and a backdrop exists, otherwise the flat rounded fill.
+    ///
+    /// Leaves the border program bound with `proj` set, so the caller can keep
+    /// filling chips, tracks and pills without re-binding.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn ui_fill_surface(
+        &self,
+        gl: &ffi::Gles2,
+        proj: &[f32; 16],
+        palette: &UiPalette,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        surface: [f32; 4],
+        alpha: f32,
+    ) {
+        unsafe {
+            let drew_glass = match palette.glass {
+                Some(params) if self.glass_backdrop.is_some() => {
+                    self.glass_fill_rounded(gl, proj, x, y, w, h, r, surface, alpha, &params);
+                    true
+                }
+                _ => false,
+            };
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, proj);
+            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
+            if !drew_glass {
+                self.sysui_fill_rounded(gl, x, y, w, h, r, UiPalette::faded(surface, alpha));
+            }
+        }
+    }
+
     unsafe fn sysui_fill_rounded(
         &self,
         gl: &ffi::Gles2,
@@ -2884,10 +3042,11 @@ impl WaylandCompositor {
         let (items_w, items_h) = dims(2);
         let (hint_w, hint_h) = dims(3);
 
+        let ui = ui_theme::palette();
         let pad = 30.0;
         let gap = 16.0;
         let qpad = 12.0;
-        let radius = 18.0;
+        let radius = ui.panel_radius;
         let screen_w = self.screen_w as f32;
         let screen_h = self.screen_h as f32;
 
@@ -2919,11 +3078,24 @@ impl WaylandCompositor {
         };
 
         let accent = self.border_gradient_color_a;
+        // The lock card hides the desktop by design, and the clear below makes
+        // the captured backdrop describe nothing that is still on screen — so
+        // it draws solid even under the glass theme.
+        let mut panel_fill = ui.panel;
+        if overlay.locked {
+            self.glass_backdrop = None;
+            panel_fill[3] = 1.0;
+        }
         unsafe {
             gl.BindVertexArray(self.quad_vao);
 
             if overlay.locked {
-                gl.ClearColor(0.016, 0.020, 0.032, 1.0);
+                gl.ClearColor(
+                    ui.lock_backdrop[0],
+                    ui.lock_backdrop[1],
+                    ui.lock_backdrop[2],
+                    ui.lock_backdrop[3],
+                );
                 gl.Clear(ffi::COLOR_BUFFER_BIT);
             } else {
                 // Scrim: dim the desktop behind the panel.
@@ -2933,18 +3105,34 @@ impl WaylandCompositor {
                 let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
                 gl.UseProgram(self.hud_program);
                 gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
-                gl.Uniform4f(bg, 0.012, 0.016, 0.028, 0.62);
+                gl.Uniform4f(bg, ui.scrim[0], ui.scrim[1], ui.scrim[2], ui.scrim[3]);
                 gl.Uniform2f(size, screen_w, screen_h);
                 gl.Uniform4f(rect, 0.0, 0.0, screen_w, screen_h);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             }
+        }
 
+        // The scrim is part of what the panel covers, so the backdrop is taken
+        // after it — otherwise the glass would show an undimmed desktop inside
+        // a dimmed one. Forced rather than lazy for the same reason.
+        if !overlay.locked {
+            self.capture_glass_backdrop(gl, ui, projection);
+        }
+
+        unsafe {
             // Drop shadow behind the card.
+            gl.BindVertexArray(self.quad_vao);
             gl.UseProgram(self.shadow_program);
             self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
-            let spread = 48.0;
+            let spread = ui.spread(48.0);
             gl.Uniform1f(self.shadow_uniforms.spread, spread);
-            gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.6);
+            gl.Uniform4f(
+                self.shadow_uniforms.shadow_color,
+                ui.shadow[0],
+                ui.shadow[1],
+                ui.shadow[2],
+                ui.shadow[3],
+            );
             gl.Uniform1f(self.shadow_uniforms.radius, radius);
             gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
             self.set_rect_uniform(
@@ -2957,20 +3145,11 @@ impl WaylandCompositor {
             );
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            // Card, query-field bar, and selection pill share the border
-            // program's rounded-fill mode. The overlay draws onto the
+            // Card surface, then the query-field bar and selection pill on the
+            // border program's rounded-fill mode. The overlay draws onto the
             // display-encoded output, so scene-linear conversion stays off.
-            gl.UseProgram(self.border_program);
-            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
-            self.sysui_fill_rounded(
-                gl,
-                x,
-                y,
-                panel_w,
-                panel_h,
-                radius,
-                [0.071, 0.082, 0.114, 0.985],
+            self.ui_fill_surface(
+                gl, projection, ui, x, y, panel_w, panel_h, radius, panel_fill, 1.0,
             );
 
             let mut cy = y + pad + title_h;
@@ -2984,7 +3163,7 @@ impl WaylandCompositor {
                     panel_w - 2.0 * pad,
                     query_bar_h,
                     10.0,
-                    [0.108, 0.122, 0.165, 1.0],
+                    ui.field,
                 );
                 query_text_pos = Some((x + pad + qpad, cy + 8.0));
                 cy += query_bar_h;
@@ -3003,7 +3182,7 @@ impl WaylandCompositor {
                             panel_w - 2.0 * pad + 16.0,
                             line_h + 4.0,
                             8.0,
-                            [accent[0], accent[1], accent[2], 0.26],
+                            [accent[0], accent[1], accent[2], ui.selection_alpha],
                         );
                     }
                 }
@@ -3015,36 +3194,56 @@ impl WaylandCompositor {
                 hint_pos = Some((x + pad, cy));
             }
 
-            // Gradient accent ring around the card, matching the focused
-            // window's border gradient.
-            gl.UseProgram(self.gradient_border_program);
-            self.set_projection_uniform(gl, self.gradient_border_uniforms.projection, projection);
-            gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
-            let ring = 1.5;
-            let [ar, ag, ab, aa] = self.border_gradient_color_a;
-            let [br, bg, bb, ba] = self.border_gradient_color_b;
-            gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
-            gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * 0.95);
-            gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * 0.95);
-            gl.Uniform1f(
-                self.gradient_border_uniforms.gradient_angle,
-                self.border_gradient_angle.to_radians(),
-            );
-            gl.Uniform1f(self.gradient_border_uniforms.radius, radius + ring);
-            gl.Uniform2f(
-                self.gradient_border_uniforms.size,
-                panel_w + 2.0 * ring,
-                panel_h + 2.0 * ring,
-            );
-            self.set_rect_uniform(
-                gl,
-                self.gradient_border_uniforms.rect,
-                x - ring,
-                y - ring,
-                panel_w + 2.0 * ring,
-                panel_h + 2.0 * ring,
-            );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            // The ring is a circular rounded rect, so a theme whose surfaces are
+            // squircles asks for none of it and relies on the shader's own rim.
+            if ui.panel_ring_alpha > 0.0 {
+                // Gradient accent ring around the card, matching the focused
+                // window's border gradient.
+                gl.UseProgram(self.gradient_border_program);
+                self.set_projection_uniform(
+                    gl,
+                    self.gradient_border_uniforms.projection,
+                    projection,
+                );
+                gl.Uniform1i(self.gradient_border_uniforms.scene_linear, 0);
+                let ring = 1.5 * ui.ring_width;
+                let [ar, ag, ab, aa] = self.border_gradient_color_a;
+                let [br, bg, bb, ba] = self.border_gradient_color_b;
+                gl.Uniform1f(self.gradient_border_uniforms.border_width, ring);
+                gl.Uniform4f(
+                    self.gradient_border_uniforms.color_a,
+                    ar,
+                    ag,
+                    ab,
+                    aa * ui.panel_ring_alpha,
+                );
+                gl.Uniform4f(
+                    self.gradient_border_uniforms.color_b,
+                    br,
+                    bg,
+                    bb,
+                    ba * ui.panel_ring_alpha,
+                );
+                gl.Uniform1f(
+                    self.gradient_border_uniforms.gradient_angle,
+                    self.border_gradient_angle.to_radians(),
+                );
+                gl.Uniform1f(self.gradient_border_uniforms.radius, radius + ring);
+                gl.Uniform2f(
+                    self.gradient_border_uniforms.size,
+                    panel_w + 2.0 * ring,
+                    panel_h + 2.0 * ring,
+                );
+                self.set_rect_uniform(
+                    gl,
+                    self.gradient_border_uniforms.rect,
+                    x - ring,
+                    y - ring,
+                    panel_w + 2.0 * ring,
+                    panel_h + 2.0 * ring,
+                );
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
 
             // Text sections.
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
@@ -3083,10 +3282,9 @@ impl WaylandCompositor {
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
-        const COLORS: [[u8; 4]; 2] = [
-            [232, 238, 250, 255], // title
-            [164, 174, 196, 255], // body
-        ];
+        let ui = ui_theme::palette();
+        // Title in the brightest ink, body one step down.
+        let colors: [[u8; 4]; 2] = [ui.value_ink, ui.label_ink];
         let mut slots = [None, None];
         for (slot, text) in [title, body].into_iter().enumerate() {
             if text.is_empty() {
@@ -3096,7 +3294,7 @@ impl WaylandCompositor {
                 text,
                 description,
                 size,
-                COLORS[slot],
+                colors[slot],
             );
             if w == 0 || h == 0 {
                 continue;
@@ -3164,10 +3362,12 @@ impl WaylandCompositor {
             unsafe { self.update_toast_textures(gl, *id, title, body) };
         }
 
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(gl, ui, projection);
         let pad = 18.0;
         let pad_left = 30.0;
         let gap = 12.0;
-        let radius = 14.0;
+        let radius = ui.toast_radius;
         let stripe_w = 3.0;
         let margin = 28.0;
         let screen_w = self.screen_w as f32;
@@ -3205,9 +3405,15 @@ impl WaylandCompositor {
 
                 gl.UseProgram(self.shadow_program);
                 self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
-                let spread = 32.0;
+                let spread = ui.spread(32.0);
                 gl.Uniform1f(self.shadow_uniforms.spread, spread);
-                gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.45 * a);
+                gl.Uniform4f(
+                    self.shadow_uniforms.shadow_color,
+                    ui.shadow[0],
+                    ui.shadow[1],
+                    ui.shadow[2],
+                    ui.shadow[3] * 0.82 * a,
+                );
                 gl.Uniform1f(self.shadow_uniforms.radius, radius);
                 gl.Uniform2f(self.shadow_uniforms.size, card_w, card_h);
                 self.set_rect_uniform(
@@ -3220,17 +3426,8 @@ impl WaylandCompositor {
                 );
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-                gl.UseProgram(self.border_program);
-                self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-                gl.Uniform1i(self.border_uniforms.scene_linear, 0);
-                self.sysui_fill_rounded(
-                    gl,
-                    x,
-                    y,
-                    card_w,
-                    card_h,
-                    radius,
-                    [0.075, 0.086, 0.118, 0.97 * a],
+                self.ui_fill_surface(
+                    gl, projection, ui, x, y, card_w, card_h, radius, ui.toast, a,
                 );
                 self.sysui_fill_rounded(
                     gl,
@@ -3291,7 +3488,7 @@ impl WaylandCompositor {
             text,
             description,
             size,
-            [232, 238, 250, 255],
+            ui_theme::palette().osd_ink,
         );
         if w == 0 || h == 0 {
             return;
@@ -3342,8 +3539,10 @@ impl WaylandCompositor {
             return;
         };
 
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(gl, ui, projection);
         let card_h = 64.0f32;
-        let radius = 18.0;
+        let radius = ui.osd_radius;
         let pad = 24.0;
         // Fixed label zone so the bar does not shift as digits change.
         let label_zone = 118.0;
@@ -3356,9 +3555,15 @@ impl WaylandCompositor {
 
             gl.UseProgram(self.shadow_program);
             self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
-            let spread = 32.0;
+            let spread = ui.spread(32.0);
             gl.Uniform1f(self.shadow_uniforms.spread, spread);
-            gl.Uniform4f(self.shadow_uniforms.shadow_color, 0.0, 0.0, 0.0, 0.45 * a);
+            gl.Uniform4f(
+                self.shadow_uniforms.shadow_color,
+                ui.shadow[0],
+                ui.shadow[1],
+                ui.shadow[2],
+                ui.shadow[3] * 0.82 * a,
+            );
             gl.Uniform1f(self.shadow_uniforms.radius, radius);
             gl.Uniform2f(self.shadow_uniforms.size, card_w, card_h);
             self.set_rect_uniform(
@@ -3371,18 +3576,7 @@ impl WaylandCompositor {
             );
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            gl.UseProgram(self.border_program);
-            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
-            gl.Uniform1i(self.border_uniforms.scene_linear, 0);
-            self.sysui_fill_rounded(
-                gl,
-                x,
-                y,
-                card_w,
-                card_h,
-                radius,
-                [0.075, 0.086, 0.118, 0.97 * a],
-            );
+            self.ui_fill_surface(gl, projection, ui, x, y, card_w, card_h, radius, ui.osd, a);
 
             // Progress bar: dim track + accent fill. Label-only kinds (media)
             // report no fill and give the whole card to the text.
@@ -3398,7 +3592,7 @@ impl WaylandCompositor {
                     bar_w,
                     bar_h,
                     bar_h / 2.0,
-                    [0.22, 0.25, 0.33, 0.9 * a],
+                    UiPalette::faded(ui.slider_track, a),
                 );
                 if fill > 0.0 {
                     self.sysui_fill_rounded(

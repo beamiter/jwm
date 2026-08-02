@@ -658,6 +658,7 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             F,
             s::POSTPROCESS_FRAGMENT_SHADER,
         ),
+        ("GLASS_FRAGMENT_SHADER", F, s::GLASS_FRAGMENT_SHADER),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
         ("CUBE_VERTEX_SHADER", V, s::CUBE_VERTEX_SHADER),
@@ -722,6 +723,7 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             F,
             s::POSTPROCESS_FRAGMENT_SHADER,
         ),
+        ("GLASS_FRAGMENT_SHADER", F, s::GLASS_FRAGMENT_SHADER),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
         ("PORTAL_FRAGMENT_SHADER", F, s::PORTAL_FRAGMENT_SHADER),
@@ -2353,6 +2355,216 @@ fn assert_gradient_border_interpolates(api: GlApi, what: &str, vs: &'static str,
     );
 
     unsafe { gl.delete_program(prog) };
+}
+
+/// The frosted-glass surface must behave like glass, not like a colored rect:
+/// with no tint it hands the backdrop through untouched, the tint covers it in
+/// proportion to its alpha, the rim lights the whole perimeter, and the mask is
+/// a squircle rather than a circular rounded rect.
+fn assert_glass_surface_frosts_its_backdrop(
+    api: GlApi,
+    what: &str,
+    vs: &'static str,
+    fs: &'static str,
+) {
+    const W: i32 = 16;
+    const H: i32 = 16;
+    const SIZE: f32 = 100.0; // sheet is SIZE x SIZE
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: glass must link:\n{log}"));
+
+    // A flat backdrop, so any sampling position gives the same reading and the
+    // assertions describe the shader's own arithmetic rather than the blur's.
+    // It also makes the refraction a no-op, which is what lets the tint and
+    // rim be measured in isolation.
+    let backdrop = [40u8, 120, 200, 255];
+
+    struct Glass {
+        tint: [f32; 4],
+        radius: f32,
+        corner_exp: f32,
+        rim: f32,
+        bevel: f32,
+    }
+    const PLAIN: Glass = Glass {
+        tint: [0.0, 0.0, 0.0, 0.0],
+        radius: 0.0,
+        corner_exp: 2.0,
+        rim: 0.0,
+        bevel: 0.0,
+    };
+
+    // Renders the sheet so its local point (qx, qy) lands on the readback pixel.
+    let sample = |qx: f32, qy: f32, g: &Glass| -> [u8; 4] {
+        render_quad(gl, prog, backdrop, W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            let cx = W as f32 / 2.0 + 0.5;
+            let cy = H as f32 / 2.0 + 0.5;
+            gl.uniform_4_f32(u("u_rect").as_ref(), cx - qx, cy - qy, SIZE, SIZE);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(u("u_backdrop").as_ref(), 0);
+            gl.uniform_2_f32(u("u_screen_size").as_ref(), W as f32, H as f32);
+            gl.uniform_4_f32(
+                u("u_tint").as_ref(),
+                g.tint[0],
+                g.tint[1],
+                g.tint[2],
+                g.tint[3],
+            );
+            gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
+            gl.uniform_1_f32(u("u_radius").as_ref(), g.radius);
+            gl.uniform_1_f32(u("u_corner_exp").as_ref(), g.corner_exp);
+            gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_luminance").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_bevel_width").as_ref(), g.bevel);
+            gl.uniform_1_f32(u("u_refraction").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_rim_width").as_ref(), 6.0);
+            gl.uniform_1_f32(u("u_rim_intensity").as_ref(), g.rim);
+            gl.uniform_3_f32(u("u_rim_tint").as_ref(), 1.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_sheen").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_edge_shade").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_grain").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+            // Wayland variant only; ignored (None location) on the X11 one.
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+        })
+    };
+
+    // No tint, no edge lighting: the sheet is a window onto its backdrop.
+    assert_pixel(
+        sample(50.0, 50.0, &PLAIN),
+        backdrop,
+        2,
+        "untinted glass passes the backdrop through",
+    );
+    // Full coverage: the tint wins outright.
+    assert_pixel(
+        sample(
+            50.0,
+            50.0,
+            &Glass {
+                tint: [1.0, 0.0, 0.0, 1.0],
+                ..PLAIN
+            },
+        ),
+        [255, 0, 0, 255],
+        2,
+        "opaque tint hides the backdrop",
+    );
+    // Half coverage: the midpoint between backdrop and tint.
+    assert_pixel(
+        sample(
+            50.0,
+            50.0,
+            &Glass {
+                tint: [1.0, 0.0, 0.0, 0.5],
+                ..PLAIN
+            },
+        ),
+        [148, 60, 100, 255],
+        3,
+        "half-covered glass blends toward the tint",
+    );
+
+    // The rim lights the *whole* perimeter, not just one edge — that is what
+    // separates a pane of glass from a card with a top highlight.
+    let lit = Glass {
+        rim: 0.5,
+        bevel: 8.0,
+        ..PLAIN
+    };
+    let middle = sample(50.0, 50.0, &lit);
+    for (name, (qx, qy)) in [
+        ("top", (50.0, 1.0)),
+        ("bottom", (50.0, SIZE - 1.0)),
+        ("left", (1.0, 50.0)),
+        ("right", (SIZE - 1.0, 50.0)),
+    ] {
+        let edge = sample(qx, qy, &lit);
+        assert!(
+            edge[0] > middle[0] + 15,
+            "{what}: the {name} edge must catch the rim light, got {edge:?} vs {middle:?}"
+        );
+    }
+    assert_pixel(
+        middle,
+        backdrop,
+        2,
+        "rim lighting does not reach the middle",
+    );
+
+    // Continuous corners: a point that a circular radius clips away is still
+    // inside the squircle, because the superellipse bulges toward the corner.
+    // On the 45° diagonal of a 32px corner the circle turns back at 9.4px from
+    // the corner and the n=4.2 squircle at 4.9px, so 7px falls between them.
+    let probe = 7.0;
+    let circular = sample(
+        probe,
+        probe,
+        &Glass {
+            tint: [1.0, 0.0, 0.0, 1.0],
+            radius: 32.0,
+            corner_exp: 2.0,
+            ..PLAIN
+        },
+    );
+    let squircle = sample(
+        probe,
+        probe,
+        &Glass {
+            tint: [1.0, 0.0, 0.0, 1.0],
+            radius: 32.0,
+            corner_exp: 4.2,
+            ..PLAIN
+        },
+    );
+    assert_pixel(
+        circular,
+        [0, 0, 0, 255],
+        2,
+        "circular corner clips the probe",
+    );
+    assert_pixel(
+        squircle,
+        [255, 0, 0, 255],
+        2,
+        "the squircle corner still covers the probe",
+    );
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_glass_surface_frosts_its_backdrop() {
+    use super::shaders as s;
+    assert_glass_surface_frosts_its_backdrop(
+        GlApi::Gles3,
+        "wayland_glass_surface_frosts_its_backdrop",
+        s::VERTEX_SHADER,
+        s::GLASS_FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_glass_surface_frosts_its_backdrop() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_glass_surface_frosts_its_backdrop(
+        GlApi::GlCore33,
+        "x11_glass_surface_frosts_its_backdrop",
+        s::VERTEX_SHADER,
+        s::GLASS_FRAGMENT_SHADER,
+    );
 }
 
 #[test]

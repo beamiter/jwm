@@ -450,6 +450,30 @@ pub(super) struct HudUniforms {
     pub(super) size: Option<glow::UniformLocation>,
 }
 
+/// Uniforms of the frosted-glass surface program used by every self-drawn
+/// panel when `appearance.ui_theme = "glass"`.
+pub(super) struct GlassUniforms {
+    pub(super) projection: Option<glow::UniformLocation>,
+    pub(super) rect: Option<glow::UniformLocation>,
+    pub(super) backdrop: Option<glow::UniformLocation>,
+    pub(super) screen_size: Option<glow::UniformLocation>,
+    pub(super) tint: Option<glow::UniformLocation>,
+    pub(super) size: Option<glow::UniformLocation>,
+    pub(super) radius: Option<glow::UniformLocation>,
+    pub(super) corner_exp: Option<glow::UniformLocation>,
+    pub(super) saturation: Option<glow::UniformLocation>,
+    pub(super) luminance: Option<glow::UniformLocation>,
+    pub(super) bevel_width: Option<glow::UniformLocation>,
+    pub(super) refraction: Option<glow::UniformLocation>,
+    pub(super) rim_width: Option<glow::UniformLocation>,
+    pub(super) rim_intensity: Option<glow::UniformLocation>,
+    pub(super) rim_tint: Option<glow::UniformLocation>,
+    pub(super) sheen: Option<glow::UniformLocation>,
+    pub(super) edge_shade: Option<glow::UniformLocation>,
+    pub(super) grain: Option<glow::UniformLocation>,
+    pub(super) alpha: Option<glow::UniformLocation>,
+}
+
 pub(super) struct HudTextUniforms {
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,

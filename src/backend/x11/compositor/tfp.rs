@@ -333,8 +333,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // tag switches before then intentionally fall back to no animation.
         self.retire_presented_scene_snapshot();
 
-        // Recreate blur FBOs for new screen size
-        if self.blur_enabled {
+        // Recreate blur FBOs for new screen size. The chain also backs the
+        // frosted-glass UI theme, so its presence — not `blur_enabled` — is
+        // what decides whether there is anything to resize.
+        if !self.blur_fbos.is_empty() || self.scene_fbo.is_some() {
             unsafe {
                 for level in self.blur_fbos.drain(..) {
                     self.gl.delete_framebuffer(level.fbo);
@@ -695,8 +697,7 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn mark_damaged(&mut self, x11_win: u32) {
         let expand = self.decoration_damage_margin();
         if let Some(wt) = self.windows.get_mut(&x11_win) {
-            crate::backend::damage_diag::MARKED
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::backend::damage_diag::MARKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             wt.dirty = true;
             wt.pixmap_refresh.damaged();
             self.damage_render_pending = true;

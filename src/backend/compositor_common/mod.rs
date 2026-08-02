@@ -12,6 +12,7 @@ pub mod rules;
 pub mod screenshot;
 pub(crate) mod toast;
 pub mod transitions;
+pub(crate) mod ui_theme;
 pub mod wallpaper;
 pub mod waterlily;
 pub(crate) mod window_glow;

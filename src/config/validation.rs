@@ -848,6 +848,12 @@ impl Config {
             );
         }
 
+        validate_choice_ignore_ascii_case(
+            &mut diagnostics,
+            "appearance.ui_theme",
+            &self.inner.appearance.ui_theme,
+            &["material", "glass", "glass-dark"],
+        );
         validate_choice(
             &mut diagnostics,
             "behavior.vsync_method",

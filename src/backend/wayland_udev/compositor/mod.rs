@@ -263,6 +263,31 @@ pub(crate) struct GradientBorderUniforms {
     pub scene_linear: i32,
 }
 
+/// Uniforms of the frosted-glass surface program used by every self-drawn
+/// panel when `appearance.ui_theme = "glass"`.
+pub(crate) struct GlassUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub backdrop: i32,
+    pub screen_size: i32,
+    pub tint: i32,
+    pub size: i32,
+    pub radius: i32,
+    pub corner_exp: i32,
+    pub saturation: i32,
+    pub luminance: i32,
+    pub bevel_width: i32,
+    pub refraction: i32,
+    pub rim_width: i32,
+    pub rim_intensity: i32,
+    pub rim_tint: i32,
+    pub sheen: i32,
+    pub edge_shade: i32,
+    pub grain: i32,
+    pub alpha: i32,
+    pub scene_linear: i32,
+}
+
 pub(crate) struct PostprocessUniforms {
     pub rect: i32,
     pub projection: i32,
@@ -596,9 +621,15 @@ pub(crate) struct WaylandCompositor {
     genie_program: u32,
     particle_program: u32,
     overview_bg_program: u32,
+    glass_program: u32,
     hud_program: u32,
     sysui_text_program: u32,
     temporal_blur_mix_program: u32,
+
+    /// Blurred copy of the frame, captured once per frame just before the
+    /// self-drawn panels so each of them can sample what it covers. `None`
+    /// under the Material theme, or when no blur chain is available.
+    glass_backdrop: Option<u32>,
 
     // Uniform locations
     win_uniforms: WindowUniforms,
@@ -606,6 +637,7 @@ pub(crate) struct WaylandCompositor {
     blur_uniforms: BlurUniforms,
     border_uniforms: BorderUniforms,
     gradient_border_uniforms: GradientBorderUniforms,
+    glass_uniforms: GlassUniforms,
     postprocess_uniforms: PostprocessUniforms,
     transition_uniforms: TransitionUniforms,
     cube_uniforms: CubeUniforms,
@@ -1193,6 +1225,10 @@ impl WaylandCompositor {
                 shaders::VERTEX_SHADER,
                 shaders::OVERVIEW_BG_FRAGMENT_SHADER,
             )?;
+            // Compiled unconditionally so switching `appearance.ui_theme` at
+            // runtime never has to touch the GL context.
+            let glass_program =
+                create_program(gl, shaders::VERTEX_SHADER, shaders::GLASS_FRAGMENT_SHADER)?;
             let hud_program =
                 create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
             let sysui_text_program = create_program(
@@ -1278,6 +1314,29 @@ impl WaylandCompositor {
                 radius: get_uniform_loc(gl, gradient_border_program, "u_radius"),
                 border_width: get_uniform_loc(gl, gradient_border_program, "u_border_width"),
                 scene_linear: get_uniform_loc(gl, gradient_border_program, "u_scene_linear"),
+            };
+
+            let glass_uniforms = GlassUniforms {
+                rect: get_uniform_loc(gl, glass_program, "u_rect"),
+                projection: get_uniform_loc(gl, glass_program, "u_projection"),
+                backdrop: get_uniform_loc(gl, glass_program, "u_backdrop"),
+                screen_size: get_uniform_loc(gl, glass_program, "u_screen_size"),
+                tint: get_uniform_loc(gl, glass_program, "u_tint"),
+                size: get_uniform_loc(gl, glass_program, "u_size"),
+                radius: get_uniform_loc(gl, glass_program, "u_radius"),
+                corner_exp: get_uniform_loc(gl, glass_program, "u_corner_exp"),
+                saturation: get_uniform_loc(gl, glass_program, "u_saturation"),
+                luminance: get_uniform_loc(gl, glass_program, "u_luminance"),
+                bevel_width: get_uniform_loc(gl, glass_program, "u_bevel_width"),
+                refraction: get_uniform_loc(gl, glass_program, "u_refraction"),
+                rim_width: get_uniform_loc(gl, glass_program, "u_rim_width"),
+                rim_intensity: get_uniform_loc(gl, glass_program, "u_rim_intensity"),
+                rim_tint: get_uniform_loc(gl, glass_program, "u_rim_tint"),
+                sheen: get_uniform_loc(gl, glass_program, "u_sheen"),
+                edge_shade: get_uniform_loc(gl, glass_program, "u_edge_shade"),
+                grain: get_uniform_loc(gl, glass_program, "u_grain"),
+                alpha: get_uniform_loc(gl, glass_program, "u_alpha"),
+                scene_linear: get_uniform_loc(gl, glass_program, "u_scene_linear"),
             };
 
             let postprocess_uniforms = PostprocessUniforms {
@@ -1536,9 +1595,11 @@ impl WaylandCompositor {
                 genie_program,
                 particle_program,
                 overview_bg_program,
+                glass_program,
                 hud_program,
                 sysui_text_program,
                 temporal_blur_mix_program,
+                glass_backdrop: None,
 
                 // Uniform locations
                 win_uniforms,
@@ -1546,6 +1607,7 @@ impl WaylandCompositor {
                 blur_uniforms,
                 border_uniforms,
                 gradient_border_uniforms,
+                glass_uniforms,
                 postprocess_uniforms,
                 transition_uniforms,
                 cube_uniforms,
