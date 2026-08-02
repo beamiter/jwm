@@ -14,7 +14,7 @@ use std::time::Duration;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
-    RuntimeUpdate, TagId, TagState, ThemeMode, TransportRecoveryConfig, UserAction,
+    RuntimeUpdate, ShellRoute, TagId, TagState, ThemeMode, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -345,6 +345,9 @@ impl TabBarApp {
             });
         }
 
+        // Shell 入口：每个条目只是向窗口管理器请求打开对应页面
+        Self::connect_shell_routes(&app);
+
         // 主题切换按钮
         app.theme_button.connect_clicked({
             let app = app.clone();
@@ -475,6 +478,50 @@ impl TabBarApp {
 
     fn handle_toggle_theme(app: Rc<Self>) {
         app.dispatch(UserAction::ToggleTheme);
+    }
+
+    /// Wire every row of the shell popover to the page it names.
+    ///
+    /// The rows are looked up rather than required: a stale `main_layout.ui`
+    /// should cost the shell entry, not stop the bar from starting.
+    fn connect_shell_routes(app: &Rc<Self>) {
+        const ROUTES: [(&str, ShellRoute); 6] = [
+            ("shell_route_hub", ShellRoute::Hub),
+            ("shell_route_applications", ShellRoute::Applications),
+            ("shell_route_notifications", ShellRoute::Notifications),
+            ("shell_route_clipboard", ShellRoute::Clipboard),
+            ("shell_route_calendar", ShellRoute::Calendar),
+            ("shell_route_wallpaper", ShellRoute::Wallpaper),
+        ];
+
+        let popover = app.builder.object::<gtk4::Popover>("shell_popover");
+        for (id, route) in ROUTES {
+            let Some(button) = app.builder.object::<Button>(id) else {
+                warn!("Shell route {id} is missing from the layout");
+                continue;
+            };
+            button.connect_clicked({
+                let app = app.clone();
+                let popover = popover.clone();
+                move |_| {
+                    // Close first: the shell takes a keyboard grab, and a
+                    // popover left open underneath it never gets dismissed.
+                    if let Some(popover) = popover.as_ref() {
+                        popover.popdown();
+                    }
+                    Self::handle_open_shell(app.clone(), route);
+                }
+            });
+        }
+    }
+
+    fn handle_open_shell(app: Rc<Self>, route: ShellRoute) {
+        if !app.state.borrow().snapshot.wm_available {
+            warn!("Ignoring shell request until the first WM snapshot arrives");
+            return;
+        }
+        info!("Opening shell route {}", route.title());
+        app.dispatch(UserAction::OpenShellHub(route));
     }
 
     fn handle_toggle_mute(app: Rc<Self>) {

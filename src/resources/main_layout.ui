@@ -195,6 +195,19 @@
               </object>
             </child>
 
+            <!-- Entry point into JWM's own shell surface. The bar renders no
+                 shell content; each row only names the page to open. -->
+            <child>
+              <object class="GtkMenuButton" id="shell_button">
+                <property name="height-request">28</property>
+                <property name="label">◈</property>
+                <property name="tooltip-text">Open the JWM shell</property>
+                <property name="width-request">40</property>
+                <property name="popover">shell_popover</property>
+                <style><class name="shell-button"/></style>
+              </object>
+            </child>
+
             <child>
               <object class="GtkButton" id="theme_button">
                 <property name="height-request">28</property>
@@ -236,5 +249,60 @@
         </child>
       </object>
     </child>
+  </object>
+
+  <!-- Pages of JWM's shell surface, in the order the hub itself lists them.
+       Every row is one request to the window manager; nothing here renders
+       shell content. -->
+  <object class="GtkPopover" id="shell_popover">
+    <property name="autohide">1</property>
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">2</property>
+        <child>
+          <object class="GtkButton" id="shell_route_hub">
+            <property name="label">◈  Shell Hub</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_applications">
+            <property name="label">🚀  Applications</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_notifications">
+            <property name="label">🔔  Notifications</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_clipboard">
+            <property name="label">📋  Clipboard</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_calendar">
+            <property name="label">📅  Calendar</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_wallpaper">
+            <property name="label">🖼  Wallpaper</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+      </object>
+    </property>
   </object>
 </interface>

@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 log = "0.4.29"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0" }
 gtk4 = { version = "0.11.4", features = ["v4_14"] }
 gdk4 = { version = "0.11.4", features = ["v4_14"] }
