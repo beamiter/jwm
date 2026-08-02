@@ -52,6 +52,26 @@ interface FrontendEnvelope {
   partition_changes?: number;
 }
 
+type ShellRoute =
+  | "hub"
+  | "applications"
+  | "notifications"
+  | "clipboard"
+  | "calendar"
+  | "wallpaper";
+
+/// Pages of JWM's own shell surface, in the order the hub itself lists them.
+/// Every entry is one request to the window manager: the bar renders no shell
+/// content and keeps no shell state.
+const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
+  { route: "hub", icon: "\u{F0F2A}", label: "Shell Hub" },
+  { route: "applications", icon: "\u{F0D22}", label: "Applications" },
+  { route: "notifications", icon: "\u{F009A}", label: "Notifications" },
+  { route: "clipboard", icon: "\u{F0192}", label: "Clipboard" },
+  { route: "calendar", icon: "\u{F00ED}", label: "Calendar" },
+  { route: "wallpaper", icon: "\u{F02E9}", label: "Wallpaper" },
+];
+
 type ActionRequest =
   | { action: "view_tag_on"; tag_index: number; monitor_id: number }
   | { action: "toggle_layout_selector" }
@@ -60,7 +80,8 @@ type ActionRequest =
   | { action: "toggle_mute" }
   | { action: "adjust_volume"; delta: number }
   | { action: "adjust_brightness"; delta: number }
-  | { action: "screenshot" };
+  | { action: "screenshot" }
+  | { action: "open_shell_hub"; route: ShellRoute };
 
 const dispatchAction = (request: ActionRequest): Promise<void> =>
   invoke("dispatch_action", { request });
@@ -252,6 +273,36 @@ function BrightnessControl({ percent }: { percent: number | null }) {
   );
 }
 
+function ShellButton({ available }: { available: boolean }) {
+  const open = (route: ShellRoute) => {
+    // The shell lives in the window manager, so a click with no projection has
+    // nowhere to go; the pill is grayed out rather than silently inert.
+    if (!available) return;
+    dispatchAction({ action: "open_shell_hub", route }).catch(console.error);
+  };
+  return (
+    <div className="shell-menu">
+      <div
+        className={`pill shell-pill ${available ? "" : "shell-pill-offline"}`}
+        onClick={() => open("hub")}
+        title="JWM shell"
+      >
+        <span className="nf-icon">{SHELL_ROUTES[0].icon}</span>
+      </div>
+      {available && (
+        <div className="shell-dropdown">
+          {SHELL_ROUTES.map(({ route, icon, label }) => (
+            <div key={route} className="shell-route" onClick={() => open(route)}>
+              <span className="nf-icon">{icon}</span>
+              <span>{label}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScreenshotButton() {
   const [isTaking, setIsTaking] = useState(false);
   const takeScreenshot = async () => {
@@ -376,6 +427,7 @@ function App() {
         <SystemInfoDisplay snapshot={snapshot} />
         <BrightnessControl percent={snapshot.brightness.percent} />
         <VolumeControl device={snapshot.audio_device} />
+        <ShellButton available={snapshot.wm_available} />
         <ScreenshotButton />
         <TimeDisplay time={snapshot.time} showSeconds={snapshot.show_seconds} />
         <div className="pill monitor-pill" title={snapshot.client_name || "显示器"}>
