@@ -106,6 +106,70 @@ impl Jwm {
         clients
     }
 
+    /// Pull windows that only float because the user dragged/resized them back
+    /// into the tiling grid.
+    ///
+    /// Applying a layout is an explicit "tile what is on screen" request, so
+    /// drag-induced floats are reclaimed. Floats that come from a rule, a window
+    /// type (dialog/dock/desktop), an explicit toggle, PiP, fullscreen or a fixed
+    /// size window are left alone — those float by design, not by accident.
+    ///
+    /// Returns the number of clients reclaimed.
+    pub(crate) fn reclaim_drag_floating(&mut self, mon_key: MonitorKey) -> usize {
+        let candidates: Vec<ClientKey> = self
+            .state
+            .monitor_clients
+            .get(mon_key)
+            .map(|keys| {
+                keys.iter()
+                    .copied()
+                    .filter(|&key| {
+                        self.state
+                            .clients
+                            .get(key)
+                            .map(|c| {
+                                c.state.is_floating
+                                    && c.state.is_drag_floating
+                                    && !c.state.is_fixed
+                                    && !c.state.is_fullscreen
+                                    && !c.state.is_pip
+                                    && !c.state.is_dock
+                                    && !c.state.is_sticky
+                                    && !c.state.is_swallowed
+                            })
+                            .unwrap_or(false)
+                            && self.is_client_visible_on_monitor(key, mon_key)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        for key in &candidates {
+            if let Some(client) = self.state.clients.get_mut(*key) {
+                // Remember where the user left it, so toggling back to floating
+                // (or switching to the float layout) restores that geometry.
+                client.geometry.floating_x = client.geometry.x;
+                client.geometry.floating_y = client.geometry.y;
+                client.geometry.floating_w = client.geometry.w;
+                client.geometry.floating_h = client.geometry.h;
+                client.state.is_floating = false;
+                client.state.is_drag_floating = false;
+            }
+            // Floating clients live at the tail of the monitor list; move the
+            // client back among the tiled ones so it gets a layout slot.
+            self.reorder_client_in_monitor_groups(*key);
+        }
+
+        if !candidates.is_empty() {
+            info!(
+                "[reclaim_drag_floating] retiled {} dragged client(s) on monitor {:?}",
+                candidates.len(),
+                mon_key
+            );
+        }
+        candidates.len()
+    }
+
     pub(crate) fn get_client_y_offset(&self, monitor: &WMMonitor) -> i32 {
         let show_bar = monitor
             .pertag

@@ -326,6 +326,10 @@ pub struct ClientState {
     pub client_fact: f32,
     pub is_fixed: bool,
     pub is_floating: bool,
+    /// True when this client floats only because the user dragged/resized it out
+    /// of the tiling grid. Re-applying a layout pulls those back under
+    /// management, while rule- or type-driven floats keep floating.
+    pub is_drag_floating: bool,
     pub is_urgent: bool,
     pub never_focus: bool,
     pub old_state: bool,

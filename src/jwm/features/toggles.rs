@@ -1073,6 +1073,9 @@ impl Jwm {
         };
         let geom = if let Some(client) = self.state.clients.get_mut(sel_client_key) {
             client.state.is_floating = !client.state.is_floating;
+            // Explicit toggling wins over the drag origin: the float stays until
+            // the user toggles it back, layout applies must not reclaim it.
+            client.state.is_drag_floating = false;
             if client.state.is_floating {
                 if client.geometry.floating_w <= 0 || client.geometry.floating_h <= 0 {
                     client.geometry.floating_x = client.geometry.x;

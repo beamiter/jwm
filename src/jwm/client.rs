@@ -651,6 +651,7 @@ impl Jwm {
         );
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.is_floating = false;
+            client.state.is_drag_floating = false;
         }
         if RuleMatcher::should_auto_float(&name, &class, &instance) {
             if let Some(client) = self.state.clients.get_mut(client_key) {

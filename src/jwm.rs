@@ -267,6 +267,9 @@ impl Jwm {
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if !client.state.is_floating {
                 client.state.is_floating = true;
+                // Floating started from a drag, so a later layout apply may
+                // reclaim this client into the tiling grid.
+                client.state.is_drag_floating = true;
                 client.geometry.floating_x = client.geometry.x;
                 client.geometry.floating_y = client.geometry.y;
                 client.geometry.floating_w = client.geometry.w;

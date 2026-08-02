@@ -179,8 +179,16 @@ impl Jwm {
         let new_layout = change_layout(self, sel_mon_key)?;
         self.handle_fullscreen_layout_transition(backend, sel_mon_key, &old_layout, &new_layout)?;
 
+        // Applying a tiling layout re-manages windows that only float because
+        // they were dragged around; the float layout keeps them as they are.
+        let reclaimed = if *new_layout != LayoutEnum::FLOAT {
+            self.reclaim_drag_floating(sel_mon_key)
+        } else {
+            0
+        };
+
         let (should_arrange, mon_num) = self.finalize_layout_update(sel_mon_key);
-        if should_arrange {
+        if should_arrange || reclaimed > 0 {
             self.arrange(backend, Some(sel_mon_key));
         } else {
             self.mark_bar_update_needed_if_visible(mon_num);

@@ -580,6 +580,7 @@ impl Jwm {
             if let Some(c) = self.state.clients.get_mut(*key) {
                 c.state.tags = restored_tags;
                 c.state.is_floating = restore.is_floating;
+                c.state.is_drag_floating = false;
                 if let Some((x, y, w, h)) = floating {
                     c.geometry.floating_x = x;
                     c.geometry.floating_y = y;
