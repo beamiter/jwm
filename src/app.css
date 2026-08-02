@@ -932,3 +932,67 @@ body {
 .spacer {
   flex: 1 1 auto;
 }
+
+/* ── JWM shell entry ─────────────────────────────────────────────────────── */
+/* The dropdown is CSS-only: hovering the pill reveals the page list, so the
+   bar needs no open/closed state of its own for a menu the window manager
+   immediately covers with its own grabbed surface. */
+.shell-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.shell-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(124, 108, 255, 0.9);
+  border-color: #7c6cff;
+}
+.shell-pill:hover {
+  background: rgba(150, 136, 255, 0.95);
+  border-color: #9688ff;
+}
+
+/* Grayed rather than hidden: the shell lives in the window manager, so an
+   unreachable one has to look unreachable instead of swallowing the click. */
+.shell-pill-offline {
+  cursor: default;
+  background: rgba(85, 91, 102, 0.7);
+  border-color: #555b66;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.shell-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 170px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(124, 108, 255, 0.45);
+  background: rgba(20, 26, 36, 0.97);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.shell-menu:hover .shell-dropdown {
+  display: flex;
+}
+
+.shell-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #e9eef5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.shell-route:hover {
+  background: rgba(124, 108, 255, 0.28);
+}

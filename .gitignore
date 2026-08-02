@@ -8,3 +8,7 @@ Cargo.lock
 *.swo
 node_modules/
 dist/
+
+# Tauri builds and codegen under src-tauri, which /target does not cover.
+src-tauri/target/
+src-tauri/gen/

@@ -52,6 +52,26 @@
     partition_changes?: number;
   }
 
+  type ShellRoute =
+    | "hub"
+    | "applications"
+    | "notifications"
+    | "clipboard"
+    | "calendar"
+    | "wallpaper";
+
+  // Pages of JWM's own shell surface, in the order the hub itself lists them.
+  // Every entry is one request to the window manager: the bar renders no shell
+  // content and keeps no shell state.
+  const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
+    { route: "hub", icon: "\u{F0F2A}", label: "Shell Hub" },
+    { route: "applications", icon: "\u{F0D22}", label: "Applications" },
+    { route: "notifications", icon: "\u{F009A}", label: "Notifications" },
+    { route: "clipboard", icon: "\u{F0192}", label: "Clipboard" },
+    { route: "calendar", icon: "\u{F00ED}", label: "Calendar" },
+    { route: "wallpaper", icon: "\u{F02E9}", label: "Wallpaper" },
+  ];
+
   type ActionRequest =
     | { action: "view_tag_on"; tag_index: number; monitor_id: number }
     | { action: "toggle_layout_selector" }
@@ -60,7 +80,8 @@
     | { action: "toggle_mute" }
     | { action: "adjust_volume"; delta: number }
     | { action: "adjust_brightness"; delta: number }
-    | { action: "screenshot" };
+    | { action: "screenshot" }
+    | { action: "open_shell_hub"; route: ShellRoute };
 
   const dispatchAction = (request: ActionRequest): Promise<void> =>
     invoke("dispatch_action", { request });
@@ -201,6 +222,13 @@
 
   function toggleSeconds() {
     dispatchAction({ action: "toggle_seconds" }).catch(console.error);
+  }
+
+  function openShell(route: ShellRoute) {
+    // The shell lives in the window manager, so a click with no projection has
+    // nowhere to go; the pill is grayed out rather than silently inert.
+    if (!snapshot?.wm_available) return;
+    dispatchAction({ action: "open_shell_hub", route }).catch(console.error);
   }
 
   async function takeScreenshot() {
@@ -392,6 +420,35 @@
       >
         <span class="nf-icon">{volumeIcon(snapshot.audio_device)}</span>
         {snapshot.audio_device ? `${snapshot.audio_device.volume}%` : "--"}
+      </div>
+
+      <div class="shell-menu">
+        <div
+          class={`pill shell-pill ${snapshot.wm_available ? "" : "shell-pill-offline"}`}
+          onclick={() => openShell("hub")}
+          role="button"
+          tabindex="0"
+          onkeydown={(event) => event.key === "Enter" && openShell("hub")}
+          title="JWM shell"
+        >
+          <span class="nf-icon">{SHELL_ROUTES[0].icon}</span>
+        </div>
+        {#if snapshot.wm_available}
+          <div class="shell-dropdown">
+            {#each SHELL_ROUTES as entry (entry.route)}
+              <div
+                class="shell-route"
+                onclick={() => openShell(entry.route)}
+                role="button"
+                tabindex="0"
+                onkeydown={(event) => event.key === "Enter" && openShell(entry.route)}
+              >
+                <span class="nf-icon">{entry.icon}</span>
+                <span>{entry.label}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <div
