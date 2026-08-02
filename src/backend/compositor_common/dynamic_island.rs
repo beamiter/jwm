@@ -56,6 +56,12 @@ pub(crate) struct IslandDock {
     pub(crate) centre_x: f32,
     /// The y a docked panel's top edge sits on.
     pub(crate) top_y: f32,
+    /// Whether a bar was actually found to merge with.
+    ///
+    /// Squaring a panel's top corners is only right when there is something
+    /// directly above for it to merge into. Hanging a flat-topped card in open
+    /// space just looks like a card with a bug in its corner radius.
+    merges_with_bar: bool,
 }
 
 impl IslandDock {
@@ -72,10 +78,12 @@ impl IslandDock {
             Some([x, y, w, h]) if w > 0.0 && h > 0.0 => Self {
                 centre_x: finite_clamp(x + w * 0.5, 0.0, screen_w, screen_w * 0.5),
                 top_y: finite_clamp(y + h + DOCK_GAP, 0.0, f32::MAX, NO_BAR_TOP_MARGIN),
+                merges_with_bar: true,
             },
             _ => Self {
                 centre_x: screen_w * 0.5,
                 top_y: NO_BAR_TOP_MARGIN,
+                merges_with_bar: false,
             },
         }
     }
@@ -89,6 +97,23 @@ impl IslandDock {
             width,
             height,
         ]
+    }
+
+    /// Corner radii for a panel of `height` hanging at `y_offset` below the
+    /// dock: `(top, bottom)`.
+    ///
+    /// Only a panel touching the bar squares off against it. One stacked below
+    /// another, or hanging from a screen edge with no bar, stays a normal
+    /// rounded card.
+    #[must_use]
+    pub(crate) fn radii(&self, height: f32, radius: f32, y_offset: f32) -> (f32, f32) {
+        if self.merges_with_bar && y_offset <= 0.0 {
+            island_radii(height, radius)
+        } else {
+            let r = finite_clamp(radius, 0.0, 512.0, 0.0)
+                .min(finite_clamp(height, 0.0, f32::MAX, 0.0) * 0.5);
+            (r, r)
+        }
     }
 }
 
@@ -311,6 +336,22 @@ mod tests {
         // frame. The step is clamped, so the panel is still near its seed.
         let (w, _) = motion.advance(start + Duration::from_secs(60), 360.0, 64.0);
         assert!(w < 360.0, "a stall finished the animation: {w}");
+    }
+
+    #[test]
+    fn only_a_panel_that_touches_the_bar_squares_off_against_it() {
+        let docked = IslandDock::for_bar(Some([0.0, 0.0, 1600.0, 40.0]), 1600.0);
+        // Touching the bar: flat above, curved below.
+        assert_eq!(docked.radii(64.0, 24.0, 0.0), (0.0, 24.0));
+        // Stacked below another card: nothing above to merge with.
+        assert_eq!(docked.radii(64.0, 24.0, 76.0), (24.0, 24.0));
+
+        // No bar at all: a flat-topped card hanging in open space would just
+        // look like a corner-radius bug.
+        let floating = IslandDock::for_bar(None, 1600.0);
+        assert_eq!(floating.radii(64.0, 24.0, 0.0), (24.0, 24.0));
+        // Still capped so a card mid-open stays a capsule.
+        assert_eq!(floating.radii(20.0, 24.0, 0.0), (10.0, 10.0));
     }
 
     #[test]

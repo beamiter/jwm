@@ -75,6 +75,11 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        // Opening a panel springs it out of the bar; closing one forgets its
+        // geometry so the next open springs again rather than resuming.
+        if self.system_ui.is_none() || overlay.is_none() {
+            self.system_ui_island.close();
+        }
         self.system_ui = overlay;
         self.needs_render = true;
     }
@@ -375,6 +380,11 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_debug_hud(&mut self, enabled: bool) {
+        if self.debug_hud_enabled != enabled {
+            // Toggling forgets the card's geometry, so showing it again
+            // springs it out of the bar rather than resuming mid-open.
+            self.hud_island.close();
+        }
         self.debug_hud_enabled = enabled;
         self.needs_render = true;
     }

@@ -187,8 +187,6 @@ pub(crate) struct UiPalette {
     pub(crate) osd_ink: [u8; 4],
 
     // --- Metrics ---
-    /// Distance from the screen corner to the HUD card.
-    pub(crate) margin: f32,
     pub(crate) card_radius: f32,
     pub(crate) chip_radius: f32,
     pub(crate) panel_radius: f32,
@@ -202,8 +200,6 @@ pub(crate) struct UiPalette {
     pub(crate) gutter: f32,
     /// Height of the HUD frame-rate meter.
     pub(crate) meter_h: f32,
-    /// Base shadow spread for the HUD card.
-    pub(crate) shadow_spread: f32,
 }
 
 impl UiPalette {
@@ -259,8 +255,6 @@ pub(crate) const MATERIAL: UiPalette = UiPalette {
     item_ink: [216, 224, 240, 255],
     hint_ink: [140, 150, 172, 255],
     osd_ink: [232, 238, 250, 255],
-
-    margin: 24.0,
     card_radius: 16.0,
     chip_radius: 9.0,
     panel_radius: 18.0,
@@ -270,7 +264,6 @@ pub(crate) const MATERIAL: UiPalette = UiPalette {
     gap: 12.0,
     gutter: 18.0,
     meter_h: 4.0,
-    shadow_spread: 36.0,
 };
 
 /// Apple's light frosted glass: the sheet is mostly the blurred desktop behind
@@ -338,8 +331,6 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     item_ink: [26, 30, 40, 255],
     hint_ink: [96, 104, 120, 255],
     osd_ink: [16, 20, 28, 255],
-
-    margin: 28.0,
     card_radius: 22.0,
     chip_radius: 11.0,
     panel_radius: 26.0,
@@ -349,7 +340,6 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     gap: 13.0,
     gutter: 20.0,
     meter_h: 5.0,
-    shadow_spread: 40.0,
 };
 
 /// The same glass optics under a graphite veil — macOS's dark vibrancy rather
@@ -401,8 +391,6 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     item_ink: [238, 243, 252, 255],
     hint_ink: [196, 206, 224, 255],
     osd_ink: [250, 252, 255, 255],
-
-    margin: 28.0,
     card_radius: 22.0,
     chip_radius: 11.0,
     panel_radius: 26.0,
@@ -412,7 +400,6 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     gap: 13.0,
     gutter: 20.0,
     meter_h: 5.0,
-    shadow_spread: 40.0,
 };
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use super::*;
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
-use crate::backend::compositor_common::dynamic_island::{IslandDock, island_radii};
+use crate::backend::compositor_common::dynamic_island::IslandDock;
 use crate::backend::compositor_common::effects::MotionTrailParams;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
@@ -2064,6 +2064,7 @@ impl WaylandCompositor {
                         gl.Uniform1f(self.gradient_border_uniforms.gradient_angle, angle);
                         gl.Uniform1f(self.gradient_border_uniforms.border_width, border_width);
                         gl.Uniform1f(self.gradient_border_uniforms.radius, outer_radius);
+                        gl.Uniform1f(self.gradient_border_uniforms.radius_top, outer_radius);
                         gl.Uniform2f(self.gradient_border_uniforms.size, bdr_w, bdr_h);
                         self.set_rect_uniform(
                             gl,
@@ -2660,51 +2661,29 @@ impl WaylandCompositor {
                 .map(|(_, w, h)| (w as f32, h as f32))
                 .unwrap_or((0.0, 0.0))
         };
-        let layout = hud::HudLayout::new(
-            ui,
-            (ui.margin, ui.margin),
-            dims(0),
-            dims(1),
-            dims(2),
-            dims(3),
-            meter,
-        );
+        let dock = self.island_dock();
+        let layout = hud::HudLayout::docked(ui, &dock, dims(0), dims(1), dims(2), dims(3), meter);
+        let (cw, ch) =
+            self.hud_island
+                .advance(std::time::Instant::now(), layout.card.2, layout.card.3);
+        // A static desktop produces no damage and therefore no frames, so the
+        // spring has to keep asking for them until it settles — the HUD does
+        // not redraw on its own just because it is on screen.
+        if self.hud_island.animating(layout.card.2, layout.card.3) {
+            self.needs_render = true;
+        }
+        let [cx, cy, ..] = dock.rect(cw, ch, 0.0);
+        let (radius_top, radius) = dock.radii(ch, ui.card_radius, 0.0);
 
         gl.BindVertexArray(self.quad_vao);
 
-        // Ambient shadow: an elevation cue under Material, a diffuse occlusion
-        // pool under glass.
-        gl.UseProgram(self.shadow_program);
-        self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
-        let (sx, sy, sw, sh) = layout.shadow();
-        gl.Uniform1f(self.shadow_uniforms.spread, layout.shadow_spread());
-        gl.Uniform4f(
-            self.shadow_uniforms.shadow_color,
-            ui.shadow[0],
-            ui.shadow[1],
-            ui.shadow[2],
-            ui.shadow[3],
-        );
-        gl.Uniform1f(self.shadow_uniforms.radius, ui.card_radius);
-        gl.Uniform2f(self.shadow_uniforms.size, layout.card.2, layout.card.3);
-        self.set_rect_uniform(gl, self.shadow_uniforms.rect, sx, sy, sw, sh);
-        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-
+        // No ambient shadow: the card's top edge is flush with the bar, and a
+        // shadow spreading up over it is the seam the dock removes.
         // Card surface, then chip and meter on the border program's
         // rounded-fill mode. The overlay draws onto the display-encoded
         // output, so scene-linear conversion stays off.
-        let (cx, cy, cw, ch) = layout.card;
-        self.ui_fill_surface(
-            gl,
-            projection,
-            ui,
-            cx,
-            cy,
-            cw,
-            ch,
-            ui.card_radius,
-            ui.card,
-            1.0,
+        self.ui_fill_island(
+            gl, projection, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0,
         );
         if layout.chip_pill.2 > 0.0 {
             let (px, py, pw, ph) = layout.chip_pill;
@@ -2744,7 +2723,15 @@ impl WaylandCompositor {
                 self.gradient_border_uniforms.gradient_angle,
                 self.border_gradient_angle.to_radians(),
             );
-            gl.Uniform1f(self.gradient_border_uniforms.radius, ui.card_radius + ring);
+            // The ring follows the card: square across the top where the card
+            // meets the bar, curved everywhere the card curves.
+            let ring_top = if radius_top > 0.0 {
+                radius_top + ring
+            } else {
+                0.0
+            };
+            gl.Uniform1f(self.gradient_border_uniforms.radius, radius + ring);
+            gl.Uniform1f(self.gradient_border_uniforms.radius_top, ring_top);
             gl.Uniform2f(
                 self.gradient_border_uniforms.size,
                 cw + 2.0 * ring,
@@ -3394,13 +3381,34 @@ impl WaylandCompositor {
             panel_h += gap + hint_h;
         }
 
-        let x = ((screen_w - panel_w) * 0.5).max(16.0);
-        // Launcher-style panels sit spotlight-like in the upper third; the
-        // lock card centers on its opaque backdrop.
-        let y = if overlay.locked {
-            ((screen_h - panel_h) * 0.5).max(16.0)
+        // The lock card owns the whole screen and centres on its own opaque
+        // backdrop; every other panel drops out of the bar like the OSD.
+        let dock = self.island_dock();
+        let (panel_w, panel_h, radius_top, radius, content_a) = if overlay.locked {
+            (panel_w, panel_h, radius, radius, 1.0)
         } else {
-            (screen_h * 0.22).min((screen_h - panel_h - 32.0).max(16.0))
+            let (w, h) = self
+                .system_ui_island
+                .advance(std::time::Instant::now(), panel_w, panel_h);
+            // Unlike the OSD, a modal panel only redraws when something asks
+            // it to, so the spring has to keep asking until it settles.
+            if self.system_ui_island.animating(panel_w, panel_h) {
+                self.needs_render = true;
+            }
+            let (r_top, r) = dock.radii(h, radius, 0.0);
+            // Contents appear as the card makes room for them rather than
+            // overflowing one that is still only a seed wide.
+            let opened = (w / panel_w.max(1.0)).clamp(0.0, 1.0);
+            (w, h, r_top, r, opened * opened)
+        };
+        let (x, y) = if overlay.locked {
+            (
+                ((screen_w - panel_w) * 0.5).max(16.0),
+                ((screen_h - panel_h) * 0.5).max(16.0),
+            )
+        } else {
+            let [x, y, ..] = dock.rect(panel_w, panel_h, 0.0);
+            (x, y)
         };
 
         let accent = self.border_gradient_color_a;
@@ -3446,36 +3454,40 @@ impl WaylandCompositor {
         }
 
         unsafe {
-            // Drop shadow behind the card.
             gl.BindVertexArray(self.quad_vao);
-            gl.UseProgram(self.shadow_program);
-            self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
-            let spread = ui.spread(48.0);
-            gl.Uniform1f(self.shadow_uniforms.spread, spread);
-            gl.Uniform4f(
-                self.shadow_uniforms.shadow_color,
-                ui.shadow[0],
-                ui.shadow[1],
-                ui.shadow[2],
-                ui.shadow[3],
-            );
-            gl.Uniform1f(self.shadow_uniforms.radius, radius);
-            gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
-            self.set_rect_uniform(
-                gl,
-                self.shadow_uniforms.rect,
-                x - spread,
-                y - spread + 14.0,
-                panel_w + 2.0 * spread,
-                panel_h + 2.0 * spread,
-            );
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            // Drop shadow behind the card — the lock card only. A docked
+            // panel's top edge is flush with the bar, and a shadow spreading up
+            // over it is exactly the seam the dock removes.
+            if overlay.locked {
+                gl.UseProgram(self.shadow_program);
+                self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+                let spread = ui.spread(48.0);
+                gl.Uniform1f(self.shadow_uniforms.spread, spread);
+                gl.Uniform4f(
+                    self.shadow_uniforms.shadow_color,
+                    ui.shadow[0],
+                    ui.shadow[1],
+                    ui.shadow[2],
+                    ui.shadow[3],
+                );
+                gl.Uniform1f(self.shadow_uniforms.radius, radius);
+                gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
+                self.set_rect_uniform(
+                    gl,
+                    self.shadow_uniforms.rect,
+                    x - spread,
+                    y - spread + 14.0,
+                    panel_w + 2.0 * spread,
+                    panel_h + 2.0 * spread,
+                );
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
 
             // Card surface, then the query-field bar and selection pill on the
             // border program's rounded-fill mode. The overlay draws onto the
             // display-encoded output, so scene-linear conversion stays off.
-            self.ui_fill_surface(
-                gl, projection, ui, x, y, panel_w, panel_h, radius, panel_fill, 1.0,
+            self.ui_fill_island(
+                gl, projection, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
             );
 
             let mut cy = y + pad + title_h;
@@ -3489,7 +3501,7 @@ impl WaylandCompositor {
                     panel_w - 2.0 * pad,
                     query_bar_h,
                     10.0,
-                    ui.field,
+                    UiPalette::faded(ui.field, content_a),
                 );
                 query_text_pos = Some((x + pad + qpad, cy + 8.0));
                 cy += query_bar_h;
@@ -3508,7 +3520,12 @@ impl WaylandCompositor {
                             panel_w - 2.0 * pad + 16.0,
                             line_h + 4.0,
                             8.0,
-                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                            [
+                                accent[0],
+                                accent[1],
+                                accent[2],
+                                ui.selection_alpha * content_a,
+                            ],
                         );
                     }
                 }
@@ -3554,7 +3571,13 @@ impl WaylandCompositor {
                     self.gradient_border_uniforms.gradient_angle,
                     self.border_gradient_angle.to_radians(),
                 );
+                let ring_top = if radius_top > 0.0 {
+                    radius_top + ring
+                } else {
+                    0.0
+                };
                 gl.Uniform1f(self.gradient_border_uniforms.radius, radius + ring);
+                gl.Uniform1f(self.gradient_border_uniforms.radius_top, ring_top);
                 gl.Uniform2f(
                     self.gradient_border_uniforms.size,
                     panel_w + 2.0 * ring,
@@ -3579,7 +3602,7 @@ impl WaylandCompositor {
             gl.UseProgram(self.sysui_text_program);
             gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
             gl.Uniform1i(text_tex, 0);
-            gl.Uniform1f(text_opacity, 1.0);
+            gl.Uniform1f(text_opacity, content_a);
             gl.ActiveTexture(ffi::TEXTURE0);
             let positions = [
                 Some((x + pad, y + pad)),
@@ -3712,7 +3735,7 @@ impl WaylandCompositor {
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
 
-            for (index, (id, _, _, urgency, alpha)) in toasts.iter().enumerate() {
+            for (id, _, _, urgency, alpha) in &toasts {
                 let slots = self.toast_textures.get(id).copied().unwrap_or([None, None]);
                 let (title_w, title_h) = slots[0]
                     .map(|(_, w, h)| (w as f32, h as f32))
@@ -3734,15 +3757,9 @@ impl WaylandCompositor {
                         motion.advance(now, target_w, target_h)
                     });
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
-                // Only the card actually touching the bar squares off against
-                // it; the ones stacked below are free-floating and stay round.
-                let touches_bar = index == 0 && top == 0.0;
-                let (radius_top, radius) = if touches_bar {
-                    island_radii(card_h, ui.toast_radius)
-                } else {
-                    let r = ui.toast_radius.min(card_h * 0.5);
-                    (r, r)
-                };
+                // Only the card actually touching the bar squares off; the
+                // dock also refuses to square anything when there is no bar.
+                let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);
                 let a = *alpha;
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
@@ -3878,7 +3895,7 @@ impl WaylandCompositor {
         let dock = self.island_dock();
         let (card_w, card_h) = self.osd_slot.motion_mut().advance(now, target_w, target_h);
         let [x, y, ..] = dock.rect(card_w, card_h, 0.0);
-        let (radius_top, radius) = island_radii(card_h, ui.osd_radius);
+        let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, 0.0);
         // Contents appear as the card makes room for them, rather than
         // overflowing a card that is still only a seed wide.
         let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);

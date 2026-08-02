@@ -410,6 +410,7 @@ pub(super) struct BorderUniforms {
 }
 
 pub(super) struct GradientBorderUniforms {
+    pub(super) radius_top: Option<glow::UniformLocation>,
     pub(super) projection: Option<glow::UniformLocation>,
     pub(super) rect: Option<glow::UniformLocation>,
     pub(super) color_a: Option<glow::UniformLocation>,

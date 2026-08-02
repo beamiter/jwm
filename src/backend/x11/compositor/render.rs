@@ -4,7 +4,7 @@ use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
 use crate::backend::compositor_common::debug_hud as hud;
-use crate::backend::compositor_common::dynamic_island::{IslandDock, island_radii};
+use crate::backend::compositor_common::dynamic_island::IslandDock;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{
     WindowGlowSettings, WindowGlowStyle, WindowGlowTarget,
@@ -819,6 +819,11 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn set_debug_hud(&mut self, enabled: bool) {
+        if self.debug_hud != enabled {
+            // Toggling forgets the card's geometry, so showing it again
+            // springs it out of the bar rather than resuming mid-open.
+            self.hud_island.close();
+        }
         self.debug_hud = enabled;
         self.needs_render = true;
     }
@@ -993,59 +998,52 @@ impl<C: CompositorConnection> Compositor<C> {
                 .map(|(_, w, h)| (w as f32, h as f32))
                 .unwrap_or((0.0, 0.0))
         };
-        let layout = hud::HudLayout::new(
-            ui,
-            (ui.margin, ui.margin),
-            dims(0),
-            dims(1),
-            dims(2),
-            dims(3),
-            meter,
-        );
+        let dock = self.island_dock();
+        let layout = hud::HudLayout::docked(ui, &dock, dims(0), dims(1), dims(2), dims(3), meter);
+        let (card_w, card_h) =
+            self.hud_island
+                .advance(std::time::Instant::now(), layout.card.2, layout.card.3);
+        // A static desktop produces no damage and therefore no frames, so the
+        // spring has to keep asking for them until it settles — the HUD does
+        // not redraw on its own just because it is on screen.
+        if self.hud_island.animating(layout.card.2, layout.card.3) {
+            self.needs_render = true;
+        }
+        let [cx, cy, ..] = dock.rect(card_w, card_h, 0.0);
+        let (radius_top, radius) = dock.radii(card_h, ui.card_radius, 0.0);
+        let opened = (card_w / layout.card.2.max(1.0)).clamp(0.0, 1.0);
+        let content_a = opened * opened;
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
-            // Ambient shadow: an elevation cue under Material, a diffuse
-            // occlusion pool under glass.
-            self.gl.use_program(Some(self.shadow_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.shadow_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            let (sx, sy, sw, sh) = layout.shadow();
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), layout.shadow_spread());
-            self.gl.uniform_4_f32(
-                self.shadow_uniforms.shadow_color.as_ref(),
-                ui.shadow[0],
-                ui.shadow[1],
-                ui.shadow[2],
-                ui.shadow[3],
-            );
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), ui.card_radius);
-            self.gl.uniform_2_f32(
-                self.shadow_uniforms.size.as_ref(),
-                layout.card.2,
-                layout.card.3,
-            );
-            self.gl
-                .uniform_4_f32(self.shadow_uniforms.rect.as_ref(), sx, sy, sw, sh);
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-
+            // No ambient shadow: the card's top edge is flush with the bar, and
+            // a shadow spreading up over it is the seam the dock removes.
             // Card surface, then chip and meter on the rounded-fill path.
-            let (cx, cy, cw, ch) = layout.card;
-            self.ui_fill_surface(proj, ui, cx, cy, cw, ch, ui.card_radius, ui.card, 1.0);
+            let (cw, ch) = (card_w, card_h);
+            self.ui_fill_island(proj, ui, cx, cy, cw, ch, radius, radius_top, ui.card, 1.0);
             if layout.chip_pill.2 > 0.0 {
                 let (px, py, pw, ph) = layout.chip_pill;
-                self.sysui_fill_rounded(px, py, pw, ph, ui.chip_radius, ui.chip);
+                self.sysui_fill_rounded(
+                    px,
+                    py,
+                    pw,
+                    ph,
+                    ui.chip_radius,
+                    UiPalette::faded(ui.chip, content_a),
+                );
             }
             let (tx, ty, tw, th) = layout.meter_track;
-            self.sysui_fill_rounded(tx, ty, tw, th, th * 0.5, ui.track);
+            self.sysui_fill_rounded(
+                tx,
+                ty,
+                tw,
+                th,
+                th * 0.5,
+                UiPalette::faded(ui.track, content_a),
+            );
             let (fx, fy, fw, fh) = layout.meter_fill;
-            self.sysui_fill_rounded(fx, fy, fw, fh, fh * 0.5, tone);
+            self.sysui_fill_rounded(fx, fy, fw, fh, fh * 0.5, UiPalette::faded(tone, content_a));
 
             // The ring is a circular rounded rect, so a theme whose surfaces are
             // squircles asks for none of it and relies on the shader's own rim.
@@ -1080,10 +1078,12 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gradient_border_uniforms.gradient_angle.as_ref(),
                     self.border_gradient_angle.to_radians(),
                 );
-                self.gl.uniform_1_f32(
-                    self.gradient_border_uniforms.radius.as_ref(),
-                    ui.card_radius + ring,
-                );
+                let ring_top = if radius_top > 0.0 {
+                    radius_top + ring
+                } else {
+                    0.0
+                };
+                self.set_gradient_border_radii(radius + ring, ring_top);
                 self.gl.uniform_2_f32(
                     self.gradient_border_uniforms.size.as_ref(),
                     cw + 2.0 * ring,
@@ -1109,7 +1109,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
             self.gl
-                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), content_a);
             self.gl.active_texture(glow::TEXTURE0);
             let positions = [layout.title, layout.chip_text, layout.labels, layout.values];
             for (slot, (px, py)) in positions.into_iter().enumerate() {
@@ -1396,6 +1396,17 @@ impl<C: CompositorConnection> Compositor<C> {
             .min_by_key(|wt| wt.y)
             .map(|wt| [wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32]);
         IslandDock::for_bar(bar, self.screen_w as f32)
+    }
+
+    /// Set the gradient-ring program's corner radii, the top two separately,
+    /// so a ring around a docked panel follows its squared top corners.
+    pub(super) fn set_gradient_border_radii(&self, bottom: f32, top: f32) {
+        unsafe {
+            self.gl
+                .uniform_1_f32(self.gradient_border_uniforms.radius.as_ref(), bottom);
+            self.gl
+                .uniform_1_f32(self.gradient_border_uniforms.radius_top.as_ref(), top);
+        }
     }
 
     /// Set the border program's corner radii, the top two separately.
@@ -1772,13 +1783,34 @@ impl<C: CompositorConnection> Compositor<C> {
             panel_h += gap + hint_h;
         }
 
-        let x = ((screen_w - panel_w) * 0.5).max(16.0);
-        // Launcher-style panels sit spotlight-like in the upper third; the
-        // lock card centers on its opaque backdrop.
-        let y = if overlay.locked {
-            ((screen_h - panel_h) * 0.5).max(16.0)
+        // The lock card owns the whole screen and centres on its own opaque
+        // backdrop; every other panel drops out of the bar like the OSD.
+        let dock = self.island_dock();
+        let (panel_w, panel_h, radius_top, radius, content_a) = if overlay.locked {
+            (panel_w, panel_h, radius, radius, 1.0)
         } else {
-            (screen_h * 0.22).min((screen_h - panel_h - 32.0).max(16.0))
+            let (w, h) = self
+                .system_ui_island
+                .advance(std::time::Instant::now(), panel_w, panel_h);
+            // Unlike the OSD, a modal panel only redraws when something asks
+            // it to, so the spring has to keep asking until it settles.
+            if self.system_ui_island.animating(panel_w, panel_h) {
+                self.needs_render = true;
+            }
+            let (r_top, r) = dock.radii(h, radius, 0.0);
+            // Contents appear as the card makes room for them rather than
+            // overflowing one that is still only a seed wide.
+            let opened = (w / panel_w.max(1.0)).clamp(0.0, 1.0);
+            (w, h, r_top, r, opened * opened)
+        };
+        let (x, y) = if overlay.locked {
+            (
+                ((screen_w - panel_w) * 0.5).max(16.0),
+                ((screen_h - panel_h) * 0.5).max(16.0),
+            )
+        } else {
+            let [x, y, ..] = dock.rect(panel_w, panel_h, 0.0);
+            (x, y)
         };
 
         let accent = self.border_gradient_color_a;
@@ -1837,40 +1869,46 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         unsafe {
-            // Drop shadow behind the card.
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            self.gl.use_program(Some(self.shadow_program));
-            self.gl.uniform_matrix_4_f32_slice(
-                self.shadow_uniforms.projection.as_ref(),
-                false,
-                proj,
-            );
-            let spread = ui.spread(48.0);
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
-            self.gl.uniform_4_f32(
-                self.shadow_uniforms.shadow_color.as_ref(),
-                ui.shadow[0],
-                ui.shadow[1],
-                ui.shadow[2],
-                ui.shadow[3],
-            );
-            self.gl
-                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), radius);
-            self.gl
-                .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
-            self.gl.uniform_4_f32(
-                self.shadow_uniforms.rect.as_ref(),
-                x - spread,
-                y - spread + 14.0,
-                panel_w + 2.0 * spread,
-                panel_h + 2.0 * spread,
-            );
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            // Drop shadow behind the card — the lock card only. A docked
+            // panel's top edge is flush with the bar, and a shadow spreading up
+            // over it is exactly the seam the dock removes.
+            if overlay.locked {
+                self.gl.use_program(Some(self.shadow_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.shadow_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                let spread = ui.spread(48.0);
+                self.gl
+                    .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
+                self.gl.uniform_4_f32(
+                    self.shadow_uniforms.shadow_color.as_ref(),
+                    ui.shadow[0],
+                    ui.shadow[1],
+                    ui.shadow[2],
+                    ui.shadow[3],
+                );
+                self.gl
+                    .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), radius);
+                self.gl
+                    .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
+                self.gl.uniform_4_f32(
+                    self.shadow_uniforms.rect.as_ref(),
+                    x - spread,
+                    y - spread + 14.0,
+                    panel_w + 2.0 * spread,
+                    panel_h + 2.0 * spread,
+                );
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
 
             // Card surface, then the query-field bar and selection pill on the
             // border program's rounded-fill mode.
-            self.ui_fill_surface(proj, ui, x, y, panel_w, panel_h, radius, panel_fill, 1.0);
+            self.ui_fill_island(
+                proj, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
+            );
 
             let mut cy = y + pad + title_h;
             let mut query_text_pos = None;
@@ -1882,7 +1920,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     panel_w - 2.0 * pad,
                     query_bar_h,
                     10.0,
-                    ui.field,
+                    UiPalette::faded(ui.field, content_a),
                 );
                 query_text_pos = Some((x + pad + qpad, cy + 8.0));
                 cy += query_bar_h;
@@ -1900,7 +1938,12 @@ impl<C: CompositorConnection> Compositor<C> {
                             panel_w - 2.0 * pad + 16.0,
                             line_h + 4.0,
                             8.0,
-                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                            [
+                                accent[0],
+                                accent[1],
+                                accent[2],
+                                ui.selection_alpha * content_a,
+                            ],
                         );
                     }
                 }
@@ -1946,8 +1989,14 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gradient_border_uniforms.gradient_angle.as_ref(),
                     self.border_gradient_angle.to_radians(),
                 );
-                self.gl
-                    .uniform_1_f32(self.gradient_border_uniforms.radius.as_ref(), radius + ring);
+                // The ring follows the card: square across the top where the
+                // card meets the bar, curved everywhere the card curves.
+                let ring_top = if radius_top > 0.0 {
+                    radius_top + ring
+                } else {
+                    0.0
+                };
+                self.set_gradient_border_radii(radius + ring, ring_top);
                 self.gl.uniform_2_f32(
                     self.gradient_border_uniforms.size.as_ref(),
                     panel_w + 2.0 * ring,
@@ -1973,7 +2022,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl
                 .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
             self.gl
-                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), content_a);
             self.gl.active_texture(glow::TEXTURE0);
             let positions = [
                 Some((x + pad, y + pad)),
@@ -2098,7 +2147,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
-            for (index, (id, _, _, urgency, alpha)) in toasts.iter().enumerate() {
+            for (id, _, _, urgency, alpha) in &toasts {
                 let slots = self.toast_textures.get(id).copied().unwrap_or([None, None]);
                 let (title_w, title_h) = slots[0]
                     .map(|(_, w, h)| (w as f32, h as f32))
@@ -2120,15 +2169,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         motion.advance(now, target_w, target_h)
                     });
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
-                // Only the card actually touching the bar squares off against
-                // it; the ones stacked below are free-floating and stay round.
-                let touches_bar = index == 0 && top == 0.0;
-                let (radius_top, radius) = if touches_bar {
-                    island_radii(card_h, ui.toast_radius)
-                } else {
-                    let r = ui.toast_radius.min(card_h * 0.5);
-                    (r, r)
-                };
+                // Only the card actually touching the bar squares off; the
+                // dock also refuses to square anything when there is no bar.
+                let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);
                 let a = *alpha;
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
@@ -2284,7 +2327,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let dock = self.island_dock();
         let (card_w, card_h) = self.osd_slot.motion_mut().advance(now, target_w, target_h);
         let [x, y, ..] = dock.rect(card_w, card_h, 0.0);
-        let (radius_top, radius) = island_radii(card_h, ui.osd_radius);
+        let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, 0.0);
         // Contents appear as the card makes room for them, rather than
         // overflowing a card that is still only a seed wide.
         let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
@@ -4641,10 +4684,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                     self.gradient_border_uniforms.gradient_angle.as_ref(),
                                     angle,
                                 );
-                                self.gl.uniform_1_f32(
-                                    self.gradient_border_uniforms.radius.as_ref(),
-                                    outer_radius,
-                                );
+                                self.set_gradient_border_radii(outer_radius, outer_radius);
                                 self.gl.uniform_2_f32(
                                     self.gradient_border_uniforms.size.as_ref(),
                                     bdr_w,

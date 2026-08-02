@@ -17,6 +17,11 @@ use std::sync::mpsc;
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        // Opening a panel springs it out of the bar; closing one forgets its
+        // geometry so the next open springs again rather than resuming.
+        if self.system_ui.is_none() || overlay.is_none() {
+            self.system_ui_island.close();
+        }
         self.system_ui = overlay;
         self.needs_render = true;
     }

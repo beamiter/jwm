@@ -110,9 +110,6 @@ pub(crate) struct HudLayout {
     pub(crate) meter_fill: Rect,
     pub(crate) labels: (f32, f32),
     pub(crate) values: (f32, f32),
-    /// Spread of the card's ambient shadow, kept so [`HudLayout::shadow`] does
-    /// not need the palette a second time.
-    spread: f32,
 }
 
 impl HudLayout {
@@ -182,25 +179,27 @@ impl HudLayout {
             meter_fill,
             labels: (x + pad, body_y),
             values: (x + pad + labels.0 + gutter, body_y),
-            spread: ui.shadow_spread,
         }
     }
 
-    /// Spread the card's ambient shadow was laid out with.
-    pub(crate) fn shadow_spread(&self) -> f32 {
-        self.spread
-    }
-
-    /// Shadow rect for the card, offset downward so the card reads as lifted.
-    pub(crate) fn shadow(&self) -> Rect {
-        let (x, y, w, h) = self.card;
-        let spread = self.spread;
-        (
-            x - spread,
-            y - spread + 10.0,
-            w + 2.0 * spread,
-            h + 2.0 * spread,
-        )
+    /// Lay the card out hanging from `dock` instead of a screen corner.
+    ///
+    /// The width falls out of the content, so the card is laid out once at the
+    /// origin to measure it and again centred on the dock. Both passes are
+    /// arithmetic on four text sizes; nothing is rasterized twice.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn docked(
+        ui: &UiPalette,
+        dock: &crate::backend::compositor_common::dynamic_island::IslandDock,
+        title: (f32, f32),
+        chip: (f32, f32),
+        labels: (f32, f32),
+        values: (f32, f32),
+        meter: f32,
+    ) -> Self {
+        let measured = Self::new(ui, (0.0, 0.0), title, chip, labels, values, meter);
+        let [x, y, ..] = dock.rect(measured.card.2, measured.card.3, 0.0);
+        Self::new(ui, (x, y), title, chip, labels, values, meter)
     }
 }
 
@@ -292,6 +291,30 @@ mod tests {
         );
         assert!(glass.card.2 > material.card.2);
         assert!(glass.card.3 > material.card.3);
-        assert!(glass.shadow_spread() > material.shadow_spread());
+    }
+
+    #[test]
+    fn a_docked_card_centres_on_the_bar() {
+        use crate::backend::compositor_common::dynamic_island::IslandDock;
+        use crate::backend::compositor_common::ui_theme::MATERIAL;
+
+        let sizes = ((120.0, 20.0), (48.0, 16.0), (140.0, 90.0), (70.0, 90.0));
+        let dock = IslandDock::for_bar(Some([40.0, 4.0, 1200.0, 36.0]), 1600.0);
+        let card =
+            HudLayout::docked(&MATERIAL, &dock, sizes.0, sizes.1, sizes.2, sizes.3, 1.0).card;
+
+        // Same size as a corner-anchored card, moved under the bar.
+        let loose = HudLayout::new(
+            &MATERIAL,
+            (0.0, 0.0),
+            sizes.0,
+            sizes.1,
+            sizes.2,
+            sizes.3,
+            1.0,
+        );
+        assert_eq!((card.2, card.3), (loose.card.2, loose.card.3));
+        assert!((card.0 + card.2 * 0.5 - dock.centre_x).abs() < 0.01);
+        assert_eq!(card.1, dock.top_y);
     }
 }

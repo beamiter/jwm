@@ -227,6 +227,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     .get_uniform_location(gradient_border_program, "u_gradient_angle"),
                 size: gl.get_uniform_location(gradient_border_program, "u_size"),
                 radius: gl.get_uniform_location(gradient_border_program, "u_radius"),
+                radius_top: gl.get_uniform_location(gradient_border_program, "u_radius_top"),
                 border_width: gl.get_uniform_location(gradient_border_program, "u_border_width"),
             }
         };
@@ -976,6 +977,8 @@ impl<C: CompositorConnection> Compositor<C> {
             osd_texture: None,
             hud_text_cache: String::new(),
             system_ui: None,
+            system_ui_island: Default::default(),
+            hud_island: Default::default(),
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),
             frame_stats: FrameStats::new(),

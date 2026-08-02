@@ -444,12 +444,16 @@ uniform vec4  u_color_b;        // gradient end RGBA
 uniform float u_gradient_angle; // radians
 uniform vec2  u_size;           // outline quad size
 uniform float u_radius;         // outer corner radius (0 = sharp)
+uniform float u_radius_top;     // radius of the top two corners
 uniform float u_border_width;   // ring thickness in pixels
 uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
 
-float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
+// Split like the plain border program's, so a ring around a docked panel
+// follows the card's square top corners instead of curving away from them.
+float rounded_rect_sdf(vec2 p, vec2 half_size, float r_bottom, float r_top) {
+    float r = p.y < 0.0 ? r_top : r_bottom;
     vec2 d = abs(p) - half_size + vec2(r);
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
@@ -463,7 +467,7 @@ vec3 srgb_inverse(vec3 c) {
 void main() {
     vec2 pixel_pos = v_uv * u_size;
     vec2 center = u_size * 0.5;
-    float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius);
+    float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius, u_radius_top);
     float outer = 1.0 - smoothstep(-1.0, 1.0, dist);
     float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);
     float border_mask = outer - inner;

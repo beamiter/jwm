@@ -252,6 +252,7 @@ pub(crate) struct BorderUniforms {
 }
 
 pub(crate) struct GradientBorderUniforms {
+    pub radius_top: i32,
     pub rect: i32,
     pub projection: i32,
     pub color_a: i32,
@@ -991,6 +992,10 @@ pub(crate) struct WaylandCompositor {
     toast_retired: Vec<u64>,
     hud_text_cache: String,
     system_ui: Option<crate::backend::api::SystemUiOverlay>,
+    /// Open/morph spring for the docked system-UI card.
+    system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
+    /// Open/morph spring for the docked debug HUD card.
+    hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     compositor_start_time: Instant,
 
     // --- Animation parameters ---
@@ -1316,6 +1321,7 @@ impl WaylandCompositor {
                 gradient_angle: get_uniform_loc(gl, gradient_border_program, "u_gradient_angle"),
                 size: get_uniform_loc(gl, gradient_border_program, "u_size"),
                 radius: get_uniform_loc(gl, gradient_border_program, "u_radius"),
+                radius_top: get_uniform_loc(gl, gradient_border_program, "u_radius_top"),
                 border_width: get_uniform_loc(gl, gradient_border_program, "u_border_width"),
                 scene_linear: get_uniform_loc(gl, gradient_border_program, "u_scene_linear"),
             };
@@ -1924,6 +1930,8 @@ impl WaylandCompositor {
                 osd_texture: None,
                 hud_text_cache: String::new(),
                 system_ui: None,
+                system_ui_island: Default::default(),
+                hud_island: Default::default(),
                 compositor_start_time: now,
 
                 // Animation parameters

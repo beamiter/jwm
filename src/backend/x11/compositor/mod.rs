@@ -468,6 +468,10 @@ where
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
     system_ui: Option<crate::backend::api::SystemUiOverlay>,
+    /// Open/morph spring for the docked system-UI card.
+    system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
+    /// Open/morph spring for the docked debug HUD card.
+    hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     debug_hud: bool,
     sys_stats: crate::backend::sys_stats::SysStatsSampler,
     frame_stats: FrameStats,
