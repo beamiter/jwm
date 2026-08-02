@@ -2766,6 +2766,87 @@ fn x11_window_shader_desaturates_inactive() {
     );
 }
 
+/// Routing an SDR desktop through the HDR pass must not change its brightness.
+///
+/// The pass scales SDR content to absolute nits, tone maps, then encodes back.
+/// Every step of that round trip has to cancel: with no tone curve and an SDR
+/// output EOTF it is by definition an identity. It was not — the encode divided
+/// by the display peak instead of the SDR reference white it had multiplied by,
+/// so turning HDR on dimmed the entire screen, wallpaper included, to
+/// `(80/peak) ^ (1/2.2)` — about 47% at the default 400-nit peak — and no
+/// brightness control could bring it back.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_hdr_pass_does_not_dim_an_sdr_desktop() {
+    use crate::backend::x11::compositor::shaders as s;
+
+    const W: i32 = 8;
+    const H: i32 = 8;
+    let what = "x11_hdr_pass_does_not_dim_an_sdr_desktop";
+
+    let Some(h) = HeadlessGl::new(GlApi::GlCore33) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(
+        gl,
+        s::BLUR_DOWN_VERTEX,
+        s::ADVANCED_POSTPROCESS_FRAGMENT_SHADER,
+    )
+    .unwrap_or_else(|log| panic!("{what}: postprocess must link:\n{log}"));
+
+    let sample = |input: [u8; 4], hdr: bool, tone_mapping: i32| -> [u8; 4] {
+        render_quad(gl, prog, input, W, H, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_color_temp").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_contrast").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_invert").as_ref(), 0);
+            gl.uniform_1_i32(u("u_grayscale").as_ref(), 0);
+            gl.uniform_1_i32(u("u_magnifier_enabled").as_ref(), 0);
+            gl.uniform_2_f32(u("u_magnifier_center").as_ref(), 0.5, 0.5);
+            gl.uniform_1_f32(u("u_magnifier_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_magnifier_zoom").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_colorblind_mode").as_ref(), 0);
+            gl.uniform_1_i32(u("u_hdr_enabled").as_ref(), i32::from(hdr));
+            gl.uniform_1_f32(u("u_hdr_peak_nits").as_ref(), 400.0);
+            gl.uniform_1_i32(u("u_tone_mapping_method").as_ref(), tone_mapping);
+            // SDR display: sRGB gamma out, BT.709 primaries — what the EDID
+            // check falls back to when the panel advertises no HDR metadata.
+            gl.uniform_1_i32(u("u_eotf_mode").as_ref(), 0);
+            gl.uniform_1_i32(u("u_output_colorspace").as_ref(), 0);
+        })
+    };
+
+    for input in [
+        [64u8, 64, 64, 255],
+        [128, 128, 128, 255],
+        [255, 255, 255, 255],
+    ] {
+        let off = sample(input, false, 0);
+        assert_pixel(off, input, 2, "hdr off is a passthrough");
+        // Tolerance covers the pow(2.2)/pow(1/2.2) round trip at 8 bits.
+        assert_pixel(sample(input, true, 0), off, 3, "hdr on, no tone curve");
+    }
+
+    // With a tone curve the midtones may move, but white must stay white:
+    // an SDR desktop's peak is the display's peak.
+    let white = sample([255, 255, 255, 255], true, 2);
+    assert!(
+        white[0] >= 250,
+        "{what}: ACES crushed white to {white:?}, the screen would read as grey"
+    );
+}
+
 /// The wobbly mesh must sit exactly on the window rect at rest and follow the
 /// spring grid's per-node offsets once a drag deforms it.
 ///

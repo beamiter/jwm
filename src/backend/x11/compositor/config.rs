@@ -323,6 +323,22 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Switch the HDR tone-mapping pass on or off.
+    ///
+    /// The GL platform picks its framebuffer format from the configured value
+    /// at startup and cannot change it later, but the tone-mapping pass itself
+    /// is a shader branch and follows the config like every other
+    /// post-processing knob. Leaving it out meant a session that started with
+    /// HDR on could never turn it off — editing the config and reloading
+    /// changed nothing at all.
+    pub(crate) fn set_hdr_enabled(&mut self, enabled: bool) {
+        if self.hdr_enabled != enabled {
+            self.hdr_enabled = enabled;
+            self.ensure_postprocess_fbo();
+            self.needs_render = true;
+        }
+    }
+
     // =====================================================================
     // Hot-reload: apply all config changes at once
     // =====================================================================
@@ -508,6 +524,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.set_invert_colors(behavior.invert_colors);
         self.set_grayscale(behavior.grayscale);
         self.set_colorblind_mode(&behavior.colorblind_mode);
+        self.set_hdr_enabled(behavior.hdr_enabled);
 
         // --- Debug HUD ---
         self.debug_hud = behavior.debug_hud;

@@ -810,11 +810,20 @@ void main() {
 
     // HDR pipeline: linearize → nits → tone map → gamut → encode EOTF
     if (u_hdr_enabled == 1) {
+        // Reference luminance of SDR white. Step 2 scales the source content
+        // by it, so the SDR encode in step 5 has to divide by the same value:
+        // dividing by the display peak instead left the whole screen at
+        // (SDR_WHITE_NITS / peak) ^ (1/2.2) of its brightness — with the
+        // default 400-nit peak, simply enabling HDR on an SDR display dimmed
+        // everything, wallpaper included, to under half, with no way to
+        // brighten it back short of turning HDR off.
+        const float SDR_WHITE_NITS = 80.0;
+
         // Step 1: Linearize from sRGB gamma (SDR source content)
         c.rgb = pow(c.rgb, vec3(2.2));
 
-        // Step 2: Scale to absolute nits (SDR white = 80 nits)
-        c.rgb *= 80.0;
+        // Step 2: Scale to absolute nits
+        c.rgb *= SDR_WHITE_NITS;
 
         // Step 3: Tone mapping to display peak luminance
         if (u_tone_mapping_method == 1) {
@@ -864,8 +873,10 @@ void main() {
             vec3 hi = a * log(12.0 * nrm - b_hlg) + c_hlg;
             c.rgb = mix(lo, hi, step(vec3(1.0/12.0), nrm));
         } else {
-            // sRGB gamma encode (SDR display, reduced banding from 10-bit internal)
-            c.rgb = clamp(c.rgb / u_hdr_peak_nits, 0.0, 1.0);
+            // sRGB gamma encode (SDR display, reduced banding from 10-bit
+            // internal). Undoes step 2 exactly, so an HDR pass with no tone
+            // curve is an identity rather than a dimmer.
+            c.rgb = clamp(c.rgb / SDR_WHITE_NITS, 0.0, 1.0);
             c.rgb = pow(c.rgb, vec3(1.0 / 2.2));
         }
     }
