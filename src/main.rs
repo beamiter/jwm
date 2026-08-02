@@ -99,7 +99,30 @@ enum ActionRequest {
     AdjustVolume { delta: i32 },
     AdjustBrightness { delta: i32 },
     Screenshot,
+    OpenShellHub { route: ShellRoute },
 }
+
+/// Pages of JWM's own shell surface. The bar renders none of them: each entry
+/// is one request naming the page the window manager should open.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ShellRoute {
+    Hub,
+    Applications,
+    Notifications,
+    Clipboard,
+    Calendar,
+    Wallpaper,
+}
+
+const SHELL_ROUTES: [(ShellRoute, &str, &str); 6] = [
+    (ShellRoute::Hub, "\u{F0F2A}", "Shell Hub"),
+    (ShellRoute::Applications, "\u{F0D22}", "Applications"),
+    (ShellRoute::Notifications, "\u{F009A}", "Notifications"),
+    (ShellRoute::Clipboard, "\u{F0192}", "Clipboard"),
+    (ShellRoute::Calendar, "\u{F00ED}", "Calendar"),
+    (ShellRoute::Wallpaper, "\u{F02E9}", "Wallpaper"),
+];
 
 #[derive(Serialize)]
 struct DispatchArgs {
@@ -466,6 +489,39 @@ fn App() -> impl IntoView {
                             >
                                 <span class="nf-icon">{audio_icon}</span>
                                 {audio_label}
+                            </div>
+
+                            // JWM shell entry. Hovering reveals the pages;
+                            // clicking the pill opens the hub, which is itself
+                            // the page that lists the rest.
+                            <div class="shell-menu">
+                                <div
+                                    class="pill shell-pill"
+                                    on:click=move |_| dispatch_action(
+                                        ActionRequest::OpenShellHub { route: ShellRoute::Hub },
+                                    )
+                                    title="JWM shell"
+                                >
+                                    <span class="nf-icon">{SHELL_ROUTES[0].1}</span>
+                                </div>
+                                <div class="shell-dropdown">
+                                    {SHELL_ROUTES
+                                        .into_iter()
+                                        .map(|(route, icon, label)| {
+                                            view! {
+                                                <div
+                                                    class="shell-route"
+                                                    on:click=move |_| dispatch_action(
+                                                        ActionRequest::OpenShellHub { route },
+                                                    )
+                                                >
+                                                    <span class="nf-icon">{icon}</span>
+                                                    <span>{label}</span>
+                                                </div>
+                                            }
+                                        })
+                                        .collect_view()}
+                                </div>
                             </div>
 
                             <div
