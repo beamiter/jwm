@@ -16,7 +16,7 @@ use std::{
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, MonitorGeometry,
-    Percent, PlatformEffectHandler, RuntimeUpdate, SystemDetails, TagId, TagState,
+    Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails, TagId, TagState,
     TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
@@ -178,6 +178,57 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.0}{}", size, UNITS[unit_index])
     } else {
         format!("{:.1}{}", size, UNITS[unit_index])
+    }
+}
+
+/// JWM 自带 shell 的入口。
+///
+/// 每一行只是向窗口管理器请求打开对应页面：应用、通知、剪贴板、日历、壁纸都
+/// 由窗口管理器绘制，状态栏不持有任何 shell 状态。
+#[component]
+fn ShellButton(wm_available: bool, on_action: EventHandler<UserAction>) -> Element {
+    const ROUTES: [(ShellRoute, &str, &str); 6] = [
+        (ShellRoute::Hub, "\u{F0F2A}", "Shell Hub"),
+        (ShellRoute::Applications, "\u{F0D22}", "Applications"),
+        (ShellRoute::Notifications, "\u{F009A}", "Notifications"),
+        (ShellRoute::Clipboard, "\u{F0192}", "Clipboard"),
+        (ShellRoute::Calendar, "\u{F00ED}", "Calendar"),
+        (ShellRoute::Wallpaper, "\u{F02E9}", "Wallpaper"),
+    ];
+
+    let class = if wm_available {
+        "pill shell-pill"
+    } else {
+        "pill shell-pill shell-pill-offline"
+    };
+
+    rsx! {
+        div { class: "shell-menu",
+            div {
+                class: "{class}",
+                // 主键直接打开 Hub；Hub 本身就是通往其它页面的目录。
+                onclick: move |_| {
+                    if wm_available {
+                        on_action.call(UserAction::OpenShellHub(ShellRoute::Hub));
+                    }
+                },
+                title: "JWM shell",
+                span { class: "nf-icon", "{ROUTES[0].1}" }
+            }
+            if wm_available {
+                div { class: "shell-dropdown",
+                    for (route, icon, label) in ROUTES {
+                        div {
+                            key: "{label}",
+                            class: "shell-route",
+                            onclick: move |_| on_action.call(UserAction::OpenShellHub(route)),
+                            span { class: "nf-icon", "{icon}" }
+                            span { "{label}" }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -693,6 +744,10 @@ fn App() -> Element {
                 }
                 VolumeControl {
                     snapshot: state.audio_device.clone(),
+                    on_action: move |action| dispatch_action.call(action),
+                }
+                ShellButton {
+                    wm_available,
                     on_action: move |action| dispatch_action.call(action),
                 }
                 ScreenshotButton { on_action: move |action| dispatch_action.call(action) }
