@@ -191,6 +191,8 @@ same [Shell Hub](docs/control-center.md#opening-the-shell-from-a-status-bar),
 so a pointer-driven session reaches it without `Alt+F10`.
 The Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition are both
 the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
+Alt+Space cycles layouts over a film strip of live thumbnails; see
+[the layout picker](docs/layout-picker.md).
 The compositor's live counters are on `Alt+Shift+F12`; see
 [the debug HUD](docs/debug-hud.md).
 Additional operational tools are documented in [tools/README.md](tools/README.md).

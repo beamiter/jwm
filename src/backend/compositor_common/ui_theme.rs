@@ -216,6 +216,17 @@ impl UiPalette {
     pub(crate) fn faded(color: [f32; 4], alpha: f32) -> [f32; 4] {
         [color[0], color[1], color[2], color[3] * alpha]
     }
+
+    /// One of the palette's text colors as a fill color, so a surface drawn
+    /// with the ink of the labels beside it stays in step with the theme.
+    pub(crate) fn ink(color: [u8; 4], alpha: f32) -> [f32; 4] {
+        [
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+            (color[3] as f32 / 255.0) * alpha,
+        ]
+    }
 }
 
 /// Material: elevated opaque surfaces on the 8dp grid. The original look.

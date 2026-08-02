@@ -3024,6 +3024,261 @@ impl WaylandCompositor {
         }
     }
 
+    /// Rounded outline through the border program: the line-drawn boxes the
+    /// layout thumbnails are made of. The program and projection must be
+    /// bound.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn sysui_stroke_rounded(
+        &self,
+        gl: &ffi::Gles2,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        width: f32,
+        color: [f32; 4],
+    ) {
+        unsafe {
+            gl.Uniform1f(self.border_uniforms.border_width, width);
+            gl.Uniform4f(
+                self.border_uniforms.border_color,
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+            gl.Uniform1f(self.border_uniforms.radius, r);
+            gl.Uniform2f(self.border_uniforms.size, w, h);
+            self.set_rect_uniform(gl, self.border_uniforms.rect, x, y, w, h);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// The layout picker: a strip of 35mm film across the panel, one cell per
+    /// layout, each holding a line-drawn thumbnail of what that layout does
+    /// with a screenful of windows. The selected cell lifts out of the strip
+    /// and the countdown under it shows how long until it commits itself.
+    unsafe fn render_layout_filmstrip(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        strip: &crate::backend::api::LayoutFilmstrip,
+    ) {
+        use crate::backend::compositor_common::layout_strip as film;
+
+        let ui = ui_theme::palette();
+        let screen_w = self.screen_w as f32;
+        let screen_h = self.screen_h as f32;
+        let geometry = film::strip_geometry(screen_w, screen_h, strip.cells.len());
+        let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
+        let accent = self.border_gradient_color_a;
+
+        unsafe {
+            gl.BindVertexArray(self.quad_vao);
+
+            // Scrim: dim the desktop the strip is describing.
+            let rect = super::get_uniform_loc(gl, self.hud_program, "u_rect");
+            let proj = super::get_uniform_loc(gl, self.hud_program, "u_projection");
+            let bg = super::get_uniform_loc(gl, self.hud_program, "u_bg_color");
+            let size = super::get_uniform_loc(gl, self.hud_program, "u_size");
+            gl.UseProgram(self.hud_program);
+            gl.UniformMatrix4fv(proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform4f(bg, ui.scrim[0], ui.scrim[1], ui.scrim[2], ui.scrim[3]);
+            gl.Uniform2f(size, screen_w, screen_h);
+            gl.Uniform4f(rect, 0.0, 0.0, screen_w, screen_h);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+
+        self.capture_glass_backdrop(gl, ui, projection);
+
+        unsafe {
+            // Drop shadow, then the card.
+            gl.BindVertexArray(self.quad_vao);
+            gl.UseProgram(self.shadow_program);
+            self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+            let spread = ui.spread(48.0);
+            gl.Uniform1f(self.shadow_uniforms.spread, spread);
+            gl.Uniform4f(
+                self.shadow_uniforms.shadow_color,
+                ui.shadow[0],
+                ui.shadow[1],
+                ui.shadow[2],
+                ui.shadow[3],
+            );
+            gl.Uniform1f(self.shadow_uniforms.radius, film::PANEL_RADIUS);
+            gl.Uniform2f(self.shadow_uniforms.size, panel_w, panel_h);
+            self.set_rect_uniform(
+                gl,
+                self.shadow_uniforms.rect,
+                panel_x - spread,
+                panel_y - spread + 14.0,
+                panel_w + 2.0 * spread,
+                panel_h + 2.0 * spread,
+            );
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            self.ui_fill_surface(
+                gl,
+                projection,
+                ui,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                film::PANEL_RADIUS,
+                ui.panel,
+                1.0,
+            );
+
+            // The film base: the palette's recessed tone, which reads darker
+            // than the card under a light theme and lighter under a dark one —
+            // either way as a band lying in the panel rather than on it.
+            let [sx, sy, sw, sh] = geometry.strip;
+            let base = ui.track;
+            self.sysui_fill_rounded(gl, sx - 4.0, sy, sw + 8.0, sh, 4.0, base);
+
+            let line = UiPalette::ink(ui.item_ink, 0.72);
+            let dim_line = UiPalette::ink(ui.hint_ink, 0.55);
+            let bar_line = UiPalette::ink(ui.hint_ink, 0.4);
+            // The perforation is punched back to the card's own tone, so the
+            // holes read as gaps in the film rather than marks on it.
+            let hole = UiPalette::faded(ui.panel, 1.0);
+
+            for (index, cell) in geometry.cells.iter().enumerate() {
+                let selected = index == strip.selected;
+                let scale = if selected { film::SELECTED_SCALE } else { 1.0 };
+                let pivot = film::center(cell.cell);
+                let cell_rect = film::scaled_about(cell.cell, pivot, scale);
+                let frame = film::scaled_about(cell.frame, pivot, scale);
+
+                self.sysui_fill_rounded(
+                    gl,
+                    cell_rect[0],
+                    cell_rect[1],
+                    cell_rect[2],
+                    cell_rect[3],
+                    film::CELL_RADIUS,
+                    if selected {
+                        UiPalette::faded(ui.chip, 1.0)
+                    } else {
+                        UiPalette::faded(ui.chip, 0.7)
+                    },
+                );
+                let ink = if selected { line } else { dim_line };
+                self.sysui_stroke_rounded(
+                    gl,
+                    frame[0],
+                    frame[1],
+                    frame[2],
+                    frame[3],
+                    film::WINDOW_RADIUS,
+                    film::LINE_WIDTH * scale,
+                    UiPalette::faded(ink, 0.6),
+                );
+
+                let Some(content) = strip.cells.get(index) else {
+                    continue;
+                };
+                // A rule across the top stands in for the status bar, which is
+                // what tells Monocle and Fullscreen apart.
+                if content.shows_bar {
+                    let bar_h = (frame[3] * 0.08).max(1.0);
+                    self.sysui_fill_rounded(
+                        gl,
+                        frame[0],
+                        frame[1] + bar_h,
+                        frame[2],
+                        film::LINE_WIDTH,
+                        0.0,
+                        if selected { ink } else { bar_line },
+                    );
+                }
+                for window in &content.windows {
+                    let rect = film::window_rect(frame, *window);
+                    self.sysui_stroke_rounded(
+                        gl,
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
+                        film::WINDOW_RADIUS,
+                        film::LINE_WIDTH * scale,
+                        ink,
+                    );
+                }
+
+                if selected {
+                    // The gate: an accent ring around the frame being shown.
+                    self.sysui_stroke_rounded(
+                        gl,
+                        cell_rect[0] - 2.0,
+                        cell_rect[1] - 2.0,
+                        cell_rect[2] + 4.0,
+                        cell_rect[3] + 4.0,
+                        film::CELL_RADIUS + 2.0,
+                        1.8,
+                        [accent[0], accent[1], accent[2], 0.95],
+                    );
+                }
+            }
+
+            // Perforation last, so it punches through the cells it crosses.
+            for [hx, hy, hw, hh] in &geometry.sprockets {
+                self.sysui_fill_rounded(gl, *hx, *hy, *hw, *hh, hh * 0.4, hole);
+            }
+
+            // Countdown to the automatic commit.
+            let [cx, cy, cw, ch] = geometry.countdown;
+            self.sysui_fill_rounded(gl, cx, cy, cw, ch, ch * 0.5, UiPalette::faded(ui.track, 0.8));
+            let filled = cw * strip.countdown.clamp(0.0, 1.0);
+            if filled > 1.0 {
+                self.sysui_fill_rounded(
+                    gl,
+                    cx,
+                    cy,
+                    filled,
+                    ch,
+                    ch * 0.5,
+                    [accent[0], accent[1], accent[2], 0.9],
+                );
+            }
+
+            // Title, the selected layout's name centred under the strip, and
+            // the footer hint.
+            let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
+            let text_proj = super::get_uniform_loc(gl, self.sysui_text_program, "u_projection");
+            let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
+            let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
+            gl.UseProgram(self.sysui_text_program);
+            gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
+            gl.Uniform1i(text_tex, 0);
+            gl.Uniform1f(text_opacity, 1.0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            let caption = geometry.caption_center;
+            for (slot, pos) in [
+                (0usize, Some(geometry.title)),
+                (2, None),
+                (3, Some(geometry.hint)),
+            ] {
+                let Some((tex, w, h)) = self.sysui_textures[slot] else {
+                    continue;
+                };
+                let (tx, ty) = match pos {
+                    Some([x, y]) => (x, y),
+                    // The caption is centred on the strip rather than aligned
+                    // to the panel's text column.
+                    None => (caption[0] - w as f32 * 0.5, caption[1] - h as f32 * 0.5),
+                };
+                gl.Uniform4f(text_rect, tx, ty, w as f32, h as f32);
+                gl.BindTexture(ffi::TEXTURE_2D, tex);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
@@ -3032,6 +3287,10 @@ impl WaylandCompositor {
             return;
         };
         unsafe { self.update_system_ui_textures(gl, &overlay) };
+        if let Some(strip) = &overlay.filmstrip {
+            unsafe { self.render_layout_filmstrip(gl, projection, strip) };
+            return;
+        }
         let dims = |slot: usize| -> (f32, f32) {
             self.sysui_textures[slot]
                 .map(|(_, w, h)| (w as f32, h as f32))

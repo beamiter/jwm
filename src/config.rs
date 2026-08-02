@@ -829,6 +829,12 @@ pub struct BehaviorConfig {
     /// survive a restart. Offers marked as secrets are never recorded.
     #[serde(default = "default_clipboard_history")]
     pub clipboard_history: bool,
+    /// Show the film-strip layout picker when cycling layouts, instead of
+    /// switching silently. The picker still cycles on every press of the same
+    /// key, so turning this off only removes the panel. Needs the compositor;
+    /// without one, cycling falls back to switching silently anyway.
+    #[serde(default = "default_true")]
+    pub layout_picker: bool,
     /// Directory the wallpaper picker lists. Empty means "beside the current
     /// wallpaper", then ~/Pictures/Wallpapers, then ~/Pictures.
     #[serde(default)]
@@ -1335,6 +1341,7 @@ fn key_function_is_repeatable(function: &str) -> bool {
             | "volume_adjust"
             | "brightness_adjust"
             | "cyclelayout"
+            | "layout_picker"
             | "scrolling_focus_column"
             | "scrolling_move_column"
             | "scrolling_consume"
@@ -1506,6 +1513,7 @@ impl Default for Config {
                     night_light_end: default_night_light_end(),
                     night_light_transition_mins: default_night_light_transition(),
                     clipboard_history: default_clipboard_history(),
+                    layout_picker: true,
                     idle_dim_secs: default_idle_dim_secs(),
                     idle_dim_level: default_idle_dim_level(),
                     idle_lock_secs: 0,
@@ -2666,6 +2674,7 @@ impl Config {
             "resizemouse" => Some(Jwm::resizemouse),
             "show_keybindings" => Some(Jwm::show_keybindings),
             "cyclelayout" => Some(Jwm::cyclelayout),
+            "layout_picker" => Some(Jwm::layout_picker),
             "togglesticky" => Some(Jwm::togglesticky),
             "togglescratchpad" => Some(Jwm::togglescratchpad),
             "togglepip" => Some(Jwm::togglepip),

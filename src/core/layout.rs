@@ -267,6 +267,163 @@ impl LayoutEnum {
         let idx = Self::CYCLE.iter().position(|l| l == self).unwrap_or(0);
         &Self::CYCLE[(idx + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
     }
+
+    /// Every layout, in the order the cycle visits them. This is what the
+    /// layout picker lays out on its film strip.
+    pub fn all() -> &'static [LayoutEnum] {
+        Self::CYCLE
+    }
+
+    /// Position in [`LayoutEnum::all`], or 0 for a layout that is not in it.
+    pub fn cycle_index(&self) -> usize {
+        Self::CYCLE.iter().position(|l| l == self).unwrap_or(0)
+    }
+
+    /// Human-facing name, for UI that has room for more than the symbol.
+    pub fn label(&self) -> &'static str {
+        match self.0 {
+            "tile" => "Tile",
+            "float" => "Float",
+            "monocle" => "Monocle",
+            "fibonacci" => "Fibonacci",
+            "centeredmaster" => "Centered Master",
+            "bstack" => "Bottom Stack",
+            "grid" => "Grid",
+            "deck" => "Deck",
+            "threecol" => "Three Column",
+            "tatami" => "Tatami",
+            "fullscreen" => "Fullscreen",
+            "scrolling" => "Scrolling",
+            "vstack" => "V-Stack",
+            _ => "Layout",
+        }
+    }
+}
+
+/// Windows a layout thumbnail is drawn with.
+///
+/// Four is enough for a master column plus a stack and for fibonacci's second
+/// turn; the layouts whose signature only appears once the grid has to fold
+/// ask for more.
+pub fn preview_window_count(layout: &LayoutEnum) -> usize {
+    match layout.0 {
+        // Tatami weaves rows of different heights together, which a 2x2 grid
+        // cannot show — at four windows it is indistinguishable from Grid.
+        "tatami" => 6,
+        _ => 4,
+    }
+}
+
+/// The frames of one layout thumbnail, in `0.0..=1.0` of the thumbnail box.
+///
+/// Produced by running the layout's own geometry function over a virtual
+/// monitor, so a thumbnail cannot describe a layout the window manager does
+/// not actually produce. Rects are returned front-to-back in stacking order,
+/// which is what makes the deck and float cascades read correctly.
+pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
+    /// Virtual monitor the preview is computed on: 16:10, large enough that
+    /// integer rounding inside the layouts stays under a thumbnail pixel.
+    const W: i32 = 1600;
+    const H: i32 = 1000;
+    const GAP: i32 = 28;
+
+    let count = count.max(1);
+    let clients: Vec<LayoutClient<usize>> = (0..count)
+        .map(|key| LayoutClient {
+            key,
+            factor: 1.0,
+            border_w: 0,
+        })
+        .collect();
+    let params = LayoutParams {
+        screen_area: Rect::new(0, 0, W, H),
+        n_master: 1,
+        m_fact: 0.55,
+        gap: GAP,
+    };
+
+    let mut results = match layout.0 {
+        "tile" => calculate_tile(&params, &clients),
+        "fibonacci" => calculate_fibonacci(&params, &clients),
+        "centeredmaster" => calculate_centered_master(&params, &clients),
+        "bstack" => calculate_bstack(&params, &clients),
+        "grid" => calculate_grid(&params, &clients),
+        "deck" => calculate_deck(&params, &clients),
+        "threecol" => calculate_three_col(&params, &clients),
+        "tatami" => calculate_tatami(&params, &clients),
+        "monocle" => calculate_monocle(&params, &clients),
+        "fullscreen" => calculate_fullscreen(&params, &clients),
+        "vstack" => calculate_vstack(&params, &clients),
+        "scrolling" => {
+            // One window per column is what the strip is about; the focused
+            // column sits centred and its neighbours are cut off by the
+            // monitor edge, which is exactly what the thumbnail should show.
+            let columns: Vec<Vec<LayoutClient<usize>>> = (0..count)
+                .map(|key| {
+                    vec![LayoutClient {
+                        key,
+                        factor: 1.0,
+                        border_w: 0,
+                    }]
+                })
+                .collect();
+            let scrolling = ScrollingParams {
+                screen_area: params.screen_area,
+                column_width_ratio: 0.45,
+                column_width_factors: Vec::new(),
+                gap: GAP,
+                viewport_x: 0.0,
+            };
+            calculate_scrolling(&scrolling, &columns, count / 2).0
+        }
+        // Float has no tiling function: nothing places these windows, so the
+        // thumbnail shows the cascade a user ends up with by hand.
+        _ => {
+            let step = (W / 12).min(H / 8);
+            (0..count)
+                .map(|i| {
+                    let i = i as i32;
+                    LayoutResult {
+                        key: i as usize,
+                        rect: Rect::new(
+                            GAP + i * step,
+                            GAP + i * step,
+                            W / 2,
+                            (H * 5) / 9,
+                        ),
+                    }
+                })
+                .collect()
+        }
+    };
+
+    // Monocle stacks every window in the same place; drawing them all would
+    // just thicken one outline.
+    results.dedup_by(|a, b| a.rect == b.rect);
+
+    results
+        .into_iter()
+        .filter_map(|result| {
+            let r = result.rect;
+            if r.w <= 0 || r.h <= 0 {
+                return None;
+            }
+            // Clip to the monitor: the scrolling strip runs off both edges.
+            let x0 = r.x.max(0);
+            let y0 = r.y.max(0);
+            let x1 = (r.x + r.w).min(W);
+            let y1 = (r.y + r.h).min(H);
+            if x1 - x0 < W / 40 || y1 - y0 < H / 40 {
+                return None;
+            }
+            Some([
+                x0 as f32 / W as f32,
+                y0 as f32 / H as f32,
+                (x1 - x0) as f32 / W as f32,
+                (y1 - y0) as f32 / H as f32,
+            ])
+        })
+        .collect()
 }
 
 impl From<u32> for LayoutEnum {
@@ -1978,3 +2135,4 @@ mod tests {
         assert_eq!(focused.x, 200);
     }
 }
+

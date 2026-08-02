@@ -5,6 +5,7 @@ pub(crate) mod debug_hud;
 pub mod effects;
 pub mod event_coalescer;
 pub mod expose;
+pub mod layout_strip;
 pub mod math;
 pub mod media;
 pub(crate) mod osd;

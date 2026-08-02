@@ -20,6 +20,7 @@ pub mod connectivity;
 pub mod expose_plan;
 pub mod idle;
 pub mod launcher;
+pub mod layout_picker;
 pub mod magnifier;
 pub mod media;
 pub mod notifications;
@@ -49,6 +50,7 @@ pub use connectivity::{
     BluetoothDevice, BluetoothState, ConnectivityState, LinkKind, NetworkState, WifiNetwork,
 };
 pub use expose_plan::ExposeAction;
+pub use layout_picker::LayoutPickerState;
 pub use magnifier::MagnifierState;
 pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};

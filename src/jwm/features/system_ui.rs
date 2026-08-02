@@ -91,6 +91,10 @@ pub enum SystemUiState {
         matches: Vec<usize>,
         offset: usize,
     },
+    /// The film strip of layout thumbnails. Its own panel rather than a list,
+    /// so it carries only the picker state; see
+    /// [`crate::jwm::features::layout_picker`].
+    LayoutPicker(crate::jwm::features::LayoutPickerState),
     MonitorLayout {
         entries: Vec<MonitorLayoutEntry>,
         selected: usize,
@@ -467,6 +471,7 @@ impl Clone for SystemUiState {
     fn clone(&self) -> Self {
         match self {
             Self::Inactive => Self::Inactive,
+            Self::LayoutPicker(picker) => Self::LayoutPicker(picker.clone()),
             Self::Launcher {
                 query,
                 entries,
@@ -567,6 +572,24 @@ impl SystemUiState {
 
     pub fn is_monitor_layout(&self) -> bool {
         matches!(self, Self::MonitorLayout { .. })
+    }
+
+    pub fn is_layout_picker(&self) -> bool {
+        matches!(self, Self::LayoutPicker(_))
+    }
+
+    pub fn layout_picker(&self) -> Option<&crate::jwm::features::LayoutPickerState> {
+        match self {
+            Self::LayoutPicker(picker) => Some(picker),
+            _ => None,
+        }
+    }
+
+    pub fn layout_picker_mut(&mut self) -> Option<&mut crate::jwm::features::LayoutPickerState> {
+        match self {
+            Self::LayoutPicker(picker) => Some(picker),
+            _ => None,
+        }
     }
 
     pub fn cancel(&mut self) {
@@ -1801,6 +1824,7 @@ impl SystemUiState {
                 message.clear();
             }
             Self::Inactive
+            | Self::LayoutPicker(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }
@@ -1829,6 +1853,7 @@ impl SystemUiState {
                 message.clear();
             }
             Self::Inactive
+            | Self::LayoutPicker(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }
@@ -1975,6 +2000,19 @@ impl SystemUiState {
     pub fn overlay_parts(&self) -> OverlayParts {
         match self {
             Self::Inactive => OverlayParts::default(),
+            // The film strip draws its own panel. Only the words come from
+            // here: the headline, the selected layout's name as the caption
+            // (the single `items` row), and the footer.
+            Self::LayoutPicker(picker) => {
+                let layout = picker.selected_layout();
+                OverlayParts {
+                    title: "\u{f008}  LAYOUT".into(),
+                    query: None,
+                    items: vec![format!("{}   {}", layout.symbol(), layout.label())],
+                    selected: Some(0),
+                    hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc  cancel".into(),
+                }
+            }
             Self::Locked { password, message } => {
                 let status = if message.is_empty() {
                     "Enter password to unlock"
@@ -2355,6 +2393,7 @@ impl SystemUiState {
             }
             Self::Inactive
             | Self::Locked { .. }
+            | Self::LayoutPicker(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }

@@ -237,7 +237,7 @@ pub struct ScreenInfo {
 /// live in JWM; backends only present this snapshot as a styled panel:
 /// headline, optional search field, list rows (one optionally highlighted),
 /// and a footer hint.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SystemUiOverlay {
     pub title: String,
     /// Search-field content; `Some` renders a query bar with a caret.
@@ -248,6 +248,29 @@ pub struct SystemUiOverlay {
     pub hint: String,
     /// A lock overlay is opaque; other system UI dims the current desktop.
     pub locked: bool,
+    /// Set by the layout picker, which is drawn as a film strip of layout
+    /// thumbnails instead of the list card.
+    pub filmstrip: Option<LayoutFilmstrip>,
+}
+
+/// The layout picker's contents: one film cell per layout.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayoutFilmstrip {
+    pub cells: Vec<LayoutFilmCell>,
+    pub selected: usize,
+    /// Fraction of the auto-confirm delay already elapsed, `0.0..=1.0`.
+    pub countdown: f32,
+}
+
+/// One layout's thumbnail.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LayoutFilmCell {
+    /// Window outlines in `0.0..=1.0` of the cell's exposed frame, back to
+    /// front.
+    pub windows: Vec<[f32; 4]>,
+    /// Whether this layout leaves room for the status bar, drawn as a rule
+    /// across the top of the thumbnail.
+    pub shows_bar: bool,
 }
 
 /// What the OSD card depicts. Unlike toasts the OSD is a single

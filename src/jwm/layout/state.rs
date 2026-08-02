@@ -146,7 +146,7 @@ impl Jwm {
         }
     }
 
-    fn current_selected_layout(
+    pub(crate) fn current_selected_layout(
         &self,
         mon_key: MonitorKey,
     ) -> Result<Rc<LayoutEnum>, Box<dyn std::error::Error>> {
@@ -157,7 +157,7 @@ impl Jwm {
             .ok_or_else(|| "No monitor".into())
     }
 
-    fn apply_layout_change<F>(
+    pub(crate) fn apply_layout_change<F>(
         &mut self,
         backend: &mut dyn Backend,
         sel_mon_key: MonitorKey,
@@ -232,6 +232,13 @@ impl Jwm {
             WMArgEnum::Int(i) => *i,
             _ => 1,
         };
+
+        // The film strip takes over the cycle when it can: pressing the key
+        // still steps to the next layout, it just shows what the neighbours
+        // look like while it does.
+        if self.cycle_through_layout_picker(backend, dir)? {
+            return Ok(());
+        }
 
         self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
             let cur_tag = this
@@ -377,7 +384,7 @@ impl Jwm {
         }
     }
 
-    fn set_new_layout(&mut self, sel_mon_key: MonitorKey, layout: &Rc<LayoutEnum>, cur_tag: usize) {
+    pub(crate) fn set_new_layout(&mut self, sel_mon_key: MonitorKey, layout: &Rc<LayoutEnum>, cur_tag: usize) {
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
             let sel_lt = monitor.sel_lt;
             if let Some(ref mut pertag) = monitor.pertag {

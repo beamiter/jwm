@@ -14,8 +14,13 @@ use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
 use crate::jwm::features::CaptureTarget;
+use crate::jwm::types::WMArgEnum;
 use log::{debug, error, info};
 use std::sync::atomic::Ordering;
+
+/// Wakeup pacing for the panels that animate on their own, roughly one frame
+/// at 60 Hz.
+const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 fn minimized_window_relinquishes_focus(minimized: bool, is_selected: bool) -> bool {
     minimized && is_selected
@@ -254,6 +259,23 @@ impl WMController for Jwm {
         detail: u8,
         time: u32,
     ) {
+        if self.features.system_ui.is_layout_picker() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            match detail {
+                // Wheel: browse the strip without committing.
+                4 => {
+                    let _ = self.layout_picker(backend, &WMArgEnum::Int(-1));
+                }
+                5 => {
+                    let _ = self.layout_picker(backend, &WMArgEnum::Int(1));
+                }
+                _ => self.click_layout_picker(backend, x, y),
+            }
+            return;
+        }
         if self.features.system_ui.is_active() {
             return;
         }
@@ -430,6 +452,11 @@ impl WMController for Jwm {
     ) {
         if self.features.system_ui.is_active() {
             self.last_mouse_root = (root_x, root_y);
+            // The film strip follows the pointer, so the cell under it is the
+            // one a click would take.
+            if self.features.system_ui.is_layout_picker() {
+                self.hover_layout_picker(backend, root_x, root_y);
+            }
             return;
         }
         if self.features.recording.selecting_region {
@@ -1322,6 +1349,141 @@ mod tests {
         assert_eq!(backend.compositor_transitions, [false]);
     }
 
+    /// A window manager with one empty monitor on a 1920x1080 screen, which is
+    /// the least the layout picker needs to have something to switch.
+    fn jwm_with_monitor() -> Jwm {
+        use crate::core::models::{Pertag, WMMonitor};
+
+        let mut jwm = empty_jwm();
+        let mut monitor = WMMonitor::new();
+        monitor.pertag = Some(Pertag::new(true, CONFIG.load().tags_length()));
+        let key = jwm.state.monitors.insert(monitor);
+        jwm.state.monitor_order.push(key);
+        jwm.state.sel_mon = Some(key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        jwm
+    }
+
+    fn current_layout(jwm: &Jwm) -> crate::core::layout::LayoutEnum {
+        let key = jwm.state.sel_mon.unwrap();
+        let monitor = jwm.state.monitors.get(key).unwrap();
+        (*monitor.lt[monitor.sel_lt]).clone()
+    }
+
+    #[test]
+    fn cycling_layouts_opens_the_film_strip_and_keeps_stepping_it() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert!(jwm.features.system_ui.is_layout_picker());
+        // A tap still switches the layout, exactly as the silent cycle did.
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert!(jwm.features.system_ui.is_layout_picker());
+        assert_eq!(&current_layout(&jwm), start.cycle_next().cycle_next());
+
+        // And back the way it came.
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(-1)).unwrap();
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+        assert_eq!(
+            jwm.features
+                .system_ui
+                .layout_picker()
+                .unwrap()
+                .selected_layout(),
+            start.cycle_next()
+        );
+    }
+
+    #[test]
+    fn confirming_keeps_the_browsed_layout_and_closes_the_strip() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.confirm_layout_picker(&mut backend);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+    }
+
+    #[test]
+    fn cancelling_puts_back_the_layout_the_picker_opened_on() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        assert_ne!(current_layout(&jwm), start);
+
+        jwm.cancel_layout_picker(&mut backend);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(current_layout(&jwm), start);
+    }
+
+    #[test]
+    fn the_strip_commits_by_itself_once_browsing_stops() {
+        use crate::jwm::features::layout_picker::AUTO_CONFIRM;
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+        let now = std::time::Instant::now();
+
+        // Still browsing: the panel stays up.
+        jwm.tick_layout_picker(&mut backend, now);
+        assert!(jwm.features.system_ui.is_layout_picker());
+
+        jwm.features.system_ui.layout_picker_mut().unwrap().touched = now - AUTO_CONFIRM;
+        jwm.tick_layout_picker(&mut backend, now);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+    }
+
+    #[test]
+    fn clicking_a_cell_picks_that_layout_and_commits_it() {
+        use crate::backend::compositor_common::layout_strip;
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        let picker = jwm.features.system_ui.layout_picker().unwrap();
+        let target = 4usize;
+        let wanted = picker.layouts[target];
+        let geometry = layout_strip::strip_geometry(1920.0, 1080.0, picker.layouts.len());
+        let [x, y] = layout_strip::center(geometry.cells[target].cell);
+
+        jwm.click_layout_picker(&mut backend, x as f64, y as f64);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(&current_layout(&jwm), wanted);
+    }
+
+    #[test]
+    fn without_a_compositor_cycling_switches_layouts_silently() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend.compositor_supported = false;
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+    }
+
     #[test]
     fn only_selected_minimized_window_relinquishes_focus() {
         assert!(minimized_window_relinquishes_focus(true, true));
@@ -1577,6 +1739,11 @@ impl EventHandler for Jwm {
         self.process_ipc(backend);
         self.poll_config_reload(backend, now);
         self.flush_pending_bar_updates();
+        // The layout picker commits on its own once the user stops browsing.
+        // Ahead of the animation tick, whose panel flush then carries the
+        // countdown's new position out in the same iteration.
+        self.tick_layout_picker(backend, now);
+
         self.tick_animations(backend);
 
         // _NET_WM_PING: send pings every 2 seconds, check for timeouts
@@ -1606,11 +1773,20 @@ impl EventHandler for Jwm {
         self.animations.has_active()
             || self.features.overview.active
             || self.features.expose_active
+            || self.features.system_ui.is_layout_picker()
             || self.config_reload_deadline_is_due(std::time::Instant::now())
     }
 
     fn next_wakeup(&self) -> Option<std::time::Duration> {
-        Some(self.config_reload_next_wakeup(std::time::Instant::now()))
+        let now = std::time::Instant::now();
+        let config_reload = self.config_reload_next_wakeup(now);
+        // The picker's countdown bar has to advance, and it commits when the
+        // countdown runs out, so it wants a frame long before the config
+        // reload poll would come round.
+        Some(match self.layout_picker_wakeup(now) {
+            Some(remaining) => config_reload.min(remaining).min(FRAME_INTERVAL),
+            None => config_reload,
+        })
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {

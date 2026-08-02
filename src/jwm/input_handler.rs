@@ -2,7 +2,8 @@
 
 use crate::Jwm;
 use crate::backend::api::{
-    AllowMode, Backend, HitTarget, SystemUiOverlay, WindowChanges, WindowType,
+    AllowMode, Backend, HitTarget, LayoutFilmCell, LayoutFilmstrip, SystemUiOverlay, WindowChanges,
+    WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::config::CONFIG;
@@ -198,6 +199,24 @@ impl Jwm {
                 selected: parts.selected,
                 hint: parts.hint,
                 locked: self.features.system_ui.is_locked(),
+                filmstrip: self.features.system_ui.layout_picker().map(|picker| {
+                    let now = std::time::Instant::now();
+                    LayoutFilmstrip {
+                        cells: picker
+                            .layouts
+                            .iter()
+                            .zip(&picker.previews)
+                            .map(|(layout, windows)| LayoutFilmCell {
+                                windows: windows.clone(),
+                                // The fullscreen layout is the one that takes
+                                // the bar down with it.
+                                shows_bar: !layout.is_fullscreen_layout(),
+                            })
+                            .collect(),
+                        selected: picker.selected,
+                        countdown: picker.countdown(now),
+                    }
+                }),
             }
         }));
         backend.compositor_force_full_redraw();
@@ -791,6 +810,27 @@ impl Jwm {
             // picker, so a typo does not cost the whole scan.
             if keysym == keys::KEY_Escape && self.features.system_ui.cancel_wifi_passphrase() {
                 self.sync_system_ui(backend);
+                return Ok(());
+            }
+            // The layout picker binds the same keys the cycle action does, so
+            // holding the modifier and tapping space keeps stepping the strip
+            // exactly as it did before the panel existed.
+            if self.features.system_ui.is_layout_picker() {
+                match keysym {
+                    keys::KEY_Escape => self.cancel_layout_picker(backend),
+                    keys::KEY_Return | keys::KEY_KP_Enter => self.confirm_layout_picker(backend),
+                    keys::KEY_Left | keys::KEY_Up | keys::KEY_ISO_Left_Tab => {
+                        self.layout_picker(backend, &WMArgEnum::Int(-1))?
+                    }
+                    keys::KEY_Right | keys::KEY_Down | keys::KEY_Tab => {
+                        self.layout_picker(backend, &WMArgEnum::Int(1))?
+                    }
+                    keys::KEY_space => {
+                        let delta = if clean_state.contains(Mods::SHIFT) { -1 } else { 1 };
+                        self.layout_picker(backend, &WMArgEnum::Int(delta))?
+                    }
+                    _ => {}
+                }
                 return Ok(());
             }
             if keysym == keys::KEY_Escape && !locked {

@@ -319,6 +319,8 @@ impl Jwm {
             "zoom"
         } else if eq!(Jwm::setlayout) {
             "setlayout"
+        } else if eq!(Jwm::layout_picker) {
+            "layout_picker"
         } else if eq!(Jwm::togglefloating) {
             "togglefloating"
         } else if eq!(Jwm::togglebar) {

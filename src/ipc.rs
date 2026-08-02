@@ -95,6 +95,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "control_center",
         "cycle_overview",
         "cyclelayout",
+        "layout_picker",
         "focus_none",
         "focus_tab",
         "focus_window",
@@ -478,6 +479,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::setlayout, layout))
         }
         "cyclelayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
+        "layout_picker" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
         "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),
 
         // --- Tags ---
