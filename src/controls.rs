@@ -8,16 +8,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::ThemeMode;
 use crate::display::{MetricTone, VolumeLevel};
-use crate::model::{BarView, MediaPlayback, MediaState, NetworkState, Percent, TagId, UserAction};
+use crate::model::{
+    BarView, MediaPlayback, MediaState, NetworkState, Percent, ShellRoute, TagId, UserAction,
+};
 use crate::presentation::{NodeId, PresentationConfig};
 
 /// Text used when a visible metric has no value.
 pub const UNKNOWN_VALUE: &str = "--";
 
-/// Status controls in the same right-to-left order used by `LayoutEngine`.
+/// Fixed status controls in the same right-to-left order used by
+/// `LayoutEngine`.
 ///
 /// The first visible entry is anchored at the right edge. Hidden entries are
-/// omitted without changing the relative order of the remaining controls.
+/// omitted without changing the relative order of the remaining controls. Any
+/// configured [`NodeId::ShellHub`] entries follow this list, so they land at
+/// the inner (left) edge of the status cluster.
 pub const STATUS_ORDER_RIGHT_TO_LEFT: [NodeId; 11] = [
     NodeId::Clock,
     NodeId::Screenshot,
@@ -444,8 +449,49 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             .with_availability(view.wm_available),
         );
     }
+    if visibility.shell_hub {
+        // Appended last, so the shell entries sit at the inner edge of the
+        // right-to-left status cluster. They are also the first cells the
+        // layout engine drops on a narrow bar, which is the right trade: a
+        // clock or a battery reading is worth more width than a launcher.
+        for &route in &config.shell_routes {
+            status.push(
+                control(
+                    NodeId::ShellHub(route),
+                    labels.shell_route(route).to_owned(),
+                    String::new(),
+                    None,
+                    None,
+                    None,
+                    ControlState::default(),
+                    shell_bindings(route),
+                )
+                // The surface lives in the window manager, so an unreachable
+                // window manager must gray the entry out rather than let a
+                // click vanish into a closed transport.
+                .with_availability(view.wm_available)
+                .with_enabled(view.wm_available),
+            );
+        }
+    }
 
     status
+}
+
+/// Primary opens the route. Secondary is "up": a page returns to the hub, and
+/// the hub jumps to the launcher, which is the page most hosts want first.
+/// Scroll walks the pages so a single cell can reach all of them.
+fn shell_bindings(route: ShellRoute) -> InputBindings {
+    InputBindings {
+        primary: Some(UserAction::OpenShellHub(route)),
+        secondary: Some(UserAction::OpenShellHub(if route == ShellRoute::Hub {
+            ShellRoute::Applications
+        } else {
+            ShellRoute::Hub
+        })),
+        scroll_up: Some(UserAction::OpenShellHub(route.previous())),
+        scroll_down: Some(UserAction::OpenShellHub(route.next())),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -725,9 +771,12 @@ mod tests {
         let mut config = PresentationConfig::default();
         let all = PresentationProjector::project(snapshot.view(), &config);
         assert_eq!(
+            // Shell entries are appended after the fixed cluster and are
+            // covered separately; this case is about the fixed order alone.
             all.status
                 .iter()
                 .map(|control| control.id)
+                .filter(|id| !matches!(id, NodeId::ShellHub(_)))
                 .collect::<Vec<_>>(),
             STATUS_ORDER_RIGHT_TO_LEFT
         );
@@ -745,6 +794,7 @@ mod tests {
             theme: false,
             screenshot: true,
             clock: false,
+            shell_hub: false,
         };
         let filtered = PresentationProjector::project(snapshot.view(), &config);
         assert_eq!(
@@ -761,6 +811,138 @@ mod tests {
             ]
         );
         assert!(filtered.client_name.is_none());
+    }
+
+    #[test]
+    fn shell_entries_are_optional_and_land_left_of_the_status_cluster() {
+        let snapshot = snapshot();
+        let mut config = PresentationConfig::default();
+        assert!(
+            config.visibility.shell_hub,
+            "the default bar exposes the shell"
+        );
+
+        config.visibility.shell_hub = false;
+        let hidden: Vec<_> = PresentationProjector::project(snapshot.view(), &config)
+            .status
+            .iter()
+            .map(|control| control.id)
+            .collect();
+        assert!(!hidden.iter().any(|id| matches!(id, NodeId::ShellHub(_))));
+
+        config.visibility.shell_hub = true;
+        config.shell_routes = vec![ShellRoute::Hub, ShellRoute::Notifications];
+        let shown: Vec<_> = PresentationProjector::project(snapshot.view(), &config)
+            .status
+            .iter()
+            .map(|control| control.id)
+            .collect();
+
+        let split = hidden.len();
+        assert_eq!(
+            &shown[..split],
+            hidden,
+            "shell entries must not reorder or displace the fixed status controls"
+        );
+        assert_eq!(
+            &shown[split..],
+            [
+                NodeId::ShellHub(ShellRoute::Hub),
+                NodeId::ShellHub(ShellRoute::Notifications),
+            ],
+            "configured routes keep their order at the inner edge of the cluster"
+        );
+    }
+
+    #[test]
+    fn shell_entries_reach_every_route_from_one_cell() {
+        let snapshot = snapshot();
+        let config = PresentationConfig {
+            visibility: PresentationVisibility {
+                shell_hub: true,
+                ..PresentationVisibility::default()
+            },
+            shell_routes: vec![ShellRoute::Hub],
+            ..PresentationConfig::default()
+        };
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        let hub = projected
+            .status
+            .iter()
+            .find(|control| control.id == NodeId::ShellHub(ShellRoute::Hub))
+            .expect("hub entry");
+
+        assert_eq!(
+            hub.bindings.primary,
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+        assert_eq!(
+            hub.bindings.secondary,
+            Some(UserAction::OpenShellHub(ShellRoute::Applications))
+        );
+
+        // Walking scroll_down from the hub must visit every page and return.
+        let mut route = ShellRoute::Hub;
+        let mut seen = vec![route];
+        for _ in 1..ShellRoute::ALL.len() {
+            route = route.next();
+            seen.push(route);
+        }
+        assert_eq!(route.next(), ShellRoute::Hub);
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ShellRoute::ALL.len());
+
+        // A page's secondary binding goes back up to the hub.
+        let config = PresentationConfig {
+            shell_routes: vec![ShellRoute::Clipboard],
+            ..config
+        };
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        let clipboard = projected
+            .status
+            .iter()
+            .find(|control| control.id == NodeId::ShellHub(ShellRoute::Clipboard))
+            .expect("clipboard entry");
+        assert_eq!(
+            clipboard.bindings.secondary,
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+    }
+
+    #[test]
+    fn shell_entries_are_disabled_while_the_window_manager_is_unreachable() {
+        let mut snapshot = snapshot();
+        let config = PresentationConfig {
+            visibility: PresentationVisibility {
+                shell_hub: true,
+                ..PresentationVisibility::default()
+            },
+            ..PresentationConfig::default()
+        };
+
+        let connected = PresentationProjector::project(snapshot.view(), &config);
+        let entry = connected
+            .status
+            .iter()
+            .find(|control| matches!(control.id, NodeId::ShellHub(_)))
+            .expect("hub entry");
+        assert!(entry.state.enabled);
+        assert!(entry.available);
+
+        snapshot.wm_available = false;
+        let offline = PresentationProjector::project(snapshot.view(), &config);
+        let entry = offline
+            .status
+            .iter()
+            .find(|control| matches!(control.id, NodeId::ShellHub(_)))
+            .expect("hub entry");
+        assert!(
+            !entry.state.enabled,
+            "a click must not vanish into a closed transport"
+        );
+        assert!(!entry.available);
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use crate::ThemeMode;
 use crate::controls::{BarPresentation, ControlSpec, PresentationProjector};
 use crate::display::{BatteryThresholds, IconSet, UsageThresholds, VolumeThresholds};
-use crate::model::{BarView, LayoutId, MAX_MODEL_TAGS, Percent, TagId, UserAction};
+use crate::model::{BarView, LayoutId, MAX_MODEL_TAGS, Percent, ShellRoute, TagId, UserAction};
 
 /// A point in logical (DPI-independent) coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -207,6 +207,10 @@ pub enum NodeId {
     Theme,
     Screenshot,
     Clock,
+    /// One entry point into the window manager's own shell surface. Carrying
+    /// the route makes each page a distinct node, so hover, damage tracking
+    /// and hit testing keep working when a bar shows several of them.
+    ShellHub(ShellRoute),
 }
 
 /// State carried by scene nodes so every renderer applies interaction styling
@@ -559,7 +563,10 @@ pub struct LayoutChoice {
     pub label: String,
 }
 
+/// `serde(default)` so a config written before a label existed keeps loading:
+/// adding an icon must never turn an existing bar into a startup failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PresentationLabels {
     pub clock: String,
     pub screenshot: String,
@@ -577,6 +584,8 @@ pub struct PresentationLabels {
     pub network_offline: String,
     pub media_playing: String,
     pub media_paused: String,
+    /// Icon per shell route, in [`ShellRoute::ALL`] order.
+    pub shell_routes: [String; 6],
 }
 
 impl Default for PresentationLabels {
@@ -598,7 +607,26 @@ impl Default for PresentationLabels {
             network_offline: "📵".to_owned(),
             media_playing: "▶".to_owned(),
             media_paused: "⏸".to_owned(),
+            shell_routes: PresentationLabels::DEFAULT_SHELL_ROUTE_ICONS.map(str::to_owned),
         }
+    }
+}
+
+impl PresentationLabels {
+    /// Emoji rather than Nerd Font glyphs, matching every other default here:
+    /// a bar with no patched font still shows something recognizable.
+    pub const DEFAULT_SHELL_ROUTE_ICONS: [&'static str; 6] = ["◈", "🚀", "🔔", "📋", "📅", "🖼"];
+
+    /// Icon for one route, falling back to the built-in default when a host
+    /// supplies a blank override.
+    #[must_use]
+    pub fn shell_route(&self, route: ShellRoute) -> &str {
+        let index = route.code() as usize;
+        self.shell_routes
+            .get(index)
+            .map(String::as_str)
+            .filter(|icon| !icon.trim().is_empty())
+            .unwrap_or(Self::DEFAULT_SHELL_ROUTE_ICONS[index])
     }
 }
 
@@ -621,6 +649,9 @@ impl From<&IconSet> for PresentationLabels {
             network_offline: "\u{f05aa}".to_owned(),
             media_playing: "\u{f040a}".to_owned(),
             media_paused: "\u{f03e4}".to_owned(),
+            // Deliberately the same glyphs JWM's own shell rows use, so the
+            // bar entry and the page it opens read as one surface.
+            shell_routes: PresentationLabels::NERD_FONT_SHELL_ROUTE_ICONS.map(str::to_owned),
         }
     }
 }
@@ -631,9 +662,19 @@ impl PresentationLabels {
     pub fn nerd_font() -> Self {
         Self::from(&IconSet::nerd_font())
     }
+
+    pub const NERD_FONT_SHELL_ROUTE_ICONS: [&'static str; 6] = [
+        "\u{f009}", // grid — hub home
+        "\u{f135}", // rocket — applications
+        "\u{f0f3}", // bell — notifications
+        "\u{f0ea}", // clipboard
+        "\u{f073}", // calendar
+        "\u{f03e}", // image — wallpaper
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PresentationVisibility {
     pub client_name: bool,
     pub monitor: bool,
@@ -646,6 +687,11 @@ pub struct PresentationVisibility {
     pub theme: bool,
     pub screenshot: bool,
     pub clock: bool,
+    /// Entry points into the window manager's shell surface. On by default:
+    /// a window manager that does not answer the shell command also does not
+    /// hold the transport open, and `wm_available` already grays the entry out
+    /// in that case, so there is no dead-button risk to guard against.
+    pub shell_hub: bool,
 }
 
 impl Default for PresentationVisibility {
@@ -662,6 +708,7 @@ impl Default for PresentationVisibility {
             theme: true,
             screenshot: true,
             clock: true,
+            shell_hub: true,
         }
     }
 }
@@ -693,6 +740,10 @@ pub struct PresentationConfig {
     pub battery_thresholds: BatteryThresholds,
     /// Renderer-independent audio icon band policy.
     pub volume_thresholds: VolumeThresholds,
+    /// Shell entry points to project, in left-to-right order, when
+    /// [`PresentationVisibility::shell_hub`] is set. Duplicates are kept: a
+    /// host that wants the hub twice is describing its own bar, not an error.
+    pub shell_routes: Vec<ShellRoute>,
     pub visibility: PresentationVisibility,
 }
 
@@ -724,6 +775,10 @@ impl Default for PresentationConfig {
             usage_thresholds: UsageThresholds::default(),
             battery_thresholds: BatteryThresholds::default(),
             volume_thresholds: VolumeThresholds::default(),
+            // One cell by default. It opens the hub home, and its scroll
+            // bindings reach every other page, so the common case costs a
+            // single pill of bar width.
+            shell_routes: vec![ShellRoute::Hub],
             visibility: PresentationVisibility::default(),
         }
     }
@@ -1431,6 +1486,78 @@ mod tests {
     }
 
     #[test]
+    fn shell_entries_reach_the_scene_and_carry_their_bindings() {
+        let tags = vec![TagState::default(); 4];
+        let config = PresentationConfig {
+            shell_routes: vec![ShellRoute::Hub, ShellRoute::Notifications],
+            ..PresentationConfig::default()
+        };
+        let engine = LayoutEngine::new(config, ApproximateTextMeasurer::default());
+        let scene = engine.build(
+            view(&tags, ""),
+            Size::new(2400.0, 38.0),
+            &InteractionState::default(),
+        );
+
+        // Every Cairo-based bar goes through this path, so reaching the scene
+        // is what "the entry works without frontend code" actually means.
+        let shell: Vec<_> = scene
+            .hits
+            .iter()
+            .filter(|hit| matches!(hit.id, NodeId::ShellHub(_)))
+            .collect();
+        assert_eq!(
+            shell.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [
+                NodeId::ShellHub(ShellRoute::Hub),
+                NodeId::ShellHub(ShellRoute::Notifications),
+            ]
+        );
+
+        let hub = shell[0];
+        assert_eq!(
+            hub.action(PointerAction::Primary),
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+        assert_eq!(
+            hub.action(PointerAction::ScrollDown),
+            Some(UserAction::OpenShellHub(ShellRoute::Applications))
+        );
+
+        // Clicking the cell must resolve through hit testing, not just exist
+        // in the display list.
+        let inside = Point::new(hub.bounds.x + 1.0, hub.bounds.y + 1.0);
+        assert_eq!(
+            scene.action_at(inside, PointerAction::Primary),
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+    }
+
+    #[test]
+    fn shell_entries_are_dropped_before_the_clock_on_a_narrow_bar() {
+        let tags = vec![TagState::default(); 4];
+        let engine = LayoutEngine::new(
+            PresentationConfig::default(),
+            ApproximateTextMeasurer::default(),
+        );
+        let scene = engine.build(
+            view(&tags, ""),
+            Size::new(220.0, 38.0),
+            &InteractionState::default(),
+        );
+
+        // A launcher is worth less bar width than a clock or a battery
+        // reading, so the shell cells are the first status cells to go.
+        assert!(
+            !scene
+                .hits
+                .iter()
+                .any(|hit| matches!(hit.id, NodeId::ShellHub(_)))
+        );
+        assert!(scene.hits.iter().any(|hit| hit.id == NodeId::Clock));
+    }
+
+    #[test]
     fn tag_count_and_labels_are_dynamic() {
         let mut tags = vec![TagState::default(); 12];
         tags[11].occupied = true;
@@ -1448,6 +1575,7 @@ mod tests {
                 theme: false,
                 screenshot: false,
                 clock: false,
+                shell_hub: false,
             },
             ..PresentationConfig::default()
         };

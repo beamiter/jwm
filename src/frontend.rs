@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DirtyBits,
-    model::{BarSnapshot, LayoutId, MAX_MODEL_TAGS, MonitorId, TagId, UserAction},
+    model::{BarSnapshot, LayoutId, MAX_MODEL_TAGS, MonitorId, ShellRoute, TagId, UserAction},
     runtime::{BarRuntime, RuntimeFrame, RuntimeSchedule, RuntimeUpdate},
 };
 
@@ -467,6 +467,7 @@ pub enum ActionRequest {
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
+    OpenShellHub { route: ShellRoute },
 }
 
 impl ActionRequest {
@@ -555,6 +556,7 @@ impl TryFrom<ActionRequest> for UserAction {
             ActionRequest::RefreshBattery => Self::RefreshBattery,
             ActionRequest::Screenshot => Self::Screenshot,
             ActionRequest::OpenAudioControl => Self::OpenAudioControl,
+            ActionRequest::OpenShellHub { route } => Self::OpenShellHub(route),
         })
     }
 }
@@ -577,7 +579,7 @@ mod tests {
     };
     use crate::{
         AudioState, BarModel, BatteryState, BrightnessState, DirtyBits, LayoutId, MonitorGeometry,
-        MonitorId, Percent, SystemState, TagId, ThemeMode, UserAction,
+        MonitorId, Percent, ShellRoute, SystemState, TagId, ThemeMode, UserAction,
         model::MAX_MODEL_TAGS,
         runtime::{RuntimeFrame, RuntimeUpdate},
     };
@@ -628,6 +630,11 @@ mod tests {
             ActionRequest::Screenshot,
             ActionRequest::OpenAudioControl,
         ]);
+        cases.extend(
+            ShellRoute::ALL
+                .into_iter()
+                .map(|route| ActionRequest::OpenShellHub { route }),
+        );
         cases
     }
 

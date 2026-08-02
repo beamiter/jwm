@@ -1,6 +1,6 @@
 # xbar_core
 
-`xbar_core` 0.7 is the backend-neutral status-bar kernel shared by the XCB,
+`xbar_core` 0.8 is the backend-neutral status-bar kernel shared by the XCB,
 x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
 The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
@@ -158,6 +158,32 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |
 | `runtime-linux` | `AlignedTimer`, owned token-based `Epoll`, reconnect-aware notifier ownership, and owned wake forwarding |
 | `render-cairo` | Scene-based `CairoRenderer`, text measurer, `CairoBar`, and validated CPU-frame rendering (`render_into_bgra`, `CpuCanvas`) |
+
+## Shell surface
+
+Bars can reach the window manager's own shell — launcher, notification center,
+clipboard history, calendar, wallpaper picker — the way DMS, Noctalia,
+Caelestia, and end-4 all do it: one bar entry that routes to every page.
+
+`xbar_core` implements none of those pages. `ShellRoute` names one, and
+`UserAction::OpenShellHub` asks the window manager to open it; everything the
+page then does belongs to the window manager. A bar therefore gains the whole
+feature without gaining any shell state to keep in sync.
+
+```rust
+use xbar_core::{ShellRoute, UserAction};
+
+// One cell reaches every page: primary opens it, scroll walks the cycle.
+let open_notifications = UserAction::OpenShellHub(ShellRoute::Notifications);
+assert_eq!(ShellRoute::Hub.next(), ShellRoute::Applications);
+assert_eq!(ShellRoute::from_key("control-center"), Some(ShellRoute::Hub));
+```
+
+`CairoBar` / `LayoutEngine` frontends project the entry automatically; toolkit
+and webview frontends dispatch the action from their own widget. The entry is
+tied to `wm_available`, so an unreachable window manager grays it out instead
+of swallowing the click. See [docs/MIGRATION-0.8.md](docs/MIGRATION-0.8.md) for
+the wire encoding, configuration keys, and default bindings.
 
 ## Companion crates
 

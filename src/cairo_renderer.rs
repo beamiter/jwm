@@ -1093,6 +1093,7 @@ mod tests {
                 theme: true,
                 screenshot: false,
                 clock: false,
+                shell_hub: false,
             },
             labels: crate::presentation::PresentationLabels {
                 theme_dark: "dark".to_owned(),
@@ -1288,6 +1289,7 @@ mod tests {
                 theme: false,
                 screenshot: false,
                 clock: false,
+                shell_hub: false,
             },
             ..crate::presentation::PresentationConfig::default()
         };

@@ -727,6 +727,138 @@ pub enum BarEvent {
     User(UserAction),
 }
 
+/// One page of the window manager's own shell surface.
+///
+/// JWM ships a native Shell Hub in the spirit of DMS, Noctalia, Caelestia and
+/// end-4: a single keyboard-driven surface that routes to the launcher,
+/// notifications, clipboard, calendar and wallpaper picker. A bar does not
+/// implement any of those pages — it only names the one it wants opened, so
+/// the shell stays a window-manager concern and the bar stays a projection.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellRoute {
+    /// The hub home page: route list plus grouped quick settings.
+    #[default]
+    Hub,
+    Applications,
+    Notifications,
+    Clipboard,
+    Calendar,
+    Wallpaper,
+}
+
+impl ShellRoute {
+    pub const ALL: [Self; 6] = [
+        Self::Hub,
+        Self::Applications,
+        Self::Notifications,
+        Self::Clipboard,
+        Self::Calendar,
+        Self::Wallpaper,
+    ];
+
+    /// Wire code shared with the window manager. Kept explicit rather than
+    /// derived from declaration order so reordering the enum for readability
+    /// can never silently repoint a running bar at a different page.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Hub => 0,
+            Self::Applications => 1,
+            Self::Notifications => 2,
+            Self::Clipboard => 3,
+            Self::Calendar => 4,
+            Self::Wallpaper => 5,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Hub),
+            1 => Some(Self::Applications),
+            2 => Some(Self::Notifications),
+            3 => Some(Self::Clipboard),
+            4 => Some(Self::Calendar),
+            5 => Some(Self::Wallpaper),
+            _ => None,
+        }
+    }
+
+    /// Stable identifier for configuration files and log lines.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Hub => "hub",
+            Self::Applications => "applications",
+            Self::Notifications => "notifications",
+            Self::Clipboard => "clipboard",
+            Self::Calendar => "calendar",
+            Self::Wallpaper => "wallpaper",
+        }
+    }
+
+    #[must_use]
+    pub fn from_key(key: &str) -> Option<Self> {
+        let key = key.trim().to_ascii_lowercase();
+        if let Some(route) = Self::ALL.into_iter().find(|route| route.key() == key) {
+            return Some(route);
+        }
+        // Names the surrounding ecosystem uses for the same pages, so a config
+        // copied from a DMS or Noctalia setup keeps working.
+        match key.as_str() {
+            "shell" | "home" | "control-center" | "control_center" => Some(Self::Hub),
+            "apps" | "launcher" | "runner" => Some(Self::Applications),
+            "notification" | "notification-center" => Some(Self::Notifications),
+            "clip" | "clipboard-history" => Some(Self::Clipboard),
+            "date" | "agenda" => Some(Self::Calendar),
+            "background" | "wallpapers" => Some(Self::Wallpaper),
+            _ => None,
+        }
+    }
+
+    /// Human-readable page name for tooltips and accessibility labels.
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Hub => "Shell Hub",
+            Self::Applications => "Applications",
+            Self::Notifications => "Notifications",
+            Self::Clipboard => "Clipboard",
+            Self::Calendar => "Calendar",
+            Self::Wallpaper => "Wallpaper",
+        }
+    }
+
+    /// The next page in [`Self::ALL`] order, wrapping. Frontends bind this to
+    /// scroll so one bar cell can reach every route without extra chrome.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Hub => Self::Applications,
+            Self::Applications => Self::Notifications,
+            Self::Notifications => Self::Clipboard,
+            Self::Clipboard => Self::Calendar,
+            Self::Calendar => Self::Wallpaper,
+            Self::Wallpaper => Self::Hub,
+        }
+    }
+
+    #[must_use]
+    pub const fn previous(self) -> Self {
+        match self {
+            Self::Hub => Self::Wallpaper,
+            Self::Applications => Self::Hub,
+            Self::Notifications => Self::Applications,
+            Self::Clipboard => Self::Notifications,
+            Self::Calendar => Self::Clipboard,
+            Self::Wallpaper => Self::Calendar,
+        }
+    }
+}
+
 /// Semantic user intent; native button/key enums are translated by a frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UserAction {
@@ -758,6 +890,8 @@ pub enum UserAction {
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
+    /// Ask the window manager to open its own shell surface at `route`.
+    OpenShellHub(ShellRoute),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,6 +906,12 @@ pub enum WmCommand {
     },
     SetLayout {
         layout: LayoutId,
+        monitor: MonitorId,
+    },
+    /// Open the window manager's shell surface on `monitor`. The bar names the
+    /// page; the window manager owns everything the page does.
+    OpenShellHub {
+        route: ShellRoute,
         monitor: MonitorId,
     },
 }
@@ -1291,6 +1431,17 @@ impl BarModel {
             UserAction::RefreshBattery => update.effects.push(BarEffect::RefreshBattery),
             UserAction::Screenshot => update.effects.push(BarEffect::Screenshot),
             UserAction::OpenAudioControl => update.effects.push(BarEffect::OpenAudioControl),
+            UserAction::OpenShellHub(route) => {
+                // No local state changes: the shell surface is owned by the
+                // window manager, so the bar must not render its own idea of
+                // whether it is open.
+                update
+                    .effects
+                    .push(BarEffect::WindowManager(WmCommand::OpenShellHub {
+                        route,
+                        monitor: self.monitor,
+                    }));
+            }
         }
         Ok(update)
     }
@@ -1342,6 +1493,98 @@ mod tests {
 
     fn percent(value: u8) -> Percent {
         Percent::from_whole(value).unwrap()
+    }
+
+    #[test]
+    fn shell_route_codes_are_stable_and_total() {
+        for route in ShellRoute::ALL {
+            assert_eq!(ShellRoute::from_code(route.code()), Some(route));
+            assert_eq!(ShellRoute::from_key(route.key()), Some(route));
+        }
+        // The codes are the wire contract with the window manager; pinning
+        // them here makes an accidental reorder of the enum a test failure
+        // rather than a bar that opens the wrong page.
+        assert_eq!(
+            ShellRoute::ALL.map(ShellRoute::code),
+            [0, 1, 2, 3, 4, 5],
+            "wire codes must not move"
+        );
+        assert_eq!(ShellRoute::from_code(6), None);
+        assert_eq!(ShellRoute::default(), ShellRoute::Hub);
+    }
+
+    #[test]
+    fn shell_route_keys_accept_case_padding_and_ecosystem_aliases() {
+        assert_eq!(
+            ShellRoute::from_key("  Notifications "),
+            Some(ShellRoute::Notifications)
+        );
+        assert_eq!(
+            ShellRoute::from_key("LAUNCHER"),
+            Some(ShellRoute::Applications)
+        );
+        assert_eq!(
+            ShellRoute::from_key("control-center"),
+            Some(ShellRoute::Hub)
+        );
+        assert_eq!(
+            ShellRoute::from_key("background"),
+            Some(ShellRoute::Wallpaper)
+        );
+        assert_eq!(ShellRoute::from_key("nope"), None);
+    }
+
+    #[test]
+    fn shell_route_neighbours_form_one_cycle_over_every_page() {
+        let mut route = ShellRoute::Hub;
+        let mut visited = vec![route];
+        for _ in 1..ShellRoute::ALL.len() {
+            route = route.next();
+            assert!(!visited.contains(&route), "next() must not revisit a page");
+            visited.push(route);
+        }
+        assert_eq!(route.next(), ShellRoute::Hub, "the cycle must close");
+
+        // previous() is the exact inverse, so scrolling back and forth over a
+        // bar cell lands on the page it started from.
+        for route in ShellRoute::ALL {
+            assert_eq!(route.next().previous(), route);
+            assert_eq!(route.previous().next(), route);
+        }
+    }
+
+    #[test]
+    fn opening_the_shell_asks_the_window_manager_and_changes_no_local_state() {
+        let mut model = BarModel::default();
+        model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                sequence: None,
+                monitor: MonitorId(2),
+                geometry: None,
+                layout_symbol: "[]=".to_owned(),
+                client_name: String::new(),
+                tags: Vec::new(),
+            }))
+            .unwrap();
+        let before = model.snapshot();
+
+        let update = model
+            .update(BarEvent::User(UserAction::OpenShellHub(
+                ShellRoute::Clipboard,
+            )))
+            .unwrap();
+
+        assert_eq!(
+            update.effects,
+            vec![BarEffect::WindowManager(WmCommand::OpenShellHub {
+                route: ShellRoute::Clipboard,
+                monitor: MonitorId(2),
+            })]
+        );
+        // The shell surface belongs to the window manager, so the bar must not
+        // start rendering its own idea of whether it is open.
+        assert!(update.dirty.is_empty());
+        assert_eq!(model.snapshot(), before);
     }
 
     #[test]

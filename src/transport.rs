@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
 
-use crate::{MonitorGeometry, MonitorId, TagState, WmCommand, WmSnapshot};
+use crate::{MonitorGeometry, MonitorId, ShellRoute, TagState, WmCommand, WmSnapshot};
 
 /// Result of submitting a command to the bounded shared command queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +106,26 @@ fn command_to_shared(command: WmCommand) -> SharedCommand {
         WmCommand::ViewTag { tag, monitor } => SharedCommand::view_tag(tag.mask(), monitor.0),
         WmCommand::ToggleTag { tag, monitor } => SharedCommand::toggle_tag(tag.mask(), monitor.0),
         WmCommand::SetLayout { layout, monitor } => SharedCommand::set_layout(layout.0, monitor.0),
+        WmCommand::OpenShellHub { route, monitor } => {
+            SharedCommand::shell_hub(shell_route_to_shared(route), monitor.0)
+        }
+    }
+}
+
+/// The two enums stay separate types on purpose: `ShellRoute` belongs to the
+/// semantic model and must compile without the shared-memory feature, while
+/// `ShellHubRoute` is the wire encoding. Matching exhaustively on both makes a
+/// page added to either crate a compile error here rather than a command that
+/// is silently dropped or misrouted.
+fn shell_route_to_shared(route: ShellRoute) -> shared_structures::ShellHubRoute {
+    use shared_structures::ShellHubRoute as Wire;
+    match route {
+        ShellRoute::Hub => Wire::Hub,
+        ShellRoute::Applications => Wire::Applications,
+        ShellRoute::Notifications => Wire::Notifications,
+        ShellRoute::Clipboard => Wire::Clipboard,
+        ShellRoute::Calendar => Wire::Calendar,
+        ShellRoute::Wallpaper => Wire::Wallpaper,
     }
 }
 
@@ -168,6 +188,29 @@ mod tests {
             owner.try_receive_command().unwrap(),
             Some(command_to_shared(command))
         );
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn every_shell_route_survives_the_wire_round_trip() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
+        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let transport = SharedTransport::open(&path).unwrap();
+
+        for route in ShellRoute::ALL {
+            let command = WmCommand::OpenShellHub {
+                route,
+                monitor: MonitorId(1),
+            };
+            assert_eq!(transport.execute(command).unwrap(), SendOutcome::Sent);
+            let received = owner.try_receive_command().unwrap().unwrap();
+            assert_eq!(
+                received.shell_hub_route(),
+                Some(shell_route_to_shared(route))
+            );
+            assert_eq!(received.get_monitor_id(), 1);
+        }
         owner.destroy().unwrap();
     }
 
