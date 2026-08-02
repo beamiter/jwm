@@ -3,6 +3,7 @@
 use super::*;
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
+use crate::backend::compositor_common::effects::MotionTrailParams;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
@@ -1448,31 +1449,20 @@ impl WaylandCompositor {
 
         // Motion trail: sample per-window position into a ring buffer.
         // Pre-pass before the immutable draw loop so we can take &mut on the
-        // window state. When the position is unchanged we pop one entry per
-        // frame so the trail naturally drains to empty after the window stops
-        // (mirroring X11 effects.rs::update_motion_trail semantics — only there
-        // it relies on geometry-sync side effects, here we do it inline).
+        // window state. Unlike X11 there is no per-delta move hook here, so the
+        // scene position of the previous frame is what gets recorded; the
+        // shared ring buffer applies the same distance spacing either way.
         if self.motion_trail_enabled && self.motion_trail_frames > 0 {
-            let cap = crate::backend::compositor_common::effects::motion_trail_capacity(
-                self.motion_trail_frames,
-            );
-            for &(win_id, x, y, _, _) in visible_scene {
+            let frames = self.motion_trail_frames;
+            let opacity = self.motion_trail_opacity;
+            for &(win_id, x, y, w, h) in visible_scene {
                 if let Some(wt) = self.windows.get_mut(&win_id) {
-                    let current = (x, y);
-                    if wt.is_moving
-                        && let Some((previous_x, previous_y)) = wt.last_motion_position
-                        && (previous_x, previous_y) != current
-                    {
-                        wt.motion_trail.push_back(
-                            crate::backend::compositor_common::effects::MotionTrailSample::new(
-                                previous_x, previous_y,
-                            ),
-                        );
-                        while wt.motion_trail.len() > cap {
-                            wt.motion_trail.pop_front();
-                        }
+                    if wt.is_moving {
+                        let params = MotionTrailParams::new(frames, opacity, w as f32, h as f32);
+                        wt.motion_trail.record_position(x as f32, y as f32, &params);
+                    } else {
+                        wt.motion_trail.sync_position(x as f32, y as f32);
                     }
-                    wt.last_motion_position = Some(current);
                 }
             }
         }
@@ -1623,29 +1613,26 @@ impl WaylandCompositor {
                 // --- Motion trail ghost copies (Phase 3.1, mirrors X11) ---
                 // Draw historical positions with decreasing opacity *before* the
                 // main texture so the live window paints on top of its trail.
-                // Skips wobbly/tilt windows because the ghost would not match the
-                // deformed shader output; trails on plain moving windows are the
-                // common case and visually consistent with X11.
-                if self.motion_trail_enabled && !wt.motion_trail.is_empty() && wt.wobbly.is_none() {
-                    let trail_len = wt.motion_trail.len();
-                    let trail_now = std::time::Instant::now();
-                    let trail_lifetime =
-                        crate::backend::compositor_common::effects::motion_trail_lifetime(
-                            self.motion_trail_frames,
-                        );
+                if self.motion_trail_enabled && !wt.motion_trail.is_empty() {
+                    let trail_params = MotionTrailParams::new(
+                        self.motion_trail_frames,
+                        self.motion_trail_opacity,
+                        draw_w,
+                        draw_h,
+                    );
                     gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, texture);
                     gl.Uniform1f(self.win_uniforms.radius, radius);
-                    gl.Uniform2f(self.win_uniforms.size, draw_w, draw_h);
-                    for (i, sample) in wt.motion_trail.iter().enumerate() {
-                        let ghost_opacity = self.motion_trail_opacity * (i as f32 + 1.0)
-                            / trail_len as f32
-                            * sample.opacity_at(trail_now, trail_lifetime);
-                        if ghost_opacity <= 0.001 {
-                            continue;
-                        }
-                        let ghost_layer = (ghost_opacity * layer_opacity).clamp(0.0, 1.0);
+                    gl.Uniform1f(self.win_uniforms.dim, 0.7);
+                    gl.Uniform1f(self.win_uniforms.desat, 0.0);
+                    for ghost in wt.motion_trail.ghosts(
+                        std::time::Instant::now(),
+                        &trail_params,
+                        draw_w,
+                        draw_h,
+                    ) {
+                        let ghost_layer = (ghost.opacity * layer_opacity).clamp(0.0, 1.0);
                         gl.Uniform1f(
                             self.win_uniforms.opacity,
                             if use_texture_alpha {
@@ -1654,15 +1641,14 @@ impl WaylandCompositor {
                                 ghost_layer
                             },
                         );
-                        gl.Uniform1f(self.win_uniforms.dim, 0.7);
-                        gl.Uniform1f(self.win_uniforms.desat, 0.0);
+                        gl.Uniform2f(self.win_uniforms.size, ghost.width, ghost.height);
                         self.set_rect_uniform(
                             gl,
                             self.win_uniforms.rect,
-                            sample.x as f32,
-                            sample.y as f32,
-                            draw_w,
-                            draw_h,
+                            ghost.x,
+                            ghost.y,
+                            ghost.width,
+                            ghost.height,
                         );
                         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                     }
@@ -3231,7 +3217,15 @@ impl WaylandCompositor {
 
             // Countdown to the automatic commit.
             let [cx, cy, cw, ch] = geometry.countdown;
-            self.sysui_fill_rounded(gl, cx, cy, cw, ch, ch * 0.5, UiPalette::faded(ui.track, 0.8));
+            self.sysui_fill_rounded(
+                gl,
+                cx,
+                cy,
+                cw,
+                ch,
+                ch * 0.5,
+                UiPalette::faded(ui.track, 0.8),
+            );
             let filled = cw * strip.countdown.clamp(0.0, 1.0);
             if filled > 1.0 {
                 self.sysui_fill_rounded(

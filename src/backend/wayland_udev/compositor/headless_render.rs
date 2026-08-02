@@ -351,6 +351,111 @@ fn render_quad(
     }
 }
 
+/// Render the wobbly grid mesh over an opaque white texel into a WxH RGBA8 FBO
+/// cleared to black, and return every pixel in OpenGL's bottom-left row order.
+///
+/// Unlike [`render_quad`] the mesh takes no vertex attributes: the wobbly
+/// vertex shader derives each node from `gl_VertexID` over `(grid_n - 1)^2`
+/// quads, exactly as both compositors draw it. A pixel is therefore "covered"
+/// iff a mesh triangle landed on it, which is what makes the deformation
+/// measurable from a readback.
+fn render_mesh(
+    gl: &glow::Context,
+    prog: glow::Program,
+    w: i32,
+    h: i32,
+    grid_n: i32,
+    uniforms: impl FnOnce(&glow::Context),
+) -> Vec<u8> {
+    unsafe {
+        let input_pixels = [255u8; 16];
+        let input_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            2,
+            2,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&input_pixels)),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+        }
+        for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+        }
+
+        let out_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA as i32,
+            w,
+            h,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+        }
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(out_tex),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "mesh output FBO incomplete"
+        );
+
+        gl.viewport(0, 0, w, h);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(prog));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(input_tex));
+        uniforms(gl);
+
+        // Core profiles still require a bound VAO for attribute-less draws.
+        let vao = gl.create_vertex_array().unwrap();
+        gl.bind_vertex_array(Some(vao));
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        let quads = (grid_n - 1).max(1);
+        gl.draw_arrays(glow::TRIANGLES, 0, quads * quads * 6);
+        gl.finish();
+
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        gl.read_pixels(
+            0,
+            0,
+            w,
+            h,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut frame)),
+        );
+
+        gl.bind_vertex_array(None);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(fbo);
+        gl.delete_texture(out_tex);
+        gl.delete_texture(input_tex);
+        frame
+    }
+}
+
 /// Render the real X11 WaterLily volume shader into an RGBA8 FBO and return
 /// every pixel in OpenGL's bottom-left row order.  The volume deliberately
 /// uses LINEAR filtering: the production texture uses the same sampler state,
@@ -2657,6 +2762,121 @@ fn x11_window_shader_desaturates_inactive() {
         GlApi::GlCore33,
         "x11_window_shader_desaturates_inactive",
         s::VERTEX_SHADER,
+        s::FRAGMENT_SHADER,
+    );
+}
+
+/// The wobbly mesh must sit exactly on the window rect at rest and follow the
+/// spring grid's per-node offsets once a drag deforms it.
+///
+/// This is the only test that runs the vertex shader against offsets produced
+/// by the real physics, so it pins the contract between `WobblyState`'s node
+/// layout (`row * grid_n + col`, drag lag weighted by distance from the grabbed
+/// node) and the `u_grid_offsets` lookup the shader performs.
+fn assert_wobbly_mesh_follows_grid_offsets(
+    api: GlApi,
+    what: &str,
+    vs: &'static str,
+    fs: &'static str,
+) {
+    use crate::backend::compositor_common::effects::wobbly_node_count;
+    use crate::backend::compositor_common::wobbly::WobblyState;
+
+    const W: i32 = 64;
+    const H: i32 = 64;
+    // Centred rect, so lag has room to move the mesh without leaving the FBO.
+    const RECT: [f32; 4] = [16.0, 16.0, 32.0, 32.0];
+    const DRAG: f32 = 16.0;
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: wobbly must link:\n{log}"));
+
+    let grid_n = wobbly_node_count(8);
+    let mut wobbly = WobblyState::new(grid_n, grid_n / 2, grid_n / 2, RECT[2], RECT[3]);
+
+    let render = |wobbly: &WobblyState| -> Vec<u8> {
+        let mut flat = Vec::with_capacity(wobbly.offsets.len() * 2);
+        for offset in &wobbly.offsets {
+            flat.push(offset[0]);
+            flat.push(offset[1]);
+        }
+        render_mesh(gl, prog, W, H, wobbly.grid_n as i32, |gl| unsafe {
+            let u = |n: &str| gl.get_uniform_location(prog, n);
+            gl.uniform_matrix_4_f32_slice(
+                u("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_4_f32(u("u_rect").as_ref(), RECT[0], RECT[1], RECT[2], RECT[3]);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_2_f32(u("u_size").as_ref(), RECT[2], RECT[3]);
+            gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_ripple_amplitude").as_ref(), 0.0);
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), 0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+            gl.uniform_2_f32_slice(u("u_grid_offsets").as_ref(), &flat);
+            gl.uniform_1_i32(u("u_grid_n").as_ref(), wobbly.grid_n as i32);
+        })
+    };
+
+    // Both probes sit on the rect's vertical middle and clear of every edge the
+    // drag moves, so a covered/uncovered flip can only come from the offsets.
+    let covered = |frame: &[u8], x: i32, y: i32| -> bool { frame[((y * W + x) * 4) as usize] > 8 };
+    let inside_right = (44, 32);
+    let outside_left = (10, 32);
+
+    let at_rest = render(&wobbly);
+    assert!(
+        covered(&at_rest, inside_right.0, inside_right.1),
+        "{what}: undeformed mesh must fill its rect"
+    );
+    assert!(
+        !covered(&at_rest, outside_left.0, outside_left.1),
+        "{what}: undeformed mesh must not spill outside its rect"
+    );
+
+    // Drag the window right: every node lags left, the grabbed centre least.
+    wobbly.apply_window_move_delta(DRAG, 0.0);
+    let dragged = render(&wobbly);
+    assert!(
+        !covered(&dragged, inside_right.0, inside_right.1),
+        "{what}: trailing edge did not lag behind the drag"
+    );
+    assert!(
+        covered(&dragged, outside_left.0, outside_left.1),
+        "{what}: leading edge did not stretch out of the rect"
+    );
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_wobbly_mesh_follows_grid_offsets() {
+    use super::shaders as s;
+    assert_wobbly_mesh_follows_grid_offsets(
+        GlApi::Gles3,
+        "wayland_wobbly_mesh_follows_grid_offsets",
+        s::WOBBLY_VERTEX_SHADER,
+        s::FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_wobbly_mesh_follows_grid_offsets() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_wobbly_mesh_follows_grid_offsets(
+        GlApi::GlCore33,
+        "x11_wobbly_mesh_follows_grid_offsets",
+        s::WOBBLY_VERTEX_SHADER,
         s::FRAGMENT_SHADER,
     );
 }

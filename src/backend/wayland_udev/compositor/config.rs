@@ -663,28 +663,41 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn notify_window_move_start(&mut self, window: u64) {
+        let geometry = self
+            .prev_scene
+            .iter()
+            .find(|&&(id, _, _, _, _)| id == window)
+            .map(|&(_, x, y, w, h)| (x, y, w, h));
+        let (mouse_x, mouse_y) = (self.mouse_x, self.mouse_y);
+        let wobbly_enabled = self.wobbly_enabled;
+        let grid_size = self.wobbly_grid_size;
+
         if let Some(win) = self.windows.get_mut(&window) {
             win.is_moving = true;
-            win.motion_trail.clear();
-            if self.wobbly_enabled {
-                let grid_n = crate::backend::compositor_common::effects::wobbly_node_count(
-                    self.wobbly_grid_size,
-                );
-                let (anchor_row, anchor_col) = self
-                    .prev_scene
-                    .iter()
-                    .find(|&&(id, _, _, _, _)| id == window)
-                    .map(|&(_, x, y, w, h)| {
+            match geometry {
+                Some((x, y, _, _)) => win.motion_trail.begin_drag(x as f32, y as f32),
+                None => win.motion_trail.clear(),
+            }
+            if wobbly_enabled {
+                let grid_n =
+                    crate::backend::compositor_common::effects::wobbly_node_count(grid_size);
+                let (anchor_row, anchor_col) = geometry
+                    .map(|(x, y, w, h)| {
                         WobblyState::anchor_for_point(
                             grid_n,
-                            self.mouse_x - x as f32,
-                            self.mouse_y - y as f32,
+                            mouse_x - x as f32,
+                            mouse_y - y as f32,
                             w as f32,
                             h as f32,
                         )
                     })
                     .unwrap_or((0, grid_n / 2));
-                win.wobbly = Some(WobblyState::new(grid_n, anchor_row, anchor_col));
+                let (width, height) = geometry
+                    .map(|(_, _, w, h)| (w as f32, h as f32))
+                    .unwrap_or((0.0, 0.0));
+                win.wobbly = Some(WobblyState::new(
+                    grid_n, anchor_row, anchor_col, width, height,
+                ));
             }
         }
     }
@@ -702,6 +715,7 @@ impl WaylandCompositor {
     pub(crate) fn notify_window_move_end(&mut self, window: u64) {
         if let Some(win) = self.windows.get_mut(&window) {
             win.is_moving = false;
+            win.motion_trail.end_drag();
             if let Some(wobbly) = win.wobbly.as_mut() {
                 wobbly.end_drag();
             }
@@ -806,8 +820,7 @@ impl WaylandCompositor {
                 anim_scale: 1.0,
                 anim_scale_target: 1.0,
                 wobbly: None,
-                motion_trail: std::collections::VecDeque::new(),
-                last_motion_position: None,
+                motion_trail: Default::default(),
                 opacity_override: None,
                 corner_radius_override: None,
                 frame_extents: [0; 4],
@@ -998,8 +1011,7 @@ impl WaylandCompositor {
                 anim_scale: 1.0,
                 anim_scale_target: 1.0,
                 wobbly: None,
-                motion_trail: std::collections::VecDeque::new(),
-                last_motion_position: None,
+                motion_trail: Default::default(),
                 opacity_override: None,
                 corner_radius_override: None,
                 frame_extents: [0; 4],

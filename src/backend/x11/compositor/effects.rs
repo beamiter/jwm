@@ -1,7 +1,8 @@
+use super::types::WindowTexture;
 use super::{Compositor, Particle};
 use crate::backend::compositor_common::effects::{
-    MAX_PARTICLE_SYSTEMS, MotionTrailSample, clamp_effect_dt, effect_noise, motion_trail_capacity,
-    motion_trail_lifetime, particle_burst_count, sanitize_animation_dt, smoothing_alpha,
+    MAX_PARTICLE_SYSTEMS, MotionTrailParams, clamp_effect_dt, effect_noise, motion_trail_lifetime,
+    particle_burst_count, sanitize_animation_dt, smoothing_alpha,
 };
 use glow::HasContext;
 
@@ -69,7 +70,7 @@ impl<C: CompositorConnection> Compositor<C> {
         for (&win, wt) in self.windows.iter_mut() {
             if let Some(ref mut w) = wt.wobbly {
                 let dt = w.elapsed_dt(now);
-                if w.tick_physics(dt, neighbor_k, restore_k, damping, 0.1) {
+                if w.tick_physics(dt, neighbor_k, restore_k, damping) {
                     any_active = true;
                 } else {
                     to_clear.push(win);
@@ -291,36 +292,38 @@ impl<C: CompositorConnection> Compositor<C> {
     // Phase 3.1: Motion trail
     // =================================================================
 
-    /// Record the current window position into the motion trail ring buffer.
-    pub(super) fn update_motion_trail(&mut self, x11_win: u32, x: i32, y: i32) {
+    /// Trail tuning for one window, combining config with the window's size.
+    pub(super) fn motion_trail_params(&self, wt: &WindowTexture) -> MotionTrailParams {
+        MotionTrailParams::new(
+            if self.motion_trail_enabled {
+                self.motion_trail_frames
+            } else {
+                0
+            },
+            self.motion_trail_opacity,
+            wt.w as f32,
+            wt.h as f32,
+        )
+    }
+
+    /// Advance a window's motion trail by an interactive-move delta.
+    pub(super) fn update_motion_trail(&mut self, x11_win: u32, dx: f32, dy: f32) {
         if !self.motion_trail_enabled {
             return;
         }
+        let Some(params) = self
+            .windows
+            .get(&x11_win)
+            .map(|wt| self.motion_trail_params(wt))
+        else {
+            return;
+        };
         if let Some(wt) = self.windows.get_mut(&x11_win) {
-            let capacity = motion_trail_capacity(self.motion_trail_frames);
-            if capacity == 0 {
-                wt.motion_trail.clear();
-                return;
-            }
-            if wt
-                .motion_trail
-                .back()
-                .is_some_and(|sample| sample.x == x && sample.y == y)
-            {
-                return;
-            }
-            wt.motion_trail.push_back(MotionTrailSample::new(x, y));
-            while wt.motion_trail.len() > capacity {
-                wt.motion_trail.pop_front();
-            }
-        }
-    }
-
-    /// Clear the motion trail for a window.
-    pub(super) fn clear_motion_trail(&mut self, x11_win: u32) {
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            wt.motion_trail.clear();
-            wt.motion_trail_cursor = None;
+            // The window rect has already moved, so its pre-move origin seeds
+            // the logical cursor when the drag was not announced through
+            // move_start.
+            let fallback = (wt.x as f32 - dx, wt.y as f32 - dy);
+            wt.motion_trail.record_delta(dx, dy, fallback, &params);
         }
     }
 
@@ -329,7 +332,6 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.motion_trail_enabled || self.motion_trail_frames == 0 {
             for wt in self.windows.values_mut() {
                 wt.motion_trail.clear();
-                wt.motion_trail_cursor = None;
             }
             return false;
         }
@@ -337,9 +339,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let lifetime = motion_trail_lifetime(self.motion_trail_frames);
         let mut active = false;
         for wt in self.windows.values_mut() {
-            wt.motion_trail
-                .retain(|sample| sample.opacity_at(now, lifetime) > 0.0);
-            active |= !wt.motion_trail.is_empty();
+            active |= wt.motion_trail.retain_live(now, lifetime);
         }
         active
     }

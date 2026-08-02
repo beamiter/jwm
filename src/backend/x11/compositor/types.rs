@@ -1,11 +1,10 @@
-use crate::backend::compositor_common::effects::MotionTrailSample;
+use crate::backend::compositor_common::effects::MotionTrail;
 use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
 pub(super) use crate::backend::x11::compositor_common::effects::{
     Particle, ParticleSystem, RippleState,
 };
 pub(super) use crate::backend::x11::compositor_common::expose::{ExposeEntry, SnapPreview};
 use std::cell::Cell;
-use std::collections::VecDeque;
 
 /// A backdrop-blur result owned by one X11 window.
 ///
@@ -174,11 +173,7 @@ pub(super) struct WindowTexture {
     pub(super) is_frosted: bool,
     pub(super) is_override_redirect: bool,
     pub(super) wobbly: Option<WobblyState>,
-    pub(super) motion_trail: VecDeque<MotionTrailSample>,
-    /// Logical drag position advanced by move deltas. X ConfigureNotify can
-    /// arrive before or after the move hook, so deriving a previous position
-    /// from `x/y` would intermittently duplicate or skip trail samples.
-    pub(super) motion_trail_cursor: Option<(f32, f32)>,
+    pub(super) motion_trail: MotionTrail,
     pub(super) audio_sync_target: Option<f32>,
 }
 

@@ -1400,7 +1400,8 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl
                 .uniform_1_f32(self.border_uniforms.radius.as_ref(), r);
-            self.gl.uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
+            self.gl
+                .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
             self.gl
                 .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, w, h);
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -1441,8 +1442,13 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl
                 .uniform_2_f32(self.hud_uniforms.size.as_ref(), screen_w, screen_h);
-            self.gl
-                .uniform_4_f32(self.hud_uniforms.rect.as_ref(), 0.0, 0.0, screen_w, screen_h);
+            self.gl.uniform_4_f32(
+                self.hud_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                screen_w,
+                screen_h,
+            );
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
 
@@ -1451,8 +1457,11 @@ impl<C: CompositorConnection> Compositor<C> {
         unsafe {
             // Drop shadow, then the card.
             self.gl.use_program(Some(self.shadow_program));
-            self.gl
-                .uniform_matrix_4_f32_slice(self.shadow_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
             let spread = ui.spread(48.0);
             self.gl
                 .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
@@ -1605,18 +1614,17 @@ impl<C: CompositorConnection> Compositor<C> {
         let hint = geometry.hint;
         unsafe {
             self.gl.use_program(Some(self.hud_text_program));
-            self.gl
-                .uniform_matrix_4_f32_slice(self.hud_text_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
             self.gl
                 .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
             self.gl
                 .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
             self.gl.active_texture(glow::TEXTURE0);
-            for (slot, pos) in [
-                (0usize, Some(title)),
-                (2, None),
-                (3, Some(hint)),
-            ] {
+            for (slot, pos) in [(0usize, Some(title)), (2, None), (3, Some(hint))] {
                 let Some((tex, w, h)) = self.sysui_textures[slot] else {
                     continue;
                 };
@@ -4230,21 +4238,18 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Phase 3.1: Motion trail ghost copies at historical positions
                     if self.motion_trail_enabled && !wt.motion_trail.is_empty() {
-                        let trail_len = wt.motion_trail.len();
-                        let trail_now = std::time::Instant::now();
-                        let trail_lifetime =
-                            crate::backend::compositor_common::effects::motion_trail_lifetime(
-                                self.motion_trail_frames,
-                            );
-                        for (i, sample) in wt.motion_trail.iter().enumerate() {
-                            let age_opacity = sample.opacity_at(trail_now, trail_lifetime);
-                            let trail_opacity = self.motion_trail_opacity * (i as f32 + 1.0)
-                                / trail_len as f32
-                                * age_opacity;
-                            if trail_opacity <= 0.001 {
-                                continue;
-                            }
-                            let trail_layer = (trail_opacity * layer_opacity).clamp(0.0, 1.0);
+                        let trail_params = self.motion_trail_params(wt);
+                        self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
+                        self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+                        self.gl.active_texture(glow::TEXTURE0);
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                        for ghost in wt.motion_trail.ghosts(
+                            std::time::Instant::now(),
+                            &trail_params,
+                            draw_w,
+                            draw_h,
+                        ) {
+                            let trail_layer = (ghost.opacity * layer_opacity).clamp(0.0, 1.0);
                             self.gl.uniform_1_f32(
                                 self.win_uniforms.opacity.as_ref(),
                                 if use_texture_alpha {
@@ -4253,19 +4258,18 @@ impl<C: CompositorConnection> Compositor<C> {
                                     trail_layer
                                 },
                             );
-                            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 0.7);
-                            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
                             self.gl.uniform_4_f32(
                                 self.win_uniforms.rect.as_ref(),
-                                sample.x as f32,
-                                sample.y as f32,
-                                draw_w,
-                                draw_h,
+                                ghost.x,
+                                ghost.y,
+                                ghost.width,
+                                ghost.height,
                             );
-                            self.gl
-                                .uniform_2_f32(self.win_uniforms.size.as_ref(), draw_w, draw_h);
-                            self.gl.active_texture(glow::TEXTURE0);
-                            self.gl.bind_texture(glow::TEXTURE_2D, Some(wt.gl_texture));
+                            self.gl.uniform_2_f32(
+                                self.win_uniforms.size.as_ref(),
+                                ghost.width,
+                                ghost.height,
+                            );
                             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                         }
                     }

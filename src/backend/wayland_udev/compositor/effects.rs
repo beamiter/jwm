@@ -98,7 +98,7 @@ impl WaylandCompositor {
                 Some(w) => w,
                 None => continue,
             };
-            if !wobbly.tick_physics(dt, spring_k, restore_k, damping, 0.5) {
+            if !wobbly.tick_physics(dt, spring_k, restore_k, damping) {
                 win.wobbly = None;
             }
         }
@@ -137,8 +137,7 @@ impl WaylandCompositor {
         let now = std::time::Instant::now();
         let lifetime = motion_trail_lifetime(self.motion_trail_frames);
         for win in self.windows.values_mut() {
-            win.motion_trail
-                .retain(|sample| sample.opacity_at(now, lifetime) > 0.0);
+            win.motion_trail.retain_live(now, lifetime);
         }
     }
 

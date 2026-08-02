@@ -145,21 +145,13 @@ impl<C: CompositorConnection> Compositor<C> {
             return true;
         }
         // Need render if any window has active wobbly
-        if self.wobbly_windows {
-            for wt in self.windows.values() {
-                if let Some(ref w) = wt.wobbly {
-                    if w.dragging
-                        || w.offsets
-                            .iter()
-                            .any(|o| o[0].abs() > 0.1 || o[1].abs() > 0.1)
-                        || w.velocities
-                            .iter()
-                            .any(|v| v[0].abs() > 0.1 || v[1].abs() > 0.1)
-                    {
-                        return true;
-                    }
-                }
-            }
+        if self.wobbly_windows
+            && self
+                .windows
+                .values()
+                .any(|wt| wt.wobbly.as_ref().is_some_and(|w| w.is_active()))
+        {
+            return true;
         }
         // Need render if attention animation is active for any window
         if self.attention_animation {
@@ -736,7 +728,6 @@ impl<C: CompositorConnection> Compositor<C> {
         if disabling_motion_trail {
             for wt in self.windows.values_mut() {
                 wt.motion_trail.clear();
-                wt.motion_trail_cursor = None;
             }
         }
         if disabling_genie {

@@ -282,8 +282,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 is_frosted: false,
                 is_override_redirect: false,
                 wobbly: None,
-                motion_trail: std::collections::VecDeque::new(),
-                motion_trail_cursor: None,
+                motion_trail: Default::default(),
                 audio_sync_target: None,
             },
         );

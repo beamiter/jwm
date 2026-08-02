@@ -291,11 +291,10 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn notify_window_move_start(&mut self, x11_win: u32) {
-        if self.motion_trail_enabled {
-            self.clear_motion_trail(x11_win);
-            if let Some(wt) = self.windows.get_mut(&x11_win) {
-                wt.motion_trail_cursor = Some((wt.x as f32, wt.y as f32));
-            }
+        if self.motion_trail_enabled
+            && let Some(wt) = self.windows.get_mut(&x11_win)
+        {
+            wt.motion_trail.begin_drag(wt.x as f32, wt.y as f32);
         }
         if !self.wobbly_windows {
             return;
@@ -309,7 +308,13 @@ impl<C: CompositorConnection> Compositor<C> {
             let (anchor_row, anchor_col) =
                 WobblyState::anchor_for_point(grid_n, rel_x, rel_y, wt.w as f32, wt.h as f32);
 
-            wt.wobbly = Some(WobblyState::new(grid_n, anchor_row, anchor_col));
+            wt.wobbly = Some(WobblyState::new(
+                grid_n,
+                anchor_row,
+                anchor_col,
+                wt.w as f32,
+                wt.h as f32,
+            ));
         } else {
             log::warn!(
                 "[wobbly] move_start: window 0x{:x} not tracked by compositor",
@@ -320,18 +325,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn notify_window_move_delta(&mut self, x11_win: u32, dx: f32, dy: f32) {
         // Phase 3.1: Record position for motion trail
-        if self.motion_trail_enabled {
-            let previous = self.windows.get_mut(&x11_win).map(|wt| {
-                let (previous_x, previous_y) = wt
-                    .motion_trail_cursor
-                    .unwrap_or((wt.x as f32 - dx, wt.y as f32 - dy));
-                wt.motion_trail_cursor = Some((previous_x + dx, previous_y + dy));
-                (previous_x.round() as i32, previous_y.round() as i32)
-            });
-            if let Some((previous_x, previous_y)) = previous {
-                self.update_motion_trail(x11_win, previous_x, previous_y);
-            }
-        }
+        self.update_motion_trail(x11_win, dx, dy);
 
         if self.wobbly_windows {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
@@ -364,7 +358,7 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn notify_window_move_end(&mut self, x11_win: u32) {
         // Release anchor — let all nodes spring back via tick_wobbly
         if let Some(wt) = self.windows.get_mut(&x11_win) {
-            wt.motion_trail_cursor = None;
+            wt.motion_trail.end_drag();
             if let Some(ref mut w) = wt.wobbly {
                 w.end_drag();
             }

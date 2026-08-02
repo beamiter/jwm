@@ -63,13 +63,12 @@ mod wallpaper;
 use smithay::backend::renderer::gles::{GlesTexture, ffi};
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::backend::compositor_common::effects::MotionTrailSample;
+use crate::backend::compositor_common::effects::MotionTrail;
 use crate::backend::compositor_common::math;
 use crate::backend::compositor_common::rules::{CornerRadiusRule, OpacityRule, ScaleRule};
 use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
@@ -479,8 +478,7 @@ pub(crate) struct WindowState {
     pub anim_scale: f32,
     pub anim_scale_target: f32,
     pub wobbly: Option<WobblyState>,
-    pub motion_trail: VecDeque<MotionTrailSample>,
-    pub last_motion_position: Option<(i32, i32)>,
+    pub motion_trail: MotionTrail,
     pub opacity_override: Option<f32>,
     pub corner_radius_override: Option<f32>,
     pub frame_extents: [u32; 4],
