@@ -113,6 +113,29 @@
         <span class="nf-icon">{{ volumeIconChar }}</span> {{ volumeLabel }}
       </div>
 
+      <!-- JWM shell 入口 -->
+      <div class="shell-menu">
+        <div
+          class="pill shell-pill"
+          :class="{ 'shell-pill-offline': !wmAvailable }"
+          @click="onOpenShell('hub')"
+          title="JWM shell"
+        >
+          <span class="nf-icon">{{ SHELL_ROUTES[0].icon }}</span>
+        </div>
+        <div v-if="wmAvailable" class="shell-dropdown">
+          <div
+            v-for="entry in SHELL_ROUTES"
+            :key="entry.route"
+            class="shell-route"
+            @click="onOpenShell(entry.route)"
+          >
+            <span class="nf-icon">{{ entry.icon }}</span>
+            <span>{{ entry.label }}</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 截图按钮 -->
       <div
         class="pill screenshot-pill"
@@ -197,6 +220,14 @@ interface FrontendEnvelope {
   partition_changes?: number;
 }
 
+type ShellRoute =
+  | 'hub'
+  | 'applications'
+  | 'notifications'
+  | 'clipboard'
+  | 'calendar'
+  | 'wallpaper';
+
 type ActionRequest =
   | { action: 'view_tag_on'; tag_index: number; monitor_id: number }
   | { action: 'toggle_layout_selector' }
@@ -205,7 +236,8 @@ type ActionRequest =
   | { action: 'toggle_mute' }
   | { action: 'adjust_volume'; delta: number }
   | { action: 'adjust_brightness'; delta: number }
-  | { action: 'screenshot' };
+  | { action: 'screenshot' }
+  | { action: 'open_shell_hub'; route: ShellRoute };
 
 const dispatchAction = (request: ActionRequest): Promise<void> =>
   invoke('dispatch_action', { request });
@@ -233,6 +265,18 @@ const ICON_VOL_LOW = '\u{F057F}';
 const ICON_VOL_MUTE = '\u{F075F}';
 const ICON_BRIGHT = '\u{F00DE}';
 const ICON_SHOT = '\u{F0104}';
+
+// Pages of JWM's own shell surface, in the order the hub itself lists them.
+// Every entry is one request to the window manager: the bar renders no shell
+// content and keeps no shell state.
+const SHELL_ROUTES: { route: ShellRoute; icon: string; label: string }[] = [
+  { route: 'hub', icon: '\u{F0F2A}', label: 'Shell Hub' },
+  { route: 'applications', icon: '\u{F0D22}', label: 'Applications' },
+  { route: 'notifications', icon: '\u{F009A}', label: 'Notifications' },
+  { route: 'clipboard', icon: '\u{F0192}', label: 'Clipboard' },
+  { route: 'calendar', icon: '\u{F00ED}', label: 'Calendar' },
+  { route: 'wallpaper', icon: '\u{F02E9}', label: 'Wallpaper' },
+];
 const ICON_TIME = '\u{F0954}';
 const ICON_MON = '\u{F0379}';
 
@@ -305,6 +349,7 @@ onBeforeUnmount(() => {
 
 // --- 计算属性 ---
 const monitorSnapshot = computed(() => snapshot.value);
+const wmAvailable = computed(() => snapshot.value?.wm_available ?? false);
 const systemSnapshot = computed(() => snapshot.value?.system_details ?? null);
 const audioSnapshot = computed(() => snapshot.value?.audio_device ?? null);
 const monitorNum = computed(() => snapshot.value?.monitor ?? 0);
@@ -424,6 +469,13 @@ async function onLayoutSelect(layoutId: number) {
   } catch (error) {
     console.error('set_layout_on error:', error);
   }
+}
+
+function onOpenShell(route: ShellRoute) {
+  // The shell lives in the window manager, so a click with no projection has
+  // nowhere to go; the pill is grayed out rather than silently inert.
+  if (!wmAvailable.value) return;
+  dispatchAction({ action: 'open_shell_hub', route }).catch(console.error);
 }
 
 async function onScreenshot() {
@@ -873,6 +925,70 @@ body {
 .layout-option { cursor: pointer; color: #fff; background: rgba(65, 105, 225, 0.85); border-color: #4169e1; }
 .layout-option.current { background: rgba(60, 179, 113, 0.9); border-color: #3cb371; border-width: 2px; }
 .layout-option:hover { filter: brightness(1.05); border-width: 2px; }
+
+/* ── JWM shell entry ─────────────────────────────────────────────────────── */
+/* The dropdown is CSS-only: hovering the pill reveals the page list, so the
+   bar needs no open/closed state of its own for a menu the window manager
+   immediately covers with its own grabbed surface. */
+.shell-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.shell-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(124, 108, 255, 0.9);
+  border-color: #7c6cff;
+}
+.shell-pill:hover {
+  background: rgba(150, 136, 255, 0.95);
+  border-color: #9688ff;
+}
+
+/* Grayed rather than hidden: the shell lives in the window manager, so an
+   unreachable one has to look unreachable instead of swallowing the click. */
+.shell-pill-offline {
+  cursor: default;
+  background: rgba(85, 91, 102, 0.7);
+  border-color: #555b66;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.shell-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 170px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(124, 108, 255, 0.45);
+  background: rgba(20, 26, 36, 0.97);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.shell-menu:hover .shell-dropdown {
+  display: flex;
+}
+
+.shell-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #e9eef5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.shell-route:hover {
+  background: rgba(124, 108, 255, 0.28);
+}
 
 .screenshot-pill { cursor: pointer; color: #fff; background: rgba(0, 204, 204, 0.9); border-color: #00cccc; }
 .screenshot-pill:hover { background: rgba(255, 136, 0, 0.95); border-color: #ff8800; }
