@@ -124,7 +124,14 @@ pub struct ClientMessageAtoms<A> {
     pub net_wm_moveresize: A,
     pub wm_protocols: A,
     pub net_wm_ping: A,
+    pub wm_change_state: A,
 }
+
+/// ICCCM `WM_STATE` value asking for a window to be iconified. A client that
+/// minimises itself — which is what `XIconifyWindow`, and therefore most
+/// toolkits' minimise buttons and most taskbars, ends up doing — sends
+/// `WM_CHANGE_STATE` carrying this, not an `_NET_WM_STATE_HIDDEN` request.
+pub const ICCCM_ICONIC_STATE: u32 = 3;
 
 pub enum ClientMessageKind {
     WindowState {
@@ -141,6 +148,8 @@ pub enum ClientMessageKind {
     PingResponse {
         window: u32,
     },
+    /// An ICCCM `WM_CHANGE_STATE` asking for the window to be minimised.
+    Iconify,
     Other,
 }
 
@@ -381,6 +390,9 @@ pub fn classify_client_message(
     }
     if type_ == atoms.wm_protocols && format == 32 && data[0] == atoms.net_wm_ping {
         return ClientMessageKind::PingResponse { window: data[2] };
+    }
+    if type_ == atoms.wm_change_state && format == 32 && data[0] == ICCCM_ICONIC_STATE {
+        return ClientMessageKind::Iconify;
     }
     ClientMessageKind::Other
 }
@@ -884,13 +896,59 @@ fn decode_latin1(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_OUTPUT_REFRESH_MHZ, decode_text_property, enrich_background_event, mode_refresh_hz,
+        ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ, ICCCM_ICONIC_STATE,
+        classify_client_message, decode_text_property, enrich_background_event, mode_refresh_hz,
         parse_icon_data, parse_normal_hints, parse_strut, parse_wm_class, primary_refresh,
         refresh_millihz_to_hz,
     };
     use crate::backend::api::{BackendEvent, HitTarget};
     use crate::backend::common_define::OutputId;
     use std::cell::Cell;
+
+    const MESSAGE_ATOMS: ClientMessageAtoms<u32> = ClientMessageAtoms {
+        net_wm_state: 10,
+        net_active_window: 11,
+        net_close_window: 12,
+        net_wm_moveresize: 13,
+        wm_protocols: 14,
+        net_wm_ping: 15,
+        wm_change_state: 16,
+    };
+
+    #[test]
+    fn wm_change_state_asking_for_iconic_is_a_minimise_request() {
+        let kind = classify_client_message(
+            MESSAGE_ATOMS.wm_change_state,
+            32,
+            [ICCCM_ICONIC_STATE, 0, 0, 0, 0],
+            MESSAGE_ATOMS,
+        );
+        assert!(matches!(kind, ClientMessageKind::Iconify));
+    }
+
+    #[test]
+    fn wm_change_state_asking_for_anything_else_is_not() {
+        // NormalState is a restore request, which arrives as a map instead;
+        // acting on it here would minimise a window that asked to come back.
+        for data0 in [0u32, 1, 2, 4] {
+            let kind = classify_client_message(
+                MESSAGE_ATOMS.wm_change_state,
+                32,
+                [data0, 0, 0, 0, 0],
+                MESSAGE_ATOMS,
+            );
+            assert!(matches!(kind, ClientMessageKind::Other), "data0={data0}");
+        }
+        // A byte-format message carrying the same number is not a 32-bit
+        // WM_CHANGE_STATE and must not be read as one.
+        let kind = classify_client_message(
+            MESSAGE_ATOMS.wm_change_state,
+            8,
+            [ICCCM_ICONIC_STATE, 0, 0, 0, 0],
+            MESSAGE_ATOMS,
+        );
+        assert!(matches!(kind, ClientMessageKind::Other));
+    }
 
     #[test]
     fn background_pointer_events_get_their_output_filled() {

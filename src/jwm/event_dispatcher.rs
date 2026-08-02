@@ -22,10 +22,6 @@ use std::sync::atomic::Ordering;
 /// at 60 Hz.
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
-fn minimized_window_relinquishes_focus(minimized: bool, is_selected: bool) -> bool {
-    minimized && is_selected
-}
-
 fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
     match action {
         NetWmAction::Add => true,
@@ -927,35 +923,7 @@ impl WMController for Jwm {
                         .map(|client| client.state.is_hidden)
                         .unwrap_or(false);
                     let on = requested_hidden_state(action, was_hidden);
-
-                    if on != was_hidden {
-                        let was_selected = self.is_client_selected(ck);
-                        let monitor = self.state.clients.get(ck).and_then(|client| client.mon);
-                        if let Some(c) = self.state.clients.get_mut(ck) {
-                            c.state.is_hidden = on;
-                        }
-                        let _ = backend.property_ops().set_net_wm_state_flag(
-                            win,
-                            NetWmState::Hidden,
-                            on,
-                        );
-
-                        // The minimize side must detach the still-visible
-                        // compositor texture before arrange moves the X window
-                        // off-screen. Restoration is the inverse: arrange first
-                        // establishes the live geometry, then the backend
-                        // rebuilds/cancels the detached compositor entry.
-                        if on {
-                            backend.compositor_set_window_minimized(win, true);
-                        }
-                        if minimized_window_relinquishes_focus(on, was_selected) {
-                            let _ = self.focus(backend, None);
-                        }
-                        let _ = self.arrange(backend, monitor);
-                        if !on {
-                            backend.compositor_set_window_minimized(win, false);
-                        }
-                    }
+                    self.set_client_minimized(backend, ck, on);
                 }
                 NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
                     if let Some(c) = self.state.clients.get_mut(ck) {
@@ -1485,13 +1453,6 @@ mod tests {
     }
 
     #[test]
-    fn only_selected_minimized_window_relinquishes_focus() {
-        assert!(minimized_window_relinquishes_focus(true, true));
-        assert!(!minimized_window_relinquishes_focus(true, false));
-        assert!(!minimized_window_relinquishes_focus(false, true));
-    }
-
-    #[test]
     fn hidden_state_requests_are_idempotent_and_toggle_current_state() {
         assert!(requested_hidden_state(NetWmAction::Add, false));
         assert!(requested_hidden_state(NetWmAction::Add, true));
@@ -1684,27 +1645,7 @@ impl EventHandler for Jwm {
             }
             BackendEvent::ForeignToplevelSetMinimized(win, minimized) => {
                 if let Some(ck) = self.wintoclient(win) {
-                    let was_selected = self.is_client_selected(ck);
-                    let monitor = self.state.clients.get(ck).and_then(|client| client.mon);
-                    if let Some(client) = self.state.clients.get_mut(ck) {
-                        client.state.is_hidden = minimized;
-                    }
-                    let _ = backend.property_ops().set_net_wm_state_flag(
-                        win,
-                        NetWmState::Hidden,
-                        minimized,
-                    );
-                    if minimized {
-                        backend.compositor_set_window_minimized(win, true);
-                    }
-                    if minimized_window_relinquishes_focus(minimized, was_selected) {
-                        let _ = self.focus(backend, None);
-                    }
-                    let _ = self.arrange(backend, monitor);
-                    if !minimized {
-                        backend.compositor_set_window_minimized(win, false);
-                        let _ = self.focusin(backend, win);
-                    }
+                    self.set_client_minimized(backend, ck, minimized);
                 }
             }
             BackendEvent::ForeignToplevelSetFullscreen(win, fullscreen) => {

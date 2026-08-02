@@ -2652,6 +2652,7 @@ impl Config {
             "quit" => Some(Jwm::quit),
             "restart" => Some(Jwm::restart),
             "killclient" => Some(Jwm::killclient),
+            "minimize" => Some(Jwm::minimize),
             "zoom" => Some(Jwm::zoom),
 
             "setlayout" => Some(Jwm::setlayout),

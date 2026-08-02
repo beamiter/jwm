@@ -2245,7 +2245,7 @@ mod event_source {
     use x11rb::rust_connection::RustConnection;
 
     use super::ids::X11IdRegistry;
-    use crate::backend::api::{BackendEvent, NetWmState, PropertyKind};
+    use crate::backend::api::{BackendEvent, NetWmAction, NetWmState, PropertyKind};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
     use crate::backend::x11::wm::{
@@ -2334,6 +2334,7 @@ mod event_source {
                 net_wm_moveresize: self.atoms._NET_WM_MOVERESIZE,
                 wm_protocols: self.atoms.WM_PROTOCOLS,
                 net_wm_ping: self.atoms._NET_WM_PING,
+                wm_change_state: self.atoms.WM_CHANGE_STATE,
             }
         }
 
@@ -2573,6 +2574,15 @@ mod event_source {
                                 window: self.ids.intern(window),
                             })
                         }
+                        // An iconify request is a minimise request; it reaches
+                        // the window manager as the same state change a pager's
+                        // `_NET_WM_STATE_HIDDEN` would, so both arrive at one
+                        // handler.
+                        ClientMessageKind::Iconify => Some(BackendEvent::WindowStateRequest {
+                            window: self.ids.intern(e.window),
+                            action: NetWmAction::Add,
+                            state: NetWmState::Hidden,
+                        }),
                         ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
                             window: self.ids.intern(e.window),
                             type_: e.type_,

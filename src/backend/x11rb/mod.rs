@@ -76,6 +76,7 @@ x11rb::atom_manager! {
         _NET_CLOSE_WINDOW,
         _NET_RESTACK_WINDOW,
         _NET_WM_PING,
+        WM_CHANGE_STATE,
         _NET_WM_USER_TIME,
         _NET_WM_USER_TIME_WINDOW,
         _NET_WM_ICON,

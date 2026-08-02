@@ -245,4 +245,81 @@ impl Jwm {
             }
         }
     }
+
+    /// Minimise or restore a client, whoever asked. Every route into this —
+    /// the `minimize` command, an ICCCM `WM_CHANGE_STATE` from a toolkit's own
+    /// minimise button, a pager's `_NET_WM_STATE_HIDDEN`, a Wayland taskbar's
+    /// foreign-toplevel request — has to run the same steps in the same order,
+    /// so they all run these.
+    ///
+    /// The order is the part that matters. Minimising must detach the still
+    /// visible compositor texture *before* `arrange` moves the X window off
+    /// screen, or the genie animation has nothing left to animate; restoring
+    /// is the exact inverse, with `arrange` re-establishing live geometry
+    /// before the compositor rebuilds its entry.
+    ///
+    /// Returns false when the client was already in that state.
+    pub(crate) fn set_client_minimized(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        minimized: bool,
+    ) -> bool {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return false;
+        };
+        if client.state.is_hidden == minimized {
+            return false;
+        }
+        let win = client.win;
+        let monitor = client.mon;
+        let was_selected = self.is_client_selected(client_key);
+
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.state.is_hidden = minimized;
+        }
+        let _ = backend.property_ops().set_net_wm_state_flag(
+            win,
+            crate::backend::api::NetWmState::Hidden,
+            minimized,
+        );
+
+        if minimized {
+            backend.compositor_set_window_minimized(win, true);
+        }
+        if minimized_window_relinquishes_focus(minimized, was_selected) {
+            let _ = self.focus(backend, None);
+        }
+        let _ = self.arrange(backend, monitor);
+        if !minimized {
+            backend.compositor_set_window_minimized(win, false);
+            // Restoring is always someone asking for *this* window back, so it
+            // takes the focus. `focusin` cannot do that job — it is the
+            // FocusIn handler, and re-asserts focus on whatever is already
+            // selected, which left a restored window unfocused behind the
+            // window that replaced it.
+            let _ = self.focus(backend, Some(client_key));
+            let _ = self.restack(backend, self.state.sel_mon);
+        }
+        true
+    }
+}
+
+/// A minimised window cannot stay focused — nothing on screen would show where
+/// the keyboard is going — but minimising some *other* window must not steal
+/// focus away from whatever has it.
+fn minimized_window_relinquishes_focus(minimized: bool, is_selected: bool) -> bool {
+    minimized && is_selected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::minimized_window_relinquishes_focus;
+
+    #[test]
+    fn only_the_selected_window_relinquishes_focus_when_minimised() {
+        assert!(minimized_window_relinquishes_focus(true, true));
+        assert!(!minimized_window_relinquishes_focus(true, false));
+        assert!(!minimized_window_relinquishes_focus(false, true));
+    }
 }

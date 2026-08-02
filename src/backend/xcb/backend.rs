@@ -10,10 +10,10 @@ use crate::backend::api::InteractionAction;
 use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
     CompositorBenchmark, CursorProvider, DisplayControl, EventHandler, EwmhFacade, EwmhFeature,
-    Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, MotifWmHints, NetWmState,
-    NormalHints, NotifyMode, OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler,
-    ResizeEdge, ScreenInfo, StackMode, StrutPartial, VrrCapabilities, WindowAttributes,
-    WindowChanges, WindowOps, WindowType, WmHints,
+    Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, MotifWmHints, NetWmAction,
+    NetWmState, NormalHints, NotifyMode, OutputInfo, OutputOps, PropertyKind, PropertyOps,
+    RenderScheduler, ResizeEdge, ScreenInfo, StackMode, StrutPartial, VrrCapabilities,
+    WindowAttributes, WindowChanges, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
     ArgbColor, ColorScheme, CursorHandle, EventMaskBits, KeySym, Mods, OutputId, Pixel, SchemeType,
@@ -116,6 +116,7 @@ struct XcbAtoms {
     net_close_window: x::Atom,
     net_restack_window: x::Atom,
     net_wm_ping: x::Atom,
+    wm_change_state: x::Atom,
     net_wm_sync_request: x::Atom,
     net_wm_sync_request_counter: x::Atom,
     net_wm_user_time: x::Atom,
@@ -225,6 +226,7 @@ impl XcbAtoms {
             net_close_window: Self::intern(conn, b"_NET_CLOSE_WINDOW")?,
             net_restack_window: Self::intern(conn, b"_NET_RESTACK_WINDOW")?,
             net_wm_ping: Self::intern(conn, b"_NET_WM_PING")?,
+            wm_change_state: Self::intern(conn, b"WM_CHANGE_STATE")?,
             net_wm_sync_request: Self::intern(conn, b"_NET_WM_SYNC_REQUEST")?,
             net_wm_sync_request_counter: Self::intern(conn, b"_NET_WM_SYNC_REQUEST_COUNTER")?,
             net_wm_user_time: Self::intern(conn, b"_NET_WM_USER_TIME")?,
@@ -383,6 +385,7 @@ impl XcbAtoms {
             net_wm_moveresize: self.net_wm_moveresize.resource_id(),
             wm_protocols: self.wm_protocols.resource_id(),
             net_wm_ping: self.net_wm_ping.resource_id(),
+            wm_change_state: self.wm_change_state.resource_id(),
         }
     }
 }
@@ -1637,6 +1640,14 @@ impl XcbBackend {
             }
             ClientMessageKind::PingResponse { window } => Some(BackendEvent::PingResponse {
                 window: self.ids.intern(x::Window::new(window)),
+            }),
+            // An iconify request is a minimise request; it reaches the window
+            // manager as the same state change a pager's `_NET_WM_STATE_HIDDEN`
+            // would, so both arrive at one handler.
+            ClientMessageKind::Iconify => Some(BackendEvent::WindowStateRequest {
+                window,
+                action: NetWmAction::Add,
+                state: NetWmState::Hidden,
             }),
             ClientMessageKind::Other => Some(BackendEvent::ClientMessage {
                 window,

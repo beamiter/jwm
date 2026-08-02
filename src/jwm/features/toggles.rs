@@ -1058,6 +1058,24 @@ impl Jwm {
         self.sync_system_ui(backend);
         Ok(())
     }
+    /// Minimise the selected window.
+    ///
+    /// One-way on purpose: a hidden window is on no tag and cannot be
+    /// selected, so a key that toggled would have nothing to toggle back.
+    /// Bringing one back is the launcher's window search (`reveal_and_focus`),
+    /// or a taskbar.
+    pub fn minimize(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(client_key) = self.get_selected_client_key() else {
+            return Ok(());
+        };
+        self.set_client_minimized(backend, client_key, true);
+        Ok(())
+    }
+
     /// 切换当前选中窗口的浮动状态
     pub fn togglefloating(
         &mut self,
