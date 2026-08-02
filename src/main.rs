@@ -21,7 +21,7 @@ use std::time::Duration;
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule,
-    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
+    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -51,6 +51,7 @@ const ICON_VOL_MID: &str = "\u{F0580}";
 const ICON_VOL_LOW: &str = "\u{F057F}";
 const ICON_VOL_MUTE: &str = "\u{F075F}";
 const ICON_BRIGHT: &str = "\u{F00DE}";
+const ICON_SHELL: &str = "\u{F0F2A}";
 const ICON_SHOT: &str = "\u{F0104}";
 const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
@@ -113,6 +114,9 @@ enum Message {
     MouseExitScreenShot,
     LeftClick,
     RightClick,
+
+    /// Ask the window manager to open its own shell surface.
+    OpenShell,
 
     TransportPoll,
 
@@ -256,6 +260,8 @@ impl IcedBar {
                 let tick = self.handle_runtime_update(update);
                 Task::batch([toggle, tick])
             }
+
+            Message::OpenShell => self.dispatch(UserAction::OpenShellHub(ShellRoute::Hub)),
 
             Message::LeftClick => self.dispatch(UserAction::Screenshot),
 
@@ -664,6 +670,35 @@ impl IcedBar {
             .into()
     }
 
+    /// Entry point into JWM's own shell surface.
+    ///
+    /// One pill: it opens the hub, and the hub is itself the page that routes
+    /// to applications, notifications, clipboard, calendar and wallpaper. The
+    /// bar renders none of those — it only names the page it wants.
+    fn shell_pill<'a>(&self) -> Element<'a, Message> {
+        let available = self.runtime.view().wm_available;
+        let pill = container(text(ICON_SHELL.to_string()).size(15).color(Color::WHITE))
+            .padding([3, 10])
+            .height(Self::PILL_HEIGHT)
+            .style(move |_theme: &Theme| {
+                // Grayed out rather than hidden: the shell lives in the window
+                // manager, so an unreachable one has to look unreachable.
+                let bg = if available {
+                    color!(0x7C6CFF).scale_alpha(0.90)
+                } else {
+                    color!(0x555B66).scale_alpha(0.70)
+                };
+                Self::pill_style(bg, bg, Color::WHITE)
+            });
+
+        let area = mouse_area(pill);
+        if available {
+            area.on_press(Message::OpenShell).into()
+        } else {
+            area.into()
+        }
+    }
+
     fn screenshot_pill<'a>(&self) -> Element<'a, Message> {
         let is_hovered = self.is_hovered;
         let pill = container(text(ICON_SHOT.to_string()).size(15).color(Color::WHITE))
@@ -836,6 +871,7 @@ impl IcedBar {
 
         let brightness_pill = self.brightness_pill();
         let volume_pill = self.volume_pill();
+        let shell_pill = self.shell_pill();
         let screenshot_pill = self.screenshot_pill();
         let time_pill = self.time_pill();
 
@@ -860,6 +896,8 @@ impl IcedBar {
             .push(brightness_pill)
             .push(Space::new().width(6).height(Length::Fill))
             .push(volume_pill)
+            .push(Space::new().width(6).height(Length::Fill))
+            .push(shell_pill)
             .push(Space::new().width(6).height(Length::Fill))
             .push(screenshot_pill)
             .push(Space::new().width(6).height(Length::Fill))
