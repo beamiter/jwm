@@ -21,7 +21,7 @@ use log::{debug, warn};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
+    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -57,6 +57,7 @@ const ICON_VOL_MID: &str = "\u{F0580}";
 const ICON_VOL_LOW: &str = "\u{F057F}";
 const ICON_VOL_MUTE: &str = "\u{F075F}";
 const ICON_BRIGHT: &str = "\u{F00DE}";
+const ICON_SHELL: &str = "\u{F0F2A}";
 const ICON_SHOT: &str = "\u{F0104}";
 const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
@@ -453,6 +454,52 @@ impl GpuiBar {
             }))
     }
 
+    /// Entry point into JWM's own shell surface.
+    ///
+    /// One pill: it opens the hub, and the hub is itself the page that routes
+    /// to applications, notifications, clipboard, calendar and wallpaper. The
+    /// bar renders none of that content and keeps no shell state.
+    fn render_shell_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Grayed rather than hidden: the shell lives in the window manager, so
+        // an unreachable one has to look unreachable.
+        let available = self.runtime.view().wm_available;
+        let bg = if available {
+            rgba_alpha(0x7C6CFF, 0.90)
+        } else {
+            rgba_alpha(0x555B66, 0.70)
+        };
+        let hover_bg = if available {
+            rgba_alpha(0x9688FF, 0.95)
+        } else {
+            bg
+        };
+        div()
+            .id("shell")
+            .h(px(22.))
+            .px(px(7.))
+            .py(px(2.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(10.))
+            .bg(bg)
+            .border_1()
+            .border_color(bg)
+            .text_color(rgba_alpha(0xFFFFFF, if available { 1.0 } else { 0.55 }))
+            .text_size(px(12.))
+            .child(ICON_SHELL)
+            .hover(move |s| s.bg(hover_bg).border_color(hover_bg))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| {
+                    if this.runtime.view().wm_available {
+                        this.dispatch(UserAction::OpenShellHub(ShellRoute::Hub));
+                        cx.notify();
+                    }
+                }),
+            )
+    }
+
     fn render_screenshot_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let bg = rgba_alpha(0x00CCCC, 0.90);
         let hover_bg = rgba_alpha(0xFF8800, 0.95);
@@ -652,6 +699,7 @@ impl Render for GpuiBar {
             .child(self.render_battery_pill())
             .child(self.render_brightness_pill(cx))
             .child(self.render_volume_pill(cx))
+            .child(self.render_shell_pill(cx))
             .child(self.render_screenshot_pill(cx))
             .child(self.render_time_pill(cx))
             .child(self.render_monitor_pill())
