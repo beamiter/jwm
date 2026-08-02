@@ -221,6 +221,9 @@ pub enum CommandType {
     ViewTag = 1,
     ToggleTag = 2,
     SetLayout = 3,
+    /// 状态栏请求窗口管理器打开自带的 Shell Hub。`parameter` 携带路由编号，
+    /// 由 `ShellHubRoute` 定义；未知路由退化为 Hub 首页而不是被丢弃。
+    ShellHub = 4,
 }
 
 impl From<u32> for CommandType {
@@ -229,6 +232,7 @@ impl From<u32> for CommandType {
             1 => CommandType::ViewTag,
             2 => CommandType::ToggleTag,
             3 => CommandType::SetLayout,
+            4 => CommandType::ShellHub,
             _ => CommandType::None,
         }
     }
@@ -243,8 +247,83 @@ impl CommandType {
             1 => Some(Self::ViewTag),
             2 => Some(Self::ToggleTag),
             3 => Some(Self::SetLayout),
+            4 => Some(Self::ShellHub),
             _ => None,
         }
+    }
+}
+
+/// Shell Hub 的路由编号，与 `CommandType::ShellHub` 的 `parameter` 一一对应。
+///
+/// 这是一个纯协议枚举：窗口管理器把它映射到自己的界面状态，状态栏用它标注
+/// 按钮，两端都不需要知道对方的实现。
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub enum ShellHubRoute {
+    /// Hub 首页：路由列表加快捷开关。
+    #[default]
+    Hub = 0,
+    Applications = 1,
+    Notifications = 2,
+    Clipboard = 3,
+    Calendar = 4,
+    Wallpaper = 5,
+}
+
+impl ShellHubRoute {
+    pub const ALL: [Self; 6] = [
+        Self::Hub,
+        Self::Applications,
+        Self::Notifications,
+        Self::Clipboard,
+        Self::Calendar,
+        Self::Wallpaper,
+    ];
+
+    /// 严格解析路由编号。未知编号返回 `None`，调用方决定是丢弃还是退化。
+    #[must_use]
+    pub const fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Hub),
+            1 => Some(Self::Applications),
+            2 => Some(Self::Notifications),
+            3 => Some(Self::Clipboard),
+            4 => Some(Self::Calendar),
+            5 => Some(Self::Wallpaper),
+            _ => None,
+        }
+    }
+
+    /// 宽松解析：未知编号退化为 Hub 首页，这样新版状态栏配上旧版窗口管理器
+    /// 时仍然能打开一个有用的界面。
+    #[must_use]
+    pub const fn from_raw_or_hub(value: u32) -> Self {
+        match Self::from_raw(value) {
+            Some(route) => route,
+            None => Self::Hub,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_raw(self) -> u32 {
+        self as u32
+    }
+}
+
+impl From<u32> for ShellHubRoute {
+    fn from(value: u32) -> Self {
+        Self::from_raw_or_hub(value)
+    }
+}
+
+impl From<ShellHubRoute> for u32 {
+    fn from(route: ShellHubRoute) -> Self {
+        route.as_raw()
     }
 }
 
@@ -303,6 +382,20 @@ impl SharedCommand {
     #[must_use]
     pub fn set_layout(layout_idx: u32, monitor_id: i32) -> Self {
         Self::new(CommandType::SetLayout, layout_idx, monitor_id)
+    }
+
+    #[must_use]
+    pub fn shell_hub(route: ShellHubRoute, monitor_id: i32) -> Self {
+        Self::new(CommandType::ShellHub, route.as_raw(), monitor_id)
+    }
+
+    /// 命令是 `ShellHub` 时返回它的路由，其它命令返回 `None`。
+    #[must_use]
+    pub const fn shell_hub_route(&self) -> Option<ShellHubRoute> {
+        match CommandType::from_raw(self.cmd_type) {
+            Some(CommandType::ShellHub) => Some(ShellHubRoute::from_raw_or_hub(self.parameter)),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -599,6 +692,7 @@ mod tests {
         assert_eq!(u32::from(CommandType::ViewTag), 1);
         assert_eq!(u32::from(CommandType::ToggleTag), 2);
         assert_eq!(u32::from(CommandType::SetLayout), 3);
+        assert_eq!(u32::from(CommandType::ShellHub), 4);
     }
 
     #[test]
@@ -607,14 +701,15 @@ mod tests {
         assert_eq!(CommandType::from(1u32), CommandType::ViewTag);
         assert_eq!(CommandType::from(2u32), CommandType::ToggleTag);
         assert_eq!(CommandType::from(3u32), CommandType::SetLayout);
+        assert_eq!(CommandType::from(4u32), CommandType::ShellHub);
     }
 
     #[test]
     fn test_command_type_unknown_values_map_to_none() {
-        assert_eq!(CommandType::from(4u32), CommandType::None);
+        assert_eq!(CommandType::from(5u32), CommandType::None);
         assert_eq!(CommandType::from(u32::MAX), CommandType::None);
         assert_eq!(CommandType::from(100u32), CommandType::None);
-        assert_eq!(CommandType::from_raw(4), None);
+        assert_eq!(CommandType::from_raw(5), None);
         assert_eq!(CommandType::from_raw(u32::MAX), None);
     }
 
@@ -625,11 +720,34 @@ mod tests {
             CommandType::ViewTag,
             CommandType::ToggleTag,
             CommandType::SetLayout,
+            CommandType::ShellHub,
         ];
         for &ct in &types {
             let v: u32 = ct.into();
             assert_eq!(CommandType::from(v), ct);
         }
+    }
+
+    // ── ShellHubRoute ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_shell_hub_route_roundtrip_is_total_over_all_variants() {
+        for &route in &ShellHubRoute::ALL {
+            let raw = route.as_raw();
+            assert_eq!(ShellHubRoute::from_raw(raw), Some(route));
+            assert_eq!(ShellHubRoute::from(raw), route);
+        }
+        assert_eq!(ShellHubRoute::default(), ShellHubRoute::Hub);
+    }
+
+    #[test]
+    fn test_shell_hub_route_unknown_is_strict_but_degrades_to_hub() {
+        assert_eq!(ShellHubRoute::from_raw(6), None);
+        assert_eq!(ShellHubRoute::from_raw(u32::MAX), None);
+        // A newer bar talking to an older window manager still lands somewhere
+        // useful instead of having its command silently dropped.
+        assert_eq!(ShellHubRoute::from_raw_or_hub(6), ShellHubRoute::Hub);
+        assert_eq!(ShellHubRoute::from(u32::MAX), ShellHubRoute::Hub);
     }
 
     // ── SharedCommand ────────────────────────────────────────────────────────
@@ -676,10 +794,29 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_command_shell_hub_carries_the_route() {
+        for &route in &ShellHubRoute::ALL {
+            let cmd = SharedCommand::shell_hub(route, 1);
+            assert_eq!(cmd.get_command_type(), CommandType::ShellHub);
+            assert_eq!(cmd.get_parameter(), route.as_raw());
+            assert_eq!(cmd.get_monitor_id(), 1);
+            assert_eq!(cmd.shell_hub_route(), Some(route));
+        }
+    }
+
+    #[test]
+    fn test_shell_hub_route_accessor_ignores_other_commands() {
+        assert_eq!(SharedCommand::view_tag(1, 0).shell_hub_route(), None);
+        assert_eq!(SharedCommand::set_layout(2, 0).shell_hub_route(), None);
+        assert_eq!(SharedCommand::default().shell_hub_route(), None);
+    }
+
+    #[test]
     fn test_all_shared_command_constructors_have_nonzero_timestamp() {
         assert!(SharedCommand::view_tag(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::toggle_tag(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::set_layout(0, 0).get_timestamp() > 0);
+        assert!(SharedCommand::shell_hub(ShellHubRoute::Hub, 0).get_timestamp() > 0);
         assert!(SharedCommand::new(CommandType::None, 0, 0).get_timestamp() > 0);
     }
 

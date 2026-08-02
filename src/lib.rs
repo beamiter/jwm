@@ -24,8 +24,8 @@
 
 mod shared_message;
 pub use shared_message::{
-    CommandType, MonitorInfo, SharedCommand, SharedMessage, TagStatus, MAX_CLIENT_NAME_LEN,
-    MAX_LT_SYMBOL_LEN, MAX_TAGS,
+    CommandType, MonitorInfo, SharedCommand, SharedMessage, ShellHubRoute, TagStatus,
+    MAX_CLIENT_NAME_LEN, MAX_LT_SYMBOL_LEN, MAX_TAGS,
 };
 
 mod typed_ring_buffer;

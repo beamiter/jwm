@@ -201,6 +201,24 @@ fn open_or_create() -> std::io::Result<()> {
 
 `send_command`、`receive_command` 及 `*_aux` 便捷构造器已标记 deprecated，将在后续大版本移除；新代码应使用 `try_send_command`、`try_receive_command` 与 `SharedRingBufferOptions`。
 
+## 命令类型
+
+`SharedCommand` 的 `cmd_type` 取值由 `CommandType` 定义，`parameter` 的含义由命令类型决定：
+
+| `CommandType` | 值 | `parameter` |
+| --- | --- | --- |
+| `None` | 0 | 无 |
+| `ViewTag` | 1 | 标签位掩码 |
+| `ToggleTag` | 2 | 标签位掩码 |
+| `SetLayout` | 3 | 布局序号 |
+| `ShellHub` | 4 | `ShellHubRoute` 路由编号 |
+
+`ShellHubRoute` 是状态栏请求窗口管理器打开自带 shell 页面时使用的纯协议枚举：`Hub`(0)、`Applications`(1)、`Notifications`(2)、`Clipboard`(3)、`Calendar`(4)、`Wallpaper`(5)。两端都不需要知道对方如何实现这些页面。
+
+`SharedCommand::shell_hub(route, monitor_id)` 构造这类命令，`shell_hub_route()` 读回路由（其它命令类型返回 `None`）。
+
+结构体布局没有变化，因此新增命令类型在两个方向上都保持兼容：旧版窗口管理器把未知 `cmd_type` 当作 `None` 忽略；新版状态栏发出的未知路由经 `ShellHubRoute::from_raw_or_hub` 退化为 Hub 首页，而不是被静默丢弃。需要严格解析时使用 `CommandType::from_raw` 和 `ShellHubRoute::from_raw`，它们对未知取值返回 `None`。
+
 ## 状态与统计
 
 `capacity()`、`command_capacity()`、`strategy()`、`is_creator()`、`creator_pid()`、`creator_alive()` 和 `last_message_timestamp()` 提供单项查询。`available_messages()`/`available_commands()` 是免锁快照，可在热路径高频调用。`stats()` 返回 `SharedRingBufferStats` 快照，包括：
