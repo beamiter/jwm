@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.103"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0", default-features = false, features = [
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = [
     "clock-chrono",
     "config-toml",
     "logging-flexi",
@@ -18,7 +18,7 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0",
     "runtime-linux",
     "transport-shared",
 ] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0" }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
 libc = "0.2.186"
 log = "0.4.33"
 cairo-rs = { version = "0.22.0", features = ["xcb"] }
