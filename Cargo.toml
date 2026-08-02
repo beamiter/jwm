@@ -1,6 +1,6 @@
 [package]
 name = "xbar_core"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 description = "Backend-neutral status-bar model, frontend projection, runtime, and explicit adapters"
 repository = "https://github.com/beamiter/xbar_core"
@@ -28,7 +28,12 @@ anyhow = { version = "1.0.103", optional = true }
 chrono = { version = "0.4.45", optional = true }
 sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", features = ["use-futex"], optional = true }
+# Pinned, not floating: a tagged xbar_core release has to decide the
+# ring-buffer protocol revision it was built and tested against. Without a
+# rev, every consumer resolves shared_structures independently — a repo
+# with a lock keeps an old one across an xbar_core bump, and a repo
+# without one silently follows the default branch at build time.
+shared_structures = { git = "https://github.com/beamiter/shared_structures.git", rev = "4eff3a2e7b39e0dee80f83830cfda37147b89ee4", features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = { version = "0.9.8", optional = true }
 
