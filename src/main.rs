@@ -19,7 +19,7 @@ use log::{debug, warn};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
+    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -46,6 +46,7 @@ const ICON_VOL_MID: &str = "\u{F0580}";
 const ICON_VOL_LOW: &str = "\u{F057F}";
 const ICON_VOL_MUTE: &str = "\u{F075F}";
 const ICON_BRIGHT: &str = "\u{F00DE}";
+const ICON_SHELL: &str = "\u{F0F2A}";
 const ICON_SHOT: &str = "\u{F0104}";
 const ICON_TIME: &str = "\u{F0954}";
 const ICON_MON: &str = "\u{F0379}";
@@ -462,6 +463,35 @@ impl GpuiComponentBar {
                 cx,
             ));
 
+        // Entry point into JWM's own shell surface. It opens the hub, which
+        // is itself the page that routes to applications, notifications,
+        // clipboard, calendar and wallpaper; the bar renders none of them.
+        let shell_available = self.runtime.view().wm_available;
+        let shell_chip = Self::chip_button(
+            "shell",
+            ICON_SHELL,
+            // Grayed rather than hidden: the shell lives in the window
+            // manager, so an unreachable one has to look unreachable.
+            if shell_available {
+                indigo_500()
+            } else {
+                gray_500()
+            },
+            if shell_available {
+                indigo_500()
+            } else {
+                slate_700()
+            },
+            white(),
+            cx,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if this.runtime.view().wm_available {
+                this.dispatch(UserAction::OpenShellHub(ShellRoute::Hub));
+                cx.notify();
+            }
+        }));
+
         let screenshot_chip =
             Self::chip_button("screenshot", ICON_SHOT, cyan_500(), blue_500(), white(), cx)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -484,6 +514,7 @@ impl GpuiComponentBar {
             .gap(px(6.))
             .child(brightness_chip)
             .child(volume_chip)
+            .child(shell_chip)
             .child(screenshot_chip)
             .child(time_chip)
             .child(self.chip_tag(monitor, indigo_500(), white(), indigo_500()))
