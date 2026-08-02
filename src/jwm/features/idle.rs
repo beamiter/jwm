@@ -254,8 +254,20 @@ impl crate::jwm::Jwm {
         if !self.idle.is_dimmed() {
             return;
         }
-        let level = crate::config::CONFIG.load().behavior().idle_dim_level;
-        backend.compositor_set_brightness(configured_brightness() * level);
+        // Validated the same way the dim stage validates it, so an out-of-range
+        // `idle_dim_level` cannot make a config reload land on a different
+        // brightness than the dim it is restoring.
+        let level = IdleSettings::from_secs(
+            1,
+            crate::config::CONFIG.load().behavior().idle_dim_level,
+            0,
+            0,
+            false,
+        )
+        .dim_level;
+        let brightness = configured_brightness() * level;
+        log::info!("Idle: re-applying the dim after a config change ({brightness})");
+        backend.compositor_set_brightness(brightness);
     }
 
     fn apply_idle_action(
@@ -265,12 +277,18 @@ impl crate::jwm::Jwm {
     ) {
         match action {
             IdleAction::Dim(level) => {
-                log::info!("Idle: dimming to {level}");
-                backend.compositor_set_brightness(configured_brightness() * level);
+                let brightness = configured_brightness() * level;
+                log::info!("Idle: dimming to {level} (brightness {brightness})");
+                backend.compositor_set_brightness(brightness);
                 self.broadcast_idle_state();
             }
             IdleAction::Undim => {
-                backend.compositor_set_brightness(configured_brightness());
+                // Logged as loudly as the dim: a dim with no matching restore
+                // in the log is the whole symptom of a screen that stays dark,
+                // and without this line there is nothing to tell the two apart.
+                let brightness = configured_brightness();
+                log::info!("Idle: restoring brightness to {brightness}");
+                backend.compositor_set_brightness(brightness);
                 self.broadcast_idle_state();
             }
             IdleAction::Lock => {

@@ -94,13 +94,22 @@ fn parse_amixer(output: &str) -> Option<AudioState> {
 }
 
 /// `brightnessctl -m` → `intel_backlight,backlight,4800,50%,9600`.
+///
+/// The class column is checked rather than trusted. `brightnessctl` enumerates
+/// LEDs as well as panels, and on a desktop with no panel at all the first line
+/// is something like `igc-08400-led1,leds,1,100%,1` — a network card's status
+/// light. Taking the first percentage in the output would report that LED as
+/// the screen's brightness and, worse, let the brightness keys blink it.
 fn parse_brightnessctl(output: &str) -> Option<u8> {
-    output
-        .trim()
-        .split(',')
-        .filter_map(|field| field.strip_suffix('%'))
-        .filter_map(|percent| percent.parse::<u8>().ok())
-        .next()
+    output.lines().find_map(|line| {
+        let mut fields = line.trim().split(',');
+        let _device = fields.next()?;
+        if fields.next()? != "backlight" {
+            return None;
+        }
+        let _current = fields.next()?;
+        fields.next()?.strip_suffix('%')?.parse::<u8>().ok()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -549,9 +558,39 @@ fn sysfs_brightness_percent() -> Option<u8> {
     Some(((current * 100 + max / 2) / max).min(100) as u8)
 }
 
+/// Every `brightnessctl` call is pinned to the backlight class.
+///
+/// Without it the tool operates on whatever device it lists first, which on a
+/// desktop with no panel is an LED belonging to some unrelated device.
+const BACKLIGHT_CLASS: [&str; 2] = ["-c", "backlight"];
+
+fn brightnessctl(args: &[&str]) -> Vec<String> {
+    BACKLIGHT_CLASS
+        .iter()
+        .chain(args)
+        .map(|arg| (*arg).to_string())
+        .collect()
+}
+
+fn run_brightnessctl(args: &[&str]) -> Option<String> {
+    let args = brightnessctl(args);
+    run(
+        "brightnessctl",
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
+fn run_brightnessctl_ok(args: &[&str]) -> bool {
+    let args = brightnessctl(args);
+    run_ok(
+        "brightnessctl",
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
+}
+
 fn detect_brightness_tool() -> Option<BrightnessTool> {
     *BRIGHTNESS_TOOL.get_or_init(|| {
-        if run("brightnessctl", &["-m"])
+        if run_brightnessctl(&["-m"])
             .as_deref()
             .and_then(parse_brightnessctl)
             .is_some()
@@ -569,7 +608,7 @@ fn detect_brightness_tool() -> Option<BrightnessTool> {
 /// Current backlight level in percent, or `None` without a backlight.
 pub fn brightness_percent() -> Option<u8> {
     match detect_brightness_tool()? {
-        BrightnessTool::Brightnessctl => parse_brightnessctl(&run("brightnessctl", &["-m"])?),
+        BrightnessTool::Brightnessctl => parse_brightnessctl(&run_brightnessctl(&["-m"])?),
         BrightnessTool::Sysfs => sysfs_brightness_percent(),
     }
 }
@@ -600,7 +639,7 @@ pub fn brightness_adjust(delta: i32) -> Option<u8> {
                 // turns fully black from a key repeat.
                 format!("{magnitude}%-")
             };
-            if !run_ok("brightnessctl", &["-n1", "set", &step]) {
+            if !run_brightnessctl_ok(&["-n1", "set", &step]) {
                 return None;
             }
             brightness_percent()
@@ -616,10 +655,7 @@ pub fn brightness_adjust(delta: i32) -> Option<u8> {
 pub fn brightness_set(percent: u8) -> Option<u8> {
     match detect_brightness_tool()? {
         BrightnessTool::Brightnessctl => {
-            if !run_ok(
-                "brightnessctl",
-                &["-n1", "set", &format!("{}%", percent.min(100))],
-            ) {
+            if !run_brightnessctl_ok(&["-n1", "set", &format!("{}%", percent.min(100))]) {
                 return None;
             }
             brightness_percent()
@@ -842,5 +878,25 @@ Source #51
             Some(50)
         );
         assert_eq!(parse_brightnessctl("no percent here"), None);
+    }
+
+    #[test]
+    fn an_led_is_never_mistaken_for_a_backlight() {
+        // A desktop with no panel: `brightnessctl -m` lists a network card's
+        // status light first. Reading it as the screen's brightness made the
+        // OSD report a level it could not change, and the brightness keys
+        // blink the card instead of dimming anything.
+        assert_eq!(parse_brightnessctl("igc-08400-led1,leds,1,100%,1\n"), None);
+        assert_eq!(
+            parse_brightnessctl("input3::capslock,leds,0,0%,1\nigc-08400-led1,leds,1,100%,1\n"),
+            None
+        );
+        // A panel further down the list is still found.
+        assert_eq!(
+            parse_brightnessctl(
+                "input3::capslock,leds,0,0%,1\nintel_backlight,backlight,2400,25%,9600\n"
+            ),
+            Some(25)
+        );
     }
 }
