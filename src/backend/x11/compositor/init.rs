@@ -1132,10 +1132,11 @@ impl<C: CompositorConnection> Compositor<C> {
             peek_start: None,
             // Phase 5: Window Tabs
             window_tabs_enabled: behavior.window_tabs,
-            tab_bar_height: finite_clamp(behavior.tab_bar_height, 1.0, 256.0, 24.0),
             tab_bar_color: behavior.tab_bar_color,
             tab_active_color: behavior.tab_active_color,
-            window_groups: HashMap::new(),
+            window_groups: Vec::new(),
+            tab_title_textures: Vec::new(),
+            tab_titles_dirty: false,
             // Particle effects
             particle_program,
             particle_uniforms,

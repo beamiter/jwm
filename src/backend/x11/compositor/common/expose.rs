@@ -21,11 +21,3 @@ pub struct SnapPreview {
     pub start: std::time::Instant,
     pub fading_out: bool,
 }
-
-/// Single tab in a window group.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WindowTab {
-    pub x11_win: u32,
-    pub title: String,
-    pub is_active: bool,
-}

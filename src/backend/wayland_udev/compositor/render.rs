@@ -2175,7 +2175,8 @@ impl WaylandCompositor {
         // 15c. Tab bar for window groups
         // =================================================================
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
-            self.render_tab_bar(gl, &projection, visible_scene);
+            self.refresh_tab_titles(gl);
+            self.render_tab_bar(gl, &projection);
         }
 
         // =================================================================

@@ -588,7 +588,6 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Window tabs ---
         self.window_tabs_enabled = behavior.window_tabs;
-        self.tab_bar_height = finite_clamp(behavior.tab_bar_height, 1.0, 256.0, 24.0);
         self.tab_bar_color = behavior.tab_bar_color;
         self.tab_active_color = behavior.tab_active_color;
 

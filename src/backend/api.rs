@@ -1444,7 +1444,16 @@ pub trait CompositorWindowEffects: Send {
     fn compositor_set_window_minimized(&mut self, _window: WindowId, _minimized: bool) {}
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
     fn compositor_set_peek_mode(&mut self, _active: bool) {}
-    fn compositor_set_window_groups(&mut self, _groups: Vec<(u32, Vec<(u32, String, bool)>)>) {}
+    /// Hand the compositor the tab bars to paint. Each group carries the strip
+    /// the window manager reserved for it, so the compositor never has to
+    /// derive the position from a window's geometry — and never has to know
+    /// which windows the cells stand for, since the window manager owns the
+    /// hit test.
+    fn compositor_set_window_groups(
+        &mut self,
+        _groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+    ) {
+    }
     fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
 }
 

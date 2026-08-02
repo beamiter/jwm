@@ -245,36 +245,6 @@ impl Jwm {
         }
     }
 
-    /// Build window tab groups: one group per monitor, containing visible tiled windows.
-    /// The focused window is marked as active tab.
-    #[allow(dead_code)]
-    pub(super) fn build_window_groups(&self) -> Vec<(u32, Vec<(u32, String, bool)>)> {
-        let mut groups = Vec::with_capacity(self.state.monitor_order.len());
-        let focused_ck = self.get_selected_client_key();
-        for (i, &mon_key) in self.state.monitor_order.iter().enumerate() {
-            let monitor_clients = self.get_monitor_clients(mon_key);
-            let mut tabs = Vec::with_capacity(monitor_clients.len());
-            for &ck in monitor_clients {
-                if !self.is_client_visible_on_monitor(ck, mon_key) {
-                    continue;
-                }
-                let client = match self.state.clients.get(ck) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                if client.state.is_floating || client.state.is_fullscreen {
-                    continue;
-                }
-                let is_active = focused_ck == Some(ck);
-                tabs.push((client.win.raw() as u32, client.name.clone(), is_active));
-            }
-            if tabs.len() > 1 {
-                groups.push((i as u32, tabs));
-            }
-        }
-        groups
-    }
-
     /// Build an ordered scene for the compositor: Vec<(window_id_raw, x, y, w, h)>
     /// from bottom to top, using the last_stacking order. For windows with
     /// active animation overrides, use the interpolated rect instead of actual geometry.

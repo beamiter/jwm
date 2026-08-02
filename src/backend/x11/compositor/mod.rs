@@ -661,10 +661,14 @@ where
 
     // --- Phase 5: Window Tabs ---
     window_tabs_enabled: bool,
-    tab_bar_height: f32,
     tab_bar_color: [f32; 4],
     tab_active_color: [f32; 4],
-    window_groups: HashMap<u32, Vec<WindowTab>>,
+    /// The bars the window manager reserved, strip geometry included.
+    window_groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+    /// One (texture, w, h) per cell, in `window_groups` order. Rebuilt only
+    /// when the groups change; see `Compositor::refresh_tab_titles`.
+    tab_title_textures: Vec<Vec<Option<(glow::Texture, u32, u32)>>>,
+    tab_titles_dirty: bool,
 
     // --- Particle effects ---
     particle_program: glow::Program,
@@ -938,6 +942,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 if let Some((tex, _, _)) = slot.take() {
                     self.gl.delete_texture(tex);
                 }
+            }
+            for (tex, _, _) in self.tab_title_textures.drain(..).flatten().flatten() {
+                self.gl.delete_texture(tex);
             }
             self.gl.delete_program(self.transition_program);
             self.gl.delete_program(self.portal_program);

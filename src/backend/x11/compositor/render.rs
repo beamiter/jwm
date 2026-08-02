@@ -2336,7 +2336,10 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.tickless_focus_or_wallpaper_animation_active()
             || self.pending_wallpaper.is_some()
             || !self.pending_monitor_wallpapers.is_empty()
-            || (self.window_tabs_enabled && self.window_groups.values().any(|tabs| tabs.len() > 1))
+            || (self.window_tabs_enabled
+                && self.window_groups.iter().any(|group| {
+                    crate::backend::compositor_common::window_tabs::wants_bar(group.tabs.len())
+                }))
         {
             return true;
         }
@@ -4749,11 +4752,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 3c: Window tab bars ===
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
-            for &(win, x, y, w, _h) in visible_scene {
-                if let Some((_gid, tabs)) = self.find_window_group(win) {
-                    self.render_tab_bar(&proj, x as f32, y as f32, w as f32, tabs);
-                }
-            }
+            self.refresh_tab_titles();
+            self.render_tab_bar(&proj);
         }
 
         // === Pass 4: Post-processing (features 8/9/10) ===

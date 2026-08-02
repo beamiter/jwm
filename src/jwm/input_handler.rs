@@ -1494,6 +1494,23 @@ impl Jwm {
             self.state.sel_mon = target_mon_key;
             self.focus(backend, None)?;
         }
+        // A click on a monitor's tab bar picks that window. The strip is space
+        // the layout reserved, so nothing tiled can be under it; a floating
+        // window that happens to cover it still keeps its own clicks.
+        let clicked_a_managed_window = clicked_win
+            .filter(|&wid| Some(wid) != backend.root_window())
+            .and_then(|wid| self.wintoclient(wid))
+            .is_some();
+        if !clicked_a_managed_window {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            if self.click_window_tab(backend, x, y)? {
+                return Ok(());
+            }
+        }
+
         let mut is_client_click = false;
         let mut clicked_client_key: Option<ClientKey> = None;
         if let Some(wid) = clicked_win {

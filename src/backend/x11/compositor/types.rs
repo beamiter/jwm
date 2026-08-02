@@ -3,9 +3,7 @@ use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
 pub(super) use crate::backend::x11::compositor_common::effects::{
     Particle, ParticleSystem, RippleState,
 };
-pub(super) use crate::backend::x11::compositor_common::expose::{
-    ExposeEntry, SnapPreview, WindowTab,
-};
+pub(super) use crate::backend::x11::compositor_common::expose::{ExposeEntry, SnapPreview};
 use std::cell::Cell;
 use std::collections::VecDeque;
 

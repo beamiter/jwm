@@ -191,7 +191,22 @@ impl Jwm {
         }
     }
 
+    /// The area windows may occupy: everything left after the status bar,
+    /// docks and the window tab bar have taken their share.
     pub(crate) fn monitor_work_area(&self, mon_key: MonitorKey) -> Option<Rect> {
+        let area = self.monitor_work_area_untabbed(mon_key)?;
+        Some(crate::jwm::window_tabs::without_tab_bar(
+            area,
+            self.tab_bar_reserved(mon_key),
+        ))
+    }
+
+    /// The work area before the window tab bar is subtracted — which is also
+    /// where that bar goes. Only [`Jwm::monitor_tab_bar`] and
+    /// [`Jwm::monitor_work_area`] should need it; everything laying out or
+    /// placing a window wants the tabbed area, or it will put the window
+    /// underneath the strip.
+    pub(crate) fn monitor_work_area_untabbed(&self, mon_key: MonitorKey) -> Option<Rect> {
         let monitor = self.state.monitors.get(mon_key)?;
 
         let debug_workarea = std::env::var("JWM_DEBUG_WORKAREA")

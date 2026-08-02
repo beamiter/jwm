@@ -3499,7 +3499,10 @@ impl CompositorWindowEffects for UdevBackend {
             c.set_peek_mode(active);
         }
     }
-    fn compositor_set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+    fn compositor_set_window_groups(
+        &mut self,
+        groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+    ) {
         if let Some(c) = self.compositor.as_mut() {
             c.set_window_groups(groups);
         }

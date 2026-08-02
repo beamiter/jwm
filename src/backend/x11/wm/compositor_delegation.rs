@@ -577,8 +577,12 @@ macro_rules! delegate_compositor_capabilities {
 
             fn compositor_set_window_groups(
                 &mut self,
-                groups: Vec<(u32, Vec<(u32, String, bool)>)>,
+                groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
             ) {
+                // No id translation here, and deliberately none needed: a group
+                // is a rectangle and a list of titles. The window manager owns
+                // which window each cell stands for, so no window id crosses
+                // this boundary to be mistranslated.
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_window_groups(groups);
                 }

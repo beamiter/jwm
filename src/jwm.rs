@@ -29,6 +29,7 @@ pub mod positioning;
 pub mod process;
 pub mod rendering;
 pub mod window_state;
+pub mod window_tabs;
 pub use types::{
     ICONIC_STATE, InteractionAction, InteractionState, MonitorIndex, NORMAL_STATE, STEXT_MAX_LEN,
     SecondaryBarInstance, WITHDRAWN_STATE, WMArgEnum, WMButton, WMClickType, WMFuncType, WMKey,

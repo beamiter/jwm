@@ -17,4 +17,5 @@ pub(crate) mod ui_theme;
 pub mod wallpaper;
 pub mod waterlily;
 pub(crate) mod window_glow;
+pub mod window_tabs;
 pub mod wobbly;

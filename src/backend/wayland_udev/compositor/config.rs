@@ -223,7 +223,6 @@ impl WaylandCompositor {
 
         // --- Window tabs ---
         self.window_tabs_enabled = b.window_tabs;
-        self.tab_bar_height = finite_clamp(b.tab_bar_height, 1.0, 256.0, 24.0);
         self.tab_bar_color = b.tab_bar_color;
         self.tab_active_color = b.tab_active_color;
 
@@ -576,11 +575,17 @@ impl WaylandCompositor {
         self.dock_y = y;
     }
 
-    pub(crate) fn set_window_groups(&mut self, groups: Vec<(u32, Vec<(u32, String, bool)>)>) {
+    pub(crate) fn set_window_groups(
+        &mut self,
+        groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+    ) {
         if self.window_groups == groups {
             return;
         }
         self.window_groups = groups;
+        // A group change is the only thing that can invalidate a title: the
+        // text, the cell width and the focus flag all live in it.
+        self.tab_titles_dirty = true;
         self.needs_render = true;
     }
 

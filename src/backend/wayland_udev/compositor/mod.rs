@@ -826,8 +826,12 @@ pub(crate) struct WaylandCompositor {
     // Active genie minimize animations
     pub(crate) genie_active: Vec<GenieAnimation>,
 
-    // Window groups (tabs)
-    window_groups: Vec<(u32, Vec<(u32, String, bool)>)>,
+    // Window groups (tabs): the bars the window manager reserved, strip
+    // geometry included, plus one (texture, w, h) per cell rebuilt only when
+    // the groups change.
+    window_groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+    tab_title_textures: Vec<Vec<Option<(u32, u32, u32)>>>,
+    tab_titles_dirty: bool,
 
     // Monitors info
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
@@ -945,7 +949,6 @@ pub(crate) struct WaylandCompositor {
 
     // --- Window tabs config ---
     window_tabs_enabled: bool,
-    tab_bar_height: f32,
     tab_bar_color: [f32; 4],
     tab_active_color: [f32; 4],
 
@@ -1771,6 +1774,8 @@ impl WaylandCompositor {
 
                 // Window groups
                 window_groups: Vec::new(),
+                tab_title_textures: Vec::new(),
+                tab_titles_dirty: false,
 
                 // Monitors
                 monitors: Vec::new(),
@@ -1882,7 +1887,6 @@ impl WaylandCompositor {
 
                 // Window tabs
                 window_tabs_enabled: false,
-                tab_bar_height: 24.0,
                 tab_bar_color: [0.2, 0.2, 0.2, 0.9],
                 tab_active_color: [0.3, 0.5, 0.8, 1.0],
 
