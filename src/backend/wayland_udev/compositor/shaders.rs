@@ -355,12 +355,18 @@ precision highp float;
 uniform vec4  u_border_color;  // border/glow RGBA
 uniform vec2  u_size;          // outline quad size, or inner window size in glow mode
 uniform float u_radius;        // corner radius (0 = sharp)
+uniform float u_radius_top;    // radius of the top two corners
 uniform float u_border_width;  // >=0: border width, <0: directional glow radius
 uniform int   u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
 
-float rounded_rect_sdf(vec2 p, vec2 half_size, float r) {
+// The top two corners carry their own radius so a panel can sit flush against
+// the bar it drops out of: square where the two shapes meet, rounded below.
+// Inside the rect the chosen radius cancels out of the expression, so the two
+// halves meet with no seam however far apart the radii are.
+float rounded_rect_sdf(vec2 p, vec2 half_size, float r_bottom, float r_top) {
+    float r = p.y < 0.0 ? r_top : r_bottom;
     vec2 d = abs(p) - half_size + vec2(r);
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
@@ -381,7 +387,7 @@ void main() {
         vec2 expanded = u_size + vec2(2.0 * spread);
         vec2 pixel_pos = v_uv * expanded;
         vec2 center = expanded * 0.5;
-        float dist = rounded_rect_sdf(pixel_pos - center, u_size * 0.5, u_radius);
+        float dist = rounded_rect_sdf(pixel_pos - center, u_size * 0.5, u_radius, u_radius_top);
         float aa = max(fwidth(dist), 0.75);
         float outside = max(dist, 0.0);
         float normalized = outside / spread;
@@ -413,7 +419,7 @@ void main() {
 
     vec2 pixel_pos = v_uv * u_size;
     vec2 center = u_size * 0.5;
-    float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius);
+    float dist = rounded_rect_sdf(pixel_pos - center, center, u_radius, u_radius_top);
     // The border is visible between -u_border_width and 0
     float outer = 1.0 - smoothstep(-1.0, 1.0, dist);
     float inner = 1.0 - smoothstep(-1.0, 1.0, dist + u_border_width);
@@ -504,6 +510,7 @@ uniform vec2  u_screen_size;       // framebuffer size in pixels
 uniform vec4  u_tint;              // veil over the backdrop: rgb + coverage
 uniform vec2  u_size;              // sheet size in pixels
 uniform float u_radius;            // corner radius in pixels
+uniform float u_radius_top;        // radius of the top two corners
 uniform float u_corner_exp;        // 2 = circular, ~4 = continuous (squircle)
 uniform float u_saturation;        // chroma multiplier on the backdrop
 uniform float u_luminance;         // brightness multiplier on the backdrop
@@ -530,7 +537,8 @@ vec3 srgb_inverse(vec3 c) {
 // the circular rounded rect every other program uses; higher n bulges the
 // corner outward into Apple's continuous curvature, where the arc eases into
 // the straight edge instead of meeting it at a visible tangent point.
-float squircle_sdf(vec2 p, vec2 half_size, float r, float n) {
+float squircle_sdf(vec2 p, vec2 half_size, float r_bottom, float r_top, float n) {
+    float r = p.y < 0.0 ? r_top : r_bottom;
     vec2 d = abs(p) - half_size + vec2(r);
     vec2 m = max(d, 0.0);
     float corner = pow(pow(m.x, n) + pow(m.y, n), 1.0 / n);
@@ -539,7 +547,7 @@ float squircle_sdf(vec2 p, vec2 half_size, float r, float n) {
 
 void main() {
     vec2 half_size = u_size * 0.5;
-    float dist = squircle_sdf(v_uv * u_size - half_size, half_size, u_radius,
+    float dist = squircle_sdf(v_uv * u_size - half_size, half_size, u_radius, u_radius_top,
                               max(u_corner_exp, 2.0));
 
     // Derivatives must be taken before any discard: once part of a quad is

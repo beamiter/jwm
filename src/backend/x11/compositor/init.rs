@@ -205,6 +205,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 border_color: gl.get_uniform_location(border_program, "u_border_color"),
                 size: gl.get_uniform_location(border_program, "u_size"),
                 radius: gl.get_uniform_location(border_program, "u_radius"),
+                radius_top: gl.get_uniform_location(border_program, "u_radius_top"),
                 border_width: gl.get_uniform_location(border_program, "u_border_width"),
             }
         };
@@ -343,6 +344,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 tint: gl.get_uniform_location(glass_program, "u_tint"),
                 size: gl.get_uniform_location(glass_program, "u_size"),
                 radius: gl.get_uniform_location(glass_program, "u_radius"),
+                radius_top: gl.get_uniform_location(glass_program, "u_radius_top"),
                 corner_exp: gl.get_uniform_location(glass_program, "u_corner_exp"),
                 saturation: gl.get_uniform_location(glass_program, "u_saturation"),
                 luminance: gl.get_uniform_location(glass_program, "u_luminance"),

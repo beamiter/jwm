@@ -252,6 +252,26 @@ fn render_quad(
     h: i32,
     uniforms: impl FnOnce(&glow::Context),
 ) -> [u8; 4] {
+    let frame = render_quad_frame(gl, prog, input, w, h, uniforms);
+    let centre = ((h / 2) * w + w / 2) as usize * 4;
+    [
+        frame[centre],
+        frame[centre + 1],
+        frame[centre + 2],
+        frame[centre + 3],
+    ]
+}
+
+/// As [`render_quad`], but returns every pixel in OpenGL's bottom-left row
+/// order for tests that need to probe a shape rather than a colour.
+fn render_quad_frame(
+    gl: &glow::Context,
+    prog: glow::Program,
+    input: [u8; 4],
+    w: i32,
+    h: i32,
+    uniforms: impl FnOnce(&glow::Context),
+) -> Vec<u8> {
     unsafe {
         let input_pixels: Vec<u8> = input.iter().copied().cycle().take(4 * 4).collect();
         let input_tex = gl.create_texture().unwrap();
@@ -339,7 +359,16 @@ fn render_quad(
         gl.clear(glow::COLOR_BUFFER_BIT);
         gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         gl.finish();
-        let px = read_center(gl, w, h);
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        gl.read_pixels(
+            0,
+            0,
+            w,
+            h,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut frame)),
+        );
 
         gl.bind_vertex_array(None);
         gl.delete_buffer(vbo);
@@ -347,7 +376,7 @@ fn render_quad(
         gl.delete_framebuffer(fbo);
         gl.delete_texture(out_tex);
         gl.delete_texture(input_tex);
-        px
+        frame
     }
 }
 
@@ -1998,6 +2027,7 @@ fn main_window_shader_renders_opacity_and_dim() {
         gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &proj);
         gl.uniform_1_i32(u("u_texture").as_ref(), 0);
         gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+        gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
         gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
         gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
         gl.uniform_1_f32(u("u_ripple_progress").as_ref(), -1.0);
@@ -2160,6 +2190,7 @@ fn main_window_shader_color_management_identity_is_passthrough() {
         gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &proj);
         gl.uniform_1_i32(u("u_texture").as_ref(), 0);
         gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+        gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
         gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
         gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
         gl.uniform_1_f32(u("u_ripple_progress").as_ref(), -1.0);
@@ -2335,6 +2366,7 @@ fn assert_shadow_gaussian_falloff(api: GlApi, what: &str, vs: &'static str, fs: 
             gl.uniform_4_f32(u("u_shadow_color").as_ref(), 0.0, 0.0, 0.0, 0.8);
             gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
             gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
             gl.uniform_1_f32(u("u_spread").as_ref(), SPREAD);
         })
     };
@@ -2412,6 +2444,7 @@ fn assert_gradient_border_interpolates(api: GlApi, what: &str, vs: &'static str,
             gl.uniform_1_f32(u("u_gradient_angle").as_ref(), angle_deg.to_radians());
             gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
             gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
             gl.uniform_1_f32(u("u_border_width").as_ref(), bw);
             // Wayland variant only; ignored (None location) on the X11 one.
             gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
@@ -2528,6 +2561,7 @@ fn assert_glass_surface_frosts_its_backdrop(
             );
             gl.uniform_2_f32(u("u_size").as_ref(), SIZE, SIZE);
             gl.uniform_1_f32(u("u_radius").as_ref(), g.radius);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), g.radius);
             gl.uniform_1_f32(u("u_corner_exp").as_ref(), g.corner_exp);
             gl.uniform_1_f32(u("u_saturation").as_ref(), 1.0);
             gl.uniform_1_f32(u("u_luminance").as_ref(), 1.0);
@@ -2722,6 +2756,7 @@ fn assert_window_shader_desaturates(api: GlApi, what: &str, vs: &'static str, fs
             gl.uniform_1_i32(u("u_texture").as_ref(), 0);
             gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
             gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
             gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
             gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
             gl.uniform_1_f32(u("u_desat").as_ref(), desat);
@@ -2896,6 +2931,7 @@ fn assert_wobbly_mesh_follows_grid_offsets(
             gl.uniform_1_i32(u("u_texture").as_ref(), 0);
             gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
             gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
             gl.uniform_2_f32(u("u_size").as_ref(), RECT[2], RECT[3]);
             gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
             gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
@@ -2959,5 +2995,105 @@ fn x11_wobbly_mesh_follows_grid_offsets() {
         "x11_wobbly_mesh_follows_grid_offsets",
         s::WOBBLY_VERTEX_SHADER,
         s::FRAGMENT_SHADER,
+    );
+}
+
+/// A docked panel's top corners must be square and its bottom corners round.
+///
+/// This is the whole shape of the Dynamic-Island effect: the panel merges with
+/// the bar above it because the two meet along a straight edge, and reads as a
+/// separate object below because it curves away. A single-radius mask cannot
+/// express that, so the SDF picks its radius per half — and the halves have to
+/// meet without a seam, which is what the mid-edge probes check.
+fn assert_island_corners_are_asymmetric(
+    api: GlApi,
+    what: &str,
+    vs: &'static str,
+    fs: &'static str,
+) {
+    const W: i32 = 64;
+    const H: i32 = 64;
+    const RADIUS: f32 = 20.0;
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping {what}");
+        return;
+    };
+    let gl = &h.gl;
+    let prog = link(gl, vs, fs).unwrap_or_else(|log| panic!("{what}: border must link:\n{log}"));
+
+    let frame = render_quad_frame(gl, prog, [255, 255, 255, 255], W, H, |gl| unsafe {
+        let u = |n: &str| gl.get_uniform_location(prog, n);
+        gl.uniform_matrix_4_f32_slice(
+            u("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+        gl.uniform_2_f32(u("u_size").as_ref(), W as f32, H as f32);
+        gl.uniform_4_f32(u("u_border_color").as_ref(), 1.0, 1.0, 1.0, 1.0);
+        // A border wider than the rect fills it, which is how every JWM panel
+        // is drawn through this program.
+        gl.uniform_1_f32(u("u_border_width").as_ref(), W as f32);
+        gl.uniform_1_f32(u("u_radius").as_ref(), RADIUS);
+        gl.uniform_1_f32(u("u_radius_top").as_ref(), 0.0);
+        gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+    });
+
+    // The shader's own space is what the split is expressed in: `p.y < 0` — the
+    // half nearer y = 0 — takes the top radius. `ortho` here maps y = 0 to NDC
+    // -1 and read_pixels starts at NDC -1, so a readback row *is* a shader row.
+    // (Production projects top-left-origin instead, which is why that half is
+    // the screen's top there.)
+    let covered =
+        |x: i32, shader_row: i32| -> bool { frame[((shader_row * W + x) * 4) as usize] > 128 };
+
+    // Two pixels into the top-left corner: square, so it is filled.
+    assert!(covered(2, 2), "{what}: top-left corner was rounded off");
+    assert!(
+        covered(W - 3, 2),
+        "{what}: top-right corner was rounded off"
+    );
+    // The same inset at the bottom sits outside a 20 px radius: cut away.
+    assert!(
+        !covered(2, H - 3),
+        "{what}: bottom-left corner stayed square"
+    );
+    assert!(
+        !covered(W - 3, H - 3),
+        "{what}: bottom-right corner stayed square"
+    );
+
+    // The straight edges must not step where the two radii meet. Inside the
+    // rect the radius cancels out of the SDF, so a seam here would mean the
+    // split was done wrong.
+    for row in [H / 2 - 1, H / 2, H / 2 + 1] {
+        assert!(covered(1, row), "{what}: left edge broke at row {row}");
+        assert!(covered(W - 2, row), "{what}: right edge broke at row {row}");
+    }
+
+    unsafe { gl.delete_program(prog) };
+}
+
+#[test]
+fn wayland_island_corners_are_asymmetric() {
+    use super::shaders as s;
+    assert_island_corners_are_asymmetric(
+        GlApi::Gles3,
+        "wayland_island_corners_are_asymmetric",
+        s::VERTEX_SHADER,
+        s::BORDER_FRAGMENT_SHADER,
+    );
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_island_corners_are_asymmetric() {
+    use crate::backend::x11::compositor::shaders as s;
+    assert_island_corners_are_asymmetric(
+        GlApi::GlCore33,
+        "x11_island_corners_are_asymmetric",
+        s::VERTEX_SHADER,
+        s::BORDER_FRAGMENT_SHADER,
     );
 }

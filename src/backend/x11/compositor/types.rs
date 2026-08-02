@@ -405,6 +405,7 @@ pub(super) struct BorderUniforms {
     pub(super) border_color: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
     pub(super) radius: Option<glow::UniformLocation>,
+    pub(super) radius_top: Option<glow::UniformLocation>,
     pub(super) border_width: Option<glow::UniformLocation>,
 }
 
@@ -453,6 +454,7 @@ pub(super) struct GlassUniforms {
     pub(super) tint: Option<glow::UniformLocation>,
     pub(super) size: Option<glow::UniformLocation>,
     pub(super) radius: Option<glow::UniformLocation>,
+    pub(super) radius_top: Option<glow::UniformLocation>,
     pub(super) corner_exp: Option<glow::UniformLocation>,
     pub(super) saturation: Option<glow::UniformLocation>,
     pub(super) luminance: Option<glow::UniformLocation>,

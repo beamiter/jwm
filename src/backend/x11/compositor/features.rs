@@ -534,6 +534,9 @@ impl<C: CompositorConnection> Compositor<C> {
                                     .get_uniform_location(new_program, "u_border_color"),
                                 size: self.gl.get_uniform_location(new_program, "u_size"),
                                 radius: self.gl.get_uniform_location(new_program, "u_radius"),
+                                radius_top: self
+                                    .gl
+                                    .get_uniform_location(new_program, "u_radius_top"),
                                 border_width: self
                                     .gl
                                     .get_uniform_location(new_program, "u_border_width"),

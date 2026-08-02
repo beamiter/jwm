@@ -6,6 +6,7 @@
 //! compositors cannot drift.
 
 use crate::backend::api::OsdKind;
+use crate::backend::compositor_common::dynamic_island::IslandMotion;
 use std::time::{Duration, Instant};
 
 /// Time the card stays fully visible after the most recent event.
@@ -15,6 +16,9 @@ const OSD_FADE_OUT: f32 = 0.25;
 /// Fade-in length when the card first appears.
 const OSD_FADE_IN: f32 = 0.12;
 
+/// Height of the docked card. Shared so the toast stack can reserve room for
+/// an OSD without waiting for its spring to arrive at a height.
+pub(crate) const OSD_CARD_HEIGHT: f32 = 64.0;
 /// Card width for the slider kinds: a fixed geometry so the bar does not
 /// jump as digits change.
 const SLIDER_CARD_WIDTH: f32 = 360.0;
@@ -116,6 +120,10 @@ fn sanitize_label(label: &str) -> String {
 #[derive(Debug, Default)]
 pub(crate) struct OsdSlot {
     active: Option<ActiveOsd>,
+    /// Open/morph spring for the docked card. Living here rather than in each
+    /// compositor is what keeps a card that changes kind mid-flight — volume
+    /// replaced by a wider media card — morphing rather than restarting.
+    motion: IslandMotion,
 }
 
 impl OsdSlot {
@@ -140,6 +148,9 @@ impl OsdSlot {
                 osd.refreshed = now;
             }
             _ => {
+                // A card that fully expired earlier springs open again rather
+                // than resuming the geometry it died at.
+                self.motion.close();
                 self.active = Some(ActiveOsd {
                     kind,
                     percent,
@@ -156,10 +167,16 @@ impl OsdSlot {
     pub(crate) fn prune(&mut self, now: Instant) -> bool {
         if self.active.as_ref().is_some_and(|osd| osd.expired(now)) {
             self.active = None;
+            self.motion.close();
             true
         } else {
             false
         }
+    }
+
+    /// The card's open/morph spring, for the renderer to advance.
+    pub(crate) fn motion_mut(&mut self) -> &mut IslandMotion {
+        &mut self.motion
     }
 
     pub(crate) fn get(&self) -> Option<&ActiveOsd> {

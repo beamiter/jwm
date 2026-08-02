@@ -154,8 +154,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         1.0,
                         opacity,
                     );
-                    self.gl
-                        .uniform_1_f32(self.border_uniforms.radius.as_ref(), self.corner_radius);
+                    self.set_border_radii(self.corner_radius, self.corner_radius);
                     self.gl.uniform_2_f32(
                         self.border_uniforms.size.as_ref(),
                         entry.current_w,
@@ -316,8 +315,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.border_uniforms.border_width.as_ref(), fill_size);
             self.gl
                 .uniform_4_f32(self.border_uniforms.border_color.as_ref(), r, g, b, alpha);
-            self.gl
-                .uniform_1_f32(self.border_uniforms.radius.as_ref(), self.corner_radius);
+            self.set_border_radii(self.corner_radius, self.corner_radius);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), sp.w, sp.h);
             self.gl
@@ -370,8 +368,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 0.12,
                 0.95,
             );
-            self.gl
-                .uniform_1_f32(self.border_uniforms.radius.as_ref(), 2.0);
+            self.set_border_radii(2.0, 2.0);
             self.gl
                 .uniform_2_f32(self.border_uniforms.size.as_ref(), width, height);
             self.gl
@@ -590,8 +587,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         color[2],
                         color[3],
                     );
-                    self.gl
-                        .uniform_1_f32(self.border_uniforms.radius.as_ref(), 0.0);
+                    self.set_border_radii(0.0, 0.0);
                     self.gl
                         .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
                     self.gl

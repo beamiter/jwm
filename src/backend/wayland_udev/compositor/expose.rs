@@ -157,6 +157,7 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.border_uniforms.border_width, 3.0);
                     gl.Uniform4f(self.border_uniforms.border_color, 0.4, 0.6, 1.0, opacity);
                     gl.Uniform1f(self.border_uniforms.radius, 6.0);
+                    gl.Uniform1f(self.border_uniforms.radius_top, 6.0);
                     gl.Uniform2f(self.border_uniforms.size, w, h);
                     gl.Uniform4f(self.border_uniforms.rect, x, y, w, h);
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -208,6 +209,7 @@ impl WaylandCompositor {
             );
             gl.Uniform2f(self.border_uniforms.size, w, h);
             gl.Uniform1f(self.border_uniforms.radius, 8.0);
+            gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
             // Use a very large border_width to fill the entire rect
             gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -250,6 +252,7 @@ impl WaylandCompositor {
             );
             gl.Uniform4f(self.border_uniforms.border_color, 1.0, 0.2, 0.12, 0.95);
             gl.Uniform1f(self.border_uniforms.radius, 2.0);
+            gl.Uniform1f(self.border_uniforms.radius_top, 2.0);
             gl.Uniform2f(self.border_uniforms.size, width, height);
             gl.Uniform4f(self.border_uniforms.rect, x, y, width, height);
             gl.Uniform1f(self.border_uniforms.border_width, 3.0);
@@ -501,6 +504,7 @@ impl WaylandCompositor {
                     );
                     gl.Uniform2f(self.border_uniforms.size, w, h);
                     gl.Uniform1f(self.border_uniforms.radius, 0.0);
+                    gl.Uniform1f(self.border_uniforms.radius_top, 0.0);
                     // The border shader fills solid once the width covers the
                     // whole rect, which is what makes a cell out of a ring.
                     gl.Uniform1f(self.border_uniforms.border_width, w.max(h));

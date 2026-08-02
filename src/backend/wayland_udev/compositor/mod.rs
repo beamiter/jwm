@@ -246,6 +246,7 @@ pub(crate) struct BorderUniforms {
     pub border_color: i32,
     pub size: i32,
     pub radius: i32,
+    pub radius_top: i32,
     pub border_width: i32,
     pub scene_linear: i32,
 }
@@ -272,6 +273,7 @@ pub(crate) struct GlassUniforms {
     pub tint: i32,
     pub size: i32,
     pub radius: i32,
+    pub radius_top: i32,
     pub corner_exp: i32,
     pub saturation: i32,
     pub luminance: i32,
@@ -1301,6 +1303,7 @@ impl WaylandCompositor {
                 border_color: get_uniform_loc(gl, border_program, "u_border_color"),
                 size: get_uniform_loc(gl, border_program, "u_size"),
                 radius: get_uniform_loc(gl, border_program, "u_radius"),
+                radius_top: get_uniform_loc(gl, border_program, "u_radius_top"),
                 border_width: get_uniform_loc(gl, border_program, "u_border_width"),
                 scene_linear: get_uniform_loc(gl, border_program, "u_scene_linear"),
             };
@@ -1325,6 +1328,7 @@ impl WaylandCompositor {
                 tint: get_uniform_loc(gl, glass_program, "u_tint"),
                 size: get_uniform_loc(gl, glass_program, "u_size"),
                 radius: get_uniform_loc(gl, glass_program, "u_radius"),
+                radius_top: get_uniform_loc(gl, glass_program, "u_radius_top"),
                 corner_exp: get_uniform_loc(gl, glass_program, "u_corner_exp"),
                 saturation: get_uniform_loc(gl, glass_program, "u_saturation"),
                 luminance: get_uniform_loc(gl, glass_program, "u_luminance"),

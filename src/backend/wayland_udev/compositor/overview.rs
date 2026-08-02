@@ -501,10 +501,9 @@ impl WaylandCompositor {
                 color[3],
             );
             gl.Uniform2f(self.border_uniforms.size, w, h);
-            gl.Uniform1f(
-                self.border_uniforms.radius,
-                radius.min(w * 0.5).min(h * 0.5),
-            );
+            let radius = radius.min(w * 0.5).min(h * 0.5);
+            gl.Uniform1f(self.border_uniforms.radius, radius);
+            gl.Uniform1f(self.border_uniforms.radius_top, radius);
             gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
         }
@@ -786,6 +785,7 @@ impl WaylandCompositor {
                 );
                 gl.Uniform2f(self.border_uniforms.size, rect_w, rect_h);
                 gl.Uniform1f(self.border_uniforms.radius, 8.0);
+                gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
                 gl.Uniform1f(self.border_uniforms.border_width, bw);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);

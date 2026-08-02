@@ -6,6 +6,7 @@
 //! the two backends cannot drift.
 
 use crate::backend::api::ToastNotification;
+use crate::backend::compositor_common::dynamic_island::IslandMotion;
 use std::time::{Duration, Instant};
 
 /// Visible cards are capped; older toasts are evicted first.
@@ -29,6 +30,9 @@ pub(crate) struct ActiveToast {
     pub(crate) id: u64,
     pub(crate) created: Instant,
     pub(crate) timeout: Duration,
+    /// Open spring for the docked card, so each notification drops out of the
+    /// bar on its own rather than the whole stack sliding as one.
+    motion: IslandMotion,
 }
 
 impl ActiveToast {
@@ -98,6 +102,7 @@ impl ToastStack {
             id,
             created: now,
             timeout,
+            motion: IslandMotion::default(),
         });
 
         let mut removed = self.prune(now);
@@ -127,6 +132,15 @@ impl ToastStack {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &ActiveToast> {
         self.toasts.iter()
+    }
+
+    /// One card's open spring, for the renderer to advance once its measured
+    /// size is known.
+    pub(crate) fn motion_for(&mut self, id: u64) -> Option<&mut IslandMotion> {
+        self.toasts
+            .iter_mut()
+            .find(|toast| toast.id == id)
+            .map(|toast| &mut toast.motion)
     }
 }
 

@@ -2,6 +2,7 @@
 
 pub mod capture;
 pub(crate) mod debug_hud;
+pub(crate) mod dynamic_island;
 pub mod effects;
 pub mod event_coalescer;
 pub mod expose;
