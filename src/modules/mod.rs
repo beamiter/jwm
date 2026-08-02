@@ -8,6 +8,7 @@ pub mod layout;
 pub mod media;
 pub mod memory;
 pub mod network;
+pub mod shell;
 pub mod workspaces;
 
 use crate::state::AppState;
@@ -57,7 +58,7 @@ impl ModuleRegistry {
         // Default module layout
         let left_names = ["workspaces", "layout"];
         let center_names: [&str; 0] = [];
-        let right_names = ["cpu", "memory", "battery", "audio", "clock"];
+        let right_names = ["shell", "cpu", "memory", "battery", "audio", "clock"];
 
         let left: Vec<Box<dyn BarModule>> = left_names
             .iter()
@@ -87,6 +88,7 @@ fn create_module(name: &str) -> Option<Box<dyn BarModule>> {
     match name {
         "workspaces" => Some(Box::new(workspaces::WorkspacesModule::new())),
         "layout" => Some(Box::new(layout::LayoutModule::new())),
+        "shell" => Some(Box::new(shell::ShellModule::new())),
         "clock" => Some(Box::new(clock::ClockModule::new())),
         "cpu" => Some(Box::new(cpu::CpuModule::new())),
         "memory" => Some(Box::new(memory::MemoryModule::new())),
