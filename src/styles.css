@@ -267,3 +267,20 @@ window.theme-dark .metric-label.level-crit { background-color: #7a1d24; color: #
   border-radius: 8px;
   font-size: 14px;
 }
+
+/* Entry point into JWM's own shell surface. Insensitive styling matters here:
+   the shell lives in the window manager, so an unreachable one has to look
+   unreachable rather than swallow the click. */
+.shell-button {
+  background: rgba(124, 108, 255, 0.9);
+  border: 1px solid #7c6cff;
+  color: #ffffff;
+}
+.shell-button:hover {
+  background: rgba(150, 136, 255, 0.95);
+}
+.shell-button:disabled {
+  background: rgba(85, 91, 102, 0.7);
+  border-color: #555b66;
+  color: rgba(255, 255, 255, 0.55);
+}

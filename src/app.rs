@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
-    RuntimeUpdate, TagId, TransportRecoveryConfig, UserAction,
+    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -31,6 +31,7 @@ pub enum AppInput {
     ToggleMute,
     VolumeStep(i32),
     Screenshot,
+    OpenShell,
     PollTransport,
     Tick,
 }
@@ -92,6 +93,7 @@ impl SimpleComponent for AppModel {
                 StatusStripOutput::ToggleMute => AppInput::ToggleMute,
                 StatusStripOutput::VolumeStep(step) => AppInput::VolumeStep(step),
                 StatusStripOutput::Screenshot => AppInput::Screenshot,
+                StatusStripOutput::OpenShell => AppInput::OpenShell,
             });
 
         let top_hbox = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -204,6 +206,14 @@ impl SimpleComponent for AppModel {
             AppInput::Screenshot => {
                 info!("Taking screenshot");
                 self.dispatch(UserAction::Screenshot);
+            }
+            AppInput::OpenShell => {
+                if self.snapshot.wm_available {
+                    info!("Opening the JWM shell");
+                    self.dispatch(UserAction::OpenShellHub(ShellRoute::Hub));
+                } else {
+                    warn!("Ignoring shell input until the first WM snapshot arrives");
+                }
             }
             AppInput::PollTransport => {
                 let update = self.runtime.poll_transport();
@@ -347,6 +357,7 @@ impl AppModel {
                     .unwrap_or_default(),
                 theme_dark: self.snapshot.theme == xbar_core::ThemeMode::Dark,
                 monitor_num,
+                wm_available: self.snapshot.wm_available,
             }));
     }
 }

@@ -16,6 +16,9 @@ pub struct StatusStripState {
     pub memory_usage: f64,
     pub theme_dark: bool,
     pub monitor_num: u8,
+    /// The shell lives in the window manager, so its entry has to gray out
+    /// when the projection is gone rather than silently drop clicks.
+    pub wm_available: bool,
 }
 
 impl Default for StatusStripState {
@@ -28,6 +31,7 @@ impl Default for StatusStripState {
             memory_usage: 0.0,
             theme_dark: true,
             monitor_num: 0,
+            wm_available: false,
         }
     }
 }
@@ -44,6 +48,8 @@ pub enum StatusStripOutput {
     ToggleMute,
     VolumeStep(i32),
     Screenshot,
+    /// Ask the window manager to open its own shell surface.
+    OpenShell,
 }
 
 pub struct StatusStripModel {
@@ -92,6 +98,22 @@ impl SimpleComponent for StatusStripModel {
                 set_label: &volume_label(model.state.current_volume, model.state.current_muted),
                 connect_clicked[sender] => move |_| {
                     let _ = sender.output(StatusStripOutput::ToggleMute);
+                },
+            },
+            // Entry point into JWM's own shell surface. It opens the hub,
+            // which is itself the page that routes to applications,
+            // notifications, clipboard, calendar and wallpaper.
+            #[name(shell_button)]
+            gtk::Button {
+                set_width_request: 40,
+                set_height_request: 28,
+                set_label: " \u{25c8} ",
+                set_tooltip_text: Some("Open the JWM shell"),
+                add_css_class: "shell-button",
+                #[watch]
+                set_sensitive: model.state.wm_available,
+                connect_clicked[sender] => move |_| {
+                    let _ = sender.output(StatusStripOutput::OpenShell);
                 },
             },
             #[name(theme_button)]

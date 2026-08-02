@@ -6,5 +6,5 @@ edition = "2024"
 [dependencies]
 log = "0.4.33"
 relm4 = { version = "0.11.0", features = ["libadwaita"] }
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.7.1" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.0" }
