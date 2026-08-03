@@ -469,7 +469,7 @@ impl Jwm {
         self.set_initial_allowed_actions(backend, client_key);
         self.read_sync_counter(backend, client_key);
 
-        self.attach_back(client_key);
+        self.attach_new_client(client_key);
         self.attachstack(client_key);
 
         self.register_client_events(backend, client_key)?;

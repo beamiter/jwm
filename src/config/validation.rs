@@ -886,6 +886,12 @@ impl Config {
         );
         validate_choice_ignore_ascii_case(
             &mut diagnostics,
+            "behavior.new_client_position",
+            &behavior.new_client_position,
+            &["master", "tail", "after_focused"],
+        );
+        validate_choice_ignore_ascii_case(
+            &mut diagnostics,
             "behavior.wallpaper_mode",
             &behavior.wallpaper_mode,
             &["fill", "fit", "stretch", "center"],

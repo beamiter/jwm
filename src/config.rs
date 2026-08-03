@@ -195,9 +195,39 @@ pub struct AppearanceConfig {
     pub ui_theme: String,
 }
 
+/// Where a freshly managed window is inserted into its monitor's client list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewClientPosition {
+    /// Head of the list: the new window becomes master (dwm's `attach`).
+    Master,
+    /// End of the list: the new window trails every existing one.
+    Tail,
+    /// Directly behind the focused window.
+    AfterFocused,
+}
+
+impl NewClientPosition {
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tail" => NewClientPosition::Tail,
+            "after_focused" => NewClientPosition::AfterFocused,
+            _ => NewClientPosition::Master,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     pub focus_follows_new_window: bool,
+    /// Where a newly-managed window lands in its monitor's client list, which
+    /// is what decides its slot in tiling layouts:
+    /// - "master" (default): head of the list, i.e. the master area (dwm-like);
+    /// - "tail": end of the list, behind every existing window;
+    /// - "after_focused": right behind the currently focused window, falling
+    ///   back to "master" when nothing comparable is focused.
+    /// Floating windows keep their own group at the end of the list either way.
+    #[serde(default = "default_new_client_position")]
+    pub new_client_position: String,
     pub resize_hints: bool,
     pub lock_fullscreen: bool,
     #[serde(default)]
@@ -1024,6 +1054,9 @@ fn default_compositor_api() -> String {
 fn default_vsync_method() -> String {
     "global".to_string()
 }
+fn default_new_client_position() -> String {
+    "master".to_string()
+}
 fn default_audio_buffer_latency() -> u32 {
     50
 }
@@ -1412,6 +1445,7 @@ impl Default for Config {
                 },
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
+                    new_client_position: default_new_client_position(),
                     resize_hints: true,
                     lock_fullscreen: true,
                     compositor: true,
@@ -2373,6 +2407,10 @@ impl Config {
         &self.inner.behavior
     }
 
+    pub fn new_client_position(&self) -> NewClientPosition {
+        NewClientPosition::from_str(&self.inner.behavior.new_client_position)
+    }
+
     pub fn compositor_enabled(&self) -> bool {
         self.inner.behavior.compositor
     }
@@ -2970,6 +3008,10 @@ impl Config {
             else if section == "behavior" && trimmed.starts_with("wallpaper_mode") {
                 result.push_str("# available: fill, fit, stretch, center\n");
             }
+            // new_client_position (in [behavior])
+            else if section == "behavior" && trimmed.starts_with("new_client_position") {
+                result.push_str("# available: master, tail, after_focused\n");
+            }
             // colorblind_mode (in [behavior])
             else if section == "behavior" && trimmed.starts_with("colorblind_mode") {
                 result.push_str(
@@ -3161,6 +3203,16 @@ impl Config {
                     return Err(format!("behavior.blur_strength={v} out of [0, 5]"));
                 }
                 self.inner.behavior.blur_strength = v;
+            }
+            "behavior.new_client_position" => {
+                let position = as_string()?;
+                let normalized = position.trim().to_ascii_lowercase();
+                if !["master", "tail", "after_focused"].contains(&normalized.as_str()) {
+                    return Err(format!(
+                        "behavior.new_client_position={position:?} (expected master, tail, or after_focused)"
+                    ));
+                }
+                self.inner.behavior.new_client_position = normalized;
             }
             "behavior.wallpaper" => self.inner.behavior.wallpaper = as_string()?,
             "behavior.wallpaper_mode" => {
@@ -3388,8 +3440,8 @@ pub fn reload_global() -> Result<(), ConfigError> {
 mod tests {
     use super::{
         ArgumentConfig, CONFIG_WRITE_COUNTER, Config, ConfigDiagnosticLevel, ConfigError,
-        GestureSwipeConfig, KeyConfig, Mods, Ordering, STATUS_BAR_NAME, TomlConfig,
-        WallpaperMonitorConfig, WallpaperTagConfig, key_function_is_repeatable,
+        GestureSwipeConfig, KeyConfig, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME,
+        TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig, key_function_is_repeatable,
     };
 
     fn temporary_config_path(label: &str) -> std::path::PathBuf {
@@ -4054,6 +4106,49 @@ mod tests {
             .join("\n");
         let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
         assert_eq!(parsed.appearance.ui_theme, "material");
+    }
+
+    #[test]
+    fn new_clients_become_master_by_default() {
+        let cfg = Config::default();
+        assert_eq!(cfg.new_client_position(), NewClientPosition::Master);
+
+        // Configs written before the key existed must still load as master.
+        let serialized = toml::to_string(&cfg.inner).unwrap();
+        let stripped = serialized
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("new_client_position"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
+        assert_eq!(parsed.behavior.new_client_position, "master");
+    }
+
+    #[test]
+    fn new_client_position_parses_its_choices() {
+        assert_eq!(NewClientPosition::from_str("tail"), NewClientPosition::Tail);
+        assert_eq!(NewClientPosition::from_str("Tail"), NewClientPosition::Tail);
+        assert_eq!(
+            NewClientPosition::from_str(" after_focused "),
+            NewClientPosition::AfterFocused
+        );
+        // Anything unknown falls back to the default instead of failing.
+        assert_eq!(
+            NewClientPosition::from_str("nonsense"),
+            NewClientPosition::Master
+        );
+    }
+
+    #[test]
+    fn new_client_position_is_hot_tunable_via_set_value() {
+        let mut cfg = Config::default();
+        cfg.set_value("behavior.new_client_position", &serde_json::json!("Tail"))
+            .unwrap();
+        assert_eq!(cfg.new_client_position(), NewClientPosition::Tail);
+        assert!(
+            cfg.set_value("behavior.new_client_position", &serde_json::json!("middle"))
+                .is_err()
+        );
     }
 
     #[test]
