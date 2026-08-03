@@ -1239,7 +1239,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// back to back share a single capture: re-blurring the whole screen per
     /// card would cost more than the parallax it buys, and the only thing the
     /// later cards miss is the earlier cards themselves.
-    fn ensure_glass_backdrop(&mut self, palette: &UiPalette) {
+    pub(super) fn ensure_glass_backdrop(&mut self, palette: &UiPalette) {
         if self.glass_backdrop.is_none() {
             self.capture_glass_backdrop(palette);
         }
@@ -1340,7 +1340,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// As [`Self::ui_fill_surface`], but the top two corners take their own
     /// radius. A docked panel passes zero so it merges with the bar above it.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn ui_fill_island(
+    pub(super) unsafe fn ui_fill_island(
         &self,
         proj: &[f32; 16],
         palette: &UiPalette,
@@ -1425,7 +1425,15 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Filled rounded rectangle through the border program (a border wider
     /// than the rect fills it). The program and projection must be bound.
-    unsafe fn sysui_fill_rounded(&self, x: f32, y: f32, w: f32, h: f32, r: f32, color: [f32; 4]) {
+    pub(super) unsafe fn sysui_fill_rounded(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        r: f32,
+        color: [f32; 4],
+    ) {
         unsafe { self.sysui_fill_island(x, y, w, h, r, r, color) }
     }
 

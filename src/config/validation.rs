@@ -6,6 +6,7 @@
 //! reload one source of truth.
 
 use super::{ArgumentConfig, Config, KeyConfig};
+use crate::core::layout::LayoutEnum;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt;
@@ -380,6 +381,48 @@ impl Config {
             );
         }
         require_f32_range(&mut diagnostics, "layout.m_fact", layout.m_fact, 0.05, 0.95);
+
+        // Per-tag layouts are usually written by JWM, but the file is a file:
+        // a hand-written entry that names a layout that does not exist, or a
+        // tag that does not exist, would otherwise be dropped in silence.
+        for (index, entry) in layout.tags.iter().enumerate() {
+            let path = format!("layout.tags[{index}]");
+            if entry.tag > layout.tags_length {
+                diagnostics.warning(
+                    format!("{path}.tag"),
+                    format!(
+                        "tag {} is outside the {} configured tags",
+                        entry.tag, layout.tags_length
+                    ),
+                    Some("tags are numbered from 1; 0 is the all-tags view".into()),
+                );
+            }
+            for (field, name) in [("layout", &entry.layout), ("alt", &entry.alt)] {
+                if !name.is_empty() && LayoutEnum::from_name(name).is_none() {
+                    diagnostics.warning(
+                        format!("{path}.{field}"),
+                        format!("unknown layout {name:?}"),
+                        Some(format!(
+                            "available: {}",
+                            LayoutEnum::all()
+                                .iter()
+                                .map(|layout| layout.0)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                    );
+                }
+            }
+            if let Some(m_fact) = entry.m_fact {
+                require_f32_range(
+                    &mut diagnostics,
+                    &format!("{path}.m_fact"),
+                    m_fact,
+                    0.05,
+                    0.95,
+                );
+            }
+        }
         if self.inner.appearance.border_px > i32::MAX as u32 {
             diagnostics.error(
                 "appearance.border_px",
@@ -780,8 +823,6 @@ impl Config {
             ("behavior.attention_color", behavior.attention_color),
             ("behavior.pip_border_color", behavior.pip_border_color),
             ("behavior.snap_preview_color", behavior.snap_preview_color),
-            ("behavior.tab_bar_color", behavior.tab_bar_color),
-            ("behavior.tab_active_color", behavior.tab_active_color),
             (
                 "behavior.focus_highlight_color",
                 behavior.focus_highlight_color,

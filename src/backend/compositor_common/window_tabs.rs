@@ -6,6 +6,23 @@
 //! against it, and the two compositors draw it; all three derive every
 //! rectangle from this module, so a click lands on the cell it looks like it
 //! lands on and the reserved strip is exactly the strip that gets painted.
+//!
+//! There are two families of rectangle here, and the split is deliberate:
+//!
+//! * [`tab_rect`] is the *slot*, the share of the reserved strip that belongs
+//!   to one window. Slots tile the whole band edge to edge, which is what
+//!   [`tab_at`] hit-tests, so no pixel of a strip the layout paid for is dead.
+//! * [`track_rect`] and [`cell_rect`] are what actually gets *painted*: a
+//!   rounded track inset from the band, and inside it one rounded cell per
+//!   slot with a gap between neighbours — the segmented control the rest of
+//!   JWM's self-drawn UI (`ui_theme`) is styled like. Their tones come from
+//!   the active `UiTheme` palette rather than from any tab-specific color, so
+//!   the strip is frosted glass or a Material card exactly when every other
+//!   JWM surface is.
+//!
+//! Painting inside the slot instead of over it is what lets the cells be pills
+//! with air around them while a click anywhere in the band — the gaps and the
+//! inset margins included — still lands on the window it looks nearest to.
 
 /// A rectangle in screen pixels: `[x, y, w, h]`.
 pub type Rect = [f32; 4];
@@ -64,6 +81,115 @@ pub fn wants_bar(count: usize) -> bool {
 /// below a floor that still fits a couple of characters.
 pub const TITLE_PADDING: f32 = 12.0;
 pub const TITLE_MIN_WIDTH: f32 = 20.0;
+
+/// Margin between the reserved band and the painted track, sideways and
+/// vertically. The band is what the layout gave up; the track is what the eye
+/// sees, and leaving air around it is what makes it read as one control
+/// floating in the work area rather than a second status bar.
+pub const TRACK_INSET_X: f32 = 8.0;
+pub const TRACK_INSET_Y: f32 = 2.0;
+/// Margin between the track and a cell inside it.
+pub const CELL_INSET_X: f32 = 2.0;
+pub const CELL_INSET_Y: f32 = 2.0;
+/// Gap between two neighbouring cells.
+pub const CELL_GAP: f32 = 4.0;
+
+/// The margins the track keeps from the band it is painted in. A band too
+/// short or narrow for the constants keeps a proportional margin instead,
+/// rather than losing its track to an inverted rectangle.
+fn track_insets(bar: Rect) -> (f32, f32) {
+    let [_, _, w, h] = bar;
+    (TRACK_INSET_X.min(w * 0.25), TRACK_INSET_Y.min(h * 0.25))
+}
+
+/// The painted track: the reserved band minus its margins. `None` when the
+/// band is too small to hold one, in which case the compositors paint nothing
+/// and the strip is simply a bit of empty work area.
+#[must_use]
+pub fn track_rect(bar: Rect) -> Option<Rect> {
+    if !bar_is_drawable(bar) {
+        return None;
+    }
+    let [x, y, w, h] = bar;
+    let (inset_x, inset_y) = track_insets(bar);
+    let track = [
+        x + inset_x,
+        y + inset_y,
+        w - 2.0 * inset_x,
+        h - 2.0 * inset_y,
+    ];
+    bar_is_drawable(track).then_some(track)
+}
+
+/// The painted cell for `index`: its slot, less half a gap towards each
+/// neighbour and the track's own margin on the outside.
+///
+/// Anchoring on the slot rather than on a second partition of the track is
+/// what guarantees the nesting [`tab_at`] depends on — a cell painted a
+/// fraction of a pixel into its neighbour's slot would be a cell a click on it
+/// focuses the wrong window from.
+#[must_use]
+pub fn cell_rect(bar: Rect, count: usize, index: usize) -> Option<Rect> {
+    let [slot_x, _, slot_w, _] = tab_rect(bar, count, index)?;
+    let [_, track_y, _, track_h] = track_rect(bar)?;
+    let (inset_x, _) = track_insets(bar);
+
+    // Outer edges follow the track; inner edges share a gap with the
+    // neighbour they face.
+    let outer = inset_x + CELL_INSET_X;
+    let left = if index == 0 { outer } else { CELL_GAP * 0.5 };
+    let right = if index + 1 == count {
+        outer
+    } else {
+        CELL_GAP * 0.5
+    };
+    // A slot too narrow for both margins keeps half its width regardless.
+    let margins = left + right;
+    let scale = if margins > slot_w * 0.5 {
+        slot_w * 0.5 / margins
+    } else {
+        1.0
+    };
+    let (left, right) = (left * scale, right * scale);
+
+    let inset_y = CELL_INSET_Y.min(track_h * 0.25);
+    let cell = [
+        slot_x + left,
+        track_y + inset_y,
+        slot_w - left - right,
+        track_h - 2.0 * inset_y,
+    ];
+    bar_is_drawable(cell).then_some(cell)
+}
+
+/// Corner radius that turns a rectangle this tall into a pill.
+#[must_use]
+pub fn pill_radius(height: f32) -> f32 {
+    if height.is_finite() {
+        (height * 0.5).max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// Point size for a title in a cell this tall.
+///
+/// The strip's height is configurable, so the type has to follow it: a fixed
+/// system-UI size would overflow the 28px default outright. The fraction
+/// leaves room for the ascender, the descender and the two pixels the
+/// rasterizer pads with, so the texture is always shorter than the cell that
+/// centres it.
+#[must_use]
+pub fn title_font_size(cell_height: f32) -> f32 {
+    if cell_height.is_finite() {
+        (cell_height * 0.58).clamp(8.0, 22.0)
+    } else {
+        DEFAULT_TITLE_FONT_SIZE
+    }
+}
+
+/// Used when the cell height is not a finite number.
+pub const DEFAULT_TITLE_FONT_SIZE: f32 = 12.0;
 
 /// Pixel budget for the title in a cell this wide.
 #[must_use]
@@ -196,5 +322,97 @@ mod tests {
         assert!(!wants_bar(0));
         assert!(!wants_bar(1));
         assert!(wants_bar(2));
+    }
+
+    #[test]
+    fn the_painted_track_stays_inside_the_reserved_band() {
+        let [tx, ty, tw, th] = track_rect(BAR).expect("a 28px band has room for a track");
+        assert!(tx > BAR[0] && ty > BAR[1]);
+        assert!(tx + tw < BAR[0] + BAR[2]);
+        assert!(ty + th < BAR[1] + BAR[3]);
+        assert_eq!(track_rect([100.0, 40.0, 900.0, 0.0]), None);
+        assert_eq!(track_rect([f32::NAN, 40.0, 900.0, 28.0]), None);
+    }
+
+    /// The two families must not drift: a painted cell that poked out of its
+    /// slot would sit under the neighbour a click there focuses.
+    #[test]
+    fn every_painted_cell_sits_inside_the_slot_that_hit_tests_it() {
+        for count in 1..=9usize {
+            for index in 0..count {
+                let [sx, sy, sw, sh] = tab_rect(BAR, count, index).expect("slot in range");
+                let [cx, cy, cw, ch] = cell_rect(BAR, count, index).expect("cell in range");
+                assert!(cx >= sx && cx + cw <= sx + sw, "count={count} cell {index}");
+                assert!(cy >= sy && cy + ch <= sy + sh, "count={count} cell {index}");
+                assert!(cw > 0.0 && ch > 0.0);
+                // The cell's centre is what the title is drawn around, so it
+                // has to be the slot a click there resolves to.
+                assert_eq!(
+                    tab_at(BAR, count, cx + cw * 0.5, cy + ch * 0.5),
+                    Some(index)
+                );
+            }
+            assert_eq!(cell_rect(BAR, count, count), None);
+        }
+    }
+
+    #[test]
+    fn neighbouring_cells_never_touch() {
+        let count = 5;
+        for index in 1..count {
+            let [px, _, pw, _] = cell_rect(BAR, count, index - 1).expect("cell in range");
+            let [x, ..] = cell_rect(BAR, count, index).expect("cell in range");
+            assert!(x - (px + pw) > 0.0, "cells {} and {index} touch", index - 1);
+        }
+    }
+
+    /// A band narrow enough that the constants would invert it still yields a
+    /// drawable track and cells, or none at all — never a negative rectangle.
+    #[test]
+    fn a_cramped_band_degrades_instead_of_inverting() {
+        for bar in [
+            [0.0, 0.0, 12.0, 6.0],
+            [0.0, 0.0, 40.0, 3.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ] {
+            if let Some([_, _, w, h]) = track_rect(bar) {
+                assert!(w > 0.0 && h > 0.0, "track {bar:?}");
+            }
+            for index in 0..3 {
+                if let Some([_, _, w, h]) = cell_rect(bar, 3, index) {
+                    assert!(w > 0.0 && h > 0.0, "cell {index} of {bar:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pill_is_exactly_half_as_round_as_it_is_tall() {
+        assert_eq!(pill_radius(22.0), 11.0);
+        assert_eq!(pill_radius(0.0), 0.0);
+        assert_eq!(pill_radius(-4.0), 0.0);
+        assert_eq!(pill_radius(f32::NAN), 0.0);
+    }
+
+    /// Whatever the configured bar height, the title texture the rasterizer
+    /// produces has to be shorter than the cell that centres it, or it spills
+    /// over the windows below.
+    #[test]
+    fn titles_are_sized_to_fit_the_cell_they_are_centred_in() {
+        for configured in [8.0, 20.0, 28.0, 44.0, 96.0, 256.0] {
+            let bar = [0.0, 0.0, 800.0, bar_height(configured)];
+            let Some([_, _, _, cell_h]) = cell_rect(bar, 3, 1) else {
+                continue;
+            };
+            let size = title_font_size(cell_h);
+            // What `render_ui_text_to_rgba` produces: a line box of roughly
+            // 1.25x the pixel size, plus its two-pixel pad top and bottom.
+            let texture_h = size * 1.25 + 4.0;
+            assert!(
+                texture_h <= cell_h || size <= 8.0,
+                "a {configured}px bar leaves a {cell_h}px cell holding {texture_h}px of text"
+            );
+        }
+        assert_eq!(title_font_size(f32::NAN), DEFAULT_TITLE_FONT_SIZE);
     }
 }

@@ -158,6 +158,11 @@ pub struct Jwm {
     pub config_reload_last_success: Option<bool>,
     pub config_reload_last_error: Option<String>,
 
+    /// When a tag's layout last changed, while the write of it back to the
+    /// config file is still waiting out its debounce. See
+    /// [`crate::jwm::layout::persist`].
+    pub(crate) layout_persist_dirty: Option<std::time::Instant>,
+
     /// Override-redirect windows (menus, tooltips, launchers, etc.) that are
     /// currently mapped.  These are not managed by the WM but must be rendered
     /// by the compositor when COMPOSITE_REDIRECT_MANUAL is active.
@@ -602,6 +607,7 @@ impl Jwm {
             config_reload_last_unix_ms: None,
             config_reload_last_success: None,
             config_reload_last_error: None,
+            layout_persist_dirty: None,
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),

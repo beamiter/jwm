@@ -191,6 +191,123 @@ fn load_ui_font(description: &str) -> Option<FontArc> {
     font
 }
 
+/// Transparent margin the rasterizer leaves on every side, so an overhanging
+/// glyph edge is not clipped by the texture bounds.
+const TEXT_PAD: u32 = 2;
+
+/// Advance width of one resolved line, kerning included.
+///
+/// Shared by the rasterizer and by [`measure_ui_text_width`] so a caller that
+/// asks how wide a string will be gets the number the raster then produces.
+fn resolved_line_width(fonts: &[FontArc], line: &ResolvedLine, pixel_size: f32) -> f32 {
+    let mut width = 0.0;
+    let mut previous: Option<(usize, GlyphId)> = None;
+    for &(font_index, id) in &line.glyphs {
+        let scaled = fonts[font_index].as_scaled(pixel_size);
+        // Kerning is a property of one font's pairs; across a fallback
+        // boundary there is no pair to look up.
+        if let Some((prev_index, prev_id)) = previous
+            && prev_index == font_index
+        {
+            width += scaled.kern(prev_id, id);
+        }
+        width += scaled.h_advance(id);
+        previous = Some((font_index, id));
+    }
+    width
+}
+
+/// Width in pixels [`render_ui_text_to_rgba`] would return for `text`, without
+/// rasterizing it. Single line: callers that fit text to a box measure one
+/// candidate after another, and outlining every glyph of each would cost far
+/// more than the search.
+pub(crate) fn measure_ui_text_width(text: &str, font_description: &str, pixel_size: f32) -> u32 {
+    if text.is_empty() {
+        return 0;
+    }
+    let Some(font) = load_ui_font(font_description) else {
+        // Matches the bitmap fallback the rasterizer drops to.
+        return text.chars().count() as u32 * GLYPH_W * 2;
+    };
+    let mut fonts: Vec<FontArc> = Vec::with_capacity(2);
+    let mut sources: Vec<GlyphSource> = Vec::with_capacity(2);
+    let line = resolve_line(&mut fonts, &mut sources, &font, text);
+    (resolved_line_width(&fonts, &line, pixel_size).ceil() as u32).saturating_add(TEXT_PAD * 2)
+}
+
+/// The longest prefix of `text` that fits `max_width` pixels, with an ellipsis
+/// standing in for what was cut.
+///
+/// Truncating by character count would cut a proportional face in the wrong
+/// place — `WWWWW` and `iiiii` are not the same width — so the cut is found by
+/// measuring, on character boundaries so a multi-byte glyph is never split.
+/// Returns an empty string when not even the ellipsis fits.
+///
+/// The result is always one line: a window title carrying a newline would
+/// otherwise be measured as one line and rasterized as two, and the second one
+/// would hang below whatever box the caller sized from the measurement.
+pub(crate) fn fit_ui_text(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    max_width: u32,
+) -> String {
+    const ELLIPSIS: char = '…';
+
+    let collapsed: String = {
+        let mut out = String::with_capacity(text.len());
+        let mut in_space = false;
+        for ch in text.chars() {
+            if ch.is_whitespace() || ch.is_control() {
+                in_space = true;
+                continue;
+            }
+            if in_space && !out.is_empty() {
+                out.push(' ');
+            }
+            in_space = false;
+            out.push(ch);
+        }
+        out
+    };
+    let text = collapsed.as_str();
+    if text.is_empty() || max_width == 0 {
+        return String::new();
+    }
+    if measure_ui_text_width(text, font_description, pixel_size) <= max_width {
+        return text.to_owned();
+    }
+
+    let boundaries: Vec<usize> = text
+        .char_indices()
+        .map(|(index, _)| index)
+        .skip(1)
+        .chain(std::iter::once(text.len()))
+        .collect();
+
+    // Binary search the last prefix that still fits once the ellipsis is on
+    // it. `fits` is monotone in the prefix length, so this converges on the
+    // longest one in a handful of measurements.
+    let mut low = 0usize;
+    let mut high = boundaries.len();
+    let mut best = String::new();
+    while low < high {
+        let middle = (low + high).div_ceil(2);
+        if middle == 0 {
+            break;
+        }
+        let mut candidate = text[..boundaries[middle - 1]].trim_end().to_owned();
+        candidate.push(ELLIPSIS);
+        if measure_ui_text_width(&candidate, font_description, pixel_size) <= max_width {
+            best = candidate;
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    best
+}
+
 /// Render UTF-8 UI text with the configured TrueType/OpenType font. This path
 /// supports Nerd Font private-use glyphs and produces smooth alpha coverage.
 /// The embedded bitmap font remains the dependency-free fallback.
@@ -233,19 +350,13 @@ pub(crate) fn render_ui_text_to_rgba(
         _ => 0.0,
     };
 
-    let mut line_widths = Vec::with_capacity(lines.len());
-    for line in &resolved {
-        let mut width = 0.0;
-        let mut previous = None;
-        for &(font_index, id) in &line.glyphs {
-            width += kern(previous, font_index, id);
-            width += advance(font_index, id);
-            previous = Some((font_index, id));
-        }
-        line_widths.push(width.ceil() as u32);
-    }
-    let width = line_widths.into_iter().max().unwrap_or(0).saturating_add(4);
-    let height = (line_height * lines.len().max(1) as f32).ceil() as u32 + 4;
+    let width = resolved
+        .iter()
+        .map(|line| resolved_line_width(&fonts, line, pixel_size).ceil() as u32)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(TEXT_PAD * 2);
+    let height = (line_height * lines.len().max(1) as f32).ceil() as u32 + TEXT_PAD * 2;
     if width == 0 || height == 0 {
         return (Vec::new(), 0, 0);
     }
@@ -550,6 +661,46 @@ mod tests {
         let (px, w, h) = render_text_to_rgba("", 2, [255, 255, 255, 255]);
         assert!(px.is_empty());
         assert_eq!((w, h), (0, 0));
+    }
+
+    /// The font behind these is whatever the machine has, so the assertions
+    /// are about the contract rather than about pixel counts.
+    const FIT_FONT: &str = "monospace 11";
+
+    #[test]
+    fn text_that_fits_is_returned_whole() {
+        let text = "kitty";
+        let width = measure_ui_text_width(text, FIT_FONT, 12.0);
+        assert_eq!(fit_ui_text(text, FIT_FONT, 12.0, width), text);
+        assert_eq!(fit_ui_text(text, FIT_FONT, 12.0, width + 100), text);
+    }
+
+    #[test]
+    fn a_long_title_is_cut_to_the_budget_with_an_ellipsis() {
+        let text = "a very long window title that no tab cell could ever hold";
+        let full = measure_ui_text_width(text, FIT_FONT, 12.0);
+        let budget = full / 4;
+        let fitted = fit_ui_text(text, FIT_FONT, 12.0, budget);
+        assert!(fitted.len() < text.len());
+        assert!(fitted.ends_with('…'), "{fitted:?} should be elided");
+        assert!(measure_ui_text_width(&fitted, FIT_FONT, 12.0) <= budget);
+    }
+
+    #[test]
+    fn a_budget_too_small_for_anything_yields_nothing() {
+        assert_eq!(fit_ui_text("anything", FIT_FONT, 12.0, 0), "");
+        assert_eq!(fit_ui_text("", FIT_FONT, 12.0, 500), "");
+        assert_eq!(fit_ui_text("   ", FIT_FONT, 12.0, 500), "");
+    }
+
+    /// A title is drawn on one line and measured on one line, so the newline a
+    /// client is free to put in `WM_NAME` has to be gone before either.
+    #[test]
+    fn whitespace_is_collapsed_onto_a_single_line() {
+        assert_eq!(
+            fit_ui_text("  two\n\tlines  ", FIT_FONT, 12.0, 100_000),
+            "two lines"
+        );
     }
 
     #[test]

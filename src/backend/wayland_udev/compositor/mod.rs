@@ -950,8 +950,6 @@ pub(crate) struct WaylandCompositor {
 
     // --- Window tabs config ---
     window_tabs_enabled: bool,
-    tab_bar_color: [f32; 4],
-    tab_active_color: [f32; 4],
 
     // --- Border config ---
     border_enabled: bool,
@@ -1895,8 +1893,6 @@ impl WaylandCompositor {
 
                 // Window tabs
                 window_tabs_enabled: false,
-                tab_bar_color: [0.2, 0.2, 0.2, 0.9],
-                tab_active_color: [0.3, 0.5, 0.8, 1.0],
 
                 // Border config
                 border_enabled: true,

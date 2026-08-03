@@ -555,6 +555,16 @@ impl WMMonitor {
         new_cur_tag
     }
 
+    /// 把当前 tag 的 Pertag 状态重新加载到 monitor 上。
+    ///
+    /// 用于在不切换 tag 的情况下改写了 Pertag（例如启动时从配置恢复每个 tag
+    /// 的布局）之后，让 monitor 的 `layout`/`lt`/`sel_lt`/`lt_symbol` 与之
+    /// 一致；否则显示的仍是初始化时的默认布局。
+    pub fn reload_current_tag_context(&mut self) {
+        let cur_tag = self.pertag.as_ref().map(|p| p.cur_tag).unwrap_or(0);
+        self.apply_pertag_context(cur_tag);
+    }
+
     /// 应用 Pertag 上下文 (logic from: apply_pertag_settings/apply_pertag_settings_for_monitor)
     fn apply_pertag_context(&mut self, new_tag_idx: usize) {
         if let Some(ref mut pertag) = self.pertag {

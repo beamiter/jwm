@@ -597,8 +597,11 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // --- Window tabs ---
         self.window_tabs_enabled = behavior.window_tabs;
-        self.tab_bar_color = behavior.tab_bar_color;
-        self.tab_active_color = behavior.tab_active_color;
+        // The strip follows `appearance.ui_theme` and the system-UI font, and
+        // its titles are baked into textures with the ink of whichever theme
+        // was live when they were rasterized. A reload can change both, so the
+        // cache is dropped rather than left carrying the old palette.
+        self.tab_titles_dirty = true;
 
         // --- Particle effects ---
         self.particle_effects = behavior.particle_effects;

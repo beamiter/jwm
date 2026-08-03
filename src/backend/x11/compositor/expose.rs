@@ -1,5 +1,7 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
+use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
+use crate::backend::compositor_font;
 use crate::backend::x11::compositor_common::expose::{build_expose_entries, tick_expose_entries};
 use glow::HasContext;
 
@@ -486,6 +488,11 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Rasterise and upload every tab title, once per change. Doing it per
     /// frame instead — a CPU text raster plus a texture create, upload and
     /// delete for every tab — is pure waste on a desktop that is not moving.
+    ///
+    /// Titles are drawn in the UI theme's ink with the configured system-UI
+    /// font, the same as every other surface the compositor owns, so the ink
+    /// is part of what a change invalidates: the focused cell reads in
+    /// `title_ink` and the rest in the dimmer `label_ink`.
     pub(super) fn refresh_tab_titles(&mut self) {
         if !self.tab_titles_dirty {
             return;
@@ -499,15 +506,36 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+
         let mut cache = Vec::with_capacity(self.window_groups.len());
         for group in &self.window_groups {
             let count = group.tabs.len();
             let mut row = Vec::with_capacity(count);
             for (index, tab) in group.tabs.iter().enumerate() {
-                row.push(window_tabs::tab_rect(group.bar, count, index).and_then(
-                    |[_, _, cell_w, _]| {
+                row.push(window_tabs::cell_rect(group.bar, count, index).and_then(
+                    |[_, _, cell_w, cell_h]| {
+                        // The strip's height is configurable, so the type is
+                        // sized from the cell rather than from the system-UI
+                        // font's own size, which would overflow it.
+                        let size = window_tabs::title_font_size(cell_h);
                         let budget = window_tabs::title_budget(cell_w);
-                        let (pixels, w, h) = Self::render_title_to_pixels(&tab.title, budget)?;
+                        let text = compositor_font::fit_ui_text(&tab.title, font, size, budget);
+                        if text.is_empty() {
+                            return None;
+                        }
+                        let ink = if tab.active {
+                            ui.title_ink
+                        } else {
+                            ui.label_ink
+                        };
+                        let (pixels, w, h) =
+                            compositor_font::render_ui_text_to_rgba(&text, font, size, ink);
+                        if w == 0 || h == 0 {
+                            return None;
+                        }
                         let texture = unsafe { self.upload_tab_title(&pixels, w, h) }?;
                         Some((texture, w, h))
                     },
@@ -549,7 +577,21 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     /// Paint every tab bar. Called from render_frame once the windows are down.
-    pub(super) fn render_tab_bar(&self, proj: &[f32; 16]) {
+    ///
+    /// The strip is one of JWM's own surfaces, so it is drawn like the rest of
+    /// them: a rounded track in the theme's card tone — frosted over a blurred
+    /// backdrop under the glass themes, flat under Material — carrying one
+    /// pill per window, the focused one raised as a chip and washed with the
+    /// same accent the launcher marks its selected row with.
+    ///
+    /// Taking `&mut self` is what the frosted themes cost: the track samples
+    /// the blurred scene, and that capture has to happen before the first
+    /// cell is filled.
+    pub(super) fn render_tab_bar(&mut self, proj: &[f32; 16]) {
+        let ui = ui_theme::palette();
+        self.ensure_glass_backdrop(ui);
+        let accent = self.border_gradient_color_a;
+
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
 
@@ -558,82 +600,75 @@ impl<C: CompositorConnection> Compositor<C> {
                 if !window_tabs::wants_bar(count) {
                     continue;
                 }
+                let Some([tx, ty, tw, th]) = window_tabs::track_rect(group.bar) else {
+                    continue;
+                };
 
-                // All the cells first: a title must never end up under the
-                // neighbouring cell's fill.
-                self.gl.use_program(Some(self.border_program));
-                self.gl.uniform_matrix_4_f32_slice(
-                    self.border_uniforms.projection.as_ref(),
-                    false,
+                // Track first, then every cell: a title must never end up
+                // under the neighbouring cell's fill. `ui_fill_island` leaves
+                // the border program bound for the pills that follow.
+                let track_radius = window_tabs::pill_radius(th);
+                self.ui_fill_island(
                     proj,
+                    ui,
+                    tx,
+                    ty,
+                    tw,
+                    th,
+                    track_radius,
+                    track_radius,
+                    ui.card,
+                    1.0,
                 );
+
                 for (index, tab) in group.tabs.iter().enumerate() {
-                    let Some([x, y, w, h]) = window_tabs::tab_rect(group.bar, count, index) else {
+                    // Only the focused cell is drawn; the rest are the track
+                    // showing through, which is what makes the focused one
+                    // read as raised out of it.
+                    if !tab.active {
+                        continue;
+                    }
+                    let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
-                    let color = if tab.active {
-                        self.tab_active_color
-                    } else {
-                        self.tab_bar_color
-                    };
-                    // The border shader fills solid once the width covers the
-                    // whole rect, which is what makes a cell out of a ring.
-                    self.gl
-                        .uniform_1_f32(self.border_uniforms.border_width.as_ref(), w.max(h));
-                    self.gl.uniform_4_f32(
-                        self.border_uniforms.border_color.as_ref(),
-                        color[0],
-                        color[1],
-                        color[2],
-                        color[3],
+                    let radius = window_tabs::pill_radius(h);
+                    self.sysui_fill_rounded(x, y, w, h, radius, ui.chip);
+                    self.sysui_fill_rounded(
+                        x,
+                        y,
+                        w,
+                        h,
+                        radius,
+                        [accent[0], accent[1], accent[2], ui.selection_alpha],
                     );
-                    self.set_border_radii(0.0, 0.0);
-                    self.gl
-                        .uniform_2_f32(self.border_uniforms.size.as_ref(), w, h);
-                    self.gl
-                        .uniform_4_f32(self.border_uniforms.rect.as_ref(), x, y, w, h);
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
 
                 let Some(titles) = self.tab_title_textures.get(group_index) else {
                     continue;
                 };
-                self.gl.use_program(Some(self.program));
+                self.gl.use_program(Some(self.hud_text_program));
                 self.gl.uniform_matrix_4_f32_slice(
-                    self.win_uniforms.projection.as_ref(),
+                    self.hud_text_uniforms.projection.as_ref(),
                     false,
                     proj,
                 );
-                self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
                 self.gl
-                    .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
                 self.gl
-                    .uniform_1_f32(self.win_uniforms.opacity.as_ref(), -1.0);
-                self.gl
-                    .uniform_1_f32(self.win_uniforms.radius.as_ref(), 0.0);
-                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
-                self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
-                // The window program carries the open ripple; a leftover
-                // amplitude from the last client drawn would warp the text.
-                self.gl
-                    .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
-                self.gl
-                    .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), -1.0);
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
                 self.gl.active_texture(glow::TEXTURE0);
                 for (index, slot) in titles.iter().enumerate() {
                     let Some((texture, tw, th)) = slot else {
                         continue;
                     };
-                    let Some([x, y, w, h]) = window_tabs::tab_rect(group.bar, count, index) else {
+                    let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
                     let (tw, th) = (*tw as f32, *th as f32);
-                    self.gl
-                        .uniform_2_f32(self.win_uniforms.size.as_ref(), tw, th);
                     self.gl.uniform_4_f32(
-                        self.win_uniforms.rect.as_ref(),
-                        x + (w - tw) * 0.5,
-                        y + (h - th) * 0.5,
+                        self.hud_text_uniforms.rect.as_ref(),
+                        (x + (w - tw) * 0.5).round(),
+                        (y + (h - th) * 0.5).round(),
                         tw,
                         th,
                     );

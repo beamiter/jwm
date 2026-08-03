@@ -116,6 +116,10 @@ impl ConfigReloadTracker {
         self.last_attempted = Some(revision);
         self.pending = None;
     }
+
+    fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 impl Jwm {
@@ -131,6 +135,9 @@ impl Jwm {
 
     pub fn cleanup(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
         info!("[cleanup] Starting essential cleanup (letting Rust handle memory)");
+        // Before anything can fail: a layout changed seconds before a restart
+        // is exactly the one the next process has to come back to.
+        self.flush_layout_persistence_on_exit();
         // Shut down IPC server (also handled by Drop, but explicit is clearer)
         if let Some(ref mut ipc) = self.ipc_server {
             ipc.shutdown();
@@ -457,6 +464,19 @@ impl Jwm {
         } else {
             warn!("[config] reload failed: {:?}", response.error);
         }
+    }
+
+    /// Whether an edit to the config file is waiting out its debounce.
+    pub(crate) fn config_reload_is_pending(&self) -> bool {
+        self.config_reload_tracker.has_pending()
+    }
+
+    /// Record a revision JWM wrote itself — the per-tag layout save is the
+    /// only one today. Without this the watcher would see the new mtime as an
+    /// edit and reload the config a second or two after every layout change.
+    pub(crate) fn note_config_written_by_us(&mut self, revision: SystemTime) {
+        self.config_reload_tracker.mark_attempted(revision);
+        self.config_last_modified = Some(revision);
     }
 
     pub(crate) fn config_reload_next_wakeup(&self, now: Instant) -> Duration {

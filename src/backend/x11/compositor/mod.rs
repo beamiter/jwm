@@ -665,8 +665,6 @@ where
 
     // --- Phase 5: Window Tabs ---
     window_tabs_enabled: bool,
-    tab_bar_color: [f32; 4],
-    tab_active_color: [f32; 4],
     /// The bars the window manager reserved, strip geometry included.
     window_groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
     /// One (texture, w, h) per cell, in `window_groups` order. Rebuilt only

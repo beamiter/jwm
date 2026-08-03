@@ -322,7 +322,15 @@ impl WaylandCompositor {
     // Helper: set a vec4 uniform (u_rect, etc.)
     // =========================================================================
 
-    fn set_rect_uniform(&self, gl: &ffi::Gles2, loc: i32, x: f32, y: f32, w: f32, h: f32) {
+    pub(super) fn set_rect_uniform(
+        &self,
+        gl: &ffi::Gles2,
+        loc: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
         unsafe {
             gl.Uniform4f(loc, x, y, w, h);
         }
@@ -332,7 +340,7 @@ impl WaylandCompositor {
     // Helper: set a mat4 uniform (u_projection, etc.)
     // =========================================================================
 
-    fn set_projection_uniform(&self, gl: &ffi::Gles2, loc: i32, proj: &[f32; 16]) {
+    pub(super) fn set_projection_uniform(&self, gl: &ffi::Gles2, loc: i32, proj: &[f32; 16]) {
         unsafe {
             gl.UniformMatrix4fv(loc, 1, ffi::FALSE as u8, proj.as_ptr());
         }
@@ -2904,7 +2912,12 @@ impl WaylandCompositor {
         IslandDock::for_bar(bar, self.screen_w as f32)
     }
 
-    fn ensure_glass_backdrop(&mut self, gl: &ffi::Gles2, palette: &UiPalette, proj: &[f32; 16]) {
+    pub(super) fn ensure_glass_backdrop(
+        &mut self,
+        gl: &ffi::Gles2,
+        palette: &UiPalette,
+        proj: &[f32; 16],
+    ) {
         if self.glass_backdrop.is_none() {
             self.capture_glass_backdrop(gl, palette, proj);
         }
@@ -2992,7 +3005,7 @@ impl WaylandCompositor {
     /// As [`Self::ui_fill_surface`], but the top two corners take their own
     /// radius. A docked panel passes zero so it merges with the bar above it.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn ui_fill_island(
+    pub(super) unsafe fn ui_fill_island(
         &self,
         gl: &ffi::Gles2,
         proj: &[f32; 16],
@@ -3025,7 +3038,7 @@ impl WaylandCompositor {
         }
     }
 
-    unsafe fn sysui_fill_rounded(
+    pub(super) unsafe fn sysui_fill_rounded(
         &self,
         gl: &ffi::Gles2,
         x: f32,

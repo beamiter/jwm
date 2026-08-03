@@ -25,6 +25,7 @@ impl Jwm {
                 monitor.update_current_tag_layout_params();
                 info!("[incnmaster] Updated n_master to {}", new_n);
             }
+            self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
         }
         Ok(())
@@ -95,6 +96,7 @@ impl Jwm {
                     monitor.update_current_tag_layout_params();
                 }
             }
+            self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
         }
         Ok(())
@@ -116,6 +118,7 @@ impl Jwm {
                     info!("[setgaps] Updated gap to {}", new_gap);
                 }
             }
+            self.mark_layout_dirty();
             self.arrange(backend, Some(sel_mon_key));
         }
         Ok(())
@@ -200,6 +203,11 @@ impl Jwm {
                 "layout": format!("{:?}", *new_layout),
             }),
         );
+
+        // Every path that changes which layout a tag is on — `setlayout`, the
+        // cycle, the film-strip picker — comes through here, so this is the
+        // one place the save has to be armed from.
+        self.mark_layout_dirty();
 
         Ok(new_layout)
     }

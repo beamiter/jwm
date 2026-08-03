@@ -228,8 +228,11 @@ impl WaylandCompositor {
 
         // --- Window tabs ---
         self.window_tabs_enabled = b.window_tabs;
-        self.tab_bar_color = b.tab_bar_color;
-        self.tab_active_color = b.tab_active_color;
+        // The strip follows `appearance.ui_theme` and the system-UI font, and
+        // its titles are baked into textures with the ink of whichever theme
+        // was live when they were rasterized. A reload can change both, so the
+        // cache is dropped rather than left carrying the old palette.
+        self.tab_titles_dirty = true;
 
         // --- Debug HUD extended ---
         self.debug_hud_extended = b.debug_hud_extended;

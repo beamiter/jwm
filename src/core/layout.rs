@@ -279,6 +279,18 @@ impl LayoutEnum {
         Self::CYCLE.iter().position(|l| l == self).unwrap_or(0)
     }
 
+    /// The layout `name` identifies — `tile`, `fibonacci`, `centeredmaster`, …
+    /// — or `None` when nothing goes by that name.
+    ///
+    /// Resolving against [`LayoutEnum::all`] rather than a second list of
+    /// names is what keeps a layout added to the cycle immediately settable
+    /// from a keybinding and restorable from a saved per-tag entry, instead of
+    /// silently missing from one of them.
+    pub fn from_name(name: &str) -> Option<&'static LayoutEnum> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::CYCLE.iter().find(|layout| layout.0 == name)
+    }
+
     /// Human-facing name, for UI that has room for more than the symbol.
     pub fn label(&self) -> &'static str {
         match self.0 {

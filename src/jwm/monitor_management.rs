@@ -43,6 +43,11 @@ impl Jwm {
             ref_pertag.lt_idxs[i][1] = Some(default_layout_1.clone());
             ref_pertag.sel_lts[i] = m.sel_lt;
         }
+        // Saved per-tag layouts land on top of those defaults. The monitor is
+        // appended by `insert_monitor`, so the index it will answer to is the
+        // current length — which is what the saved entries are keyed by.
+        let mon_index = self.state.monitor_order.len() as i32;
+        crate::jwm::layout::persist::seed_pertag_from_config(&mut m, mon_index, &cfg);
         info!("[createmon]: {}", m);
         return m;
     }

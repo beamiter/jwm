@@ -1216,6 +1216,7 @@ mod tests {
             config_reload_last_unix_ms: None,
             config_reload_last_success: None,
             config_reload_last_error: None,
+            layout_persist_dirty: None,
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
@@ -1679,6 +1680,9 @@ impl EventHandler for Jwm {
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);
         self.poll_config_reload(backend, now);
+        // After the reload poll: a pending edit of the user's gets to land
+        // before JWM writes its own per-tag layouts over the same file.
+        self.flush_layout_persistence(now);
         self.flush_pending_bar_updates();
         // The layout picker commits on its own once the user stops browsing.
         // Ahead of the animation tick, whose panel flush then carries the

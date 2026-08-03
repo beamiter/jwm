@@ -63,6 +63,32 @@ fn resolve_write_destination(path: &Path) -> std::io::Result<std::path::PathBuf>
     ))
 }
 
+/// Quote a string as a TOML basic string.
+///
+/// Layout names are all lowercase ASCII today, so this is belt-and-braces —
+/// but the value ends up in a file the parser has to read back, and a name
+/// that ever grows a quote or a backslash would otherwise write a config that
+/// no longer loads.
+fn toml_string_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 || ch as u32 == 0x7f => {
+                out.push_str(&format!("\\u{:04X}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // Preserve symlink-based dotfile setups. Renaming over `path` itself would
     // replace the link; resolving the complete chain lets us atomically
@@ -688,14 +714,13 @@ pub struct BehaviorConfig {
     pub peek_exclude: Vec<String>,
 
     // --- Window Tabs ---
+    /// Strip across the top of a monitor's tiling area, one cell per tiled
+    /// window. It is drawn in the `appearance.ui_theme` palette, like every
+    /// other surface JWM paints itself, so it has no colors of its own.
     #[serde(default = "default_true")]
     pub window_tabs: bool,
     #[serde(default = "default_tab_bar_height")]
     pub tab_bar_height: f32,
-    #[serde(default = "default_tab_bar_color")]
-    pub tab_bar_color: [f32; 4],
-    #[serde(default = "default_tab_active_color")]
-    pub tab_active_color: [f32; 4],
 
     // --- Motion trail (drag ghosting) ---
     /// Enable motion trail ghost copies when dragging windows.
@@ -1254,12 +1279,6 @@ fn default_snap_animation_duration_ms() -> u64 {
 fn default_tab_bar_height() -> f32 {
     28.0
 }
-fn default_tab_bar_color() -> [f32; 4] {
-    [0.15, 0.15, 0.18, 0.9]
-}
-fn default_tab_active_color() -> [f32; 4] {
-    [0.3, 0.5, 0.9, 0.9]
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusBarConfig {
@@ -1286,6 +1305,64 @@ pub struct LayoutConfig {
     pub m_fact: f32,
     pub n_master: u32,
     pub tags_length: usize,
+    /// Carry each tag's layout across restarts.
+    ///
+    /// With this on, JWM writes the `[[layout.tags]]` block below back to this
+    /// file whenever a tag's layout, master count, master fraction or gap
+    /// changes, and reads it again on the next start, so a desktop comes back
+    /// arranged the way it was left. Turn it off to keep the file entirely
+    /// under your own hand: the entries are then only ever read.
+    #[serde(default = "default_true")]
+    pub persist_tags: bool,
+    /// Per-tag, per-monitor layout state.
+    ///
+    /// Hand-written entries seed a fresh session; JWM replaces the whole block
+    /// when it saves, so comments inside it do not survive — everything else in
+    /// the file does.
+    ///
+    /// An empty list is left out of the file entirely rather than written as
+    /// `tags = []`: the saved block is appended as `[[layout.tags]]` tables,
+    /// and TOML rejects a document that defines the same key both ways.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<LayoutTagConfig>,
+}
+
+/// One tag's layout on one monitor.
+///
+/// The `layout`/`alt` pair mirrors what a monitor actually holds: two layouts,
+/// with `Mod+space` toggling between them. `layout` is always the one in use,
+/// so a restart lands on it whichever half of the pair was selected when the
+/// entry was written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutTagConfig {
+    /// Tag number as the status bar shows it: 1 for the first tag. Index 0 is
+    /// the "all tags" view every monitor keeps beside its numbered tags.
+    pub tag: usize,
+    /// Monitor index (0-based). `-1` matches any monitor, which is what a
+    /// hand-written entry usually wants; JWM writes one entry per monitor.
+    #[serde(default = "default_layout_tag_monitor")]
+    pub monitor: i32,
+    /// Layout in use, by name: `tile`, `fibonacci`, `monocle`, `scrolling`, …
+    /// An unknown name leaves the tag on the built-in default.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub layout: String,
+    /// The other half of the pair, reached with the layout toggle.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub alt: String,
+    /// Windows in the master area. Absent means the global `n_master`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_master: Option<u32>,
+    /// Share of the screen the master area takes. Absent means the global
+    /// `m_fact`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m_fact: Option<f32>,
+    /// Pixels between tiled windows. Absent means `appearance.gap_px`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<i32>,
+}
+
+fn default_layout_tag_monitor() -> i32 {
+    -1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1591,8 +1668,6 @@ impl Default for Config {
                     peek_exclude: Vec::new(),
                     window_tabs: true,
                     tab_bar_height: default_tab_bar_height(),
-                    tab_bar_color: default_tab_bar_color(),
-                    tab_active_color: default_tab_active_color(),
                     // Phase 3: Visual effects
                     motion_trail: true,
                     motion_trail_frames: default_motion_trail_frames(),
@@ -1667,6 +1742,8 @@ impl Default for Config {
                     m_fact: 0.55,
                     n_master: 1,
                     tags_length: 9,
+                    persist_tags: true,
+                    tags: Vec::new(),
                 },
                 animation: AnimationConfig::default_value(),
                 keybindings: KeyBindingsConfig {
@@ -2434,6 +2511,45 @@ impl Config {
         (1 << self.tags_length()) - 1
     }
 
+    /// Whether a layout change is written back to the config file.
+    pub fn layout_persist_tags(&self) -> bool {
+        self.inner.layout.persist_tags
+    }
+
+    /// Every stored per-tag layout, in file order.
+    pub fn layout_tags(&self) -> &[LayoutTagConfig] {
+        &self.inner.layout.tags
+    }
+
+    /// The stored layout for `tag` on monitor `monitor`.
+    ///
+    /// A monitor-specific entry wins over an any-monitor one, so the usual
+    /// hand-written `monitor = -1` line is a default the saved per-monitor
+    /// entries then refine.
+    pub fn layout_for_tag(&self, monitor: i32, tag: usize) -> Option<&LayoutTagConfig> {
+        let matching = |entry: &&LayoutTagConfig| entry.tag == tag;
+        self.inner
+            .layout
+            .tags
+            .iter()
+            .filter(matching)
+            .find(|entry| entry.monitor == monitor)
+            .or_else(|| {
+                self.inner
+                    .layout
+                    .tags
+                    .iter()
+                    .filter(matching)
+                    .find(|entry| entry.monitor < 0)
+            })
+    }
+
+    /// Replace the stored per-tag layouts in memory. Writing them to disk is
+    /// [`Self::persist_layout_tags`].
+    pub fn set_layout_tags(&mut self, tags: Vec<LayoutTagConfig>) {
+        self.inner.layout.tags = tags;
+    }
+
     pub fn animation_enabled(&self) -> bool {
         self.inner.animation.enabled
     }
@@ -2898,21 +3014,11 @@ impl Config {
             ArgumentConfig::UInt(u) => jwm::WMArgEnum::UInt(*u),
             ArgumentConfig::Float(f) => jwm::WMArgEnum::Float(*f),
             ArgumentConfig::StringVec(v) => jwm::WMArgEnum::StringVec(v.clone()),
-            ArgumentConfig::String(s) => match s.as_str() {
-                "tile" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)),
-                "float" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::FLOAT)),
-                "monocle" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::MONOCLE)),
-                "fibonacci" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::FIBONACCI)),
-                "centeredmaster" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::CENTERED_MASTER)),
-                "bstack" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::BSTACK)),
-                "grid" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::GRID)),
-                "deck" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::DECK)),
-                "threecol" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::THREE_COL)),
-                "tatami" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::TATAMI)),
-                "fullscreen" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::FULLSCREEN)),
-                "scrolling" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::SCROLLING)),
-                "vstack" => jwm::WMArgEnum::Layout(Rc::new(LayoutEnum::VSTACK)),
-                _ => jwm::WMArgEnum::StringVec(vec![s.clone()]),
+            // A string argument is a layout name when one goes by it, and a
+            // one-element command line otherwise.
+            ArgumentConfig::String(s) => match LayoutEnum::from_name(s) {
+                Some(layout) => jwm::WMArgEnum::Layout(Rc::new(layout.clone())),
+                None => jwm::WMArgEnum::StringVec(vec![s.clone()]),
             },
         }
     }
@@ -2986,6 +3092,152 @@ impl Config {
         let toml_string = Self::add_option_comments(&toml_string);
         atomic_write(path.as_ref(), toml_string.as_bytes())?;
         Ok(())
+    }
+
+    /// The comment header above the block JWM owns, so a reader can see which
+    /// lines are written by the window manager rather than by hand. Written
+    /// verbatim and recognized verbatim, so a save replaces its own header
+    /// instead of stacking a new copy on every write.
+    const LAYOUT_TAGS_HEADER: [&'static str; 3] = [
+        "# --- per-tag layout, saved by jwm ---",
+        "# Rewritten when a tag's layout changes; set layout.persist_tags",
+        "# to false to keep this block under your own hand.",
+    ];
+
+    /// Write `entries` into the config file's `[[layout.tags]]` block, leaving
+    /// every other byte of the file exactly as it was.
+    ///
+    /// A full `save_to_file` would be the obvious way to do this and is the
+    /// wrong one: serializing the whole config back out normalizes the
+    /// formatting and drops every comment the user wrote. The block JWM owns
+    /// is small and always at the end, so it is cut out and re-appended as
+    /// text instead — the rest of the file is never re-serialized.
+    ///
+    /// Returns the file's new modification time, which the caller records so
+    /// the config watcher does not treat JWM's own write as an edit to reload.
+    pub fn persist_layout_tags(
+        &self,
+        entries: &[LayoutTagConfig],
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        self.persist_layout_tags_to(Self::resolve_load_path(), entries)
+    }
+
+    /// [`Self::persist_layout_tags`] against an explicit path.
+    pub fn persist_layout_tags_to<P: AsRef<Path>>(
+        &self,
+        path: P,
+        entries: &[LayoutTagConfig],
+    ) -> Result<std::time::SystemTime, ConfigError> {
+        let path = path.as_ref();
+        let existing = match fs::read_to_string(path) {
+            Ok(text) => text,
+            // No file to preserve: fall back to writing the whole config,
+            // which is also what the first start does.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut whole = self.clone();
+                whole.set_layout_tags(entries.to_vec());
+                whole.save_to_file(&path)?;
+                return Ok(fs::metadata(&path)?.modified()?);
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut text = Self::strip_layout_tag_blocks(&existing);
+        let block = Self::render_layout_tag_blocks(entries);
+        if !block.is_empty() {
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push('\n');
+            text.push_str(&block);
+        }
+        atomic_write(&path, text.as_bytes())?;
+        Ok(fs::metadata(&path)?.modified()?)
+    }
+
+    /// Remove every `[[layout.tags]]` table from a config file's text, along
+    /// with the comment header JWM writes above them.
+    ///
+    /// A table runs until the next table header, which is the only structure
+    /// TOML gives us to cut on; comments a user parked *inside* the block are
+    /// part of it and go too. Everything outside is untouched, which is the
+    /// whole reason this path exists.
+    fn strip_layout_tag_blocks(text: &str) -> String {
+        let mut kept: Vec<&str> = Vec::with_capacity(text.lines().count());
+        let mut in_block = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if Self::LAYOUT_TAGS_HEADER.contains(&trimmed) {
+                continue;
+            }
+            if trimmed == "[[layout.tags]]" {
+                in_block = true;
+                continue;
+            }
+            if in_block {
+                if trimmed.starts_with('[') {
+                    in_block = false;
+                } else {
+                    continue;
+                }
+            }
+            kept.push(line);
+        }
+        // A block at the end of the file leaves the blank line that separated
+        // it behind; the new block brings its own.
+        while kept.last().is_some_and(|last| last.trim().is_empty()) {
+            kept.pop();
+        }
+        let mut out = kept.join("\n");
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render `entries` as TOML tables.
+    ///
+    /// Hand-written rather than serialized because the file is edited as text:
+    /// `toml` would happily produce the same tables, but only as part of a
+    /// document, and the point of this path is to leave the document alone.
+    /// Every value here is a number or an identifier-shaped layout name, so
+    /// the only quoting needed is on the two string fields.
+    fn render_layout_tag_blocks(entries: &[LayoutTagConfig]) -> String {
+        if entries.is_empty() {
+            return String::new();
+        }
+        let mut out = String::with_capacity(entries.len() * 128);
+        for line in Self::LAYOUT_TAGS_HEADER {
+            out.push_str(line);
+            out.push('\n');
+        }
+        for entry in entries {
+            out.push_str("[[layout.tags]]\n");
+            out.push_str(&format!("tag = {}\n", entry.tag));
+            out.push_str(&format!("monitor = {}\n", entry.monitor));
+            if !entry.layout.is_empty() {
+                out.push_str(&format!(
+                    "layout = {}\n",
+                    toml_string_literal(&entry.layout)
+                ));
+            }
+            if !entry.alt.is_empty() {
+                out.push_str(&format!("alt = {}\n", toml_string_literal(&entry.alt)));
+            }
+            if let Some(n_master) = entry.n_master {
+                out.push_str(&format!("n_master = {n_master}\n"));
+            }
+            // TOML floats need a decimal point; `{:?}` on f32 keeps one and
+            // round-trips the value exactly. A NaN would print as `nan` and
+            // make the file unloadable, so it is simply not written.
+            if let Some(m_fact) = entry.m_fact.filter(|value| value.is_finite()) {
+                out.push_str(&format!("m_fact = {m_fact:?}\n"));
+            }
+            if let Some(gap) = entry.gap {
+                out.push_str(&format!("gap = {gap}\n"));
+            }
+        }
+        out
     }
 
     /// Post-process TOML output to add comments showing available options for enum-like fields.
@@ -3440,8 +3692,9 @@ pub fn reload_global() -> Result<(), ConfigError> {
 mod tests {
     use super::{
         ArgumentConfig, CONFIG_WRITE_COUNTER, Config, ConfigDiagnosticLevel, ConfigError,
-        GestureSwipeConfig, KeyConfig, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME,
-        TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig, key_function_is_repeatable,
+        GestureSwipeConfig, KeyConfig, LayoutTagConfig, Mods, NewClientPosition, Ordering,
+        STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
+        key_function_is_repeatable,
     };
 
     fn temporary_config_path(label: &str) -> std::path::PathBuf {
@@ -3699,6 +3952,192 @@ mod tests {
                 .iter()
                 .any(|issue| issue.path == "layout.tags_length")
         );
+    }
+
+    fn layout_tag(tag: usize, monitor: i32, layout: &str) -> LayoutTagConfig {
+        LayoutTagConfig {
+            tag,
+            monitor,
+            layout: layout.to_owned(),
+            alt: "tile".to_owned(),
+            n_master: Some(2),
+            m_fact: Some(0.62),
+            gap: Some(8),
+        }
+    }
+
+    /// The whole point of editing the file as text: a config full of the
+    /// user's comments and ordering must come back byte for byte apart from
+    /// the block JWM owns.
+    #[test]
+    fn saving_per_tag_layouts_leaves_the_rest_of_the_file_alone() {
+        let path = temporary_config_path("layout-tags");
+        let handwritten = "\
+# my window manager
+[layout]
+m_fact = 0.55 # golden-ish
+n_master = 1
+tags_length = 9
+
+[appearance]
+border_px = 3
+";
+        std::fs::write(&path, handwritten).unwrap();
+
+        let config = Config::default();
+        config
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "monocle")])
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written.starts_with(handwritten), "{written}");
+        assert!(written.contains("m_fact = 0.55 # golden-ish"));
+        assert!(written.contains("[[layout.tags]]"));
+        assert!(written.contains("layout = \"monocle\""));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Saving repeatedly must replace the block rather than stack copies of
+    /// it, and what comes back has to parse into what went in.
+    #[test]
+    fn per_tag_layouts_are_replaced_not_appended_and_reload_intact() {
+        let path = temporary_config_path("layout-tags-replace");
+        Config::default().save_to_file(&path).unwrap();
+
+        let config = Config::default();
+        config
+            .persist_layout_tags_to(
+                &path,
+                &[layout_tag(1, 0, "monocle"), layout_tag(2, 0, "grid")],
+            )
+            .unwrap();
+        config
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written.matches("[[layout.tags]]").count(), 1, "{written}");
+        // The default keybindings mention layouts by name too, so it is the
+        // saved entry specifically that must be gone.
+        assert!(!written.contains("layout = \"monocle\""), "{written}");
+
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.layout_tags(), [layout_tag(1, 0, "deck")]);
+        // And the values survive the round trip untouched.
+        let restored = loaded.layout_for_tag(0, 1).expect("entry for tag 1");
+        assert_eq!(restored.m_fact, Some(0.62));
+        assert_eq!(restored.n_master, Some(2));
+        assert_eq!(restored.gap, Some(8));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// An empty entry list is how "stop persisting" ends up on disk; it must
+    /// clear the block instead of leaving the last save behind.
+    #[test]
+    fn saving_no_per_tag_layouts_removes_the_block() {
+        let path = temporary_config_path("layout-tags-empty");
+        Config::default().save_to_file(&path).unwrap();
+        let config = Config::default();
+        config
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .unwrap();
+        config.persist_layout_tags_to(&path, &[]).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("[[layout.tags]]"), "{written}");
+        // The comment header goes with it, or the file accumulates a heading
+        // over nothing.
+        assert!(
+            !written.contains(Config::LAYOUT_TAGS_HEADER[0]),
+            "{written}"
+        );
+        assert!(
+            Config::load_from_file(&path)
+                .unwrap()
+                .layout_tags()
+                .is_empty()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Saving the same layouts twice must produce the same file: this runs
+    /// every couple of seconds of arranging windows, so any growth compounds.
+    #[test]
+    fn saving_the_same_per_tag_layouts_twice_is_a_no_op() {
+        let path = temporary_config_path("layout-tags-stable");
+        Config::default().save_to_file(&path).unwrap();
+        let config = Config::default();
+        let entries = [layout_tag(1, 0, "deck"), layout_tag(2, 0, "grid")];
+
+        config.persist_layout_tags_to(&path, &entries).unwrap();
+        let first = std::fs::read_to_string(&path).unwrap();
+        config.persist_layout_tags_to(&path, &entries).unwrap();
+        let second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.matches(Config::LAYOUT_TAGS_HEADER[0]).count(),
+            1,
+            "{first}"
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// A hand-written block sitting in the middle of the file — with tables
+    /// after it — has to be cut out without taking its neighbours along.
+    #[test]
+    fn a_block_in_the_middle_of_the_file_is_cut_out_cleanly() {
+        let path = temporary_config_path("layout-tags-middle");
+        std::fs::write(
+            &path,
+            "\
+[layout]
+m_fact = 0.55
+n_master = 1
+tags_length = 9
+
+[[layout.tags]]
+tag = 4
+monitor = -1
+layout = \"grid\"
+
+[appearance]
+border_px = 3
+",
+        )
+        .unwrap();
+
+        Config::default()
+            .persist_layout_tags_to(&path, &[layout_tag(1, 0, "deck")])
+            .unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(!written.contains("tag = 4"), "{written}");
+        assert!(written.contains("[appearance]\nborder_px = 3"), "{written}");
+        assert_eq!(written.matches("[[layout.tags]]").count(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_missing_config_file_is_written_whole() {
+        let path = temporary_config_path("layout-tags-missing");
+        let _ = std::fs::remove_file(&path);
+        Config::default()
+            .persist_layout_tags_to(&path, &[layout_tag(3, 1, "bstack")])
+            .unwrap();
+
+        let loaded = Config::load_from_file(&path).unwrap();
+        assert_eq!(loaded.layout_tags(), [layout_tag(3, 1, "bstack")]);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_monitor_specific_entry_is_preferred_over_the_shared_one() {
+        let mut config = Config::default();
+        config.set_layout_tags(vec![layout_tag(1, -1, "grid"), layout_tag(1, 2, "deck")]);
+        assert_eq!(config.layout_for_tag(2, 1).unwrap().layout, "deck");
+        assert_eq!(config.layout_for_tag(0, 1).unwrap().layout, "grid");
+        assert!(config.layout_for_tag(0, 7).is_none());
     }
 
     #[test]
