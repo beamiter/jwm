@@ -340,8 +340,8 @@ void main() {
 }
 "#;
 
-/// Frosted-glass surface for JWM's own panels under `appearance.ui_theme =
-/// "glass"` / `"glass-dark"`.
+/// Frosted-glass surface for JWM's own panels under the glass themes
+/// (`appearance.ui_theme = "glass"` / `"glass-dark"` / `"aurora"`).
 ///
 /// The quad samples `u_backdrop` — a Kawase-blurred copy of the frame captured
 /// just before the overlays are drawn — in screen space, so the sheet shows the

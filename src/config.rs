@@ -206,11 +206,17 @@ pub struct AppearanceConfig {
     /// Design language for the surfaces JWM draws itself — the debug HUD, the
     /// modal system-UI card, toasts and the volume/brightness OSD.
     ///
-    /// * `"material"` (default) — opaque elevated cards with a drop shadow.
-    /// * `"glass"` — Apple's light frosted glass: each card samples a blurred
-    ///   copy of the desktop behind it through a squircle mask, refracts it at
-    ///   the bevel, and lifts it under a white veil with a rim hairline.
+    /// * `"glass"` (default) — Apple's light frosted glass: each card samples
+    ///   a blurred copy of the desktop behind it through a squircle mask,
+    ///   refracts it at the bevel, and lifts it under a white veil with a rim
+    ///   hairline.
     /// * `"glass-dark"` — the same optics under a graphite veil, for a dark UI.
+    /// * `"aurora"` — the same optics under a deep indigo veil with an
+    ///   aurora-teal rim: tinted glass rather than neutral.
+    /// * `"material"` — opaque elevated cards with a drop shadow.
+    /// * `"nord"` — flat cards in the Nord palette.
+    /// * `"tokyo-night"` — flat cards in the Tokyo Night palette.
+    /// * `"paper"` — flat off-white cards with dark ink; light without blur.
     ///
     /// The compositor keeps its blur chain alive for the glass themes even
     /// when `blur_enabled` is off; without a usable chain the cards fall back
@@ -1023,10 +1029,11 @@ fn default_active_opacity() -> f32 {
 fn default_blur_strength() -> u32 {
     3
 }
-/// Material stays the default so an untouched config keeps the look it had
-/// before `appearance.ui_theme` existed.
+/// Frosted glass is the default: an untouched config gets the flagship look,
+/// and both compositors fall back to flat fills wherever a blur chain cannot
+/// be built.
 fn default_ui_theme() -> String {
-    "material".to_string()
+    "glass".to_string()
 }
 fn default_fade_step() -> f32 {
     0.03
@@ -3424,10 +3431,15 @@ impl Config {
             }
             "appearance.ui_theme" => {
                 let v = as_string()?;
-                let normalized = v.trim().to_ascii_lowercase();
-                if !matches!(normalized.as_str(), "material" | "glass" | "glass-dark") {
+                let normalized = v.trim().to_ascii_lowercase().replace('_', "-");
+                if !matches!(
+                    normalized.as_str(),
+                    "material" | "glass" | "glass-dark" | "aurora" | "nord" | "tokyo-night"
+                        | "paper"
+                ) {
                     return Err(format!(
-                        "appearance.ui_theme={v} is not one of: material, glass, glass-dark"
+                        "appearance.ui_theme={v} is not one of: material, glass, glass-dark, \
+                         aurora, nord, tokyo-night, paper"
                     ));
                 }
                 self.inner.appearance.ui_theme = normalized;
@@ -4524,19 +4536,24 @@ border_px = 3
     }
 
     #[test]
-    fn ui_theme_defaults_to_material_and_only_accepts_known_themes() {
+    fn ui_theme_defaults_to_glass_and_only_accepts_known_themes() {
         let mut cfg = Config::default();
-        // An untouched config keeps the look it had before the key existed.
+        // An untouched config gets the flagship look.
+        assert_eq!(cfg.ui_theme(), "glass");
+
+        cfg.set_value("appearance.ui_theme", &serde_json::json!("Material"))
+            .expect("a known theme is accepted, case-insensitively");
         assert_eq!(cfg.ui_theme(), "material");
 
-        cfg.set_value("appearance.ui_theme", &serde_json::json!("Glass"))
-            .expect("a known theme is accepted, case-insensitively");
-        assert_eq!(cfg.ui_theme(), "glass");
+        // Underscores normalize to the canonical hyphenated name.
+        cfg.set_value("appearance.ui_theme", &serde_json::json!("Tokyo_Night"))
+            .expect("a known theme is accepted with underscores");
+        assert_eq!(cfg.ui_theme(), "tokyo-night");
 
         cfg.set_value("appearance.ui_theme", &serde_json::json!("neumorphic"))
             .expect_err("an unknown theme is rejected instead of silently applied");
         // The rejected write leaves the previous theme in place.
-        assert_eq!(cfg.ui_theme(), "glass");
+        assert_eq!(cfg.ui_theme(), "tokyo-night");
     }
 
     #[test]
@@ -4550,7 +4567,7 @@ border_px = 3
             .collect::<Vec<_>>()
             .join("\n");
         let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
-        assert_eq!(parsed.appearance.ui_theme, "material");
+        assert_eq!(parsed.appearance.ui_theme, "glass");
     }
 
     #[test]

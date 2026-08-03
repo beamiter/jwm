@@ -6,42 +6,67 @@
 //! one switchable palette so a second design language can exist beside Material
 //! without either backend growing its own opinion.
 //!
-//! Three themes ship today, chosen by `appearance.ui_theme`:
+//! Seven themes ship today, chosen by `appearance.ui_theme`:
 //!
-//! * [`UiTheme::Material`] — the original elevated surfaces: near-opaque dark
-//!   cards separated from the desktop by a drop shadow.
-//! * [`UiTheme::Glass`] — Apple's light frosted glass ("毛玻璃"), the material
-//!   iOS and macOS use for folders, sheets and Control Center: a luminous sheet
-//!   that *lifts* what is behind it, with continuous (squircle) corners, a
-//!   beveled edge that refracts the backdrop, and a rim hairline all the way
-//!   around. Depth comes from the optics, so the shadow is nearly absent.
+//! * [`UiTheme::Glass`] (default) — Apple's light frosted glass ("毛玻璃"),
+//!   the material iOS and macOS use for folders, sheets and Control Center: a
+//!   luminous sheet that *lifts* what is behind it, with continuous (squircle)
+//!   corners, a beveled edge that refracts the backdrop, and a rim hairline
+//!   all the way around. Depth comes from the optics, so the shadow is nearly
+//!   absent.
 //! * [`UiTheme::GlassDark`] — the same optics with a graphite veil, for people
 //!   who want frosted panels without a light UI.
+//! * [`UiTheme::Aurora`] — the glass optics under a deep indigo veil with an
+//!   aurora-teal rim and richer chroma: tinted glass rather than neutral.
+//! * [`UiTheme::Material`] — the original elevated surfaces: near-opaque dark
+//!   cards separated from the desktop by a drop shadow.
+//! * [`UiTheme::Nord`] — flat cards in the Nord palette: Polar Night surfaces
+//!   under Snow Storm inks.
+//! * [`UiTheme::TokyoNight`] — flat cards in the Tokyo Night palette: a
+//!   near-black indigo ground under periwinkle inks.
+//! * [`UiTheme::Paper`] — a light flat material: warm off-white opaque cards
+//!   with dark ink, for desktops where frost is unwanted but Material's dark
+//!   cards are too heavy.
 //!
-//! Both glass themes carry a [`GlassParams`] block; Material's is `None`, which
-//! is also how a renderer decides whether it needs a backdrop capture at all.
+//! The glass themes carry a [`GlassParams`] block; the flat themes' is `None`,
+//! which is also how a renderer decides whether it needs a backdrop capture at
+//! all.
 
 /// Which design language the compositor's own surfaces follow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum UiTheme {
     /// Material elevation: opaque surface plus drop shadow.
-    #[default]
     Material,
     /// Apple's light frosted glass over a blurred backdrop.
+    #[default]
     Glass,
     /// The same optics, tinted dark.
     GlassDark,
+    /// The glass optics under an indigo veil with an aurora-teal rim.
+    Aurora,
+    /// Flat Nord: Polar Night surfaces, Snow Storm inks.
+    Nord,
+    /// Flat Tokyo Night: indigo ground, periwinkle inks.
+    TokyoNight,
+    /// Flat light material: off-white cards, dark ink.
+    Paper,
 }
 
 impl UiTheme {
-    /// Parse `appearance.ui_theme`. Unknown values fall back to Material, which
-    /// matches how the rest of the config treats an unrecognized choice: the
-    /// validator reports it, the compositor still starts.
+    /// Parse `appearance.ui_theme`. Unknown values fall back to the default
+    /// ([`UiTheme::Glass`]), which matches how the rest of the config treats
+    /// an unrecognized choice: the validator reports it, the compositor still
+    /// starts.
     pub(crate) fn from_config(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
-            "glass" | "glass-light" | "glass_light" | "acrylic" | "frosted" => Self::Glass,
+            "material" => Self::Material,
             "glass-dark" | "glass_dark" => Self::GlassDark,
-            _ => Self::Material,
+            "aurora" | "glass-aurora" | "glass_aurora" => Self::Aurora,
+            "nord" => Self::Nord,
+            "tokyo-night" | "tokyo_night" | "tokyonight" => Self::TokyoNight,
+            "paper" | "light" => Self::Paper,
+            "glass" | "glass-light" | "glass_light" | "acrylic" | "frosted" => Self::Glass,
+            _ => Self::default(),
         }
     }
 
@@ -51,6 +76,10 @@ impl UiTheme {
             Self::Material => &MATERIAL,
             Self::Glass => &GLASS,
             Self::GlassDark => &GLASS_DARK,
+            Self::Aurora => &AURORA,
+            Self::Nord => &NORD,
+            Self::TokyoNight => &TOKYO_NIGHT,
+            Self::Paper => &PAPER,
         }
     }
 
@@ -402,6 +431,201 @@ pub(crate) const GLASS_DARK: UiPalette = UiPalette {
     meter_h: 5.0,
 };
 
+/// Tinted glass: the same pane as [`GLASS_DARK`] but the veil is a deep
+/// indigo and the rim catches an aurora teal, so the panels read as colored
+/// glass rather than smoked glass. Saturation is pushed harder — a tinted
+/// pane is allowed to enrich the desktop it shows — and the shadow picks up
+/// a violet cast instead of pure black.
+pub(crate) const AURORA: UiPalette = UiPalette {
+    glass: Some(GlassParams {
+        blur_levels: 4,
+        saturation: 1.45,
+        luminance: 0.94,
+        corner_exponent: 4.2,
+        bevel_width: 16.0,
+        refraction: 9.0,
+        rim_width: 1.6,
+        rim_intensity: 0.48,
+        // Aurora teal, not neutral white: the rim is where the tint shows.
+        rim_tint: [0.62, 0.95, 0.90],
+        sheen: 0.045,
+        edge_shade: 0.10,
+        grain: 0.016,
+    }),
+
+    card: [0.10, 0.08, 0.20, 0.55],
+    panel: [0.09, 0.07, 0.19, 0.62],
+    toast: [0.10, 0.08, 0.20, 0.55],
+    osd: [0.10, 0.08, 0.20, 0.55],
+    // Raised controls take a periwinkle wash rather than plain white.
+    chip: [0.62, 0.70, 1.0, 0.20],
+    field: [0.62, 0.70, 1.0, 0.16],
+    track: [1.0, 1.0, 1.0, 0.20],
+    slider_track: [0.62, 0.95, 0.90, 0.30],
+    scrim: [0.02, 0.02, 0.06, 0.36],
+    lock_backdrop: [0.04, 0.03, 0.09, 1.0],
+    shadow: [0.02, 0.0, 0.08, 0.36],
+    shadow_spread_scale: 1.45,
+    // As in the other glass themes: the rim hairline is the boundary.
+    ring_alpha: 0.0,
+    panel_ring_alpha: 0.0,
+    ring_width: 1.0,
+    selection_alpha: 0.36,
+
+    title_ink: [240, 240, 255, 255],
+    chip_ink: [204, 208, 240, 255],
+    label_ink: [196, 200, 234, 255],
+    value_ink: [248, 248, 255, 255],
+    panel_title_ink: [242, 242, 255, 255],
+    query_ink: [250, 250, 255, 255],
+    item_ink: [232, 234, 252, 255],
+    hint_ink: [188, 192, 226, 255],
+    osd_ink: [248, 248, 255, 255],
+    card_radius: 22.0,
+    chip_radius: 11.0,
+    panel_radius: 26.0,
+    toast_radius: 20.0,
+    osd_radius: 24.0,
+    pad: 20.0,
+    gap: 13.0,
+    gutter: 20.0,
+    meter_h: 5.0,
+};
+
+/// Flat Nord: Polar Night surfaces (nord0/nord1) under Snow Storm inks
+/// (nord4–nord6). Material's geometry and elevation model, retoned — the
+/// drop shadow stays, the accent ring stays, only the temperature changes.
+pub(crate) const NORD: UiPalette = UiPalette {
+    glass: None,
+
+    card: [0.180, 0.204, 0.251, 0.96],
+    panel: [0.180, 0.204, 0.251, 0.985],
+    toast: [0.188, 0.212, 0.259, 0.97],
+    osd: [0.188, 0.212, 0.259, 0.97],
+    chip: [0.231, 0.259, 0.322, 1.0],
+    field: [0.231, 0.259, 0.322, 1.0],
+    track: [1.0, 1.0, 1.0, 0.10],
+    slider_track: [0.298, 0.337, 0.416, 0.9],
+    scrim: [0.08, 0.09, 0.12, 0.62],
+    lock_backdrop: [0.145, 0.161, 0.196, 1.0],
+    // Polar Night is lighter than Material's ground, so the shadow works a
+    // little less hard and carries a hint of the palette's blue.
+    shadow: [0.01, 0.02, 0.05, 0.50],
+    shadow_spread_scale: 1.0,
+    ring_alpha: 0.55,
+    panel_ring_alpha: 0.95,
+    ring_width: 1.0,
+    selection_alpha: 0.28,
+
+    title_ink: [236, 239, 244, 255],
+    chip_ink: [170, 182, 200, 255],
+    label_ink: [160, 172, 192, 255],
+    value_ink: [229, 233, 240, 255],
+    panel_title_ink: [236, 239, 244, 255],
+    query_ink: [236, 239, 244, 255],
+    item_ink: [216, 222, 233, 255],
+    hint_ink: [143, 157, 179, 255],
+    osd_ink: [229, 233, 240, 255],
+    card_radius: 16.0,
+    chip_radius: 9.0,
+    panel_radius: 18.0,
+    toast_radius: 14.0,
+    osd_radius: 18.0,
+    pad: 18.0,
+    gap: 12.0,
+    gutter: 18.0,
+    meter_h: 4.0,
+};
+
+/// Flat Tokyo Night: the editor theme's near-black indigo ground under its
+/// periwinkle foreground. Darker than Nord, cooler than Material.
+pub(crate) const TOKYO_NIGHT: UiPalette = UiPalette {
+    glass: None,
+
+    card: [0.102, 0.106, 0.149, 0.95],
+    panel: [0.102, 0.106, 0.149, 0.985],
+    toast: [0.110, 0.114, 0.157, 0.97],
+    osd: [0.110, 0.114, 0.157, 0.97],
+    chip: [0.161, 0.180, 0.259, 1.0],
+    field: [0.161, 0.180, 0.259, 1.0],
+    track: [1.0, 1.0, 1.0, 0.09],
+    slider_track: [0.253, 0.278, 0.400, 0.9],
+    scrim: [0.035, 0.037, 0.055, 0.64],
+    lock_backdrop: [0.063, 0.065, 0.094, 1.0],
+    shadow: [0.0, 0.0, 0.02, 0.58],
+    shadow_spread_scale: 1.0,
+    ring_alpha: 0.55,
+    panel_ring_alpha: 0.95,
+    ring_width: 1.0,
+    selection_alpha: 0.26,
+
+    title_ink: [192, 202, 245, 255],
+    chip_ink: [154, 165, 206, 255],
+    label_ink: [139, 148, 189, 255],
+    value_ink: [205, 214, 250, 255],
+    panel_title_ink: [192, 202, 245, 255],
+    query_ink: [212, 220, 252, 255],
+    item_ink: [169, 177, 214, 255],
+    hint_ink: [108, 117, 160, 255],
+    osd_ink: [205, 214, 250, 255],
+    card_radius: 16.0,
+    chip_radius: 9.0,
+    panel_radius: 18.0,
+    toast_radius: 14.0,
+    osd_radius: 18.0,
+    pad: 18.0,
+    gap: 12.0,
+    gutter: 18.0,
+    meter_h: 4.0,
+};
+
+/// Flat light material: warm off-white opaque cards with dark ink. The one
+/// theme for people who want a light UI without the blur chain the glass
+/// themes keep alive. Shadows are soft and slightly warm — a hard black
+/// elevation shadow looks punched-out on a light ground.
+pub(crate) const PAPER: UiPalette = UiPalette {
+    glass: None,
+
+    card: [0.976, 0.973, 0.965, 0.97],
+    panel: [0.984, 0.982, 0.976, 0.99],
+    toast: [0.976, 0.973, 0.965, 0.97],
+    osd: [0.976, 0.973, 0.965, 0.97],
+    // Raised controls recess slightly instead of lightening: there is no
+    // headroom above an off-white card.
+    chip: [0.922, 0.918, 0.906, 1.0],
+    field: [0.929, 0.925, 0.914, 1.0],
+    track: [0.0, 0.0, 0.0, 0.10],
+    slider_track: [0.0, 0.0, 0.0, 0.14],
+    scrim: [0.20, 0.20, 0.22, 0.30],
+    lock_backdrop: [0.906, 0.902, 0.890, 1.0],
+    shadow: [0.15, 0.14, 0.12, 0.30],
+    shadow_spread_scale: 1.2,
+    ring_alpha: 0.45,
+    panel_ring_alpha: 0.8,
+    ring_width: 1.0,
+    // An accent wash has to work harder on a light surface, as in [`GLASS`].
+    selection_alpha: 0.32,
+
+    title_ink: [28, 27, 24, 255],
+    chip_ink: [92, 90, 84, 255],
+    label_ink: [108, 106, 100, 255],
+    value_ink: [22, 21, 18, 255],
+    panel_title_ink: [26, 25, 22, 255],
+    query_ink: [16, 15, 12, 255],
+    item_ink: [36, 35, 30, 255],
+    hint_ink: [122, 120, 112, 255],
+    osd_ink: [22, 21, 18, 255],
+    card_radius: 14.0,
+    chip_radius: 8.0,
+    panel_radius: 16.0,
+    toast_radius: 12.0,
+    osd_radius: 16.0,
+    pad: 18.0,
+    gap: 12.0,
+    gutter: 18.0,
+    meter_h: 4.0,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,21 +636,30 @@ mod tests {
         assert_eq!(UiTheme::from_config("  Glass "), UiTheme::Glass);
         assert_eq!(UiTheme::from_config("Glass-Dark"), UiTheme::GlassDark);
         assert_eq!(UiTheme::from_config("MATERIAL"), UiTheme::Material);
-        // Anything unrecognized keeps the historical look.
-        assert_eq!(UiTheme::from_config("neumorphic"), UiTheme::Material);
-        assert_eq!(UiTheme::from_config(""), UiTheme::Material);
+        assert_eq!(UiTheme::from_config("Aurora"), UiTheme::Aurora);
+        assert_eq!(UiTheme::from_config("Nord"), UiTheme::Nord);
+        assert_eq!(UiTheme::from_config("Tokyo-Night"), UiTheme::TokyoNight);
+        assert_eq!(UiTheme::from_config("tokyonight"), UiTheme::TokyoNight);
+        assert_eq!(UiTheme::from_config("Paper"), UiTheme::Paper);
+        // Anything unrecognized falls back to the default look.
+        assert_eq!(UiTheme::from_config("neumorphic"), UiTheme::Glass);
+        assert_eq!(UiTheme::from_config(""), UiTheme::Glass);
     }
 
     #[test]
     fn only_glass_wants_a_backdrop_capture() {
         assert!(UiTheme::Glass.needs_backdrop());
         assert!(UiTheme::GlassDark.needs_backdrop());
+        assert!(UiTheme::Aurora.needs_backdrop());
         assert!(!UiTheme::Material.needs_backdrop());
+        assert!(!UiTheme::Nord.needs_backdrop());
+        assert!(!UiTheme::TokyoNight.needs_backdrop());
+        assert!(!UiTheme::Paper.needs_backdrop());
     }
 
     #[test]
     fn glass_surfaces_stay_translucent_enough_to_see_through() {
-        for theme in [UiTheme::Glass, UiTheme::GlassDark] {
+        for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
             let glass = theme.palette();
             for tint in [glass.card, glass.panel, glass.toast, glass.osd] {
                 assert!(
@@ -436,9 +669,22 @@ mod tests {
                 );
             }
         }
-        // Material is the opposite contract: the surface must hide what's under it.
-        let material = UiTheme::Material.palette();
-        assert!(material.card[3] > 0.9);
+        // The flat themes are the opposite contract: the surface must hide
+        // what's under it.
+        for theme in [
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            let flat = theme.palette();
+            assert!(flat.glass.is_none(), "{theme:?} must not ask for a backdrop");
+            assert!(
+                flat.card[3] > 0.9,
+                "{theme:?}: a flat card at {} would show through",
+                flat.card[3]
+            );
+        }
     }
 
     /// Relative luminance, the WCAG way, for an 8-bit ink.
@@ -485,7 +731,7 @@ mod tests {
     /// material from a plain backdrop blur.
     #[test]
     fn glass_variants_share_the_apple_optics() {
-        for theme in [UiTheme::Glass, UiTheme::GlassDark] {
+        for theme in [UiTheme::Glass, UiTheme::GlassDark, UiTheme::Aurora] {
             let params = theme
                 .palette()
                 .glass
@@ -501,9 +747,29 @@ mod tests {
             );
             assert!(params.rim_intensity > 0.0);
         }
-        // The light sheet lifts what is behind it; the dark one absorbs first.
+        // The light sheet lifts what is behind it; the dark ones absorb first.
         assert!(GLASS.glass.unwrap().luminance > 1.0);
         assert!(GLASS_DARK.glass.unwrap().luminance < 1.0);
+        assert!(AURORA.glass.unwrap().luminance < 1.0);
+    }
+
+    /// The light flat theme carries the same obligation as the light glass:
+    /// dark ink over its lightest surface must clear body-text contrast.
+    #[test]
+    fn paper_holds_its_ink() {
+        let paper = UiTheme::Paper.palette();
+        let surface = relative_luminance([
+            (paper.panel[0] * 255.0) as u8,
+            (paper.panel[1] * 255.0) as u8,
+            (paper.panel[2] * 255.0) as u8,
+            255,
+        ]);
+        let ink = relative_luminance(paper.item_ink);
+        let contrast = (surface + 0.05) / (ink + 0.05);
+        assert!(
+            contrast >= 4.5,
+            "paper would leave body text at {contrast:.1}:1"
+        );
     }
 
     #[test]

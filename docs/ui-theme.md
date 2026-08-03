@@ -7,23 +7,21 @@ share one palette, chosen by `appearance.ui_theme`:
 
 ```toml
 [appearance]
-# "material" (default), "glass", or "glass-dark"
+# "glass" (default), "glass-dark", "aurora", "material", "nord",
+# "tokyo-night", or "paper"
 ui_theme = "glass"
 ```
 
 The setting only touches JWM's own overlays. Client windows keep their own
 corner radius, shadow, border and per-window frost settings.
 
-## The themes
+The themes split into two families: three **glass** themes that sample a
+blurred copy of the desktop behind each card, and four **flat** themes that
+draw opaque fills, differing only in palette.
 
-### `material` — elevated surfaces
+## The glass themes
 
-The original look, unchanged: near-opaque dark cards on the 8dp grid, lifted
-off the desktop by a drop shadow, with an accent ring picked up from the
-focused window's border gradient. It reads clearly against any wallpaper and
-costs nothing beyond the fills it draws.
-
-### `glass` — Apple frosted glass (毛玻璃)
+### `glass` — Apple frosted glass (毛玻璃), the default
 
 The light material iOS and macOS use for folders, sheets and Control Center.
 Each card samples a Kawase-blurred copy of whatever is behind it and *lifts*
@@ -52,12 +50,47 @@ macOS's dark vibrancy rather than iOS's light sheet: identical geometry,
 refraction and rim, but a dark veil with light inks. Use it when a light UI
 would clash with the rest of your desktop.
 
-The lock card is the one exception in both glass themes. It hides the desktop
-on purpose, so it draws solid.
+### `aurora` — tinted glass
+
+The same pane again, but the veil is a deep indigo and the rim catches an
+aurora teal, so the panels read as *colored* glass rather than smoked glass.
+Saturation on the backdrop is pushed harder — a tinted pane is allowed to
+enrich the desktop it shows — and the shadow carries a violet cast.
+
+The lock card is the one exception in all three glass themes. It hides the
+desktop on purpose, so it draws solid.
+
+## The flat themes
+
+None of these need the blur chain; they draw opaque fills, cast a drop
+shadow, and pick up an accent ring from the focused window's border gradient.
+
+### `material` — elevated surfaces
+
+The original look, unchanged: near-opaque dark cards on the 8dp grid. It
+reads clearly against any wallpaper and costs nothing beyond the fills it
+draws.
+
+### `nord` — Polar Night
+
+Material's geometry retoned into the [Nord](https://www.nordtheme.com/)
+palette: Polar Night surfaces under Snow Storm inks. Cooler and a step
+lighter than Material.
+
+### `tokyo-night` — indigo ground
+
+The Tokyo Night editor theme's near-black indigo ground under its periwinkle
+foreground. Darker than Nord, cooler than Material.
+
+### `paper` — light, no blur
+
+Warm off-white opaque cards with dark ink and a soft, slightly warm shadow —
+a light UI for machines or drivers where keeping the glass themes' blur chain
+alive is unwanted.
 
 ## Requirements and fallback
 
-Both glass themes need the compositor's blur FBO chain. JWM keeps that chain alive
+The glass themes need the compositor's blur FBO chain. JWM keeps that chain alive
 whenever the theme asks for it, so `behavior.blur_enabled` does **not** have to
 be on — turning it on additionally frosts individual client windows, which is a
 separate feature.
@@ -87,7 +120,7 @@ no restart, no relaunch of the overlays.
 ## Where it lives
 
 `src/backend/compositor_common/ui_theme.rs` holds `UiTheme`, the `UiPalette`
-struct and the two palettes. Both compositors read tones, metrics and glass
+struct and every palette. Both compositors read tones, metrics and glass
 parameters from there, so the X11 and Wayland backends cannot drift apart; each
 one only owns its GL calls (`GLASS_FRAGMENT_SHADER` in its own `shaders.rs`,
 plus the backdrop capture against its own framebuffer).
