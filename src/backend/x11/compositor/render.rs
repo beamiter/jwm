@@ -2948,7 +2948,8 @@ impl<C: CompositorConnection> Compositor<C> {
             .delta(std::time::Instant::now(), incremental_effects_active);
 
         // Tick fade animations
-        let fades_active = self.tick_fades(effect_dt);
+        let fade_tick = self.tick_fades(effect_dt);
+        let fades_active = fade_tick.any;
 
         // Tick wobbly spring physics
         let wobbly_active = self.tick_wobbly();
@@ -3929,11 +3930,15 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        // Phase 2.2: Auto blur quality downgrade during animations/transitions
+        // Phase 2.2: Auto blur quality downgrade during animations/transitions.
+        // Only fades on managed clients count: an override-redirect overlay
+        // (fcitx5's candidate list, menus, tooltips) fading on every keystroke
+        // must not pump every frosted client between Full and Reduced blur —
+        // the same rule that keeps IME popups out of the smart-border count.
         if self.blur_quality_auto {
             self.blur_quality = if self.transition_active() || self.overview_active {
                 BlurQuality::Minimal
-            } else if fades_active || wobbly_active {
+            } else if fade_tick.on_clients || wobbly_active {
                 BlurQuality::Reduced
             } else {
                 BlurQuality::Full

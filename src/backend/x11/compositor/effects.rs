@@ -44,6 +44,31 @@ impl EffectTickClock {
     }
 }
 
+/// Per-frame result of `tick_fades`.
+///
+/// `any` keeps the render loop pacing frames while anything is still fading —
+/// every animated pixel needs a redraw, whoever owns it. `on_clients` only
+/// reports animation on windows the WM manages: override-redirect overlays
+/// (fcitx5's candidate list and input-method switcher, menus, tooltips, drag
+/// icons) fade in and out on every keystroke, and letting those fades feed
+/// the adaptive blur-quality downgrade made every frosted client visibly pump
+/// between Full and Reduced blur for as long as a user typed Chinese.
+#[derive(Clone, Copy, Default)]
+pub(super) struct FadeTick {
+    pub(super) any: bool,
+    pub(super) on_clients: bool,
+}
+
+impl FadeTick {
+    /// Fold one animating window into the frame-wide flags.
+    pub(super) fn record(&mut self, is_override_redirect: bool) {
+        self.any = true;
+        if !is_override_redirect {
+            self.on_clients = true;
+        }
+    }
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(super) fn incremental_effects_active(&self) -> bool {
         (!self.particle_systems.is_empty() && self.particle_effects)
@@ -232,13 +257,15 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
-    /// Advance fade animations. Returns true if any fades are still in progress.
-    pub(super) fn tick_fades(&mut self, dt: f32) -> bool {
+    /// Advance fade animations.
+    pub(super) fn tick_fades(&mut self, dt: f32) -> FadeTick {
         let frame_scale = sanitize_animation_dt(dt) * 60.0;
-        let mut any_active = false;
+        let mut tick = FadeTick::default();
         let mut to_remove = Vec::new();
 
         for (&win, wt) in self.windows.iter_mut() {
+            let mut window_active = false;
+
             // Fade animation
             if self.fading {
                 if wt.fading_out {
@@ -247,14 +274,14 @@ impl<C: CompositorConnection> Compositor<C> {
                         wt.fade_opacity = 0.0;
                         to_remove.push(win);
                     } else {
-                        any_active = true;
+                        window_active = true;
                     }
                 } else if wt.fade_opacity < 1.0 {
                     wt.fade_opacity += self.fade_in_step * frame_scale;
                     if wt.fade_opacity >= 1.0 {
                         wt.fade_opacity = 1.0;
                     } else {
-                        any_active = true;
+                        window_active = true;
                     }
                 }
             }
@@ -275,9 +302,13 @@ impl<C: CompositorConnection> Compositor<C> {
                     {
                         wt.anim_scale = wt.anim_scale_target;
                     } else {
-                        any_active = true;
+                        window_active = true;
                     }
                 }
+            }
+
+            if window_active {
+                tick.record(wt.is_override_redirect);
             }
         }
 
@@ -285,7 +316,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.remove_window_immediate(win);
         }
 
-        any_active
+        tick
     }
 
     // =================================================================
@@ -484,8 +515,26 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::EffectTickClock;
+    use super::{EffectTickClock, FadeTick};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn ime_popup_fades_do_not_count_as_client_fades() {
+        // fcitx5's candidate list fading on every keystroke keeps the render
+        // loop pacing frames (`any`) but must not feed the adaptive blur
+        // downgrade (`on_clients`), or a lone frosted client pumps between
+        // Full and Reduced blur the whole time a user types Chinese.
+        let mut tick = FadeTick::default();
+        assert!(!tick.any && !tick.on_clients);
+
+        tick.record(true); // override-redirect IME popup
+        assert!(tick.any);
+        assert!(!tick.on_clients);
+
+        tick.record(false); // managed client
+        assert!(tick.any);
+        assert!(tick.on_clients);
+    }
 
     #[test]
     fn idle_time_is_not_applied_to_a_new_effect() {
