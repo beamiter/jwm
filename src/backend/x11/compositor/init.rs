@@ -16,6 +16,26 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+/// Vertex stage of the stand-in bound in place of an effect whose shader would
+/// not compile. Every vertex lands on the same clip-space point, so whatever
+/// primitive the draw site asked for has zero area and never reaches the
+/// rasteriser. It declares no attributes; the ones the call site enabled are
+/// simply left unread.
+pub(crate) const DISABLED_EFFECT_VERTEX: &str = r#"#version 330 core
+void main() {
+    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+"#;
+
+/// Fragment stage of that stand-in — unreachable given the degenerate geometry
+/// above, and a discard if some driver shades it anyway.
+pub(crate) const DISABLED_EFFECT_FRAGMENT: &str = r#"#version 330 core
+out vec4 frag_color;
+void main() {
+    discard;
+}
+"#;
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn new(
         conn: Arc<C>,
@@ -276,7 +296,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // WaterLily is a separate, input-transparent compositor layer. Keeping
         // it out of the post-process shader prevents its dimensions and updates
         // from changing how client windows are sampled or color processed.
-        let waterlily_program = shader_cache.get_or_compile(
+        let waterlily_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "waterlily_layer",
             shaders::VERTEX_SHADER,
@@ -297,7 +318,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // Volumetric WaterLily frames (a true 3D solve such as the jellyfish
         // smack) ray-march through a perspective camera instead of stretching
         // a pre-projected quad.
-        let waterlily_volume_program = shader_cache.get_or_compile(
+        let waterlily_volume_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "waterlily_volume",
             shaders::VERTEX_SHADER,
@@ -330,7 +352,8 @@ impl<C: CompositorConnection> Compositor<C> {
         // Compile the frosted-glass surface shader used by the self-drawn
         // panels under `appearance.ui_theme = "glass"`. Compiled unconditionally
         // so switching themes at runtime never has to touch the GL context.
-        let glass_program = shader_cache.get_or_compile(
+        let glass_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "glass_surface",
             shaders::VERTEX_SHADER,
@@ -362,7 +385,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile HUD shader (feature 11)
-        let hud_program = shader_cache.get_or_compile(
+        let hud_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "hud",
             shaders::VERTEX_SHADER,
@@ -378,7 +402,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile HUD text shader (feature 11b)
-        let hud_text_program = shader_cache.get_or_compile(
+        let hud_text_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "hud_text",
             shaders::VERTEX_SHADER,
@@ -393,7 +418,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        let annotation_line_program = shader_cache.get_or_compile(
+        let annotation_line_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "annotation_line",
             shaders::LINE_VERTEX_SHADER,
@@ -407,7 +433,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile tag-switch transition shader
-        let transition_program = shader_cache.get_or_compile(
+        let transition_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "transition",
             shaders::BLUR_DOWN_VERTEX,
@@ -424,7 +451,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile portal transition shader
-        let portal_program = shader_cache.get_or_compile(
+        let portal_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "portal",
             shaders::BLUR_DOWN_VERTEX,
@@ -443,7 +471,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile edge glow shader
-        let edge_glow_program = shader_cache.get_or_compile(
+        let edge_glow_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "edge_glow",
             shaders::VERTEX_SHADER,
@@ -462,7 +491,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile tilt shader (uses tilt vertex + tilt fragment)
-        let tilt_program = shader_cache.get_or_compile(
+        let tilt_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "tilt",
             shaders::TILT_VERTEX_SHADER,
@@ -486,7 +516,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile wobbly shader (uses wobbly vertex + standard fragment)
-        let wobbly_program = shader_cache.get_or_compile(
+        let wobbly_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "wobbly",
             shaders::WOBBLY_VERTEX_SHADER,
@@ -508,7 +539,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile overview background shader
-        let overview_bg_program = shader_cache.get_or_compile(
+        let overview_bg_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "overview_bg",
             shaders::VERTEX_SHADER,
@@ -528,7 +560,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // Compile the prism shaders shared by the overview and the cube
         // transition: lit faces and polygon caps.
-        let overview_face_program = shader_cache.get_or_compile(
+        let overview_face_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "overview_face",
             shaders::OVERVIEW_FACE_VERTEX_SHADER,
@@ -553,7 +586,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        let overview_cap_program = shader_cache.get_or_compile(
+        let overview_cap_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "overview_cap",
             shaders::OVERVIEW_CAP_VERTEX_SHADER,
@@ -573,7 +607,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Compile particle shader
-        let particle_program = shader_cache.get_or_compile(
+        let particle_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "particle",
             shaders::PARTICLE_VERTEX_SHADER,
@@ -620,7 +655,8 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         // Phase 3.2: Compile genie minimize shader
-        let genie_program = shader_cache.get_or_compile(
+        let genie_program = Self::optional_program(
+            &shader_cache,
             &gl,
             "genie",
             shaders::GENIE_VERTEX_SHADER,
@@ -1300,12 +1336,60 @@ impl<C: CompositorConnection> Compositor<C> {
         })
     }
 
+    /// Compile one effect's program, degrading to a stand-in that draws nothing
+    /// rather than failing compositor start-up.
+    ///
+    /// The base composite pass — window, shadow, blur, border, post-process —
+    /// is load-bearing: if one of those will not compile there is nothing to
+    /// fall back to and `new` returns `Err`. Everything after it is a single
+    /// effect, and losing one should cost that effect, not the desktop. That
+    /// distinction is not hypothetical: a `sampler3D` precision error in the
+    /// volumetric WaterLily shader, reachable only on EGL/GLES3, used to take
+    /// the whole compositor down to non-composited mode — no rounded corners,
+    /// no shadows, no blur — over a jellyfish.
+    ///
+    /// The stand-in collapses every vertex onto a single point, so its
+    /// primitives have no area and nothing rasterises; the fragment stage
+    /// discards as a second guard. Draw sites therefore need no special
+    /// handling: they bind it, write uniforms into absent locations (a no-op in
+    /// glow), issue their draw, and leave GL state as balanced as always. Each
+    /// disabled effect gets its own stand-in rather than sharing one, so live
+    /// shader reload and `Drop` can delete a program without touching another
+    /// effect's.
+    fn optional_program(
+        shader_cache: &ShaderCache,
+        gl: &glow::Context,
+        name: &str,
+        vert: &str,
+        frag: &str,
+    ) -> Result<glow::Program, String> {
+        match shader_cache.get_or_compile(gl, name, vert, frag) {
+            Ok(program) => Ok(program),
+            Err(e) => {
+                log::warn!("compositor: effect '{name}' disabled, shader failed to compile: {e}");
+                unsafe {
+                    Self::create_program(gl, DISABLED_EFFECT_VERTEX, DISABLED_EFFECT_FRAGMENT)
+                }
+                .map_err(|e| format!("stand-in program for disabled effect '{name}': {e}"))
+            }
+        }
+    }
+
     pub(crate) unsafe fn create_program(
         gl: &glow::Context,
         vs_src: &str,
         fs_src: &str,
     ) -> Result<glow::Program, String> {
         unsafe {
+            // The shader set is authored as desktop `#version 330 core`, but the
+            // compositor also runs on EGL/GLES3. Apply the same ESSL rewrite
+            // `ShaderCache` does, so this path (live shader reload) is not the
+            // one place that hands raw desktop GLSL to a GLES driver.
+            let is_gles = gl.get_parameter_string(glow::VERSION).contains("OpenGL ES");
+            let vs_src = ShaderCache::prepare_source(vs_src, is_gles);
+            let fs_src = ShaderCache::prepare_source(fs_src, is_gles);
+            let (vs_src, fs_src) = (vs_src.as_ref(), fs_src.as_ref());
+
             let vs = gl
                 .create_shader(glow::VERTEX_SHADER)
                 .map_err(|e| format!("create vs: {e}"))?;

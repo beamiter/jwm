@@ -40,7 +40,18 @@ impl ShaderCache {
         hasher.finish()
     }
 
-    fn prepare_source(source: &str, is_gles: bool) -> Cow<'_, str> {
+    /// Rewrite a desktop `#version 330 core` source into ESSL 3.00 for the
+    /// EGL/GLES3 path.
+    ///
+    /// ESSL has no default precision for `float`, and none at all for the
+    /// sampler types outside `sampler2D`/`samplerCube` (which default to
+    /// `lowp`) — a declaration without one is a compile error, which is why
+    /// every sampler type the shader set uses gets an explicit default here.
+    /// `sampler2D` is pinned to `highp` rather than left at the spec's `lowp`
+    /// default because the compositor samples full-screen window textures,
+    /// where low-precision coordinates would be visible on any GPU that
+    /// honours the qualifier.
+    pub(crate) fn prepare_source(source: &str, is_gles: bool) -> Cow<'_, str> {
         if !is_gles {
             return Cow::Borrowed(source);
         }
@@ -50,7 +61,12 @@ impl ShaderCache {
             .and_then(|rest| rest.split_once('\n').map(|(_, body)| body))
             .unwrap_or(source);
         Cow::Owned(format!(
-            "#version 300 es\nprecision highp float;\nprecision highp int;\n{body}"
+            "#version 300 es\n\
+             precision highp float;\n\
+             precision highp int;\n\
+             precision highp sampler2D;\n\
+             precision highp sampler3D;\n\
+             {body}"
         ))
     }
 
@@ -314,6 +330,17 @@ mod tests {
         assert!(rewritten.starts_with("#version 300 es\n"));
         assert!(rewritten.contains("precision highp float;"));
         assert!(!rewritten.contains("330 core"));
+    }
+
+    /// ESSL 3.00 defines no default precision for `sampler3D`, so the volume
+    /// ray-marcher's `uniform sampler3D` declarations fail to compile unless
+    /// the rewrite supplies one.
+    #[test]
+    fn gles_source_declares_sampler_precision() {
+        let source = "#version 330 core\nuniform sampler3D u_volume;\n";
+        let rewritten = ShaderCache::prepare_source(source, true);
+        assert!(rewritten.contains("precision highp sampler2D;"));
+        assert!(rewritten.contains("precision highp sampler3D;"));
     }
 
     #[test]

@@ -918,7 +918,11 @@ fn x11_shaders() -> Vec<(&'static str, Stage, &'static str)> {
     ]
 }
 
-fn assert_all_compile(api: GlApi, what: &str, shaders: Vec<(&'static str, Stage, &'static str)>) {
+fn assert_all_compile<N: AsRef<str>, S: AsRef<str>>(
+    api: GlApi,
+    what: &str,
+    shaders: Vec<(N, Stage, S)>,
+) {
     let Some(h) = HeadlessGl::new(api) else {
         eprintln!("headless GL unavailable - skipping {what}");
         return;
@@ -927,8 +931,8 @@ fn assert_all_compile(api: GlApi, what: &str, shaders: Vec<(&'static str, Stage,
 
     let mut failures = Vec::new();
     for (name, stage, src) in shaders {
-        if let Err(log) = compile(gl, stage, src) {
-            failures.push(format!("{name}:\n{log}"));
+        if let Err(log) = compile(gl, stage, src.as_ref()) {
+            failures.push(format!("{}:\n{log}", name.as_ref()));
         }
     }
     assert!(
@@ -949,6 +953,70 @@ fn wayland_shaders_compile() {
 #[test]
 fn x11_shaders_compile() {
     assert_all_compile(GlApi::GlCore33, "x11_shaders_compile", x11_shaders());
+}
+
+/// The X11 compositor does not always get a desktop-GL context: on an EGL
+/// platform it reports `graphics API=egl/gles3` and `ShaderCache` rewrites the
+/// `#version 330 core` sources into ESSL 3.00 on the fly. ESSL is the stricter
+/// dialect (mandatory precision qualifiers, no implicit int/float conversions),
+/// so `x11_shaders_compile` passing says nothing about that path — compile the
+/// rewritten form the GLES path actually feeds the driver. A failure here takes
+/// the whole compositor down, not just the offending effect, because
+/// `Compositor::new` compiles every program up front.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn x11_shaders_compile_as_gles() {
+    use crate::backend::x11::compositor::ShaderCache;
+
+    let rewritten: Vec<(&'static str, Stage, String)> = x11_shaders()
+        .into_iter()
+        .map(|(name, stage, src)| {
+            (
+                name,
+                stage,
+                ShaderCache::prepare_source(src, true).into_owned(),
+            )
+        })
+        .collect();
+    assert_all_compile(GlApi::Gles3, "x11_shaders_compile_as_gles", rewritten);
+}
+
+/// When an effect's shader will not compile, `Compositor::optional_program`
+/// keeps the compositor alive by binding a stand-in program in its place. Draw
+/// sites are unaware of the substitution — they bind it and issue their draw
+/// exactly as before — so the stand-in has to rasterise nothing at all, or a
+/// disabled effect would paint garbage over the desktop instead of vanishing.
+/// Check that on both context flavours the X11 compositor can be handed, since
+/// the ESSL rewrite applies to the stand-in too.
+#[cfg(feature = "x11-backends")]
+#[test]
+fn disabled_effect_stand_in_draws_nothing() {
+    use crate::backend::x11::compositor::ShaderCache;
+    use crate::backend::x11::compositor::init::{DISABLED_EFFECT_FRAGMENT, DISABLED_EFFECT_VERTEX};
+
+    for (api, label) in [(GlApi::GlCore33, "gl33"), (GlApi::Gles3, "gles3")] {
+        let Some(h) = HeadlessGl::new(api) else {
+            eprintln!("headless GL unavailable - skipping disabled_effect_stand_in ({label})");
+            continue;
+        };
+        let is_gles = matches!(api, GlApi::Gles3);
+        let vs = ShaderCache::prepare_source(DISABLED_EFFECT_VERTEX, is_gles).into_owned();
+        let fs = ShaderCache::prepare_source(DISABLED_EFFECT_FRAGMENT, is_gles).into_owned();
+        let prog = link(&h.gl, &vs, &fs)
+            .unwrap_or_else(|e| panic!("stand-in program failed to build on {label}: {e}"));
+
+        // Opaque red input, so a stand-in that did rasterise would be obvious
+        // against the black clear `render_quad_frame` starts from.
+        let frame = render_quad_frame(&h.gl, prog, [255, 0, 0, 255], 8, 8, |_| {});
+        let touched = frame
+            .chunks_exact(4)
+            .filter(|p| *p != [0, 0, 0, 255])
+            .count();
+        assert_eq!(
+            touched, 0,
+            "stand-in program shaded {touched} pixel(s) on {label}; it must draw nothing"
+        );
+    }
 }
 
 #[cfg(feature = "x11-backends")]

@@ -140,7 +140,7 @@ pub(crate) mod wobbly {
 mod config;
 mod event_apply;
 mod features;
-mod init;
+pub(crate) mod init;
 mod render;
 mod rules;
 mod wallpaper;
