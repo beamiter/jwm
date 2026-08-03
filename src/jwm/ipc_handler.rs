@@ -233,7 +233,7 @@ fn parse_required_i32_ipc_arg(
 }
 
 fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u32) {
-    let current_layout = || format!("{:?}", *mon.lt[mon.sel_lt]);
+    let current_layout = || format!("{:?}", *mon.lt);
     let Some(pertag_index) = tag_index.checked_add(1) else {
         return (current_layout(), mon.layout.m_fact, mon.layout.n_master);
     };
@@ -242,10 +242,8 @@ fn workspace_layout_state(mon: &WMMonitor, tag_index: usize) -> (String, f32, u3
     };
 
     let layout = pertag
-        .sel_lts
+        .lts
         .get(pertag_index)
-        .and_then(|&selected| pertag.lt_idxs.get(pertag_index)?.get(selected))
-        .and_then(Option::as_ref)
         .map_or_else(current_layout, |layout| format!("{:?}", **layout));
     let m_fact = pertag
         .m_facts
@@ -2299,7 +2297,7 @@ impl Jwm {
                     w: m.geometry.m_w,
                     h: m.geometry.m_h,
                     active_tags: m.get_active_tags(),
-                    layout: format!("{:?}", *m.lt[m.sel_lt]),
+                    layout: format!("{:?}", *m.lt),
                     focused: self.state.sel_mon == Some(mk),
                 })
             })
@@ -2314,7 +2312,7 @@ impl Jwm {
             .iter()
             .filter_map(|&mk| {
                 let mon = self.state.monitors.get(mk)?;
-                let layout = &*mon.lt[mon.sel_lt];
+                let layout = &*mon.lt;
                 let active_tags = mon.get_active_tags();
                 let state_key = self.scrolling_state_key(mk);
                 let state = self.scrolling_state_for_monitor(mk);
@@ -2614,7 +2612,7 @@ impl Jwm {
                         w: m.geometry.m_w,
                         h: m.geometry.m_h,
                         active_tags: m.get_active_tags(),
-                        layout: format!("{:?}", *m.lt[m.sel_lt]),
+                        layout: format!("{:?}", *m.lt),
                         focused: self.state.sel_mon == Some(mk),
                     },
                     windows,
@@ -2864,12 +2862,10 @@ mod tests {
         pertag.n_masters[0] = 9;
         pertag.m_facts[1] = 0.61;
         pertag.n_masters[1] = 2;
-        pertag.sel_lts[1] = 1;
-        pertag.lt_idxs[1][1] = Some(Rc::new(LayoutEnum::MONOCLE));
+        pertag.lts[1] = Rc::new(LayoutEnum::MONOCLE);
         pertag.m_facts[2] = 0.72;
         pertag.n_masters[2] = 3;
-        pertag.sel_lts[2] = 0;
-        pertag.lt_idxs[2][0] = Some(Rc::new(LayoutEnum::GRID));
+        pertag.lts[2] = Rc::new(LayoutEnum::GRID);
         monitor.pertag = Some(pertag);
 
         assert_eq!(
@@ -2885,7 +2881,7 @@ mod tests {
     #[test]
     fn workspace_layout_state_falls_back_without_safe_pertag_data() {
         let mut monitor = WMMonitor::new();
-        monitor.sel_lt = 1;
+        monitor.lt = Rc::new(LayoutEnum::TILE);
         monitor.layout.m_fact = 0.66;
         monitor.layout.n_master = 4;
         let current = (format!("{:?}", LayoutEnum::TILE), 0.66, 4);

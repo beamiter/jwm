@@ -741,7 +741,7 @@ impl Jwm {
     ) -> Result<Option<ClientKey>, Box<dyn std::error::Error>> {
         let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
-        let (n_master, m_fact, sel_lt, layout_0, layout_1, sel_client_key) = {
+        let (n_master, m_fact, layout, prev_layout, sel_client_key) = {
             let monitor = self
                 .state
                 .monitors
@@ -753,17 +753,11 @@ impl Jwm {
                 .as_ref()
                 .ok_or("No pertag information available")?;
 
-            let sel_lt = pertag.sel_lts[cur_tag];
             (
                 pertag.n_masters[cur_tag],
                 pertag.m_facts[cur_tag],
-                sel_lt,
-                pertag.lt_idxs[cur_tag][sel_lt]
-                    .clone()
-                    .ok_or("Layout not found")?,
-                pertag.lt_idxs[cur_tag][sel_lt ^ 1]
-                    .clone()
-                    .ok_or("Alternative layout not found")?,
+                pertag.lts[cur_tag].clone(),
+                pertag.prev_lts[cur_tag].clone(),
                 pertag.sel[cur_tag],
             )
         };
@@ -771,9 +765,8 @@ impl Jwm {
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
             monitor.layout.n_master = n_master;
             monitor.layout.m_fact = m_fact;
-            monitor.sel_lt = sel_lt;
-            monitor.lt[sel_lt] = layout_0;
-            monitor.lt[sel_lt ^ 1] = layout_1;
+            monitor.lt = layout;
+            monitor.prev_lt = prev_layout;
         } else {
             return Err("Monitor disappeared during operation".into());
         }

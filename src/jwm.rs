@@ -325,6 +325,8 @@ impl Jwm {
             "zoom"
         } else if eq!(Jwm::setlayout) {
             "setlayout"
+        } else if eq!(Jwm::lastlayout) {
+            "lastlayout"
         } else if eq!(Jwm::layout_picker) {
             "layout_picker"
         } else if eq!(Jwm::togglefloating) {
@@ -1295,9 +1297,9 @@ impl Jwm {
                 },
                 "setlayout" => match &kc.argument {
                     crate::config::ArgumentConfig::String(s) => format!("layout: {}", s),
-                    crate::config::ArgumentConfig::UInt(_) => "toggle layout".to_string(),
-                    _ => "setlayout".to_string(),
+                    _ => "previous layout".to_string(),
                 },
+                "lastlayout" => "previous layout".to_string(),
                 "focusstack" => match &kc.argument {
                     crate::config::ArgumentConfig::Int(i) => {
                         if *i > 0 {

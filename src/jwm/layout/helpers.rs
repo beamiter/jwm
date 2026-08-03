@@ -451,7 +451,7 @@ impl Jwm {
             .sel_mon
             .and_then(|mon_key| {
                 let monitor = self.state.monitors.get(mon_key)?;
-                if *monitor.lt[monitor.sel_lt] != LayoutEnum::SCROLLING {
+                if *monitor.lt != LayoutEnum::SCROLLING {
                     return None;
                 }
                 let visible = self

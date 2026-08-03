@@ -103,6 +103,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "focusstack",
         "incnmaster",
         "killclient",
+        "lastlayout",
         "lock_screen",
         "loopview",
         "media_next",
@@ -480,6 +481,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             let layout = parse_layout_arg(args)?;
             Ok((Jwm::setlayout, layout))
         }
+        "lastlayout" => Ok((Jwm::lastlayout, parse_int_arg(args, 0)?)),
         "cyclelayout" => Ok((Jwm::cyclelayout, parse_int_arg(args, 1)?)),
         "layout_picker" => Ok((Jwm::layout_picker, parse_int_arg(args, 0)?)),
         "togglebar" => Ok((Jwm::togglebar, parse_int_arg(args, 0)?)),

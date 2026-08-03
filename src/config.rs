@@ -1329,10 +1329,9 @@ pub struct LayoutConfig {
 
 /// One tag's layout on one monitor.
 ///
-/// The `layout`/`alt` pair mirrors what a monitor actually holds: two layouts,
-/// with `Mod+space` toggling between them. `layout` is always the one in use,
-/// so a restart lands on it whichever half of the pair was selected when the
-/// entry was written.
+/// The `layout`/`alt` pair mirrors what a monitor actually holds: the layout
+/// in use and the one the tag was on before its last change, which is where
+/// `lastlayout` goes back to. A restart lands on `layout`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LayoutTagConfig {
     /// Tag number as the status bar shows it: 1 for the first tag. Index 0 is
@@ -1346,7 +1345,7 @@ pub struct LayoutTagConfig {
     /// An unknown name leaves the tag on the built-in default.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub layout: String,
-    /// The other half of the pair, reached with the layout toggle.
+    /// The layout in use before the last change, reached with `lastlayout`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub alt: String,
     /// Windows in the master area. Absent means the global `n_master`.
@@ -2173,6 +2172,12 @@ impl Config {
                 argument: ArgumentConfig::Int(-1),
             },
             KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "grave".to_string(),
+                function: "lastlayout".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "f".to_string(),
                 function: "setlayout".to_string(),
@@ -2816,6 +2821,7 @@ impl Config {
             "zoom" => Some(Jwm::zoom),
 
             "setlayout" => Some(Jwm::setlayout),
+            "lastlayout" => Some(Jwm::lastlayout),
             "togglefloating" => Some(Jwm::togglefloating),
             "togglebar" => Some(Jwm::togglebar),
             "setmfact" => Some(Jwm::setmfact),

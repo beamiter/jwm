@@ -25,7 +25,7 @@ impl Jwm {
             .state
             .monitors
             .get(mon_key)
-            .map(|monitor| *monitor.lt[monitor.sel_lt] == LayoutEnum::SCROLLING)
+            .map(|monitor| *monitor.lt == LayoutEnum::SCROLLING)
             .unwrap_or(false);
         if !is_scrolling || !self.is_client_visible_on_monitor(client_key, mon_key) {
             return;

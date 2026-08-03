@@ -11,8 +11,7 @@ impl Jwm {
         info!("[arrangemon]");
 
         let (layout_type, layout_symbol) = if let Some(monitor) = self.state.monitors.get(mon_key) {
-            let sel_lt = monitor.sel_lt;
-            let layout = &monitor.lt[sel_lt];
+            let layout = &monitor.lt;
             (layout.clone(), layout.symbol().to_string())
         } else {
             warn!("Monitor {:?} not found", mon_key);
@@ -21,10 +20,7 @@ impl Jwm {
 
         if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
             monitor.lt_symbol = layout_symbol;
-            info!(
-                "sel_lt: {}, ltsymbol: {:?}",
-                monitor.sel_lt, monitor.lt_symbol
-            );
+            info!("ltsymbol: {:?}", monitor.lt_symbol);
         }
 
         match *layout_type {
@@ -54,6 +50,13 @@ impl Jwm {
 
         for &mon_key in &monitors_to_process {
             self.showhide_monitor(backend, mon_key);
+        }
+
+        // show_bar is per-tag but the bar window is not: switching to a tag
+        // that hides it (the fullscreen layout, or a toggled-off bar) has to
+        // physically move the bar, not just stop reserving its pixels.
+        for &mon_key in &monitors_to_process {
+            self.sync_secondary_bar_position(backend, mon_key);
         }
 
         for &mon_key in &monitors_to_process {

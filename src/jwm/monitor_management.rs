@@ -24,24 +24,23 @@ impl Jwm {
         m.layout.m_fact = cfg.m_fact();
         m.layout.n_master = cfg.n_master();
         m.layout.gap = cfg.gap_px() as i32;
-        m.lt[0] = Rc::new(LayoutEnum::FIBONACCI);
-        m.lt[1] = Rc::new(LayoutEnum::TILE);
-        m.lt_symbol = m.lt[0].symbol().to_string();
+        m.lt = Rc::new(LayoutEnum::FIBONACCI);
+        m.prev_lt = Rc::new(LayoutEnum::TILE);
+        m.lt_symbol = m.lt.symbol().to_string();
         m.pertag = Some(Pertag::new(show_bar, cfg.tags_length()));
         // SAFETY: pertag was just set to Some on the line above
         let ref_pertag = m.pertag.as_mut().expect("pertag just initialized");
         ref_pertag.cur_tag = 1;
         ref_pertag.prev_tag = 1;
-        let default_layout_0 = m.lt[0].clone();
-        let default_layout_1 = m.lt[1].clone();
+        let default_lt = m.lt.clone();
+        let default_prev_lt = m.prev_lt.clone();
         for i in 0..=cfg.tags_length() {
             ref_pertag.n_masters[i] = m.layout.n_master;
             ref_pertag.m_facts[i] = m.layout.m_fact;
             ref_pertag.gaps[i] = m.layout.gap;
 
-            ref_pertag.lt_idxs[i][0] = Some(default_layout_0.clone());
-            ref_pertag.lt_idxs[i][1] = Some(default_layout_1.clone());
-            ref_pertag.sel_lts[i] = m.sel_lt;
+            ref_pertag.lts[i] = default_lt.clone();
+            ref_pertag.prev_lts[i] = default_prev_lt.clone();
         }
         // Saved per-tag layouts land on top of those defaults. The monitor is
         // appended by `insert_monitor`, so the index it will answer to is the

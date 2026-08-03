@@ -31,6 +31,14 @@ impl Jwm {
         if !CONFIG.load().behavior().window_tabs {
             return Vec::new();
         }
+        // The fullscreen layout hands the whole output to one window and takes
+        // the status bar down with it; the tab strip follows, or it would be
+        // the only chrome left floating over the fullscreen surface.
+        if let Some(monitor) = self.state.monitors.get(mon_key) {
+            if monitor.lt.is_fullscreen_layout() {
+                return Vec::new();
+            }
+        }
         let Some(client_keys) = self.state.monitor_clients.get(mon_key) else {
             return Vec::new();
         };

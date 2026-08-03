@@ -64,20 +64,18 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
         let Some(pertag) = monitor.pertag.as_mut() else {
             return;
         };
-        if pertag.lt_idxs.len() <= tag {
+        if pertag.lts.len() <= tag {
             continue;
         }
 
-        // The saved `layout` is whichever half of the pair was in use, so it
-        // is restored into slot 0 and selected. Which slot it came from is not
-        // worth keeping: the toggle reaches the other one either way.
         if let Some(layout) = LayoutEnum::from_name(&entry.layout) {
-            pertag.lt_idxs[tag][0] = Some(Rc::new(layout.clone()));
-            pertag.sel_lts[tag] = 0;
+            pertag.lts[tag] = Rc::new(layout.clone());
             restored += 1;
         }
-        if let Some(alt) = LayoutEnum::from_name(&entry.alt) {
-            pertag.lt_idxs[tag][1] = Some(Rc::new(alt.clone()));
+        // `alt` is the layout the tag was on before its last change, kept so
+        // `lastlayout` still has somewhere to go after a restart.
+        if let Some(prev) = LayoutEnum::from_name(&entry.alt) {
+            pertag.prev_lts[tag] = Rc::new(prev.clone());
         }
         if let Some(n_master) = entry.n_master {
             pertag.n_masters[tag] = n_master.min(MAX_N_MASTER);
@@ -177,21 +175,18 @@ impl Jwm {
                 continue;
             };
             for tag in 0..=tags_length {
-                let Some(pair) = pertag.lt_idxs.get(tag) else {
+                let Some(layout) = pertag.lts.get(tag) else {
                     continue;
-                };
-                let selected = pertag.sel_lts.get(tag).copied().unwrap_or(0).min(1);
-                let name = |slot: usize| {
-                    pair.get(slot)
-                        .and_then(|layout| layout.as_ref())
-                        .map(|layout| layout.0.to_owned())
-                        .unwrap_or_default()
                 };
                 entries.push(LayoutTagConfig {
                     tag,
                     monitor: index as i32,
-                    layout: name(selected),
-                    alt: name(selected ^ 1),
+                    layout: layout.0.to_owned(),
+                    alt: pertag
+                        .prev_lts
+                        .get(tag)
+                        .map(|prev| prev.0.to_owned())
+                        .unwrap_or_default(),
                     n_master: pertag.n_masters.get(tag).copied(),
                     m_fact: pertag.m_facts.get(tag).copied(),
                     gap: pertag.gaps.get(tag).copied(),
@@ -214,8 +209,8 @@ mod tests {
             pertag.cur_tag = 1;
             pertag.prev_tag = 1;
             for tag in 0..=tags {
-                pertag.lt_idxs[tag][0] = Some(Rc::new(LayoutEnum::FIBONACCI));
-                pertag.lt_idxs[tag][1] = Some(Rc::new(LayoutEnum::TILE));
+                pertag.lts[tag] = Rc::new(LayoutEnum::FIBONACCI);
+                pertag.prev_lts[tag] = Rc::new(LayoutEnum::TILE);
                 pertag.n_masters[tag] = 1;
                 pertag.m_facts[tag] = 0.55;
             }
@@ -252,12 +247,11 @@ mod tests {
         seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]));
 
         let pertag = monitor.pertag.as_ref().expect("pertag");
-        assert_eq!(pertag.lt_idxs[1][0].as_deref(), Some(&LayoutEnum::MONOCLE));
-        assert_eq!(pertag.lt_idxs[1][1].as_deref(), Some(&LayoutEnum::GRID));
-        assert_eq!(pertag.sel_lts[1], 0);
+        assert_eq!(*pertag.lts[1], LayoutEnum::MONOCLE);
+        assert_eq!(*pertag.prev_lts[1], LayoutEnum::GRID);
         // The monitor itself must show the restored tag, not the default it
         // was built with.
-        assert_eq!(*monitor.lt[monitor.sel_lt], LayoutEnum::MONOCLE);
+        assert_eq!(*monitor.lt, LayoutEnum::MONOCLE);
         assert_eq!(monitor.lt_symbol, LayoutEnum::MONOCLE.symbol());
         assert_eq!(monitor.layout.n_master, 3);
         assert!((monitor.layout.m_fact - 0.7).abs() < 1e-6);
@@ -269,11 +263,8 @@ mod tests {
         let mut monitor = monitor_with_tags(9);
         seed_pertag_from_config(&mut monitor, 0, &config_with(vec![entry(2, 0, "grid")]));
         let pertag = monitor.pertag.as_ref().expect("pertag");
-        assert_eq!(pertag.lt_idxs[2][0].as_deref(), Some(&LayoutEnum::GRID));
-        assert_eq!(
-            pertag.lt_idxs[3][0].as_deref(),
-            Some(&LayoutEnum::FIBONACCI)
-        );
+        assert_eq!(*pertag.lts[2], LayoutEnum::GRID);
+        assert_eq!(*pertag.lts[3], LayoutEnum::FIBONACCI);
     }
 
     #[test]
@@ -284,7 +275,7 @@ mod tests {
             1,
             &config_with(vec![entry(1, -1, "grid"), entry(1, 1, "deck")]),
         );
-        assert_eq!(*monitor.lt[monitor.sel_lt], LayoutEnum::DECK);
+        assert_eq!(*monitor.lt, LayoutEnum::DECK);
 
         // ...and a monitor with no entry of its own still gets the shared one.
         let mut other = monitor_with_tags(9);
@@ -293,7 +284,7 @@ mod tests {
             2,
             &config_with(vec![entry(1, -1, "grid"), entry(1, 1, "deck")]),
         );
-        assert_eq!(*other.lt[other.sel_lt], LayoutEnum::GRID);
+        assert_eq!(*other.lt, LayoutEnum::GRID);
     }
 
     /// A hand-edited file is the normal way these entries get written, so one
@@ -308,7 +299,7 @@ mod tests {
         seed_pertag_from_config(&mut monitor, 0, &config_with(vec![saved]));
 
         // The unknown name left the tag on its default...
-        assert_eq!(*monitor.lt[monitor.sel_lt], LayoutEnum::FIBONACCI);
+        assert_eq!(*monitor.lt, LayoutEnum::FIBONACCI);
         // ...while the numbers that could be salvaged were.
         assert_eq!(monitor.layout.n_master, MAX_N_MASTER);
         assert!((monitor.layout.m_fact - 0.55).abs() < 1e-6);
@@ -319,6 +310,6 @@ mod tests {
     fn an_entry_for_a_tag_that_does_not_exist_is_ignored() {
         let mut monitor = monitor_with_tags(4);
         seed_pertag_from_config(&mut monitor, 0, &config_with(vec![entry(30, 0, "grid")]));
-        assert_eq!(*monitor.lt[monitor.sel_lt], LayoutEnum::FIBONACCI);
+        assert_eq!(*monitor.lt, LayoutEnum::FIBONACCI);
     }
 }

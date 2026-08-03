@@ -39,7 +39,7 @@ impl Jwm {
                 self.state
                     .monitors
                     .get(mk)
-                    .map(|m| *m.lt[m.sel_lt] == LayoutEnum::SCROLLING)
+                    .map(|m| *m.lt == LayoutEnum::SCROLLING)
             })
             .unwrap_or(false)
     }
@@ -52,7 +52,7 @@ impl Jwm {
                 self.state
                     .monitors
                     .get(mk)
-                    .map(|m| *m.lt[m.sel_lt] == LayoutEnum::VSTACK)
+                    .map(|m| *m.lt == LayoutEnum::VSTACK)
             })
             .unwrap_or(false)
     }
@@ -156,7 +156,7 @@ impl Jwm {
         self.state
             .monitors
             .get(mon_key)
-            .map(|m| m.lt[m.sel_lt].clone())
+            .map(|m| m.lt.clone())
             .ok_or_else(|| "No monitor".into())
     }
 
@@ -220,12 +220,68 @@ impl Jwm {
         info!("[setlayout]");
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
 
+        let layout = match arg {
+            WMArgEnum::Layout(lt) => lt.clone(),
+            // The argument-less form was the toggle before `lastlayout`
+            // existed; old bindings keep their meaning.
+            _ => return self.lastlayout(backend, arg),
+        };
+
+        // A layout key is idempotent: re-pressing it is a no-op, not a flip
+        // to whatever invisible state the other slot happened to hold.
+        if *self.current_selected_layout(sel_mon_key)? == *layout {
+            return Ok(());
+        }
+
         self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
-            this.update_layout_selection(mon_key, arg)?;
-            this.current_selected_layout(mon_key)
+            let cur_tag = this.pertag_current_tag(mon_key)?;
+            this.set_new_layout(mon_key, &layout, cur_tag);
+            Ok(layout.clone())
         })?;
 
         Ok(())
+    }
+
+    /// Go back to the layout the current tag was on before the last change —
+    /// the explicit form of what re-pressing a layout key used to mean.
+    pub(crate) fn lastlayout(
+        &mut self,
+        backend: &mut dyn Backend,
+        _arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[lastlayout]");
+        let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
+
+        let previous = self
+            .state
+            .monitors
+            .get(sel_mon_key)
+            .ok_or("No monitor")?
+            .prev_lt
+            .clone();
+        if *self.current_selected_layout(sel_mon_key)? == *previous {
+            return Ok(());
+        }
+
+        self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
+            let cur_tag = this.pertag_current_tag(mon_key)?;
+            this.set_new_layout(mon_key, &previous, cur_tag);
+            Ok(previous.clone())
+        })?;
+
+        Ok(())
+    }
+
+    fn pertag_current_tag(
+        &self,
+        mon_key: MonitorKey,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        self.state
+            .monitors
+            .get(mon_key)
+            .and_then(|m| m.pertag.as_ref())
+            .map(|p| p.cur_tag)
+            .ok_or_else(|| "No pertag".into())
     }
 
     pub(crate) fn cyclelayout(
@@ -249,13 +305,7 @@ impl Jwm {
         }
 
         self.apply_layout_change(backend, sel_mon_key, |this, mon_key| {
-            let cur_tag = this
-                .state
-                .monitors
-                .get(mon_key)
-                .and_then(|m| m.pertag.as_ref())
-                .map(|p| p.cur_tag)
-                .ok_or("No pertag")?;
+            let cur_tag = this.pertag_current_tag(mon_key)?;
 
             let current = this.current_selected_layout(mon_key)?;
             let next = if dir >= 0 {
@@ -275,7 +325,7 @@ impl Jwm {
     /// Handle bar visibility and border_w changes when transitioning to/from fullscreen layout
     fn handle_fullscreen_layout_transition(
         &mut self,
-        _backend: &mut dyn Backend,
+        backend: &mut dyn Backend,
         mon_key: MonitorKey,
         old_layout: &LayoutEnum,
         new_layout: &LayoutEnum,
@@ -326,70 +376,12 @@ impl Jwm {
             }
         }
 
-        Ok(())
-    }
-
-    fn update_layout_selection(
-        &mut self,
-        sel_mon_key: MonitorKey,
-        arg: &WMArgEnum,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        match *arg {
-            WMArgEnum::Layout(ref lt) => self.handle_specific_layout(sel_mon_key, lt),
-            _ => self.toggle_layout_selection(sel_mon_key),
-        }
-    }
-
-    fn handle_specific_layout(
-        &mut self,
-        sel_mon_key: MonitorKey,
-        layout: &Rc<LayoutEnum>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let monitor = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .ok_or("Monitor not found")?;
-
-        let current_layout = monitor.lt[monitor.sel_lt].clone();
-        let cur_tag = monitor
-            .pertag
-            .as_ref()
-            .ok_or("No pertag information")?
-            .cur_tag;
-
-        if **layout == *current_layout {
-            self.toggle_layout_selection_impl(sel_mon_key, cur_tag);
-        } else {
-            self.set_new_layout(sel_mon_key, layout, cur_tag);
-        }
+        // The flag alone only stops the work area from reserving the bar's
+        // pixels; the bar window itself has to move. The caller's arrange()
+        // would also do this, but it is skipped when the tag has no selection.
+        self.sync_secondary_bar_position(backend, mon_key);
 
         Ok(())
-    }
-
-    fn toggle_layout_selection(
-        &mut self,
-        sel_mon_key: MonitorKey,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let cur_tag = self
-            .state
-            .monitors
-            .get(sel_mon_key)
-            .and_then(|m| m.pertag.as_ref())
-            .map(|p| p.cur_tag)
-            .ok_or("No pertag information available")?;
-
-        self.toggle_layout_selection_impl(sel_mon_key, cur_tag);
-        Ok(())
-    }
-
-    fn toggle_layout_selection_impl(&mut self, sel_mon_key: MonitorKey, cur_tag: usize) {
-        if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            if let Some(ref mut pertag) = monitor.pertag {
-                pertag.sel_lts[cur_tag] ^= 1;
-                monitor.sel_lt = pertag.sel_lts[cur_tag];
-            }
-        }
     }
 
     pub(crate) fn set_new_layout(
@@ -399,17 +391,21 @@ impl Jwm {
         cur_tag: usize,
     ) {
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            let sel_lt = monitor.sel_lt;
+            if *monitor.lt == **layout {
+                return;
+            }
+            monitor.prev_lt = monitor.lt.clone();
+            monitor.lt = layout.clone();
             if let Some(ref mut pertag) = monitor.pertag {
-                pertag.lt_idxs[cur_tag][sel_lt] = Some(layout.clone());
-                monitor.lt[sel_lt] = layout.clone();
+                pertag.prev_lts[cur_tag] = pertag.lts[cur_tag].clone();
+                pertag.lts[cur_tag] = layout.clone();
             }
         }
     }
 
     fn finalize_layout_update(&mut self, sel_mon_key: MonitorKey) -> (bool, Option<i32>) {
         if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-            monitor.lt_symbol = monitor.lt[monitor.sel_lt].symbol().to_string();
+            monitor.lt_symbol = monitor.lt.symbol().to_string();
 
             let has_selection = monitor.sel.is_some();
             let mon_num = monitor.num;

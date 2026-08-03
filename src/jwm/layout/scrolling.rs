@@ -11,7 +11,7 @@ impl Jwm {
     fn get_scrolling_state_for_sel_mon(&self) -> Option<(MonitorKey, &ScrollingState)> {
         let mon_key = self.state.sel_mon?;
         let monitor = self.state.monitors.get(mon_key)?;
-        let layout = &monitor.lt[monitor.sel_lt];
+        let layout = &monitor.lt;
         if **layout != LayoutEnum::SCROLLING {
             return None;
         }

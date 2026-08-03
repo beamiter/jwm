@@ -419,10 +419,10 @@ pub struct WMMonitor {
     pub layout: MonitorLayout,
     pub geometry: MonitorGeometry,
     pub sel_tags: usize,
-    pub sel_lt: usize,
     pub tag_set: [u32; 2],
     pub sel: Option<ClientKey>,
-    pub lt: [Rc<LayoutEnum>; 2],
+    pub lt: Rc<LayoutEnum>,
+    pub prev_lt: Rc<LayoutEnum>,
     pub pertag: Option<Pertag>,
 }
 
@@ -452,8 +452,8 @@ pub struct Pertag {
     pub n_masters: Vec<u32>,
     pub m_facts: Vec<f32>,
     pub gaps: Vec<i32>,
-    pub sel_lts: Vec<usize>,
-    pub lt_idxs: Vec<Vec<Option<Rc<LayoutEnum>>>>,
+    pub lts: Vec<Rc<LayoutEnum>>,
+    pub prev_lts: Vec<Rc<LayoutEnum>>,
     pub show_bars: Vec<bool>,
     pub sel: Vec<Option<ClientKey>>,
 }
@@ -467,8 +467,8 @@ impl Pertag {
             n_masters: vec![0; len],
             m_facts: vec![0.; len],
             gaps: vec![0; len],
-            sel_lts: vec![0; len],
-            lt_idxs: vec![vec![None; 2]; len],
+            lts: vec![Rc::new(LayoutEnum::FIBONACCI); len],
+            prev_lts: vec![Rc::new(LayoutEnum::TILE); len],
             show_bars: vec![show_bar; len],
             sel: vec![None; len],
         }
@@ -497,10 +497,10 @@ impl WMMonitor {
             },
             geometry: MonitorGeometry::default(),
             sel_tags: 0,
-            sel_lt: 0,
             tag_set: [0; 2],
             sel: None,
-            lt: [Rc::new(LayoutEnum::FIBONACCI), Rc::new(LayoutEnum::TILE)],
+            lt: Rc::new(LayoutEnum::FIBONACCI),
+            prev_lt: Rc::new(LayoutEnum::TILE),
             pertag: None,
         }
     }
@@ -558,7 +558,7 @@ impl WMMonitor {
     /// 把当前 tag 的 Pertag 状态重新加载到 monitor 上。
     ///
     /// 用于在不切换 tag 的情况下改写了 Pertag（例如启动时从配置恢复每个 tag
-    /// 的布局）之后，让 monitor 的 `layout`/`lt`/`sel_lt`/`lt_symbol` 与之
+    /// 的布局）之后，让 monitor 的 `layout`/`lt`/`prev_lt`/`lt_symbol` 与之
     /// 一致；否则显示的仍是初始化时的默认布局。
     pub fn reload_current_tag_context(&mut self) {
         let cur_tag = self.pertag.as_ref().map(|p| p.cur_tag).unwrap_or(0);
@@ -575,17 +575,11 @@ impl WMMonitor {
             self.layout.n_master = pertag.n_masters[new_tag_idx];
             self.layout.m_fact = pertag.m_facts[new_tag_idx];
             self.layout.gap = pertag.gaps[new_tag_idx];
-            self.sel_lt = pertag.sel_lts[new_tag_idx];
-
-            if let Some(l0) = &pertag.lt_idxs[new_tag_idx][0] {
-                self.lt[0] = l0.clone();
-            }
-            if let Some(l1) = &pertag.lt_idxs[new_tag_idx][1] {
-                self.lt[1] = l1.clone();
-            }
+            self.lt = pertag.lts[new_tag_idx].clone();
+            self.prev_lt = pertag.prev_lts[new_tag_idx].clone();
         }
         // 更新符号
-        self.lt_symbol = self.lt[self.sel_lt].symbol().to_string();
+        self.lt_symbol = self.lt.symbol().to_string();
     }
 
     /// 更新当前 Tag 的布局参数 (当 incnmaster 或 setmfact 时调用)
@@ -595,17 +589,6 @@ impl WMMonitor {
             pertag.n_masters[cur] = self.layout.n_master;
             pertag.m_facts[cur] = self.layout.m_fact;
             pertag.gaps[cur] = self.layout.gap;
-        }
-    }
-
-    /// 更新当前 Tag 的 Layout 选择
-    pub fn update_current_tag_layout_selection(&mut self) {
-        if let Some(ref mut pertag) = self.pertag {
-            let cur = pertag.cur_tag;
-            let sel = self.sel_lt;
-            pertag.sel_lts[cur] = sel;
-            // 更新 layout 引用
-            pertag.lt_idxs[cur][sel] = Some(self.lt[sel].clone());
         }
     }
 
@@ -915,7 +898,6 @@ mod tests {
         let p = Pertag::new(false, 4);
         assert!(p.n_masters.iter().all(|&n| n == 0));
         assert!(p.m_facts.iter().all(|&f| f == 0.0));
-        assert!(p.sel_lts.iter().all(|&s| s == 0));
         assert!(p.sel.iter().all(Option::is_none));
     }
 

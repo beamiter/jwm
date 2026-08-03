@@ -787,6 +787,30 @@ impl Jwm {
         let actual_bar_height = cfg.status_bar_height();
         let bar_height = if show_bar { actual_bar_height } else { 0 };
 
+        // arrange() reconciles the bar on every pass, so a bar that is already
+        // where this call would put it must cost nothing — no configure, no
+        // strut churn, no forced compositor redraw.
+        let already_placed = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|c| {
+                if show_bar {
+                    let pad = cfg.status_bar_padding();
+                    c.geometry.x == monitor.geometry.m_x + pad
+                        && c.geometry.y == monitor.geometry.m_y + pad
+                        && c.geometry.w == monitor.geometry.m_w - 2 * pad - 2 * c.geometry.border_w
+                        && c.geometry.h == bar_height
+                } else {
+                    c.geometry.x == monitor.geometry.m_x
+                        && c.geometry.y == monitor.geometry.m_y - actual_bar_height
+                }
+            })
+            .unwrap_or(false);
+        if already_placed {
+            return Ok(());
+        }
+
         if let Some(client) = self.state.clients.get_mut(client_key) {
             if show_bar {
                 let pad = cfg.status_bar_padding();
@@ -840,6 +864,29 @@ impl Jwm {
         }
 
         Ok(())
+    }
+
+    /// Bring `mon_key`'s status-bar window in line with the current tag's
+    /// show_bar flag. The flag is per-tag but the bar window is not, so every
+    /// path that changes the effective flag — togglebar, entering or leaving
+    /// the fullscreen layout, switching to a tag that remembers either — funnels
+    /// through here; a bar already in place returns without touching the backend.
+    pub(crate) fn sync_secondary_bar_position(
+        &mut self,
+        backend: &mut dyn Backend,
+        mon_key: MonitorKey,
+    ) {
+        let Some(mon_num) = self.state.monitors.get(mon_key).map(|m| m.num) else {
+            return;
+        };
+        let Some((client_key, win)) = self
+            .secondary_bars
+            .get(&mon_num)
+            .and_then(|bar| bar.client_key.zip(bar.window))
+        else {
+            return;
+        };
+        let _ = self.position_secondary_bar_on_monitor(backend, client_key, win, mon_num);
     }
 
     pub(crate) fn set_bar_strut(

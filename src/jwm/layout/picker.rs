@@ -201,9 +201,9 @@ impl Jwm {
         layout_strip::cell_at(&geometry, x as f32, y as f32)
     }
 
-    /// Switch the selected monitor to `layout` without the "same layout means
-    /// toggle" behaviour of [`Jwm::setlayout`] — re-selecting the highlighted
-    /// cell has to be a no-op, not a flip to the previous layout.
+    /// Switch the selected monitor to `layout`. Re-selecting the highlighted
+    /// cell is a no-op, same as [`Jwm::setlayout`] — the early return here
+    /// also skips the fullscreen/arrange side effects of a real change.
     fn apply_picked_layout(&mut self, backend: &mut dyn Backend, layout: &'static LayoutEnum) {
         let Some(sel_mon_key) = self.state.sel_mon else {
             return;

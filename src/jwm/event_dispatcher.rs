@@ -1337,7 +1337,7 @@ mod tests {
     fn current_layout(jwm: &Jwm) -> crate::core::layout::LayoutEnum {
         let key = jwm.state.sel_mon.unwrap();
         let monitor = jwm.state.monitors.get(key).unwrap();
-        (*monitor.lt[monitor.sel_lt]).clone()
+        (*monitor.lt).clone()
     }
 
     #[test]
