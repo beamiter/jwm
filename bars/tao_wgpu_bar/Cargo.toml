@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.103"
 libc = "0.2.186"
 log = "0.4.33"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = [
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
     "logging-flexi",
@@ -20,8 +20,8 @@ xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1",
     "runtime-linux",
     "transport-shared",
 ] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
-xbar_present_wgpu = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+xbar_present_wgpu = { path = "../../crates/xbar_core/crates/xbar_present_wgpu" }
 cairo-rs = "0.22.0"
 pango = "0.22.8"
 raw-window-handle = "0.6.2"

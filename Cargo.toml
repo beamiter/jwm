@@ -1,6 +1,26 @@
-# [workspace]
-# members = [".", "portal"]
-# resolver = "2"
+# Monorepo root: jwm plus its whole protocol stack resolve from one tree, so
+# a protocol change lands atomically in shared_structures, xbar_core, jwm, and
+# every bar in the same commit. The bars stay OUT of this workspace on purpose:
+# their GUI frameworks (gpui, tauri, gtk4, iced, …) keep their own Cargo.lock
+# under bars/<name> so their huge dependency trees never fight this one.
+# xbar_tauri and xbar_present_wgpu are likewise excluded: only bars consume
+# them (via path), and tauri/wgpu don't belong in the core lock.
+[workspace]
+members = [
+    ".",
+    "portal",
+    "bridge",
+    "crates/shared_structures",
+    "crates/xbar_core",
+    "crates/xbar_core/crates/xbar_linux_actions",
+    "crates/xbar_core/crates/xbar_dbus_providers",
+]
+exclude = [
+    "bars",
+    "crates/xbar_core/crates/xbar_tauri",
+    "crates/xbar_core/crates/xbar_present_wgpu",
+]
+resolver = "3"
 
 [package]
 name = "jwm"
@@ -93,9 +113,9 @@ chrono = "0.4.45"
 log = "0.4.33"
 toml = "1.1.3"
 # Protocol single entry point: shared_structures is consumed only through
-# xbar_core's re-export so one xbar_core resolution decides the ring-buffer
+# xbar_core's re-export, and both live in this tree — the working tree IS the
 # protocol revision for jwm and every bar.
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.9.1", features = ["logging-flexi", "transport-shared"] }
+xbar_core = { path = "crates/xbar_core", features = ["logging-flexi", "transport-shared"] }
 nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"

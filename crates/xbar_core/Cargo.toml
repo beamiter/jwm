@@ -28,12 +28,10 @@ anyhow = { version = "1.0.103", optional = true }
 chrono = { version = "0.4.45", optional = true }
 sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 
-# Pinned, not floating: a tagged xbar_core release has to decide the
-# ring-buffer protocol revision it was built and tested against. Without a
-# rev, every consumer resolves shared_structures independently — a repo
-# with a lock keeps an old one across an xbar_core bump, and a repo
-# without one silently follows the default branch at build time.
-shared_structures = { git = "https://github.com/beamiter/shared_structures.git", rev = "4eff3a2e7b39e0dee80f83830cfda37147b89ee4", features = ["use-futex"], optional = true }
+# In-tree sibling: the monorepo working tree is the protocol revision, so
+# every consumer of xbar_core resolves the same shared_structures by
+# construction — no tag/rev to keep in sync.
+shared_structures = { path = "../shared_structures", features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = { version = "0.9.8", optional = true }
 
@@ -48,13 +46,3 @@ pangocairo = { version = "0.22.8", optional = true }
 
 [dev-dependencies]
 serde_json = "1.0.145"
-
-[workspace]
-members = [
-    ".",
-    "crates/xbar_dbus_providers",
-    "crates/xbar_linux_actions",
-    "crates/xbar_present_wgpu",
-    "crates/xbar_tauri",
-]
-resolver = "3"
