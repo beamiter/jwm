@@ -94,12 +94,14 @@ pub struct ControlSpec {
 
 impl ControlSpec {
     /// Join icon and value without introducing leading or trailing whitespace.
+    /// Two spaces, not one: Nerd Font icon ink regularly overflows its advance
+    /// to the right, swallowing a single space and gluing icon to value.
     #[must_use]
     pub fn text(&self) -> String {
         match (self.icon.is_empty(), self.value.is_empty()) {
             (true, _) => self.value.clone(),
             (_, true) => self.icon.clone(),
-            (false, false) => format!("{} {}", self.icon, self.value),
+            (false, false) => format!("{}  {}", self.icon, self.value),
         }
     }
 
@@ -618,7 +620,7 @@ mod tests {
         control.value = "V".to_owned();
         assert_eq!(control.text(), "V");
         control.icon = "I".to_owned();
-        assert_eq!(control.text(), "I V");
+        assert_eq!(control.text(), "I  V");
     }
 
     #[test]
