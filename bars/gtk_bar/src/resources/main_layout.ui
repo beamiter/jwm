@@ -1,0 +1,308 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<!-- Created with Cambalache -->
+<interface>
+  <requires lib="gtk" version="4.0"/>
+  <object class="GtkApplicationWindow" id="main_window">
+    <property name="decorated">false</property>
+    <property name="default-height">40</property>
+    <property name="default-width">1000</property>
+    <property name="resizable">true</property>
+    <property name="title">gtk_bar</property>
+    <child>
+      <object class="GtkBox" id="top_hbox">
+        <property name="margin-bottom">0</property>
+        <property name="margin-end">1</property>
+        <property name="margin-start">1</property>
+        <property name="margin-top">0</property>
+        <property name="orientation">horizontal</property>
+        <property name="spacing">4</property>
+        <style><class name="panel-root"/></style>
+        <child>
+          <object class="GtkBox" id="tab_box">
+            <property name="orientation">horizontal</property>
+            <property name="spacing">3</property>
+            <style><class name="workspace-strip"/></style>
+
+            <!-- 9 个工作区按钮 -->
+            <child>
+              <object class="GtkButton" id="tab_button_0">
+                <property name="height-request">28</property>
+                <property name="label">1</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_1">
+                <property name="height-request">28</property>
+                <property name="label">2</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_2">
+                <property name="height-request">28</property>
+                <property name="label">3</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_3">
+                <property name="height-request">28</property>
+                <property name="label">4</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_4">
+                <property name="height-request">28</property>
+                <property name="label">5</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_5">
+                <property name="height-request">28</property>
+                <property name="label">6</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_6">
+                <property name="height-request">28</property>
+                <property name="label">7</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_7">
+                <property name="height-request">28</property>
+                <property name="label">8</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="tab_button_8">
+                <property name="height-request">28</property>
+                <property name="label">9</property>
+                <property name="width-request">36</property>
+                <style><class name="tab-button"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 布局开关（pill） -->
+        <child>
+          <object class="GtkButton" id="layout_toggle">
+            <property name="height-request">28</property>
+            <property name="width-request">46</property>
+            <property name="label">[]=</property>
+            <property name="tooltip-text">Choose window layout</property>
+            <style>
+              <class name="layout-toggle"/>
+              <class name="closed"/>
+            </style>
+          </object>
+        </child>
+
+        <!-- 可展开的布局选项（GtkRevealer 动画） -->
+        <child>
+          <object class="GtkRevealer" id="layout_revealer">
+            <property name="reveal-child">false</property>
+            <property name="transition-type">slide-right</property>
+            <property name="transition-duration">120</property>
+            <child>
+              <object class="GtkBox" id="layout_selector_box">
+                <property name="orientation">horizontal</property>
+                <property name="spacing">4</property>
+                <style><class name="layout-selector"/></style>
+                <child>
+                  <object class="GtkButton" id="layout_option_tiled">
+                    <property name="height-request">24</property>
+                    <property name="width-request">36</property>
+                    <property name="label">[]=</property>
+                    <style><class name="layout-option"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="layout_option_floating">
+                    <property name="height-request">24</property>
+                    <property name="width-request">36</property>
+                    <property name="label">&gt;&lt;&gt;</property>
+                    <style><class name="layout-option"/></style>
+                  </object>
+                </child>
+                <child>
+                  <object class="GtkButton" id="layout_option_monocle">
+                    <property name="height-request">24</property>
+                    <property name="width-request">36</property>
+                    <property name="label">[M]</property>
+                    <style><class name="layout-option"/></style>
+                  </object>
+                </child>
+              </object>
+            </child>
+          </object>
+        </child>
+
+        <!-- 中间撑开 -->
+        <child>
+          <object class="GtkBox" id="spacer">
+            <property name="hexpand">true</property>
+            <property name="orientation">horizontal</property>
+          </object>
+        </child>
+
+        <!-- 右侧信息：CPU/MEM/截图/时间/监视器 -->
+        <child>
+          <object class="GtkBox" id="right_box">
+            <property name="halign">end</property>
+            <property name="orientation">horizontal</property>
+            <property name="spacing">4</property>
+            <style><class name="status-strip"/></style>
+
+            <child>
+              <object class="GtkLabel" id="cpu_label">
+                <property name="justify">center</property>
+                <property name="label">CPU</property>
+                <property name="width-request">58</property>
+                <property name="height-request">24</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="memory_label">
+                <property name="label">MEM</property>
+                <property name="width-request">58</property>
+                <property name="height-request">24</property>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="volume_button">
+                <property name="height-request">28</property>
+                <property name="label">Vol --%</property>
+                <property name="tooltip-text">Click to mute; scroll to adjust volume</property>
+                <property name="width-request">92</property>
+                <style><class name="volume-button"/></style>
+              </object>
+            </child>
+
+            <!-- Entry point into JWM's own shell surface. The bar renders no
+                 shell content; each row only names the page to open. -->
+            <child>
+              <object class="GtkMenuButton" id="shell_button">
+                <property name="height-request">28</property>
+                <property name="label">◈</property>
+                <property name="tooltip-text">Open the JWM shell</property>
+                <property name="width-request">40</property>
+                <property name="popover">shell_popover</property>
+                <style><class name="shell-button"/></style>
+              </object>
+            </child>
+
+            <child>
+              <object class="GtkButton" id="theme_button">
+                <property name="height-request">28</property>
+                <property name="label">☾</property>
+                <property name="tooltip-text">Switch light/dark appearance</property>
+                <property name="width-request">40</property>
+                <style><class name="theme-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="screenshot_button">
+                <property name="height-request">28</property>
+                <property name="icon-name">camera-photo-symbolic</property>
+                <property name="tooltip-text">Take screenshot</property>
+                <property name="width-request">36</property>
+                <style><class name="screenshot-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkButton" id="time_label">
+                <property name="height-request">28</property>
+                <property name="label">--:--</property>
+                <property name="tooltip-text">Show or hide seconds</property>
+                <property name="width-request">132</property>
+                <style><class name="time-button"/></style>
+              </object>
+            </child>
+            <child>
+              <object class="GtkLabel" id="monitor_label">
+                <property name="halign">center</property>
+                <property name="height-request">28</property>
+                <property name="label">1</property>
+                <property name="tooltip-text">Active monitor</property>
+                <property name="width-request">36</property>
+                <style><class name="monitor-badge"/></style>
+              </object>
+            </child>
+          </object>
+        </child>
+      </object>
+    </child>
+  </object>
+
+  <!-- Pages of JWM's shell surface, in the order the hub itself lists them.
+       Every row is one request to the window manager; nothing here renders
+       shell content. -->
+  <object class="GtkPopover" id="shell_popover">
+    <property name="autohide">1</property>
+    <property name="child">
+      <object class="GtkBox">
+        <property name="orientation">vertical</property>
+        <property name="spacing">2</property>
+        <child>
+          <object class="GtkButton" id="shell_route_hub">
+            <property name="label">◈  Shell Hub</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_applications">
+            <property name="label">🚀  Applications</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_notifications">
+            <property name="label">🔔  Notifications</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_clipboard">
+            <property name="label">📋  Clipboard</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_calendar">
+            <property name="label">📅  Calendar</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+        <child>
+          <object class="GtkButton" id="shell_route_wallpaper">
+            <property name="label">🖼  Wallpaper</property>
+            <property name="halign">fill</property>
+            <style><class name="shell-route"/></style>
+          </object>
+        </child>
+      </object>
+    </property>
+  </object>
+</interface>
