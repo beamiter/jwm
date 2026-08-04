@@ -1,0 +1,23 @@
+[package]
+name = "gpui_bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# gpui is not on crates.io — pull from the zed monorepo.
+gpui = { git = "https://github.com/zed-industries/zed", branch = "main" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", features = ["wayland", "x11"] }
+
+log = "0.4"
+anyhow = "1"
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+
+# Linux-only offline build: gpui pins exact macOS-only versions that aren't in
+# the local cargo cache. These crates are gated on `cfg(target_os = "macos")`
+# in gpui itself, so on Linux nothing is ever compiled from them — they only
+# need to resolve. Swap them for empty local stubs at the pinned versions.
+[patch.crates-io]
+cocoa = { path = "vendor/cocoa-stub" }
+cocoa-foundation = { path = "vendor/cocoa-foundation-stub" }
+core-foundation = { path = "vendor/core-foundation-stub" }

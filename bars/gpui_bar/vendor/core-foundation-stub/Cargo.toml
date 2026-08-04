@@ -1,0 +1,17 @@
+[package]
+name = "core-foundation"
+version = "0.10.0"
+edition = "2021"
+description = "macOS-only stub for offline Linux builds"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = []
+link = []
+mac_os_10_7_support = []
+mac_os_10_8_features = []
+with-chrono = []
+with-uuid = []
