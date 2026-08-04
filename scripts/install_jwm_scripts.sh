@@ -38,13 +38,10 @@ err()   { echo -e "${RED}[ERROR]${NC} $*"; }
 # ============================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SUBMODULES_DIR="$PROJECT_ROOT/submodules"
-
-GITHUB_USER="beamiter"
-GITHUB_BASE="https://github.com/$GITHUB_USER"
+BARS_DIR="$PROJECT_ROOT/bars"
 
 # ============================================================
-# 所有支持的 bar（与 Cargo.toml features 对应）
+# 所有支持的 bar（monorepo 内 bars/ 目录下的 crate）
 # ============================================================
 ALL_BARS=(
     dioxus_bar
@@ -79,36 +76,6 @@ ALL_BARS=(
 BUILD_MODE="release"
 JWM_BAR_NAME="xcb_bar"
 JWM_BAR_SET_BY_ARGS=false
-
-# CLONE_BARS：仅用于把这些 bar 仓库拉到本地（git clone / pull），
-# 不参与编译。实际构建的对象只有 JWM_BAR_NAME 对应的那个 bar。
-# 取消注释你希望保留本地副本的 bar 即可。
-CLONE_BARS=(
-    # dioxus_bar
-    # egui_bar
-    # gtk_bar
-    # iced_bar
-    # relm_bar
-    # tao_pixels_bar
-    # tao_softbuffer_bar
-    # tao_wgpu_bar
-    # tauri_leptos_bar
-    # tauri_react_bar
-    # tauri_solid_bar
-    # tauri_svelte_bar
-    # tauri_vue_bar
-    # tauri_yew_bar
-    # winit_pixels_bar
-    # winit_softbuffer_bar
-    # winit_wgpu_bar
-    # xcb_wgpu_bar
-    # x11rb_wgpu_bar
-    # x11rb_bar
-    # xcb_bar
-    # xilem_bar
-    # gpui_bar
-    # gpui_component_bar
-)
 SKIP_BAR=false
 SKIP_JWM=false
 REGEN_CONFIG=false
@@ -123,20 +90,18 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        指定要构建的 bar，同时把该 bar 加入克隆列表；
-                              可重复传入或使用逗号分隔；第一个显式传入的 bar 会被构建，
-                              其余仅作为额外的本地克隆目标（不参与构建）。
+  -b, --bar <bar_name>        指定要构建的 bar（bars/ 目录内的 crate，monorepo 自带全部源码）。
                               jwm 启动时通过 config_x11.toml/config_wayland.toml 的 status_bar.name 选择 bar，
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
   -j, --jobs <N>              并行编译任务数（传给 cargo）
   --gen-config                安装后重新生成默认配置（备份旧配置为 .toml.backup）
-  --skip-bar                  跳过 bar 安装（仍会按 CLONE_BARS 同步代码）
+  --skip-bar                  跳过 bar 安装
   --skip-jwm                  跳过 jwm 编译安装（仅处理 bar）
   -h, --help                  显示此帮助信息
 
 说明:
-  - CLONE_BARS（脚本顶部）只用于把哪些 bar 仓库 git clone/pull 到本地，不会构建。
+  - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 除 dioxus_bar 外，bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx build --release 构建，并把其 Dioxus 产物安装到同一目录。
@@ -147,11 +112,10 @@ usage() {
     如果任一配置文件不存在，会先运行 jwm --gen-config 生成默认配置。
 
 示例:
-  $(basename "$0")                           # 安装 jwm + 默认 bar，按 CLONE_BARS 同步其它仓库
+  $(basename "$0")                           # 安装 jwm + 默认 bar
   $(basename "$0") --gen-config              # 同上，并重新生成默认配置
   $(basename "$0") -m debug                  # debug 模式编译安装
   $(basename "$0") -b xcb_bar                # 安装 xcb_bar
-  $(basename "$0") -b xcb_bar,egui_bar       # 安装 xcb_bar；同时把 egui_bar 仓库拉到本地
   $(basename "$0") -b xcb_bar --skip-jwm     # 仅安装 xcb_bar
   $(basename "$0") --gen-config --skip-bar   # 仅重新生成配置，不安装 bar
 EOF
@@ -202,18 +166,8 @@ add_selected_bars() {
         if [[ "$JWM_BAR_SET_BY_ARGS" == false ]]; then
             JWM_BAR_NAME="$candidate"
             JWM_BAR_SET_BY_ARGS=true
-        fi
-
-        local already_listed=false
-        for existing in "${CLONE_BARS[@]}"; do
-            if [[ "$existing" == "$candidate" ]]; then
-                already_listed=true
-                break
-            fi
-        done
-
-        if [[ "$already_listed" == false ]]; then
-            CLONE_BARS+=("$candidate")
+        else
+            warn "忽略额外的 bar: $candidate（每次只构建一个 bar）"
         fi
     done
 }
@@ -279,29 +233,6 @@ CARGO_JOBS=""
 if [[ -n "$JOBS" ]]; then
     CARGO_JOBS="-j $JOBS"
 fi
-
-# ============================================================
-# 拉取/更新 submodule（bar 代码）
-# ============================================================
-sync_bar_repo() {
-    local bar="$1"
-    local repo_url="$GITHUB_BASE/$bar.git"
-    local bar_dir="$SUBMODULES_DIR/$bar"
-
-    if [[ -d "$bar_dir/.git" ]]; then
-        info "更新 $bar ..."
-        git -C "$bar_dir" pull --ff-only || {
-            warn "$bar pull 失败，尝试 fetch + reset ..."
-            git -C "$bar_dir" fetch origin
-            git -C "$bar_dir" reset --hard origin/HEAD
-        }
-    else
-        info "克隆 $bar ..."
-        mkdir -p "$SUBMODULES_DIR"
-        git clone "$repo_url" "$bar_dir"
-    fi
-    ok "$bar 代码已就绪: $bar_dir"
-}
 
 # ============================================================
 # cargo install 目标目录
@@ -387,7 +318,7 @@ install_system_binary() {
 # ============================================================
 build_bar() {
     local bar="$1"
-    local bar_dir="$SUBMODULES_DIR/$bar"
+    local bar_dir="$BARS_DIR/$bar"
 
     if [[ ! -f "$bar_dir/Cargo.toml" ]]; then
         err "$bar_dir/Cargo.toml 不存在，无法编译"
@@ -515,7 +446,8 @@ sync_selected_bar_config() {
 # ============================================================
 # 构建并安装 jwm-bridge
 #
-# bridge/ 是独立 crate（不在主 workspace 内），主 cargo build 不会构建它。
+# bridge/ 是 workspace 成员，产物落在根 target/；主 cargo build 只构建
+# 根 package，所以这里显式 -p jwm-bridge。
 # 它是 org.freedesktop.Notifications 与 MPRIS 的唯一提供者：少了它，
 # 飞书等应用发出的通知在会话总线上无人接收，桌面完全不弹通知。
 # 因此把它和 jwm 一起安装，并注册 D-Bus 激活文件由总线按需拉起。
@@ -530,9 +462,9 @@ build_and_install_bridge() {
 
     info "编译 jwm-bridge（$BUILD_MODE 模式）..."
     # shellcheck disable=SC2086
-    (cd "$bridge_dir" && cargo build --locked $CARGO_BUILD_MODE_FLAG $CARGO_JOBS)
+    (cd "$PROJECT_ROOT" && cargo build --locked -p jwm-bridge $CARGO_BUILD_MODE_FLAG $CARGO_JOBS)
 
-    local bridge_target="$bridge_dir/target"
+    local bridge_target="$PROJECT_ROOT/target"
     if [[ "$BUILD_MODE" == "release" ]]; then
         bridge_target="$bridge_target/release"
     else
@@ -635,28 +567,11 @@ show_jwm_tool_help() {
 # ============================================================
 # 主流程
 # ============================================================
-# 把要编译的 bar 也加进克隆列表（去重）
-if [[ -n "$JWM_BAR_NAME" && "$SKIP_BAR" == false ]]; then
-    already_listed=false
-    for existing in "${CLONE_BARS[@]}"; do
-        if [[ "$existing" == "$JWM_BAR_NAME" ]]; then
-            already_listed=true
-            break
-        fi
-    done
-    if [[ "$already_listed" == false ]]; then
-        CLONE_BARS+=("$JWM_BAR_NAME")
-    fi
-fi
-
 echo ""
 info "========================================="
 info " JWM 安装脚本"
 info " 构建模式: $BUILD_MODE"
 info " JWM Bar (installed only): $JWM_BAR_NAME"
-if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
-    info " 拉取仓库: ${CLONE_BARS[*]}"
-fi
 info " 重新生成配置: $REGEN_CONFIG"
 info "========================================="
 echo ""
@@ -664,19 +579,12 @@ echo ""
 # JWM 只安装到 /usr/local/bin；无论本次是否跳过编译，都先清理旧遗留文件。
 remove_jwm_cargo_bins
 
-# 1. 拉取所有 CLONE_BARS 仓库到本地（不编译）
-if [[ ${#CLONE_BARS[@]} -gt 0 ]]; then
-    for bar in "${CLONE_BARS[@]}"; do
-        sync_bar_repo "$bar"
-    done
-fi
-
-# 2. 仅安装 JWM_BAR_NAME 对应的 bar 到 cargo bin
+# 1. 安装 JWM_BAR_NAME 对应的 bar 到 cargo bin（源码就在 bars/ 目录）
 if [[ "$SKIP_BAR" == false && -n "$JWM_BAR_NAME" ]]; then
     build_bar "$JWM_BAR_NAME"
 fi
 
-# 3. 处理 jwm
+# 2. 处理 jwm
 if [[ "$SKIP_JWM" == false ]]; then
     build_and_install_jwm
     show_jwm_tool_help

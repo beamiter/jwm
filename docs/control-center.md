@@ -62,7 +62,7 @@ selection stays put (clamped if a row disappeared).
 
 ## Opening the shell from a status bar
 
-The Hub is not only reachable from the keyboard. Every bar in `submodules/`
+The Hub is not only reachable from the keyboard. Every bar in `bars/`
 carries an entry that asks JWM to open it, so a pointer-driven session gets
 the same surface as `Alt+F10`.
 

@@ -10,7 +10,7 @@ DBUS_SVC="$HOME/.local/share/dbus-1/services"
 PORTAL_DIR="$HOME/.local/share/xdg-desktop-portal/portals"
 PORTAL_CONF="$HOME/.config/xdg-desktop-portal"
 PORTAL_MANIFEST="$ROOT/portal/Cargo.toml"
-PORTAL_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/portal/target}"
+PORTAL_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 if [[ "$PORTAL_TARGET_DIR" != /* ]]; then
     # Cargo resolves a relative CARGO_TARGET_DIR from the invocation cwd.
     PORTAL_TARGET_DIR="$ROOT/$PORTAL_TARGET_DIR"

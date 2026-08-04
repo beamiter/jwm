@@ -186,7 +186,7 @@ the [wallpaper picker and its colour theming](docs/wallpaper.md),
 [clipboard history](docs/clipboard.md), the [idle policy](docs/idle.md),
 the [resource rows](docs/resources.md), and the
 [session menu and night light](docs/session-menu.md) — is documented per
-feature. Every status bar in `submodules/` carries an entry that opens the
+feature. Every status bar in `bars/` carries an entry that opens the
 same [Shell Hub](docs/control-center.md#opening-the-shell-from-a-status-bar),
 so a pointer-driven session reaches it without `Alt+F10`. Every panel key is a
 toggle: `Alt+F10`, `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest each take their
