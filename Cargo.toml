@@ -8,5 +8,5 @@ anyhow = "1"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 log = "0.4"
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
-xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.9.0", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.9.0" }
