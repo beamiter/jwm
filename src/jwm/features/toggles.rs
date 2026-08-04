@@ -9,6 +9,7 @@ use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
+use crate::jwm::features::SystemUiState;
 use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::features::expose_plan;
 use crate::jwm::types::WMArgEnum;
@@ -195,7 +196,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         route: crate::jwm::features::ShellHubRoute,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::jwm::features::{ShellHubRoute, SystemUiState};
+        use crate::jwm::features::ShellHubRoute;
 
         let next = match route {
             ShellHubRoute::Applications => {
@@ -278,7 +279,10 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        // A child route reached from the hub is still the shell the key
+        // opened, so the same key closes the whole stack from any page.
+        let in_shell = self.features.system_ui_return_to_hub;
+        if self.toggle_off_system_ui(backend, |state| in_shell || state.is_control_center()) {
             return Ok(());
         }
         self.prepare_system_ui(backend, "control center", true)?;
@@ -322,7 +326,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_session_menu) {
             return Ok(());
         }
         self.prepare_system_ui(backend, "session menu", true)?;
@@ -406,7 +410,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         direction: crate::jwm::features::system_controls::AudioDirection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, |state| {
+            state.audio_picker_direction() == Some(direction)
+        }) {
             return Ok(());
         }
         let devices = crate::jwm::features::system_controls::audio_devices(direction);
@@ -480,7 +486,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_wifi_picker) {
             return Ok(());
         }
         let Some(scan) = crate::jwm::features::connectivity::start_scan() else {
@@ -500,7 +506,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_wallpaper_picker) {
             return Ok(());
         }
         let next = Self::wallpaper_picker_state();
@@ -547,7 +553,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_clipboard_picker) {
             return Ok(());
         }
         if !CONFIG.load().behavior().clipboard_history {
@@ -605,7 +611,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_calendar) {
             return Ok(());
         }
         self.prepare_system_ui(backend, "the calendar", true)?;
@@ -621,7 +627,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_bluetooth_picker) {
             return Ok(());
         }
         let Some(scan) = crate::jwm::features::connectivity::start_device_scan() else {
@@ -958,6 +964,29 @@ impl Jwm {
         self.release_temporary_system_ui_compositor(backend, "system UI");
     }
 
+    /// Every UI key binding is a toggle: the key that put a panel on screen
+    /// takes it away again, so nobody has to reach for Escape.
+    ///
+    /// Returns `true` once the press has been dealt with and the opener
+    /// should return — either it dismissed the caller's own panel, or a
+    /// different panel owns the screen and the key stays quiet rather than
+    /// swapping surfaces (and grabs) out from under the user. `mine` decides
+    /// which of those it is; openers call this instead of a bare
+    /// `is_active()` guard.
+    pub(crate) fn toggle_off_system_ui(
+        &mut self,
+        backend: &mut dyn Backend,
+        mine: impl FnOnce(&crate::jwm::features::SystemUiState) -> bool,
+    ) -> bool {
+        if !self.features.system_ui.is_active() {
+            return false;
+        }
+        if mine(&self.features.system_ui) {
+            self.close_system_ui(backend);
+        }
+        true
+    }
+
     /// Open the notification center: the bounded history JWM kept while
     /// toasts came and went, including what Do-Not-Disturb suppressed.
     pub(crate) fn notification_center(
@@ -965,7 +994,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_notification_center) {
             return Ok(());
         }
         self.prepare_system_ui(backend, "notification center", true)?;
@@ -982,7 +1011,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_launcher) {
             return Ok(());
         }
         self.prepare_system_ui(backend, "application launcher", true)?;
@@ -997,7 +1026,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.features.system_ui.is_active() {
+        if self.toggle_off_system_ui(backend, SystemUiState::is_monitor_layout) {
             return Ok(());
         }
         #[allow(unused_mut)]
@@ -1048,6 +1077,8 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // The one UI key that is not a toggle: a lock the lock key could take
+        // back off is not a lock. It comes off with the password.
         if self.features.system_ui.is_active() {
             return Ok(());
         }

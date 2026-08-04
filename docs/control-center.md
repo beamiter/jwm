@@ -20,6 +20,13 @@ and `Enter` opens or toggles it. A page opened from the Hub keeps the modal
 grabs; `Esc` returns to the Hub, and a second `Esc` closes it. Directly opened
 pages still close with one `Esc`.
 
+Every panel key is a toggle: pressing the binding that opened a panel takes it
+back down, so `Alt+F10` both opens and dismisses the Hub — from any of its
+pages — and the same holds for `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest.
+While a panel is up, the *other* panel keys stay quiet rather than swapping
+surfaces (and grabs) mid-typing. The lock screen is the one exception: it comes
+off with the password, never with its own key.
+
 The remaining rows are grouped into **Now Playing**, **Quick Settings**,
 **Sound & Display**, **System**, and **Session** sections. The viewport follows
 the selected row, so machines exposing every optional control do not grow a
@@ -139,7 +146,7 @@ dropped — there is nothing to select.
 | `Up` / `Down` | move the selection |
 | `Enter` | join, prompting for a passphrase when one is needed |
 | `r` | rescan |
-| `Esc` | close — or, while prompting, cancel the prompt and keep the list |
+| `Esc` or `Alt+F12` | close — or, while prompting, `Esc` cancels the prompt and keeps the list |
 
 ### Scanning does not block the compositor
 
@@ -165,7 +172,7 @@ mistyped passphrase can be retried without rescanning.
 `Alt+Ctrl+F12` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
 the devices the controller remembers: connected first, then paired, then by
 name. `Enter` connects the selected device, or disconnects it if it is already
-connected; `r` re-reads the list; `Esc` closes.
+connected; `r` re-reads the list; `Esc` — or `Alt+Ctrl+F12` again — closes.
 
 Reading the list is one `bluetoothctl info` per device, so it runs on a worker
 thread like the Wi-Fi scan and the panel shows `Reading devices…` until it

@@ -623,6 +623,10 @@ impl SystemUiState {
         state
     }
 
+    pub fn is_launcher(&self) -> bool {
+        matches!(self, Self::Launcher { .. })
+    }
+
     pub fn lock() -> Self {
         Self::Locked {
             password: String::new(),

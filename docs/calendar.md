@@ -8,7 +8,7 @@ the month laid out as a grid with today in brackets.
 | `Left` / `Right` | previous / next month |
 | `Up` / `Down` | previous / next year |
 | `t` / `Home` | back to the month containing today |
-| `Esc` | close |
+| `Esc` or `Alt+F9` | close — the key that opened the card also dismisses it |
 
 Weeks start on Monday (the ISO week). Today is only bracketed in its own
 month, so paging away makes it clear you are looking somewhere else.

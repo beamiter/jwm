@@ -1,7 +1,7 @@
 # Application launcher
 
 `Alt+R` (`app_launcher`) opens the launcher. Type to filter, `Up`/`Down` (or
-`Tab`) to move, `Enter` to launch, `Esc` to close.
+`Tab`) to move, `Enter` to launch, `Esc` — or `Alt+R` again — to close.
 
 Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 `$XDG_DATA_DIRS`, plus every executable on `PATH` that no desktop entry already

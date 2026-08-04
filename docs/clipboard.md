@@ -9,7 +9,7 @@ puts the entry you choose back on the clipboard.
 | `Enter` | copy the entry back |
 | `d` / `Delete` | forget the selected entry |
 | `c` | clear the whole history |
-| `Esc` | close |
+| `Esc` or `Alt+Ctrl+V` | close — the key that opened the list also dismisses it |
 
 Each row shows its position, how much was copied (`31c` for a single line of
 31 characters, `3L` for three lines), and a one-line preview with whitespace

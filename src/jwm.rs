@@ -294,6 +294,33 @@ impl Jwm {
             .unwrap_or(false)
     }
 
+    /// Whether an action opens one of the modal system UI panels, and so is
+    /// bound as a toggle: pressing the key again takes its panel back down.
+    ///
+    /// The lock screen is deliberately absent — a lock its own key could
+    /// undo is not a lock — as is the layout picker, whose repeats step the
+    /// film strip instead.
+    pub(crate) fn opens_system_ui_panel(func: WMFuncType) -> bool {
+        macro_rules! eq {
+            ($f:path) => {
+                std::ptr::fn_addr_eq(func, $f as WMFuncType)
+            };
+        }
+
+        eq!(Jwm::app_launcher)
+            || eq!(Jwm::control_center)
+            || eq!(Jwm::notification_center)
+            || eq!(Jwm::session_menu)
+            || eq!(Jwm::calendar)
+            || eq!(Jwm::wifi_picker)
+            || eq!(Jwm::bluetooth_picker)
+            || eq!(Jwm::clipboard_picker)
+            || eq!(Jwm::wallpaper_picker)
+            || eq!(Jwm::audio_output_picker)
+            || eq!(Jwm::audio_input_picker)
+            || eq!(Jwm::monitor_layout)
+    }
+
     fn func_name(func: WMFuncType) -> &'static str {
         macro_rules! eq {
             ($f:path) => {

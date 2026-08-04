@@ -41,7 +41,7 @@ while notifications are muted.
 | `Enter` | invoke the button under the cursor, or dismiss when there is none |
 | `d` / `Delete` | dismiss the selected notification |
 | `c` | clear the whole history |
-| `Esc` | close the panel |
+| `Esc` or `Alt+F11` | close the panel — the key that opened it also dismisses it |
 
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.

@@ -4,8 +4,8 @@
 
 `Alt+Shift+Escape` (`session_menu`) opens the power actions as a material
 card: lock, suspend, hibernate, log out, restart, shut down. `Up`/`Down` move,
-`Enter` selects, `Esc` closes. The control center's `Session…` row opens the
-same panel.
+`Enter` selects, `Esc` — or `Alt+Shift+Escape` again — closes. The control
+center's `Session…` row opens the same panel.
 
 Hibernate is listed only when the kernel advertises suspend-to-disk in
 `/sys/power/state`, so the row is never an action that cannot work.

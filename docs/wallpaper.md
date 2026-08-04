@@ -2,7 +2,7 @@
 
 `Alt+Ctrl+W` (`wallpaper_picker`) lists the images in the wallpaper directory
 and applies the one you pick. `Up`/`Down` select, `Enter` applies and closes,
-`Esc` closes without changing anything. The wallpaper already in use is marked
+`Esc` — or `Alt+Ctrl+W` again — closes without changing anything. The wallpaper already in use is marked
 and starts selected, so reopening the panel does not lose your place.
 
 ## Which directory

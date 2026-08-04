@@ -801,6 +801,13 @@ impl Jwm {
 
         let keysym = backend.key_ops_mut().keysym_from_keycode(keycode)?;
         let clean_state = self.clean_mask(backend, state_bits);
+        let key_mods = Mods::SHIFT
+            | Mods::CONTROL
+            | Mods::ALT
+            | Mods::SUPER
+            | Mods::MOD2
+            | Mods::MOD3
+            | Mods::MOD5;
 
         // Built-in system UI is modal and consumes every key. This branch is
         // shared by X11rb, XCB and Wayland-udev, keeping behavior identical.
@@ -836,6 +843,31 @@ impl Jwm {
                     _ => {}
                 }
                 return Ok(());
+            }
+            // Every UI key binding is a toggle. The panel is modal and would
+            // otherwise swallow the very key that opened it, so the binding
+            // table is consulted here first: the opener sees its own panel on
+            // screen and closes it (see `Jwm::toggle_off_system_ui`).
+            //
+            // Only bindings carrying a modifier qualify. A bare key belongs to
+            // whatever the panel is typing into — the launcher query, a Wi-Fi
+            // passphrase — and must not be stolen from it.
+            if !locked && !(clean_state & key_mods).is_empty() {
+                let toggle = self
+                    .key_bindings
+                    .iter()
+                    .find(|kc| {
+                        keysym == kc.key_sym
+                            && (kc.mask & key_mods) == clean_state
+                            && kc.func_opt.is_some_and(Self::opens_system_ui_panel)
+                    })
+                    .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())));
+                if let Some((func, arg)) = toggle {
+                    if let Err(e) = func(self, backend, &arg) {
+                        error!("Error toggling system UI panel: {:?}", e);
+                    }
+                    return Ok(());
+                }
             }
             if keysym == keys::KEY_Escape && !locked {
                 if self.features.system_ui_return_to_hub {
@@ -1311,14 +1343,6 @@ impl Jwm {
             // Consume all other keys while overview is active
             return Ok(());
         }
-
-        let key_mods = Mods::SHIFT
-            | Mods::CONTROL
-            | Mods::ALT
-            | Mods::SUPER
-            | Mods::MOD2
-            | Mods::MOD3
-            | Mods::MOD5;
 
         // Chord state machine. The leader sets `chord_armed_until` and grabs
         // the keyboard so the WM gets the next keypress regardless of focus.

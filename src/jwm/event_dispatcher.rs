@@ -1273,6 +1273,39 @@ mod tests {
     }
 
     #[test]
+    fn a_ui_action_closes_the_panel_it_opened_and_leaves_someone_else_alone() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_launcher());
+
+        // Another UI action does not swap panels — and grabs — out from
+        // under whoever is typing.
+        jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_launcher());
+
+        // The action that opened it takes it back down.
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+
+        jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_calendar());
+        jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn the_lock_action_never_unlocks() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_locked());
+    }
+
+    #[test]
     fn persistent_compositor_stays_enabled_after_system_ui_closes() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
