@@ -1,0 +1,28 @@
+[package]
+name = "winit_wgpu_bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+libc = "0.2.186"
+log = "0.4.33"
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = [
+    "clock-chrono",
+    "config-toml",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-network-sysfs",
+    "provider-system",
+    "render-cairo",
+    "runtime-linux",
+    "transport-shared",
+] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+xbar_present_wgpu = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+cairo-rs = "0.22.0"
+pango = "0.22.8"
+winit = "0.30.13"
+raw-window-handle = "0.6.2"
