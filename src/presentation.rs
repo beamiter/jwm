@@ -1037,14 +1037,11 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         } else {
             palette.pill
         };
+        // macOS keeps unselected items flat: occupancy shows as a translucent
+        // fill only, and a stroke is reserved for the urgent state.
         let stroke = if spec.state.urgent {
             Some(Stroke {
                 color: palette.urgent_stroke,
-                width: 1.0,
-            })
-        } else if spec.state.occupied && !spec.state.selected {
-            Some(Stroke {
-                color: palette.accent,
                 width: 1.0,
             })
         } else {
@@ -1220,33 +1217,36 @@ struct Palette {
 }
 
 impl Palette {
+    // macOS menu-bar material. Overlay colors are translucent white/black so
+    // they read correctly over any frosted background a frontend composites
+    // beneath the scene; selection is the system accent blue.
     const fn for_theme(theme: ThemeMode) -> Self {
         match theme {
             ThemeMode::Dark => Self {
-                background: Rgba::rgb8(13, 16, 23),
-                pill: Rgba::rgb8(45, 55, 72),
-                occupied: Rgba::rgb8(55, 65, 82),
-                hovered: Rgba::rgb8(67, 79, 99),
-                selected: Rgba::rgb8(8, 145, 178),
-                urgent: Rgba::rgb8(220, 38, 38),
-                urgent_stroke: Rgba::rgb8(254, 202, 202),
-                text: Rgba::rgb8(235, 238, 245),
+                background: Rgba::rgb8(28, 28, 30),
+                pill: Rgba::new(1.0, 1.0, 1.0, 0.0),
+                occupied: Rgba::new(1.0, 1.0, 1.0, 0.12),
+                hovered: Rgba::new(1.0, 1.0, 1.0, 0.18),
+                selected: Rgba::rgb8(10, 132, 255),
+                urgent: Rgba::rgb8(255, 69, 58),
+                urgent_stroke: Rgba::new(1.0, 1.0, 1.0, 0.35),
+                text: Rgba::new(1.0, 1.0, 1.0, 0.88),
                 selected_text: Rgba::rgb8(255, 255, 255),
-                muted_text: Rgba::rgb8(148, 163, 184),
-                accent: Rgba::rgb8(34, 211, 238),
+                muted_text: Rgba::new(1.0, 1.0, 1.0, 0.55),
+                accent: Rgba::rgb8(10, 132, 255),
             },
             ThemeMode::Light => Self {
-                background: Rgba::rgb8(246, 247, 250),
-                pill: Rgba::rgb8(226, 232, 240),
-                occupied: Rgba::rgb8(203, 213, 225),
-                hovered: Rgba::rgb8(186, 200, 218),
-                selected: Rgba::rgb8(59, 130, 246),
-                urgent: Rgba::rgb8(220, 38, 38),
-                urgent_stroke: Rgba::rgb8(127, 29, 29),
-                text: Rgba::rgb8(22, 24, 28),
+                background: Rgba::rgb8(246, 246, 248),
+                pill: Rgba::new(0.0, 0.0, 0.0, 0.0),
+                occupied: Rgba::new(0.0, 0.0, 0.0, 0.08),
+                hovered: Rgba::new(0.0, 0.0, 0.0, 0.12),
+                selected: Rgba::rgb8(0, 122, 255),
+                urgent: Rgba::rgb8(255, 59, 48),
+                urgent_stroke: Rgba::new(0.0, 0.0, 0.0, 0.25),
+                text: Rgba::new(0.0, 0.0, 0.0, 0.85),
                 selected_text: Rgba::rgb8(255, 255, 255),
-                muted_text: Rgba::rgb8(100, 116, 139),
-                accent: Rgba::rgb8(37, 99, 235),
+                muted_text: Rgba::new(0.24, 0.24, 0.26, 0.60),
+                accent: Rgba::rgb8(0, 122, 255),
             },
         }
     }
@@ -1442,16 +1442,7 @@ mod tests {
         };
 
         assert_eq!(tag_rect(0), (palette.pill, None));
-        assert_eq!(
-            tag_rect(1),
-            (
-                palette.occupied,
-                Some(Stroke {
-                    color: palette.accent,
-                    width: 1.0,
-                }),
-            )
-        );
+        assert_eq!(tag_rect(1), (palette.occupied, None));
         assert_eq!(tag_rect(2), (palette.selected, None));
     }
 

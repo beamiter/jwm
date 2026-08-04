@@ -464,7 +464,9 @@ impl IconSet {
             .map(str::to_owned)
             .collect(),
             tag_fallback: TagFallback::OneBasedNumber,
-            cpu: "\u{F4BC}".to_owned(),
+            // Classic Font Awesome microchip: present in every Nerd Font
+            // build, unlike the octicon range which older installs lack.
+            cpu: "\u{F2DB}".to_owned(),
             memory: "\u{F035B}".to_owned(),
             battery: "\u{F0079}".to_owned(),
             battery_charging: "\u{F0084}".to_owned(),
