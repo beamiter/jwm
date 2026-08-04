@@ -1,0 +1,24 @@
+[package]
+name = "xbar_tauri"
+version = "0.1.0"
+edition = "2024"
+description = "Tauri 2 host bridge for xbar_core"
+repository = "https://github.com/beamiter/xbar_core"
+
+[features]
+default = []
+clock-chrono = ["xbar_core/clock-chrono"]
+provider-alsa = ["xbar_core/provider-alsa"]
+provider-battery-sysfs = ["xbar_core/provider-battery-sysfs"]
+provider-brightnessctl = ["xbar_core/provider-brightnessctl"]
+provider-network-sysfs = ["xbar_core/provider-network-sysfs"]
+provider-system = ["xbar_core/provider-system"]
+
+[dependencies]
+log = "0.4.33"
+tauri = { version = "2.11.5", default-features = false }
+xbar_core = { path = "../..", default-features = false, features = ["transport-shared"] }
+xbar_linux_actions = { path = "../xbar_linux_actions" }
+
+[dev-dependencies]
+tauri = { version = "2.11.5", default-features = false, features = ["wry"] }

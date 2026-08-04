@@ -1,0 +1,12 @@
+[package]
+name = "xbar_present_wgpu"
+version = "0.1.0"
+edition = "2024"
+description = "wgpu CPU-frame presenter for xbar_core bars"
+repository = "https://github.com/beamiter/xbar_core"
+
+[dependencies]
+anyhow = "1.0.103"
+log = "0.4.33"
+pollster = "1.0.1"
+wgpu = "30.0.0"
