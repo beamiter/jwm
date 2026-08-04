@@ -6,8 +6,11 @@
 # xbar_tauri and xbar_present_wgpu are likewise excluded: only bars consume
 # them (via path), and tauri/wgpu don't belong in the core lock.
 [workspace]
+# NOTE: the root package (jwm) is an implicit member — do NOT list "." here.
+# With "." in members, cargo (observed on 1.97.1) stops applying `exclude` to
+# packages loaded standalone, and every bar fails with "current package
+# believes it's in a workspace when it's not".
 members = [
-    ".",
     "portal",
     "bridge",
     "crates/shared_structures",
@@ -16,7 +19,37 @@ members = [
     "crates/xbar_core/crates/xbar_dbus_providers",
 ]
 exclude = [
-    "bars",
+    # Every bar package (and its vendored/src-tauri crates): exclude must name
+    # exact package dirs — globs only work in `members`.
+    "bars/dioxus_bar",
+    "bars/egui_bar",
+    "bars/gpui_bar",
+    "bars/gpui_bar/vendor/cocoa-foundation-stub",
+    "bars/gpui_bar/vendor/cocoa-stub",
+    "bars/gpui_bar/vendor/core-foundation-stub",
+    "bars/gpui_component_bar",
+    "bars/gtk_bar",
+    "bars/iced_bar",
+    "bars/relm_bar",
+    "bars/tao_pixels_bar",
+    "bars/tao_softbuffer_bar",
+    "bars/tao_wgpu_bar",
+    "bars/tauri_leptos_bar",
+    "bars/tauri_leptos_bar/src-tauri",
+    "bars/tauri_react_bar/src-tauri",
+    "bars/tauri_solid_bar/src-tauri",
+    "bars/tauri_svelte_bar/src-tauri",
+    "bars/tauri_vue_bar/src-tauri",
+    "bars/tauri_yew_bar",
+    "bars/tauri_yew_bar/src-tauri",
+    "bars/winit_pixels_bar",
+    "bars/winit_softbuffer_bar",
+    "bars/winit_wgpu_bar",
+    "bars/x11rb_bar",
+    "bars/x11rb_wgpu_bar",
+    "bars/xcb_bar",
+    "bars/xcb_wgpu_bar",
+    "bars/xilem_bar",
     "crates/xbar_core/crates/xbar_tauri",
     "crates/xbar_core/crates/xbar_present_wgpu",
 ]
