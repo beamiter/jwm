@@ -95,7 +95,7 @@ toml = "1.1.3"
 # Protocol single entry point: shared_structures is consumed only through
 # xbar_core's re-export so one xbar_core resolution decides the ring-buffer
 # protocol revision for jwm and every bar.
-xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.9.0", features = ["logging-flexi", "transport-shared"] }
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.9.1", features = ["logging-flexi", "transport-shared"] }
 nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll"] }
 lazy_static = "1.5.0"
 arc-swap = "1"

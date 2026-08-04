@@ -4492,8 +4492,8 @@ checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xbar_core"
-version = "0.9.0"
-source = "git+https://github.com/beamiter/xbar_core.git?tag=v0.9.0#4f271e4cdb506f77ce7cbeea258894a22a1de792"
+version = "0.9.1"
+source = "git+https://github.com/beamiter/xbar_core.git?tag=v0.9.1#b3cddbde454567131e3e4495f9ff693afed06182"
 dependencies = [
  "anyhow",
  "flexi_logger",
