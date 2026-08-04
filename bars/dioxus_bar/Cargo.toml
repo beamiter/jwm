@@ -1,0 +1,17 @@
+[package]
+name = "dioxus_bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wasm-bindgen = "0.2.104"
+web-sys = "0.3.81"
+
+tokio = { version = "1.47.1", features = ["full"] }
+log = "0.4.28"
+xbar_core = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1", default-features = false, features = ["clock-chrono", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_linux_actions = { git = "https://github.com/beamiter/xbar_core.git", tag = "v0.8.1" }
+serde = { version = "1.0.228", features = ["derive"] }
+libc = "0.2.176"
+dioxus = { version = "0.7.9", features = ["desktop"] }
+dioxus-desktop = "0.7.9"

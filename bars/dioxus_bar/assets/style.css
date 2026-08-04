@@ -1,0 +1,722 @@
+/* ===== Reset & base ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 40px !important;
+  overflow: hidden;
+  font-family:
+    "Symbols Nerd Font",
+    "JetBrainsMono Nerd Font",
+    "FiraCode Nerd Font",
+    "Hack Nerd Font",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  background: transparent;
+  color: #202124;
+  font-size: 14px;
+}
+
+/* Nerd Font icon */
+.nf-icon {
+  font-family:
+    "Symbols Nerd Font",
+    "JetBrainsMono Nerd Font",
+    "FiraCode Nerd Font",
+    "Hack Nerd Font",
+    "Symbols Nerd Font Mono",
+    monospace;
+  font-size: 15px;
+  line-height: 1;
+  display: inline-block;
+  vertical-align: middle;
+  width: 1.2em;
+  text-align: center;
+}
+
+.pill .nf-icon {
+  margin-right: 6px;
+}
+
+.emoji-button .nf-icon {
+  margin: 0;
+  font-size: 18px;
+  width: auto;
+}
+
+/* ===== Bar row ===== */
+.button-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  margin: 0;
+  padding: 1px 6px;
+  gap: 8px;
+  width: 100vw;
+  height: 40px;
+  min-height: 40px;
+  max-height: 40px;
+  background: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+  position: relative;
+  overflow: visible;
+  box-sizing: border-box;
+  user-select: none;
+}
+
+.buttons-container {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 1;
+  flex-grow: 0;
+  min-width: 0;
+  overflow: visible;
+  padding: 2px 0;
+}
+
+.right-info-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  flex-grow: 0;
+  margin-left: auto;
+}
+
+.system-info-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* ===== Tag buttons ===== */
+.emoji-button {
+  width: 38px;
+  height: 32px;
+  min-width: 38px;
+  min-height: 32px;
+  max-width: 38px;
+  max-height: 32px;
+  font-size: 18px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    all 0.2s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  user-select: none;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.emoji-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: grayscale(50%);
+}
+
+.emoji-button > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* default */
+.emoji-button.state-default {
+  background: #ffffff;
+  border-color: #dee2e6;
+}
+
+.emoji-button.state-default:hover:not(:disabled):not(.pressed):not(:active) {
+  background: #f8f9fa;
+  border-color: #adb5bd;
+  transform: scale(1.02);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+/* per-tag color (1..9) */
+.emoji-button:nth-child(1).state-occupied {
+  background: rgba(255, 107, 107, 0.3) !important;
+  border-color: rgba(255, 107, 107, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(1).state-selected {
+  background: rgba(255, 107, 107, 0.7) !important;
+  border-color: rgba(255, 107, 107, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(1).state-filtered {
+  background: rgba(255, 107, 107, 1) !important;
+  border-color: rgba(255, 107, 107, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(255, 107, 107, 0.4);
+}
+
+.emoji-button:nth-child(2).state-occupied {
+  background: rgba(78, 205, 196, 0.3) !important;
+  border-color: rgba(78, 205, 196, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(2).state-selected {
+  background: rgba(78, 205, 196, 0.7) !important;
+  border-color: rgba(78, 205, 196, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(2).state-filtered {
+  background: rgba(78, 205, 196, 1) !important;
+  border-color: rgba(78, 205, 196, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(78, 205, 196, 0.4);
+}
+
+.emoji-button:nth-child(3).state-occupied {
+  background: rgba(69, 183, 209, 0.3) !important;
+  border-color: rgba(69, 183, 209, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(3).state-selected {
+  background: rgba(69, 183, 209, 0.7) !important;
+  border-color: rgba(69, 183, 209, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(3).state-filtered {
+  background: rgba(69, 183, 209, 1) !important;
+  border-color: rgba(69, 183, 209, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(69, 183, 209, 0.4);
+}
+
+.emoji-button:nth-child(4).state-occupied {
+  background: rgba(150, 206, 180, 0.3) !important;
+  border-color: rgba(150, 206, 180, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(4).state-selected {
+  background: rgba(150, 206, 180, 0.7) !important;
+  border-color: rgba(150, 206, 180, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(4).state-filtered {
+  background: rgba(150, 206, 180, 1) !important;
+  border-color: rgba(150, 206, 180, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(150, 206, 180, 0.4);
+}
+
+.emoji-button:nth-child(5).state-occupied {
+  background: rgba(254, 202, 87, 0.3) !important;
+  border-color: rgba(254, 202, 87, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(5).state-selected {
+  background: rgba(254, 202, 87, 0.7) !important;
+  border-color: rgba(254, 202, 87, 0.9) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(5).state-filtered {
+  background: rgba(254, 202, 87, 1) !important;
+  border-color: rgba(254, 202, 87, 1) !important;
+  color: #333 !important;
+  box-shadow: 0 2px 8px rgba(254, 202, 87, 0.4);
+}
+
+.emoji-button:nth-child(6).state-occupied {
+  background: rgba(255, 159, 243, 0.3) !important;
+  border-color: rgba(255, 159, 243, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(6).state-selected {
+  background: rgba(255, 159, 243, 0.7) !important;
+  border-color: rgba(255, 159, 243, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(6).state-filtered {
+  background: rgba(255, 159, 243, 1) !important;
+  border-color: rgba(255, 159, 243, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(255, 159, 243, 0.4);
+}
+
+.emoji-button:nth-child(7).state-occupied {
+  background: rgba(84, 160, 255, 0.3) !important;
+  border-color: rgba(84, 160, 255, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(7).state-selected {
+  background: rgba(84, 160, 255, 0.7) !important;
+  border-color: rgba(84, 160, 255, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(7).state-filtered {
+  background: rgba(84, 160, 255, 1) !important;
+  border-color: rgba(84, 160, 255, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(84, 160, 255, 0.4);
+}
+
+.emoji-button:nth-child(8).state-occupied {
+  background: rgba(95, 39, 205, 0.3) !important;
+  border-color: rgba(95, 39, 205, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(8).state-selected {
+  background: rgba(95, 39, 205, 0.7) !important;
+  border-color: rgba(95, 39, 205, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(8).state-filtered {
+  background: rgba(95, 39, 205, 1) !important;
+  border-color: rgba(95, 39, 205, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(95, 39, 205, 0.4);
+}
+
+.emoji-button:nth-child(9).state-occupied {
+  background: rgba(0, 210, 211, 0.3) !important;
+  border-color: rgba(0, 210, 211, 0.6) !important;
+  color: #333 !important;
+}
+.emoji-button:nth-child(9).state-selected {
+  background: rgba(0, 210, 211, 0.7) !important;
+  border-color: rgba(0, 210, 211, 0.9) !important;
+  color: #fff !important;
+}
+.emoji-button:nth-child(9).state-filtered {
+  background: rgba(0, 210, 211, 1) !important;
+  border-color: rgba(0, 210, 211, 1) !important;
+  color: #fff !important;
+  box-shadow: 0 2px 8px rgba(0, 210, 211, 0.4);
+}
+
+/* urgent */
+.emoji-button.state-urgent {
+  background: linear-gradient(135deg, #dc3545, #c82333) !important;
+  border-color: #bd2130 !important;
+  color: #fff !important;
+}
+
+.emoji-button.state-urgent::after {
+  content: "U";
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  background: #ffc107;
+  border-radius: 50%;
+  width: 12px;
+  height: 12px;
+  border: 1px solid #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  font-size: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #000;
+  font-weight: bold;
+}
+
+/* state badges */
+.emoji-button.state-filtered::after {
+  content: "●";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 10px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  font-weight: bold;
+}
+.emoji-button.state-selected::after {
+  content: "◆";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 8px;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  font-weight: bold;
+}
+.emoji-button:nth-child(5).state-selected::after,
+.emoji-button:nth-child(5).state-filtered::after {
+  color: rgba(51, 51, 51, 0.8);
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.3);
+}
+.emoji-button.state-occupied::after {
+  content: "○";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  color: rgba(51, 51, 51, 0.7);
+  font-size: 8px;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.3);
+  font-weight: bold;
+}
+
+/* press effect */
+.emoji-button::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.6) 0%,
+    rgba(255, 255, 255, 0) 70%
+  );
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+  transition: all 0.3s ease;
+}
+
+.emoji-button.pressed,
+.emoji-button:active {
+  transform: scale(0.92) !important;
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.3),
+    0 1px 2px rgba(0, 0, 0, 0.2) !important;
+  transition: all 0.1s ease !important;
+}
+
+.emoji-button.state-default.pressed,
+.emoji-button.state-default:active {
+  background: #dee2e6 !important;
+  border-color: #6c757d !important;
+}
+
+.emoji-button.state-occupied.pressed,
+.emoji-button.state-selected.pressed,
+.emoji-button.state-filtered.pressed {
+  opacity: 0.8;
+}
+
+/* hover halo (only on default state) */
+.emoji-button:nth-child(1):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #ff6b6b !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(255, 107, 107, 0.4);
+  background: rgba(255, 107, 107, 0.1);
+}
+.emoji-button:nth-child(2):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #4ecdc4 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(78, 205, 196, 0.4);
+  background: rgba(78, 205, 196, 0.1);
+}
+.emoji-button:nth-child(3):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #45b7d1 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(69, 183, 209, 0.4);
+  background: rgba(69, 183, 209, 0.1);
+}
+.emoji-button:nth-child(4):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #96ceb4 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(150, 206, 180, 0.4);
+  background: rgba(150, 206, 180, 0.1);
+}
+.emoji-button:nth-child(5):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #feca57 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(254, 202, 87, 0.4);
+  background: rgba(254, 202, 87, 0.1);
+}
+.emoji-button:nth-child(6):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #ff9ff3 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(255, 159, 243, 0.4);
+  background: rgba(255, 159, 243, 0.1);
+}
+.emoji-button:nth-child(7):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #54a0ff !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(84, 160, 255, 0.4);
+  background: rgba(84, 160, 255, 0.1);
+}
+.emoji-button:nth-child(8):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #5f27cd !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(95, 39, 205, 0.4);
+  background: rgba(95, 39, 205, 0.1);
+}
+.emoji-button:nth-child(9):hover:not(:disabled):not(.pressed):not(:active):not(
+    .state-occupied
+  ):not(.state-selected):not(.state-filtered):not(.state-urgent) {
+  border-color: #00d2d3 !important;
+  border-width: 2px !important;
+  box-shadow: 0 0 6px rgba(0, 210, 211, 0.4);
+  background: rgba(0, 210, 211, 0.1);
+}
+
+.emoji-button:hover:not(.pressed):not(:active) {
+  transform: scale(1.05);
+  transition: all 0.2s ease;
+}
+
+/* touch */
+@media (hover: none) {
+  .emoji-button:hover {
+    transform: none;
+  }
+  .emoji-button.pressed,
+  .emoji-button:active {
+    transform: scale(0.95) !important;
+  }
+}
+
+/* ===== Pills ===== */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  padding: 4px 10px;
+  font-size: 14px;
+  line-height: 1;
+  border: 1px solid transparent;
+  transition: all 120ms ease-in-out;
+  white-space: nowrap;
+}
+
+/* usage pills */
+.usage-pill {
+  color: #fff;
+  border-width: 1px;
+}
+.usage-good {
+  background: rgba(31, 191, 81, 0.9);
+  border-color: #1fbf51;
+}
+.usage-warn {
+  background: rgba(244, 194, 13, 0.9);
+  border-color: #f4c20d;
+  color: #000;
+}
+.usage-caution {
+  background: rgba(255, 140, 26, 0.9);
+  border-color: #ff8c1a;
+}
+.usage-danger {
+  background: rgba(229, 57, 53, 0.9);
+  border-color: #e53935;
+}
+
+/* layout switcher */
+.layout-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+}
+.layout-toggle {
+  cursor: pointer;
+  color: #fff;
+}
+.layout-toggle.open {
+  background: rgba(60, 179, 113, 0.85);
+  border-color: #3cb371;
+}
+.layout-toggle.closed {
+  background: rgba(211, 84, 0, 0.85);
+  border-color: #d35400;
+}
+.layout-toggle:hover {
+  filter: brightness(1.05);
+  border-width: 2px;
+}
+
+.layout-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.layout-option {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(65, 105, 225, 0.85);
+  border-color: #4169e1;
+}
+.layout-option.current {
+  background: rgba(60, 179, 113, 0.9);
+  border-color: #3cb371;
+  border-width: 2px;
+}
+.layout-option:hover {
+  filter: brightness(1.05);
+  border-width: 2px;
+}
+
+/* screenshot */
+.screenshot-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(0, 204, 204, 0.9);
+  border-color: #00cccc;
+}
+.screenshot-pill:hover {
+  background: rgba(255, 136, 0, 0.95);
+  border-color: #ff8800;
+}
+.screenshot-pill.taking {
+  background: linear-gradient(135deg, #007bff, #0056b3);
+  border-color: #004085;
+  cursor: not-allowed;
+}
+
+/* time */
+.time-pill {
+  color: #fff;
+  background: rgba(77, 163, 255, 0.9);
+  border-color: #4da3ff;
+  cursor: pointer;
+}
+
+/* monitor / scale */
+.monitor-pill {
+  color: #fff;
+  background: rgba(155, 89, 182, 0.9);
+  border-color: #9b59b6;
+}
+.scale-pill {
+  color: #fff;
+  background: rgba(120, 120, 120, 0.88);
+  border-color: #777;
+}
+
+/* volume */
+.volume-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(20, 184, 166, 0.9);
+  border-color: #14b8a6;
+  user-select: none;
+}
+.volume-pill:hover {
+  filter: brightness(1.08);
+  border-width: 2px;
+}
+.volume-pill.muted {
+  background: rgba(120, 120, 120, 0.85);
+  border-color: #888;
+  color: #eee;
+}
+
+/* brightness */
+.brightness-pill {
+  cursor: pointer;
+  color: #1f2937;
+  background: rgba(253, 224, 71, 0.92);
+  border-color: #facc15;
+  user-select: none;
+}
+.brightness-pill:hover {
+  filter: brightness(1.05);
+  border-width: 2px;
+}
+
+/* ── JWM shell entry ─────────────────────────────────────────────────────── */
+/* The dropdown is CSS-only: hovering the pill reveals the page list, so the
+   bar needs no open/closed state of its own for a menu the window manager
+   will immediately cover with its own grabbed surface. */
+.shell-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.shell-pill {
+  cursor: pointer;
+  color: #fff;
+  background: rgba(124, 108, 255, 0.9);
+  border-color: #7c6cff;
+}
+.shell-pill:hover {
+  background: rgba(150, 136, 255, 0.95);
+  border-color: #9688ff;
+}
+
+/* Grayed rather than hidden: the shell lives in the window manager, so an
+   unreachable one has to look unreachable instead of silently doing nothing. */
+.shell-pill-offline {
+  cursor: default;
+  background: rgba(85, 91, 102, 0.7);
+  border-color: #555b66;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.shell-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 170px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 10px;
+  border: 1px solid rgba(124, 108, 255, 0.45);
+  background: rgba(20, 26, 36, 0.97);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.shell-menu:hover .shell-dropdown {
+  display: flex;
+}
+
+.shell-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #e9eef5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.shell-route:hover {
+  background: rgba(124, 108, 255, 0.28);
+}
