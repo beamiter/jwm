@@ -14,7 +14,6 @@ __pycache__/
 .venv/
 *.swp
 *.swo
-/submodules/
 
 # Local GPU capability probe output.
 gpu.log
