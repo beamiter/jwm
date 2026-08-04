@@ -1,0 +1,163 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  format:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (all targets and features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Clippy without a synchronization backend
+        run: cargo clippy --no-default-features --lib --tests -- -D warnings
+
+  msrv:
+    name: MSRV (Rust 1.86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86.0
+      - run: cargo check --all-features --lib
+
+  docs:
+    name: rustdoc (all features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build documentation with warnings denied
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
+
+  feature-checks:
+    name: check (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: all-features
+            args: "--all-features"
+          - name: no-default-features
+            args: "--no-default-features --tests"
+          - name: legacy-use-futex
+            args: "--no-default-features --features use-futex"
+          - name: legacy-use-semaphore
+            args: "--no-default-features --features use-semaphore"
+          - name: legacy-use-eventfd
+            args: "--no-default-features --features use-eventfd"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check ${{ matrix.args }}
+
+  default-tests:
+    name: test (default features)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - name: Test message-only build
+        run: cargo test --no-default-features
+
+  single-backend-tests:
+    name: test (${{ matrix.feature }} only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: futex
+            test_threads: 4
+          - feature: semaphore
+            test_threads: 4
+          - feature: eventfd
+            test_threads: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test the ${{ matrix.feature }} backend
+        run: >-
+          cargo test --no-default-features --features ${{ matrix.feature }}
+          -- --test-threads=${{ matrix.test_threads }}
+
+  legacy-selector-tests:
+    name: test legacy selector (${{ matrix.feature }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [use-futex, use-semaphore, use-eventfd]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: >-
+          cargo test --no-default-features --features ${{ matrix.feature }}
+          backends::common::tests::legacy_selector_has_deterministic_priority
+
+  bench-build:
+    name: compile benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench --all-features --no-run
+
+  serde-features:
+    name: check optional serde/rkyv features
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --features serde
+      - run: cargo check --features rkyv
+
+  deny:
+    name: cargo-deny (advisories, licenses, bans, sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2

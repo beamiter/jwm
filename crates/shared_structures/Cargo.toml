@@ -1,0 +1,54 @@
+[package]
+name = "shared_structures"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Linux shared-memory IPC with fixed-size message and command ring buffers"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/beamiter/shared_structures"
+documentation = "https://docs.rs/shared_structures"
+keywords = ["shared-memory", "ipc", "ring-buffer", "linux", "concurrency"]
+categories = ["concurrency", "data-structures", "os::linux-apis"]
+
+[dependencies]
+libc = { version = "0.2.186", optional = true }
+log = "0.4.29"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
+rkyv = { version = "0.8", optional = true }
+serde-big-array = { version = "0.5.1", optional = true }
+shared_memory = "0.12.4"
+nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"], optional = true }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[features]
+futex = ["dep:libc"]
+semaphore = ["dep:libc"]
+eventfd = ["dep:libc", "dep:nix"]
+# 领域类型的可选序列化 derive；队列传输本身不使用它们。
+serde = ["dep:serde", "dep:serde-big-array"]
+rkyv = ["dep:rkyv"]
+default = ["futex", "semaphore", "eventfd"]
+
+# Legacy default-backend selectors. Prefer choosing `SyncStrategy` at runtime.
+use-eventfd = ["eventfd"]
+use-futex = ["futex"]
+use-semaphore = ["semaphore"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+
+[[bench]]
+name = "ring_buffer_bench"
+harness = false
+
+[[bench]]
+name = "stress_test"
+harness = false
+
+[[bench]]
+name = "cross_process_latency"
+harness = false
