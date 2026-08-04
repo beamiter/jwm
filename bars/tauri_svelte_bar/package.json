@@ -1,0 +1,27 @@
+{
+  "name": "tauri_svelte_bar",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "svelte-check --tsconfig ./tsconfig.json && vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-opener": "^2",
+    "svelte": "^5.0.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tauri-apps/cli": "^2.8.4",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte-check": "^4.0.0",
+    "tslib": "^2.7.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3"
+  }
+}
