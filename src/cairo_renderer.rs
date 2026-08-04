@@ -207,14 +207,32 @@ impl CairoRenderer {
         }
 
         configure_layout(layout, &self.font, text, size);
-        let (text_width, text_height) = layout.pixel_size();
-        let (x, y) = text_origin(bounds, text_width, text_height, style.align);
+        // Place the ink/logical union so glyphs whose ink overflows their
+        // advance (Nerd Font icons) are centered on what is actually drawn
+        // and fit the width the measurer reported for them.
+        let extents = layout_paint_extents(layout);
+        let (x, y) = text_origin(bounds, extents.width(), extents.height(), style.align);
         set_source(context, style.color, 1.0);
-        context.move_to(x, y);
+        context.move_to(x - f64::from(extents.x()), y - f64::from(extents.y()));
         pangocairo::functions::show_layout(context, layout);
         context.status()?;
         Ok(())
     }
+}
+
+/// Union of a layout's ink and logical pixel extents, relative to the layout
+/// origin. Logical extents alone under-report icon glyphs whose ink extends
+/// past their advance, which used to clip them inside their pill.
+fn layout_paint_extents(layout: &Layout) -> pango::Rectangle {
+    let (ink, logical) = layout.pixel_extents();
+    if ink.width() <= 0 || ink.height() <= 0 {
+        return logical;
+    }
+    let x = ink.x().min(logical.x());
+    let y = ink.y().min(logical.y());
+    let right = (ink.x() + ink.width()).max(logical.x() + logical.width());
+    let bottom = (ink.y() + ink.height()).max(logical.y() + logical.height());
+    pango::Rectangle::new(x, y, right - x, bottom - y)
 }
 
 /// Semantic pointer buttons shared by native window-system frontends.
@@ -743,8 +761,10 @@ impl TextMeasurer for PangoTextMeasurer {
         let layout = Layout::new(&self.context);
         layout.set_single_paragraph_mode(true);
         configure_layout(&layout, &self.font, text, size);
-        let (width, height) = layout.pixel_size();
-        Size::new(width.max(0) as f32, height.max(0) as f32)
+        // Report the same ink/logical union the renderer paints, so layout
+        // reserves enough pill width for overflowing icon glyphs.
+        let extents = layout_paint_extents(&layout);
+        Size::new(extents.width().max(0) as f32, extents.height().max(0) as f32)
     }
 }
 
