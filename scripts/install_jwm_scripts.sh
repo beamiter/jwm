@@ -513,6 +513,44 @@ sync_selected_bar_config() {
 }
 
 # ============================================================
+# 构建并安装 jwm-bridge
+#
+# bridge/ 是独立 crate（不在主 workspace 内），主 cargo build 不会构建它。
+# 它是 org.freedesktop.Notifications 与 MPRIS 的唯一提供者：少了它，
+# 飞书等应用发出的通知在会话总线上无人接收，桌面完全不弹通知。
+# 因此把它和 jwm 一起安装，并注册 D-Bus 激活文件由总线按需拉起。
+# ============================================================
+build_and_install_bridge() {
+    local bridge_dir="$PROJECT_ROOT/bridge"
+
+    if [[ ! -f "$bridge_dir/Cargo.toml" ]]; then
+        err "$bridge_dir/Cargo.toml 不存在，无法编译 jwm-bridge"
+        exit 1
+    fi
+
+    info "编译 jwm-bridge（$BUILD_MODE 模式）..."
+    # shellcheck disable=SC2086
+    (cd "$bridge_dir" && cargo build --locked $CARGO_BUILD_MODE_FLAG $CARGO_JOBS)
+
+    local bridge_target="$bridge_dir/target"
+    if [[ "$BUILD_MODE" == "release" ]]; then
+        bridge_target="$bridge_target/release"
+    else
+        bridge_target="$bridge_target/debug"
+    fi
+
+    info "同步 jwm-bridge 到 /usr/local/bin ..."
+    install_system_binary "$bridge_target/jwm-bridge" /usr/local/bin
+
+    # D-Bus 按需激活：应用第一次调用 Notify 时总线才启动 bridge，
+    # 不需要写进任何 autostart，也能在 jwm 重启后继续工作。
+    install -Dm644 "$bridge_dir/dist/org.freedesktop.Notifications.service" \
+        "$HOME/.local/share/dbus-1/services/org.freedesktop.Notifications.service"
+
+    ok "jwm-bridge 安装完成，并已注册 org.freedesktop.Notifications 激活文件"
+}
+
+# ============================================================
 # 构建 JWM，并将 desktop 依赖的二进制安装到 /usr/local/bin
 # ============================================================
 build_and_install_jwm() {
@@ -541,6 +579,8 @@ build_and_install_jwm() {
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
 
     ok "jwm, jwm-tool, jwm-support 安装完成: /usr/local/bin（未安装到 cargo bin）"
+
+    build_and_install_bridge
 
     info "安装 desktop 文件 ..."
     [[ -f jwm-x11rb.desktop ]]         && sudo install -m644 jwm-x11rb.desktop         /usr/share/xsessions/
