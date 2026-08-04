@@ -1,0 +1,362 @@
+use anyhow::{Context as _, Result};
+use log::warn;
+use pango::FontDescription;
+use std::env;
+use std::sync::Arc;
+use std::time::Duration;
+use tao::event_loop::EventLoopBuilder;
+use tao::platform::run_return::EventLoopExtRunReturn;
+use tao::{
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop, EventLoopProxy},
+    window::{Window, WindowBuilder, WindowId},
+};
+use xbar_core::{
+    AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
+    WakeAck,
+    logging::init as initialize_logging,
+    presentation::{Point, PointerAction},
+    render::cairo::{CairoBar, CpuCanvas},
+};
+use xbar_linux_actions::{EffectRouter, GeometryRequest};
+use xbar_present_wgpu::{PresentRect, WgpuPresenter};
+
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug)]
+enum UserEvent {
+    Tick,
+    SharedUpdated(WakeAck),
+}
+
+struct App {
+    window_id: Option<WindowId>,
+    window: Option<Arc<Window>>,
+    bar: CairoBar,
+    scale_factor: f64,
+    logical_size: LogicalSize<f64>,
+    default_logical_size: LogicalSize<f64>,
+    last_physical_size: PhysicalSize<u32>,
+    last_cursor_pos: Option<Point>,
+    gpu: Option<WgpuPresenter>,
+    canvas: CpuCanvas,
+    proxy: EventLoopProxy<UserEvent>,
+    transport_wake: TransportWakeSlot,
+    effects: EffectRouter,
+}
+
+impl App {
+    fn new(
+        bar: CairoBar,
+        logical_size: LogicalSize<f64>,
+        scale_factor: f64,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
+        Self {
+            window_id: None,
+            window: None,
+            bar,
+            scale_factor,
+            logical_size,
+            default_logical_size: logical_size,
+            last_physical_size: PhysicalSize::new(
+                logical_size.width.round() as u32,
+                logical_size.height.round() as u32,
+            ),
+            last_cursor_pos: None,
+            gpu: None,
+            canvas: CpuCanvas::new(),
+            proxy,
+            transport_wake: TransportWakeSlot::new(true),
+            effects: EffectRouter::default(),
+        }
+    }
+
+    fn init_window_and_gpu(&mut self, event_loop: &EventLoop<UserEvent>) -> Result<()> {
+        let primary = event_loop
+            .primary_monitor()
+            .or_else(|| event_loop.available_monitors().next());
+        self.scale_factor = primary
+            .as_ref()
+            .map_or(1.0, |monitor| monitor.scale_factor());
+        let screen_size = primary
+            .as_ref()
+            .map_or(PhysicalSize::new(1920, 1080), |monitor| monitor.size());
+        self.logical_size = LogicalSize::new(
+            f64::from(screen_size.width) / self.scale_factor,
+            f64::from(self.bar.config().bar_height),
+        );
+        self.default_logical_size = self.logical_size;
+
+        let window = Arc::new(
+            WindowBuilder::new()
+                .with_title("tao_wgpu_bar")
+                .with_inner_size(self.logical_size)
+                .with_decorations(false)
+                .with_resizable(true)
+                .with_visible(true)
+                .with_transparent(false)
+                .build(event_loop)
+                .context("failed to create tao window")?,
+        );
+        let size = window.inner_size();
+        let safe_width = size.width.max(1);
+        let safe_height = size.height.max(1);
+        let gpu = WgpuPresenter::new_blocking(Arc::clone(&window), safe_width, safe_height)
+            .context("failed to initialize wgpu")?;
+
+        self.window_id = Some(window.id());
+        self.window = Some(window);
+        self.last_physical_size = size;
+        self.gpu = Some(gpu);
+
+        let tick = self.bar.tick();
+        self.handle_runtime_update(tick);
+        let shared = self.bar.poll_transport();
+        self.handle_runtime_update(shared);
+        self.sync_transport_wake();
+        self.request_redraw();
+        Ok(())
+    }
+
+    fn redraw(&mut self) -> Result<()> {
+        if self.window_id.is_none() || self.gpu.is_none() {
+            return Ok(());
+        }
+        let width = self.last_physical_size.width;
+        let height = self.last_physical_size.height;
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        // Cairo builds the scene in logical coordinates; the CPU frame stays
+        // in physical pixels.
+        let frame = self
+            .canvas
+            .render(&mut self.bar, width, height, self.scale_factor)?;
+        let damage = frame.damage.map(|rect| PresentRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        });
+        self.gpu
+            .as_mut()
+            .expect("GPU presence checked above")
+            .present_bgra(frame.data, frame.stride, damage)?;
+        Ok(())
+    }
+
+    fn request_redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
+        let update = self.bar.pointer_action(point, action);
+        self.handle_runtime_update(update);
+    }
+
+    fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
+        let mut effects = std::mem::take(&mut self.effects);
+        let needs_redraw = effects
+            .route::<_, std::convert::Infallible>(update, |request| {
+                match request {
+                    GeometryRequest::Apply(geometry) => self.apply_monitor_geometry(geometry),
+                    GeometryRequest::Clear => {
+                        if let Some(window) = &self.window {
+                            window.set_outer_position(LogicalPosition::new(0.0, 0.0));
+                            window.set_inner_size(self.default_logical_size);
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .expect("geometry closure is infallible");
+        self.effects = effects;
+        if needs_redraw {
+            self.request_redraw();
+        }
+    }
+
+    fn tick_and_poll(&mut self) {
+        let mut update = self.bar.tick();
+        update.merge(self.bar.poll_transport());
+        self.handle_runtime_update(update);
+        self.sync_transport_wake();
+    }
+
+    fn sync_transport_wake(&mut self) {
+        let proxy = self.proxy.clone();
+        if let Err(error) = self.transport_wake.sync(self.bar.runtime(), move |ack| {
+            proxy.send_event(UserEvent::SharedUpdated(ack))
+        }) {
+            warn!("failed to synchronize shared transport wake: {error}");
+        }
+    }
+
+    fn apply_monitor_geometry(&self, geometry: xbar_core::MonitorGeometry) {
+        if let Some(window) = &self.window {
+            let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
+                .round()
+                .clamp(1.0, f64::from(u32::MAX)) as u32;
+            window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
+            window.set_inner_size(PhysicalSize::new(geometry.width, height));
+        }
+    }
+
+    fn on_user_event(&mut self, event: UserEvent) {
+        match event {
+            UserEvent::Tick => self.tick_and_poll(),
+            UserEvent::SharedUpdated(_ack) => {
+                let update = self.bar.poll_transport();
+                self.handle_runtime_update(update);
+                self.sync_transport_wake();
+            }
+        }
+    }
+
+    fn on_window_event(&mut self, window_id: WindowId, event: WindowEvent) -> Option<ControlFlow> {
+        if Some(window_id) != self.window_id {
+            return None;
+        }
+
+        match event {
+            WindowEvent::CloseRequested => return Some(ControlFlow::Exit),
+            WindowEvent::Resized(size) => {
+                self.last_physical_size = size;
+                if size.width > 0 && size.height > 0 {
+                    self.logical_size = size.to_logical(self.scale_factor);
+                    if let Some(gpu) = self.gpu.as_mut() {
+                        gpu.resize(size.width, size.height);
+                    }
+                }
+                self.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                new_inner_size,
+            } => {
+                self.scale_factor = scale_factor;
+                self.last_physical_size = *new_inner_size;
+                self.logical_size = self.last_physical_size.to_logical::<f64>(self.scale_factor);
+                if self.last_physical_size.width > 0
+                    && self.last_physical_size.height > 0
+                    && let Some(gpu) = self.gpu.as_mut()
+                {
+                    gpu.resize(
+                        self.last_physical_size.width,
+                        self.last_physical_size.height,
+                    );
+                }
+                if let Some(geometry) = self.bar.runtime().view().geometry {
+                    self.apply_monitor_geometry(geometry);
+                }
+                self.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let position = position.to_logical::<f64>(self.scale_factor);
+                let point = Point::new(position.x as f32, position.y as f32);
+                self.last_cursor_pos = Some(point);
+                if self.bar.pointer_motion(point) {
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.last_cursor_pos = None;
+                if self.bar.pointer_leave() {
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                use tao::event::MouseScrollDelta;
+                if let Some(point) = self.last_cursor_pos {
+                    let vertical = match delta {
+                        MouseScrollDelta::LineDelta(_, value) => f64::from(value),
+                        MouseScrollDelta::PixelDelta(position) => position.y,
+                        _ => 0.0,
+                    };
+                    if let Some(action) = PointerAction::from_vertical_delta(vertical) {
+                        self.handle_pointer_action(point, action);
+                    }
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                use tao::event::{ElementState, MouseButton};
+                if state == ElementState::Pressed
+                    && let Some(point) = self.last_cursor_pos
+                {
+                    let action = match button {
+                        MouseButton::Left => Some(PointerAction::Primary),
+                        MouseButton::Right => Some(PointerAction::Secondary),
+                        MouseButton::Middle | MouseButton::Other(_) => None,
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        self.handle_pointer_action(point, action);
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+}
+
+fn main() -> Result<()> {
+    let shared_path = env::args().skip(1).last().unwrap_or_default();
+    initialize_logging("tao_wgpu_bar", &shared_path)?;
+
+    let app_config = xbar_core::config::BarConfig::load_default()?;
+    let runtime = if shared_path.is_empty() {
+        BarRuntime::new(app_config.model_config())?
+    } else {
+        let recovery = TransportRecoveryConfig::new(shared_path.clone(), TRANSPORT_RETRY_INTERVAL)?;
+        BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
+    };
+    let presentation = app_config.presentation.clone();
+    let mut bar = CairoBar::new(
+        runtime,
+        presentation,
+        FontDescription::from_string(&app_config.font),
+    );
+    if let Some(opacity) = app_config.background_opacity {
+        bar.renderer_mut().set_background_opacity(Some(opacity));
+    }
+
+    let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
+    let proxy = event_loop.create_proxy();
+    let tick_proxy = proxy.clone();
+    let _tick_forwarder = AlignedWakeThread::spawn(move || tick_proxy.send_event(UserEvent::Tick))?;
+
+    let mut app = App::new(bar, LogicalSize::new(800.0, 38.0), 1.0, proxy);
+    app.init_window_and_gpu(&event_loop)?;
+
+    let exit_code = event_loop.run_return(move |event, _target, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::UserEvent(event) => app.on_user_event(event),
+            Event::WindowEvent {
+                window_id, event, ..
+            } => {
+                if let Some(next) = app.on_window_event(window_id, event) {
+                    *control_flow = next;
+                }
+            }
+            Event::RedrawRequested(window_id) if Some(window_id) == app.window_id => {
+                if let Err(error) = app.redraw() {
+                    warn!("redraw failed: {error}");
+                }
+            }
+            _ => {}
+        }
+    });
+
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        anyhow::bail!("tao event loop exited with status {exit_code}")
+    }
+}
