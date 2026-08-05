@@ -931,6 +931,7 @@ impl Config {
                 "coverflow",
                 "helix",
                 "portal",
+                "book",
             ],
         );
         validate_choice_ignore_ascii_case(

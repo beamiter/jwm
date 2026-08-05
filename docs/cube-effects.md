@@ -73,12 +73,21 @@ transition, not once per frame.
 solid, but they share the same lit-face shader, and CoverFlow gets the floor
 reflection its name implies.
 
+`book` turns the old workspace like a book page: hinged on the spine-side
+monitor edge (left going forward, right going back), bending along a circular
+arc away from the viewer. The page is tessellated into strips whose chords ride
+the arc (`backend::compositor_common::page_curl`, shared with the Wayland
+compositor), parametrized by arc length so the paper never stretches. The curl
+is zero at both ends — the first and last frame are the flat workspace — and
+the free edge leads but is clamped at the landed position, so the page settles
+tip-first the way paper does.
+
 ## Timing
 
 Flat wipes read best when they are quick; a rotating solid needs long enough for
 the eye to follow it around. The cube family therefore stretches the configured
-animation duration (cube and helix ×1.8, flip and coverflow ×1.4) rather than
-asking for a second duration setting.
+animation duration (cube and helix ×1.8, book ×1.6, flip and coverflow ×1.4)
+rather than asking for a second duration setting.
 
 ## Shader hot-reload
 

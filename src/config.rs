@@ -3267,7 +3267,7 @@ impl Config {
 
             // transition_mode (in [behavior])
             if section == "behavior" && trimmed.starts_with("transition_mode") {
-                result.push_str("# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal\n");
+                result.push_str("# available: slide, cube, fade, flip, zoom, stack, blinds, coverflow, helix, portal, book\n");
             }
             // wallpaper_mode (in [behavior])
             else if section == "behavior" && trimmed.starts_with("wallpaper_mode") {

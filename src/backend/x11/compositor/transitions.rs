@@ -3,6 +3,7 @@ use super::CompositorConnection;
 use super::compute_wallpaper_rect;
 use super::math::{mat4_mul, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix};
 use super::prism::{PrismCamera, PrismFace, PrismPass, build_prism_pieces, mirror_matrix};
+use crate::backend::compositor_common::page_curl::{PAGE_CURL_STRIPS, page_curl_strips};
 use crate::backend::x11::compositor_common::transitions::normalized_transition_progress;
 use glow::HasContext;
 
@@ -436,6 +437,85 @@ impl<C: CompositorConnection> Compositor<C> {
             0.0,
             false,
         );
+        self.end_3d_transition();
+    }
+
+    /// Turn the old workspace like a book page. The page is hinged on the
+    /// spine-side monitor edge and bends along a circular arc away from the
+    /// viewer — tessellated into strips whose chords ride the arc, so the
+    /// silhouette, shading and perspective all read as one curved sheet of
+    /// paper. The free edge leads and lands first, the way paper settles.
+    pub(crate) fn render_book_transition(&mut self, progress: f32, _ortho_proj: &[f32; 16]) {
+        let Some(texture) = self.old_transition_texture() else {
+            return;
+        };
+        let Some(workspace) = self.transition_workspace() else {
+            return;
+        };
+
+        let t = progress.clamp(0.0, 1.0);
+        let pulse = (t * std::f32::consts::PI).sin();
+        let time = self.compositor_start_time.elapsed().as_secs_f32();
+        // A slight mid-turn pitch lets the arc's silhouette read from above;
+        // it is zero at both ends so the flat page stays pixel-identical to
+        // the workspace.
+        let camera = PrismCamera::card(workspace.aspect, 1.0, 0.10 * pulse);
+
+        let mut strips = page_curl_strips(
+            workspace.aspect,
+            self.transition_direction,
+            t,
+            PAGE_CURL_STRIPS,
+        );
+        // Painter's order: the crest recedes furthest, the landed tip is
+        // nearest the screen plane and must cover it.
+        strips.sort_by(|a, b| {
+            a.mid_z
+                .partial_cmp(&b.mid_z)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        self.begin_3d_transition(workspace);
+        self.bind_prism_programs(&camera, time);
+        for strip in &strips {
+            let model = mat4_mul(
+                &translate_matrix(strip.mid_x, 0.0, strip.mid_z),
+                &mat4_mul(
+                    &rotate_y_matrix(-strip.angle),
+                    &scale_matrix(strip.scale_x, 1.0, 1.0),
+                ),
+            );
+            let uv_rect = [
+                workspace.uv_rect[0] + strip.u0 * workspace.uv_rect[2],
+                workspace.uv_rect[1],
+                strip.du * workspace.uv_rect[2],
+                workspace.uv_rect[3],
+            ];
+            let brightness = if strip.facing >= 0.0 {
+                0.34 + 0.66 * strip.facing
+            } else {
+                // The turned-over part shows the page's duller back.
+                0.26 + 0.30 * (-strip.facing)
+            };
+            self.draw_prism_face(
+                &camera.mvp(&model),
+                &model,
+                &PrismFace {
+                    texture: Some(texture),
+                    uv_rect,
+                    // Strips must butt flush — a per-strip bevel would draw
+                    // seams across the page.
+                    edge: 0.0,
+                    mipmapped: true,
+                    ..PrismFace::default()
+                },
+                texture,
+                brightness,
+                1.0,
+                0.0,
+                false,
+            );
+        }
         self.end_3d_transition();
     }
 

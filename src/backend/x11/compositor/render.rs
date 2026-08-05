@@ -5627,6 +5627,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 TransitionMode::Portal => {
                     self.render_portal_transition(progress, &proj);
                 }
+                TransitionMode::Book => {
+                    self.render_book_transition(progress, &proj);
+                }
             }
             true
         } else {

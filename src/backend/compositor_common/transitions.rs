@@ -13,6 +13,7 @@ pub enum TransitionMode {
     CoverFlow,
     Helix,
     Portal,
+    Book,
 }
 
 impl TransitionMode {
@@ -33,6 +34,7 @@ impl TransitionMode {
             "coverflow" => Self::CoverFlow,
             "helix" => Self::Helix,
             "portal" => Self::Portal,
+            "book" => Self::Book,
             _ => Self::Slide,
         }
     }
@@ -58,6 +60,7 @@ impl TransitionMode {
             Self::CoverFlow => "coverflow",
             Self::Helix => "helix",
             Self::Portal => "portal",
+            Self::Book => "book",
         }
     }
 
@@ -80,6 +83,7 @@ impl TransitionMode {
     pub fn stretch_duration(self, base: Duration) -> Duration {
         let scale = match self {
             Self::Cube | Self::Helix => 1.8,
+            Self::Book => 1.6,
             Self::Flip | Self::CoverFlow => 1.4,
             _ => 1.0,
         };
@@ -95,7 +99,7 @@ impl TransitionMode {
         match self {
             Self::Slide | Self::Stack => smoothstep(t),
             Self::Fade | Self::Zoom | Self::Portal => smootherstep(t),
-            Self::Cube | Self::Flip | Self::Blinds | Self::CoverFlow | Self::Helix => {
+            Self::Cube | Self::Flip | Self::Blinds | Self::CoverFlow | Self::Helix | Self::Book => {
                 ease_in_out_cubic(t)
             }
             Self::None => t,
@@ -159,7 +163,7 @@ fn smootherstep(t: f32) -> f32 {
 mod tests {
     use super::*;
 
-    const MODES: [TransitionMode; 11] = [
+    const MODES: [TransitionMode; 12] = [
         TransitionMode::None,
         TransitionMode::Slide,
         TransitionMode::Cube,
@@ -171,6 +175,7 @@ mod tests {
         TransitionMode::CoverFlow,
         TransitionMode::Helix,
         TransitionMode::Portal,
+        TransitionMode::Book,
     ];
 
     #[test]

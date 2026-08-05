@@ -10,6 +10,7 @@ pub mod layout_strip;
 pub mod math;
 pub mod media;
 pub(crate) mod osd;
+pub mod page_curl;
 pub mod rules;
 pub mod screenshot;
 pub(crate) mod toast;

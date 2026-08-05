@@ -2,6 +2,7 @@ use super::*;
 use crate::backend::compositor_common::math::{
     mat4_mul, perspective_matrix, rotate_x_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
 };
+use crate::backend::compositor_common::page_curl::{PAGE_CURL_STRIPS, page_curl_strips};
 use crate::backend::compositor_common::transitions::normalized_transition_progress;
 use smithay::backend::renderer::gles::ffi;
 
@@ -173,6 +174,7 @@ impl WaylandCompositor {
         layout: TransitionLayout,
         mvp: &[f32; 16],
         brightness: f32,
+        uv_rect: [f32; 4],
     ) {
         unsafe {
             gl.Viewport(
@@ -190,10 +192,10 @@ impl WaylandCompositor {
             gl.Uniform1f(self.cube_uniforms.brightness, brightness.clamp(0.0, 1.0));
             gl.Uniform4f(
                 self.cube_uniforms.uv_rect,
-                layout.uv_rect[0],
-                layout.uv_rect[1],
-                layout.uv_rect[2],
-                layout.uv_rect[3],
+                uv_rect[0],
+                uv_rect[1],
+                uv_rect[2],
+                uv_rect[3],
             );
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.transition_texture);
@@ -254,6 +256,7 @@ impl WaylandCompositor {
             TransitionMode::Blinds => self.render_blinds_transition(gl, projection, layout, t),
             TransitionMode::CoverFlow => self.render_coverflow_transition(gl, layout, t),
             TransitionMode::Helix => self.render_helix_transition(gl, layout, t),
+            TransitionMode::Book => self.render_book_transition(gl, layout, t),
             TransitionMode::None => {}
         }
 
@@ -365,7 +368,7 @@ impl WaylandCompositor {
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = 0.22 + 0.78 * angle.cos().abs();
 
-        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness, layout.uv_rect);
     }
 
     fn render_flip_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
@@ -386,7 +389,52 @@ impl WaylandCompositor {
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = 0.18 + 0.82 * angle.cos().abs();
 
-        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness, layout.uv_rect);
+    }
+
+    /// Turn the old workspace like a book page: hinged on the spine-side
+    /// monitor edge, bending along a circular arc away from the viewer.
+    /// The page is tessellated into strips riding the arc, so it reads as
+    /// one curved sheet; the free edge leads and lands first like paper.
+    fn render_book_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
+        let aspect = layout.draw_rect[2] / layout.draw_rect[3];
+        let direction = self.transition_direction as f32;
+        // With a 90° fov the flat page at camera distance 1 fills the
+        // workspace exactly, so the first frame matches the desktop.
+        let perspective = perspective_matrix(std::f32::consts::FRAC_PI_2, aspect, 0.1, 16.0);
+        let view = translate_matrix(0.0, 0.0, -1.0);
+
+        let mut strips = page_curl_strips(aspect, direction, t, PAGE_CURL_STRIPS);
+        // Painter's order: the receding crest first, the landed tip last.
+        strips.sort_by(|a, b| {
+            a.mid_z
+                .partial_cmp(&b.mid_z)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        for strip in &strips {
+            let model = mat4_mul(
+                &translate_matrix(strip.mid_x, 0.0, strip.mid_z),
+                &mat4_mul(
+                    &rotate_y_matrix(-strip.angle),
+                    &scale_matrix(strip.scale_x, 1.0, 1.0),
+                ),
+            );
+            let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
+            let uv_rect = [
+                layout.uv_rect[0] + strip.u0 * layout.uv_rect[2],
+                layout.uv_rect[1],
+                strip.du * layout.uv_rect[2],
+                layout.uv_rect[3],
+            ];
+            let brightness = if strip.facing >= 0.0 {
+                0.34 + 0.66 * strip.facing
+            } else {
+                // The turned-over part shows the page's duller back.
+                0.26 + 0.30 * (-strip.facing)
+            };
+            self.draw_3d_transition_face(gl, layout, &mvp, brightness, uv_rect);
+        }
     }
 
     fn render_blinds_transition(
@@ -455,7 +503,7 @@ impl WaylandCompositor {
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = (1.0 - 0.58 * t).max(0.28);
 
-        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness, layout.uv_rect);
     }
 
     fn render_helix_transition(&self, gl: &ffi::Gles2, layout: TransitionLayout, t: f32) {
@@ -482,7 +530,7 @@ impl WaylandCompositor {
         let mvp = mat4_mul(&perspective, &mat4_mul(&view, &model));
         let brightness = (1.0 - 0.68 * t).max(0.2);
 
-        self.draw_3d_transition_face(gl, layout, &mvp, brightness);
+        self.draw_3d_transition_face(gl, layout, &mvp, brightness, layout.uv_rect);
     }
 
     fn render_portal_transition(
