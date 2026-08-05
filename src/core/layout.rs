@@ -2,6 +2,7 @@
 use super::types::Rect;
 
 // 用于布局计算的客户端信息
+#[derive(Clone, Copy)]
 pub struct LayoutClient<K> {
     pub key: K,        // ClientKey, 用于标识
     pub factor: f32,   // client_fact
@@ -42,12 +43,6 @@ fn usable_area(screen_area: Rect, gap: i32) -> Rect {
 fn client_rect(x: i32, y: i32, w: i32, h: i32, border_w: i32) -> Rect {
     let border2 = 2 * border_w.max(0);
     Rect::new(x, y, (w - border2).max(1), (h - border2).max(1))
-}
-
-fn split_evenly(total: i32, count: i32, gap: i32, used: i32, index: i32) -> i32 {
-    let remaining = (total - (count - 1).max(0) * gap - used).max(0);
-    let remaining_count = (count - index).max(1);
-    (remaining / remaining_count).max(1)
 }
 
 fn choose_grid_dimensions(n: usize, area: Rect) -> (i32, i32) {
@@ -160,8 +155,8 @@ fn push_deck_previews<K: Copy>(
     h: i32,
     gap: i32,
 ) {
+    let preview_step = gap.clamp(6, 16);
     for (i, c) in clients.iter().enumerate() {
-        let preview_step = gap.max(6).min(16);
         let preview_offset = (i as i32).min(5) * preview_step;
         results.push(LayoutResult {
             key: c.key,
@@ -565,7 +560,7 @@ pub fn calculate_fibonacci<K: Copy>(
 
     let has_stack = n > *n_master;
     let mw = if has_stack {
-        ((ww - gap) as f32 * m_fact) as i32
+        ((ww - gap) as f32 * m_fact.clamp(0.05, 0.95)) as i32
     } else {
         ww
     };
@@ -636,14 +631,22 @@ pub fn calculate_fibonacci<K: Copy>(
     results
 }
 
-/// Centered Master: Master 居中，Stack 分列两侧
-pub fn calculate_centered_master<K: Copy>(
+/// 三列骨架：左 Stack | 中 Master | 右 Stack。
+/// centered_master 与 three_col 共用；`shrink_master` 控制 stack 窗口增多时
+/// 是否收窄 master（centered_master 的设计），three_col 保持固定 m_fact。
+fn centered_columns<K: Copy>(
     params: &LayoutParams,
     clients: &[LayoutClient<K>],
+    shrink_master: bool,
 ) -> Vec<LayoutResult<K>> {
     let n = clients.len() as u32;
     if n == 0 {
         return Vec::new();
+    }
+
+    let n_master = params.n_master;
+    if n_master == 0 {
+        return calculate_grid(params, clients);
     }
 
     let mut results = Vec::with_capacity(clients.len());
@@ -652,24 +655,11 @@ pub fn calculate_centered_master<K: Copy>(
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
-    let n_master = params.n_master;
-    let n_master_count = n.min(n_master) as i32;
     let n_stack = (n as i32 - n_master as i32).max(0);
 
-    if n_master == 0 {
-        return calculate_grid(params, clients);
-    }
-
     if n_stack == 0 {
-        let mut my = 0;
-        for (i, c) in clients.iter().enumerate() {
-            let h = split_evenly(wh, n_master_count, gap, my, i as i32);
-            results.push(LayoutResult {
-                key: c.key,
-                rect: client_rect(wx, wy + my + i as i32 * gap, ww, h, c.border_w),
-            });
-            my += h;
-        }
+        // 全部是 master：纵向排满，与其他布局一样尊重 client_fact
+        push_factor_column(&mut results, clients, wx, wy, ww, wh, gap);
         return results;
     }
 
@@ -677,17 +667,13 @@ pub fn calculate_centered_master<K: Copy>(
         return calculate_bstack(params, clients);
     }
 
-    // 左 stack | 中 master | 右 stack
     let mfact = params.m_fact.clamp(0.25, 0.75);
-    let side_total = n_stack.max(1) as f32;
-    let master_bias = if n_stack <= 2 {
+    let master_bias = if !shrink_master || n_stack <= 2 {
         1.0
     } else {
-        (2.0 / side_total).max(0.7)
+        (2.0 / n_stack as f32).max(0.7)
     };
     let mw = ((ww - 2 * gap) as f32 * mfact * master_bias).max(1.0) as i32;
-    let n_left = (n_stack + 1) / 2;
-    let n_right = n_stack - n_left;
     let side_w_total = (ww - mw - 2 * gap).max(1);
     let left_w = (side_w_total / 2).max(1);
     let right_w = (side_w_total - left_w).max(1);
@@ -695,24 +681,12 @@ pub fn calculate_centered_master<K: Copy>(
     let master_x = wx + left_w + gap;
     let right_x = master_x + mw + gap;
 
+    // Stack 交替分到左右两列
     let master_end = (n_master as usize).min(clients.len());
-    let mut left_clients = Vec::with_capacity(n_left as usize);
-    let mut right_clients = Vec::with_capacity(n_right as usize);
-    for (idx, c) in clients[master_end..].iter().enumerate() {
-        if idx % 2 == 0 {
-            left_clients.push(LayoutClient {
-                key: c.key,
-                factor: c.factor,
-                border_w: c.border_w,
-            });
-        } else {
-            right_clients.push(LayoutClient {
-                key: c.key,
-                factor: c.factor,
-                border_w: c.border_w,
-            });
-        }
-    }
+    let stack = &clients[master_end..];
+    let left_clients: Vec<_> = stack.iter().step_by(2).copied().collect();
+    let right_clients: Vec<_> = stack.iter().skip(1).step_by(2).copied().collect();
+
     push_factor_column(
         &mut results,
         &clients[..master_end],
@@ -726,6 +700,14 @@ pub fn calculate_centered_master<K: Copy>(
     push_factor_column(&mut results, &right_clients, right_x, wy, right_w, wh, gap);
 
     results
+}
+
+/// Centered Master: Master 居中，Stack 分列两侧
+pub fn calculate_centered_master<K: Copy>(
+    params: &LayoutParams,
+    clients: &[LayoutClient<K>],
+) -> Vec<LayoutResult<K>> {
+    centered_columns(params, clients, true)
 }
 
 /// Bottom Stack: Master 在上，Stack 横排在下
@@ -783,13 +765,19 @@ pub fn calculate_bstack<K: Copy>(
             stack_cols as usize
         };
         let row_end = (row_start + row_len).min(stack_clients.len());
+        // 末行吸收整除余数，与工作区底边齐平
+        let row_h = if row == stack_rows - 1 {
+            (stack_total_h - row * (stack_cell_h + gap)).max(1)
+        } else {
+            stack_cell_h
+        };
         push_factor_row(
             &mut results,
             &stack_clients[row_start..row_end],
             wx,
             wy + mh + gap + row * (stack_cell_h + gap),
             ww,
-            stack_cell_h,
+            row_h,
             gap,
         );
     }
@@ -815,25 +803,28 @@ pub fn calculate_grid<K: Copy>(
 
     let (cols, rows) = choose_grid_dimensions(n, area);
 
-    let cell_w = (ww - (cols - 1) * gap) / cols;
     let cell_h = (wh - (rows - 1) * gap) / rows;
 
     for (i, c) in clients.iter().enumerate() {
         let row = i as i32 / cols;
-        let col = i as i32 % cols;
+        let col = i as i32 - row * cols;
         // 最后一行可能不满，拉宽填满
-        let (cx, cw) = if row == rows - 1 {
-            let last_row_count = n as i32 - row * cols;
-            let last_cell_w = (ww - (last_row_count - 1) * gap) / last_row_count;
-            let last_col = i as i32 - row * cols;
-            (wx + last_col * (last_cell_w + gap), last_cell_w)
+        let row_cols = if row == rows - 1 {
+            n as i32 - row * cols
         } else {
-            (wx + col * (cell_w + gap), cell_w)
+            cols
         };
+        let cell_w = (ww - (row_cols - 1) * gap) / row_cols;
+
+        // 行尾 / 底行吸收整除余数，让网格与工作区边缘齐平
+        let x_off = col * (cell_w + gap);
+        let y_off = row * (cell_h + gap);
+        let w = if col == row_cols - 1 { ww - x_off } else { cell_w };
+        let h = if row == rows - 1 { wh - y_off } else { cell_h };
 
         results.push(LayoutResult {
             key: c.key,
-            rect: client_rect(cx, wy + row * (cell_h + gap), cw, cell_h, c.border_w),
+            rect: client_rect(wx + x_off, wy + y_off, w, h, c.border_w),
         });
     }
 
@@ -909,93 +900,7 @@ pub fn calculate_three_col<K: Copy>(
     params: &LayoutParams,
     clients: &[LayoutClient<K>],
 ) -> Vec<LayoutResult<K>> {
-    let n = clients.len() as u32;
-    if n == 0 {
-        return Vec::new();
-    }
-
-    let mut results = Vec::with_capacity(clients.len());
-    let gap = params.gap;
-
-    let area = usable_area(params.screen_area, gap);
-    let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
-
-    let n_master = params.n_master;
-    let n_master_count = n.min(n_master) as i32;
-    let n_stack = (n as i32 - n_master as i32).max(0);
-
-    if n_master == 0 {
-        return calculate_grid(params, clients);
-    }
-
-    if n_stack == 0 {
-        let mut my = 0;
-        for (i, c) in clients.iter().enumerate() {
-            let h = split_evenly(wh, n_master_count, gap, my, i as i32);
-            results.push(LayoutResult {
-                key: c.key,
-                rect: client_rect(wx, wy + my + i as i32 * gap, ww, h, c.border_w),
-            });
-            my += h;
-        }
-        return results;
-    }
-
-    if wh > ww {
-        return calculate_bstack(params, clients);
-    }
-
-    let mfact = params.m_fact.clamp(0.25, 0.75);
-    let mw = ((ww - 2 * gap) as f32 * mfact).max(1.0) as i32;
-    let side_w_total = (ww - mw - 2 * gap).max(1);
-    let side_w = (side_w_total / 2).max(1);
-    let right_side_w = (side_w_total - side_w).max(1);
-
-    let n_left = (n_stack + 1) / 2;
-    let n_right = n_stack - n_left;
-
-    let master_x = wx + side_w + gap;
-    let right_x = master_x + mw + gap;
-
-    let master_end = (n_master as usize).min(clients.len());
-    let mut left_clients = Vec::with_capacity(n_left as usize);
-    let mut right_clients = Vec::with_capacity(n_right as usize);
-    for (idx, c) in clients[master_end..].iter().enumerate() {
-        if idx % 2 == 0 {
-            left_clients.push(LayoutClient {
-                key: c.key,
-                factor: c.factor,
-                border_w: c.border_w,
-            });
-        } else {
-            right_clients.push(LayoutClient {
-                key: c.key,
-                factor: c.factor,
-                border_w: c.border_w,
-            });
-        }
-    }
-    push_factor_column(
-        &mut results,
-        &clients[..master_end],
-        master_x,
-        wy,
-        mw,
-        wh,
-        gap,
-    );
-    push_factor_column(&mut results, &left_clients, wx, wy, side_w, wh, gap);
-    push_factor_column(
-        &mut results,
-        &right_clients,
-        right_x,
-        wy,
-        right_side_w,
-        wh,
-        gap,
-    );
-
-    results
+    centered_columns(params, clients, false)
 }
 
 /// Tatami: 日式榻榻米布局，根据窗口数量选择不同的排列图案
@@ -1089,6 +994,12 @@ pub fn calculate_tatami<K: Copy>(
             let remaining = n - idx;
             let count = remaining.min(5);
             let gy = wy + g as i32 * (row_h + gap);
+            // 末组吸收整除余数，与工作区底边齐平
+            let row_h = if g == groups - 1 {
+                (wh - g as i32 * (row_h + gap)).max(1)
+            } else {
+                row_h
+            };
 
             if count < 5 {
                 // 不足 5 个的尾部组用 grid 方式铺
@@ -1291,7 +1202,9 @@ pub fn calculate_scrolling<K: Copy>(
         let strip_x = col_positions[col_idx];
         let col_w = col_widths[col_idx];
         // Screen x = strip_x - viewport_x + screen.x
-        let screen_x = strip_x as f32 - new_viewport_x + screen.x as f32;
+        // round 而不是向零截断：向零截断会让视口左侧的列（负坐标）相对
+        // 右侧的列偏移 1px。
+        let screen_x = (strip_x as f32 - new_viewport_x + screen.x as f32).round();
 
         let inner_gaps = (col.len() as i32 - 1).max(0) * gap;
         let avail_col_h = (avail_h - inner_gaps).max(0);
@@ -1733,6 +1646,51 @@ mod tests {
         for r in &result {
             assert!(r.rect.w > 0 && r.rect.h > 0);
         }
+    }
+
+    #[test]
+    fn test_grid_fills_work_area_flush() {
+        // 整除余数由行尾/底行吸收：网格必须与可用区边缘齐平
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1601, 999),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 28,
+        };
+        for n in 1..=7 {
+            let clients: Vec<_> = (0..n)
+                .map(|key| LayoutClient {
+                    key,
+                    factor: 1.0,
+                    border_w: 0,
+                })
+                .collect();
+            let result = calculate_grid(&p, &clients);
+            let right = result.iter().map(|r| r.rect.x + r.rect.w).max().unwrap();
+            let bottom = result.iter().map(|r| r.rect.y + r.rect.h).max().unwrap();
+            assert_eq!(right, 1601 - 28, "n={} right edge should be flush", n);
+            assert_eq!(bottom, 999 - 28, "n={} bottom edge should be flush", n);
+        }
+    }
+
+    #[test]
+    fn test_tatami_groups_fill_work_area_flush() {
+        let p = LayoutParams {
+            screen_area: Rect::new(0, 0, 1601, 999),
+            n_master: 1,
+            m_fact: 0.55,
+            gap: 28,
+        };
+        let clients: Vec<_> = (0..10)
+            .map(|key| LayoutClient {
+                key,
+                factor: 1.0,
+                border_w: 0,
+            })
+            .collect();
+        let result = calculate_tatami(&p, &clients);
+        let bottom = result.iter().map(|r| r.rect.y + r.rect.h).max().unwrap();
+        assert_eq!(bottom, 999 - 28);
     }
 
     #[test]
