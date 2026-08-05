@@ -42,12 +42,12 @@ usage() {
   -u            双向更新：拉取之后，如本地领先则自动 push 到 upstream
   -q            只输出汇总表
 
-编译选项 (只作用于已知项目: jsh jterm1 jterm2 jterm3 jterm4 jwm):
+编译选项 (只作用于已知项目: jsh anvil ember frost forge jwm):
   -B            全部重新编译，不管本次有没有拉到新提交
   -N            不编译，只更新仓库
   -I            用各项目自己的安装方式安装 (安装脚本自带构建；jwm 需要 sudo)
                 只改变“怎么做”，不改变“做哪些”：没有新提交时配合 -B 使用
-  -T 列表       只处理这些项目，逗号分隔，如 -T jterm1,jwm
+  -T 列表       只处理这些项目，逗号分隔，如 -T anvil,jwm
   -J N          同时编译几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
@@ -59,9 +59,9 @@ usage() {
   jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
                    / scripts/install-jsh.sh (它从本地 checkout 编译，含未提交改动，
                      原子替换、留回滚副本、检查 PATH 遮挡)
-  jterm1, jterm4   nix develop --command cargo build ... / scripts/install.sh
+  anvil, forge     nix develop --command cargo build ... / scripts/install.sh
                    (检测不到 nix 时回退到直接 cargo，和 install.sh 的 auto backend 一致)
-  jterm2, jterm3   cargo build --release --locked        / scripts/install.sh
+  ember, frost     cargo build --release --locked        / scripts/install.sh
   jwm              cargo build --release --locked        / scripts/install_jwm_scripts.sh
 
 环境变量:
@@ -314,7 +314,7 @@ update_one() {
 
 # ——— 编译/安装：每个项目的方式都不一样，差异全部集中在下面三个函数里 ———
 
-KNOWN_TARGETS="jsh jterm1 jterm2 jterm3 jterm4 jwm"
+KNOWN_TARGETS="jsh anvil ember frost forge jwm"
 
 is_known_target() {
     case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
@@ -389,12 +389,12 @@ artifact_path() {
     printf '%s/release/%s\n' "$target_dir" "$name"
 }
 
-# 编译命令：jterm1/jterm4 的依赖由 flake 提供，有 nix 就进 nix develop，
+# 编译命令：anvil/forge 的依赖由 flake 提供，有 nix 就进 nix develop，
 # 没有就直接 cargo（与两者 install.sh 的 auto backend 行为一致）。
 build_cmd() {
     local name="$1"
     case "$name" in
-        jterm1|jterm4)
+        anvil|forge)
             if command -v nix >/dev/null 2>&1; then
                 printf '%s\n' nix develop --command cargo build --release --locked
             else
@@ -408,7 +408,7 @@ build_cmd() {
                 printf '%s\n' cargo build --release --locked
             fi
             ;;
-        jterm2|jterm3|jwm)
+        ember|frost|jwm)
             printf '%s\n' cargo build --release --locked
             ;;
     esac
@@ -418,13 +418,13 @@ build_cmd() {
 #   jsh    scripts/install-jsh.sh 从本地 checkout 编译（含未提交改动），静态 musl、
 #          rename(2) 原子替换、保留回滚副本、检查 PATH 遮挡——全都归它管，
 #          这里不再自己拼 cargo install
-#   jterm* scripts/install.sh 负责构建 + 桌面集成，装到 ~/.cargo/bin
+#   四个终端 scripts/install.sh 负责构建 + 桌面集成，装到 ~/.cargo/bin
 #   jwm    install_jwm_scripts.sh 还要装 status bar 和 session 文件，需要 sudo
 install_cmd() {
     local name="$1"
     case "$name" in
         jsh)    printf '%s\n' sh scripts/install-jsh.sh ${JSH_INSTALL_ARGS} ;;
-        jterm1|jterm2|jterm3|jterm4)
+        anvil|ember|frost|forge)
                 printf '%s\n' bash scripts/install.sh ;;
         jwm)    printf '%s\n' bash scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS} ;;
     esac
