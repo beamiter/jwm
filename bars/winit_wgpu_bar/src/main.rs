@@ -13,6 +13,9 @@ use winit::{
     window::{WindowAttributes, WindowId},
 };
 
+use xbar_core::config::GlassConfig;
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
@@ -50,6 +53,11 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
+    /// Frosted backdrop, present only when a wallpaper was configured. These
+    /// windows are opaque, so glass here always means a baked strip.
+    glass: Option<GlassBackdrop<WallpaperFile>>,
+    glass_config: GlassConfig,
+    glass_fallback: [u8; 3],
 }
 
 impl App {
@@ -58,6 +66,8 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale: f64,
         proxy: EventLoopProxy<UserEvent>,
+        glass_config: GlassConfig,
+        glass_fallback: [u8; 3],
     ) -> Self {
         Self {
             window_id: None,
@@ -76,7 +86,18 @@ impl App {
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
+            glass: None,
+            glass_config,
+            glass_fallback,
         }
+    }
+
+    /// Window position in screen coordinates, where the wallpaper is sampled.
+    fn bar_origin(&self) -> (i32, i32) {
+        self.window
+            .as_ref()
+            .and_then(|window| window.outer_position().ok())
+            .map_or((0, 0), |position| (position.x, position.y))
     }
 
     fn redraw(&mut self) -> anyhow::Result<()> {
@@ -92,9 +113,14 @@ impl App {
 
         // Cairo builds the scene in logical coordinates; the CPU frame stays
         // in physical pixels.
-        let frame = self
-            .canvas
-            .render(&mut self.bar, width, height, self.scale_factor)?;
+        let (origin_x, origin_y) = self.bar_origin();
+        let backdrop = self
+            .glass
+            .as_mut()
+            .and_then(|glass| glass.ensure(origin_x, origin_y, width, height));
+        let frame =
+            self.canvas
+                .render_over(&mut self.bar, width, height, self.scale_factor, backdrop)?;
         let damage = frame.damage.map(|rect| PresentRect {
             x: rect.x,
             y: rect.y,
@@ -194,6 +220,13 @@ impl ApplicationHandler<UserEvent> for App {
 
             self.logical_size = LogicalSize::new((width_px as f64) / self.scale_factor, bar_height);
             self.default_logical_size = self.logical_size;
+            // The wallpaper is laid out across the whole screen, so the strip
+            // the bar frosts depends on the screen size, not the bar's.
+            self.glass = self.glass_config.file_backdrop(
+                screen_size.width,
+                screen_size.height,
+                self.glass_fallback,
+            );
 
             let attrs = WindowAttributes::default()
                 .with_title("winit_wgpu_bar")
@@ -372,8 +405,15 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
-    if let Some(opacity) = app_config.background_opacity {
-        bar.renderer_mut().set_background_opacity(Some(opacity));
+    // A frosted backdrop only reads as a material if the bar's own background
+    // lets some of it through, so glass changes what "no opacity configured"
+    // should mean.
+    match app_config.background_opacity {
+        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
+        None if app_config.glass.wallpaper.is_some() => bar
+            .renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
+        None => {}
     }
 
     // 事件循环与代理（winit 0.30.12）
@@ -385,7 +425,14 @@ fn main() -> Result<()> {
 
     // 初始逻辑尺寸，实际在 resumed 中根据显示器设置
     let logical_size = LogicalSize::new(800.0, 38.0);
-    let mut app = App::new(bar, logical_size, 1.0, proxy);
+    let mut app = App::new(
+        bar,
+        logical_size,
+        1.0,
+        proxy,
+        app_config.glass.clone(),
+        fallback_rgb(app_config.theme),
+    );
 
     // 运行
     event_loop.run_app(&mut app)?;

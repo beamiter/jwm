@@ -15,6 +15,8 @@ use raw_window_handle::{
     WindowHandle, XcbDisplayHandle, XcbWindowHandle,
 };
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::{Point, PointerAction};
 use xbar_core::render::cairo::{CairoBar, CpuCanvas};
@@ -154,9 +156,31 @@ struct WindowAdapter<'a> {
     win: x::Window,
     bar_height: Cell<u16>,
     effects: RefCell<EffectRouter>,
+    /// Frosted backdrop, present only when a wallpaper was configured. This
+    /// window is on the root visual and can never be genuinely translucent, so
+    /// glass here always means a baked strip.
+    glass: RefCell<Option<GlassBackdrop<WallpaperFile>>>,
 }
 
 impl WindowAdapter<'_> {
+    /// Bar origin in root coordinates, resolved through the server so
+    /// reparenting window managers cannot skew wallpaper sampling.
+    fn root_origin(&self) -> (i32, i32) {
+        let cookie = self.conn.send_request(&x::TranslateCoordinates {
+            src_window: self.win,
+            dst_window: self.screen.root(),
+            src_x: 0,
+            src_y: 0,
+        });
+        match self.conn.wait_for_reply(cookie) {
+            Ok(reply) => (i32::from(reply.dst_x()), i32::from(reply.dst_y())),
+            Err(error) => {
+                log::debug!("translate coordinates failed: {error}");
+                (0, 0)
+            }
+        }
+    }
+
     fn sync_bar_height(&self, bar: &mut CairoBar, height: u16) {
         // A window manager may enforce its configured dock height instead of
         // the size requested when the window was created. Keep both future
@@ -203,11 +227,17 @@ impl WindowAdapter<'_> {
 fn redraw(
     gpu: &mut WgpuPresenter,
     canvas: &mut CpuCanvas,
+    window: &WindowAdapter<'_>,
     width: u16,
     height: u16,
     bar: &mut CairoBar,
 ) -> Result<()> {
-    let frame = canvas.render(bar, u32::from(width), u32::from(height), 1.0)?;
+    let mut glass = window.glass.borrow_mut();
+    let backdrop = glass.as_mut().and_then(|glass| {
+        let (x, y) = window.root_origin();
+        glass.ensure(x, y, u32::from(width), u32::from(height))
+    });
+    let frame = canvas.render_over(bar, u32::from(width), u32::from(height), 1.0, backdrop)?;
     let _ = bar.runtime_mut().take_changes();
     let damage = frame.damage.map(|rect| PresentRect {
         x: rect.x,
@@ -259,8 +289,20 @@ fn main() -> Result<()> {
         .clamp(1.0, f32::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
-    if let Some(opacity) = app_config.background_opacity {
-        bar.renderer_mut().set_background_opacity(Some(opacity));
+    // A frosted backdrop only reads as a material if the bar's own background
+    // lets some of it through, so glass changes what "no opacity configured"
+    // should mean.
+    let glass = app_config.glass.file_backdrop(
+        u32::from(screen.width_in_pixels()),
+        u32::from(screen.height_in_pixels()),
+        fallback_rgb(app_config.theme),
+    );
+    match app_config.background_opacity {
+        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
+        None if glass.is_some() => bar
+            .renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
+        None => {}
     }
 
     let win = conn.generate_id();
@@ -313,6 +355,7 @@ fn main() -> Result<()> {
         win,
         bar_height: Cell::new(bar_height),
         effects: RefCell::new(EffectRouter::default()),
+        glass: RefCell::new(glass),
     };
 
     let mut initial_update = bar.tick();
@@ -322,6 +365,7 @@ fn main() -> Result<()> {
     redraw(
         &mut gpu,
         &mut canvas,
+        &window,
         current_width,
         current_height,
         &mut bar,
@@ -385,6 +429,7 @@ fn main() -> Result<()> {
                         redraw(
                             &mut gpu,
                             &mut canvas,
+                            &window,
                             current_width,
                             current_height,
                             &mut bar,
@@ -401,6 +446,7 @@ fn main() -> Result<()> {
                             redraw(
                                 &mut gpu,
                                 &mut canvas,
+                                &window,
                                 current_width,
                                 current_height,
                                 &mut bar,
@@ -418,6 +464,7 @@ fn main() -> Result<()> {
                             redraw(
                                 &mut gpu,
                                 &mut canvas,
+                                &window,
                                 current_width,
                                 current_height,
                                 &mut bar,

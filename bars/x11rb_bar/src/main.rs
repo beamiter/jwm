@@ -15,6 +15,8 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::{Point, PointerAction, Size};
 use xbar_core::render::cairo::CairoBar;
@@ -216,9 +218,30 @@ struct WindowAdapter<'a> {
     win: Window,
     bar_height: Cell<u16>,
     effects: RefCell<EffectRouter>,
+    /// Frosted backdrop, present only when a wallpaper was configured. This
+    /// window is on the root visual and can never be genuinely translucent, so
+    /// glass here always means a baked strip.
+    glass: RefCell<Option<GlassBackdrop<WallpaperFile>>>,
 }
 
 impl WindowAdapter<'_> {
+    /// Bar origin in root coordinates, resolved through the server so
+    /// reparenting window managers cannot skew wallpaper sampling.
+    fn root_origin(&self) -> (i32, i32) {
+        let origin = self
+            .conn
+            .translate_coordinates(self.win, self.screen.root, 0, 0)
+            .map_err(anyhow::Error::from)
+            .and_then(|cookie| cookie.reply().map_err(anyhow::Error::from));
+        match origin {
+            Ok(reply) => (i32::from(reply.dst_x), i32::from(reply.dst_y)),
+            Err(error) => {
+                debug!("translate coordinates failed: {error}");
+                (0, 0)
+            }
+        }
+    }
+
     fn sync_bar_height(&self, bar: &mut CairoBar, height: u16) {
         // A window manager may enforce its configured dock height instead of
         // the size requested when the window was created. Keep both future
@@ -270,8 +293,17 @@ fn redraw(
     height: u16,
     bar: &mut CairoBar,
 ) -> Result<()> {
+    let mut glass = window.glass.borrow_mut();
+    let backdrop = glass.as_mut().and_then(|glass| {
+        let (x, y) = window.root_origin();
+        glass.ensure(x, y, u32::from(width), u32::from(height))
+    });
     let context = back.ensure_context(cairo_xcb)?;
-    bar.render(context, Size::new(f32::from(width), f32::from(height)))?;
+    bar.render_over(
+        context,
+        Size::new(f32::from(width), f32::from(height)),
+        backdrop,
+    )?;
     let _ = bar.runtime_mut().take_changes();
     back.flush();
     back.blit_to_window(window.conn, window.win, gc)?;
@@ -410,8 +442,20 @@ fn main() -> Result<()> {
         .clamp(1.0, f32::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
-    if let Some(opacity) = app_config.background_opacity {
-        bar.renderer_mut().set_background_opacity(Some(opacity));
+    // A frosted backdrop only reads as a material if the bar's own background
+    // lets some of it through, so glass changes what "no opacity configured"
+    // should mean.
+    let glass = app_config.glass.file_backdrop(
+        u32::from(screen.width_in_pixels),
+        u32::from(screen.height_in_pixels),
+        fallback_rgb(app_config.theme),
+    );
+    match app_config.background_opacity {
+        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
+        None if glass.is_some() => bar
+            .renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
+        None => {}
     }
 
     let win = conn.generate_id()?;
@@ -458,6 +502,7 @@ fn main() -> Result<()> {
         win,
         bar_height: Cell::new(bar_height),
         effects: RefCell::new(EffectRouter::default()),
+        glass: RefCell::new(glass),
     };
     let mut back = BackBuffer::new(
         window.conn,

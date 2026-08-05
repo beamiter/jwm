@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 use cairo::ffi::{xcb_connection_t, xcb_visualtype_t};
 use cairo::{
-    Context, Filter, Format, ImageSurface, Operator, XCBConnection as CairoXCBConnection,
-    XCBDrawable, XCBSurface, XCBVisualType,
+    Context, Format, ImageSurface, XCBConnection as CairoXCBConnection, XCBDrawable, XCBSurface,
+    XCBVisualType,
 };
 use log::{debug, warn};
 use pango::FontDescription;
@@ -10,12 +10,17 @@ use std::cell::{Cell, RefCell};
 use std::env;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::time::Duration;
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{
+    DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, GlassError, GlassImage, StripRequest,
+    WallpaperSource, fallback_rgb,
+};
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::{Point, PointerAction, PresentationLabels, Size};
 use xbar_core::render::cairo::CairoBar;
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
-    NotifierChange, RuntimeUpdate, ThemeMode, TransportNotifierSlot, TransportRecoveryConfig,
+    NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 use xcb::{self, Xid, x};
@@ -25,19 +30,6 @@ const X_TOKEN: u64 = 1;
 const TIMER_TOKEN: u64 = 2;
 const SHARED_TOKEN: u64 = 3;
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-
-// Frosted-glass parameters approximating the macOS menu-bar material: the
-// wallpaper strip behind the bar is downscaled, box-blurred (three passes of
-// a box blur converge on a Gaussian), saturation-boosted, and upscaled.
-const GLASS_DOWNSCALE: i32 = 4;
-const GLASS_BLUR_RADIUS: usize = 6;
-const GLASS_BLUR_PASSES: u32 = 3;
-const GLASS_SATURATION: f32 = 1.8;
-/// Extra wallpaper rows sampled below the bar so the blur has real
-/// neighborhood data instead of clamped edge pixels.
-const GLASS_PAD: u16 = 48;
-/// Background tint applied when the config file does not choose one.
-const DEFAULT_BACKGROUND_OPACITY: f64 = 0.55;
 
 // ---------------- Cairo XCB bridge ----------------
 struct CairoXcb {
@@ -63,7 +55,12 @@ fn find_visual_by_id_and_depth(
     None
 }
 
-fn build_cairo_xcb(conn: &xcb::Connection, screen: &x::Screen, visual_id: u32, depth: u8) -> Result<CairoXcb> {
+fn build_cairo_xcb(
+    conn: &xcb::Connection,
+    screen: &x::Screen,
+    visual_id: u32,
+    depth: u8,
+) -> Result<CairoXcb> {
     let visual = find_visual_by_id_and_depth(screen, visual_id, depth)
         .ok_or_else(|| anyhow!("could not find the requested X visual"))?;
     let visual_owner = Box::new(visual);
@@ -129,52 +126,80 @@ impl RootPixmapAtoms {
     }
 }
 
-/// Cached blurred wallpaper strip for the bar's current root-space geometry.
-struct GlassCache {
+/// Wallpaper pixels captured from the X root pixmap.
+///
+/// This works only where some tool published `_XROOTPMAP_ID` — feh, hsetroot,
+/// and the like do.  A compositor that draws the wallpaper from its own
+/// configuration never publishes it, which is why `glass.wallpaper` exists;
+/// this stays as the fallback for a plain X session.
+struct RootPixmapSource<'a> {
+    conn: &'a xcb::Connection,
+    cairo_xcb: &'a CairoXcb,
+    gc: x::Gcontext,
+    root: x::Window,
     atoms: RootPixmapAtoms,
-    /// Opaque base color used when no wallpaper pixmap is available.
-    fallback: (f64, f64, f64),
-    key: Option<(i16, i16, u16, u16)>,
-    surface: Option<ImageSurface>,
+    revision: u64,
 }
 
-impl GlassCache {
-    fn new(atoms: RootPixmapAtoms, fallback: (f64, f64, f64)) -> Self {
-        Self {
-            atoms,
-            fallback,
-            key: None,
-            surface: None,
+impl RootPixmapSource<'_> {
+    /// React to a root property change; true when the wallpaper changed and
+    /// the frosted strip must be rebuilt.
+    fn note_property(&mut self, atom: x::Atom) -> bool {
+        if self.atoms.matches(atom) {
+            self.revision = self.revision.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl WallpaperSource for RootPixmapSource<'_> {
+    fn revision(&mut self) -> u64 {
+        self.revision
+    }
+
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        capture_root_strip(self, request)
+            .map_err(|error| GlassError::Unavailable(error.to_string()))
+    }
+}
+
+/// Where this bar's wallpaper comes from.
+///
+/// A configured file is preferred because it is the only source that survives
+/// a compositor-drawn wallpaper, and the root pixmap covers the sessions that
+/// still publish one.
+enum WallpaperOrigin<'a> {
+    File(WallpaperFile),
+    RootPixmap(RootPixmapSource<'a>),
+}
+
+impl WallpaperSource for WallpaperOrigin<'_> {
+    fn revision(&mut self) -> u64 {
+        match self {
+            Self::File(source) => source.revision(),
+            Self::RootPixmap(source) => source.revision(),
         }
     }
 
-    fn invalidate(&mut self) {
-        self.key = None;
-        self.surface = None;
-    }
-
-    /// Return the frosted strip for the bar at root-space `(x, y)` with the
-    /// given size, rebuilding it only when geometry or wallpaper changed.
-    /// Every X error along the way degrades to `None` (solid background).
-    #[allow(clippy::too_many_arguments)]
-    fn ensure(
-        &mut self,
-        conn: &xcb::Connection,
-        cairo_xcb: &CairoXcb,
-        gc: x::Gcontext,
-        root: x::Window,
-        origin: (i16, i16),
-        width: u16,
-        height: u16,
-    ) -> Option<&ImageSurface> {
-        let key = (origin.0, origin.1, width, height);
-        if self.key != Some(key) || self.surface.is_none() {
-            self.surface = build_glass(conn, cairo_xcb, gc, &self.atoms, root, origin, width, height)
-                .map_err(|error| debug!("frosted glass unavailable: {error}"))
-                .ok();
-            self.key = Some(key);
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        match self {
+            Self::File(source) => source.strip(request),
+            Self::RootPixmap(source) => source.strip(request),
         }
-        self.surface.as_ref()
+    }
+}
+
+impl WallpaperOrigin<'_> {
+    /// React to a root property change; true when the wallpaper changed and
+    /// the frosted strip must be rebuilt.  A file source restats the wallpaper
+    /// itself and ignores X properties entirely.
+    fn note_property(&mut self, atom: x::Atom) -> bool {
+        match self {
+            Self::RootPixmap(source) => source.note_property(atom),
+            Self::File(_) => false,
+        }
     }
 }
 
@@ -194,31 +219,33 @@ fn read_wallpaper_pixmap(conn: &xcb::Connection, root: x::Window, atom: x::Atom)
     reply.value::<u32>().first().copied().filter(|id| *id != 0)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_glass(
-    conn: &xcb::Connection,
-    cairo_xcb: &CairoXcb,
-    gc: x::Gcontext,
-    atoms: &RootPixmapAtoms,
-    root: x::Window,
-    origin: (i16, i16),
-    width: u16,
-    height: u16,
-) -> Result<ImageSurface> {
+/// Copy the wallpaper under the bar out of the root pixmap.
+///
+/// The result is raw wallpaper, not yet frosted: blurring it is
+/// `xbar_core::glass`'s job, and everything here is the X11 half that cannot
+/// move into a platform-neutral crate.
+fn capture_root_strip(source: &RootPixmapSource<'_>, request: &StripRequest) -> Result<GlassImage> {
+    let width = u16::try_from(request.width)?;
+    let height = u16::try_from(request.height)?;
     if width == 0 || height == 0 {
         return Err(anyhow!("empty bar geometry"));
     }
-    let pixmap_id = read_wallpaper_pixmap(conn, root, atoms.xrootpmap)
-        .or_else(|| read_wallpaper_pixmap(conn, root, atoms.esetroot))
+    let conn = source.conn;
+    let pixmap_id = read_wallpaper_pixmap(conn, source.root, source.atoms.xrootpmap)
+        .or_else(|| read_wallpaper_pixmap(conn, source.root, source.atoms.esetroot))
         .ok_or_else(|| anyhow!("no wallpaper pixmap property"))?;
     let wallpaper = <x::Pixmap as xcb::XidNew>::new(pixmap_id);
 
     let geometry = conn.wait_for_reply(conn.send_request(&x::GetGeometry {
         drawable: x::Drawable::Pixmap(wallpaper),
     }))?;
-    let strip_height = height.saturating_add(GLASS_PAD);
-    let src_x = i32::from(origin.0).clamp(0, i32::from(geometry.width()).saturating_sub(1));
-    let src_y = i32::from(origin.1).clamp(0, i32::from(geometry.height()).saturating_sub(1));
+    let strip_height = u16::try_from(request.padded_height().min(u32::from(u16::MAX)))?;
+    let src_x = request
+        .x
+        .clamp(0, i32::from(geometry.width()).saturating_sub(1));
+    let src_y = request
+        .y
+        .clamp(0, i32::from(geometry.height()).saturating_sub(1));
     if i32::from(geometry.width()) - src_x < i32::from(width) {
         return Err(anyhow!("wallpaper pixmap narrower than the bar"));
     }
@@ -241,7 +268,7 @@ fn build_glass(
     let copied = conn.send_and_check_request(&x::CopyArea {
         src_drawable: x::Drawable::Pixmap(wallpaper),
         dst_drawable: x::Drawable::Pixmap(strip),
-        gc,
+        gc: source.gc,
         src_x: src_x as i16,
         src_y: src_y as i16,
         dst_x: 0,
@@ -252,17 +279,14 @@ fn build_glass(
     let image = copied.map_err(anyhow::Error::from).and_then(|()| {
         let drawable = XCBDrawable(strip.resource_id());
         let xcb_surface = XCBSurface::create(
-            &cairo_xcb.connection,
+            &source.cairo_xcb.connection,
             &drawable,
-            &cairo_xcb.visual,
+            &source.cairo_xcb.visual,
             i32::from(width),
             i32::from(available_height),
         )?;
-        let image = ImageSurface::create(
-            Format::Rgb24,
-            i32::from(width),
-            i32::from(available_height),
-        )?;
+        let image =
+            ImageSurface::create(Format::Rgb24, i32::from(width), i32::from(available_height))?;
         let context = Context::new(&image)?;
         context.set_source_surface(&xcb_surface, 0.0, 0.0)?;
         context.paint()?;
@@ -272,114 +296,7 @@ fn build_glass(
     let _ = conn.send_and_check_request(&x::FreePixmap { pixmap: strip });
     let mut image = image?;
     image.flush();
-    frost(&mut image, i32::from(height))
-}
-
-/// Downscale, blur, saturate, and upscale the captured strip; the result is
-/// exactly `width x target_height`.
-fn frost(strip: &mut ImageSurface, target_height: i32) -> Result<ImageSurface> {
-    let width = strip.width();
-    let height = strip.height();
-    let small_width = (width / GLASS_DOWNSCALE).max(1);
-    let small_height = (height / GLASS_DOWNSCALE).max(1);
-
-    let mut small = ImageSurface::create(Format::Rgb24, small_width, small_height)?;
-    scale_paint(strip, &small, Filter::Good)?;
-    small.flush();
-    box_blur(&mut small)?;
-    saturate(&mut small, GLASS_SATURATION)?;
-
-    let output = ImageSurface::create(Format::Rgb24, width, target_height.max(1))?;
-    scale_paint(&small, &output, Filter::Bilinear)?;
-    Ok(output)
-}
-
-fn scale_paint(source: &ImageSurface, target: &ImageSurface, filter: Filter) -> Result<()> {
-    let context = Context::new(target)?;
-    context.scale(
-        f64::from(target.width()) / f64::from(source.width()),
-        f64::from(target.height()) / f64::from(source.height()),
-    );
-    context.set_source_surface(source, 0.0, 0.0)?;
-    context.source().set_filter(filter);
-    context.paint()?;
-    Ok(())
-}
-
-/// Three-pass box blur over the B, G, R byte lanes of an `Rgb24` surface.
-fn box_blur(surface: &mut ImageSurface) -> Result<()> {
-    let width = surface.width() as usize;
-    let height = surface.height() as usize;
-    let stride = surface.stride() as usize;
-    if width == 0 || height == 0 {
-        return Ok(());
-    }
-    let mut data = surface
-        .data()
-        .map_err(|error| anyhow!("image data borrow failed: {error}"))?;
-    let mut scratch = data.to_vec();
-    let window = 2 * GLASS_BLUR_RADIUS + 1;
-
-    for _ in 0..GLASS_BLUR_PASSES {
-        // Horizontal pass: data -> scratch.
-        for y in 0..height {
-            let row = y * stride;
-            for channel in 0..3 {
-                let sample = |x: usize| i32::from(data[row + x.min(width - 1) * 4 + channel]);
-                // Clamped window around x = 0: radius copies of the edge
-                // pixel plus the first radius + 1 real samples.
-                let mut sum: i32 = GLASS_BLUR_RADIUS as i32 * sample(0)
-                    + (0..=GLASS_BLUR_RADIUS).map(sample).sum::<i32>();
-                for x in 0..width {
-                    scratch[row + x * 4 + channel] = (sum / window as i32) as u8;
-                    sum += sample(x + GLASS_BLUR_RADIUS + 1)
-                        - sample(x.saturating_sub(GLASS_BLUR_RADIUS));
-                }
-            }
-        }
-        // Vertical pass: scratch -> data.
-        for x in 0..width {
-            for channel in 0..3 {
-                let column = x * 4 + channel;
-                let sample = |y: usize| i32::from(scratch[y.min(height - 1) * stride + column]);
-                let mut sum: i32 = GLASS_BLUR_RADIUS as i32 * sample(0)
-                    + (0..=GLASS_BLUR_RADIUS).map(sample).sum::<i32>();
-                for y in 0..height {
-                    data[y * stride + column] = (sum / window as i32) as u8;
-                    sum += sample(y + GLASS_BLUR_RADIUS + 1)
-                        - sample(y.saturating_sub(GLASS_BLUR_RADIUS));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Push colors away from their luma, mimicking the saturation boost of the
-/// macOS glass material.
-fn saturate(surface: &mut ImageSurface, saturation: f32) -> Result<()> {
-    let width = surface.width() as usize;
-    let height = surface.height() as usize;
-    let stride = surface.stride() as usize;
-    let mut data = surface
-        .data()
-        .map_err(|error| anyhow!("image data borrow failed: {error}"))?;
-    for y in 0..height {
-        for x in 0..width {
-            let offset = y * stride + x * 4;
-            let bytes: [u8; 4] = data[offset..offset + 4].try_into().expect("pixel slice");
-            let pixel = u32::from_ne_bytes(bytes);
-            let red = ((pixel >> 16) & 0xff) as f32;
-            let green = ((pixel >> 8) & 0xff) as f32;
-            let blue = (pixel & 0xff) as f32;
-            let luma = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-            let adjust =
-                |value: f32| (luma + (value - luma) * saturation).clamp(0.0, 255.0) as u32;
-            let pixel = (adjust(red) << 16) | (adjust(green) << 8) | adjust(blue);
-            data[offset..offset + 4].copy_from_slice(&pixel.to_ne_bytes());
-        }
-    }
-    Ok(())
+    Ok(GlassImage::from_image_surface(&mut image)?)
 }
 
 // ---------------- XCB back buffer ----------------
@@ -390,10 +307,6 @@ struct BackBuffer {
     depth: u8,
     surface: Option<XCBSurface>,
     context: Option<Context>,
-    /// ARGB32 intermediate the scene renders into, so its translucent
-    /// background can be composited over the frosted wallpaper strip.
-    scene_surface: Option<ImageSurface>,
-    scene_context: Option<Context>,
 }
 
 impl BackBuffer {
@@ -419,55 +332,7 @@ impl BackBuffer {
             depth,
             surface: None,
             context: None,
-            scene_surface: None,
-            scene_context: None,
         })
-    }
-
-    fn ensure_scene_context(&mut self) -> Result<&Context> {
-        if self.scene_surface.is_none() {
-            let surface = ImageSurface::create(
-                Format::ARgb32,
-                i32::from(self.width),
-                i32::from(self.height),
-            )?;
-            self.scene_context = Some(Context::new(&surface)?);
-            self.scene_surface = Some(surface);
-        }
-        self.scene_context
-            .as_ref()
-            .ok_or_else(|| anyhow!("scene context was not initialized"))
-    }
-
-    /// Fill the pixmap with the frosted strip (or the fallback color) and
-    /// draw the rendered scene over it.
-    fn compose(
-        &mut self,
-        cairo_xcb: &CairoXcb,
-        glass: Option<&ImageSurface>,
-        fallback: (f64, f64, f64),
-    ) -> Result<()> {
-        self.ensure_context(cairo_xcb)?;
-        let context = self
-            .context
-            .as_ref()
-            .ok_or_else(|| anyhow!("Cairo context was not initialized"))?;
-        let scene = self
-            .scene_surface
-            .as_ref()
-            .ok_or_else(|| anyhow!("scene surface was not initialized"))?;
-        context.save()?;
-        context.set_operator(Operator::Source);
-        match glass {
-            Some(glass) => context.set_source_surface(glass, 0.0, 0.0)?,
-            None => context.set_source_rgb(fallback.0, fallback.1, fallback.2),
-        }
-        context.paint()?;
-        context.set_operator(Operator::Over);
-        context.set_source_surface(scene, 0.0, 0.0)?;
-        context.paint()?;
-        context.restore()?;
-        Ok(())
     }
 
     fn ensure_context<'a>(&'a mut self, cairo_xcb: &CairoXcb) -> Result<&'a Context> {
@@ -522,8 +387,6 @@ impl BackBuffer {
         self.height = height;
         self.surface = None;
         self.context = None;
-        self.scene_surface = None;
-        self.scene_context = None;
         Ok(())
     }
 
@@ -644,7 +507,7 @@ struct WindowAdapter<'a> {
     win: x::Window,
     bar_height: Cell<u16>,
     effects: RefCell<EffectRouter>,
-    glass: RefCell<GlassCache>,
+    glass: RefCell<GlassBackdrop<WallpaperOrigin<'a>>>,
     /// True when the window uses a 32-bit visual under a compositor: the bar
     /// then emits real per-pixel alpha and skips the baked frost strip.
     translucent: bool,
@@ -672,13 +535,7 @@ impl WindowAdapter<'_> {
     /// React to a root property change; true when the wallpaper changed and
     /// the frosted strip must be rebuilt.
     fn wallpaper_changed(&self, atom: x::Atom) -> bool {
-        let mut glass = self.glass.borrow_mut();
-        if glass.atoms.matches(atom) {
-            glass.invalidate();
-            true
-        } else {
-            false
-        }
+        self.glass.borrow_mut().source_mut().note_property(atom)
     }
 
     fn sync_bar_height(&self, bar: &mut CairoBar, height: u16) {
@@ -739,29 +596,21 @@ fn redraw(
         // per-pixel alpha straight into the window-depth back buffer.
         let context = back.ensure_context(cairo_xcb)?;
         bar.render(context, size)?;
-        let _ = bar.runtime_mut().take_changes();
     } else {
-        let context = back.ensure_scene_context()?;
-        bar.render(context, size)?;
-        let _ = bar.runtime_mut().take_changes();
-        if let Some(scene) = &back.scene_surface {
-            scene.flush();
-        }
-
+        // Nobody will blur behind an opaque window, so the bar bakes its own
+        // backdrop and the scene blends over it in one pass.
         let mut glass = window.glass.borrow_mut();
         let origin = window.root_origin();
-        let fallback = glass.fallback;
-        let strip = glass.ensure(
-            window.conn,
-            cairo_xcb,
-            gc,
-            window.screen.root(),
-            origin,
-            width,
-            height,
+        let backdrop = glass.ensure(
+            i32::from(origin.0),
+            i32::from(origin.1),
+            u32::from(width),
+            u32::from(height),
         );
-        back.compose(cairo_xcb, strip, fallback)?;
+        let context = back.ensure_context(cairo_xcb)?;
+        bar.render_over(context, size, backdrop)?;
     }
+    let _ = bar.runtime_mut().take_changes();
 
     back.flush();
     back.blit_to_window(window.conn, window.win, gc)?;
@@ -1006,14 +855,29 @@ fn main() -> Result<()> {
     conn.flush()?;
 
     // Watch the root window so wallpaper swaps rebuild the frosted strip.
-    let glass_atoms = RootPixmapAtoms::intern(&conn)?;
     conn.send_and_check_request(&x::ChangeWindowAttributes {
         window: screen.root(),
         value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
     })?;
-    let fallback = match app_config.theme {
-        ThemeMode::Dark => (28.0 / 255.0, 28.0 / 255.0, 30.0 / 255.0),
-        ThemeMode::Light => (246.0 / 255.0, 246.0 / 255.0, 248.0 / 255.0),
+    let fallback = fallback_rgb(app_config.theme);
+
+    // A configured wallpaper wins: it is the only source that still works when
+    // the compositor draws the wallpaper itself instead of publishing a root
+    // pixmap, which is what JWM does.
+    let source = match app_config.glass.file_source(
+        u32::from(screen.width_in_pixels()),
+        u32::from(screen.height_in_pixels()),
+        fallback,
+    ) {
+        Some(file) => WallpaperOrigin::File(file),
+        None => WallpaperOrigin::RootPixmap(RootPixmapSource {
+            conn: &conn,
+            cairo_xcb: &cairo_xcb,
+            gc,
+            root: screen.root(),
+            atoms: RootPixmapAtoms::intern(&conn)?,
+            revision: 0,
+        }),
     };
 
     let window = WindowAdapter {
@@ -1022,7 +886,9 @@ fn main() -> Result<()> {
         win,
         bar_height: Cell::new(bar_height),
         effects: RefCell::new(EffectRouter::default()),
-        glass: RefCell::new(GlassCache::new(glass_atoms, fallback)),
+        glass: RefCell::new(
+            GlassBackdrop::new(source, app_config.glass.params()).with_fallback(fallback),
+        ),
         translucent,
     };
     let mut back = BackBuffer::new(

@@ -14,6 +14,8 @@ use tao::{
     window::{Window, WindowBuilder},
 };
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
@@ -44,6 +46,9 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
+    /// Frosted backdrop, present only when a wallpaper was configured. This
+    /// window is opaque, so glass here always means a baked strip.
+    glass: Option<GlassBackdrop<WallpaperFile>>,
 }
 
 impl App {
@@ -53,6 +58,7 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
+        glass: Option<GlassBackdrop<WallpaperFile>>,
     ) -> Result<Self> {
         let physical_size = window.inner_size();
         let soft_context = softbuffer::Context::new(Rc::clone(&window))
@@ -74,7 +80,15 @@ impl App {
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
+            glass,
         })
+    }
+
+    /// Window position in screen coordinates, where the wallpaper is sampled.
+    fn bar_origin(&self) -> (i32, i32) {
+        self.window
+            .outer_position()
+            .map_or((0, 0), |position| (position.x, position.y))
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -83,9 +97,14 @@ impl App {
             return Ok(());
         }
 
-        let frame = self
-            .canvas
-            .render(&mut self.bar, width, height, self.scale_factor)?;
+        let (origin_x, origin_y) = self.bar_origin();
+        let backdrop = self
+            .glass
+            .as_mut()
+            .and_then(|glass| glass.ensure(origin_x, origin_y, width, height));
+        let frame =
+            self.canvas
+                .render_over(&mut self.bar, width, height, self.scale_factor, backdrop)?;
         let width = width as usize;
         let height = height as usize;
         let mut buffer = self
@@ -224,8 +243,15 @@ fn main() -> Result<()> {
     let presentation = app_config.presentation.clone();
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
-    if let Some(opacity) = app_config.background_opacity {
-        bar.renderer_mut().set_background_opacity(Some(opacity));
+    // A frosted backdrop only reads as a material if the bar's own background
+    // lets some of it through, so glass changes what "no opacity configured"
+    // should mean.
+    match app_config.background_opacity {
+        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
+        None if app_config.glass.wallpaper.is_some() => bar
+            .renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
+        None => {}
     }
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
@@ -257,7 +283,14 @@ fn main() -> Result<()> {
             .build(&event_loop)
             .context("failed to build tao window")?,
     );
-    let mut app = App::new(window, bar, logical_size, scale_factor, proxy)?;
+    // The wallpaper is laid out across the whole screen, so the strip the bar
+    // frosts depends on the screen size, not the bar's.
+    let glass = app_config.glass.file_backdrop(
+        screen_size.width,
+        screen_size.height,
+        fallback_rgb(app_config.theme),
+    );
+    let mut app = App::new(window, bar, logical_size, scale_factor, proxy, glass)?;
 
     let update = app.bar.tick();
     app.handle_runtime_update(update);

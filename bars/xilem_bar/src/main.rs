@@ -22,6 +22,8 @@ use std::time::Duration;
 
 use log::{debug, warn};
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
@@ -33,7 +35,7 @@ use xbar_linux_actions::ProcessActionHandler;
 use masonry::core::{ErasedAction, WidgetId};
 use masonry::kurbo::Axis;
 use masonry::layout::{Dim, Length};
-use masonry::peniko::Color;
+use masonry::peniko::{Color, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use masonry::properties::{Dimensions, Padding};
 use masonry_winit::app::{AppDriver, DriverCtx, MasonryState, WgpuContext, WindowId};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -41,14 +43,29 @@ use winit::window::WindowLevel;
 use xilem::core::{MessageProxy, NoElement, View, fork};
 use xilem::style::Style;
 use xilem::view::{
-    CrossAxisAlignment, FlexSpacer, PointerButton, button, button_any_pointer, flex, label,
-    sized_box, task_raw,
+    CrossAxisAlignment, FlexSpacer, ObjectFit, PointerButton, button, button_any_pointer, flex,
+    image, label, sized_box, task_raw, zstack,
 };
 use xilem::{EventLoop, ViewCtx, WidgetView, WindowOptions, Xilem};
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
 
 const NERD_FONT: &str = "JetBrainsMono Nerd Font";
+
+/// Alpha the bar's background keeps once a frosted backdrop shows through it.
+const GLASS_TINT_ALPHA: f32 = 0.55;
+
+/// A single transparent pixel, standing in for a backdrop that has not been
+/// frosted yet.
+fn empty_brush() -> ImageBrush {
+    ImageBrush::new(ImageData {
+        data: vec![0_u8; 4].into(),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: 1,
+        height: 1,
+    })
+}
 
 const TAG_ICONS: [&str; 9] = [
     "\u{F0A1E}",
@@ -98,6 +115,10 @@ struct GeometryBridgeState {
     generation: u64,
     geometry: Option<MonitorGeometry>,
     scale_factor: f64,
+    /// Where the window actually ended up, in physical pixels. The frosted
+    /// backdrop samples the wallpaper there, and only the driver — which holds
+    /// the winit handle — can see it.
+    window_rect: Option<(i32, i32, u32, u32)>,
 }
 
 impl Default for GeometryBridgeState {
@@ -106,6 +127,7 @@ impl Default for GeometryBridgeState {
             generation: 0,
             geometry: None,
             scale_factor: 1.0,
+            window_rect: None,
         }
     }
 }
@@ -123,6 +145,14 @@ impl GeometryBridge {
         });
         state.generation = state.generation.wrapping_add(1).max(1);
         state.geometry = geometry;
+    }
+
+    fn update_window_rect(&self, rect: (i32, i32, u32, u32)) {
+        let mut state = self.state.lock().unwrap_or_else(|error| {
+            warn!("xilem geometry bridge mutex was poisoned");
+            error.into_inner()
+        });
+        state.window_rect = Some(rect);
     }
 
     fn update_scale_factor(&self, scale_factor: f64) {
@@ -173,6 +203,11 @@ impl<D> GeometryDriver<D> {
         let window = ctx.window(window_id).handle();
         let scale_factor = window.scale_factor().max(f64::EPSILON);
         self.bridge.update_scale_factor(scale_factor);
+        if let Ok(position) = window.outer_position() {
+            let size = window.inner_size();
+            self.bridge
+                .update_window_rect((position.x, position.y, size.width, size.height));
+        }
 
         let applied = self.windows.entry(window_id).or_insert_with(|| {
             let physical_size = window.inner_size();
@@ -277,6 +312,14 @@ struct XilemBar {
     process_actions: ProcessActionHandler,
     geometry_bridge: Arc<GeometryBridge>,
     theme: Theme,
+
+    // --- Frosted glass ---
+    /// Wallpaper source and frosting cache, absent when no wallpaper is
+    /// configured. The bar then keeps its opaque background.
+    glass: Option<GlassStrip<WallpaperFile>>,
+    /// The frosted strip as a brush, rebuilt only when the cache says so.
+    glass_brush: Option<ImageBrush>,
+    glass_generation: u64,
 }
 
 impl XilemBar {
@@ -299,6 +342,17 @@ impl XilemBar {
             BarRuntime::with_managed_transport(config, recovery)
         };
         let runtime = runtime.expect("xilem bar model configuration is valid");
+        // Only the `[glass]` section applies here; the rest of this bar's
+        // appearance is its own theme.
+        let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            xbar_core::config::BarConfig::default()
+        });
+        // A provisional screen size; `refresh_glass` corrects it from the
+        // window manager's monitor geometry as soon as one arrives.
+        let glass = app_config
+            .glass
+            .file_strip(1920, 1080, fallback_rgb(theme_mode));
         Self {
             tab_colors: [
                 rgb(0xFF, 0x6B, 0x6B),
@@ -316,7 +370,45 @@ impl XilemBar {
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
             theme: Theme::from_mode(theme_mode),
+            glass,
+            glass_brush: None,
+            glass_generation: 0,
         }
+    }
+
+    /// Re-frost the wallpaper under the bar and rebuild the brush when it
+    /// changed. Cheap on an unchanged wallpaper and geometry: the cache hands
+    /// back the same generation and the brush is left alone.
+    fn refresh_glass(&mut self) {
+        let bridge = self.geometry_bridge.snapshot();
+        // The wallpaper is laid out across the monitor, and the bar samples
+        // the part of it the window actually covers.
+        if let (Some(strip), Some(geometry)) = (self.glass.as_mut(), bridge.geometry) {
+            strip
+                .source_mut()
+                .set_screen(geometry.width.max(1), geometry.height.max(1));
+        }
+        let Some((x, y, width, height)) = bridge.window_rect else {
+            return;
+        };
+        let Some(strip) = self.glass.as_mut() else {
+            return;
+        };
+        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
+            return;
+        };
+        if generation == self.glass_generation && self.glass_brush.is_some() {
+            return;
+        }
+        self.glass_brush = Some(ImageBrush::new(ImageData {
+            data: image.to_rgba8().into(),
+            format: ImageFormat::Rgba8,
+            // `to_rgba8` un-premultiplies on the way out.
+            alpha_type: ImageAlphaType::Alpha,
+            width: image.width(),
+            height: image.height(),
+        }));
+        self.glass_generation = generation;
     }
 
     fn toggle_theme(&mut self) {
@@ -989,11 +1081,31 @@ fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<
 
 // Top-level view: fork attaches the background tasks to the visible tree.
 fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    let bar_bg = state.theme.bar_bg;
+    state.refresh_glass();
+    // Whether the backdrop view exists is decided once, by whether a wallpaper
+    // is configured at all: a `zstack` whose sequence changes shape between
+    // rebuilds leaves Masonry looking for a child that is no longer there.
+    // Until the first strip is frosted, the view holds a transparent
+    // placeholder rather than being absent.
+    let backdrop = state
+        .glass
+        .is_some()
+        .then(|| state.glass_brush.clone().unwrap_or_else(empty_brush));
+    // With a backdrop the bar's own background becomes a tint over it; without
+    // one it stays exactly as opaque as it was.
+    let bar_bg = match backdrop {
+        Some(_) => state.theme.bar_bg.multiply_alpha(GLASS_TINT_ALPHA),
+        None => state.theme.bar_bg,
+    };
     fork(
-        sized_box(app_logic(state))
-            .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
-            .background(bar_bg),
+        zstack((
+            // The backdrop is built at the window's pixel size, so it must
+            // land on it one-to-one rather than be letterboxed.
+            backdrop.map(|brush| image(brush).decorative(true).fit(ObjectFit::Stretch)),
+            sized_box(app_logic(state))
+                .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
+                .background(bar_bg),
+        )),
         (driver_task(),),
     )
 }

@@ -7,3 +7,4 @@ Cargo.lock
 *.swp
 *.swo
 node_modules/
+/target-nix

@@ -13,6 +13,11 @@ default = []
 
 clock-chrono = ["dep:chrono"]
 config-toml = ["dep:toml"]
+# Frosted-glass backdrop. The core is integer pixel math with no toolkit
+# dependency; `glass-wallpaper` adds the file-backed source, which is the only
+# part that needs an image decoder.
+glass = ["dep:log"]
+glass-wallpaper = ["glass", "dep:image"]
 logging-flexi = ["dep:anyhow", "dep:flexi_logger", "dep:log"]
 provider-alsa = ["dep:alsa", "dep:anyhow", "dep:log"]
 provider-battery-sysfs = []
@@ -39,6 +44,16 @@ alsa = { version = "0.12.0", optional = true }
 log = { version = "0.4.33", optional = true }
 flexi_logger = { version = "0.31.9", optional = true }
 libc = { version = "0.2.186", optional = true }
+
+# Only the formats JWM's own wallpaper loader accepts, and no rayon: a bar
+# decodes one image at startup, not a batch.
+image = { version = "0.25", default-features = false, features = [
+    "bmp",
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+], optional = true }
 
 cairo-rs = { version = "0.22.0", optional = true }
 pango = { version = "0.22.8", optional = true }

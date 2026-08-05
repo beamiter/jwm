@@ -26,11 +26,15 @@ use xbar_core::{
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgba, size,
+    App, Bounds, Context, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Render,
+    RenderImage, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, img, point,
+    prelude::*, px, rgba, size,
 };
 use gpui_platform::application;
+use std::sync::Arc;
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{GlassStrip, fallback_rgb};
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
 
@@ -81,6 +85,14 @@ struct GpuiBar {
     geometry_dirty: bool,
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
+
+    // --- Frosted glass ---
+    /// Wallpaper source and frosting cache, absent when no wallpaper is
+    /// configured. The bar then stays fully transparent and leaves the effect
+    /// to whatever compositor is running.
+    glass: Option<GlassStrip<WallpaperFile>>,
+    glass_image: Option<Arc<RenderImage>>,
+    glass_generation: u64,
 }
 
 impl GpuiBar {
@@ -106,6 +118,9 @@ impl GpuiBar {
             runtime,
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
+            glass: glass_strip(),
+            glass_image: None,
+            glass_generation: 0,
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
@@ -648,6 +663,45 @@ impl GpuiBar {
     }
 }
 
+impl GpuiBar {
+    /// Re-frost the wallpaper under the bar and rebuild the render image when
+    /// it changed. Cheap on an unchanged wallpaper and geometry.
+    fn refresh_glass(&mut self, window: &Window) {
+        let scale = window.scale_factor().max(f32::EPSILON);
+        let bounds = window.bounds();
+        let width = (f32::from(bounds.size.width) * scale).round().max(1.0) as u32;
+        let height = (f32::from(bounds.size.height) * scale).round().max(1.0) as u32;
+        // GPUI exposes no window position on X11, so the origin is the one the
+        // window manager assigned; the wallpaper is laid out on that monitor.
+        let geometry = self.active_geometry;
+        let Some(strip) = self.glass.as_mut() else {
+            return;
+        };
+        if let Some(geometry) = geometry {
+            strip
+                .source_mut()
+                .set_screen(geometry.width.max(1), geometry.height.max(1));
+        }
+        let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
+
+        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
+            return;
+        };
+        if generation == self.glass_generation && self.glass_image.is_some() {
+            return;
+        }
+        // GPUI's `RenderImage` carries BGRA despite its `RgbaImage` container,
+        // which is exactly the byte order a `GlassImage` already holds.
+        let Some(buffer) =
+            image::RgbaImage::from_raw(image.width(), image.height(), image.data().to_vec())
+        else {
+            return;
+        };
+        self.glass_image = Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
+        self.glass_generation = generation;
+    }
+}
+
 impl Render for GpuiBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale_factor = window.scale_factor().max(f32::EPSILON);
@@ -670,6 +724,7 @@ impl Render for GpuiBar {
             self.geometry_dirty = false;
             self.last_scale_factor = Some(scale_factor);
         }
+        self.refresh_glass(window);
         let system = self.runtime.view().system;
         let cpu = system.cpu_percent.map_or(0.0, |value| value.as_f32());
         let mem = system.memory_percent.map_or(0.0, |value| value.as_f32());
@@ -717,20 +772,46 @@ impl Render for GpuiBar {
             left = left.child(opts);
         }
 
-        div()
+        // With a backdrop the bar tints it; without one it stays fully
+        // transparent and whatever compositor is running decides what shows.
+        let background = match self.glass_image {
+            Some(_) => rgba_alpha(0x1C1C1E, GLASS_TINT_ALPHA),
+            None => rgba(0x00000000),
+        };
+        let mut root = div()
+            .relative()
             .w_full()
             .h_full()
-            .p(px(2.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_between()
             .overflow_hidden()
             .font_family(NERD_FONT)
-            .text_color(rgba_alpha(0xFFFFFF, 1.0))
-            .bg(rgba(0x00000000))
-            .child(left)
-            .child(right_pills)
+            .text_color(rgba_alpha(0xFFFFFF, 1.0));
+        if let Some(backdrop) = self.glass_image.clone() {
+            // Built at the window's own pixel size, so it must land on it
+            // one-to-one rather than be letterboxed.
+            root = root.child(
+                img(backdrop)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Fill),
+            );
+        }
+        root.child(
+            div()
+                .relative()
+                .w_full()
+                .h_full()
+                .p(px(2.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .bg(background)
+                .child(left)
+                .child(right_pills),
+        )
     }
 }
 
@@ -771,4 +852,23 @@ fn main() {
             .expect("failed to open window");
         cx.activate(true);
     });
+}
+
+/// Alpha the bar's background keeps once a frosted backdrop shows through it.
+const GLASS_TINT_ALPHA: f32 = 0.55;
+
+/// The wallpaper source this bar's configuration asks for, if any.
+///
+/// Only the `[glass]` section of the shared bar config applies here; the rest
+/// of this bar's appearance is its own theme.
+fn glass_strip() -> Option<GlassStrip<WallpaperFile>> {
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+        warn!("falling back to the default bar config: {error}");
+        xbar_core::config::BarConfig::default()
+    });
+    // A provisional screen size; `refresh_glass` corrects it from the window
+    // manager's monitor geometry as soon as one arrives.
+    config
+        .glass
+        .file_strip(1920, 1080, fallback_rgb(config.theme))
 }

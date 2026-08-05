@@ -17,7 +17,11 @@ provider-system = ["xbar_core/provider-system"]
 [dependencies]
 log = "0.4.33"
 tauri = { version = "2.11.5", default-features = false }
-xbar_core = { path = "../..", default-features = false, features = ["transport-shared"] }
+xbar_core = { path = "../..", default-features = false, features = [
+    "config-toml",
+    "glass-wallpaper",
+    "transport-shared",
+] }
 xbar_linux_actions = { path = "../xbar_linux_actions" }
 
 [dev-dependencies]

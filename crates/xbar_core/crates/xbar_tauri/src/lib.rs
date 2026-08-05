@@ -17,6 +17,8 @@ use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, State, WebviewWindow,
     Window, WindowEvent,
 };
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, fallback_rgb};
 use xbar_core::{
     ActionRequest, BarEffect, BarPlacement, FrontendSession, ModelConfig, ModelError,
     MonitorGeometry, PlatformEffectHandler, SessionOutput, TransportRecoveryConfig,
@@ -29,6 +31,12 @@ pub const DEFAULT_STATE_EVENT: &str = "xbar-state";
 pub const DEFAULT_WINDOW_LABEL: &str = "main";
 /// Poll fallback used when no native transport wake is integrated by Tauri.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Element every frontend in this family uses as its bar root, and so the one
+/// the frosted backdrop is installed behind.
+pub const DEFAULT_GLASS_SELECTOR: &str = ".button-row";
+/// `id` of the style element the bridge owns in the page.
+const GLASS_STYLE_ID: &str = "xbar-glass";
 
 /// Configuration shared by all Tauri web-framework frontends.
 #[derive(Debug, Clone)]
@@ -152,6 +160,18 @@ struct BridgeInner {
     baseline: WindowBaseline,
     config: BridgeConfig,
     process_actions: Mutex<ProcessActionHandler>,
+    glass: Mutex<Option<GlassBackdrop>>,
+}
+
+/// The frosted backdrop, which a webview can only receive as an image file.
+///
+/// `backdrop-filter` blurs what is inside the page and never the desktop
+/// behind the window, so the bridge frosts the wallpaper itself and hands the
+/// page a `data:` URL to composite its own tint over.
+struct GlassBackdrop {
+    strip: GlassStrip<WallpaperFile>,
+    tint: [u8; 3],
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -216,6 +236,7 @@ fn setup<R: Runtime>(
         session: Mutex::new(FrontendSession::new(runtime)),
         baseline,
         process_actions: Mutex::new(ProcessActionHandler::new(config.process_actions.clone())),
+        glass: Mutex::new(glass_backdrop()),
         config,
     });
     let guard = spawn_worker(app.clone(), Arc::clone(&inner))?;
@@ -260,6 +281,10 @@ fn worker_loop<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner, signal: &Wor
             let deadline = session.next_service_deadline(Instant::now());
             if let Err(error) = deliver_output(app, inner, output, false) {
                 log::error!("xbar background service failed: {error}");
+            }
+            // Cheap unless the wallpaper file or the bar geometry changed.
+            if let Err(error) = refresh_glass(app, inner) {
+                log::warn!("frosted backdrop unavailable: {error}");
             }
             (deadline, inner.config.poll_interval)
         };
@@ -425,6 +450,120 @@ fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     }
 }
 
+/// The wallpaper source this bar's configuration asks for, if any.
+///
+/// Only the `[glass]` section of the shared bar config applies here; the rest
+/// of a Tauri bar's appearance belongs to its own stylesheet.
+fn glass_backdrop() -> Option<GlassBackdrop> {
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+        log::warn!("falling back to the default bar config: {error}");
+        xbar_core::config::BarConfig::default()
+    });
+    let tint = fallback_rgb(config.theme);
+    // A provisional screen size; `refresh_glass` corrects it from the window
+    // manager's monitor geometry as soon as one arrives.
+    let strip = config.glass.file_strip(1920, 1080, tint)?;
+    Some(GlassBackdrop {
+        strip,
+        tint,
+        generation: 0,
+    })
+}
+
+/// Re-frost the wallpaper under the bar and install it in the page when it
+/// changed.
+///
+/// The stylesheet is injected rather than routed through the frontend so that
+/// all six web frameworks share one implementation; the page keeps ownership
+/// of everything else it draws.
+fn refresh_glass<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner) -> Result<(), String> {
+    let mut glass = inner
+        .glass
+        .lock()
+        .map_err(|error| format!("glass backdrop lock poisoned: {error}"))?;
+    let Some(glass) = glass.as_mut() else {
+        return Ok(());
+    };
+    let window = main_window(app, &inner.config.window_label)?;
+    let geometry = inner
+        .session
+        .lock()
+        .map_err(|error| format!("xbar frontend session lock poisoned: {error}"))?
+        .runtime()
+        .snapshot()
+        .geometry;
+    if let Some(geometry) = geometry {
+        glass
+            .strip
+            .source_mut()
+            .set_screen(geometry.width.max(1), geometry.height.max(1));
+    }
+    let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
+    let size = window
+        .inner_size()
+        .map_err(|error| format!("failed to query bar size: {error}"))?;
+
+    let Some((generation, image)) = glass
+        .strip
+        .ensure(x, y, size.width.max(1), size.height.max(1))
+    else {
+        return Ok(());
+    };
+    if generation == glass.generation {
+        return Ok(());
+    }
+    let css = image
+        .to_css_backdrop(
+            DEFAULT_GLASS_SELECTOR,
+            glass.tint,
+            DEFAULT_BACKGROUND_OPACITY as f32,
+        )
+        .map_err(|error| format!("failed to encode the frosted backdrop: {error}"))?;
+    window
+        .eval(install_style_script(&css))
+        .map_err(|error| format!("failed to install the frosted backdrop: {error}"))?;
+    glass.generation = generation;
+    Ok(())
+}
+
+/// Script that creates the bridge's own style element once and then only ever
+/// replaces its text, so repeated updates cannot accumulate elements.
+fn install_style_script(css: &str) -> String {
+    let css = json_string(css);
+    format!(
+        "(function(){{var e=document.getElementById({id});         if(!e){{e=document.createElement('style');e.id={id};         document.head.appendChild(e);}}e.textContent={css};}})()",
+        id = json_string(GLASS_STYLE_ID),
+    )
+}
+
+/// Quote `text` as a JavaScript string literal.
+///
+/// A `data:` URL is base64 and a stylesheet is ASCII, but neither is trusted
+/// to stay that way: anything that could end the literal early is escaped.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // `</script>` and U+2028/9 end a literal in some HTML contexts.
+            '<' => out.push_str("\\u003c"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            character if (character as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => out.push(character),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn main_window<R: Runtime>(app: &AppHandle<R>, label: &str) -> Result<WebviewWindow<R>, String> {
     app.get_webview_window(label)
         .ok_or_else(|| format!("Tauri bar window {label:?} is unavailable"))
@@ -549,6 +688,27 @@ mod tests {
             PhysicalSize::new(1000, 50)
         );
         assert!(baseline_physical_size(baseline, 0.0).is_err());
+    }
+
+    #[test]
+    fn the_style_script_installs_one_element_and_escapes_its_payload() {
+        let script = install_style_script(".button-row { color: red; }");
+
+        // The element is looked up before it is created, so repeated updates
+        // replace text rather than pile up style elements.
+        let lookup = script.find("getElementById").expect("lookup");
+        let create = script.find("createElement").expect("create");
+        assert!(lookup < create);
+        assert!(script.contains("e.textContent="));
+
+        // Anything that could end the JavaScript string literal early is
+        // escaped, including the `<` of a stray `</script>`.
+        let hostile = install_style_script("a\"b\\c\n<d");
+        assert!(hostile.contains("\\\"b"), "{hostile}");
+        assert!(hostile.contains("\\\\c"), "{hostile}");
+        assert!(hostile.contains("\\n"), "{hostile}");
+        assert!(hostile.contains("\\u003cd"), "{hostile}");
+        assert!(!hostile.contains("</"), "{hostile}");
     }
 
     #[test]

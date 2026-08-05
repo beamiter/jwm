@@ -13,6 +13,8 @@ use std::{
     time::Duration,
 };
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, MonitorGeometry,
@@ -22,6 +24,13 @@ use xbar_core::{
 use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
 
 const STYLE_CSS: &str = include_str!("../assets/style.css");
+
+/// Alpha the bar's own background keeps once a frosted backdrop shows through
+/// it.
+const GLASS_TINT_ALPHA: f32 = 0.55;
+/// The element this bar uses as its root, and so the one the frosted backdrop
+/// is installed behind.
+const GLASS_SELECTOR: &str = ".button-row";
 const BAR_LOGICAL_HEIGHT: f64 = 40.0;
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -110,6 +119,58 @@ impl RuntimeOwner {
         let update = self.runtime.dispatch(action);
         (update, self.runtime.snapshot())
     }
+}
+
+/// The wallpaper source this bar's configuration asks for, if any.
+///
+/// Only the `[glass]` section of the shared bar config applies here; the rest
+/// of this bar's appearance is its stylesheet.
+fn glass_strip() -> Option<GlassStrip<WallpaperFile>> {
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+        warn!("falling back to the default bar config: {error}");
+        xbar_core::config::BarConfig::default()
+    });
+    // A provisional screen size; `glass_style` corrects it from the window
+    // manager's monitor geometry as soon as one arrives.
+    config
+        .glass
+        .file_strip(1920, 1080, fallback_rgb(config.theme))
+}
+
+/// A stylesheet putting the frosted strip behind the bar, or `None` when
+/// nothing changed since the last call.
+///
+/// A webview cannot be handed a pixel buffer, and `backdrop-filter` blurs only
+/// what is inside the page — never the desktop behind the window — so the
+/// backdrop travels as a `data:` URL and CSS composites the bar's own tint
+/// over it. That is also why this is rebuilt only when the strip's generation
+/// changes: the URL is a base64 PNG, not a pointer.
+fn glass_style(
+    strip: &mut GlassStrip<WallpaperFile>,
+    window: &DesktopContext,
+    geometry: Option<MonitorGeometry>,
+    last_generation: &mut u64,
+) -> Option<String> {
+    if let Some(geometry) = geometry {
+        strip
+            .source_mut()
+            .set_screen(geometry.width.max(1), geometry.height.max(1));
+    }
+    // The webview has no window position of its own; the origin is the one the
+    // window manager assigned.
+    let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
+    let size = window.inner_size();
+
+    let (generation, image) = strip.ensure(x, y, size.width.max(1), size.height.max(1))?;
+    if generation == *last_generation {
+        return None;
+    }
+    let css = image
+        .to_css_backdrop(GLASS_SELECTOR, [255, 255, 255], GLASS_TINT_ALPHA)
+        .map_err(|error| warn!("frosted strip could not be encoded: {error}"))
+        .ok()?;
+    *last_generation = generation;
+    Some(css)
 }
 
 fn apply_monitor_geometry(geometry: MonitorGeometry, window: &DesktopContext) {
@@ -529,6 +590,9 @@ fn App() -> Element {
         })
     };
     let mut scale_factor = use_signal(|| window.scale_factor());
+    // Empty unless a wallpaper is configured, in which case it overrides the
+    // stylesheet's opaque bar background with the frosted strip.
+    let mut glass_css = use_signal(String::new);
     let mut pressed_button = use_signal(|| None::<usize>);
     let runtime = use_signal(move || Arc::new(Mutex::new(RuntimeOwner::new(shared_path))));
     let initial_runtime = runtime.read().clone();
@@ -548,6 +612,8 @@ fn App() -> Element {
             let runtime = Arc::clone(&runtime);
             let window = window.clone();
             let mut observed_scale_factor = window.scale_factor();
+            let mut glass = glass_strip();
+            let mut glass_generation = 0;
             spawn(async move {
                 loop {
                     let result = runtime.lock().ok().map(|mut runtime| runtime.tick());
@@ -564,6 +630,16 @@ fn App() -> Element {
                             );
                         }
 
+                        if let Some(strip) = glass.as_mut()
+                            && let Some(style) = glass_style(
+                                strip,
+                                &window,
+                                snapshot.geometry,
+                                &mut glass_generation,
+                            )
+                        {
+                            glass_css.set(style);
+                        }
                         bar_snapshot.set(snapshot);
                     } else {
                         error!("xbar runtime mutex was poisoned");
@@ -662,6 +738,7 @@ fn App() -> Element {
 
     rsx! {
         document::Style { "{STYLE_CSS}" }
+        document::Style { "{glass_css}" }
 
         div { class: "button-row",
             div { class: "buttons-container",

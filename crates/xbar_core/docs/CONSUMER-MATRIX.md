@@ -71,6 +71,10 @@ and typed command validation.
   it consumes.
 - `render-cairo` is limited to native scene consumers; toolkit and Tauri bars
   consume model snapshots directly.
+- `glass` carries no toolkit dependency on purpose: a frosted backdrop is
+  pixels, and every consumer — Cairo, softbuffer, pixels, a GPU upload, or a
+  webview handed a PNG — needs the same ones. `glass-wallpaper` is separate
+  because only the file-backed source needs an image decoder.
 - `runtime-linux` is limited to consumers registering timerfd/eventfd handles.
 - `transport-shared` is the only dependency path to `shared_structures`.
 - Battery and brightness remain independent provider features; GTK/Relm do

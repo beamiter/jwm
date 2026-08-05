@@ -3,7 +3,7 @@ use gtk4::gio::{self};
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Builder, Button, EventControllerScroll,
-    EventControllerScrollFlags, Label, Revealer, glib,
+    EventControllerScrollFlags, Label, Orientation, Overflow, Overlay, Picture, Revealer, glib,
 };
 use log::{info, warn};
 use std::cell::{Cell, RefCell};
@@ -11,6 +11,8 @@ use std::env;
 use std::rc::Rc;
 use std::time::Duration;
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
@@ -114,6 +116,17 @@ struct TabBarApp {
 
     // Cached UI-applied values for diff
     ui_last_monitor_num: Cell<i32>,
+
+    // --- Frosted glass ---
+    /// Backdrop image behind the panel, empty when no wallpaper is configured.
+    glass_picture: Picture,
+    glass: RefCell<Option<GlassStrip<WallpaperFile>>>,
+    /// Generation of the strip currently uploaded into `glass_picture`.
+    glass_generation: Cell<u64>,
+    /// Bar origin in physical pixels, as last assigned by the window manager.
+    /// GTK4 exposes no window position of its own, so the geometry the WM
+    /// hands us is what tells the backdrop where to sample.
+    glass_origin: Cell<(i32, i32)>,
 }
 
 impl TabBarApp {
@@ -142,6 +155,29 @@ impl TabBarApp {
             // 强制重绘以确保样式应用
             win.queue_draw();
         });
+
+        // Slide a backdrop under the existing tree: the panel keeps its own
+        // widget hierarchy, and the frosted wallpaper is simply what shows
+        // through its translucent background. The clip box repeats
+        // `.panel-root`'s margin and corner radius so the backdrop stops where
+        // the panel does instead of squaring off its rounded corners.
+        let glass_picture = Picture::new();
+        glass_picture.set_can_target(false);
+        glass_picture.set_content_fit(gtk4::ContentFit::Fill);
+        glass_picture.set_hexpand(true);
+        glass_picture.set_vexpand(true);
+        if let Some(content) = window.child() {
+            let clip = gtk4::Box::new(Orientation::Horizontal, 0);
+            clip.add_css_class("glass-backdrop");
+            clip.set_overflow(Overflow::Hidden);
+            clip.append(&glass_picture);
+
+            let overlay = Overlay::new();
+            window.set_child(None::<&gtk4::Widget>);
+            overlay.set_child(Some(&clip));
+            overlay.add_overlay(&content);
+            window.set_child(Some(&overlay));
+        }
 
         // 标签按钮
         let mut tab_buttons = Vec::new();
@@ -205,6 +241,22 @@ impl TabBarApp {
         // UI state is an owned projection; providers and transport stay in runtime.
         let state: SharedAppState = Rc::new(RefCell::new(AppState::new(runtime.snapshot())));
 
+        // Only the `[glass]` section of the shared bar config applies here;
+        // everything else about this bar's appearance lives in its CSS.
+        let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            xbar_core::config::BarConfig::default()
+        });
+        let (screen_width, screen_height) = primary_screen_size();
+        let glass = app_config.glass.file_strip(
+            screen_width,
+            screen_height,
+            fallback_rgb(app_config.theme),
+        );
+        if glass.is_some() {
+            window.add_css_class("glass");
+        }
+
         // 样式
         Self::apply_styles();
 
@@ -227,6 +279,10 @@ impl TabBarApp {
             runtime: RefCell::new(runtime),
             process_actions: RefCell::new(ProcessActionHandler::default()),
             ui_last_monitor_num: Cell::new(i32::MIN),
+            glass_picture,
+            glass: RefCell::new(glass),
+            glass_generation: Cell::new(0),
+            glass_origin: Cell::new((0, 0)),
         });
 
         // Default theme: dark
@@ -246,6 +302,8 @@ impl TabBarApp {
             glib::timeout_add_seconds_local(1, move || {
                 let update = app_clone.runtime.borrow_mut().tick();
                 app_clone.handle_runtime_update(update);
+                // Cheap unless the wallpaper file actually changed.
+                app_clone.refresh_glass();
                 ControlFlow::Continue
             });
         }
@@ -264,6 +322,7 @@ impl TabBarApp {
 
         // 首次时间显示
         app_instance.update_time_display();
+        app_instance.refresh_glass();
         // 首次布局 UI 同步（默认 closed）
         app_instance.update_layout_ui();
         // 首次音量/主题 UI 同步
@@ -420,12 +479,16 @@ impl TabBarApp {
 
     fn handle_platform_effect(&self, effect: BarEffect) {
         match effect {
-            BarEffect::ApplyMonitorGeometry(geometry) => self.resize_window_to_monitor(
-                geometry.x,
-                geometry.y,
-                geometry.width,
-                geometry.height,
-            ),
+            BarEffect::ApplyMonitorGeometry(geometry) => {
+                self.glass_origin.set((geometry.x, geometry.y));
+                self.refresh_glass();
+                self.resize_window_to_monitor(
+                    geometry.x,
+                    geometry.y,
+                    geometry.width,
+                    geometry.height,
+                )
+            }
             BarEffect::ClearMonitorGeometry => self.window.set_default_size(1000, 40),
             effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
                 if let Err(error) = self.process_actions.borrow_mut().handle(effect) {
@@ -761,6 +824,54 @@ impl TabBarApp {
         }
     }
 
+    /// The bar's size in physical pixels, which is what the backdrop is
+    /// sampled and uploaded in.
+    ///
+    /// This comes from the window rather than from the geometry the window
+    /// manager asked for: the two agree once the resize lands, and using the
+    /// real allocation means a backdrop is never stretched to a width the
+    /// window does not have.
+    fn bar_size_px(&self) -> (u32, u32) {
+        let scale = self.window.scale_factor().max(1) as u32;
+        (
+            (self.window.width().max(1) as u32).saturating_mul(scale),
+            (self.window.height().max(1) as u32).saturating_mul(scale),
+        )
+    }
+
+    /// Re-frost the wallpaper under the bar and upload it when it changed.
+    ///
+    /// Everything here is a no-op on an unchanged wallpaper and geometry: the
+    /// cache returns the same generation and the texture is left alone.
+    fn refresh_glass(&self) {
+        let mut glass = self.glass.borrow_mut();
+        let Some(strip) = glass.as_mut() else {
+            return;
+        };
+        // Only the origin comes from the window manager: GTK4 deliberately
+        // exposes no window position, and the size is better read from the
+        // window itself.
+        let (x, y) = self.glass_origin.get();
+        let (width, height) = self.bar_size_px();
+        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
+            return;
+        };
+        if generation == self.glass_generation.get() {
+            return;
+        }
+
+        let bytes = glib::Bytes::from_owned(image.to_rgba8());
+        let texture = gdk4::MemoryTexture::new(
+            image.width() as i32,
+            image.height() as i32,
+            gdk4::MemoryFormat::R8g8b8a8,
+            &bytes,
+            image.stride(),
+        );
+        self.glass_picture.set_paintable(Some(&texture));
+        self.glass_generation.set(generation);
+    }
+
     #[allow(dead_code)]
     fn resize_window_to_monitor(
         &self,
@@ -857,4 +968,26 @@ fn main() -> glib::ExitCode {
     });
 
     app.run()
+}
+
+/// Physical size of the primary monitor, which is the canvas the compositor
+/// lays the wallpaper out on.
+fn primary_screen_size() -> (u32, u32) {
+    let fallback = (1920, 1080);
+    let Some(display) = gdk4::Display::default() else {
+        return fallback;
+    };
+    let monitors = display.monitors();
+    let Some(monitor) = monitors
+        .item(0)
+        .and_then(|object| object.downcast::<gdk4::Monitor>().ok())
+    else {
+        return fallback;
+    };
+    let geometry = monitor.geometry();
+    let scale = monitor.scale_factor().max(1);
+    (
+        (geometry.width() * scale).max(1) as u32,
+        (geometry.height() * scale).max(1) as u32,
+    )
 }

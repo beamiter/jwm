@@ -10,6 +10,7 @@ log = "0.4.33"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
+    "glass-wallpaper",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",

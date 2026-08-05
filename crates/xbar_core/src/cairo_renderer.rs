@@ -4,7 +4,7 @@
 //! should configure the Cairo context transform before calling [`CairoRenderer::render`].
 
 use anyhow::Result;
-use cairo::{Context, LineCap, LineJoin, Operator};
+use cairo::{Context, Extend, Filter, ImageSurface, LineCap, LineJoin, Operator};
 use pango::prelude::FontMapExt as _;
 use pango::{FontDescription, Layout};
 
@@ -64,6 +64,34 @@ impl CairoRenderer {
     /// Render every node in display-list order, clipped to the intersection
     /// of the scene viewport and scene clip.
     pub fn render(&self, context: &Context, scene: &Scene) -> Result<()> {
+        self.render_scene(context, scene, None)
+    }
+
+    /// Render `scene` over `backdrop` — a frosted wallpaper strip, typically
+    /// from [`glass::GlassBackdrop`](crate::glass).
+    ///
+    /// The backdrop is painted first and the scene's background node then
+    /// blends *over* it instead of replacing it, so the bar's background
+    /// opacity decides how much of the backdrop shows through.  `None` renders
+    /// exactly like [`render`](Self::render).
+    ///
+    /// The backdrop is mapped onto the scene viewport, so an image built in
+    /// device pixels lands one-to-one under any frontend transform.
+    pub fn render_over(
+        &self,
+        context: &Context,
+        scene: &Scene,
+        backdrop: Option<&ImageSurface>,
+    ) -> Result<()> {
+        self.render_scene(context, scene, backdrop)
+    }
+
+    fn render_scene(
+        &self,
+        context: &Context,
+        scene: &Scene,
+        backdrop: Option<&ImageSurface>,
+    ) -> Result<()> {
         let Some(viewport) = valid_rect(Rect::new(
             0.0,
             0.0,
@@ -76,15 +104,25 @@ impl CairoRenderer {
         else {
             return Ok(());
         };
+        // Without a backdrop the background node owns the backing store and
+        // replaces it; with one it must preserve what was just painted.
+        let background_operator = if backdrop.is_some() {
+            Operator::Over
+        } else {
+            Operator::Source
+        };
 
         with_preserved_path(context, || {
             with_saved(context, || {
                 clip_to_rect(context, scene_clip)?;
+                if let Some(backdrop) = backdrop {
+                    paint_backdrop(context, backdrop, scene_clip)?;
+                }
                 let layout = pangocairo::functions::create_layout(context);
                 layout.set_single_paragraph_mode(true);
 
                 for node in &scene.nodes {
-                    self.draw_node(context, &layout, node)?;
+                    self.draw_node(context, &layout, node, background_operator)?;
                 }
                 context.status()?;
                 Ok(())
@@ -92,7 +130,13 @@ impl CairoRenderer {
         })
     }
 
-    fn draw_node(&self, context: &Context, layout: &Layout, node: &SceneNode) -> Result<()> {
+    fn draw_node(
+        &self,
+        context: &Context,
+        layout: &Layout,
+        node: &SceneNode,
+        background_operator: Operator,
+    ) -> Result<()> {
         let Some(bounds) = valid_rect(node.bounds()) else {
             return Ok(());
         };
@@ -106,8 +150,10 @@ impl CairoRenderer {
                     let opacity = self.background_opacity.unwrap_or(1.0);
                     // A full-frame scene can be rendered repeatedly into the
                     // same backing store. Source replacement keeps a
-                    // translucent background from accumulating opacity.
-                    context.set_operator(Operator::Source);
+                    // translucent background from accumulating opacity; a
+                    // backdrop re-establishes the base itself and is blended
+                    // over instead.
+                    context.set_operator(background_operator);
                     context.rectangle(
                         f64::from(bounds.x),
                         f64::from(bounds.y),
@@ -370,6 +416,28 @@ impl CairoBar {
     /// Cairo context. This keeps layout and drawing on the same Pango font map,
     /// resolution, transform, and font options.
     pub fn render(&mut self, context: &Context, viewport: Size) -> Result<()> {
+        self.render_frame(context, viewport, None)
+    }
+
+    /// Render over a frosted backdrop; see
+    /// [`CairoRenderer::render_over`].  `None` behaves exactly like
+    /// [`render`](Self::render), so a frontend keeps one call site whether or
+    /// not glass is available this frame.
+    pub fn render_over(
+        &mut self,
+        context: &Context,
+        viewport: Size,
+        backdrop: Option<&ImageSurface>,
+    ) -> Result<()> {
+        self.render_frame(context, viewport, backdrop)
+    }
+
+    fn render_frame(
+        &mut self,
+        context: &Context,
+        viewport: Size,
+        backdrop: Option<&ImageSurface>,
+    ) -> Result<()> {
         let measurer = self.renderer.text_measurer(context);
         let layout = LayoutEngine::new(self.config.clone(), measurer);
         let mut next_interaction = self.interaction;
@@ -379,7 +447,7 @@ impl CairoBar {
         {
             next_scene = layout.build(self.runtime.view(), viewport, &next_interaction);
         }
-        self.renderer.render(context, &next_scene)?;
+        self.renderer.render_over(context, &next_scene, backdrop)?;
         self.last_damage = next_scene.damage_from(&self.scene);
         self.interaction = next_interaction;
         self.scene = next_scene;
@@ -408,6 +476,28 @@ impl CairoBar {
         physical_height: u32,
         stride: u32,
         scale_factor: f64,
+    ) -> Result<()> {
+        self.render_into_bgra_over(
+            frame,
+            physical_width,
+            physical_height,
+            stride,
+            scale_factor,
+            None,
+        )
+    }
+
+    /// [`render_into_bgra`](Self::render_into_bgra) over a frosted backdrop.
+    ///
+    /// The backdrop is expected in the same device pixels as `frame`.
+    pub fn render_into_bgra_over(
+        &mut self,
+        frame: &mut [u8],
+        physical_width: u32,
+        physical_height: u32,
+        stride: u32,
+        scale_factor: f64,
+        backdrop: Option<&ImageSurface>,
     ) -> Result<()> {
         if physical_width == 0 || physical_height == 0 {
             anyhow::bail!("CPU frame dimensions must be non-zero");
@@ -456,7 +546,7 @@ impl CairoBar {
             (f64::from(physical_width) / scale_factor) as f32,
             (f64::from(physical_height) / scale_factor) as f32,
         );
-        self.render(&context, viewport)?;
+        self.render_over(&context, viewport, backdrop)?;
         drop(context);
         surface.flush();
         Ok(())
@@ -621,6 +711,21 @@ impl CpuCanvas {
         physical_height: u32,
         scale_factor: f64,
     ) -> Result<CpuFrame<'a>> {
+        self.render_over(bar, physical_width, physical_height, scale_factor, None)
+    }
+
+    /// Render `bar` over a frosted backdrop built for these device pixels.
+    ///
+    /// `None` is exactly [`render`](Self::render), so a frontend keeps one
+    /// call site whether or not the wallpaper was readable this frame.
+    pub fn render_over<'a>(
+        &'a mut self,
+        bar: &mut CairoBar,
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f64,
+        backdrop: Option<&ImageSurface>,
+    ) -> Result<CpuFrame<'a>> {
         if physical_width == 0 || physical_height == 0 {
             anyhow::bail!("CPU canvas dimensions must be non-zero");
         }
@@ -641,12 +746,13 @@ impl CpuCanvas {
             self.height = physical_height;
             self.stride = stride;
         }
-        bar.render_into_bgra(
+        bar.render_into_bgra_over(
             &mut self.data,
             self.width,
             self.height,
             self.stride,
             scale_factor,
+            backdrop,
         )?;
         let damage = if reallocated {
             None
@@ -764,7 +870,10 @@ impl TextMeasurer for PangoTextMeasurer {
         // Report the same ink/logical union the renderer paints, so layout
         // reserves enough pill width for overflowing icon glyphs.
         let extents = layout_paint_extents(&layout);
-        Size::new(extents.width().max(0) as f32, extents.height().max(0) as f32)
+        Size::new(
+            extents.width().max(0) as f32,
+            extents.height().max(0) as f32,
+        )
     }
 }
 
@@ -873,6 +982,34 @@ fn text_origin(bounds: Rect, text_width: i32, text_height: i32, align: TextAlign
     };
     let y = f64::from(bounds.y) + (f64::from(bounds.height) - text_height) * 0.5;
     (x, y)
+}
+
+/// Paint `backdrop` across `bounds`, replacing whatever the target held.
+///
+/// The image is stretched onto `bounds` rather than blitted at its own size:
+/// the frontend builds it in device pixels while the scene is laid out in
+/// logical units, and mapping the two makes the transform between them the
+/// caller's business instead of this function's.
+fn paint_backdrop(context: &Context, backdrop: &ImageSurface, bounds: Rect) -> Result<()> {
+    let (width, height) = (backdrop.width(), backdrop.height());
+    if width <= 0 || height <= 0 {
+        return Ok(());
+    }
+    with_saved(context, || {
+        clip_to_rect(context, bounds)?;
+        context.scale(
+            f64::from(bounds.width) / f64::from(width),
+            f64::from(bounds.height) / f64::from(height),
+        );
+        context.set_source_surface(backdrop, 0.0, 0.0)?;
+        let source = context.source();
+        source.set_extend(Extend::Pad);
+        source.set_filter(Filter::Bilinear);
+        context.set_operator(Operator::Source);
+        context.paint()?;
+        context.status()?;
+        Ok(())
+    })
 }
 
 fn clip_to_rect(context: &Context, bounds: Rect) -> Result<()> {
@@ -1048,6 +1185,62 @@ mod tests {
 
         let line = pixel(20, 29);
         assert!((line as u8) > ((line >> 16) as u8));
+    }
+
+    /// The whole point of a backdrop: the bar's background must tint it rather
+    /// than replace it, and repeated frames must not drift.
+    #[test]
+    fn a_backdrop_shows_through_the_background_and_does_not_compound() {
+        let (width, height) = (16_i32, 8_i32);
+        // A backdrop half the bar's size exercises the viewport mapping too.
+        let backdrop = ImageSurface::create(Format::ARgb32, width / 2, height / 2).unwrap();
+        {
+            let context = Context::new(&backdrop).unwrap();
+            context.set_source_rgb(0.0, 0.0, 1.0);
+            context.paint().unwrap();
+        }
+        backdrop.flush();
+
+        let scene = Scene {
+            viewport: Size::new(width as f32, height as f32),
+            clip: Rect::new(0.0, 0.0, width as f32, height as f32),
+            hits: Vec::new(),
+            nodes: vec![SceneNode::Background {
+                id: NodeId::Background,
+                bounds: Rect::new(0.0, 0.0, width as f32, height as f32),
+                fill: Rgba::new(1.0, 0.0, 0.0, 1.0),
+            }],
+        };
+
+        let mut surface = ImageSurface::create(Format::ARgb32, width, height).unwrap();
+        {
+            let context = Context::new(&surface).unwrap();
+            let renderer = CairoRenderer::new(FontDescription::from_string("Sans"))
+                .with_background_opacity(0.5);
+            renderer
+                .render_over(&context, &scene, Some(&backdrop))
+                .unwrap();
+            renderer
+                .render_over(&context, &scene, Some(&backdrop))
+                .unwrap();
+        }
+        surface.flush();
+
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let offset = 2 * stride + 8;
+        let pixel = u32::from_ne_bytes(data[offset..offset + 4].try_into().unwrap());
+        let (alpha, red, blue) = (
+            (pixel >> 24) as u8,
+            ((pixel >> 16) & 0xff) as u8,
+            (pixel & 0xff) as u8,
+        );
+
+        // Opaque, half the background's red, and the backdrop's blue survives
+        // at the complementary half. A second frame changes neither.
+        assert_eq!(alpha, 255, "a backdrop must leave the frame opaque");
+        assert!((126..=129).contains(&red), "background red was {red}");
+        assert!((126..=129).contains(&blue), "backdrop blue was {blue}");
     }
 
     #[test]

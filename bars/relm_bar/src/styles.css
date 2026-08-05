@@ -65,6 +65,24 @@ window.theme-dark .panel-root {
   color: @bar_dark_text;
 }
 
+/* Frosted glass. The `.glass` class is added by the bar only when a wallpaper
+ * is configured, so a bar without one keeps its near-opaque panel instead of
+ * turning translucent over nothing. The backdrop lives in a clip box behind
+ * the panel; its margin and radius must track `.panel-root` above, or the
+ * wallpaper will show past the panel's rounded corners. */
+.glass-backdrop {
+  margin: 1px;
+  border-radius: 12px;
+}
+
+window.glass.theme-light .panel-root {
+  background-color: alpha(@bar_light_bg, 0.55);
+}
+
+window.glass.theme-dark .panel-root {
+  background-color: alpha(@bar_dark_bg, 0.55);
+}
+
 /* Workspaces use an Adwaita-style flat segmented treatment. */
 .tab-button {
   margin: 0 1px;

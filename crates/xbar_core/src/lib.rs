@@ -19,6 +19,8 @@ pub mod config;
 pub mod controls;
 pub mod display;
 pub mod frontend;
+#[cfg(feature = "glass")]
+pub mod glass;
 #[cfg(feature = "runtime-linux")]
 pub mod linux;
 #[cfg(feature = "logging-flexi")]

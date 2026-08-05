@@ -9,6 +9,8 @@ use relm4::{
 };
 use std::time::Duration;
 
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
     RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
@@ -45,6 +47,16 @@ pub struct AppModel {
     workspaces: Controller<WorkspacesModel>,
     layout_selector: Controller<LayoutSelectorModel>,
     status_strip: Controller<StatusStripModel>,
+
+    // --- Frosted glass ---
+    /// Backdrop image behind the panel, empty when no wallpaper is configured.
+    glass_picture: gtk::Picture,
+    glass: Option<GlassStrip<WallpaperFile>>,
+    /// Generation of the strip currently held in `glass_picture`.
+    glass_generation: u64,
+    /// Bar origin in physical pixels, as last assigned by the window manager.
+    /// GTK4 exposes no window position of its own.
+    glass_origin: (i32, i32),
 }
 
 #[relm4::component(pub)]
@@ -61,7 +73,7 @@ impl SimpleComponent for AppModel {
             set_default_size: (1000, 40),
             set_resizable: true,
             add_css_class: "transparent-window",
-            set_child: Some(&top_hbox),
+            set_child: Some(&glass_overlay),
         }
     }
 
@@ -111,6 +123,45 @@ impl SimpleComponent for AppModel {
         top_hbox.append(&spacer);
         top_hbox.append(status_strip.widget());
 
+        // Slide a backdrop under the panel: the panel keeps its own widget
+        // tree, and the frosted wallpaper is simply what shows through its
+        // translucent background. The clip box repeats `.panel-root`'s margin
+        // and corner radius so the backdrop stops where the panel does.
+        let glass_picture = gtk::Picture::new();
+        glass_picture.set_can_target(false);
+        // `set_content_fit(Fill)` would be the modern spelling, but relm4
+        // pins gtk4-rs below the 4.8 feature level that exposes it. Dropping
+        // the aspect ratio is the same instruction in the older API: the
+        // backdrop is built at exactly the bar's pixel size and must land on
+        // it one-to-one, never letterboxed.
+        #[allow(deprecated)]
+        glass_picture.set_keep_aspect_ratio(false);
+        glass_picture.set_hexpand(true);
+        glass_picture.set_vexpand(true);
+        let glass_clip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        glass_clip.add_css_class("glass-backdrop");
+        glass_clip.set_overflow(gtk::Overflow::Hidden);
+        glass_clip.append(&glass_picture);
+        let glass_overlay = gtk::Overlay::new();
+        glass_overlay.set_child(Some(&glass_clip));
+        glass_overlay.add_overlay(&top_hbox);
+
+        // Only the `[glass]` section of the shared bar config applies here;
+        // the rest of this bar's appearance lives in its CSS.
+        let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            xbar_core::config::BarConfig::default()
+        });
+        let (screen_width, screen_height) = primary_screen_size();
+        let glass = app_config.glass.file_strip(
+            screen_width,
+            screen_height,
+            fallback_rgb(app_config.theme),
+        );
+        if glass.is_some() {
+            root.add_css_class("glass");
+        }
+
         root.set_title(Some("relm_bar"));
 
         root.connect_realize(|window| {
@@ -143,6 +194,10 @@ impl SimpleComponent for AppModel {
             workspaces,
             layout_selector,
             status_strip,
+            glass_picture,
+            glass,
+            glass_generation: 0,
+            glass_origin: (0, 0),
         };
 
         root.add_css_class("theme-dark");
@@ -222,6 +277,8 @@ impl SimpleComponent for AppModel {
             AppInput::Tick => {
                 let update = self.runtime.tick();
                 self.handle_runtime_update(update);
+                // Cheap unless the wallpaper file actually changed.
+                self.refresh_glass();
             }
         }
     }
@@ -251,6 +308,8 @@ impl AppModel {
     fn handle_platform_effect(&mut self, effect: BarEffect) {
         match effect {
             BarEffect::ApplyMonitorGeometry(geometry) => {
+                self.glass_origin = (geometry.x, geometry.y);
+                self.refresh_glass();
                 let scale_factor = self.root_window.scale_factor().max(1);
                 let logical_width = (f64::from(geometry.width) / f64::from(scale_factor))
                     .round()
@@ -275,6 +334,50 @@ impl AppModel {
                 warn!("No enabled runtime adapter handled effect: {effect:?}");
             }
         }
+    }
+
+    /// The bar's size in physical pixels, which is what the backdrop is
+    /// sampled and uploaded in.
+    ///
+    /// This comes from the window rather than from the geometry the window
+    /// manager asked for: the two agree once the resize lands, and using the
+    /// real allocation means a backdrop is never stretched to a width the
+    /// window does not have.
+    fn bar_size_px(&self) -> (u32, u32) {
+        let scale = self.root_window.scale_factor().max(1) as u32;
+        (
+            (self.root_window.width().max(1) as u32).saturating_mul(scale),
+            (self.root_window.height().max(1) as u32).saturating_mul(scale),
+        )
+    }
+
+    /// Re-frost the wallpaper under the bar and upload it when it changed.
+    ///
+    /// Everything here is a no-op on an unchanged wallpaper and geometry: the
+    /// cache returns the same generation and the texture is left alone.
+    fn refresh_glass(&mut self) {
+        let (width, height) = self.bar_size_px();
+        let (x, y) = self.glass_origin;
+        let Some(strip) = self.glass.as_mut() else {
+            return;
+        };
+        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
+            return;
+        };
+        if generation == self.glass_generation {
+            return;
+        }
+
+        let bytes = glib::Bytes::from_owned(image.to_rgba8());
+        let texture = gtk::gdk::MemoryTexture::new(
+            image.width() as i32,
+            image.height() as i32,
+            gtk::gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            image.stride(),
+        );
+        self.glass_picture.set_paintable(Some(&texture));
+        self.glass_generation = generation;
     }
 
     fn sync_all_views(&self) {
@@ -374,4 +477,26 @@ fn spawn_runtime_timers(sender: ComponentSender<AppModel>) {
         tick_sender.input(AppInput::Tick);
         ControlFlow::Continue
     });
+}
+
+/// Physical size of the primary monitor, which is the canvas the compositor
+/// lays the wallpaper out on.
+fn primary_screen_size() -> (u32, u32) {
+    let fallback = (1920, 1080);
+    let Some(display) = gtk::gdk::Display::default() else {
+        return fallback;
+    };
+    let Some(monitor) = display
+        .monitors()
+        .item(0)
+        .and_then(|object| object.downcast::<gtk::gdk::Monitor>().ok())
+    else {
+        return fallback;
+    };
+    let geometry = monitor.geometry();
+    let scale = monitor.scale_factor().max(1);
+    (
+        (geometry.width() * scale).max(1) as u32,
+        (geometry.height() * scale).max(1) as u32,
+    )
 }

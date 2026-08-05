@@ -5583,6 +5583,7 @@ dependencies = [
  "cairo-rs",
  "chrono",
  "flexi_logger",
+ "image",
  "libc 0.2.189",
  "log",
  "pango",

@@ -14,6 +14,9 @@ use tao::{
     event_loop::{ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowBuilder, WindowId},
 };
+use xbar_core::config::GlassConfig;
+use xbar_core::glass::wallpaper::WallpaperFile;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
@@ -46,6 +49,11 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
+    /// Frosted backdrop, present only when a wallpaper was configured. These
+    /// windows are opaque, so glass here always means a baked strip.
+    glass: Option<GlassBackdrop<WallpaperFile>>,
+    glass_config: GlassConfig,
+    glass_fallback: [u8; 3],
 }
 
 impl App {
@@ -54,6 +62,8 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
+        glass_config: GlassConfig,
+        glass_fallback: [u8; 3],
     ) -> Self {
         let physical_size = PhysicalSize::new(
             logical_size.width.round() as u32,
@@ -74,6 +84,9 @@ impl App {
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
+            glass: None,
+            glass_config,
+            glass_fallback,
         }
     }
 
@@ -90,6 +103,13 @@ impl App {
         self.logical_size = LogicalSize::new(
             f64::from(screen_size.width) / self.scale_factor,
             f64::from(self.bar.config().bar_height),
+        );
+        // The wallpaper is laid out across the whole screen, so the strip the
+        // bar frosts depends on the screen size, not the bar's.
+        self.glass = self.glass_config.file_backdrop(
+            screen_size.width,
+            screen_size.height,
+            self.glass_fallback,
         );
 
         let window = Arc::new(
@@ -134,6 +154,14 @@ impl App {
         Ok(())
     }
 
+    /// Window position in screen coordinates, where the wallpaper is sampled.
+    fn bar_origin(&self) -> (i32, i32) {
+        self.window
+            .as_ref()
+            .and_then(|window| window.outer_position().ok())
+            .map_or((0, 0), |position| (position.x, position.y))
+    }
+
     fn redraw(&mut self) -> Result<()> {
         if self.window_id.is_none() || self.pixels.is_none() {
             return Ok(());
@@ -144,13 +172,19 @@ impl App {
         if width == 0 || height == 0 {
             return Ok(());
         }
+        let (origin_x, origin_y) = self.bar_origin();
+        let backdrop = self
+            .glass
+            .as_mut()
+            .and_then(|glass| glass.ensure(origin_x, origin_y, width, height));
         let pixels = self.pixels.as_mut().expect("pixels presence checked above");
-        self.bar.render_into_bgra(
+        self.bar.render_into_bgra_over(
             pixels.frame_mut(),
             width,
             height,
             width.saturating_mul(4),
             self.scale_factor,
+            backdrop,
         )?;
         let _ = self.bar.runtime_mut().take_changes();
         pixels
@@ -342,8 +376,15 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
-    if let Some(opacity) = app_config.background_opacity {
-        bar.renderer_mut().set_background_opacity(Some(opacity));
+    // A frosted backdrop only reads as a material if the bar's own background
+    // lets some of it through, so glass changes what "no opacity configured"
+    // should mean.
+    match app_config.background_opacity {
+        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
+        None if app_config.glass.wallpaper.is_some() => bar
+            .renderer_mut()
+            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
+        None => {}
     }
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
@@ -351,7 +392,14 @@ fn main() -> Result<()> {
     let tick_proxy = proxy.clone();
     let _tick_forwarder = AlignedWakeThread::spawn(move || tick_proxy.send_event(UserEvent::Tick))?;
 
-    let mut app = App::new(bar, LogicalSize::new(800.0, 38.0), 1.0, proxy);
+    let mut app = App::new(
+        bar,
+        LogicalSize::new(800.0, 38.0),
+        1.0,
+        proxy,
+        app_config.glass.clone(),
+        fallback_rgb(app_config.theme),
+    );
     app.init_window_and_pixels(&event_loop)?;
 
     let exit_code = event_loop.run_return(move |event, _target, control_flow| {

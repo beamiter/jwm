@@ -25,6 +25,7 @@ pub struct BarConfig {
     /// Optional background alpha multiplier for renderers that support it.
     pub background_opacity: Option<f64>,
     pub presentation: PresentationConfig,
+    pub glass: GlassConfig,
 }
 
 impl Default for BarConfig {
@@ -34,7 +35,123 @@ impl Default for BarConfig {
             theme: ThemeMode::Dark,
             background_opacity: None,
             presentation: PresentationConfig::default(),
+            glass: GlassConfig::default(),
         }
+    }
+}
+
+/// Frosted-glass backdrop settings.
+///
+/// Every field is an override: what is unset keeps
+/// [`GlassParams::default`](crate::glass::GlassParams::default), so this type
+/// never becomes a second place where the recipe is defined.
+///
+/// `wallpaper` is the one field a user normally has to set, and it should name
+/// the same file the compositor draws — under JWM that is `behavior.wallpaper`
+/// from its own config.  Leaving it unset asks the frontend to fall back to
+/// whatever its platform offers, which on X11 means the root pixmap.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GlassConfig {
+    pub wallpaper: Option<PathBuf>,
+    /// `fill`, `fit`, `stretch`, or `center`; must match the compositor's own
+    /// mode or the backdrop will not line up with its surroundings.
+    pub wallpaper_mode: Option<String>,
+    pub downscale: Option<u32>,
+    pub blur_radius: Option<u32>,
+    pub blur_passes: Option<u32>,
+    pub saturation: Option<f32>,
+    pub pad: Option<u32>,
+}
+
+impl GlassConfig {
+    /// Apply these overrides to the default recipe.
+    #[cfg(feature = "glass")]
+    #[must_use]
+    pub fn params(&self) -> crate::glass::GlassParams {
+        let mut params = crate::glass::GlassParams::default();
+        if let Some(downscale) = self.downscale {
+            params.downscale = downscale;
+        }
+        if let Some(radius) = self.blur_radius {
+            params.blur_radius = radius;
+        }
+        if let Some(passes) = self.blur_passes {
+            params.blur_passes = passes;
+        }
+        if let Some(saturation) = self.saturation {
+            params.saturation = saturation;
+        }
+        if let Some(pad) = self.pad {
+            params.pad = pad;
+        }
+        params.sanitized()
+    }
+
+    /// The configured layout mode, defaulting the way a compositor defaults it.
+    #[cfg(feature = "glass-wallpaper")]
+    #[must_use]
+    pub fn mode(&self) -> crate::glass::wallpaper::WallpaperMode {
+        self.wallpaper_mode.as_deref().map_or_else(
+            Default::default,
+            crate::glass::wallpaper::WallpaperMode::parse,
+        )
+    }
+
+    /// The file-backed wallpaper source this configuration asks for, if any.
+    ///
+    /// `background` fills whatever the wallpaper does not cover under `fit` and
+    /// `center`, and should be the frontend's own opaque fallback color.
+    #[cfg(feature = "glass-wallpaper")]
+    #[must_use]
+    pub fn file_source(
+        &self,
+        screen_width: u32,
+        screen_height: u32,
+        background: [u8; 3],
+    ) -> Option<crate::glass::wallpaper::WallpaperFile> {
+        let path = self.wallpaper.as_ref()?;
+        Some(
+            crate::glass::wallpaper::WallpaperFile::new(
+                path,
+                self.mode(),
+                screen_width,
+                screen_height,
+            )
+            .with_background(background),
+        )
+    }
+
+    /// Source and cache in one call, for a frontend that uploads the strip
+    /// into its own texture.
+    ///
+    /// `None` means no wallpaper was configured, and a frontend without a
+    /// platform fallback should then simply render without glass.
+    #[cfg(feature = "glass-wallpaper")]
+    #[must_use]
+    pub fn file_strip(
+        &self,
+        screen_width: u32,
+        screen_height: u32,
+        background: [u8; 3],
+    ) -> Option<crate::glass::GlassStrip<crate::glass::wallpaper::WallpaperFile>> {
+        let source = self.file_source(screen_width, screen_height, background)?;
+        Some(crate::glass::GlassStrip::new(source, self.params()).with_fallback(background))
+    }
+
+    /// The whole Cairo-side backdrop in one call: source, cache, and surface.
+    ///
+    /// `None` means no wallpaper was configured, and a frontend without a
+    /// platform fallback should then simply render without glass.
+    #[cfg(all(feature = "glass-wallpaper", feature = "render-cairo"))]
+    #[must_use]
+    pub fn file_backdrop(
+        &self,
+        screen_width: u32,
+        screen_height: u32,
+        background: [u8; 3],
+    ) -> Option<crate::glass::GlassBackdrop<crate::glass::wallpaper::WallpaperFile>> {
+        let source = self.file_source(screen_width, screen_height, background)?;
+        Some(crate::glass::GlassBackdrop::new(source, self.params()).with_fallback(background))
     }
 }
 
@@ -92,6 +209,8 @@ struct FileConfig {
     background_opacity: Option<f64>,
     #[serde(default)]
     presentation: FilePresentation,
+    #[serde(default)]
+    glass: FileGlass,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -113,6 +232,18 @@ struct FilePresentation {
     font_size: Option<f32>,
     left_fraction: Option<f32>,
     tag_labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileGlass {
+    wallpaper: Option<String>,
+    wallpaper_mode: Option<String>,
+    downscale: Option<u32>,
+    blur_radius: Option<u32>,
+    blur_passes: Option<u32>,
+    saturation: Option<f32>,
+    pad: Option<u32>,
 }
 
 impl BarConfig {
@@ -259,8 +390,62 @@ impl BarConfig {
             }
             presentation.tag_labels = labels;
         }
+
+        config.glass = glass_from_file(file.glass)?;
         Ok(config)
     }
+}
+
+/// Validate the `[glass]` section.
+///
+/// Only the values that would be *meaningless* rather than merely extreme are
+/// rejected here; ranges are the recipe's business and it clamps them.
+fn glass_from_file(file: FileGlass) -> Result<GlassConfig, ConfigError> {
+    let wallpaper = match file.wallpaper {
+        Some(path) if path.trim().is_empty() => {
+            return Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper",
+                reason: "path must not be empty",
+            });
+        }
+        Some(path) => Some(PathBuf::from(path)),
+        None => None,
+    };
+    if let Some(mode) = &file.wallpaper_mode
+        && !matches!(
+            mode.trim().to_ascii_lowercase().as_str(),
+            "fill" | "fit" | "stretch" | "center"
+        )
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "glass.wallpaper_mode",
+            reason: "must be one of fill, fit, stretch, center",
+        });
+    }
+    if file.downscale == Some(0) {
+        return Err(ConfigError::InvalidValue {
+            field: "glass.downscale",
+            reason: "must be at least 1",
+        });
+    }
+    if let Some(saturation) = file.saturation
+        && (!saturation.is_finite() || saturation < 0.0)
+    {
+        return Err(ConfigError::InvalidValue {
+            field: "glass.saturation",
+            reason: "must be a finite non-negative value",
+        });
+    }
+
+    Ok(GlassConfig {
+        wallpaper,
+        wallpaper_mode: file.wallpaper_mode,
+        downscale: file.downscale,
+        blur_radius: file.blur_radius,
+        blur_passes: file.blur_passes,
+        saturation: file.saturation,
+        pad: file.pad,
+    })
 }
 
 fn apply_positive(
@@ -364,6 +549,76 @@ tag_labels = ["a", "b", "c"]
         ));
         assert!(matches!(
             BarConfig::from_toml("theme = \"solarized\""),
+            Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn glass_overrides_only_what_the_file_names() {
+        let config = BarConfig::from_toml(
+            r#"
+[glass]
+wallpaper = "/home/user/.config/jwm/wallpaper.jpg"
+wallpaper_mode = "Fit"
+blur_radius = 10
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.glass.wallpaper.as_deref(),
+            Some(Path::new("/home/user/.config/jwm/wallpaper.jpg"))
+        );
+        assert_eq!(config.glass.blur_radius, Some(10));
+        assert_eq!(config.glass.saturation, None);
+
+        #[cfg(feature = "glass")]
+        {
+            let params = config.glass.params();
+            let default = crate::glass::GlassParams::default();
+            assert_eq!(params.blur_radius, 10);
+            assert_eq!(params.saturation, default.saturation);
+            assert_eq!(params.downscale, default.downscale);
+        }
+        #[cfg(feature = "glass-wallpaper")]
+        assert_eq!(
+            config.glass.mode(),
+            crate::glass::wallpaper::WallpaperMode::Fit
+        );
+    }
+
+    #[test]
+    fn glass_rejects_values_that_could_not_mean_anything() {
+        assert!(matches!(
+            BarConfig::from_toml("[glass]\nwallpaper = \"\""),
+            Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[glass]\nwallpaper_mode = \"tile\""),
+            Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper_mode",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[glass]\ndownscale = 0"),
+            Err(ConfigError::InvalidValue {
+                field: "glass.downscale",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[glass]\nsaturation = -1.0"),
+            Err(ConfigError::InvalidValue {
+                field: "glass.saturation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[glass]\nblur = 3"),
             Err(ConfigError::Parse { .. })
         ));
     }
