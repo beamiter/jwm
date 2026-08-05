@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# 一键更新目录下所有 git 仓库。
-# 默认行为：fetch --prune 后对当前分支做 fast-forward，只要有任何风险就跳过而不是硬来。
+# 一键更新目录下所有 git 仓库，并按各自的方式重新编译（可选安装）已知项目。
+# 默认行为：fetch --prune 后对当前分支做 fast-forward，只要有任何风险就跳过而不是硬来；
+# 更新完成后，对本次真的有新提交（或产物缺失）的已知项目跑一次 release 构建。
 set -uo pipefail
 
 ROOT="."
@@ -11,28 +12,70 @@ STASH=0
 DRY_RUN=0
 QUIET=0
 PUSH=0
+BUILD=1          # 更新后是否编译
+BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
+INSTALL=0        # 1 = 用项目自己的安装方式（安装脚本自带构建）
+BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
+ONLY=""          # 逗号分隔的项目名白名单
+
+# 传给各自安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
+JWM_INSTALL_ARGS="${JWM_INSTALL_ARGS:-}"
+JSH_INSTALL_ARGS="${JSH_INSTALL_ARGS:-}"
+# jsh 在 Linux 上的安装形态是静态 musl 二进制（scripts/install-jsh.sh 的原话：
+# 一个动态链接的 jsh 没法被 bind-mount 进容器、也没法推到 ssh 主机上）。
+# 默认 target 给的是 glibc 动态版本，所以这里显式指定三元组；想要 glibc 就
+# 明确写 JSH_INSTALL_TARGET=x86_64-unknown-linux-gnu，和 install-jsh.sh 一致。
+JSH_TRIPLE=""
+JSH_CC=""
 
 usage() {
     cat <<'EOF'
 用法: git-update-all.sh [选项] [目录]
 
-选项:
+更新选项:
   -j N          并发数 (默认 4)
   -r            用 git pull --rebase 代替 fast-forward
   -m            用 git pull --no-rebase 代替 fast-forward (允许产生 merge commit)
   -s            工作区有改动时自动 stash，更新后再 stash pop
-  -n            dry-run: 只 fetch 和汇报，不改动工作区
+  -n            dry-run: 只 fetch 和汇报，不改动工作区也不编译
   -P            不加 --prune
   -u            双向更新：拉取之后，如本地领先则自动 push 到 upstream
   -q            只输出汇总表
+
+编译选项 (只作用于已知项目: jsh jterm1 jterm2 jterm3 jterm4 jwm):
+  -B            全部重新编译，不管本次有没有拉到新提交
+  -N            不编译，只更新仓库
+  -I            用各项目自己的安装方式安装 (安装脚本自带构建；jwm 需要 sudo)
+                只改变“怎么做”，不改变“做哪些”：没有新提交时配合 -B 使用
+  -T 列表       只处理这些项目，逗号分隔，如 -T jterm1,jwm
+  -J N          同时编译几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
 默认目录为当前目录，扫描其下一层的子目录。
-退出码: 0 全部成功；1 有仓库更新失败。
+不在已知项目表里的仓库只更新、不编译。默认只编译本次真的有新提交、
+或者 release 产物不存在的项目。
+
+各项目的编译/安装方式并不相同，脚本里按名字分派:
+  jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
+                   / scripts/install-jsh.sh (它从本地 checkout 编译，含未提交改动，
+                     原子替换、留回滚副本、检查 PATH 遮挡)
+  jterm1, jterm4   nix develop --command cargo build ... / scripts/install.sh
+                   (检测不到 nix 时回退到直接 cargo，和 install.sh 的 auto backend 一致)
+  jterm2, jterm3   cargo build --release --locked        / scripts/install.sh
+  jwm              cargo build --release --locked        / scripts/install_jwm_scripts.sh
+
+环境变量:
+  JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
+  JSH_INSTALL_ARGS   追加给 install-jsh.sh 的参数，如 '--bin-dir ~/.local/bin'
+  JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
+                     (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
+  CARGO_TARGET_DIR   若设置，产物检测也跟着走这个目录
+
+退出码: 0 全部成功；1 有仓库更新失败或编译失败。
 EOF
 }
 
-while getopts ":j:rmsnPuqh" opt; do
+while getopts ":j:J:T:rmsnPuqBNIh" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
@@ -42,6 +85,11 @@ while getopts ":j:rmsnPuqh" opt; do
         P) PRUNE=0 ;;
         u) PUSH=1 ;;
         q) QUIET=1 ;;
+        B) BUILD_ALL=1; BUILD=1 ;;
+        N) BUILD=0 ;;
+        I) INSTALL=1; BUILD=1 ;;
+        T) ONLY="$OPTARG" ;;
+        J) BUILD_JOBS="$OPTARG" ;;
         h) usage; exit 0 ;;
         \?) echo "未知选项: -$OPTARG" >&2; usage >&2; exit 2 ;;
         :)  echo "选项 -$OPTARG 需要参数" >&2; exit 2 ;;
@@ -53,6 +101,18 @@ shift $((OPTIND - 1))
 if [ ! -d "$ROOT" ]; then
     echo "目录不存在: $ROOT" >&2
     exit 2
+fi
+
+case "$JOBS" in ''|*[!0-9]*|0) echo "-j 需要正整数" >&2; exit 2 ;; esac
+case "$BUILD_JOBS" in ''|*[!0-9]*|0) echo "-J 需要正整数" >&2; exit 2 ;; esac
+
+# dry-run 只汇报，不碰工作区，自然也不编译
+[ "$DRY_RUN" -eq 1 ] && BUILD=0
+
+# 编译要用到 cargo；非登录 shell 里 PATH 未必带上 ~/.cargo/bin
+if [ "$BUILD" -eq 1 ] && ! command -v cargo >/dev/null 2>&1 && [ -f "$HOME/.cargo/env" ]; then
+    # shellcheck source=/dev/null
+    . "$HOME/.cargo/env"
 fi
 
 if [ -t 1 ]; then
@@ -252,6 +312,163 @@ update_one() {
     fi
 }
 
+# ——— 编译/安装：每个项目的方式都不一样，差异全部集中在下面三个函数里 ———
+
+KNOWN_TARGETS="jsh jterm1 jterm2 jterm3 jterm4 jwm"
+
+is_known_target() {
+    case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# -T 白名单；未指定时全部已知项目都在范围内
+in_scope() {
+    local name="$1" item
+    [ -z "$ONLY" ] && return 0
+    IFS=',' read -r -a _only <<<"$ONLY"
+    for item in "${_only[@]}"; do
+        [ "${item// /}" = "$name" ] && return 0
+    done
+    return 1
+}
+
+# jsh 要编译成哪个 target。空 = 交给 cargo 的默认 target（非 Linux/未知架构）。
+jsh_target() {
+    local arch
+    [ -n "${JSH_INSTALL_TARGET:-}" ] && { printf '%s\n' "$JSH_INSTALL_TARGET"; return; }
+    [ "$(uname -s)" = "Linux" ] || return 0
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) return 0 ;;
+    esac
+    printf '%s-unknown-linux-musl\n' "$arch"
+}
+
+# musl 需要两样东西：musl 版 std（rustup 能补）和一个 musl C 编译器（给
+# TLS 依赖的 C 代码用）。缺了就直接失败，不退回宿主工具链——那样会装上一个
+# 看着正常的动态二进制，等到它被推进容器里才暴露。设置 JSH_CC 供 build_cmd 用。
+jsh_preflight() {
+    local triple="$1" candidate
+    JSH_CC=""
+    case "$triple" in *-musl) ;; *) return 0 ;; esac
+
+    for candidate in "${triple%%-*}-linux-musl-gcc" musl-gcc; do
+        if command -v "$candidate" >/dev/null 2>&1; then JSH_CC="$candidate"; break; fi
+    done
+    if [ -z "$JSH_CC" ]; then
+        printf '%s\n' "${C_RED}jsh 需要 musl C 编译器（Debian/Ubuntu: sudo apt install musl-tools）${C_RST}" >&2
+        printf '%s\n' "${C_DIM}要按宿主 glibc 编译请显式指定 JSH_INSTALL_TARGET=${triple%%-*}-unknown-linux-gnu${C_RST}" >&2
+        return 1
+    fi
+    if ! command -v rustup >/dev/null 2>&1; then
+        printf '%s\n' "${C_RED}jsh 静态构建需要 rustup 来安装 $triple 的 std${C_RST}" >&2
+        return 1
+    fi
+    if ! rustup target list --installed 2>/dev/null | grep -qx "$triple"; then
+        printf '%s\n' "${C_DIM}rustup target add $triple${C_RST}"
+        rustup target add "$triple" || {
+            printf '%s\n' "${C_RED}无法安装 $triple 的 std${C_RST}" >&2
+            return 1
+        }
+    fi
+    # cc-rs 认的变量名，和 jsh 的 release workflow 用的是同一个
+    export CC_x86_64_unknown_linux_musl="$JSH_CC"
+    export CC_aarch64_unknown_linux_musl="$JSH_CC"
+    return 0
+}
+
+# release 产物路径，用来判断“没更新但还没编译过”的情况
+artifact_path() {
+    local name="$1" repo="$2" target_dir
+    target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+    # 指定了 --target 的话，cargo 会多一层三元组目录
+    if [ "$name" = "jsh" ] && [ -n "$JSH_TRIPLE" ]; then
+        printf '%s/%s/release/%s\n' "$target_dir" "$JSH_TRIPLE" "$name"
+        return
+    fi
+    printf '%s/release/%s\n' "$target_dir" "$name"
+}
+
+# 编译命令：jterm1/jterm4 的依赖由 flake 提供，有 nix 就进 nix develop，
+# 没有就直接 cargo（与两者 install.sh 的 auto backend 行为一致）。
+build_cmd() {
+    local name="$1"
+    case "$name" in
+        jterm1|jterm4)
+            if command -v nix >/dev/null 2>&1; then
+                printf '%s\n' nix develop --command cargo build --release --locked
+            else
+                printf '%s\n' cargo build --release --locked
+            fi
+            ;;
+        jsh)
+            if [ -n "$JSH_TRIPLE" ]; then
+                printf '%s\n' cargo build --release --locked --target "$JSH_TRIPLE"
+            else
+                printf '%s\n' cargo build --release --locked
+            fi
+            ;;
+        jterm2|jterm3|jwm)
+            printf '%s\n' cargo build --release --locked
+            ;;
+    esac
+}
+
+# 安装命令：安装脚本自己会构建，所以安装模式下不再单独跑一次 build。
+#   jsh    scripts/install-jsh.sh 从本地 checkout 编译（含未提交改动），静态 musl、
+#          rename(2) 原子替换、保留回滚副本、检查 PATH 遮挡——全都归它管，
+#          这里不再自己拼 cargo install
+#   jterm* scripts/install.sh 负责构建 + 桌面集成，装到 ~/.cargo/bin
+#   jwm    install_jwm_scripts.sh 还要装 status bar 和 session 文件，需要 sudo
+install_cmd() {
+    local name="$1"
+    case "$name" in
+        jsh)    printf '%s\n' sh scripts/install-jsh.sh ${JSH_INSTALL_ARGS} ;;
+        jterm1|jterm2|jterm3|jterm4)
+                printf '%s\n' bash scripts/install.sh ;;
+        jwm)    printf '%s\n' bash scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS} ;;
+    esac
+}
+
+# 单个项目的编译/安装。结果写 $WORKDIR/b<idx>.status，日志写 $WORKDIR/b<idx>.log。
+build_one() {
+    local idx="$1" repo="$2" name="$3" reason="$4" live="$5"
+    local log="$WORKDIR/b$idx.log" cmd=() rc=0 start elapsed
+
+    if [ "$INSTALL" -eq 1 ]; then
+        mapfile -t cmd < <(install_cmd "$name")
+    else
+        mapfile -t cmd < <(build_cmd "$name")
+    fi
+    if [ "${#cmd[@]}" -eq 0 ]; then
+        printf 'SKIP|%s|没有定义构建方式\n' "$name" >"$WORKDIR/b$idx.status"
+        return
+    fi
+
+    {
+        printf '%s\n' "${C_BLD}==> $([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译) $name${C_RST} ${C_DIM}($reason)${C_RST}"
+        printf '  %s\n' "${C_DIM}\$ ${cmd[*]}${C_RST}"
+    } >"$log"
+
+    start=$SECONDS
+    if [ "$live" -eq 1 ]; then
+        cat "$log"
+        ( cd "$repo" && "${cmd[@]}" ) 2>&1 | tee -a "$log" | sed 's/^/  /'
+        rc=${PIPESTATUS[0]}
+    else
+        ( cd "$repo" && "${cmd[@]}" ) >>"$log" 2>&1
+        rc=$?
+    fi
+    elapsed=$((SECONDS - start))
+
+    if [ "$rc" -eq 0 ]; then
+        printf 'OK|%s|%s，耗时 %ds\n' "$name" "$([ "$INSTALL" -eq 1 ] && echo 已安装 || echo 已编译)" "$elapsed" \
+            >"$WORKDIR/b$idx.status"
+    else
+        printf 'FAIL|%s|退出码 %d，耗时 %ds\n' "$name" "$rc" "$elapsed" >"$WORKDIR/b$idx.status"
+    fi
+}
+
 printf '%s\n' "${C_BLD}扫描 $ROOT: ${#repos[@]} 个仓库，并发 $JOBS，模式 $MODE$([ $DRY_RUN -eq 1 ] && echo ' (dry-run)')${C_RST}"
 
 running=0
@@ -268,10 +485,12 @@ wait
 # 按仓库顺序回放日志与汇总
 n_ok=0; n_upd=0; n_push=0; n_sync=0; n_skip=0; n_fail=0; n_warn=0; n_dry=0
 summary=()
+declare -a git_st=()
 for i in "${!repos[@]}"; do
     [ "$QUIET" -eq 0 ] && [ -s "$WORKDIR/$i.log" ] && cat "$WORKDIR/$i.log"
     line="$(cat "$WORKDIR/$i.status" 2>/dev/null || printf 'FAIL|%s|无结果\n' "$(basename "${repos[$i]}")")"
     summary+=("$line")
+    git_st[$i]="${line%%|*}"
     case "${line%%|*}" in
         OK)   n_ok=$((n_ok+1)) ;;
         UPD)  n_upd=$((n_upd+1)) ;;
@@ -300,5 +519,114 @@ for line in "${summary[@]}"; do
 done
 printf '%s\n' "${C_DIM}共 ${#repos[@]} 个: 拉取 $n_upd / 推送 $n_push / 双向同步 $n_sync / 最新 $n_ok / 待更新 $n_dry / 跳过 $n_skip / 注意 $n_warn / 失败 $n_fail${C_RST}"
 
-[ "$n_fail" -gt 0 ] && exit 1
+n_bok=0; n_bfail=0; n_bskip=0
+if [ "$BUILD" -eq 1 ]; then
+    JSH_TRIPLE="$(jsh_target)"
+    # 挑出要处理的项目：默认只编译本次拉到新提交的，产物不存在的补一次，-B 全编
+    declare -a run_idx=() build_reason=()
+    for i in "${!repos[@]}"; do
+        name="$(basename "${repos[$i]}")"
+        is_known_target "$name" || continue
+        in_scope "$name" || continue
+        st="${git_st[$i]:-FAIL}"
+
+        # 更新失败或 stash 冲突未处理时，源码不在一个干净的已知状态，不碰它
+        if [ "$st" = "FAIL" ] || [ "$st" = "WARN" ]; then
+            printf 'SKIP|%s|仓库更新未成功，未编译\n' "$name" >"$WORKDIR/b$i.status"
+            continue
+        fi
+
+        reason=""
+        case "$st" in
+            UPD|SYNC) reason="有新提交" ;;
+        esac
+        if [ -z "$reason" ] && [ "$BUILD_ALL" -eq 1 ]; then
+            reason="-B 强制"
+        fi
+        if [ -z "$reason" ] && [ "$INSTALL" -eq 0 ] && [ ! -x "$(artifact_path "$name" "${repos[$i]}")" ]; then
+            reason="产物缺失"
+        fi
+        [ -n "$reason" ] || continue
+
+        build_reason[$i]="$reason"
+        run_idx+=("$i")
+    done
+
+    # jsh 的 musl 工具链检查放在开跑之前：缺东西就只把 jsh 摘掉，别的照编。
+    # 安装模式不用查——install-jsh.sh 自己会找 musl-gcc、必要时补 rustup target，
+    # 而且它的报错比这里更具体。
+    if [ "$INSTALL" -eq 0 ]; then
+        for i in "${run_idx[@]}"; do
+            [ "$(basename "${repos[$i]}")" = "jsh" ] || continue
+            if ! jsh_preflight "$JSH_TRIPLE"; then
+                printf 'FAIL|jsh|%s 工具链不全，未编译\n' "$JSH_TRIPLE" >"$WORKDIR/b$i.status"
+                keep=()
+                for j in "${run_idx[@]}"; do [ "$j" = "$i" ] || keep+=("$j"); done
+                run_idx=(${keep[@]+"${keep[@]}"})
+            fi
+            break
+        done
+    fi
+
+    if ! command -v cargo >/dev/null 2>&1 && [ "${#run_idx[@]}" -gt 0 ]; then
+        printf '\n%s\n' "${C_RED}找不到 cargo，跳过全部编译（先装 Rust 工具链，或用 -N 关掉编译）${C_RST}"
+        for i in "${run_idx[@]}"; do
+            printf 'FAIL|%s|没有 cargo\n' "$(basename "${repos[$i]}")" >"$WORKDIR/b$i.status"
+        done
+        run_idx=()
+    fi
+
+    live=0
+    [ "$BUILD_JOBS" -le 1 ] && [ "$QUIET" -eq 0 ] && live=1
+
+    if [ "${#run_idx[@]}" -gt 0 ]; then
+        printf '\n%s\n' "${C_BLD}—— $([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译): ${#run_idx[@]} 个项目，并发 $BUILD_JOBS ——${C_RST}"
+        brunning=0
+        for i in "${run_idx[@]}"; do
+            if [ "$live" -eq 1 ]; then
+                build_one "$i" "${repos[$i]}" "$(basename "${repos[$i]}")" "${build_reason[$i]}" 1
+            else
+                build_one "$i" "${repos[$i]}" "$(basename "${repos[$i]}")" "${build_reason[$i]}" 0 &
+                brunning=$((brunning + 1))
+                if [ "$brunning" -ge "$BUILD_JOBS" ]; then
+                    wait -n 2>/dev/null || wait
+                    brunning=$((brunning - 1))
+                fi
+            fi
+        done
+        wait
+    fi
+
+    bsummary=()
+    for i in "${!repos[@]}"; do
+        [ -f "$WORKDIR/b$i.status" ] || continue
+        [ "$live" -eq 0 ] && [ "$QUIET" -eq 0 ] && [ -s "$WORKDIR/b$i.log" ] && cat "$WORKDIR/b$i.log"
+        line="$(cat "$WORKDIR/b$i.status")"
+        bsummary+=("$line")
+        case "${line%%|*}" in
+            OK)   n_bok=$((n_bok+1)) ;;
+            SKIP) n_bskip=$((n_bskip+1)) ;;
+            *)    n_bfail=$((n_bfail+1)) ;;
+        esac
+    done
+
+    if [ "${#bsummary[@]}" -gt 0 ]; then
+        printf '\n%s\n' "${C_BLD}—— 构建汇总 ——${C_RST}"
+        for line in "${bsummary[@]}"; do
+            st="${line%%|*}"; rest="${line#*|}"; nm="${rest%%|*}"; msg="${rest#*|}"
+            case "$st" in
+                OK)   printf '  %s%-8s%s %-16s %s\n' "$C_GRN" "成功" "$C_RST" "$nm" "$msg" ;;
+                SKIP) printf '  %s%-8s%s %-16s %s\n' "$C_YLW" "跳过" "$C_RST" "$nm" "$msg" ;;
+                *)    printf '  %s%-8s%s %-16s %s\n' "$C_RED" "失败" "$C_RST" "$nm" "$msg" ;;
+            esac
+        done
+        printf '%s\n' "${C_DIM}成功 $n_bok / 跳过 $n_bskip / 失败 $n_bfail${C_RST}"
+    elif [ "$QUIET" -eq 0 ]; then
+        printf '%s\n' "${C_DIM}没有项目需要$([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译)（本次没有新提交；加 -B 可强制全部处理）${C_RST}"
+    fi
+fi
+
+if [ "$n_fail" -gt 0 ] || [ "$n_bfail" -gt 0 ]; then
+    exit 1
+fi
 exit 0
