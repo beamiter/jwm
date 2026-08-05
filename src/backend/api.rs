@@ -1655,6 +1655,12 @@ pub trait Backend:
         None
     }
 
+    /// Which interactive operation the backend is currently tracking, if any.
+    /// `None` also covers backends that track drags without reporting them.
+    fn interaction_action(&self) -> Option<InteractionAction> {
+        None
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> Result<(), BackendError>;
 
     fn compositor_render_frame(

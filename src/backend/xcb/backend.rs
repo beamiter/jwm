@@ -2212,6 +2212,10 @@ impl Backend for XcbBackend {
         Some((s.win, s.current_x, s.current_y, s.current_w, s.current_h))
     }
 
+    fn interaction_action(&self) -> Option<InteractionAction> {
+        self.interaction.as_ref().map(|s| s.action)
+    }
+
     fn run(&mut self, handler: &mut dyn EventHandler) -> XcbResult<()> {
         let mut event_loop: EventLoop<XcbLoopData> = EventLoop::try_new()?;
         let loop_signal = event_loop.get_signal();

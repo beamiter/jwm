@@ -1151,6 +1151,10 @@ impl Backend for X11rbBackend {
         ))
     }
 
+    fn interaction_action(&self) -> Option<InteractionAction> {
+        self.interaction.as_ref().map(|s| s.action)
+    }
+
     // [实现] 处理 ButtonRelease
     fn handle_button_release(&mut self, _time: u32) -> Result<bool, BackendError> {
         if self.interaction.is_some() {

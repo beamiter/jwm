@@ -4,12 +4,12 @@
 //! 负责分发所有来自 Backend 的事件到对应的处理函数
 
 use crate::backend::api::{
-    Backend, BackendEvent, EventHandler, HitTarget, NetWmAction, NetWmState, PropertyKind,
-    ResizeEdge, WindowChanges,
+    Backend, BackendEvent, EventHandler, HitTarget, InteractionAction, NetWmAction, NetWmState,
+    PropertyKind, ResizeEdge, WindowChanges,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
-use crate::config::{BackendFamily, CONFIG, get_backend_family};
+use crate::config::{BackendFamily, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
@@ -367,6 +367,9 @@ impl WMController for Jwm {
             return;
         }
 
+        // Query before handle_button_release: the backends drop their
+        // interaction state inside that call.
+        let interaction_action = backend.interaction_action();
         match backend.handle_button_release(0) {
             Ok(handled) => {
                 if handled {
@@ -379,41 +382,21 @@ impl WMController for Jwm {
                         }
                     }
 
-                    // Snap: if mouse is near a monitor edge, snap the window
-                    let (rx, ry) = self.last_mouse_root;
-                    let rx = rx as i32;
-                    let ry = ry as i32;
-                    let snap_dist = CONFIG.load().snap() as i32;
-                    if let Some(mk) = self.recttomon(backend, rx, ry) {
-                        let (mx, my, mw, mh) = self.monitor_rect(mk);
-                        let mw = mw as i32;
-                        let mh = mh as i32;
-                        let snap_rect = if rx - mx < snap_dist {
-                            Some((mx, my, mw / 2, mh))
-                        } else if (mx + mw) - rx < snap_dist {
-                            Some((mx + mw / 2, my, mw / 2, mh))
-                        } else if ry - my < snap_dist {
-                            Some((mx, my, mw, mh))
-                        } else {
-                            None
-                        };
-                        if let Some((sx, sy, sw, sh)) = snap_rect {
-                            if let Some(ck) = self.get_selected_client_key() {
-                                let bw = self
-                                    .state
-                                    .clients
-                                    .get(ck)
-                                    .map(|c| c.geometry.border_w)
-                                    .unwrap_or(0);
-                                self.resize_client(
-                                    backend,
-                                    ck,
-                                    sx + bw,
-                                    sy + bw,
-                                    sw - 2 * bw,
-                                    sh - 2 * bw,
-                                    false,
-                                );
+                    // Snap: releasing a move-drag near a monitor edge re-attaches
+                    // the window into the current layout at the slot under the
+                    // pointer; design floats and the float layout keep the classic
+                    // floating half-screen snap. Resize drags never snap.
+                    let is_resize =
+                        matches!(interaction_action, Some(InteractionAction::Resize(_)));
+                    if !is_resize {
+                        let (rx, ry) = self.last_mouse_root;
+                        let rx = rx as i32;
+                        let ry = ry as i32;
+                        if let Some(mk) = self.recttomon(backend, rx, ry) {
+                            if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
+                                if let Some(ck) = self.get_selected_client_key() {
+                                    self.apply_drag_snap(backend, ck, plan);
+                                }
                             }
                         }
                     }
@@ -588,29 +571,23 @@ impl WMController for Jwm {
                     }
                     backend.compositor_force_full_redraw();
 
-                    // Snap preview: detect mouse near monitor edges
-                    let snap_dist = CONFIG.load().snap() as i32;
-                    let rx = root_x as i32;
-                    let ry = root_y as i32;
-                    let mon_key = self.recttomon(backend, rx, ry);
-                    let preview = if let Some(mk) = mon_key {
-                        let (mx, my, mw, mh) = self.monitor_rect(mk);
-                        let mw = mw as i32;
-                        let mh = mh as i32;
-                        if rx - mx < snap_dist {
-                            // Left edge → left half
-                            Some((mx as f32, my as f32, (mw / 2) as f32, mh as f32))
-                        } else if (mx + mw) - rx < snap_dist {
-                            // Right edge → right half
-                            Some(((mx + mw / 2) as f32, my as f32, (mw / 2) as f32, mh as f32))
-                        } else if ry - my < snap_dist {
-                            // Top edge → fullscreen
-                            Some((mx as f32, my as f32, mw as f32, mh as f32))
-                        } else {
-                            None
-                        }
-                    } else {
+                    // Snap preview: show where a drop would land — the layout
+                    // slot the window would re-attach to, or the floating half.
+                    let is_resize = matches!(
+                        backend.interaction_action(),
+                        Some(InteractionAction::Resize(_))
+                    );
+                    let preview = if is_resize {
                         None
+                    } else {
+                        let rx = root_x as i32;
+                        let ry = root_y as i32;
+                        self.recttomon(backend, rx, ry)
+                            .and_then(|mk| self.plan_drag_snap(mk, rx, ry))
+                            .map(|plan| {
+                                let r = plan.preview_rect();
+                                (r.x as f32, r.y as f32, r.w as f32, r.h as f32)
+                            })
                     };
                     backend.compositor_set_snap_preview(preview);
                 }
@@ -1037,6 +1014,8 @@ impl Jwm {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use crate::config::CONFIG;
+
     use crate::backend::api::{
         BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,

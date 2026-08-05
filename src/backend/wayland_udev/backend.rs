@@ -3825,6 +3825,13 @@ impl Backend for UdevBackend {
         Ok(false)
     }
 
+    fn interaction_action(&self) -> Option<crate::backend::api::InteractionAction> {
+        self.drag.map(|s| match s.action {
+            UdevDragAction::Move => crate::backend::api::InteractionAction::Move,
+            UdevDragAction::Resize(edge) => crate::backend::api::InteractionAction::Resize(edge),
+        })
+    }
+
     fn window_ops(&self) -> &dyn WindowOps {
         &*self.window_ops
     }
