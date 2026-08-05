@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键更新目录下所有 git 仓库，并按各自的方式重新编译（可选安装）已知项目。
+# 一键更新目录下所有 git 仓库，并按各自的方式重新编译已知项目。
 # 默认行为：fetch --prune 后对当前分支做 fast-forward，只要有任何风险就跳过而不是硬来；
 # 更新完成后，对本次真的有新提交（或产物缺失）的已知项目跑一次 release 构建。
 set -uo pipefail
@@ -14,14 +14,12 @@ QUIET=0
 PUSH=0
 BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
-INSTALL=0        # 1 = 用项目自己的安装方式（安装脚本自带构建）
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
 ONLY=""          # 逗号分隔的项目名白名单
 
-# 传给各自安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
+# 传给 jwm 安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
 JWM_INSTALL_ARGS="${JWM_INSTALL_ARGS:-}"
-JSH_INSTALL_ARGS="${JSH_INSTALL_ARGS:-}"
-# jsh 在 Linux 上的安装形态是静态 musl 二进制（scripts/install-jsh.sh 的原话：
+# jsh 在 Linux 上的安装形态是静态 musl 二进制（jsh 仓库 scripts/install-jsh.sh 的原话：
 # 一个动态链接的 jsh 没法被 bind-mount 进容器、也没法推到 ssh 主机上）。
 # 默认 target 给的是 glibc 动态版本，所以这里显式指定三元组；想要 glibc 就
 # 明确写 JSH_INSTALL_TARGET=x86_64-unknown-linux-gnu，和 install-jsh.sh 一致。
@@ -45,28 +43,28 @@ usage() {
 编译选项 (只作用于已知项目: jsh anvil ember frost forge jwm):
   -B            全部重新编译，不管本次有没有拉到新提交
   -N            不编译，只更新仓库
-  -I            用各项目自己的安装方式安装 (安装脚本自带构建；jwm 需要 sudo)
-                只改变“怎么做”，不改变“做哪些”：没有新提交时配合 -B 使用
   -T 列表       只处理这些项目，逗号分隔，如 -T anvil,jwm
   -J N          同时编译几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
 默认目录为当前目录，扫描其下一层的子目录。
 不在已知项目表里的仓库只更新、不编译。默认只编译本次真的有新提交、
-或者 release 产物不存在的项目。
+或者 release 产物不存在的项目 (jwm 看的是 /usr/local/bin/jwm)。
 
-各项目的编译/安装方式并不相同，脚本里按名字分派:
+各项目的构建方式并不相同，脚本里按名字分派:
   jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
-                   / scripts/install-jsh.sh (它从本地 checkout 编译，含未提交改动，
-                     原子替换、留回滚副本、检查 PATH 遮挡)
-  anvil, forge     nix develop --command cargo build ... / scripts/install.sh
+  anvil, forge     nix develop --command cargo build --release --locked
                    (检测不到 nix 时回退到直接 cargo，和 install.sh 的 auto backend 一致)
-  ember, frost     cargo build --release --locked        / scripts/install.sh
-  jwm              cargo build --release --locked        / scripts/install_jwm_scripts.sh
+  ember, frost     cargo build --release --locked
+  jwm              scripts/install_jwm_scripts.sh —— jwm 没有只编不装的中间态：
+                   裸 cargo build 只出根 package 的三个二进制，不编 bar 和
+                   jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
+                   那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
+
+除 jwm 外都只编译不安装；要装 jsh 和四个终端请自行运行各自仓库的 scripts/install*.sh。
 
 环境变量:
   JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
-  JSH_INSTALL_ARGS   追加给 install-jsh.sh 的参数，如 '--bin-dir ~/.local/bin'
   JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
   CARGO_TARGET_DIR   若设置，产物检测也跟着走这个目录
@@ -75,7 +73,7 @@ usage() {
 EOF
 }
 
-while getopts ":j:J:T:rmsnPuqBNIh" opt; do
+while getopts ":j:J:T:rmsnPuqBNh" opt; do
     case "$opt" in
         j) JOBS="$OPTARG" ;;
         r) MODE="rebase" ;;
@@ -87,7 +85,6 @@ while getopts ":j:J:T:rmsnPuqBNIh" opt; do
         q) QUIET=1 ;;
         B) BUILD_ALL=1; BUILD=1 ;;
         N) BUILD=0 ;;
-        I) INSTALL=1; BUILD=1 ;;
         T) ONLY="$OPTARG" ;;
         J) BUILD_JOBS="$OPTARG" ;;
         h) usage; exit 0 ;;
@@ -312,7 +309,7 @@ update_one() {
     fi
 }
 
-# ——— 编译/安装：每个项目的方式都不一样，差异全部集中在下面三个函数里 ———
+# ——— 构建：每个项目的方式都不一样，差异全部集中在下面几个函数里 ———
 
 KNOWN_TARGETS="jsh anvil ember frost forge jwm"
 
@@ -380,6 +377,11 @@ jsh_preflight() {
 # release 产物路径，用来判断“没更新但还没编译过”的情况
 artifact_path() {
     local name="$1" repo="$2" target_dir
+    # jwm 走安装脚本，target/ 里有产物不代表装上了；看真正被会话启动的那份
+    if [ "$name" = "jwm" ]; then
+        printf '/usr/local/bin/jwm\n'
+        return
+    fi
     target_dir="${CARGO_TARGET_DIR:-$repo/target}"
     # 指定了 --target 的话，cargo 会多一层三元组目录
     if [ "$name" = "jsh" ] && [ -n "$JSH_TRIPLE" ]; then
@@ -389,8 +391,9 @@ artifact_path() {
     printf '%s/release/%s\n' "$target_dir" "$name"
 }
 
-# 编译命令：anvil/forge 的依赖由 flake 提供，有 nix 就进 nix develop，
+# 构建命令：anvil/forge 的依赖由 flake 提供，有 nix 就进 nix develop，
 # 没有就直接 cargo（与两者 install.sh 的 auto backend 行为一致）。
+# 除 jwm 外都只编译不安装，装不装由各仓库自己的 install.sh 决定。
 build_cmd() {
     local name="$1"
     case "$name" in
@@ -408,37 +411,28 @@ build_cmd() {
                 printf '%s\n' cargo build --release --locked
             fi
             ;;
-        ember|frost|jwm)
+        ember|frost)
             printf '%s\n' cargo build --release --locked
+            ;;
+        # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
+        # jwm/jwm-tool/jwm-support，bar 和 jwm-bridge 都不在里面，产物也不会
+        # 进 /usr/local/bin，编完了跑的还是旧的那份。所以直接跑安装脚本，
+        # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
+        jwm)
+            printf '%s\n' ./scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS}
             ;;
     esac
 }
 
-# 安装命令：安装脚本自己会构建，所以安装模式下不再单独跑一次 build。
-#   jsh    scripts/install-jsh.sh 从本地 checkout 编译（含未提交改动），静态 musl、
-#          rename(2) 原子替换、保留回滚副本、检查 PATH 遮挡——全都归它管，
-#          这里不再自己拼 cargo install
-#   四个终端 scripts/install.sh 负责构建 + 桌面集成，装到 ~/.cargo/bin
-#   jwm    install_jwm_scripts.sh 还要装 status bar 和 session 文件，需要 sudo
-install_cmd() {
-    local name="$1"
-    case "$name" in
-        jsh)    printf '%s\n' sh scripts/install-jsh.sh ${JSH_INSTALL_ARGS} ;;
-        anvil|ember|frost|forge)
-                printf '%s\n' bash scripts/install.sh ;;
-        jwm)    printf '%s\n' bash scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS} ;;
-    esac
-}
-
-# 单个项目的编译/安装。结果写 $WORKDIR/b<idx>.status，日志写 $WORKDIR/b<idx>.log。
+# 单个项目的构建。结果写 $WORKDIR/b<idx>.status，日志写 $WORKDIR/b<idx>.log。
 build_one() {
     local idx="$1" repo="$2" name="$3" reason="$4" live="$5"
-    local log="$WORKDIR/b$idx.log" cmd=() rc=0 start elapsed
+    local log="$WORKDIR/b$idx.log" cmd=() rc=0 start elapsed verb="编译" done_verb="已编译"
 
-    if [ "$INSTALL" -eq 1 ]; then
-        mapfile -t cmd < <(install_cmd "$name")
-    else
-        mapfile -t cmd < <(build_cmd "$name")
+    mapfile -t cmd < <(build_cmd "$name")
+    # jwm 跑的是安装脚本，别在日志里谎称只是“编译”
+    if [ "$name" = "jwm" ]; then
+        verb="安装"; done_verb="已安装"
     fi
     if [ "${#cmd[@]}" -eq 0 ]; then
         printf 'SKIP|%s|没有定义构建方式\n' "$name" >"$WORKDIR/b$idx.status"
@@ -446,7 +440,7 @@ build_one() {
     fi
 
     {
-        printf '%s\n' "${C_BLD}==> $([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译) $name${C_RST} ${C_DIM}($reason)${C_RST}"
+        printf '%s\n' "${C_BLD}==> $verb $name${C_RST} ${C_DIM}($reason)${C_RST}"
         printf '  %s\n' "${C_DIM}\$ ${cmd[*]}${C_RST}"
     } >"$log"
 
@@ -462,8 +456,7 @@ build_one() {
     elapsed=$((SECONDS - start))
 
     if [ "$rc" -eq 0 ]; then
-        printf 'OK|%s|%s，耗时 %ds\n' "$name" "$([ "$INSTALL" -eq 1 ] && echo 已安装 || echo 已编译)" "$elapsed" \
-            >"$WORKDIR/b$idx.status"
+        printf 'OK|%s|%s，耗时 %ds\n' "$name" "$done_verb" "$elapsed" >"$WORKDIR/b$idx.status"
     else
         printf 'FAIL|%s|退出码 %d，耗时 %ds\n' "$name" "$rc" "$elapsed" >"$WORKDIR/b$idx.status"
     fi
@@ -543,7 +536,7 @@ if [ "$BUILD" -eq 1 ]; then
         if [ -z "$reason" ] && [ "$BUILD_ALL" -eq 1 ]; then
             reason="-B 强制"
         fi
-        if [ -z "$reason" ] && [ "$INSTALL" -eq 0 ] && [ ! -x "$(artifact_path "$name" "${repos[$i]}")" ]; then
+        if [ -z "$reason" ] && [ ! -x "$(artifact_path "$name" "${repos[$i]}")" ]; then
             reason="产物缺失"
         fi
         [ -n "$reason" ] || continue
@@ -553,20 +546,16 @@ if [ "$BUILD" -eq 1 ]; then
     done
 
     # jsh 的 musl 工具链检查放在开跑之前：缺东西就只把 jsh 摘掉，别的照编。
-    # 安装模式不用查——install-jsh.sh 自己会找 musl-gcc、必要时补 rustup target，
-    # 而且它的报错比这里更具体。
-    if [ "$INSTALL" -eq 0 ]; then
-        for i in "${run_idx[@]}"; do
-            [ "$(basename "${repos[$i]}")" = "jsh" ] || continue
-            if ! jsh_preflight "$JSH_TRIPLE"; then
-                printf 'FAIL|jsh|%s 工具链不全，未编译\n' "$JSH_TRIPLE" >"$WORKDIR/b$i.status"
-                keep=()
-                for j in "${run_idx[@]}"; do [ "$j" = "$i" ] || keep+=("$j"); done
-                run_idx=(${keep[@]+"${keep[@]}"})
-            fi
-            break
-        done
-    fi
+    for i in "${run_idx[@]}"; do
+        [ "$(basename "${repos[$i]}")" = "jsh" ] || continue
+        if ! jsh_preflight "$JSH_TRIPLE"; then
+            printf 'FAIL|jsh|%s 工具链不全，未编译\n' "$JSH_TRIPLE" >"$WORKDIR/b$i.status"
+            keep=()
+            for j in "${run_idx[@]}"; do [ "$j" = "$i" ] || keep+=("$j"); done
+            run_idx=(${keep[@]+"${keep[@]}"})
+        fi
+        break
+    done
 
     if ! command -v cargo >/dev/null 2>&1 && [ "${#run_idx[@]}" -gt 0 ]; then
         printf '\n%s\n' "${C_RED}找不到 cargo，跳过全部编译（先装 Rust 工具链，或用 -N 关掉编译）${C_RST}"
@@ -576,11 +565,27 @@ if [ "$BUILD" -eq 1 ]; then
         run_idx=()
     fi
 
+    # jwm 的安装脚本要 sudo 往 /usr/local/bin 和 xsessions 里装东西。并发或 -q
+    # 模式下子进程的输出全进日志文件，密码提示看不见，表现就是整个脚本卡死；
+    # 所以开跑前先把凭据取到手，非交互环境只提醒不阻塞。
+    for i in "${run_idx[@]}"; do
+        [ "$(basename "${repos[$i]}")" = "jwm" ] || continue
+        if command -v sudo >/dev/null 2>&1 && ! sudo -n true 2>/dev/null; then
+            if [ -t 0 ]; then
+                printf '\n%s\n' "${C_DIM}jwm 安装需要 sudo，先验证一次密码${C_RST}"
+                sudo -v || printf '%s\n' "${C_YLW}sudo 验证失败，jwm 安装大概率会失败${C_RST}" >&2
+            else
+                printf '\n%s\n' "${C_YLW}jwm 安装需要 sudo，但当前不是交互终端；请先 sudo -v，或用 -T 把 jwm 排除${C_RST}" >&2
+            fi
+        fi
+        break
+    done
+
     live=0
     [ "$BUILD_JOBS" -le 1 ] && [ "$QUIET" -eq 0 ] && live=1
 
     if [ "${#run_idx[@]}" -gt 0 ]; then
-        printf '\n%s\n' "${C_BLD}—— $([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译): ${#run_idx[@]} 个项目，并发 $BUILD_JOBS ——${C_RST}"
+        printf '\n%s\n' "${C_BLD}—— 构建: ${#run_idx[@]} 个项目，并发 $BUILD_JOBS ——${C_RST}"
         brunning=0
         for i in "${run_idx[@]}"; do
             if [ "$live" -eq 1 ]; then
@@ -622,7 +627,7 @@ if [ "$BUILD" -eq 1 ]; then
         done
         printf '%s\n' "${C_DIM}成功 $n_bok / 跳过 $n_bskip / 失败 $n_bfail${C_RST}"
     elif [ "$QUIET" -eq 0 ]; then
-        printf '%s\n' "${C_DIM}没有项目需要$([ "$INSTALL" -eq 1 ] && echo 安装 || echo 编译)（本次没有新提交；加 -B 可强制全部处理）${C_RST}"
+        printf '%s\n' "${C_DIM}没有项目需要构建（本次没有新提交；加 -B 可强制全部处理）${C_RST}"
     fi
 fi
 
