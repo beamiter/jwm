@@ -7,7 +7,7 @@ description = "A modern system status bar built with egui"
 
 [dependencies]
 log = "0.4.33"
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 
@@ -16,8 +16,8 @@ xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions"
 font-kit = "0.14"
 
 # Compositor detection and the EWMH dock properties eframe does not set.
-x11rb = "0.13.2"
+x11rb = "0.14.0"
 raw-window-handle = "0.6"
 
-eframe = "0.35.0"
-egui = "0.35.0"
+eframe = "0.36.0"
+egui = "0.36.0"
