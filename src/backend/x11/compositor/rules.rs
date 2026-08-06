@@ -662,8 +662,17 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Whether a window should receive per-frame backdrop blur compositing.
     pub(super) fn needs_backdrop_blur(&self, wt: &WindowTexture, status_bar_name: &str) -> bool {
-        // Skip backdrop blur for statusbar
-        if wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name) {
+        // The bar is the one window that always sits directly over the
+        // wallpaper, so by default it is blurred behind like anything else
+        // translucent. Opting out leaves the frosting to the bar itself, which
+        // is what a bar that cannot present per-pixel alpha has to do.
+        //
+        // An empty configured name must match nothing: `contains("")` is true
+        // for every class, which would otherwise exclude every window here.
+        if !self.blur_status_bar
+            && !status_bar_name.is_empty()
+            && (wt.class_name == status_bar_name || wt.class_name.contains(status_bar_name))
+        {
             return false;
         }
         if class_matches_exclude(&wt.class_name, &self.blur_exclude) {

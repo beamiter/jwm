@@ -364,6 +364,14 @@ pub struct BehaviorConfig {
     /// Window classes to exclude from blur.
     #[serde(default)]
     pub blur_exclude: Vec<String>,
+    /// Blur behind the status bar like any other translucent window.
+    ///
+    /// The bar is the one window that always sits directly over the wallpaper,
+    /// so leaving it out of the blur pass is what makes a translucent bar show
+    /// a sharp backdrop. Turn this off for a bar that frosts its own wallpaper
+    /// strip, which would otherwise composite over a second blur.
+    #[serde(default = "default_true")]
+    pub blur_status_bar: bool,
     /// Enable temporal blur reuse: blend current frame blur with previous frame for stable content.
     #[serde(default = "default_true")]
     pub blur_temporal_enabled: bool,
@@ -1602,6 +1610,7 @@ impl Default for Config {
                     shadow_exclude: Vec::new(),
                     opacity_rules: Vec::new(),
                     blur_exclude: Vec::new(),
+                    blur_status_bar: default_true(),
                     rounded_corners_exclude: Vec::new(),
                     detect_client_opacity: true,
                     fullscreen_unredirect: true,
