@@ -6,36 +6,18 @@ authors = ["Your Name <your.email@example.com>"]
 description = "A modern system status bar built with egui"
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
 log = "0.4.33"
 anyhow = "1.0.103"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 
+# egui has no system font fallback, so the Nerd Font and CJK faces are loaded
+# by name and registered explicitly; see `src/fonts.rs`.
 font-kit = "0.14"
-notify = "8"
-dirs = "6.0"
-arc-swap = "1"
-once_cell = "1.21.4"
 
-mpris = "2.1"
-system-tray = "0.8"
+# Compositor detection and the EWMH dock properties eframe does not set.
+x11rb = "0.13.2"
+raw-window-handle = "0.6"
 
-smithay-client-toolkit = { version = "0.19", optional = true }
-wayland-client = { version = "0.31", optional = true }
-wayland-protocols-wlr = { version = "0.3", optional = true, features = ["client"] }
-raw-window-handle = { version = "0.6", optional = true }
 eframe = "0.35.0"
 egui = "0.35.0"
-toml = "1.1.2"
-
-[features]
-default = ["x11"]
-x11 = []
-wayland = [
-    "dep:smithay-client-toolkit",
-    "dep:wayland-client",
-    "dep:wayland-protocols-wlr",
-    "dep:raw-window-handle",
-]
-debug_mode = []

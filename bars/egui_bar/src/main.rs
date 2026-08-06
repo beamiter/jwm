@@ -1,62 +1,59 @@
-//! egui_bar - A modern system status bar application
+//! egui_bar — the shared xbar_core bar, rendered with egui.
 
 mod app;
-mod modules;
-mod state;
-mod theme;
+mod fonts;
+mod platform;
+mod scene;
 
-use app::EguiBarApp;
-use log::info;
+use app::{BAR_NAME, EguiBarApp};
+use log::{info, warn};
 use std::env;
 use xbar_core::logging::init as initialize_logging;
 
-/// Application entry point
 fn main() -> anyhow::Result<()> {
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
+    let shared_path = env::args().skip(1).last().unwrap_or_default();
+    initialize_logging(BAR_NAME, &shared_path)?;
 
-    // Initialize logging
-    if let Err(e) = initialize_logging("egui_bar", &shared_path) {
-        eprintln!("Failed to initialize logging: {}", e);
-        std::process::exit(1);
-    }
+    let x11 = platform::X11Session::open()
+        .inspect_err(|error| warn!("no X11 connection: {error}"))
+        .ok();
 
-    info!("Starting egui_bar V1.0");
+    // A compositing manager means the bar can present per-pixel alpha and have
+    // the desktop blurred behind it. Asking for a transparent window is what
+    // gets winit to pick a 32-bit visual, which is in turn what makes JWM's
+    // compositor treat the bar as translucent. Without a compositor the window
+    // stays opaque and the bar frosts its own wallpaper strip instead.
+    let translucent = x11
+        .as_ref()
+        .is_some_and(platform::X11Session::compositor_active);
+    info!("starting {BAR_NAME} (translucent: {translucent})");
 
-    // Transparent: env var overrides default
-    let transparent = env::var("EGUI_BAR_TRANSPARENT")
-        .ok()
-        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_default();
+    let height = config.presentation.bar_height.max(1.0);
+    let width = x11
+        .as_ref()
+        .map_or(1920.0, |session| session.screen_size().0 as f32);
 
-    let height = 40.0;
-
-    // Run eframe
-    log::info!("Using eframe/X11 backend");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_app_id(BAR_NAME)
             .with_position(egui::Pos2::new(0.0, 0.0))
-            .with_inner_size([1080.0, height])
-            .with_min_inner_size([480.0, height])
+            .with_inner_size([width, height])
             .with_decorations(false)
             .with_resizable(true)
-            .with_transparent(transparent),
+            .with_taskbar(false)
+            .with_transparent(translucent),
         ..Default::default()
     };
 
     eframe::run_native(
-        "egui_bar",
+        BAR_NAME,
         native_options,
-        Box::new(move |cc| match EguiBarApp::new(cc, shared_path) {
-            Ok(app) => {
-                info!("Application created successfully");
-                Ok(Box::new(app))
-            }
-            Err(e) => {
-                log::error!("Failed to create application: {}", e);
-                std::process::exit(1);
-            }
+        Box::new(move |cc| {
+            EguiBarApp::new(cc, shared_path, x11, translucent)
+                .map(|app| Box::new(app) as Box<dyn eframe::App>)
+                .map_err(|error| error.into())
         }),
     )
-    .map_err(|e| anyhow::anyhow!("eframe error: {}", e))
+    .map_err(|error| anyhow::anyhow!("eframe error: {error}"))
 }
