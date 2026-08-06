@@ -942,6 +942,12 @@ impl Config {
         );
         validate_choice_ignore_ascii_case(
             &mut diagnostics,
+            "behavior.client_moveresize",
+            &behavior.client_moveresize,
+            &["always", "floating-only", "never"],
+        );
+        validate_choice_ignore_ascii_case(
+            &mut diagnostics,
             "behavior.wallpaper_mode",
             &behavior.wallpaper_mode,
             &["fill", "fit", "stretch", "center"],

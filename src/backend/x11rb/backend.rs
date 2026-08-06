@@ -106,6 +106,17 @@ struct X11Interaction {
 }
 
 impl X11rbBackend {
+    fn resize_cursor_kind(edge: ResizeEdge) -> StdCursorKind {
+        match edge {
+            ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
+            ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
+            ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
+            ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
+            ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
+            ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
+        }
+    }
+
     fn debug_drag_enabled() -> bool {
         // Cached: this is read on every MotionNotify during a drag, so the
         // env lookup (process-wide env lock + alloc) must not run per-event.
@@ -1027,6 +1038,54 @@ impl Backend for X11rbBackend {
         Ok(())
     }
 
+    // [实现] 追踪式拖拽:只抓取指针汇报运动,不移动窗口
+    fn begin_track(
+        &mut self,
+        win: WindowId,
+        intent: InteractionAction,
+    ) -> Result<bool, BackendError> {
+        let geom = self.window_ops.get_geometry(win)?;
+        let (rx, ry) = self.input_ops.get_pointer_position()?;
+        if Self::debug_drag_enabled() {
+            log::info!(
+                "[drag] begin_track win={:?} intent={:?} geom={:?} pointer=({:.1},{:.1})",
+                win,
+                intent,
+                geom,
+                rx,
+                ry
+            );
+        }
+
+        let cursor_kind = match intent {
+            InteractionAction::Resize(edge) => Self::resize_cursor_kind(edge),
+            _ => StdCursorKind::Hand,
+        };
+        self.cursor_provider.get(cursor_kind)?; // 预加载
+        self.input_ops.set_cursor(cursor_kind)?;
+        let cursor_handle = self.cursor_provider.get(cursor_kind)?.0;
+        let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
+
+        if self.input_ops.grab_pointer(mask, Some(cursor_handle))? {
+            self.interaction = Some(X11Interaction {
+                win,
+                current_x: geom.x,
+                current_y: geom.y,
+                current_w: geom.w,
+                current_h: geom.h,
+                start_geom: geom,
+                start_root_x: rx,
+                start_root_y: ry,
+                action: InteractionAction::Track,
+            });
+            return Ok(true);
+        }
+        if Self::debug_drag_enabled() {
+            log::info!("[drag] begin_track grab_pointer failed win={:?}", win);
+        }
+        Ok(false)
+    }
+
     // [实现] 开始调整大小
     fn begin_resize(&mut self, win: WindowId, edge: ResizeEdge) -> Result<(), BackendError> {
         let geom = self.window_ops.get_geometry(win)?;
@@ -1042,14 +1101,7 @@ impl Backend for X11rbBackend {
         }
 
         // Do not warp pointer: resizemouse already picked an edge based on current cursor.
-        let cursor_kind = match edge {
-            ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
-            ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
-            ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
-            ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
-            ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
-            ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
-        };
+        let cursor_kind = Self::resize_cursor_kind(edge);
 
         self.cursor_provider.get(cursor_kind)?; // 预加载
         self.input_ops.set_cursor(cursor_kind)?;
@@ -1133,6 +1185,8 @@ impl Backend for X11rbBackend {
                         state.start_geom.border,
                     )?;
                 }
+                // 追踪模式:窗口不动,Jwm 拿根坐标决定何时升级/如何预览。
+                InteractionAction::Track => {}
             }
             // 告诉 Jwm 这个事件被处理了
             return Ok(true);

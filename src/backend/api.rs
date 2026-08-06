@@ -339,6 +339,10 @@ pub enum ResizeEdge {
 pub enum InteractionAction {
     Move,
     Resize(ResizeEdge),
+    /// Grab the pointer and report motion/release without touching any
+    /// window. The WM uses this to watch a drag until it crosses the
+    /// drag threshold (or, for tiled reorder drags, for their whole life).
+    Track,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1639,6 +1643,20 @@ pub trait Backend:
 
     fn begin_resize(&mut self, _win: WindowId, _edge: ResizeEdge) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Start a track-only interactive drag: grab the pointer and feed
+    /// `handle_motion`/`handle_button_release` without moving any window.
+    /// `intent` is the operation the drag will become once it crosses the
+    /// drag threshold, and picks the cursor shown meanwhile. Returns `false`
+    /// when the backend cannot track (no grab support, or the grab failed) —
+    /// the caller must then abandon the drag.
+    fn begin_track(
+        &mut self,
+        _win: WindowId,
+        _intent: InteractionAction,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
     }
 
     fn handle_motion(&mut self, _x: f64, _y: f64, _time: u32) -> Result<bool, BackendError> {

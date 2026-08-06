@@ -53,22 +53,19 @@ impl DragSnapPlan {
 /// smallest wins (fibonacci/tatami nest small cells inside the master's
 /// bounding area, deck stacks previews), otherwise nearest center wins.
 fn pick_best_candidate(candidates: &[(usize, Rect)], px: i32, py: i32) -> Option<(usize, Rect)> {
-    candidates
-        .iter()
-        .copied()
-        .min_by_key(|&(_, r)| {
-            let contains = px >= r.x && px < r.x + r.w.max(1) && py >= r.y && py < r.y + r.h.max(1);
-            if contains {
-                (r.w as i64) * (r.h as i64)
-            } else {
-                let cx = r.x + r.w / 2;
-                let cy = r.y + r.h / 2;
-                let dx = (px - cx) as i64;
-                let dy = (py - cy) as i64;
-                // Never let a far center beat any containing rect.
-                i64::MAX / 2 + dx * dx + dy * dy
-            }
-        })
+    candidates.iter().copied().min_by_key(|&(_, r)| {
+        let contains = px >= r.x && px < r.x + r.w.max(1) && py >= r.y && py < r.y + r.h.max(1);
+        if contains {
+            (r.w as i64) * (r.h as i64)
+        } else {
+            let cx = r.x + r.w / 2;
+            let cy = r.y + r.h / 2;
+            let dx = (px - cx) as i64;
+            let dy = (py - cy) as i64;
+            // Never let a far center beat any containing rect.
+            i64::MAX / 2 + dx * dx + dy * dy
+        }
+    })
 }
 
 /// The layout calculators that share the plain (params, clients) signature.
@@ -156,6 +153,45 @@ impl Jwm {
         Some(DragSnapPlan::Float { rect })
     }
 
+    /// Plan a reorder drop for a window that stayed tiled through its drag:
+    /// the whole monitor is a drop zone and the plan is always an attach at
+    /// the layout slot under the pointer. Returns None when the monitor's
+    /// layout is not a tiling one or the client cannot be re-slotted.
+    pub(crate) fn plan_drag_reorder(
+        &self,
+        drag_key: ClientKey,
+        mon_key: MonitorKey,
+        px: i32,
+        py: i32,
+    ) -> Option<DragSnapPlan> {
+        let eligible = self
+            .state
+            .clients
+            .get(drag_key)
+            .map(|c| {
+                !c.state.is_floating
+                    && !c.state.is_fixed
+                    && !c.state.is_fullscreen
+                    && !c.state.is_pip
+                    && !c.state.is_dock
+                    && !c.state.is_sticky
+                    && !c.state.is_swallowed
+            })
+            .unwrap_or(false);
+        if !eligible {
+            return None;
+        }
+
+        let layout = self.state.monitors.get(mon_key).map(|m| (*m.lt).clone())?;
+        if !layout.is_tile() {
+            return None;
+        }
+        if layout == LayoutEnum::SCROLLING {
+            return self.plan_scrolling_attach(mon_key, px);
+        }
+        self.plan_layout_attach(mon_key, drag_key, &layout, px, py)
+    }
+
     /// Simulate the layout with the dragged client inserted at every index of
     /// the tiled order and keep the index whose rect lands under the pointer.
     fn plan_layout_attach(
@@ -168,8 +204,14 @@ impl Jwm {
     ) -> Option<DragSnapPlan> {
         let calc = layout_calc_fn(layout)?;
 
-        // The dragged client is floating right now, so it is not in this list.
-        let tiled = self.collect_tileable_clients(mon_key);
+        // Simulate without the dragged client: it is absent already when the
+        // drag floated it, and must be pulled out for a reorder drag where it
+        // is still tiled.
+        let tiled: Vec<(ClientKey, f32, i32)> = self
+            .collect_tileable_clients(mon_key)
+            .into_iter()
+            .filter(|&(key, _, _)| key != drag_key)
+            .collect();
         let count = tiled.len() + 1;
 
         let (wx, wy, ww, wh, m_fact, n_master, _, _) = self.get_monitor_info(mon_key);
@@ -179,7 +221,11 @@ impl Jwm {
 
         // Mirror apply_smart_borders for a single-window monitor.
         let cfg = CONFIG.load();
-        let border_w = if count == 1 { 0 } else { cfg.border_px() as i32 };
+        let border_w = if count == 1 {
+            0
+        } else {
+            cfg.border_px() as i32
+        };
         let monitor_gap = self
             .state
             .monitors
@@ -320,9 +366,13 @@ impl Jwm {
                 self.attach_dragged_client(backend, drag_key, mon_key, |jwm| {
                     // Anchor before mutating: the monitor_clients position of
                     // the tiled client currently holding the target index.
+                    // The dragged client is skipped to mirror the plan's
+                    // simulation (it is still tiled during a reorder drag).
                     jwm.collect_tileable_clients(mon_key)
-                        .get(tiled_index)
-                        .map(|&(key, _, _)| key)
+                        .into_iter()
+                        .filter(|&(key, _, _)| key != drag_key)
+                        .nth(tiled_index)
+                        .map(|(key, _, _)| key)
                 });
             }
             DragSnapPlan::AttachScrolling {
@@ -369,10 +419,14 @@ impl Jwm {
         if let Some(client) = self.state.clients.get_mut(drag_key) {
             // Remember where the user left it so toggling back to floating
             // restores the drop position, matching reclaim_drag_floating.
-            client.geometry.floating_x = client.geometry.x;
-            client.geometry.floating_y = client.geometry.y;
-            client.geometry.floating_w = client.geometry.w;
-            client.geometry.floating_h = client.geometry.h;
+            // A reorder drag never floated the window, so its tile rect must
+            // not clobber the remembered floating geometry.
+            if client.state.is_floating {
+                client.geometry.floating_x = client.geometry.x;
+                client.geometry.floating_y = client.geometry.y;
+                client.geometry.floating_w = client.geometry.w;
+                client.geometry.floating_h = client.geometry.h;
+            }
             client.state.is_floating = false;
             client.state.is_drag_floating = false;
         }
@@ -504,7 +558,10 @@ mod tests {
         // window in the spiral's last (bottom-right) cell.
         assert_eq!(index, tiled.len());
         assert!(rect.x >= 960, "cell should sit in the right half: {rect:?}");
-        assert!(rect.y >= 540, "cell should sit in the bottom half: {rect:?}");
+        assert!(
+            rect.y >= 540,
+            "cell should sit in the bottom half: {rect:?}"
+        );
 
         // And a drop on the left edge must instead claim the master slot.
         let (index, rect) = pick_best_candidate(&candidates, 5, 540).unwrap();

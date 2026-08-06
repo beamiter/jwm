@@ -937,6 +937,9 @@ fn open_active_libseat_session() -> Result<(LibSeatSession, LibSeatSessionNotifi
 enum UdevDragAction {
     Move,
     Resize(ResizeEdge),
+    /// Grab-and-report only: the WM watches the pointer (drag threshold,
+    /// tiled reorder) and no window is moved by the backend.
+    Track,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3738,6 +3741,38 @@ impl Backend for UdevBackend {
         Ok(())
     }
 
+    fn begin_track(
+        &mut self,
+        win: WindowId,
+        intent: crate::backend::api::InteractionAction,
+    ) -> Result<bool, BackendError> {
+        let geom = self.window_ops.get_geometry(win)?;
+        let (rx, ry) = self.input_ops.get_pointer_position()?;
+        let cursor_kind = match intent {
+            crate::backend::api::InteractionAction::Resize(edge) => match edge {
+                ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
+                ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
+                ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
+                ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
+                ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
+                ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
+            },
+            _ => StdCursorKind::Hand,
+        };
+        let _ = self.input_ops.set_cursor(cursor_kind);
+        let _ = self.input_ops.grab_pointer(0, None)?;
+        self.drag = Some(UdevDragState {
+            win,
+            start_geom: geom,
+            start_root_x: rx,
+            start_root_y: ry,
+            action: UdevDragAction::Track,
+        });
+        self.state.needs_redraw = true;
+        self.request_flush();
+        Ok(true)
+    }
+
     fn handle_motion(&mut self, x: f64, y: f64, _time: u32) -> Result<bool, BackendError> {
         let Some(state) = self.drag else {
             return Ok(false);
@@ -3808,6 +3843,8 @@ impl Backend for UdevBackend {
                     state.start_geom.border,
                 )?;
             }
+            // 追踪模式:窗口不动,Jwm 拿根坐标决定何时升级/如何预览。
+            UdevDragAction::Track => {}
         }
 
         Ok(true)
@@ -3829,6 +3866,7 @@ impl Backend for UdevBackend {
         self.drag.map(|s| match s.action {
             UdevDragAction::Move => crate::backend::api::InteractionAction::Move,
             UdevDragAction::Resize(edge) => crate::backend::api::InteractionAction::Resize(edge),
+            UdevDragAction::Track => crate::backend::api::InteractionAction::Track,
         })
     }
 

@@ -248,6 +248,30 @@ impl NewClientPosition {
     }
 }
 
+/// Which windows may start an interactive move/resize through the client
+/// protocol (`_NET_WM_MOVERESIZE`: CSD title bars, invisible resize borders).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientMoveResize {
+    /// Every window: floating windows move/resize, tiled windows reorder
+    /// within the layout on move and float on resize.
+    Always,
+    /// Only windows that already float (default). A tiled window's layout
+    /// slot cannot be disturbed by a client-side drag region.
+    FloatingOnly,
+    /// Ignore client move/resize requests entirely.
+    Never,
+}
+
+impl ClientMoveResize {
+    pub fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "always" => ClientMoveResize::Always,
+            "never" => ClientMoveResize::Never,
+            _ => ClientMoveResize::FloatingOnly,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BehaviorConfig {
     pub focus_follows_new_window: bool,
@@ -260,6 +284,22 @@ pub struct BehaviorConfig {
     /// Floating windows keep their own group at the end of the list either way.
     #[serde(default = "default_new_client_position")]
     pub new_client_position: String,
+    /// Drag dead zone in pixels: an interactive move/resize only engages once
+    /// the pointer has travelled this far from the press. Below it the button
+    /// release is a plain click and the window is left untouched, so a
+    /// click-and-hold can no longer accidentally pop a window out of the
+    /// tiling layout.
+    #[serde(default = "default_drag_threshold_px")]
+    pub drag_threshold_px: u32,
+    /// Which windows may start an interactive move/resize through the client
+    /// protocol (`_NET_WM_MOVERESIZE`: CSD title bars, invisible resize
+    /// borders):
+    /// - "floating-only" (default): only already-floating windows respond;
+    /// - "always": floating windows move/resize; tiled windows reorder
+    ///   within the layout on move, and float on resize;
+    /// - "never": client requests are ignored entirely.
+    #[serde(default = "default_client_moveresize")]
+    pub client_moveresize: String,
     pub resize_hints: bool,
     pub lock_fullscreen: bool,
     #[serde(default)]
@@ -1089,6 +1129,12 @@ fn default_vsync_method() -> String {
 fn default_new_client_position() -> String {
     "master".to_string()
 }
+fn default_drag_threshold_px() -> u32 {
+    12
+}
+fn default_client_moveresize() -> String {
+    "floating-only".to_string()
+}
 fn default_audio_buffer_latency() -> u32 {
     50
 }
@@ -1529,6 +1575,8 @@ impl Default for Config {
                 behavior: BehaviorConfig {
                     focus_follows_new_window: false,
                     new_client_position: default_new_client_position(),
+                    drag_threshold_px: default_drag_threshold_px(),
+                    client_moveresize: default_client_moveresize(),
                     resize_hints: true,
                     lock_fullscreen: true,
                     compositor: true,
@@ -2496,6 +2544,14 @@ impl Config {
         &self.inner.behavior
     }
 
+    pub fn drag_threshold_px(&self) -> u32 {
+        self.inner.behavior.drag_threshold_px
+    }
+
+    pub fn client_moveresize(&self) -> ClientMoveResize {
+        ClientMoveResize::from_str(&self.inner.behavior.client_moveresize)
+    }
+
     pub fn new_client_position(&self) -> NewClientPosition {
         NewClientPosition::from_str(&self.inner.behavior.new_client_position)
     }
@@ -3434,7 +3490,12 @@ impl Config {
                 let normalized = v.trim().to_ascii_lowercase().replace('_', "-");
                 if !matches!(
                     normalized.as_str(),
-                    "material" | "glass" | "glass-dark" | "aurora" | "nord" | "tokyo-night"
+                    "material"
+                        | "glass"
+                        | "glass-dark"
+                        | "aurora"
+                        | "nord"
+                        | "tokyo-night"
                         | "paper"
                 ) {
                     return Err(format!(
@@ -3483,6 +3544,19 @@ impl Config {
                     ));
                 }
                 self.inner.behavior.new_client_position = normalized;
+            }
+            "behavior.drag_threshold_px" => {
+                self.inner.behavior.drag_threshold_px = as_u32()?;
+            }
+            "behavior.client_moveresize" => {
+                let policy = as_string()?;
+                let normalized = policy.trim().to_ascii_lowercase();
+                if !["always", "floating-only", "never"].contains(&normalized.as_str()) {
+                    return Err(format!(
+                        "behavior.client_moveresize={policy:?} (expected always, floating-only, or never)"
+                    ));
+                }
+                self.inner.behavior.client_moveresize = normalized;
             }
             "behavior.wallpaper" => self.inner.behavior.wallpaper = as_string()?,
             "behavior.wallpaper_mode" => {
@@ -3709,9 +3783,9 @@ pub fn reload_global() -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgumentConfig, CONFIG_WRITE_COUNTER, Config, ConfigDiagnosticLevel, ConfigError,
-        GestureSwipeConfig, KeyConfig, LayoutTagConfig, Mods, NewClientPosition, Ordering,
-        STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
+        ArgumentConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config, ConfigDiagnosticLevel,
+        ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig, Mods, NewClientPosition,
+        Ordering, STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
         key_function_is_repeatable,
     };
 
@@ -4584,6 +4658,61 @@ border_px = 3
             .join("\n");
         let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
         assert_eq!(parsed.behavior.new_client_position, "master");
+    }
+
+    #[test]
+    fn client_moveresize_defaults_to_floating_only() {
+        let cfg = Config::default();
+        assert_eq!(cfg.client_moveresize(), ClientMoveResize::FloatingOnly);
+        assert_eq!(cfg.drag_threshold_px(), 12);
+
+        // Configs written before the keys existed must still load with the
+        // safe defaults.
+        let serialized = toml::to_string(&cfg.inner).unwrap();
+        let stripped = serialized
+            .lines()
+            .filter(|l| {
+                let l = l.trim_start();
+                !l.starts_with("client_moveresize") && !l.starts_with("drag_threshold_px")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&stripped).unwrap();
+        assert_eq!(parsed.behavior.client_moveresize, "floating-only");
+        assert_eq!(parsed.behavior.drag_threshold_px, 12);
+    }
+
+    #[test]
+    fn client_moveresize_parses_its_choices() {
+        assert_eq!(
+            ClientMoveResize::from_str("always"),
+            ClientMoveResize::Always
+        );
+        assert_eq!(ClientMoveResize::from_str("Never"), ClientMoveResize::Never);
+        assert_eq!(
+            ClientMoveResize::from_str(" floating-only "),
+            ClientMoveResize::FloatingOnly
+        );
+        // Anything unknown falls back to the safe default instead of failing.
+        assert_eq!(
+            ClientMoveResize::from_str("nonsense"),
+            ClientMoveResize::FloatingOnly
+        );
+    }
+
+    #[test]
+    fn client_moveresize_is_hot_tunable_via_set_value() {
+        let mut cfg = Config::default();
+        cfg.set_value("behavior.client_moveresize", &serde_json::json!("always"))
+            .unwrap();
+        assert_eq!(cfg.client_moveresize(), ClientMoveResize::Always);
+        assert!(
+            cfg.set_value("behavior.client_moveresize", &serde_json::json!("maybe"))
+                .is_err()
+        );
+        cfg.set_value("behavior.drag_threshold_px", &serde_json::json!(24))
+            .unwrap();
+        assert_eq!(cfg.drag_threshold_px(), 24);
     }
 
     #[test]

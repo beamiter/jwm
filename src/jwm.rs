@@ -97,6 +97,11 @@ pub struct Jwm {
     pub is_restarting: AtomicBool,
     pub last_mouse_root: (f64, f64),
 
+    /// A pointer drag being watched: armed by a button press or a client
+    /// `_NET_WM_MOVERESIZE` request, engaged once the pointer crosses the
+    /// drag threshold. See [`mouse_handler::DragCtl`].
+    pub(crate) drag_ctl: Option<mouse_handler::DragCtl>,
+
     pub message: SharedMessage,
 
     // Per-monitor status bars
@@ -627,6 +632,7 @@ impl Jwm {
             debug_hud_on: CONFIG.load().behavior().debug_hud,
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
+            drag_ctl: None,
 
             ipc_server,
             config_reload_tracker: lifecycle::ConfigReloadTracker::new(config_revision),

@@ -9,11 +9,12 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
-use crate::config::{BackendFamily, get_backend_family};
+use crate::config::{BackendFamily, CONFIG, ClientMoveResize, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
 use crate::jwm::Jwm;
 use crate::jwm::features::CaptureTarget;
+use crate::jwm::mouse_handler::DragMode;
 use crate::jwm::types::WMArgEnum;
 use log::{debug, error, info};
 use std::sync::atomic::Ordering;
@@ -370,50 +371,126 @@ impl WMController for Jwm {
         // Query before handle_button_release: the backends drop their
         // interaction state inside that call.
         let interaction_action = backend.interaction_action();
+        let ctl = self.drag_ctl.take();
         match backend.handle_button_release(0) {
             Ok(handled) => {
                 if handled {
-                    // Notify compositor of window move end (for wobbly windows effect)
-                    if backend.has_compositor() {
-                        if let Some(ck) = self.get_selected_client_key() {
-                            if let Some(client) = self.state.clients.get(ck) {
-                                backend.compositor_notify_window_move_end(client.win);
+                    match ctl {
+                        // Below the drag threshold the press was a plain
+                        // click: the window was never floated, moved or
+                        // resized, so there is nothing to commit or undo.
+                        Some(ctl) if !ctl.activated => {
+                            debug!(
+                                "Pointer drag on {:?} released below threshold; treating as click",
+                                ctl.win
+                            );
+                            if backend.has_compositor() {
+                                backend.compositor_set_snap_preview(None);
                             }
                         }
-                    }
+                        Some(ctl) => {
+                            // Notify compositor of window move end (for wobbly windows effect)
+                            if matches!(ctl.mode, DragMode::MoveFloat) && backend.has_compositor() {
+                                backend.compositor_notify_window_move_end(ctl.win);
+                            }
 
-                    // Snap: releasing a move-drag near a monitor edge re-attaches
-                    // the window into the current layout at the slot under the
-                    // pointer; design floats and the float layout keep the classic
-                    // floating half-screen snap. Resize drags never snap.
-                    let is_resize =
-                        matches!(interaction_action, Some(InteractionAction::Resize(_)));
-                    if !is_resize {
-                        let (rx, ry) = self.last_mouse_root;
-                        let rx = rx as i32;
-                        let ry = ry as i32;
-                        if let Some(mk) = self.recttomon(backend, rx, ry) {
-                            if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
-                                if let Some(ck) = self.get_selected_client_key() {
-                                    self.apply_drag_snap(backend, ck, plan);
+                            let (rx, ry) = self.last_mouse_root;
+                            let rx = rx as i32;
+                            let ry = ry as i32;
+                            match ctl.mode {
+                                // Snap: releasing a move-drag near a monitor edge
+                                // re-attaches the window into the current layout at
+                                // the slot under the pointer; design floats and the
+                                // float layout keep the classic floating half-screen
+                                // snap.
+                                DragMode::MoveFloat => {
+                                    if let Some(mk) = self.recttomon(backend, rx, ry) {
+                                        if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
+                                            if let Some(ck) = self.get_selected_client_key() {
+                                                self.apply_drag_snap(backend, ck, plan);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Reorder: the window stayed tiled the whole drag;
+                                // the drop commits the layout slot under the pointer.
+                                DragMode::Reorder => {
+                                    if let Some(mk) = self.recttomon(backend, rx, ry) {
+                                        if let Some(plan) =
+                                            self.plan_drag_reorder(ctl.client, mk, rx, ry)
+                                        {
+                                            self.apply_drag_snap(backend, ctl.client, plan);
+                                        }
+                                    }
+                                }
+                                // Resize drags never snap.
+                                DragMode::Resize(_) => {}
+                            }
+
+                            // Clear snap preview
+                            if backend.has_compositor() {
+                                backend.compositor_set_snap_preview(None);
+                            }
+
+                            if !matches!(ctl.mode, DragMode::Reorder) {
+                                // Sync floating window geometry after drag ends
+                                self.sync_focused_floating_geometry(backend);
+
+                                if let Err(e) = self.check_monitor_consistency(backend) {
+                                    error!(
+                                        "Error checking monitor consistency after button release: {:?}",
+                                        e
+                                    );
                                 }
                             }
                         }
-                    }
+                        // Legacy path: a backend interaction without a drag
+                        // controller (backend without track support, e.g. a
+                        // fallback begin_move started elsewhere).
+                        None => {
+                            // Notify compositor of window move end (for wobbly windows effect)
+                            if backend.has_compositor() {
+                                if let Some(ck) = self.get_selected_client_key() {
+                                    if let Some(client) = self.state.clients.get(ck) {
+                                        backend.compositor_notify_window_move_end(client.win);
+                                    }
+                                }
+                            }
 
-                    // Clear snap preview
-                    if backend.has_compositor() {
-                        backend.compositor_set_snap_preview(None);
-                    }
+                            // Snap: releasing a move-drag near a monitor edge re-attaches
+                            // the window into the current layout at the slot under the
+                            // pointer; design floats and the float layout keep the classic
+                            // floating half-screen snap. Resize drags never snap.
+                            let is_resize =
+                                matches!(interaction_action, Some(InteractionAction::Resize(_)));
+                            if !is_resize {
+                                let (rx, ry) = self.last_mouse_root;
+                                let rx = rx as i32;
+                                let ry = ry as i32;
+                                if let Some(mk) = self.recttomon(backend, rx, ry) {
+                                    if let Some(plan) = self.plan_drag_snap(mk, rx, ry) {
+                                        if let Some(ck) = self.get_selected_client_key() {
+                                            self.apply_drag_snap(backend, ck, plan);
+                                        }
+                                    }
+                                }
+                            }
 
-                    // Sync floating window geometry after drag ends
-                    self.sync_focused_floating_geometry(backend);
+                            // Clear snap preview
+                            if backend.has_compositor() {
+                                backend.compositor_set_snap_preview(None);
+                            }
 
-                    if let Err(e) = self.check_monitor_consistency(backend) {
-                        error!(
-                            "Error checking monitor consistency after button release: {:?}",
-                            e
-                        );
+                            // Sync floating window geometry after drag ends
+                            self.sync_focused_floating_geometry(backend);
+
+                            if let Err(e) = self.check_monitor_consistency(backend) {
+                                error!(
+                                    "Error checking monitor consistency after button release: {:?}",
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -545,8 +622,33 @@ impl WMController for Jwm {
         };
         match backend.handle_motion(root_x, root_y, time) {
             Ok(true) => {
-                // Backend is handling a drag — notify compositor of move delta (wobbly windows)
-                if backend.has_compositor() {
+                // Deferred drags: below the drag threshold nothing engages —
+                // a click-and-hold without movement stays a plain click and
+                // the window is left untouched.
+                if let Some((sx, sy, activated)) = self
+                    .drag_ctl
+                    .as_ref()
+                    .map(|c| (c.start_root.0, c.start_root.1, c.activated))
+                {
+                    if !activated {
+                        let thr = CONFIG.load().drag_threshold_px() as f64;
+                        let (dx, dy) = (root_x - sx, root_y - sy);
+                        if dx * dx + dy * dy < thr * thr {
+                            self.last_mouse_root = (root_x, root_y);
+                            return;
+                        }
+                        if let Err(e) = self.activate_pointer_drag(backend) {
+                            error!("Error activating pointer drag: {:?}", e);
+                        }
+                    }
+                }
+                let reorder_drag = matches!(
+                    self.drag_ctl.as_ref().map(|c| c.mode),
+                    Some(DragMode::Reorder)
+                );
+                // Backend is handling a drag — notify compositor of move delta
+                // (wobbly windows). A reorder drag never moves the window.
+                if backend.has_compositor() && !reorder_drag {
                     let (prev_x, prev_y) = self.last_mouse_root;
                     let dx = (root_x - prev_x) as f32;
                     let dy = (root_y - prev_y) as f32;
@@ -572,22 +674,35 @@ impl WMController for Jwm {
                     backend.compositor_force_full_redraw();
 
                     // Snap preview: show where a drop would land — the layout
-                    // slot the window would re-attach to, or the floating half.
-                    let is_resize = matches!(
-                        backend.interaction_action(),
-                        Some(InteractionAction::Resize(_))
-                    );
-                    let preview = if is_resize {
-                        None
-                    } else {
-                        let rx = root_x as i32;
-                        let ry = root_y as i32;
-                        self.recttomon(backend, rx, ry)
-                            .and_then(|mk| self.plan_drag_snap(mk, rx, ry))
+                    // slot the window would re-attach to (or reorder into),
+                    // or the floating half.
+                    let rx = root_x as i32;
+                    let ry = root_y as i32;
+                    let preview = match self.drag_ctl.as_ref().map(|c| (c.mode, c.client)) {
+                        Some((DragMode::Resize(_), _)) => None,
+                        Some((DragMode::Reorder, drag_key)) => self
+                            .recttomon(backend, rx, ry)
+                            .and_then(|mk| self.plan_drag_reorder(drag_key, mk, rx, ry))
                             .map(|plan| {
                                 let r = plan.preview_rect();
                                 (r.x as f32, r.y as f32, r.w as f32, r.h as f32)
-                            })
+                            }),
+                        Some((DragMode::MoveFloat, _)) | None => {
+                            let is_resize = matches!(
+                                backend.interaction_action(),
+                                Some(InteractionAction::Resize(_))
+                            );
+                            if is_resize {
+                                None
+                            } else {
+                                self.recttomon(backend, rx, ry)
+                                    .and_then(|mk| self.plan_drag_snap(mk, rx, ry))
+                                    .map(|plan| {
+                                        let r = plan.preview_rect();
+                                        (r.x as f32, r.y as f32, r.w as f32, r.h as f32)
+                                    })
+                            }
+                        }
                     };
                     backend.compositor_set_snap_preview(preview);
                 }
@@ -949,7 +1064,10 @@ impl WMController for Jwm {
 impl Jwm {
     /// 处理 _NET_WM_MOVERESIZE 客户端消息
     ///
-    /// 允许窗口通过协议请求进行移动或调整大小（例如 GTK 应用的窗口边框拖动）
+    /// 允许窗口通过协议请求进行移动或调整大小（例如 GTK 应用的窗口边框拖动）。
+    /// `behavior.client_moveresize` 决定哪些窗口可以响应：默认只有已浮动的
+    /// 窗口，平铺窗口的布局槽位不会被客户端的拖拽区域打乱；"always" 时平铺
+    /// 窗口的拖动变为布局内重排（见 [`DragMode::Reorder`]）。
     pub(crate) fn on_moveresize_request(
         &mut self,
         backend: &mut dyn Backend,
@@ -960,7 +1078,7 @@ impl Jwm {
         const _NET_WM_MOVERESIZE_MOVE: u32 = 8;
 
         if direction == _NET_WM_MOVERESIZE_CANCEL {
-            let _ = backend.handle_button_release(0);
+            self.cancel_pointer_drag(backend);
             return;
         }
 
@@ -969,17 +1087,46 @@ impl Jwm {
             None => return,
         };
 
+        let policy = CONFIG.load().client_moveresize();
+        if policy == ClientMoveResize::Never {
+            return;
+        }
+
+        let (is_floating, is_fullscreen, mon) = match self.state.clients.get(client_key) {
+            Some(c) => (c.state.is_floating, c.state.is_fullscreen, c.mon),
+            None => return,
+        };
+        if is_fullscreen {
+            return;
+        }
+        // Default policy: a tiled window's layout slot cannot be disturbed
+        // by a client-side drag region (CSD title bar, invisible resize
+        // border).
+        if !is_floating && policy == ClientMoveResize::FloatingOnly {
+            return;
+        }
+
+        // The drag helpers (snap planning, geometry sync) work off the
+        // selected client, so make sure the dragged window is it.
+        if self.get_selected_client_key() != Some(client_key) {
+            let _ = self.focus(backend, Some(client_key));
+        }
+
         if direction == _NET_WM_MOVERESIZE_MOVE {
-            if let Err(e) = self.enable_floating_keep_geometry(backend, client_key) {
-                error!("Error enabling floating for move-resize move: {:?}", e);
-                return;
-            }
-            if let Err(e) = backend.begin_move(win) {
-                error!("Error begin_move for _NET_WM_MOVERESIZE: {:?}", e);
-            }
-            // Notify compositor of window move start (for wobbly windows effect)
-            if backend.has_compositor() {
-                backend.compositor_notify_window_move_start(win);
+            // Dragging a tiled window by its own surface reorders it within
+            // a tiling layout instead of popping it out; under a non-tiling
+            // layout it moves as a float like before.
+            let tiling_layout = mon
+                .and_then(|mk| self.state.monitors.get(mk))
+                .map(|m| m.lt.is_tile())
+                .unwrap_or(false);
+            let mode = if !is_floating && tiling_layout {
+                DragMode::Reorder
+            } else {
+                DragMode::MoveFloat
+            };
+            if let Err(e) = self.start_pointer_drag(backend, client_key, mode) {
+                error!("Error starting drag for _NET_WM_MOVERESIZE: {:?}", e);
             }
             return;
         }
@@ -996,12 +1143,8 @@ impl Jwm {
                 7 => ResizeEdge::Left,
                 _ => unreachable!(),
             };
-            if let Err(e) = self.enable_floating_keep_geometry(backend, client_key) {
-                error!("Error enabling floating for move-resize resize: {:?}", e);
-                return;
-            }
-            if let Err(e) = backend.begin_resize(win, edge) {
-                error!("Error begin_resize for _NET_WM_MOVERESIZE: {:?}", e);
+            if let Err(e) = self.start_pointer_drag(backend, client_key, DragMode::Resize(edge)) {
+                error!("Error starting resize drag for _NET_WM_MOVERESIZE: {:?}", e);
             }
         }
         // direction 9 (SIZE_KEYBOARD) and 10 (MOVE_KEYBOARD) are ignored
@@ -1169,6 +1312,7 @@ mod tests {
             running: AtomicBool::new(true),
             is_restarting: AtomicBool::new(false),
             last_mouse_root: (0.0, 0.0),
+            drag_ctl: None,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),

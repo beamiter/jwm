@@ -911,6 +911,17 @@ impl XcbLoopData<'_> {
 }
 
 impl XcbBackend {
+    fn resize_cursor_kind(edge: ResizeEdge) -> StdCursorKind {
+        match edge {
+            ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
+            ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
+            ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
+            ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
+            ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
+            ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
+        }
+    }
+
     fn debug_drag_enabled() -> bool {
         static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *CACHE.get_or_init(|| {
@@ -2099,14 +2110,7 @@ impl Backend for XcbBackend {
                 geom
             );
         }
-        let cursor_kind = match edge {
-            ResizeEdge::Top | ResizeEdge::Bottom => StdCursorKind::VDoubleArrow,
-            ResizeEdge::Left | ResizeEdge::Right => StdCursorKind::HDoubleArrow,
-            ResizeEdge::TopLeft => StdCursorKind::TopLeftCorner,
-            ResizeEdge::TopRight => StdCursorKind::TopRightCorner,
-            ResizeEdge::BottomLeft => StdCursorKind::BottomLeftCorner,
-            ResizeEdge::BottomRight => StdCursorKind::BottomRightCorner,
-        };
+        let cursor_kind = Self::resize_cursor_kind(edge);
         let cursor = self.cursor_provider.get(cursor_kind)?.0;
         self.input_ops.set_cursor(cursor_kind)?;
         let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
@@ -2126,6 +2130,46 @@ impl Backend for XcbBackend {
             log::info!("[drag] begin_resize grab_pointer failed win={:?}", win);
         }
         Ok(())
+    }
+
+    fn begin_track(&mut self, win: WindowId, intent: InteractionAction) -> XcbResult<bool> {
+        let geom = self.window_ops.get_geometry(win)?;
+        let (rx, ry) = self.input_ops.get_pointer_position()?;
+        if Self::debug_drag_enabled() {
+            log::info!(
+                "[drag] begin_track win={:?} intent={:?} geom={:?} pointer=({:.1},{:.1})",
+                win,
+                intent,
+                geom,
+                rx,
+                ry
+            );
+        }
+        let cursor_kind = match intent {
+            InteractionAction::Resize(edge) => Self::resize_cursor_kind(edge),
+            _ => StdCursorKind::Hand,
+        };
+        let cursor = self.cursor_provider.get(cursor_kind)?.0;
+        self.input_ops.set_cursor(cursor_kind)?;
+        let mask = (EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION).bits();
+        if self.input_ops.grab_pointer(mask, Some(cursor))? {
+            self.interaction = Some(XcbInteraction {
+                win,
+                start_geom: geom,
+                start_root_x: rx,
+                start_root_y: ry,
+                action: InteractionAction::Track,
+                current_x: geom.x,
+                current_y: geom.y,
+                current_w: geom.w,
+                current_h: geom.h,
+            });
+            return Ok(true);
+        }
+        if Self::debug_drag_enabled() {
+            log::info!("[drag] begin_track grab_pointer failed win={:?}", win);
+        }
+        Ok(false)
     }
 
     fn handle_motion(&mut self, x: f64, y: f64, _time: u32) -> XcbResult<bool> {
@@ -2180,6 +2224,8 @@ impl Backend for XcbBackend {
                         state.start_geom.border,
                     )?;
                 }
+                // 追踪模式:窗口不动,Jwm 拿根坐标决定何时升级/如何预览。
+                InteractionAction::Track => {}
             }
             return Ok(true);
         }
