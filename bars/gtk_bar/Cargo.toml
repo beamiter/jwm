@@ -5,7 +5,21 @@ edition = "2024"
 
 [dependencies]
 log = "0.4.29"
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
+# The provider set matches xcb_bar's: this bar shows the same cells, so it has
+# to be able to fill them. Only the Cairo renderer and the epoll/timerfd loop
+# are left out — GTK owns the main loop and does its own drawing.
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
+    "clock-chrono",
+    "config-toml",
+    "glass-wallpaper",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-network-sysfs",
+    "provider-system",
+    "transport-shared",
+] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 gtk4 = { version = "0.11.4", features = ["v4_14"] }
 gdk4 = { version = "0.11.4", features = ["v4_14"] }

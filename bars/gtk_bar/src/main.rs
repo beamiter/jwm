@@ -1,124 +1,67 @@
+//! A GTK4 status bar for JWM.
+//!
+//! The widget tree is a direct translation of what the Cairo bars draw: every
+//! cell comes from [`PresentationProjector`], in the order and with the text
+//! `xbar_core`'s layout engine would give it, so this bar and `xcb_bar` show
+//! the same icons, the same values, and the same macOS material.
+
+mod pill;
+mod theme;
+
 use gdk4::prelude::*;
-use gtk4::gio::{self};
+use gtk4::gio;
 use gtk4::prelude::*;
-use gtk4::{
-    Application, ApplicationWindow, Builder, Button, EventControllerScroll,
-    EventControllerScrollFlags, Label, Orientation, Overflow, Overlay, Picture, Revealer, glib,
-};
+use gtk4::{Application, ApplicationWindow, Label, Orientation, Overflow, Overlay, Picture, glib};
 use log::{info, warn};
 use std::cell::{Cell, RefCell};
 use std::env;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::Duration;
 
+use xbar_core::config::BarConfig;
+use xbar_core::controls::PresentationProjector;
 use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
+use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
 use xbar_core::{
-    BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, PlatformEffectHandler,
-    RuntimeUpdate, ShellRoute, TagId, TagState, ThemeMode, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, BarSnapshot, PlatformEffectHandler, RuntimeUpdate, ThemeMode,
+    TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
-use gtk4::glib::ControlFlow;
-use gtk4::glib::Propagation;
+use crate::pill::{Dispatch, PillRow, PillStyle};
+use crate::theme::Metrics;
 
-// ========= 常量 =========
-const CPU_REDRAW_THRESHOLD: f64 = 0.01; // 1%
-const MEM_REDRAW_THRESHOLD: f64 = 0.005; // 0.5%
+const BAR_NAME: &str = "gtk_bar";
+const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the shared-memory transport is drained. The bar has no file
+/// descriptor to wait on inside the GTK main loop, so it polls.
+const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-// 胶囊颜色阈值（占用比例）
-const LEVEL_WARN: f64 = 0.50; // 50%
-const LEVEL_HIGH: f64 = 0.75; // 75%
-const LEVEL_CRIT: f64 = 0.90; // 90%
-
-// CSS 类 bit 掩码
-const CLS_SELECTED: u8 = 1 << 0;
-const CLS_OCCUPIED: u8 = 1 << 1;
-const CLS_FILLED: u8 = 1 << 2;
-const CLS_URGENT: u8 = 1 << 3;
-const CLS_EMPTY: u8 = 1 << 4;
-
-// ========= 状态 =========
-#[allow(dead_code)]
-struct AppState {
-    snapshot: BarSnapshot,
-
-    // Last values to control redraw
-    last_cpu_usage: f64,
-    last_mem_fraction: f64,
-
-    // 上一帧每个 tab 的 class 掩码，用于差量更新
-    last_class_masks: Vec<u8>,
-}
-
-impl AppState {
-    fn new(snapshot: BarSnapshot) -> Self {
-        Self {
-            snapshot,
-            last_cpu_usage: 0.0,
-            last_mem_fraction: 0.0,
-            last_class_masks: Vec::new(),
-        }
-    }
-}
-
-type SharedAppState = Rc<RefCell<AppState>>;
-
-// ========= Metric 工具 =========
-fn usage_to_level_class(ratio: f64) -> &'static str {
-    if ratio >= LEVEL_CRIT {
-        "level-crit"
-    } else if ratio >= LEVEL_HIGH {
-        "level-high"
-    } else if ratio >= LEVEL_WARN {
-        "level-warn"
-    } else {
-        "level-ok"
-    }
-}
-
-// 统一更新“胶囊”标签：文本 + 颜色 class
-fn set_metric_capsule(label: &Label, title: &str, ratio: f64) {
-    let percent = (ratio * 100.0).round().clamp(0.0, 100.0) as i32;
-    label.set_text(&format!("{} {}%", title, percent));
-
-    for cls in ["level-ok", "level-warn", "level-high", "level-crit"] {
-        label.remove_css_class(cls);
-    }
-    label.add_css_class(usage_to_level_class(ratio));
-}
-
-// ========= 主体应用 =========
-struct TabBarApp {
-    // GTK widgets
-    builder: Builder,
+struct BarApp {
     window: ApplicationWindow,
-    tab_buttons: Vec<Button>,
-    time_button: Button,
-    volume_button: Button,
-    theme_button: Button,
-    monitor_label: Label,
-    memory_label: Label,
-    cpu_label: Label,
+    /// Tags, the layout button, and any revealed layout options, in the order
+    /// the layout engine places them.
+    leading: PillRow,
+    /// Status cells, reversed from the projector's right-to-left order.
+    trailing: PillRow,
+    client_name: Label,
 
-    // 新增：布局开关 + 展开选项
-    layout_toggle: Button,
-    layout_revealer: Revealer,
-    layout_btn_tiled: Button,
-    layout_btn_floating: Button,
-    layout_btn_monocle: Button,
+    presentation: PresentationConfig,
+    metrics: Metrics,
+    /// Width the bar falls back to before, and after, the window manager
+    /// describes a monitor: the whole screen.
+    default_width: i32,
 
-    // Shared state
-    state: SharedAppState,
     runtime: RefCell<BarRuntime>,
+    snapshot: RefCell<BarSnapshot>,
     process_actions: RefCell<ProcessActionHandler>,
 
-    // Cached UI-applied values for diff
-    ui_last_monitor_num: Cell<i32>,
-
     // --- Frosted glass ---
-    /// Backdrop image behind the panel, empty when no wallpaper is configured.
+    /// Backdrop image behind the bar, empty when no wallpaper is configured.
+    /// Without one the bar is simply translucent and the compositor supplies
+    /// what shows through, which is what `xcb_bar` does under a compositor.
     glass_picture: Picture,
     glass: RefCell<Option<GlassStrip<WallpaperFile>>>,
     /// Generation of the strip currently uploaded into `glass_picture`.
@@ -129,331 +72,179 @@ struct TabBarApp {
     glass_origin: Cell<(i32, i32)>,
 }
 
-impl TabBarApp {
+impl BarApp {
     fn new(app: &Application, shared_path: String) -> Rc<Self> {
-        // 加载 UI
-        let builder = Builder::from_string(include_str!("resources/main_layout.ui"));
-
-        // 主窗口
-        let window: ApplicationWindow = builder
-            .object("main_window")
-            .expect("Failed to get main_window from builder");
-        window.set_application(Some(app));
-
-        // 确保窗口无装饰并支持透明度
-        window.set_decorated(false);
-
-        // 连接 realize 信号以在窗口创建时设置透明度
-        window.connect_realize(|win| {
-            if let Some(surface) = win.surface() {
-                surface.set_opaque_region(None);
-            }
-
-            // 添加 app-paintable CSS 类以支持自定义绘制
-            win.add_css_class("transparent-window");
-
-            // 强制重绘以确保样式应用
-            win.queue_draw();
+        let config = BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            BarConfig::default()
         });
 
-        // Slide a backdrop under the existing tree: the panel keeps its own
-        // widget hierarchy, and the frosted wallpaper is simply what shows
-        // through its translucent background. The clip box repeats
-        // `.panel-root`'s margin and corner radius so the backdrop stops where
-        // the panel does instead of squaring off its rounded corners.
-        let glass_picture = Picture::new();
-        glass_picture.set_can_target(false);
-        glass_picture.set_content_fit(gtk4::ContentFit::Fill);
-        glass_picture.set_hexpand(true);
-        glass_picture.set_vexpand(true);
-        if let Some(content) = window.child() {
+        let mut presentation = config.presentation.clone();
+        // Monochrome Nerd Font glyphs tinted by the text color read like macOS
+        // template icons; only replace the stock emoji so a config that
+        // overrides individual labels keeps its customization. `xcb_bar` makes
+        // exactly this substitution, and the two must not diverge.
+        if presentation.labels == PresentationLabels::default() {
+            presentation.labels = PresentationLabels::nerd_font();
+        }
+        let metrics = Metrics::from_config(&presentation);
+        let background_opacity = config
+            .background_opacity
+            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
+        apply_stylesheet(&theme::stylesheet(
+            &presentation,
+            &config.font,
+            background_opacity,
+        ));
+
+        let (screen_width, screen_height) = primary_screen_size();
+        let default_width = logical_screen_width(screen_width);
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title(BAR_NAME)
+            .decorated(false)
+            .resizable(true)
+            // Span the screen from the first frame, as the Cairo bars do. The
+            // window manager's own geometry replaces this as soon as it
+            // arrives, but a bar must never flash at some arbitrary width.
+            .default_width(default_width)
+            .default_height(metrics.bar_height)
+            .build();
+        window.add_css_class("transparent-window");
+        window.connect_realize(|window| {
+            // Per-pixel alpha instead of an opaque strip: the compositor then
+            // blends the wallpaper behind the bar's translucent tint.
+            if let Some(surface) = window.surface() {
+                surface.set_opaque_region(None);
+            }
+            window.queue_draw();
+        });
+
+        let mut runtime = if shared_path.is_empty() {
+            BarRuntime::new(config.model_config())
+        } else {
+            let recovery =
+                TransportRecoveryConfig::new(shared_path.clone(), TRANSPORT_RETRY_INTERVAL)
+                    .expect("static transport recovery config is valid");
+            BarRuntime::with_managed_transport(config.model_config(), recovery)
+        }
+        .expect("bar config yields a valid model config");
+        let mut initial_update = runtime.tick();
+        initial_update.merge(runtime.poll_transport());
+        let snapshot = runtime.snapshot();
+
+        let glass =
+            config
+                .glass
+                .file_strip(screen_width, screen_height, fallback_rgb(config.theme));
+
+        let instance = Rc::new_cyclic(|weak: &Weak<Self>| {
+            let dispatch: Dispatch = {
+                let weak = weak.clone();
+                Rc::new(move |action| {
+                    if let Some(app) = weak.upgrade() {
+                        app.dispatch(action);
+                    }
+                })
+            };
+            let style = PillStyle {
+                metrics,
+                // Both themes use the same accent, so the progress line does
+                // not have to be rebuilt when the theme is toggled.
+                accent: Palette::for_theme(ThemeMode::Dark).accent,
+                font: pill_font(&config.font, presentation.font_size),
+            };
+
+            let leading = PillRow::new(style.clone(), dispatch.clone());
+            let trailing = PillRow::new(style, dispatch);
+
+            let client_name = Label::new(None);
+            client_name.add_css_class("client-name");
+            client_name.set_single_line_mode(true);
+            client_name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            client_name.set_hexpand(true);
+            client_name.set_halign(gtk4::Align::Center);
+
+            let root = gtk4::Box::new(Orientation::Horizontal, metrics.item_gap);
+            root.add_css_class("bar-root");
+            root.append(leading.widget());
+            root.append(&client_name);
+            root.append(trailing.widget());
+            trailing.widget().set_halign(gtk4::Align::End);
+
+            // Slide a backdrop under the bar: the widgets keep their own tree,
+            // and the frosted wallpaper is simply what shows through the
+            // translucent background.
+            let glass_picture = Picture::new();
+            glass_picture.set_can_target(false);
+            glass_picture.set_content_fit(gtk4::ContentFit::Fill);
+            glass_picture.set_hexpand(true);
+            glass_picture.set_vexpand(true);
             let clip = gtk4::Box::new(Orientation::Horizontal, 0);
             clip.add_css_class("glass-backdrop");
             clip.set_overflow(Overflow::Hidden);
             clip.append(&glass_picture);
 
             let overlay = Overlay::new();
-            window.set_child(None::<&gtk4::Widget>);
             overlay.set_child(Some(&clip));
-            overlay.add_overlay(&content);
+            overlay.add_overlay(&root);
             window.set_child(Some(&overlay));
-        }
 
-        // 标签按钮
-        let mut tab_buttons = Vec::new();
-        for i in 0..9 {
-            let button_id = format!("tab_button_{}", i);
-            let button: Button = builder
-                .object(&button_id)
-                .unwrap_or_else(|| panic!("Failed to get {button_id} from builder"));
-            tab_buttons.push(button);
-        }
+            if glass.is_some() {
+                window.add_css_class("glass");
+            }
 
-        // 其他组件
-        let time_button: Button = builder
-            .object("time_label")
-            .expect("Failed to get time_label from builder");
-        let volume_button: Button = builder
-            .object("volume_button")
-            .expect("Failed to get volume_button from builder");
-        let theme_button: Button = builder
-            .object("theme_button")
-            .expect("Failed to get theme_button from builder");
-        let monitor_label: Label = builder
-            .object("monitor_label")
-            .expect("Failed to get monitor_label from builder");
-        let memory_label: Label = builder
-            .object("memory_label")
-            .expect("Failed to get memory_label from builder");
-        let cpu_label: Label = builder
-            .object("cpu_label")
-            .expect("Failed to get cpu_label from builder");
-
-        // 布局开关 + 选项
-        let layout_toggle: Button = builder
-            .object("layout_toggle")
-            .expect("Failed to get layout_toggle");
-        let layout_revealer: Revealer = builder
-            .object("layout_revealer")
-            .expect("Failed to get layout_revealer");
-        let layout_btn_tiled: Button = builder
-            .object("layout_option_tiled")
-            .expect("Failed to get layout_option_tiled");
-        let layout_btn_floating: Button = builder
-            .object("layout_option_floating")
-            .expect("Failed to get layout_option_floating");
-        let layout_btn_monocle: Button = builder
-            .object("layout_option_monocle")
-            .expect("Failed to get layout_option_monocle");
-
-        let mut runtime = if shared_path.is_empty() {
-            BarRuntime::new(ModelConfig::default())
-        } else {
-            let recovery =
-                TransportRecoveryConfig::new(shared_path.clone(), Duration::from_secs(2))
-                    .expect("static transport recovery config is valid");
-            BarRuntime::with_managed_transport(ModelConfig::default(), recovery)
-        }
-        .expect("default xbar_core model config is valid");
-        let mut initial_update = runtime.tick();
-        initial_update.merge(runtime.poll_transport());
-
-        // UI state is an owned projection; providers and transport stay in runtime.
-        let state: SharedAppState = Rc::new(RefCell::new(AppState::new(runtime.snapshot())));
-
-        // Only the `[glass]` section of the shared bar config applies here;
-        // everything else about this bar's appearance lives in its CSS.
-        let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
-            warn!("falling back to the default bar config: {error}");
-            xbar_core::config::BarConfig::default()
-        });
-        let (screen_width, screen_height) = primary_screen_size();
-        let glass = app_config.glass.file_strip(
-            screen_width,
-            screen_height,
-            fallback_rgb(app_config.theme),
-        );
-        if glass.is_some() {
-            window.add_css_class("glass");
-        }
-
-        // 样式
-        Self::apply_styles();
-
-        let app_instance = Rc::new(Self {
-            builder,
-            window,
-            tab_buttons,
-            time_button,
-            volume_button,
-            theme_button,
-            monitor_label,
-            memory_label,
-            cpu_label,
-            layout_toggle,
-            layout_revealer,
-            layout_btn_tiled,
-            layout_btn_floating,
-            layout_btn_monocle,
-            state,
-            runtime: RefCell::new(runtime),
-            process_actions: RefCell::new(ProcessActionHandler::default()),
-            ui_last_monitor_num: Cell::new(i32::MIN),
-            glass_picture,
-            glass: RefCell::new(glass),
-            glass_generation: Cell::new(0),
-            glass_origin: Cell::new((0, 0)),
+            Self {
+                window,
+                leading,
+                trailing,
+                client_name,
+                presentation,
+                metrics,
+                default_width,
+                runtime: RefCell::new(runtime),
+                snapshot: RefCell::new(snapshot),
+                process_actions: RefCell::new(ProcessActionHandler::default()),
+                glass_picture,
+                glass: RefCell::new(glass),
+                glass_generation: Cell::new(0),
+                glass_origin: Cell::new((0, 0)),
+            }
         });
 
-        // Default theme: dark
-        app_instance.window.add_css_class("theme-dark");
-        app_instance.window.remove_css_class("theme-light");
+        instance.handle_runtime_update(initial_update);
+        instance.sync_views();
+        instance.spawn_timers();
+        instance
+    }
 
-        // 为 CPU/内存标签添加基础胶囊样式
-        app_instance.cpu_label.add_css_class("metric-label");
-        app_instance.memory_label.add_css_class("metric-label");
-
-        // 事件绑定
-        Self::setup_event_handlers(app_instance.clone());
-
-        // Provider and clock refresh stays in the core runtime.
-        {
-            let app_clone = app_instance.clone();
-            glib::timeout_add_seconds_local(1, move || {
-                let update = app_clone.runtime.borrow_mut().tick();
-                app_clone.handle_runtime_update(update);
+    fn spawn_timers(self: &Rc<Self>) {
+        // Providers and the clock are refreshed by the core runtime.
+        glib::timeout_add_seconds_local(1, {
+            let app = Rc::downgrade(self);
+            move || {
+                let Some(app) = app.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let update = app.runtime.borrow_mut().tick();
+                app.handle_runtime_update(update);
                 // Cheap unless the wallpaper file actually changed.
-                app_clone.refresh_glass();
-                ControlFlow::Continue
-            });
-        }
-
-        // Shared transport polling is non-blocking and owned by the UI runtime.
-        {
-            let app_clone = app_instance.clone();
-            glib::timeout_add_local(Duration::from_millis(50), move || {
-                let update = app_clone.runtime.borrow_mut().poll_transport();
-                app_clone.handle_runtime_update(update);
-                ControlFlow::Continue
-            });
-        }
-
-        app_instance.handle_runtime_update(initial_update);
-
-        // 首次时间显示
-        app_instance.update_time_display();
-        app_instance.refresh_glass();
-        // 首次布局 UI 同步（默认 closed）
-        app_instance.update_layout_ui();
-        // 首次音量/主题 UI 同步
-        app_instance.update_volume_display();
-        app_instance.update_theme_display();
-
-        // 首次 tab 样式同步（设置初始 empty 状态）
-        app_instance.update_tab_styles();
-
-        app_instance
-    }
-
-    fn apply_styles() {
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_string(include_str!("styles.css"));
-        if let Some(display) = gtk4::gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-    }
-
-    fn setup_event_handlers(app: Rc<Self>) {
-        // 标签按钮点击
-        for (i, button) in app.tab_buttons.iter().enumerate() {
-            button.connect_clicked({
-                let app = app.clone();
-                move |_| {
-                    Self::handle_tab_selected(app.clone(), i);
-                }
-            });
-        }
-
-        // 布局开关
-        app.layout_toggle.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                app.dispatch(UserAction::ToggleLayoutSelector);
+                app.refresh_glass();
+                glib::ControlFlow::Continue
             }
         });
 
-        // 布局选项
-        app.layout_btn_tiled.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_layout_clicked(app.clone(), 0);
+        glib::timeout_add_local(TRANSPORT_POLL_INTERVAL, {
+            let app = Rc::downgrade(self);
+            move || {
+                let Some(app) = app.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                let update = app.runtime.borrow_mut().poll_transport();
+                app.handle_runtime_update(update);
+                glib::ControlFlow::Continue
             }
         });
-        app.layout_btn_floating.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_layout_clicked(app.clone(), 1);
-            }
-        });
-        app.layout_btn_monocle.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_layout_clicked(app.clone(), 2);
-            }
-        });
-
-        // 时间按钮
-        app.time_button.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_toggle_seconds(app.clone());
-            }
-        });
-
-        // 截图按钮
-        if let Some(screenshot_button) = app.builder.object::<Button>("screenshot_button") {
-            screenshot_button.connect_clicked({
-                let app = app.clone();
-                move |_| {
-                    Self::handle_screenshot(app.clone());
-                }
-            });
-        }
-
-        // Shell 入口：每个条目只是向窗口管理器请求打开对应页面
-        Self::connect_shell_routes(&app);
-
-        // 主题切换按钮
-        app.theme_button.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_toggle_theme(app.clone());
-            }
-        });
-
-        // 音量按钮：点击静音/取消静音；滚轮调节音量
-        app.volume_button.connect_clicked({
-            let app = app.clone();
-            move |_| {
-                Self::handle_toggle_mute(app.clone());
-            }
-        });
-        {
-            let app = app.clone();
-            let controller = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
-            let app_for_scroll = app.clone();
-            controller.connect_scroll(move |_, _dx, dy| {
-                if dy == 0.0 {
-                    return Propagation::Proceed;
-                }
-
-                let step = if dy < 0.0 { 3 } else { -3 };
-                Self::handle_adjust_volume(app_for_scroll.clone(), step);
-                Propagation::Stop
-            });
-            app.volume_button.add_controller(controller);
-        }
-    }
-
-    // ========= 交互 =========
-    fn handle_tab_selected(app: Rc<Self>, index: usize) {
-        info!("Tab selected: {}", index);
-        let Some(tag) = TagId::new(index) else {
-            warn!("Ignoring out-of-range tag index {index}");
-            return;
-        };
-        let state = app.state.borrow();
-        if !state.snapshot.wm_available {
-            warn!("Ignoring tag input until the first WM snapshot arrives");
-            return;
-        }
-        let monitor = state.snapshot.monitor;
-        drop(state);
-        app.dispatch(UserAction::ViewTagOn { tag, monitor });
     }
 
     fn dispatch(&self, action: UserAction) {
@@ -471,9 +262,8 @@ impl TabBarApp {
         }
 
         if needs_redraw {
-            let snapshot = self.runtime.borrow().snapshot();
-            self.state.borrow_mut().snapshot = snapshot;
-            self.update_all_views();
+            *self.snapshot.borrow_mut() = self.runtime.borrow().snapshot();
+            self.sync_views();
         }
     }
 
@@ -482,14 +272,13 @@ impl TabBarApp {
             BarEffect::ApplyMonitorGeometry(geometry) => {
                 self.glass_origin.set((geometry.x, geometry.y));
                 self.refresh_glass();
-                self.resize_window_to_monitor(
-                    geometry.x,
-                    geometry.y,
-                    geometry.width,
-                    geometry.height,
-                )
+                self.resize_window_to_monitor(geometry.width);
             }
-            BarEffect::ClearMonitorGeometry => self.window.set_default_size(1000, 40),
+            BarEffect::ClearMonitorGeometry => {
+                // Back to spanning the screen, which is where the bar started.
+                self.window
+                    .set_default_size(self.default_width, self.metrics.bar_height);
+            }
             effect @ (BarEffect::Screenshot | BarEffect::OpenAudioControl) => {
                 if let Err(error) = self.process_actions.borrow_mut().handle(effect) {
                     warn!("Failed to handle platform effect: {error}");
@@ -507,321 +296,42 @@ impl TabBarApp {
         }
     }
 
-    fn update_all_views(&self) {
-        self.update_ui();
-        self.update_layout_ui();
-        self.update_time_display();
-        self.update_volume_display();
-        self.update_theme_display();
-        self.update_metrics();
-    }
-
-    fn handle_layout_clicked(app: Rc<Self>, layout_index: u32) {
-        let state = app.state.borrow();
-        if !state.snapshot.wm_available {
-            warn!("Ignoring layout input until the first WM snapshot arrives");
-            return;
-        }
-        let monitor = state.snapshot.monitor;
-        drop(state);
-        app.dispatch(UserAction::SetLayoutOn {
-            layout: LayoutId(layout_index),
-            monitor,
-        });
-    }
-
-    fn handle_toggle_seconds(app: Rc<Self>) {
-        app.dispatch(UserAction::ToggleSeconds);
-    }
-
-    fn handle_screenshot(app: Rc<Self>) {
-        info!("Taking screenshot");
-        app.dispatch(UserAction::Screenshot);
-    }
-
-    fn handle_toggle_theme(app: Rc<Self>) {
-        app.dispatch(UserAction::ToggleTheme);
-    }
-
-    /// Wire every row of the shell popover to the page it names.
+    /// Rebuild the widget tree's contents from one projection of the model.
     ///
-    /// The rows are looked up rather than required: a stale `main_layout.ui`
-    /// should cost the shell entry, not stop the bar from starting.
-    fn connect_shell_routes(app: &Rc<Self>) {
-        const ROUTES: [(&str, ShellRoute); 6] = [
-            ("shell_route_hub", ShellRoute::Hub),
-            ("shell_route_applications", ShellRoute::Applications),
-            ("shell_route_notifications", ShellRoute::Notifications),
-            ("shell_route_clipboard", ShellRoute::Clipboard),
-            ("shell_route_calendar", ShellRoute::Calendar),
-            ("shell_route_wallpaper", ShellRoute::Wallpaper),
-        ];
-
-        let popover = app.builder.object::<gtk4::Popover>("shell_popover");
-        for (id, route) in ROUTES {
-            let Some(button) = app.builder.object::<Button>(id) else {
-                warn!("Shell route {id} is missing from the layout");
-                continue;
-            };
-            button.connect_clicked({
-                let app = app.clone();
-                let popover = popover.clone();
-                move |_| {
-                    // Close first: the shell takes a keyboard grab, and a
-                    // popover left open underneath it never gets dismissed.
-                    if let Some(popover) = popover.as_ref() {
-                        popover.popdown();
-                    }
-                    Self::handle_open_shell(app.clone(), route);
-                }
-            });
-        }
-    }
-
-    fn handle_open_shell(app: Rc<Self>, route: ShellRoute) {
-        if !app.state.borrow().snapshot.wm_available {
-            warn!("Ignoring shell request until the first WM snapshot arrives");
-            return;
-        }
-        info!("Opening shell route {}", route.title());
-        app.dispatch(UserAction::OpenShellHub(route));
-    }
-
-    fn handle_toggle_mute(app: Rc<Self>) {
-        app.dispatch(UserAction::ToggleMute);
-    }
-
-    fn handle_adjust_volume(app: Rc<Self>, step: i32) {
-        app.dispatch(UserAction::AdjustVolume(step));
-    }
-
-    // ========= UI 更新 =========
-    fn update_ui(&self) {
-        if let Ok(st) = self.state.try_borrow() {
-            // monitor_label 差量
-            let monitor_num = if st.snapshot.wm_available {
-                st.snapshot.monitor.0
-            } else {
-                i32::MIN
-            };
-            if self.ui_last_monitor_num.get() != monitor_num {
-                let monitor_icon = if st.snapshot.wm_available {
-                    Self::monitor_num_to_icon(monitor_num)
-                } else {
-                    "•"
-                };
-                self.monitor_label.set_text(monitor_icon);
-                self.ui_last_monitor_num.set(monitor_num);
-            }
-        }
-        self.update_tab_styles();
-    }
-
-    fn update_tab_styles(&self) {
-        if let Ok(mut st) = self.state.try_borrow_mut() {
-            if st.last_class_masks.len() != self.tab_buttons.len() {
-                st.last_class_masks = vec![0u8; self.tab_buttons.len()];
-            }
-
-            let active_tab = st
-                .snapshot
-                .wm_available
-                .then_some(st.snapshot.active_tag)
-                .flatten()
-                .map(TagId::index);
-            for (i, button) in self.tab_buttons.iter().enumerate() {
-                let tag_opt = st
-                    .snapshot
-                    .wm_available
-                    .then(|| st.snapshot.tags.get(i))
-                    .flatten();
-                let desired_mask = Self::classes_mask_for(tag_opt, active_tab == Some(i));
-                let prev_mask = st.last_class_masks[i];
-
-                if desired_mask == prev_mask {
-                    continue;
-                }
-
-                // 移除所有相关 class
-                for c in &["selected", "occupied", "filled", "urgent", "empty"] {
-                    button.remove_css_class(c);
-                }
-                // 添加必要 class
-                if desired_mask & CLS_URGENT != 0 {
-                    button.add_css_class("urgent");
-                }
-                if desired_mask & CLS_FILLED != 0 {
-                    button.add_css_class("filled");
-                }
-                if desired_mask & CLS_SELECTED != 0 {
-                    button.add_css_class("selected");
-                }
-                if desired_mask & CLS_OCCUPIED != 0 {
-                    button.add_css_class("occupied");
-                }
-                if desired_mask & CLS_EMPTY != 0 {
-                    button.add_css_class("empty");
-                }
-
-                st.last_class_masks[i] = desired_mask;
-            }
-        }
-    }
-
-    // 新增：布局 UI 更新（切换 open/closed、高亮当前布局、更新 toggle 文本）
-    fn update_layout_ui(&self) {
-        if let Ok(st) = self.state.try_borrow() {
-            // 开关按钮文本：显示当前布局符号
-            self.layout_toggle.set_label(if st.snapshot.wm_available {
-                &st.snapshot.layout_symbol
-            } else {
-                " ? "
-            });
-
-            // revealer 展开/收起
-            self.layout_revealer
-                .set_reveal_child(st.snapshot.layout_selector_open);
-
-            // 开关按钮 open/closed 类
-            self.layout_toggle.remove_css_class("open");
-            self.layout_toggle.remove_css_class("closed");
-            self.layout_toggle
-                .add_css_class(if st.snapshot.layout_selector_open {
-                    "open"
-                } else {
-                    "closed"
-                });
-
-            // 当前布局高亮
-            let is_tiled = st.snapshot.layout_symbol.contains("[]=");
-            let is_floating = st.snapshot.layout_symbol.contains("><>");
-            let is_monocle = st.snapshot.layout_symbol.contains("[M]");
-
-            for b in [
-                &self.layout_btn_tiled,
-                &self.layout_btn_floating,
-                &self.layout_btn_monocle,
-            ] {
-                b.remove_css_class("current");
-            }
-            if is_tiled {
-                self.layout_btn_tiled.add_css_class("current");
-            } else if is_floating {
-                self.layout_btn_floating.add_css_class("current");
-            } else if is_monocle {
-                self.layout_btn_monocle.add_css_class("current");
-            }
-        }
-    }
-
-    fn update_time_display(&self) {
-        if let Ok(st) = self.state.try_borrow() {
-            self.time_button.set_label(&st.snapshot.time);
-        }
-    }
-
-    fn update_volume_display(&self) {
-        if let Ok(st) = self.state.try_borrow() {
-            match st.snapshot.audio.volume_percent {
-                Some(volume) => self.update_volume_display_inner(
-                    i32::from(volume.rounded()),
-                    st.snapshot.audio.muted,
-                ),
-                None => self.volume_button.set_label("Vol --%"),
-            }
-        }
-    }
-
-    fn update_volume_display_inner(&self, volume: i32, muted: bool) {
-        let label = if muted {
-            format!("Muted {}%", volume)
-        } else {
-            format!("Vol {}%", volume)
-        };
-        self.volume_button.set_label(&label);
-    }
-
-    fn update_theme_display(&self) {
-        let is_dark = if let Ok(st) = self.state.try_borrow() {
-            st.snapshot.theme == ThemeMode::Dark
-        } else {
-            true
-        };
+    /// Everything visible is decided by `xbar_core`: which cells exist, their
+    /// order, their glyphs, and their state. This function only spends that
+    /// decision on widgets.
+    fn sync_views(&self) {
+        let snapshot = self.snapshot.borrow();
+        let presentation = PresentationProjector::project(snapshot.view(), &self.presentation);
 
         self.window.remove_css_class("theme-dark");
         self.window.remove_css_class("theme-light");
-        self.window
-            .add_css_class(if is_dark { "theme-dark" } else { "theme-light" });
+        self.window.add_css_class(match presentation.theme {
+            ThemeMode::Dark => "theme-dark",
+            ThemeMode::Light => "theme-light",
+        });
 
-        self.theme_button.set_label(if is_dark { "☾" } else { "☀" });
-    }
+        let mut leading = presentation.tags;
+        leading.push(presentation.layout_button);
+        leading.extend(presentation.layout_choices);
+        self.leading.sync(&leading);
 
-    fn update_metrics(&self) {
-        if let Ok(mut st) = self.state.try_borrow_mut() {
-            let mem_ratio = st
-                .snapshot
-                .system
-                .memory_percent
-                .map(|value| value.as_f64() / 100.0)
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
-            let prev_mem = st.last_mem_fraction;
-            let mem_level_changed =
-                usage_to_level_class(mem_ratio) != usage_to_level_class(prev_mem);
-            if (mem_ratio - prev_mem).abs() > MEM_REDRAW_THRESHOLD || mem_level_changed {
-                st.last_mem_fraction = mem_ratio;
-                set_metric_capsule(&self.memory_label, "MEM", mem_ratio);
-            }
+        // The projector orders status cells right to left, anchored at the
+        // right edge; a horizontal box packs them the other way around.
+        let mut trailing = presentation.status;
+        trailing.reverse();
+        self.trailing.sync(&trailing);
 
-            let cpu_ratio = st
-                .snapshot
-                .system
-                .cpu_percent
-                .map(|value| value.as_f64() / 100.0)
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
-            let prev_cpu = st.last_cpu_usage;
-            let cpu_level_changed =
-                usage_to_level_class(cpu_ratio) != usage_to_level_class(prev_cpu);
-            if (cpu_ratio - prev_cpu).abs() > CPU_REDRAW_THRESHOLD || cpu_level_changed {
-                st.last_cpu_usage = cpu_ratio;
-                set_metric_capsule(&self.cpu_label, "CPU", cpu_ratio);
-            }
-        }
-    }
-
-    // ========= 工具 =========
-    fn monitor_num_to_icon(monitor_num: i32) -> &'static str {
-        match monitor_num {
-            0 => "1",
-            1 => "2",
-            2 => "3",
-            _ => "•",
-        }
-    }
-
-    fn classes_mask_for(tag: Option<&TagState>, is_active_index: bool) -> u8 {
-        if let Some(t) = tag {
-            if t.urgent {
-                CLS_URGENT
-            } else if t.filled {
-                CLS_FILLED
-            } else if t.selected && t.occupied {
-                CLS_SELECTED | CLS_OCCUPIED
-            } else if t.selected || is_active_index {
-                CLS_SELECTED
-            } else if t.occupied {
-                CLS_OCCUPIED
-            } else {
-                CLS_EMPTY
-            }
-        } else {
-            if is_active_index {
-                CLS_SELECTED
-            } else {
-                CLS_EMPTY
-            }
-        }
+        // The label stays in the tree even with nothing to say: it is the gap
+        // that holds the status cluster against the right edge, which is where
+        // the layout engine anchors it.
+        self.client_name.set_text(
+            presentation
+                .client_name
+                .as_ref()
+                .map_or("", |client| client.value.as_str()),
+        );
     }
 
     /// The bar's size in physical pixels, which is what the backdrop is
@@ -872,33 +382,21 @@ impl TabBarApp {
         self.glass_generation.set(generation);
     }
 
-    #[allow(dead_code)]
-    fn resize_window_to_monitor(
-        &self,
-        _expected_x: i32,
-        _expected_y: i32,
-        expected_width: u32,
-        _expected_height: u32,
-    ) {
+    fn resize_window_to_monitor(&self, expected_width: u32) {
         let scale_factor = self.window.scale_factor().max(1);
         let logical_width = (f64::from(expected_width) / f64::from(scale_factor))
             .round()
             .clamp(1.0, f64::from(i32::MAX)) as i32;
 
-        // GTK4 deliberately exposes no general window-position API: on
-        // Wayland the compositor/JWM owns placement. Size is logical, while
-        // xbar_core monitor geometry is physical pixels.
-        self.window.set_default_size(logical_width, 40);
+        // GTK4 deliberately exposes no general window-position API: on Wayland
+        // the compositor/JWM owns placement. Size is logical, while xbar_core
+        // monitor geometry is physical pixels.
+        self.window
+            .set_default_size(logical_width, self.metrics.bar_height);
     }
 
     fn show(&self) {
-        // 在显示前确保所有样式已应用
-        self.update_tab_styles();
-        self.update_theme_display();
-
         self.window.present();
-
-        // 在窗口显示后启用透明度支持并强制重绘
         if let Some(surface) = self.window.surface() {
             surface.set_opaque_region(None);
         }
@@ -906,17 +404,35 @@ impl TabBarApp {
     }
 }
 
-// ========= main =========
-fn main() -> glib::ExitCode {
-    let args: Vec<String> = env::args().collect();
-    let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
+/// The configured font at the size the Cairo renderer forces onto it, which is
+/// the description every pill width is measured against.
+fn pill_font(font: &str, font_size: f32) -> gtk4::pango::FontDescription {
+    let mut description = gtk4::pango::FontDescription::from_string(font);
+    description.set_absolute_size(f64::from(font_size.max(1.0)) * f64::from(gtk4::pango::SCALE));
+    description
+}
 
-    if let Err(e) = initialize_logging("gtk_bar", &shared_path) {
-        eprintln!("Failed to initialize logging: {}", e);
+fn apply_stylesheet(css: &str) {
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_string(css);
+    if let Some(display) = gdk4::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
+fn main() -> glib::ExitCode {
+    let shared_path = env::args().skip(1).last().unwrap_or_default();
+
+    if let Err(error) = initialize_logging(BAR_NAME, &shared_path) {
+        eprintln!("Failed to initialize logging: {error}");
         std::process::exit(1);
     }
 
-    info!("Starting GTK4 Bar (layout selector optimized like iced_bar)");
+    info!("Starting {BAR_NAME}");
 
     // Get monitor ID from environment or shared path to create unique application ID
     let monitor_id = env::var("JWM_MONITOR_ID").unwrap_or_else(|_| {
@@ -924,50 +440,61 @@ fn main() -> glib::ExitCode {
         shared_path
             .split('_')
             .next_back()
-            .and_then(|s| s.parse::<i32>().ok())
+            .and_then(|value| value.parse::<i32>().ok())
             .map(|id| id.to_string())
             .unwrap_or_else(|| "0".to_string())
     });
 
-    let app_id = format!("dev.gtk.bar.mon{}", monitor_id);
-    info!("Application ID: {}", app_id);
+    let app_id = format!("dev.gtk.bar.mon{monitor_id}");
+    info!("Application ID: {app_id}");
 
-    // GTK 应用
     let app = Application::builder()
         .application_id(&app_id)
         .flags(gio::ApplicationFlags::HANDLES_OPEN | gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
 
-    let shared_path_clone = shared_path.clone();
-    app.connect_activate(move |app| {
-        let app_instance = TabBarApp::new(app, shared_path_clone.clone());
-        app_instance.show();
+    // The bar has to outlive `activate`: its timers and its pills hold weak
+    // references so the widget tree cannot keep the bar alive by itself, which
+    // makes the application the one owner of it.
+    let instance: RefCell<Option<Rc<BarApp>>> = RefCell::new(None);
+    app.connect_activate({
+        let shared_path = shared_path.clone();
+        move |app| {
+            if instance.borrow().is_some() {
+                return;
+            }
+            let bar = BarApp::new(app, shared_path.clone());
+            bar.show();
+            *instance.borrow_mut() = Some(bar);
+        }
     });
 
-    // 文件打开处理
     app.connect_open(move |app, files, hint| {
         info!(
-            "App received {} files to open with hint: {}",
-            files.len(),
-            hint
+            "App received {} files to open with hint: {hint}",
+            files.len()
         );
-        for file in files {
-            if let Some(path) = file.path() {
-                info!("File to open: {:?}", path);
-            }
-        }
         app.activate();
     });
 
-    // 命令行处理
     app.connect_command_line(move |app, command_line| {
-        let args = command_line.arguments();
-        info!("Command line arguments: {:?}", args);
+        info!("Command line arguments: {:?}", command_line.arguments());
         app.activate();
         0.into()
     });
 
     app.run()
+}
+
+/// A physical screen width in the logical units GTK sizes windows in.
+fn logical_screen_width(physical_width: u32) -> i32 {
+    let scale = gdk4::Display::default()
+        .and_then(|display| display.monitors().item(0))
+        .and_then(|object| object.downcast::<gdk4::Monitor>().ok())
+        .map_or(1, |monitor| monitor.scale_factor().max(1));
+    (f64::from(physical_width) / f64::from(scale))
+        .round()
+        .clamp(1.0, f64::from(i32::MAX)) as i32
 }
 
 /// Physical size of the primary monitor, which is the canvas the compositor
@@ -977,8 +504,8 @@ fn primary_screen_size() -> (u32, u32) {
     let Some(display) = gdk4::Display::default() else {
         return fallback;
     };
-    let monitors = display.monitors();
-    let Some(monitor) = monitors
+    let Some(monitor) = display
+        .monitors()
         .item(0)
         .and_then(|object| object.downcast::<gdk4::Monitor>().ok())
     else {

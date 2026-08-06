@@ -1201,26 +1201,32 @@ impl From<ControlSpec> for PillSpec {
     }
 }
 
+/// The colors every bar paints with, whether it draws a [`Scene`] itself or
+/// hands the same values to a widget toolkit's stylesheet.
+///
+/// This is public precisely so a toolkit frontend does not have to restate the
+/// material in its own CSS, where it would drift from what the Cairo bars draw.
 #[derive(Debug, Clone, Copy)]
-struct Palette {
-    background: Rgba,
-    pill: Rgba,
-    occupied: Rgba,
-    hovered: Rgba,
-    selected: Rgba,
-    urgent: Rgba,
-    urgent_stroke: Rgba,
-    text: Rgba,
-    selected_text: Rgba,
-    muted_text: Rgba,
-    accent: Rgba,
+pub struct Palette {
+    pub background: Rgba,
+    pub pill: Rgba,
+    pub occupied: Rgba,
+    pub hovered: Rgba,
+    pub selected: Rgba,
+    pub urgent: Rgba,
+    pub urgent_stroke: Rgba,
+    pub text: Rgba,
+    pub selected_text: Rgba,
+    pub muted_text: Rgba,
+    pub accent: Rgba,
 }
 
 impl Palette {
     // macOS menu-bar material. Overlay colors are translucent white/black so
     // they read correctly over any frosted background a frontend composites
     // beneath the scene; selection is the system accent blue.
-    const fn for_theme(theme: ThemeMode) -> Self {
+    #[must_use]
+    pub const fn for_theme(theme: ThemeMode) -> Self {
         match theme {
             ThemeMode::Dark => Self {
                 background: Rgba::rgb8(28, 28, 30),
