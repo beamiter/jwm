@@ -204,6 +204,19 @@ impl Jwm {
                 c.state.is_fixed =
                     (h.max_w > 0) && (h.max_h > 0) && (h.max_w == h.min_w) && (h.max_h == h.min_h);
                 c.size_hints.hints_valid = true;
+                if h.max_w > 0 || h.max_h > 0 {
+                    // A capped client cannot fill a tile, so record the caps:
+                    // this is what tells us afterwards whether such a window
+                    // was floated (min==max) or merely clamped inside a slot.
+                    log::info!(
+                        "[updatesizehints] {win:?} min={}x{} max={}x{} is_fixed={}",
+                        h.min_w,
+                        h.min_h,
+                        h.max_w,
+                        h.max_h,
+                        c.state.is_fixed,
+                    );
+                }
             }
             None => {
                 if let Some(c) = self.state.clients.get_mut(client_key) {

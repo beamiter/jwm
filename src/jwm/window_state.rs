@@ -144,6 +144,35 @@ impl Jwm {
         Ok(backend.property_ops().set_wm_state(win, state)?)
     }
 
+    /// Float a client whose size hints pin it to a single size.
+    ///
+    /// dwm decides this in `manage()` (`c->isfloating = trans != None ||
+    /// c->isfixed`), but jwm learns `is_fixed` only in `updatesizehints`,
+    /// which runs after `applyrules_by_key` has already forced
+    /// `is_floating = false`. Without this pass a min==max window is tiled: it
+    /// occupies a layout slot it cannot fill, so `applysizehints` clamps it
+    /// back to its own size and parks it at the tile origin while the rest of
+    /// the layout is laid out around a rectangle nothing ever covers.
+    /// Feishu's 780x659 "飞书会议" pre-join window is exactly this shape.
+    pub(super) fn float_if_fixed_size(&mut self, client_key: ClientKey) {
+        let Some(client) = self.state.clients.get(client_key) else {
+            return;
+        };
+        if !client.state.is_fixed || client.state.is_floating {
+            return;
+        }
+        log::info!(
+            "[float_if_fixed_size] {:?} has min==max size hints ({}x{}); floating it",
+            client.win,
+            client.size_hints.min_w,
+            client.size_hints.min_h,
+        );
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.state.is_floating = true;
+        }
+        self.reorder_client_in_monitor_groups(client_key);
+    }
+
     pub(super) fn updatewindowtype(&mut self, backend: &mut dyn Backend, client_key: ClientKey) {
         let (win, is_popup_like) = if let Some(client) = self.state.clients.get(client_key) {
             (client.win, self.is_popup_like(backend, client_key))

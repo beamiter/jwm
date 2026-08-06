@@ -462,6 +462,7 @@ impl Jwm {
 
         self.updatewindowtype(backend, client_key);
         self.updatesizehints(backend, client_key)?;
+        self.float_if_fixed_size(client_key);
         self.updatewmhints(backend, client_key);
         self.apply_motif_hints(backend, client_key);
         self.apply_gtk_frame_extents(backend, client_key);
