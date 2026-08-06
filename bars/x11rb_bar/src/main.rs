@@ -1,6 +1,9 @@
 use anyhow::{Result, anyhow};
 use cairo::ffi::{xcb_connection_t, xcb_visualtype_t};
-use cairo::{Context, XCBConnection as CairoXCBConnection, XCBDrawable, XCBSurface, XCBVisualType};
+use cairo::{
+    Context, Format, ImageSurface, XCBConnection as CairoXCBConnection, XCBDrawable, XCBSurface,
+    XCBVisualType,
+};
 use log::{debug, warn};
 use pango::FontDescription;
 use std::cell::{Cell, RefCell};
@@ -10,15 +13,19 @@ use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ConfigureWindowAux, CreateGCAux, CreateWindowAux,
-    EventMask, Gcontext, Pixmap, PropMode, Screen, Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ColormapAlloc, ConfigureWindowAux, CreateGCAux,
+    CreateWindowAux, EventMask, Gcontext, Pixmap, PropMode, Screen, VisualClass, Visualtype,
+    Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::xcb_ffi::XCBConnection;
 use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
+use xbar_core::glass::{
+    DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, GlassError, GlassImage, StripRequest,
+    WallpaperSource, fallback_rgb,
+};
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, Size};
+use xbar_core::presentation::{Point, PointerAction, PresentationLabels, Size};
 use xbar_core::render::cairo::CairoBar;
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
@@ -43,7 +50,7 @@ fn find_visual_by_id_and_depth(
     screen: &Screen,
     target_visual_id: u32,
     target_depth: u8,
-) -> Option<x11rb::protocol::xproto::Visualtype> {
+) -> Option<Visualtype> {
     screen
         .allowed_depths
         .iter()
@@ -57,9 +64,14 @@ fn find_visual_by_id_and_depth(
         .cloned()
 }
 
-fn build_cairo_xcb(conn: &XCBConnection, screen: &Screen) -> Result<CairoXcb> {
-    let visual = find_visual_by_id_and_depth(screen, screen.root_visual, screen.root_depth)
-        .ok_or_else(|| anyhow!("could not find the root X visual"))?;
+fn build_cairo_xcb(
+    conn: &XCBConnection,
+    screen: &Screen,
+    visual_id: u32,
+    depth: u8,
+) -> Result<CairoXcb> {
+    let visual = find_visual_by_id_and_depth(screen, visual_id, depth)
+        .ok_or_else(|| anyhow!("could not find the requested X visual"))?;
     let raw_visual = xcb::x::Visualtype::new(
         visual.visual_id,
         unsafe { std::mem::transmute::<u32, xcb::x::VisualClass>(u32::from(visual.class)) },
@@ -83,6 +95,224 @@ fn build_cairo_xcb(conn: &XCBConnection, screen: &Screen) -> Result<CairoXcb> {
     })
 }
 
+// ---------------- Compositor detection ----------------
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection. With a compositor the bar renders per-pixel alpha through a
+/// 32-bit visual and lets the compositor blend what lies behind it; without
+/// one it falls back to baking a frosted wallpaper strip itself.
+fn compositor_active(conn: &XCBConnection, screen_number: usize) -> bool {
+    let owner = intern_atom(conn, &format!("_NET_WM_CM_S{screen_number}"))
+        .and_then(|atom| Ok(conn.get_selection_owner(atom)?.reply()?.owner));
+    match owner {
+        Ok(owner) => owner != x11rb::NONE,
+        Err(error) => {
+            debug!("compositor selection lookup failed: {error}");
+            false
+        }
+    }
+}
+
+/// A 32-bit TrueColor visual for translucent rendering, if the server has one.
+fn find_argb_visual(screen: &Screen) -> Option<Visualtype> {
+    screen
+        .allowed_depths
+        .iter()
+        .find(|depth| depth.depth == 32)
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
+        })
+        .cloned()
+}
+
+// ---------------- Frosted glass ----------------
+/// Root-window properties that name the wallpaper pixmap.
+struct RootPixmapAtoms {
+    xrootpmap: Atom,
+    esetroot: Atom,
+}
+
+impl RootPixmapAtoms {
+    fn intern(conn: &XCBConnection) -> Result<Self> {
+        Ok(Self {
+            xrootpmap: intern_atom(conn, "_XROOTPMAP_ID")?,
+            esetroot: intern_atom(conn, "ESETROOT_PMAP_ID")?,
+        })
+    }
+
+    fn matches(&self, atom: Atom) -> bool {
+        atom == self.xrootpmap || atom == self.esetroot
+    }
+}
+
+/// Wallpaper pixels captured from the X root pixmap.
+///
+/// This works only where some tool published `_XROOTPMAP_ID` — feh, hsetroot,
+/// and the like do.  A compositor that draws the wallpaper from its own
+/// configuration never publishes it, which is why `glass.wallpaper` exists;
+/// this stays as the fallback for a plain X session.
+struct RootPixmapSource<'a> {
+    conn: &'a XCBConnection,
+    cairo_xcb: &'a CairoXcb,
+    /// A GC on the root window, so copying between wallpaper-depth pixmaps
+    /// cannot mismatch the bar's own (possibly 32-bit) drawable.
+    gc: Gcontext,
+    root: Window,
+    atoms: RootPixmapAtoms,
+    revision: u64,
+}
+
+impl RootPixmapSource<'_> {
+    /// React to a root property change; true when the wallpaper changed and
+    /// the frosted strip must be rebuilt.
+    fn note_property(&mut self, atom: Atom) -> bool {
+        if self.atoms.matches(atom) {
+            self.revision = self.revision.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl WallpaperSource for RootPixmapSource<'_> {
+    fn revision(&mut self) -> u64 {
+        self.revision
+    }
+
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        capture_root_strip(self, request)
+            .map_err(|error| GlassError::Unavailable(error.to_string()))
+    }
+}
+
+/// Where this bar's wallpaper comes from.
+///
+/// A configured file is preferred because it is the only source that survives
+/// a compositor-drawn wallpaper, and the root pixmap covers the sessions that
+/// still publish one.
+enum WallpaperOrigin<'a> {
+    File(WallpaperFile),
+    RootPixmap(RootPixmapSource<'a>),
+}
+
+impl WallpaperSource for WallpaperOrigin<'_> {
+    fn revision(&mut self) -> u64 {
+        match self {
+            Self::File(source) => source.revision(),
+            Self::RootPixmap(source) => source.revision(),
+        }
+    }
+
+    fn strip(&mut self, request: &StripRequest) -> Result<GlassImage, GlassError> {
+        match self {
+            Self::File(source) => source.strip(request),
+            Self::RootPixmap(source) => source.strip(request),
+        }
+    }
+}
+
+impl WallpaperOrigin<'_> {
+    /// React to a root property change; true when the wallpaper changed and
+    /// the frosted strip must be rebuilt.  A file source restats the wallpaper
+    /// itself and ignores X properties entirely.
+    fn note_property(&mut self, atom: Atom) -> bool {
+        match self {
+            Self::RootPixmap(source) => source.note_property(atom),
+            Self::File(_) => false,
+        }
+    }
+}
+
+fn read_wallpaper_pixmap(conn: &XCBConnection, root: Window, atom: Atom) -> Option<Pixmap> {
+    let reply = conn
+        .get_property(false, root, atom, AtomEnum::PIXMAP, 0, 1)
+        .ok()?
+        .reply()
+        .ok()?;
+    if reply.type_ != Atom::from(AtomEnum::PIXMAP) {
+        return None;
+    }
+    reply.value32()?.next().filter(|id| *id != x11rb::NONE)
+}
+
+/// Copy the wallpaper under the bar out of the root pixmap.
+///
+/// The result is raw wallpaper, not yet frosted: blurring it is
+/// `xbar_core::glass`'s job, and everything here is the X11 half that cannot
+/// move into a platform-neutral crate.
+fn capture_root_strip(source: &RootPixmapSource<'_>, request: &StripRequest) -> Result<GlassImage> {
+    let width = u16::try_from(request.width)?;
+    let height = u16::try_from(request.height)?;
+    if width == 0 || height == 0 {
+        return Err(anyhow!("empty bar geometry"));
+    }
+    let conn = source.conn;
+    let wallpaper = read_wallpaper_pixmap(conn, source.root, source.atoms.xrootpmap)
+        .or_else(|| read_wallpaper_pixmap(conn, source.root, source.atoms.esetroot))
+        .ok_or_else(|| anyhow!("no wallpaper pixmap property"))?;
+
+    let geometry = conn.get_geometry(wallpaper)?.reply()?;
+    let strip_height = u16::try_from(request.padded_height().min(u32::from(u16::MAX)))?;
+    let src_x = request
+        .x
+        .clamp(0, i32::from(geometry.width).saturating_sub(1));
+    let src_y = request
+        .y
+        .clamp(0, i32::from(geometry.height).saturating_sub(1));
+    if i32::from(geometry.width) - src_x < i32::from(width) {
+        return Err(anyhow!("wallpaper pixmap narrower than the bar"));
+    }
+    let available_height =
+        (i32::from(geometry.height) - src_y).clamp(0, i32::from(strip_height)) as u16;
+    if available_height < height {
+        return Err(anyhow!("wallpaper pixmap shorter than the bar"));
+    }
+
+    // Copy the strip into a pixmap we own so all later Cairo traffic touches
+    // only stable resources even if the wallpaper pixmap is freed under us.
+    let strip = conn.generate_id()?;
+    conn.create_pixmap(geometry.depth, strip, wallpaper, width, available_height)?
+        .check()?;
+    let image = conn
+        .copy_area(
+            wallpaper,
+            strip,
+            source.gc,
+            src_x as i16,
+            src_y as i16,
+            0,
+            0,
+            width,
+            available_height,
+        )
+        .map_err(anyhow::Error::from)
+        .and_then(|cookie| cookie.check().map_err(anyhow::Error::from))
+        .and_then(|()| {
+            let drawable = XCBDrawable(strip);
+            let xcb_surface = XCBSurface::create(
+                &source.cairo_xcb.connection,
+                &drawable,
+                &source.cairo_xcb.visual,
+                i32::from(width),
+                i32::from(available_height),
+            )?;
+            let image =
+                ImageSurface::create(Format::Rgb24, i32::from(width), i32::from(available_height))?;
+            let context = Context::new(&image)?;
+            context.set_source_surface(&xcb_surface, 0.0, 0.0)?;
+            context.paint()?;
+            drop(context);
+            Ok(image)
+        });
+    let _ = conn.free_pixmap(strip);
+    let mut image = image?;
+    image.flush();
+    Ok(GlassImage::from_image_surface(&mut image)?)
+}
+
 // ---------------- X11 back buffer ----------------
 struct BackBuffer {
     pixmap: Pixmap,
@@ -94,20 +324,14 @@ struct BackBuffer {
 }
 
 impl BackBuffer {
-    fn new(
-        conn: &XCBConnection,
-        screen: &Screen,
-        win: Window,
-        width: u16,
-        height: u16,
-    ) -> Result<Self> {
+    fn new(conn: &XCBConnection, depth: u8, win: Window, width: u16, height: u16) -> Result<Self> {
         let pixmap = conn.generate_id()?;
-        conn.create_pixmap(screen.root_depth, pixmap, win, width, height)?;
+        conn.create_pixmap(depth, pixmap, win, width, height)?;
         Ok(Self {
             pixmap,
             width,
             height,
-            depth: screen.root_depth,
+            depth,
             surface: None,
             context: None,
         })
@@ -167,6 +391,10 @@ impl BackBuffer {
 }
 
 // ---------------- EWMH ----------------
+fn intern_atom(conn: &XCBConnection, name: &str) -> Result<Atom> {
+    Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
+}
+
 /// Write core-described dock properties with this connection. Atom names come
 /// from `DockWindowSpec`; only interning and the property calls live here.
 fn write_dock_properties(
@@ -174,16 +402,13 @@ fn write_dock_properties(
     win: Window,
     properties: &[DockProperty],
 ) -> Result<()> {
-    let intern = |name: &str| -> Result<Atom> {
-        Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom)
-    };
     for property in properties {
-        let name = intern(property.name)?;
+        let name = intern_atom(conn, property.name)?;
         match &property.value {
             DockPropertyValue::Atoms(values) => {
                 let values = values
                     .iter()
-                    .map(|value| intern(value))
+                    .map(|value| intern_atom(conn, value))
                     .collect::<Result<Vec<Atom>>>()?;
                 conn.change_property32(PropMode::REPLACE, win, name, AtomEnum::ATOM, &values)?;
             }
@@ -191,7 +416,7 @@ fn write_dock_properties(
                 conn.change_property32(PropMode::REPLACE, win, name, AtomEnum::CARDINAL, values)?;
             }
             DockPropertyValue::Utf8Text(text) => {
-                let utf8_string = intern("UTF8_STRING")?;
+                let utf8_string = intern_atom(conn, "UTF8_STRING")?;
                 conn.change_property8(PropMode::REPLACE, win, name, utf8_string, text.as_bytes())?;
             }
         }
@@ -218,10 +443,10 @@ struct WindowAdapter<'a> {
     win: Window,
     bar_height: Cell<u16>,
     effects: RefCell<EffectRouter>,
-    /// Frosted backdrop, present only when a wallpaper was configured. This
-    /// window is on the root visual and can never be genuinely translucent, so
-    /// glass here always means a baked strip.
-    glass: RefCell<Option<GlassBackdrop<WallpaperFile>>>,
+    glass: RefCell<GlassBackdrop<WallpaperOrigin<'a>>>,
+    /// True when the window uses a 32-bit visual under a compositor: the bar
+    /// then emits real per-pixel alpha and skips the baked frost strip.
+    translucent: bool,
 }
 
 impl WindowAdapter<'_> {
@@ -240,6 +465,12 @@ impl WindowAdapter<'_> {
                 (0, 0)
             }
         }
+    }
+
+    /// React to a root property change; true when the wallpaper changed and
+    /// the frosted strip must be rebuilt.
+    fn wallpaper_changed(&self, atom: Atom) -> bool {
+        self.glass.borrow_mut().source_mut().note_property(atom)
     }
 
     fn sync_bar_height(&self, bar: &mut CairoBar, height: u16) {
@@ -293,17 +524,21 @@ fn redraw(
     height: u16,
     bar: &mut CairoBar,
 ) -> Result<()> {
-    let mut glass = window.glass.borrow_mut();
-    let backdrop = glass.as_mut().and_then(|glass| {
+    let size = Size::new(f32::from(width), f32::from(height));
+    if window.translucent {
+        // The compositor blends and blurs behind the bar; render the scene's
+        // per-pixel alpha straight into the window-depth back buffer.
+        let context = back.ensure_context(cairo_xcb)?;
+        bar.render(context, size)?;
+    } else {
+        // Nobody will blur behind an opaque window, so the bar bakes its own
+        // backdrop and the scene blends over it in one pass.
+        let mut glass = window.glass.borrow_mut();
         let (x, y) = window.root_origin();
-        glass.ensure(x, y, u32::from(width), u32::from(height))
-    });
-    let context = back.ensure_context(cairo_xcb)?;
-    bar.render_over(
-        context,
-        Size::new(f32::from(width), f32::from(height)),
-        backdrop,
-    )?;
+        let backdrop = glass.ensure(x, y, u32::from(width), u32::from(height));
+        let context = back.ensure_context(cairo_xcb)?;
+        bar.render_over(context, size, backdrop)?;
+    }
     let _ = bar.runtime_mut().take_changes();
     back.flush();
     back.blit_to_window(window.conn, window.win, gc)?;
@@ -352,6 +587,9 @@ fn handle_x_event(
                 f32::from(event.event_x),
                 f32::from(event.event_y),
             ));
+        }
+        x11rb::protocol::Event::PropertyNotify(event) if event.window == window.screen.root => {
+            should_redraw = window.wallpaper_changed(event.atom);
         }
         x11rb::protocol::Event::ButtonPress(event) => {
             if let Some(input) = PointerAction::from_x11_button(event.detail) {
@@ -433,68 +671,137 @@ fn main() -> Result<()> {
         .roots
         .get(screen_number)
         .ok_or_else(|| anyhow!("no X screen found"))?;
-    let cairo_xcb = build_cairo_xcb(&conn, screen)?;
+    // Prefer real translucency when a compositor can blend it; otherwise the
+    // bar bakes its own frosted wallpaper strip below.
+    let argb_visual = if compositor_active(&conn, screen_number) {
+        find_argb_visual(screen)
+    } else {
+        None
+    };
+    let (window_depth, window_visual) = match &argb_visual {
+        Some(visual) => (32, visual.visual_id),
+        None => (screen.root_depth, screen.root_visual),
+    };
+    let translucent = argb_visual.is_some();
+    let cairo_xcb = build_cairo_xcb(&conn, screen, window_visual, window_depth)?;
 
-    let presentation = app_config.presentation.clone();
+    let mut presentation = app_config.presentation.clone();
+    // Monochrome Nerd Font glyphs tinted by the text color read like macOS
+    // template icons; only replace the stock emoji so a config that overrides
+    // individual labels keeps its customization.
+    if presentation.labels == PresentationLabels::default() {
+        presentation.labels = PresentationLabels::nerd_font();
+    }
     let bar_height = presentation
         .bar_height
         .round()
         .clamp(1.0, f32::from(u16::MAX)) as u16;
     let font = FontDescription::from_string(&app_config.font);
     let mut bar = CairoBar::new(runtime, presentation, font);
-    // A frosted backdrop only reads as a material if the bar's own background
-    // lets some of it through, so glass changes what "no opacity configured"
-    // should mean.
-    let glass = app_config.glass.file_backdrop(
-        u32::from(screen.width_in_pixels),
-        u32::from(screen.height_in_pixels),
-        fallback_rgb(app_config.theme),
-    );
-    match app_config.background_opacity {
-        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
-        None if glass.is_some() => bar
-            .renderer_mut()
-            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
-        None => {}
-    }
+    // The frosted pipeline needs a translucent background tint by default;
+    // an explicit config value still wins (1.0 restores a solid bar).
+    let opacity = app_config
+        .background_opacity
+        .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
+    bar.renderer_mut().set_background_opacity(Some(opacity));
 
     let win = conn.generate_id()?;
-    let gc = conn.generate_id()?;
-    conn.create_gc(gc, screen.root, &CreateGCAux::new())?;
-
     let mut current_width = screen.width_in_pixels;
     let mut current_height = bar_height;
-    conn.create_window(
-        x11rb::COPY_FROM_PARENT as u8,
-        win,
-        screen.root,
-        0,
-        0,
-        current_width,
-        current_height,
-        0,
-        WindowClass::INPUT_OUTPUT,
-        screen.root_visual,
-        &CreateWindowAux::new()
-            .background_pixmap(x11rb::NONE)
-            .event_mask(
-                EventMask::EXPOSURE
-                    | EventMask::STRUCTURE_NOTIFY
-                    | EventMask::BUTTON_PRESS
-                    | EventMask::POINTER_MOTION
-                    | EventMask::ENTER_WINDOW
-                    | EventMask::LEAVE_WINDOW,
-            ),
-    )?;
+    let event_mask = EventMask::EXPOSURE
+        | EventMask::STRUCTURE_NOTIFY
+        | EventMask::BUTTON_PRESS
+        | EventMask::POINTER_MOTION
+        | EventMask::ENTER_WINDOW
+        | EventMask::LEAVE_WINDOW;
+    if translucent {
+        // A depth-32 window needs an explicit border pixel and colormap for
+        // its non-default visual, or CreateWindow fails with BadMatch.
+        let colormap = conn.generate_id()?;
+        conn.create_colormap(ColormapAlloc::NONE, colormap, screen.root, window_visual)?
+            .check()?;
+        conn.create_window(
+            window_depth,
+            win,
+            screen.root,
+            0,
+            0,
+            current_width,
+            current_height,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            window_visual,
+            &CreateWindowAux::new()
+                .background_pixel(0)
+                .border_pixel(0)
+                .colormap(colormap)
+                .event_mask(event_mask),
+        )?
+        .check()?;
+    } else {
+        conn.create_window(
+            x11rb::COPY_FROM_PARENT as u8,
+            win,
+            screen.root,
+            0,
+            0,
+            current_width,
+            current_height,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            window_visual,
+            &CreateWindowAux::new()
+                .background_pixmap(x11rb::NONE)
+                .event_mask(event_mask),
+        )?
+        .check()?;
+    }
+
+    // The GC lives on the bar window so its depth always matches the back
+    // buffer, whichever visual was chosen.
+    let gc = conn.generate_id()?;
+    conn.create_gc(gc, win, &CreateGCAux::new())?;
+    // Wallpaper strips are copied between root-depth pixmaps, which a GC on a
+    // 32-bit bar window could not touch.
+    let root_gc = conn.generate_id()?;
+    conn.create_gc(root_gc, screen.root, &CreateGCAux::new())?;
 
     let spec = dock_spec(0, 0, u32::from(current_width), current_height);
     write_dock_properties(&conn, win, &spec.properties())?;
     conn.map_window(win)?;
-    conn.change_window_attributes(
-        win,
-        &ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
-    )?;
+    if !translucent {
+        conn.change_window_attributes(
+            win,
+            &ChangeWindowAttributesAux::new().background_pixmap(x11rb::NONE),
+        )?;
+    }
     conn.flush()?;
+
+    // Watch the root window so wallpaper swaps rebuild the frosted strip.
+    conn.change_window_attributes(
+        screen.root,
+        &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+    )?;
+    let fallback = fallback_rgb(app_config.theme);
+
+    // A configured wallpaper wins: it is the only source that still works when
+    // the compositor draws the wallpaper itself instead of publishing a root
+    // pixmap, which is what JWM does.
+    let source = match app_config.glass.file_source(
+        u32::from(screen.width_in_pixels),
+        u32::from(screen.height_in_pixels),
+        fallback,
+    ) {
+        Some(file) => WallpaperOrigin::File(file),
+        None => WallpaperOrigin::RootPixmap(RootPixmapSource {
+            conn: &conn,
+            cairo_xcb: &cairo_xcb,
+            gc: root_gc,
+            root: screen.root,
+            atoms: RootPixmapAtoms::intern(&conn)?,
+            revision: 0,
+        }),
+    };
 
     let window = WindowAdapter {
         conn: &conn,
@@ -502,11 +809,14 @@ fn main() -> Result<()> {
         win,
         bar_height: Cell::new(bar_height),
         effects: RefCell::new(EffectRouter::default()),
-        glass: RefCell::new(glass),
+        glass: RefCell::new(
+            GlassBackdrop::new(source, app_config.glass.params()).with_fallback(fallback),
+        ),
+        translucent,
     };
     let mut back = BackBuffer::new(
         window.conn,
-        window.screen,
+        window_depth,
         window.win,
         current_width,
         current_height,
