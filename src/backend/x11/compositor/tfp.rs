@@ -583,7 +583,17 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             };
             if let Err(error) = self.conn.name_window_pixmap(x11_win, pixmap) {
-                log::warn!("compositor: resized NameWindowPixmap failed: {error}");
+                // Name the window: on this path the retry backs off and the
+                // window keeps presenting its previous texture, so a bare
+                // "it failed" line leaves a visibly frozen window
+                // unattributable. BadMatch here means the window is not
+                // viewable/redirected right now (a client that unmapped
+                // between the geometry change and this refresh).
+                let (w, h) = self.windows.get(&win).map_or((0, 0), |wt| (wt.w, wt.h));
+                log::warn!(
+                    "compositor: resized NameWindowPixmap failed for 0x{x11_win:x} ({w}x{h}); \
+                     keeping the previous texture until the retry succeeds: {error}"
+                );
                 if let Some(wt) = self.windows.get_mut(&win) {
                     wt.pixmap_refresh.refresh_failed();
                 }
@@ -708,13 +718,38 @@ impl<C: CompositorConnection> Compositor<C> {
                 wt.h + expand as u32 * 2,
             );
             // Subtract damage so we get future notifications
-            if let Err(error) = self.conn.clear_window_damage(wt.damage) {
+            let subtract = if wt.damage == 0 {
+                Ok(())
+            } else {
+                self.conn.clear_window_damage(wt.damage)
+            };
+            if let Err(error) = subtract {
                 // A failed subtract permanently silences a NonEmpty damage
-                // object; this must never fail quietly.
+                // object: with no Subtract the server never reports the next
+                // DamageNotify, so the window freezes on screen at whatever it
+                // last drew while the client keeps painting. Logging is not
+                // enough — resubscribe, and leave the id at 0 if even that
+                // fails so the stale handle is never subtracted or freed.
                 log::warn!(
-                    "compositor: damage subtract failed for 0x{x11_win:x} (damage 0x{:x}): {error}",
+                    "compositor: damage subtract failed for 0x{x11_win:x} (damage 0x{:x}); \
+                     resubscribing: {error}",
                     wt.damage
                 );
+                let stale = std::mem::replace(&mut wt.damage, 0);
+                let _ = self.conn.destroy_window_damage(stale);
+                match self.conn.generate_xid() {
+                    Ok(id) => match self.conn.create_window_damage(id, x11_win) {
+                        Ok(()) => wt.damage = id,
+                        Err(error) => log::warn!(
+                            "compositor: damage resubscribe failed for 0x{x11_win:x}: {error}"
+                        ),
+                    },
+                    // Expected once the window is already gone; remove_window
+                    // then sees damage == 0 and skips the free.
+                    Err(error) => log::warn!(
+                        "compositor: damage XID allocation failed for 0x{x11_win:x}: {error}"
+                    ),
+                }
             }
         } else {
             crate::backend::damage_diag::UNTRACKED
