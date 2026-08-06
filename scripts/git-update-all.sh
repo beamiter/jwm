@@ -17,8 +17,13 @@ BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
 ONLY=""          # 逗号分隔的项目名白名单
 
-# 传给 jwm 安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
+# 传给各仓库安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
+# 或 ANVIL_INSTALL_ARGS='--backend cargo --no-desktop'
 JWM_INSTALL_ARGS="${JWM_INSTALL_ARGS:-}"
+ANVIL_INSTALL_ARGS="${ANVIL_INSTALL_ARGS:-}"
+EMBER_INSTALL_ARGS="${EMBER_INSTALL_ARGS:-}"
+FORGE_INSTALL_ARGS="${FORGE_INSTALL_ARGS:-}"
+FROST_INSTALL_ARGS="${FROST_INSTALL_ARGS:-}"
 # jsh 在 Linux 上的安装形态是静态 musl 二进制（jsh 仓库 scripts/install-jsh.sh 的原话：
 # 一个动态链接的 jsh 没法被 bind-mount 进容器、也没法推到 ssh 主机上）。
 # 默认 target 给的是 glibc 动态版本，所以这里显式指定三元组；想要 glibc 就
@@ -40,30 +45,37 @@ usage() {
   -u            双向更新：拉取之后，如本地领先则自动 push 到 upstream
   -q            只输出汇总表
 
-编译选项 (只作用于已知项目: jsh anvil ember frost forge jwm):
-  -B            全部重新编译，不管本次有没有拉到新提交
-  -N            不编译，只更新仓库
+构建选项 (只作用于已知项目: jsh anvil ember frost forge jwm):
+  -B            全部重新构建，不管本次有没有拉到新提交
+  -N            不构建，只更新仓库
   -T 列表       只处理这些项目，逗号分隔，如 -T anvil,jwm
-  -J N          同时编译几个项目 (默认 1；cargo 内部已经并行)
+  -J N          同时构建几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
 默认目录为当前目录，扫描其下一层的子目录。
-不在已知项目表里的仓库只更新、不编译。默认只编译本次真的有新提交、
-或者 release 产物不存在的项目 (jwm 看的是 /usr/local/bin/jwm)。
+不在已知项目表里的仓库只更新、不构建。默认只处理本次真的有新提交、
+或者产物不存在的项目。
 
 各项目的构建方式并不相同，脚本里按名字分派:
-  jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
-  anvil, forge     nix develop --command cargo build --release --locked
-                   (检测不到 nix 时回退到直接 cargo，和 install.sh 的 auto backend 一致)
-  ember, frost     cargo build --release --locked
+  anvil, ember,    scripts/install.sh —— 各仓库自带的安装脚本，构建加安装一步到位。
+  forge, frost     后端 (nix / cargo) 由脚本自己按 --backend auto 挑，二进制默认装到
+                   ~/.cargo/bin，装在 $HOME 下，不需要 sudo。
   jwm              scripts/install_jwm_scripts.sh —— jwm 没有只编不装的中间态：
                    裸 cargo build 只出根 package 的三个二进制，不编 bar 和
                    jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
+  jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
 
-除 jwm 外都只编译不安装；要装 jsh 和四个终端请自行运行各自仓库的 scripts/install*.sh。
+只有 jsh 是纯编译不安装；要装它请运行 jsh 仓库的 scripts/install-jsh.sh。
+产物检测看的是各项目真正落地的位置: jwm 看 /usr/local/bin/jwm，四个终端看
+安装脚本的目标目录 (默认 ~/.cargo/bin/<名字>，跟随 --prefix/--bin-dir/DESTDIR)，
+jsh 看 target 下的 release 产物。
 
 环境变量:
+  ANVIL_INSTALL_ARGS 追加给 anvil/scripts/install.sh 的参数，如 '--backend cargo'
+  EMBER_INSTALL_ARGS 同上，作用于 ember
+  FORGE_INSTALL_ARGS 同上，作用于 forge
+  FROST_INSTALL_ARGS 同上，作用于 frost
   JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
   JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
@@ -313,8 +325,45 @@ update_one() {
 
 KNOWN_TARGETS="jsh anvil ember frost forge jwm"
 
+# 这些项目由各自仓库的安装脚本负责“构建 + 安装”，这里不再重复拼 cargo 命令：
+# 后端选择、--locked、feature、desktop 文件等细节都在那些脚本里，抄一份必然会漂。
+INSTALL_TARGETS="anvil ember forge frost jwm"
+
 is_known_target() {
     case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+is_install_target() {
+    case " $INSTALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# 四个终端共用同一套 install.sh 接口，额外参数按 <大写名字>_INSTALL_ARGS 取。
+install_args_for() {
+    local var
+    var="$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')_INSTALL_ARGS"
+    printf '%s' "${!var:-}"
+}
+
+# 复刻 anvil/ember/forge/frost install.sh 里 BIN_DIR 的解析：显式 --bin-dir 优先，
+# 其次 --prefix/bin，都没给就是 ~/.cargo/bin；DESTDIR 作为打包用的暂存前缀。
+install_bin_dir() {
+    local prefix="" bindir=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bin-dir)   bindir="${2:-}"; shift 2 || break ;;
+            --bin-dir=*) bindir="${1#*=}"; shift ;;
+            --prefix)    prefix="${2:-}"; shift 2 || break ;;
+            --prefix=*)  prefix="${1#*=}"; shift ;;
+            *)           shift ;;
+        esac
+    done
+    if [ -n "$bindir" ]; then
+        printf '%s%s\n' "${DESTDIR:-}" "$bindir"
+    elif [ -n "$prefix" ]; then
+        printf '%s%s/bin\n' "${DESTDIR:-}" "$prefix"
+    else
+        printf '%s%s/.cargo/bin\n' "${DESTDIR:-}" "$HOME"
+    fi
 }
 
 # -T 白名单；未指定时全部已知项目都在范围内
@@ -374,12 +423,18 @@ jsh_preflight() {
     return 0
 }
 
-# release 产物路径，用来判断“没更新但还没编译过”的情况
+# 产物路径，用来判断“没更新但还没构建过”的情况。走安装脚本的项目看安装位置：
+# target/ 里躺着一个二进制不代表它已经装到 PATH 上，看装好的那份才有意义。
 artifact_path() {
     local name="$1" repo="$2" target_dir
-    # jwm 走安装脚本，target/ 里有产物不代表装上了；看真正被会话启动的那份
     if [ "$name" = "jwm" ]; then
         printf '/usr/local/bin/jwm\n'
+        return
+    fi
+    if is_install_target "$name"; then
+        # 分词是故意的：额外参数按空白拆成一个个 argv，和 JWM_INSTALL_ARGS 一致
+        # shellcheck disable=SC2046
+        printf '%s/%s\n' "$(install_bin_dir $(install_args_for "$name"))" "$name"
         return
     fi
     target_dir="${CARGO_TARGET_DIR:-$repo/target}"
@@ -391,28 +446,16 @@ artifact_path() {
     printf '%s/release/%s\n' "$target_dir" "$name"
 }
 
-# 构建命令：anvil/forge 的依赖由 flake 提供，有 nix 就进 nix develop，
-# 没有就直接 cargo（与两者 install.sh 的 auto backend 行为一致）。
-# 除 jwm 外都只编译不安装，装不装由各仓库自己的 install.sh 决定。
+# 构建命令，一行一个参数（build_one 用 mapfile 读回数组）。
 build_cmd() {
     local name="$1"
     case "$name" in
-        anvil|forge)
-            if command -v nix >/dev/null 2>&1; then
-                printf '%s\n' nix develop --command cargo build --release --locked
-            else
-                printf '%s\n' cargo build --release --locked
-            fi
-            ;;
-        jsh)
-            if [ -n "$JSH_TRIPLE" ]; then
-                printf '%s\n' cargo build --release --locked --target "$JSH_TRIPLE"
-            else
-                printf '%s\n' cargo build --release --locked
-            fi
-            ;;
-        ember|frost)
-            printf '%s\n' cargo build --release --locked
+        # 四个终端各自带 scripts/install.sh，构建加安装一步到位：后端 (nix/cargo)
+        # 由 --backend auto 自己挑，还会装 desktop/AppStream/图标并检查 PATH 遮挡。
+        # 目标是 ~/.cargo/bin，全程在 $HOME 下，不需要 sudo。
+        anvil|ember|forge|frost)
+            # shellcheck disable=SC2046  # 额外参数按空白拆成一个个 argv，是故意的
+            printf '%s\n' ./scripts/install.sh $(install_args_for "$name")
             ;;
         # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
         # jwm/jwm-tool/jwm-support，bar 和 jwm-bridge 都不在里面，产物也不会
@@ -420,6 +463,14 @@ build_cmd() {
         # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
         jwm)
             printf '%s\n' ./scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS}
+            ;;
+        # jsh 只编不装：安装形态是静态 musl 二进制，装到哪由 install-jsh.sh 决定。
+        jsh)
+            if [ -n "$JSH_TRIPLE" ]; then
+                printf '%s\n' cargo build --release --locked --target "$JSH_TRIPLE"
+            else
+                printf '%s\n' cargo build --release --locked
+            fi
             ;;
     esac
 }
@@ -430,8 +481,8 @@ build_one() {
     local log="$WORKDIR/b$idx.log" cmd=() rc=0 start elapsed verb="编译" done_verb="已编译"
 
     mapfile -t cmd < <(build_cmd "$name")
-    # jwm 跑的是安装脚本，别在日志里谎称只是“编译”
-    if [ "$name" = "jwm" ]; then
+    # 跑的是安装脚本的项目，别在日志里谎称只是“编译”
+    if is_install_target "$name"; then
         verb="安装"; done_verb="已安装"
     fi
     if [ "${#cmd[@]}" -eq 0 ]; then
