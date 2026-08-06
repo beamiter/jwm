@@ -3,8 +3,8 @@
 # every bar in the same commit. The bars stay OUT of this workspace on purpose:
 # their GUI frameworks (gpui, tauri, gtk4, iced, …) keep their own Cargo.lock
 # under bars/<name> so their huge dependency trees never fight this one.
-# xbar_tauri and xbar_present_wgpu are likewise excluded: only bars consume
-# them (via path), and tauri/wgpu don't belong in the core lock.
+# xbar_tauri, xbar_present_wgpu and xbar_gtk are likewise excluded: only bars
+# consume them (via path), and tauri/wgpu/gtk4 don't belong in the core lock.
 [workspace]
 # NOTE: the root package (jwm) is an implicit member — do NOT list "." here.
 # With "." in members, cargo (observed on 1.97.1) stops applying `exclude` to
@@ -52,6 +52,7 @@ exclude = [
     "bars/xilem_bar",
     "crates/xbar_core/crates/xbar_tauri",
     "crates/xbar_core/crates/xbar_present_wgpu",
+    "crates/xbar_core/crates/xbar_gtk",
 ]
 resolver = "3"
 

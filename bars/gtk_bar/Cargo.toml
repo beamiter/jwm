@@ -21,5 +21,7 @@ xbar_core = { path = "../../crates/xbar_core", default-features = false, feature
     "transport-shared",
 ] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+# The widgets themselves are shared with relm_bar so the two GTK bars cannot
+# grow separate ideas of what a bar looks like.
+xbar_gtk = { path = "../../crates/xbar_core/crates/xbar_gtk" }
 gtk4 = { version = "0.11.4", features = ["v4_14"] }
-gdk4 = { version = "0.11.4", features = ["v4_14"] }

@@ -6,5 +6,21 @@ edition = "2024"
 [dependencies]
 log = "0.4.33"
 relm4 = { version = "0.11.0", features = ["libadwaita"] }
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-network-sysfs", "provider-system", "transport-shared"] }
+# The provider set matches the Cairo bars': this bar shows the same cells, so
+# it has to be able to fill them.
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
+    "clock-chrono",
+    "config-toml",
+    "glass-wallpaper",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-network-sysfs",
+    "provider-system",
+    "transport-shared",
+] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+# The widgets themselves are shared with gtk_bar so the two GTK bars cannot
+# grow separate ideas of what a bar looks like.
+xbar_gtk = { path = "../../crates/xbar_core/crates/xbar_gtk" }

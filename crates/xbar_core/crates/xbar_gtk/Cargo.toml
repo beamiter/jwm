@@ -1,0 +1,17 @@
+[package]
+name = "xbar_gtk"
+version = "0.1.0"
+edition = "2024"
+description = "GTK4 widgets that render xbar_core's presentation projection"
+repository = "https://github.com/beamiter/jwm"
+
+[dependencies]
+log = "0.4.33"
+gtk4 = { version = "0.11.4", features = ["v4_14"] }
+gdk4 = { version = "0.11.4", features = ["v4_14"] }
+# The provider set is the frontend's business; this crate only needs the
+# projection, the palette, and the frosted-glass strip.
+xbar_core = { path = "../..", default-features = false, features = [
+    "config-toml",
+    "glass-wallpaper",
+] }
