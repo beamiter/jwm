@@ -190,13 +190,25 @@ impl App {
         }
     }
 
-    fn apply_monitor_geometry(&self, geometry: xbar_core::MonitorGeometry) {
+    fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
+        self.relayout_wallpaper(geometry.width, geometry.height);
         if let Some(window) = &self.window {
             let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
                 .round()
                 .clamp(1.0, f64::from(u32::MAX)) as u32;
             window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
             let _ = window.request_inner_size(PhysicalSize::new(geometry.width, height));
+        }
+    }
+
+    /// Lay the wallpaper out on the display the window manager just described.
+    ///
+    /// This size is authoritative: the platform's own monitor query is only a
+    /// startup guess, and a wrong one would leave the backdrop wrong for the
+    /// life of the process because nothing else re-lays it.
+    fn relayout_wallpaper(&mut self, width: u32, height: u32) {
+        if let Some(glass) = self.glass.as_mut() {
+            glass.source_mut().set_screen(width, height);
         }
     }
 }
@@ -214,6 +226,7 @@ impl ApplicationHandler<UserEvent> for App {
             let screen_size: PhysicalSize<u32> = primary
                 .as_ref()
                 .map(|m| m.size())
+                .and_then(usable_screen_size)
                 .unwrap_or(PhysicalSize::new(1920, 1080));
             let width_px = screen_size.width;
             let bar_height = f64::from(self.bar.config().bar_height);
@@ -379,6 +392,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+}
+
+/// A monitor size is only usable when the platform really knows one. An X
+/// server without real RandR outputs answers `1x1`, and a wallpaper laid out on
+/// that leaves the bar showing a flat fallback color instead of glass, with
+/// nothing to correct it later.
+fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
+    (size.width > 1 && size.height > 1).then_some(size)
 }
 
 fn main() -> Result<()> {
