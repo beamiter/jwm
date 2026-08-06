@@ -13,9 +13,9 @@ use std::{
     time::Duration,
 };
 
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
+use xbar_core::presentation::{Palette, Rgba};
 use xbar_core::{
     AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, MonitorGeometry,
     Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails, TagId, TagState,
@@ -25,12 +25,6 @@ use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
 
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 
-/// Alpha the bar's own background keeps once a frosted backdrop shows through
-/// it.
-const GLASS_TINT_ALPHA: f32 = 0.55;
-/// The element this bar uses as its root, and so the one the frosted backdrop
-/// is installed behind.
-const GLASS_SELECTOR: &str = ".button-row";
 const BAR_LOGICAL_HEIGHT: f64 = 40.0;
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -121,56 +115,136 @@ impl RuntimeOwner {
     }
 }
 
-/// The wallpaper source this bar's configuration asks for, if any.
+/// The bar's side X11 connection, shared by compositor detection and the
+/// window depth probe.
 ///
-/// Only the `[glass]` section of the shared bar config applies here; the rest
-/// of this bar's appearance is its stylesheet.
-fn glass_strip() -> Option<GlassStrip<WallpaperFile>> {
+/// dioxus pins GDK to X11 before its event loop starts, so this connection
+/// reaches the same server the bar window lives on; the webview stack never
+/// exposes its own connection, hence the dedicated one. A session where it
+/// cannot open — say native Wayland with no Xwayland — simply reads as "no
+/// compositor" and lands on the safe opaque bar.
+static X11_SIDE: OnceLock<Option<(x11rb::rust_connection::RustConnection, usize)>> =
+    OnceLock::new();
+
+fn x11_side() -> Option<&'static (x11rb::rust_connection::RustConnection, usize)> {
+    X11_SIDE.get_or_init(|| x11rb::connect(None).ok()).as_ref()
+}
+
+/// The launch decision, carried from `main` into the component tree; it is
+/// made before the window exists because transparency is a creation-time
+/// property dioxus offers no later way to change.
+static TRANSLUCENT_AT_LAUNCH: OnceLock<bool> = OnceLock::new();
+
+/// Whether a compositor owns `_NET_WM_CM_S{screen}` on the default screen.
+///
+/// Sampled once, at startup: a compositor started or stopped after launch is
+/// not followed until the bar restarts. Ownership also only proves
+/// compositing is on — jwm claims the selection even with blur disabled, so a
+/// translucent bar can sit over a perfectly sharp desktop. Any failure along
+/// the way reads as "no compositor", the conservative solid mode.
+fn compositor_active() -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let Some((conn, screen_num)) = x11_side() else {
+        return false;
+    };
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
+}
+
+/// Whether the window tao actually created carries an alpha channel.
+///
+/// `with_transparent` is a request, not a guarantee: without an RGBA visual
+/// GTK silently falls back to an opaque window, and translucent CSS over that
+/// window would land on undefined bytes. Depth 32 is the proof the request
+/// was honored.
+fn window_is_argb(window: &DesktopContext) -> bool {
+    use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let Some((conn, _)) = x11_side() else {
+        return false;
+    };
+    let Ok(handle) = window.window_handle() else {
+        return false;
+    };
+    let xid = match handle.as_raw() {
+        RawWindowHandle::Xlib(xlib) => match u32::try_from(xlib.window) {
+            Ok(xid) => xid,
+            Err(_) => return false,
+        },
+        RawWindowHandle::Xcb(xcb) => xcb.window.get(),
+        _ => return false,
+    };
+    conn.get_geometry(xid)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|geometry| geometry.depth == 32)
+        .unwrap_or(false)
+}
+
+fn css_rgba(color: Rgba) -> String {
+    let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "rgba({}, {}, {}, {:.3})",
+        channel(color.red),
+        channel(color.green),
+        channel(color.blue),
+        color.alpha.clamp(0.0, 1.0)
+    )
+}
+
+/// The part of the bar's appearance that the stylesheet cannot know: the
+/// compositor mode and the configured theme.
+///
+/// The stylesheet was written for the near-white row this bar used to paint
+/// unconditionally, so the theme's background alone would leave dark glyphs on
+/// a dark bar. Everything here that is not the row background therefore
+/// re-states the light-authored rules in terms of the shared palette — the same
+/// one every other bar renders from, which is what keeps the family looking
+/// like one family. The saturated pills (usage, layout, clock) already carry
+/// their own contrast and are left alone.
+///
+/// Injected after the stylesheet, so equal specificity is enough to win; the
+/// per-tag rules are `!important` at three class selectors deep, so the two
+/// overrides that fight them match that weight exactly.
+fn mode_style(translucent: bool) -> String {
     let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
         warn!("falling back to the default bar config: {error}");
         xbar_core::config::BarConfig::default()
     });
-    // A provisional screen size; `glass_style` corrects it from the window
-    // manager's monitor geometry as soon as one arrives.
-    config
-        .glass
-        .file_strip(1920, 1080, fallback_rgb(config.theme))
-}
+    let [r, g, b] = fallback_rgb(config.theme);
+    let palette = Palette::for_theme(config.theme);
+    let background = if translucent {
+        let alpha = config
+            .background_opacity
+            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
+        format!("rgba({r}, {g}, {b}, {alpha})")
+    } else {
+        format!("rgb({r}, {g}, {b})")
+    };
+    let text = css_rgba(palette.text);
+    let muted = css_rgba(palette.muted_text);
+    let idle = css_rgba(palette.occupied);
+    let hovered = css_rgba(palette.hovered);
 
-/// A stylesheet putting the frosted strip behind the bar, or `None` when
-/// nothing changed since the last call.
-///
-/// A webview cannot be handed a pixel buffer, and `backdrop-filter` blurs only
-/// what is inside the page — never the desktop behind the window — so the
-/// backdrop travels as a `data:` URL and CSS composites the bar's own tint
-/// over it. That is also why this is rebuilt only when the strip's generation
-/// changes: the URL is a base64 PNG, not a pointer.
-fn glass_style(
-    strip: &mut GlassStrip<WallpaperFile>,
-    window: &DesktopContext,
-    geometry: Option<MonitorGeometry>,
-    last_generation: &mut u64,
-) -> Option<String> {
-    if let Some(geometry) = geometry {
-        strip
-            .source_mut()
-            .set_screen(geometry.width.max(1), geometry.height.max(1));
-    }
-    // The webview has no window position of its own; the origin is the one the
-    // window manager assigned.
-    let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
-    let size = window.inner_size();
-
-    let (generation, image) = strip.ensure(x, y, size.width.max(1), size.height.max(1))?;
-    if generation == *last_generation {
-        return None;
-    }
-    let css = image
-        .to_css_backdrop(GLASS_SELECTOR, [255, 255, 255], GLASS_TINT_ALPHA)
-        .map_err(|error| warn!("frosted strip could not be encoded: {error}"))
-        .ok()?;
-    *last_generation = generation;
-    Some(css)
+    format!(
+        ".button-row {{ background: {background}; }}
+body {{ color: {text}; }}
+.emoji-button.state-default {{ background: {idle}; border-color: {hovered}; color: {muted}; }}
+.emoji-button.state-default:hover:not(:disabled):not(.pressed):not(:active) {{ background: {hovered}; border-color: {hovered}; }}
+.emoji-button.state-default.pressed, .emoji-button.state-default:active {{ background: {hovered} !important; border-color: {hovered} !important; }}
+.button-row .emoji-button.state-occupied {{ color: {text} !important; }}
+.button-row .emoji-button.state-occupied::after {{ color: {muted}; }}"
+    )
 }
 
 fn apply_monitor_geometry(geometry: MonitorGeometry, window: &DesktopContext) {
@@ -559,6 +633,12 @@ fn main() {
     }
     info!("Starting dioxus_bar v{}", 1.0);
 
+    // Transparency has to be decided before the window exists, so the
+    // compositor check happens here rather than anywhere reactive.
+    let compositor_active = compositor_active();
+    let _ = TRANSLUCENT_AT_LAUNCH.set(compositor_active);
+    info!("Compositor active at launch: {compositor_active}");
+
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             Config::new().with_window(
@@ -571,7 +651,8 @@ fn main() {
                     .with_resizable(true)
                     .with_always_on_top(true)
                     .with_visible_on_all_workspaces(true)
-                    .with_decorations(false),
+                    .with_decorations(false)
+                    .with_transparent(compositor_active),
             ),
         )
         .launch(App);
@@ -590,9 +671,10 @@ fn App() -> Element {
         })
     };
     let mut scale_factor = use_signal(|| window.scale_factor());
-    // Empty unless a wallpaper is configured, in which case it overrides the
-    // stylesheet's opaque bar background with the frosted strip.
-    let mut glass_css = use_signal(String::new);
+    // The launch decision is provisional until the depth probe below has seen
+    // the window the toolkit actually produced.
+    let translucent_at_launch = TRANSLUCENT_AT_LAUNCH.get().copied().unwrap_or(false);
+    let mut mode_css = use_signal(|| mode_style(translucent_at_launch));
     let mut pressed_button = use_signal(|| None::<usize>);
     let runtime = use_signal(move || Arc::new(Mutex::new(RuntimeOwner::new(shared_path))));
     let initial_runtime = runtime.read().clone();
@@ -601,6 +683,18 @@ fn App() -> Element {
             .lock()
             .expect("new dioxus bar runtime mutex is healthy")
             .snapshot()
+    });
+
+    // GTK only honors `with_transparent` when it finds an RGBA visual, and it
+    // falls back silently. By the time effects run the window is realized, so
+    // its actual depth settles the mode: no alpha channel means solid paint.
+    use_effect({
+        let window = window.clone();
+        move || {
+            if translucent_at_launch && !window_is_argb(&window) {
+                mode_css.set(mode_style(false));
+            }
+        }
     });
 
     // Core owns every provider and the clock. Only its owned projection
@@ -612,8 +706,6 @@ fn App() -> Element {
             let runtime = Arc::clone(&runtime);
             let window = window.clone();
             let mut observed_scale_factor = window.scale_factor();
-            let mut glass = glass_strip();
-            let mut glass_generation = 0;
             spawn(async move {
                 loop {
                     let result = runtime.lock().ok().map(|mut runtime| runtime.tick());
@@ -630,16 +722,6 @@ fn App() -> Element {
                             );
                         }
 
-                        if let Some(strip) = glass.as_mut()
-                            && let Some(style) = glass_style(
-                                strip,
-                                &window,
-                                snapshot.geometry,
-                                &mut glass_generation,
-                            )
-                        {
-                            glass_css.set(style);
-                        }
                         bar_snapshot.set(snapshot);
                     } else {
                         error!("xbar runtime mutex was poisoned");
@@ -738,7 +820,7 @@ fn App() -> Element {
 
     rsx! {
         document::Style { "{STYLE_CSS}" }
-        document::Style { "{glass_css}" }
+        document::Style { "{mode_css}" }
 
         div { class: "button-row",
             div { class: "buttons-container",

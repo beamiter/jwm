@@ -14,9 +14,7 @@ use tao::{
     event_loop::{ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowBuilder, WindowId},
 };
-use xbar_core::config::GlassConfig;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
+use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
@@ -49,11 +47,9 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
-    /// Frosted backdrop, present only when a wallpaper was configured. These
-    /// windows are opaque, so glass here always means a baked strip.
-    glass: Option<GlassBackdrop<WallpaperFile>>,
-    glass_config: GlassConfig,
-    glass_fallback: [u8; 3],
+    /// The startup compositor answer; the surface's own alpha-mode probe in
+    /// `init_window_and_pixels` finishes the translucency decision.
+    compositor_active: bool,
 }
 
 impl App {
@@ -62,8 +58,7 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
-        glass_config: GlassConfig,
-        glass_fallback: [u8; 3],
+        compositor_active: bool,
     ) -> Self {
         let physical_size = PhysicalSize::new(
             logical_size.width.round() as u32,
@@ -84,9 +79,7 @@ impl App {
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
-            glass: None,
-            glass_config,
-            glass_fallback,
+            compositor_active,
         }
     }
 
@@ -106,13 +99,6 @@ impl App {
             f64::from(screen_size.width) / self.scale_factor,
             f64::from(self.bar.config().bar_height),
         );
-        // The wallpaper is laid out across the whole screen, so the strip the
-        // bar frosts depends on the screen size, not the bar's.
-        self.glass = self.glass_config.file_backdrop(
-            screen_size.width,
-            screen_size.height,
-            self.glass_fallback,
-        );
 
         let window = Arc::new(
             WindowBuilder::new()
@@ -121,23 +107,54 @@ impl App {
                 .with_decorations(false)
                 .with_resizable(true)
                 .with_visible(true)
-                .with_transparent(false)
+                .with_transparent(self.compositor_active)
                 .build(event_loop)
                 .context("failed to create tao window")?,
         );
         let size = window.inner_size();
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
-        let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
-        let pixels = PixelsBuilder::new(safe_width, safe_height, surface_texture)
-            .texture_format(TextureFormat::Bgra8UnormSrgb)
-            .enable_vsync(true)
-            .request_adapter_options(pixels::wgpu::RequestAdapterOptions {
-                power_preference: pixels::wgpu::PowerPreference::LowPower,
-                ..Default::default()
-            })
-            .build()
-            .map_err(|error| anyhow::anyhow!("pixels initialization failed: {error}"))?;
+        let build = |want_alpha: bool| {
+            let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
+            let mut builder = PixelsBuilder::new(safe_width, safe_height, surface_texture)
+                .texture_format(TextureFormat::Bgra8UnormSrgb)
+                .enable_vsync(true)
+                .request_adapter_options(pixels::wgpu::RequestAdapterOptions {
+                    power_preference: pixels::wgpu::PowerPreference::LowPower,
+                    ..Default::default()
+                });
+            if want_alpha {
+                builder = builder
+                    .alpha_mode(pixels::wgpu::CompositeAlphaMode::PreMultiplied)
+                    .clear_color(pixels::wgpu::Color::TRANSPARENT)
+                    // Cairo hands us premultiplied pixels, and pixels' default
+                    // blend would multiply them by their alpha a second time,
+                    // leaving the bar a shade darker than every other
+                    // translucent frontend. The frame covers the whole surface,
+                    // so writing it verbatim is both correct and cheaper.
+                    .blend_state(pixels::wgpu::BlendState::REPLACE);
+            }
+            builder.build()
+        };
+        // With a compositor around, ask the surface for premultiplied alpha
+        // outright — pixels' default `Auto` resolves to Opaque on X11, which
+        // would discard the frame's alpha channel. A refusal is the
+        // capability answer: the bar then paints the fully opaque background
+        // instead of a translucent wash over an undefined clear.
+        let (pixels, translucent) = if self.compositor_active {
+            match build(true) {
+                Ok(pixels) => (Ok(pixels), true),
+                Err(pixels::Error::InvalidAlphaMode(_)) => (build(false), false),
+                Err(error) => (Err(error), false),
+            }
+        } else {
+            (build(false), false)
+        };
+        let pixels =
+            pixels.map_err(|error| anyhow::anyhow!("pixels initialization failed: {error}"))?;
+        if !translucent {
+            self.bar.renderer_mut().set_background_opacity(None);
+        }
 
         self.window_id = Some(window.id());
         self.window = Some(window);
@@ -156,14 +173,6 @@ impl App {
         Ok(())
     }
 
-    /// Window position in screen coordinates, where the wallpaper is sampled.
-    fn bar_origin(&self) -> (i32, i32) {
-        self.window
-            .as_ref()
-            .and_then(|window| window.outer_position().ok())
-            .map_or((0, 0), |position| (position.x, position.y))
-    }
-
     fn redraw(&mut self) -> Result<()> {
         if self.window_id.is_none() || self.pixels.is_none() {
             return Ok(());
@@ -174,19 +183,13 @@ impl App {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let (origin_x, origin_y) = self.bar_origin();
-        let backdrop = self
-            .glass
-            .as_mut()
-            .and_then(|glass| glass.ensure(origin_x, origin_y, width, height));
         let pixels = self.pixels.as_mut().expect("pixels presence checked above");
-        self.bar.render_into_bgra_over(
+        self.bar.render_into_bgra(
             pixels.frame_mut(),
             width,
             height,
             width.saturating_mul(4),
             self.scale_factor,
-            backdrop,
         )?;
         let _ = self.bar.runtime_mut().take_changes();
         pixels
@@ -270,24 +273,12 @@ impl App {
     }
 
     fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
-        self.relayout_wallpaper(geometry.width, geometry.height);
         if let Some(window) = &self.window {
             let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
                 .round()
                 .clamp(1.0, f64::from(u32::MAX)) as u32;
             window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
             window.set_inner_size(PhysicalSize::new(geometry.width, height));
-        }
-    }
-
-    /// Lay the wallpaper out on the display the window manager just described.
-    ///
-    /// This size is authoritative: the platform's own monitor query is only a
-    /// startup guess, and a wrong one would leave the backdrop wrong for the
-    /// life of the process because nothing else re-lays it.
-    fn relayout_wallpaper(&mut self, width: u32, height: u32) {
-        if let Some(glass) = self.glass.as_mut() {
-            glass.source_mut().set_screen(width, height);
         }
     }
 
@@ -374,11 +365,37 @@ impl App {
 }
 
 /// A monitor size is only usable when the platform really knows one. An X
-/// server without real RandR outputs answers `1x1`, and a wallpaper laid out on
-/// that leaves the bar showing a flat fallback color instead of glass, with
-/// nothing to correct it later.
+/// server without real RandR outputs answers `1x1`, and a bar sized from that
+/// would stay invisible until the window manager corrects it.
 fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
     (size.width > 1 && size.height > 1).then_some(size)
+}
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection, asked over a short-lived side connection.
+///
+/// Sampled once, before the window exists: transparency is a creation-time
+/// choice in tao, so a compositor started or stopped after launch is not
+/// followed until the bar restarts. Owning the selection also only promises
+/// compositing — whether anything blurs behind the bar is the compositor's
+/// own policy.
+fn compositor_active() -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return false;
+    };
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
 }
 
 fn main() -> Result<()> {
@@ -405,15 +422,20 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
-    // A frosted backdrop only reads as a material if the bar's own background
-    // lets some of it through, so glass changes what "no opacity configured"
-    // should mean.
-    match app_config.background_opacity {
-        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
-        None if app_config.glass.wallpaper.is_some() => bar
-            .renderer_mut()
-            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
-        None => {}
+    // A translucent background only reads as a material when a compositor is
+    // there to blend the desktop behind it; without one the bar keeps the
+    // palette background at full opacity. The surface itself may still
+    // refuse premultiplied alpha — `init_window_and_pixels` downgrades to
+    // solid if it does.
+    let compositor_active = compositor_active();
+    if compositor_active {
+        bar.renderer_mut().set_background_opacity(Some(
+            app_config
+                .background_opacity
+                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
+        ));
+    } else {
+        bar.renderer_mut().set_background_opacity(None);
     }
 
     let mut event_loop: EventLoop<UserEvent> = EventLoopBuilder::with_user_event().build();
@@ -426,8 +448,7 @@ fn main() -> Result<()> {
         LogicalSize::new(800.0, 38.0),
         1.0,
         proxy,
-        app_config.glass.clone(),
-        fallback_rgb(app_config.theme),
+        compositor_active,
     );
     app.init_window_and_pixels(&event_loop)?;
 

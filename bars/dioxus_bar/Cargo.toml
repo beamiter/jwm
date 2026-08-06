@@ -9,9 +9,11 @@ web-sys = "0.3.81"
 
 tokio = { version = "1.47.1", features = ["full"] }
 log = "0.4.28"
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 serde = { version = "1.0.228", features = ["derive"] }
 libc = "0.2.176"
 dioxus = { version = "0.7.9", features = ["desktop"] }
 dioxus-desktop = "0.7.9"
+x11rb = "0.13"
+raw-window-handle = "0.6"

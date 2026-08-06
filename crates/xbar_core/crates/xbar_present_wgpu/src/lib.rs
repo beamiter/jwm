@@ -37,6 +37,12 @@ pub struct WgpuPresenter {
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
+    /// Set while the surface refuses to hand out textures, so the warning is
+    /// logged once per episode rather than once per dropped frame.
+    surface_stale: bool,
+    /// Set when the upload texture was reallocated and so retains nothing of
+    /// the previous frame; the next present must upload all of it.
+    texture_empty: bool,
 }
 
 // Fullscreen triangle sampling the upload texture; no vertex buffer needed.
@@ -72,13 +78,53 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Which composite alpha mode the surface should be configured with.
+///
+/// `PostMultiplied` is deliberately never chosen: the Cairo frames arriving
+/// here are premultiplied, and presenting them post-multiplied would force an
+/// un-premultiply in the upload swizzle for no gain. A caller that wants alpha
+/// gets `PreMultiplied` or `Inherit` when the surface offers one; otherwise —
+/// and always when alpha was not requested — the surface stays opaque.
+fn select_alpha_mode(
+    caps: &wgpu::SurfaceCapabilities,
+    want_alpha: bool,
+) -> wgpu::CompositeAlphaMode {
+    let advertised = |mode| caps.alpha_modes.contains(&mode);
+    if want_alpha {
+        if advertised(wgpu::CompositeAlphaMode::PreMultiplied) {
+            return wgpu::CompositeAlphaMode::PreMultiplied;
+        }
+        if advertised(wgpu::CompositeAlphaMode::Inherit) {
+            return wgpu::CompositeAlphaMode::Inherit;
+        }
+    }
+    if advertised(wgpu::CompositeAlphaMode::Opaque) {
+        wgpu::CompositeAlphaMode::Opaque
+    } else {
+        caps.alpha_modes[0]
+    }
+}
+
+const fn mode_is_transparent(mode: wgpu::CompositeAlphaMode) -> bool {
+    matches!(
+        mode,
+        wgpu::CompositeAlphaMode::PreMultiplied | wgpu::CompositeAlphaMode::Inherit
+    )
+}
+
 impl WgpuPresenter {
     /// Create a presenter over any wgpu surface target (an `Arc<Window>` for
     /// winit/tao, or a raw-window-handle wrapper for XCB/x11rb).
+    ///
+    /// `want_alpha` asks for a surface whose alpha bytes reach the compositor;
+    /// whether the surface actually granted one is answered by
+    /// [`WgpuPresenter::is_transparent`], and callers must fall back to opaque
+    /// painting when it says no.
     pub async fn new(
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        want_alpha: bool,
     ) -> Result<Self> {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(target)?;
@@ -110,6 +156,7 @@ impl WgpuPresenter {
             .find(|format| format.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        let alpha_mode = select_alpha_mode(&caps, want_alpha);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
@@ -117,7 +164,7 @@ impl WgpuPresenter {
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -191,7 +238,15 @@ impl WgpuPresenter {
                 entry_point: Some("fs"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    // A transparent surface must carry the frame's alpha bytes
+                    // through intact: the frame is full-coverage premultiplied
+                    // BGRA, so REPLACE hands it to the compositor as-is, while
+                    // blending it over the clear would corrupt the coverage.
+                    blend: Some(if mode_is_transparent(alpha_mode) {
+                        wgpu::BlendState::REPLACE
+                    } else {
+                        wgpu::BlendState::ALPHA_BLENDING
+                    }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -218,6 +273,8 @@ impl WgpuPresenter {
             bind_group,
             width,
             height,
+            surface_stale: false,
+            texture_empty: true,
         })
     }
 
@@ -226,13 +283,29 @@ impl WgpuPresenter {
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        want_alpha: bool,
     ) -> Result<Self> {
-        pollster::block_on(Self::new(target, width, height))
+        pollster::block_on(Self::new(target, width, height, want_alpha))
     }
 
     #[must_use]
     pub const fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The composite alpha mode the surface was configured with.
+    #[must_use]
+    pub const fn alpha_mode(&self) -> wgpu::CompositeAlphaMode {
+        self.config.alpha_mode
+    }
+
+    /// Whether presented alpha bytes reach the compositor.
+    ///
+    /// Only `PreMultiplied` and `Inherit` qualify; anything else means the
+    /// caller must paint every pixel opaque or the result is undefined.
+    #[must_use]
+    pub const fn is_transparent(&self) -> bool {
+        mode_is_transparent(self.config.alpha_mode)
     }
 
     /// Reconfigure the surface and reallocate the upload texture.
@@ -251,6 +324,7 @@ impl WgpuPresenter {
             .cpu_tex
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.bind_group = create_bind_group(&self.device, &self.pipeline, &view, &self.sampler);
+        self.texture_empty = true;
     }
 
     /// Upload a BGRA frame (or just its damaged part) and present it.
@@ -258,6 +332,8 @@ impl WgpuPresenter {
     /// `data`/`stride` must describe a full frame at the current size.
     /// `damage: None` uploads everything; an empty rect skips the upload but
     /// still presents, which re-blits the retained texture after an expose.
+    /// Damage is ignored for the first frame after a resize, when there is no
+    /// retained texture left to patch.
     pub fn present_bgra(
         &mut self,
         data: &[u8],
@@ -278,17 +354,22 @@ impl WgpuPresenter {
             anyhow::bail!("frame is shorter than stride * height");
         }
 
+        let full = PresentRect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        };
+        // A damage rect is only meaningful against a texture that still holds
+        // the previous frame. A reallocated one holds nothing, so honouring
+        // damage there would leave everything outside it blank.
         let region = match damage {
-            None => PresentRect {
-                x: 0,
-                y: 0,
-                width: self.width,
-                height: self.height,
-            },
-            Some(rect) => clamp_rect(rect, self.width, self.height),
+            Some(rect) if !self.texture_empty => clamp_rect(rect, self.width, self.height),
+            _ => full,
         };
         if !region.is_empty() {
             self.upload(data, stride, region)?;
+            self.texture_empty = false;
         }
         self.blit_and_present()
     }
@@ -371,22 +452,42 @@ impl WgpuPresenter {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                log::warn!("surface is outdated or lost; reconfiguring");
+                // Reconfiguring can only use the size we know about, and after
+                // a window manager resize that size is stale until the caller
+                // has drained the resize event and called `resize`. So a second
+                // refusal is not a failure — it means the frame we were asked
+                // to present belongs to a window geometry that no longer
+                // exists. Drop it and let the resize that is already on its way
+                // reconfigure the surface properly; killing the bar over a
+                // transient mismatch would be the far worse outcome.
                 self.surface.configure(&self.device, &self.config);
                 match self.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(frame)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-                    wgpu::CurrentSurfaceTexture::Timeout
-                    | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-                    status => anyhow::bail!(
-                        "failed to acquire a surface texture after reconfiguration: {status:?}"
-                    ),
+                    wgpu::CurrentSurfaceTexture::Validation => {
+                        anyhow::bail!("surface texture acquisition failed validation")
+                    }
+                    status => {
+                        if !self.surface_stale {
+                            self.surface_stale = true;
+                            log::warn!(
+                                "surface unavailable at {}x{} ({status:?}); skipping frames until it is reconfigured",
+                                self.width,
+                                self.height
+                            );
+                        }
+                        return Ok(());
+                    }
                 }
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 anyhow::bail!("surface texture acquisition failed validation")
             }
         };
+        if self.surface_stale {
+            self.surface_stale = false;
+            log::info!("surface recovered at {}x{}", self.width, self.height);
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -403,7 +504,14 @@ impl WgpuPresenter {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        // A transparent surface starts from zero coverage so
+                        // pixels the frame leaves untouched stay see-through;
+                        // an opaque one keeps the historical black base.
+                        load: wgpu::LoadOp::Clear(if self.is_transparent() {
+                            wgpu::Color::TRANSPARENT
+                        } else {
+                            wgpu::Color::BLACK
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

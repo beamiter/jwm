@@ -11,7 +11,7 @@ relm4 = { version = "0.11.0", features = ["libadwaita"] }
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
-    "glass-wallpaper",
+    "glass",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",

@@ -10,8 +10,8 @@ log = "0.4.33"
 gtk4 = { version = "0.11.4", features = ["v4_14"] }
 gdk4 = { version = "0.11.4", features = ["v4_14"] }
 # The provider set is the frontend's business; this crate only needs the
-# projection, the palette, and the frosted-glass strip.
+# projection, the palette, and the shared background-opacity default.
 xbar_core = { path = "../..", default-features = false, features = [
     "config-toml",
-    "glass-wallpaper",
+    "glass",
 ] }

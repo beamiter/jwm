@@ -8,7 +8,7 @@ libc = "0.2.186"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
-    "glass-wallpaper",
+    "glass",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",
@@ -27,3 +27,5 @@ bytemuck = "1.25.1"
 cairo-rs = "0.22.0"
 pango = "0.22.8"
 tao = "0.35.3"
+x11rb = "0.13"
+raw-window-handle = "0.6"

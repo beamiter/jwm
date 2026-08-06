@@ -58,8 +58,8 @@ pub struct SceneStyle {
     /// fallback chain installed by [`crate::fonts`].
     pub family: FontFamily,
     /// Alpha multiplier for the background node alone, mirroring
-    /// `CairoRenderer::set_background_opacity`. Below 1.0 this is what lets a
-    /// frosted backdrop — the compositor's or a baked strip — show through.
+    /// `CairoRenderer::set_background_opacity`. Below 1.0 this is what lets
+    /// the compositor's blur show through; an opaque window pins it at 1.0.
     pub background_opacity: f32,
 }
 

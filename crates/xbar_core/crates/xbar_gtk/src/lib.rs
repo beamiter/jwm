@@ -13,14 +13,12 @@
 pub mod pill;
 pub mod theme;
 
-use std::cell::Cell;
-
 use gtk4::prelude::*;
-use gtk4::{Label, Orientation, Overflow, Overlay, Picture, glib};
+use gtk4::{Label, Orientation};
 use xbar_core::ThemeMode;
 use xbar_core::config::BarConfig;
 use xbar_core::controls::BarPresentation;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, WallpaperSource};
+use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
 
 pub use crate::pill::{Dispatch, Pill, PillRow, PillStyle};
@@ -39,8 +37,12 @@ pub struct BarTheme {
 }
 
 impl BarTheme {
+    /// `translucent` is the frontend's startup mode decision — compositor
+    /// present and an RGBA surface available — and it is baked into the
+    /// stylesheet here because `install()` only ever adds providers: a theme
+    /// that could change mode would have to stack rules, not replace them.
     #[must_use]
-    pub fn from_config(config: &BarConfig) -> Self {
+    pub fn from_config(config: &BarConfig, translucent: bool) -> Self {
         let mut presentation = config.presentation.clone();
         // Monochrome Nerd Font glyphs tinted by the text color read like macOS
         // template icons; only the stock emoji are replaced, so a config that
@@ -53,7 +55,8 @@ impl BarTheme {
         let background_opacity = config
             .background_opacity
             .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
-        let stylesheet = theme::stylesheet(&presentation, &config.font, background_opacity);
+        let stylesheet =
+            theme::stylesheet(&presentation, &config.font, background_opacity, translucent);
         let pill_style = PillStyle {
             metrics,
             // Both themes use the same accent, so a progress line survives a
@@ -181,107 +184,8 @@ pub fn apply_theme_class(window: &impl IsA<gtk4::Widget>, theme: ThemeMode) {
     });
 }
 
-/// The frosted wallpaper behind the bar.
-///
-/// Without a configured wallpaper this stays empty and the bar is simply
-/// translucent, which is what the Cairo bars do under a compositor: the
-/// compositor supplies whatever shows through.
-pub struct GlassBackdrop {
-    clip: gtk4::Box,
-    picture: Picture,
-    /// Generation of the strip currently uploaded into `picture`.
-    generation: Cell<u64>,
-}
-
-impl Default for GlassBackdrop {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl GlassBackdrop {
-    #[must_use]
-    pub fn new() -> Self {
-        let picture = Picture::new();
-        picture.set_can_target(false);
-        picture.set_content_fit(gtk4::ContentFit::Fill);
-        picture.set_hexpand(true);
-        picture.set_vexpand(true);
-
-        let clip = gtk4::Box::new(Orientation::Horizontal, 0);
-        clip.add_css_class("glass-backdrop");
-        clip.set_overflow(Overflow::Hidden);
-        clip.append(&picture);
-
-        Self {
-            clip,
-            picture,
-            generation: Cell::new(0),
-        }
-    }
-
-    #[must_use]
-    pub const fn widget(&self) -> &gtk4::Box {
-        &self.clip
-    }
-
-    /// The bar's widgets over this backdrop, ready to be a window's child.
-    #[must_use]
-    pub fn behind(&self, surface: &BarSurface) -> Overlay {
-        let overlay = Overlay::new();
-        overlay.set_child(Some(self.widget()));
-        overlay.add_overlay(surface.widget());
-        overlay
-    }
-
-    /// Re-frost the wallpaper under the bar and upload it when it changed.
-    ///
-    /// Everything here is a no-op on an unchanged wallpaper and geometry: the
-    /// cache returns the same generation and the texture is left alone.
-    pub fn refresh<S: WallpaperSource>(
-        &self,
-        strip: &mut GlassStrip<S>,
-        origin: (i32, i32),
-        size: (u32, u32),
-    ) {
-        let Some((generation, image)) = strip.ensure(origin.0, origin.1, size.0, size.1) else {
-            return;
-        };
-        if generation == self.generation.get() {
-            return;
-        }
-
-        let bytes = glib::Bytes::from_owned(image.to_rgba8());
-        let texture = gdk4::MemoryTexture::new(
-            image.width() as i32,
-            image.height() as i32,
-            gdk4::MemoryFormat::R8g8b8a8,
-            &bytes,
-            image.stride(),
-        );
-        self.picture.set_paintable(Some(&texture));
-        self.generation.set(generation);
-    }
-}
-
-/// The bar's size in physical pixels, which is what a backdrop is sampled and
-/// uploaded in.
-///
-/// This reads the window rather than the geometry the window manager asked
-/// for: the two agree once the resize lands, and using the real allocation
-/// means a backdrop is never stretched to a width the window does not have.
-#[must_use]
-pub fn window_size_px(window: &impl IsA<gtk4::Widget>) -> (u32, u32) {
-    let window = window.as_ref();
-    let scale = window.scale_factor().max(1) as u32;
-    (
-        (window.width().max(1) as u32).saturating_mul(scale),
-        (window.height().max(1) as u32).saturating_mul(scale),
-    )
-}
-
-/// Physical size of the primary monitor, which is the canvas the compositor
-/// lays the wallpaper out on.
+/// Physical size of the primary monitor, which is the width a bar spans until
+/// the window manager hands it real geometry.
 #[must_use]
 pub fn primary_screen_size() -> (u32, u32) {
     let fallback = (1920, 1080);

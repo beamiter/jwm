@@ -8,8 +8,8 @@ anyhow = "1"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 log = "0.4"
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
-# Only for the frame container GPUI's `RenderImage` takes; the version must
-# match the one GPUI itself uses or the types are distinct.
-image = { version = "0.25.1", default-features = false }
+# The startup compositor check rides a plain side connection; the version
+# matches the 0.13.2 already in this bar's lock so nothing compiles twice.
+x11rb = "0.13"

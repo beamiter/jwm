@@ -26,15 +26,16 @@ use xbar_core::{
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels, Render,
-    RenderImage, Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, img, point,
-    prelude::*, px, rgba, size,
+    App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
+    px, size,
 };
 use gpui_platform::application;
 use std::sync::Arc;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
+use x11rb::connection::Connection as _;
+use x11rb::xcb_ffi::XCBConnection;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
 
@@ -86,17 +87,15 @@ struct GpuiBar {
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
 
-    // --- Frosted glass ---
-    /// Wallpaper source and frosting cache, absent when no wallpaper is
-    /// configured. The bar then stays fully transparent and leaves the effect
-    /// to whatever compositor is running.
-    glass: Option<GlassStrip<WallpaperFile>>,
-    glass_image: Option<Arc<RenderImage>>,
-    glass_generation: u64,
+    // --- Compositor coupling ---
+    /// The one background wash this bar paints: the shared fallback color at
+    /// the configured opacity when a compositor blends the bar into the
+    /// desktop, fully opaque when nothing would.
+    background: Rgba,
 }
 
 impl GpuiBar {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(background: Rgba, cx: &mut Context<Self>) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
         let config = ModelConfig {
@@ -118,9 +117,7 @@ impl GpuiBar {
             runtime,
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
-            glass: glass_strip(),
-            glass_image: None,
-            glass_generation: 0,
+            background,
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
@@ -663,45 +660,6 @@ impl GpuiBar {
     }
 }
 
-impl GpuiBar {
-    /// Re-frost the wallpaper under the bar and rebuild the render image when
-    /// it changed. Cheap on an unchanged wallpaper and geometry.
-    fn refresh_glass(&mut self, window: &Window) {
-        let scale = window.scale_factor().max(f32::EPSILON);
-        let bounds = window.bounds();
-        let width = (f32::from(bounds.size.width) * scale).round().max(1.0) as u32;
-        let height = (f32::from(bounds.size.height) * scale).round().max(1.0) as u32;
-        // GPUI exposes no window position on X11, so the origin is the one the
-        // window manager assigned; the wallpaper is laid out on that monitor.
-        let geometry = self.active_geometry;
-        let Some(strip) = self.glass.as_mut() else {
-            return;
-        };
-        if let Some(geometry) = geometry {
-            strip
-                .source_mut()
-                .set_screen(geometry.width.max(1), geometry.height.max(1));
-        }
-        let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
-
-        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
-            return;
-        };
-        if generation == self.glass_generation && self.glass_image.is_some() {
-            return;
-        }
-        // GPUI's `RenderImage` carries BGRA despite its `RgbaImage` container,
-        // which is exactly the byte order a `GlassImage` already holds.
-        let Some(buffer) =
-            image::RgbaImage::from_raw(image.width(), image.height(), image.data().to_vec())
-        else {
-            return;
-        };
-        self.glass_image = Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
-        self.glass_generation = generation;
-    }
-}
-
 impl Render for GpuiBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale_factor = window.scale_factor().max(f32::EPSILON);
@@ -724,7 +682,6 @@ impl Render for GpuiBar {
             self.geometry_dirty = false;
             self.last_scale_factor = Some(scale_factor);
         }
-        self.refresh_glass(window);
         let system = self.runtime.view().system;
         let cpu = system.cpu_percent.map_or(0.0, |value| value.as_f32());
         let mem = system.memory_percent.map_or(0.0, |value| value.as_f32());
@@ -772,32 +729,13 @@ impl Render for GpuiBar {
             left = left.child(opts);
         }
 
-        // With a backdrop the bar tints it; without one it stays fully
-        // transparent and whatever compositor is running decides what shows.
-        let background = match self.glass_image {
-            Some(_) => rgba_alpha(0x1C1C1E, GLASS_TINT_ALPHA),
-            None => rgba(0x00000000),
-        };
-        let mut root = div()
+        let root = div()
             .relative()
             .w_full()
             .h_full()
             .overflow_hidden()
             .font_family(NERD_FONT)
             .text_color(rgba_alpha(0xFFFFFF, 1.0));
-        if let Some(backdrop) = self.glass_image.clone() {
-            // Built at the window's own pixel size, so it must land on it
-            // one-to-one rather than be letterboxed.
-            root = root.child(
-                img(backdrop)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Fill),
-            );
-        }
         root.child(
             div()
                 .relative()
@@ -808,7 +746,7 @@ impl Render for GpuiBar {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .bg(background)
+                .bg(self.background)
                 .child(left)
                 .child(right_pills),
         )
@@ -822,7 +760,28 @@ fn main() {
     let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
     let _ = initialize_logging("gpui_bar", &shared_path);
 
-    application().run(|cx: &mut App| {
+    // Only `theme` and `background_opacity` of the shared bar config apply
+    // here; the rest of this bar's appearance is its own theme.
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+        warn!("falling back to the default bar config: {error}");
+        xbar_core::config::BarConfig::default()
+    });
+
+    let translucent = detect_translucency();
+    let [red, green, blue] = fallback_rgb(config.theme);
+    let opacity = if translucent {
+        config.background_opacity.unwrap_or(DEFAULT_BACKGROUND_OPACITY)
+    } else {
+        1.0
+    };
+    let background = Rgba {
+        r: f32::from(red) / 255.0,
+        g: f32::from(green) / 255.0,
+        b: f32::from(blue) / 255.0,
+        a: opacity as f32,
+    };
+
+    application().run(move |cx: &mut App| {
         // Match JWM's configured status_bar_height; width spans the primary
         // display so the bar covers the screen until JWM repositions it.
         let height: Pixels = px(42.);
@@ -838,7 +797,11 @@ fn main() {
         let opts = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: None,
-            window_background: WindowBackgroundAppearance::Transparent,
+            window_background: if translucent {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             kind: WindowKind::Normal,
             is_resizable: false,
             is_minimizable: false,
@@ -848,27 +811,201 @@ fn main() {
             ..Default::default()
         };
 
-        cx.open_window(opts, |_w, cx| cx.new(GpuiBar::new))
-            .expect("failed to open window");
+        cx.open_window(opts, move |_w, cx| {
+            cx.new(move |cx| GpuiBar::new(background, cx))
+        })
+        .expect("failed to open window");
         cx.activate(true);
     });
 }
 
-/// Alpha the bar's background keeps once a frosted backdrop shows through it.
-const GLASS_TINT_ALPHA: f32 = 0.55;
+// -------- Compositor coupling ------------------------------------------------
 
-/// The wallpaper source this bar's configuration asks for, if any.
+/// The startup mode decision: translucent only when a compositing manager is
+/// running AND gpui's renderer can actually deliver per-pixel alpha; anything
+/// less paints the solid fallback. Both checks ride one side connection that
+/// is gone before gpui opens its own.
+fn detect_translucency() -> bool {
+    if x11rb::xcb_ffi::load_libxcb().is_err() {
+        return false;
+    }
+    // No X server to ask (a native-Wayland session, say) means nobody honors
+    // the CM-selection contract either way: solid.
+    let Ok((conn, screen_num)) = XCBConnection::connect(None) else {
+        return false;
+    };
+    compositor_active(&conn, screen_num) && renderer_alpha_capable(&conn, screen_num)
+}
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection.
 ///
-/// Only the `[glass]` section of the shared bar config applies here; the rest
-/// of this bar's appearance is its own theme.
-fn glass_strip() -> Option<GlassStrip<WallpaperFile>> {
-    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
-        warn!("falling back to the default bar config: {error}");
-        xbar_core::config::BarConfig::default()
-    });
-    // A provisional screen size; `refresh_glass` corrects it from the window
-    // manager's monitor geometry as soon as one arrives.
-    config
-        .glass
-        .file_strip(1920, 1080, fallback_rgb(config.theme))
+/// Sampled once, before gpui runs: per-pixel alpha is a window-creation
+/// decision, so a compositor started or stopped later goes unnoticed until
+/// the bar restarts. Ownership also only promises compositing — whether the
+/// compositor blurs behind the bar is its own affair.
+fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
+}
+
+/// A 32-bit TrueColor visual to probe with, if the server has one.
+fn find_argb_visual(screen: &x11rb::protocol::xproto::Screen) -> Option<u32> {
+    use x11rb::protocol::xproto::VisualClass;
+
+    screen
+        .allowed_depths
+        .iter()
+        .find(|depth| depth.depth == 32)
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
+        })
+        .map(|visual| visual.visual_id)
+}
+
+/// Whether gpui's wgpu renderer could actually hand per-pixel alpha to the
+/// server.
+///
+/// gpui negotiates its surface alpha mode internally and never reports the
+/// outcome, so this asks wgpu the same question ahead of time: an unmapped
+/// 1x1 ARGB window, a surface over it, and the adapter's capabilities, on the
+/// same backends gpui itself enables (`gpui_wgpu::WgpuContext::instance`).
+/// The acceptance set mirrors gpui_wgpu's transparent-window preference list
+/// (`wgpu_renderer.rs`): `PreMultiplied` or `Inherit` — anything else and the
+/// renderer would quietly composite opaque.
+fn renderer_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
+    use x11rb::protocol::xproto::{ColormapAlloc, ConnectionExt as _, CreateWindowAux, WindowClass};
+
+    let screen = &conn.setup().roots[screen_num];
+    let Some(visual_id) = find_argb_visual(screen) else {
+        return false;
+    };
+    let (Ok(colormap), Ok(window)) = (conn.generate_id(), conn.generate_id()) else {
+        return false;
+    };
+    if !conn
+        .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
+        .map(|cookie| cookie.check().is_ok())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    let created = conn
+        .create_window(
+            32,
+            window,
+            screen.root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual_id,
+            &CreateWindowAux::new()
+                .background_pixel(0)
+                .border_pixel(0)
+                .colormap(colormap)
+                .override_redirect(1),
+        )
+        .map(|cookie| cookie.check().is_ok())
+        .unwrap_or(false);
+
+    let capable = created && {
+        let target = Arc::new(ProbeTarget {
+            conn: conn.get_raw_xcb_connection(),
+            screen: screen_num as i32,
+            window,
+            visual_id,
+        });
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(target.clone()))
+        });
+        instance
+            .create_surface(target)
+            .ok()
+            .and_then(|surface| {
+                let adapter =
+                    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        force_fallback_adapter: false,
+                        compatible_surface: Some(&surface),
+                    }))
+                    .ok()?;
+                let modes = surface.get_capabilities(&adapter).alpha_modes;
+                Some(
+                    modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+                        || modes.contains(&wgpu::CompositeAlphaMode::Inherit),
+                )
+            })
+            .unwrap_or(false)
+    };
+
+    if created {
+        let _ = conn.destroy_window(window);
+    }
+    let _ = conn.free_colormap(colormap);
+    let _ = conn.flush();
+    capable
+}
+
+/// Raw-handle wrapper the capability probe hands to wgpu: the side XCB
+/// connection plus the throwaway ARGB window created on it.
+#[derive(Debug)]
+struct ProbeTarget {
+    conn: *mut std::ffi::c_void,
+    screen: i32,
+    window: u32,
+    visual_id: u32,
+}
+
+// The raw connection pointer is only ever read on this thread; wgpu's surface
+// types nonetheless insist on Send + Sync targets.
+unsafe impl Send for ProbeTarget {}
+unsafe impl Sync for ProbeTarget {}
+
+impl raw_window_handle::HasDisplayHandle for ProbeTarget {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+        let handle =
+            raw_window_handle::XcbDisplayHandle::new(std::ptr::NonNull::new(self.conn), self.screen);
+        Ok(unsafe {
+            raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Xcb(
+                handle,
+            ))
+        })
+    }
+}
+
+impl raw_window_handle::HasWindowHandle for ProbeTarget {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        let mut handle = raw_window_handle::XcbWindowHandle::new(
+            std::num::NonZeroU32::new(self.window).expect("X11 resource ids are never zero"),
+        );
+        handle.visual_id = std::num::NonZeroU32::new(self.visual_id);
+        Ok(unsafe {
+            raw_window_handle::WindowHandle::borrow_raw(raw_window_handle::RawWindowHandle::Xcb(
+                handle,
+            ))
+        })
+    }
 }

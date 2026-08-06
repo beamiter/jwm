@@ -12,13 +12,11 @@ use std::time::Duration;
 
 use xbar_core::config::BarConfig;
 use xbar_core::controls::PresentationProjector;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
     TransportRecoveryConfig, UserAction,
 };
-use xbar_gtk::{BarSurface, BarTheme, Dispatch, GlassBackdrop};
+use xbar_gtk::{BarSurface, BarTheme, Dispatch};
 use xbar_linux_actions::ProcessActionHandler;
 
 const BAR_NAME: &str = "relm_bar";
@@ -48,15 +46,6 @@ pub struct AppModel {
     /// Width the bar falls back to before, and after, the window manager
     /// describes a monitor: the whole screen.
     default_width: i32,
-
-    // --- Frosted glass ---
-    backdrop: GlassBackdrop,
-    /// Empty when no wallpaper is configured; the bar is then simply
-    /// translucent and the compositor supplies what shows through.
-    glass: Option<GlassStrip<WallpaperFile>>,
-    /// Bar origin in physical pixels, as last assigned by the window manager.
-    /// GTK4 exposes no window position of its own.
-    glass_origin: (i32, i32),
 }
 
 impl SimpleComponent for AppModel {
@@ -85,7 +74,16 @@ impl SimpleComponent for AppModel {
             warn!("falling back to the default bar config: {error}");
             BarConfig::default()
         });
-        let theme = BarTheme::from_config(&config);
+        // Sampled once, before the window realizes: whether a surface gets
+        // per-pixel alpha is a creation-time decision, so a compositor that
+        // arrives or leaves later is not seen until the bar restarts. GDK's
+        // X11 backend watches the same _NET_WM_CM_S<n> selection every other
+        // bar checks — and owning that selection only says compositing is on,
+        // not that jwm will actually blur behind the bar.
+        let translucent = gtk::gdk::Display::default()
+            .map(|display| display.is_composited() && display.is_rgba())
+            .unwrap_or(false);
+        let theme = BarTheme::from_config(&config, translucent);
         theme.install();
 
         // relm4 delivers input through the main loop, so a control can hand
@@ -95,32 +93,27 @@ impl SimpleComponent for AppModel {
             Rc::new(move |action| sender.input(AppInput::Activate(action)))
         };
         let surface = BarSurface::new(&theme, dispatch);
-        let backdrop = GlassBackdrop::new();
-        root.set_child(Some(&backdrop.behind(&surface)));
-        root.add_css_class("transparent-window");
+        root.set_child(Some(surface.widget()));
 
-        let (screen_width, screen_height) = xbar_gtk::primary_screen_size();
+        let (screen_width, _) = xbar_gtk::primary_screen_size();
         let default_width = xbar_gtk::logical_width(screen_width);
         // Span the screen from the first frame, as the Cairo bars do. The
         // window manager's own geometry replaces this as soon as it arrives,
         // but a bar must never flash at some arbitrary width.
         root.set_default_size(default_width, theme.metrics.bar_height);
 
-        root.connect_realize(|window| {
-            // Per-pixel alpha instead of an opaque strip: the compositor then
-            // blends the wallpaper behind the bar's translucent tint.
-            if let Some(surface) = window.surface() {
-                surface.set_opaque_region(None);
-            }
-            window.queue_draw();
-        });
-
-        let glass =
-            config
-                .glass
-                .file_strip(screen_width, screen_height, fallback_rgb(config.theme));
-        if glass.is_some() {
-            root.add_css_class("glass");
+        if translucent {
+            root.add_css_class("transparent-window");
+            root.connect_realize(|window| {
+                // Per-pixel alpha instead of an opaque strip: the compositor
+                // then blends whatever is behind the bar through its
+                // translucent tint. A solid bar keeps GTK's computed opaque
+                // region, which is exactly what an opaque strip wants.
+                if let Some(surface) = window.surface() {
+                    surface.set_opaque_region(None);
+                }
+                window.queue_draw();
+            });
         }
 
         let mut runtime = if shared_path.is_empty() {
@@ -146,9 +139,6 @@ impl SimpleComponent for AppModel {
             theme,
             surface,
             default_width,
-            backdrop,
-            glass,
-            glass_origin: (0, 0),
         };
 
         model.handle_runtime_update(initial_update);
@@ -169,8 +159,6 @@ impl SimpleComponent for AppModel {
             AppInput::Tick => {
                 let update = self.runtime.tick();
                 self.handle_runtime_update(update);
-                // Cheap unless the wallpaper file actually changed.
-                self.refresh_glass();
             }
         }
     }
@@ -200,8 +188,6 @@ impl AppModel {
     fn handle_platform_effect(&mut self, effect: BarEffect) {
         match effect {
             BarEffect::ApplyMonitorGeometry(geometry) => {
-                self.glass_origin = (geometry.x, geometry.y);
-                self.refresh_glass();
                 let scale_factor = self.root_window.scale_factor().max(1);
                 let logical_width = (f64::from(geometry.width) / f64::from(scale_factor))
                     .round()
@@ -238,15 +224,6 @@ impl AppModel {
             PresentationProjector::project(self.snapshot.view(), &self.theme.presentation);
         xbar_gtk::apply_theme_class(&self.root_window, presentation.theme);
         self.surface.sync(presentation);
-    }
-
-    fn refresh_glass(&mut self) {
-        let size = xbar_gtk::window_size_px(&self.root_window);
-        let origin = self.glass_origin;
-        let Some(strip) = self.glass.as_mut() else {
-            return;
-        };
-        self.backdrop.refresh(strip, origin, size);
     }
 }
 

@@ -10,21 +10,19 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, glib};
 use log::{info, warn};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::env;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
 use xbar_core::config::BarConfig;
 use xbar_core::controls::PresentationProjector;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, PlatformEffectHandler, RuntimeUpdate,
     TransportRecoveryConfig, UserAction,
 };
-use xbar_gtk::{BarSurface, BarTheme, Dispatch, GlassBackdrop};
+use xbar_gtk::{BarSurface, BarTheme, Dispatch};
 use xbar_linux_actions::ProcessActionHandler;
 
 const BAR_NAME: &str = "gtk_bar";
@@ -40,17 +38,13 @@ struct BarApp {
     /// Width the bar falls back to before, and after, the window manager
     /// describes a monitor: the whole screen.
     default_width: i32,
+    /// The startup mode decision. The window was created for this mode, so it
+    /// cannot change until the bar restarts.
+    translucent: bool,
 
     runtime: RefCell<BarRuntime>,
     snapshot: RefCell<BarSnapshot>,
     process_actions: RefCell<ProcessActionHandler>,
-
-    backdrop: GlassBackdrop,
-    glass: RefCell<Option<GlassStrip<WallpaperFile>>>,
-    /// Bar origin in physical pixels, as last assigned by the window manager.
-    /// GTK4 exposes no window position of its own, so the geometry the WM
-    /// hands us is what tells the backdrop where to sample.
-    glass_origin: Cell<(i32, i32)>,
 }
 
 impl BarApp {
@@ -59,10 +53,19 @@ impl BarApp {
             warn!("falling back to the default bar config: {error}");
             BarConfig::default()
         });
-        let theme = BarTheme::from_config(&config);
+        // Sampled once, before the window exists: whether a surface gets
+        // per-pixel alpha is a creation-time decision, so a compositor that
+        // arrives or leaves later is not seen until the bar restarts. GDK's
+        // X11 backend watches the same _NET_WM_CM_S<n> selection every other
+        // bar checks — and owning that selection only says compositing is on,
+        // not that jwm will actually blur behind the bar.
+        let translucent = gtk4::gdk::Display::default()
+            .map(|display| display.is_composited() && display.is_rgba())
+            .unwrap_or(false);
+        let theme = BarTheme::from_config(&config, translucent);
         theme.install();
 
-        let (screen_width, screen_height) = xbar_gtk::primary_screen_size();
+        let (screen_width, _) = xbar_gtk::primary_screen_size();
         let default_width = xbar_gtk::logical_width(screen_width);
         let window = ApplicationWindow::builder()
             .application(app)
@@ -75,15 +78,19 @@ impl BarApp {
             .default_width(default_width)
             .default_height(theme.metrics.bar_height)
             .build();
-        window.add_css_class("transparent-window");
-        window.connect_realize(|window| {
-            // Per-pixel alpha instead of an opaque strip: the compositor then
-            // blends the wallpaper behind the bar's translucent tint.
-            if let Some(surface) = window.surface() {
-                surface.set_opaque_region(None);
-            }
-            window.queue_draw();
-        });
+        if translucent {
+            window.add_css_class("transparent-window");
+            window.connect_realize(|window| {
+                // Per-pixel alpha instead of an opaque strip: the compositor
+                // then blends whatever is behind the bar through its
+                // translucent tint. A solid bar keeps GTK's computed opaque
+                // region, which is exactly what an opaque strip wants.
+                if let Some(surface) = window.surface() {
+                    surface.set_opaque_region(None);
+                }
+                window.queue_draw();
+            });
+        }
 
         let mut runtime = if shared_path.is_empty() {
             BarRuntime::new(config.model_config())
@@ -98,11 +105,6 @@ impl BarApp {
         initial_update.merge(runtime.poll_transport());
         let snapshot = runtime.snapshot();
 
-        let glass =
-            config
-                .glass
-                .file_strip(screen_width, screen_height, fallback_rgb(config.theme));
-
         let instance = Rc::new_cyclic(|weak: &Weak<Self>| {
             let dispatch: Dispatch = {
                 let weak = weak.clone();
@@ -113,23 +115,17 @@ impl BarApp {
                 })
             };
             let surface = BarSurface::new(&theme, dispatch);
-            let backdrop = GlassBackdrop::new();
-            window.set_child(Some(&backdrop.behind(&surface)));
-            if glass.is_some() {
-                window.add_css_class("glass");
-            }
+            window.set_child(Some(surface.widget()));
 
             Self {
                 window,
                 surface,
                 theme,
                 default_width,
+                translucent,
                 runtime: RefCell::new(runtime),
                 snapshot: RefCell::new(snapshot),
                 process_actions: RefCell::new(ProcessActionHandler::default()),
-                backdrop,
-                glass: RefCell::new(glass),
-                glass_origin: Cell::new((0, 0)),
             }
         });
 
@@ -149,8 +145,6 @@ impl BarApp {
                 };
                 let update = app.runtime.borrow_mut().tick();
                 app.handle_runtime_update(update);
-                // Cheap unless the wallpaper file actually changed.
-                app.refresh_glass();
                 glib::ControlFlow::Continue
             }
         });
@@ -191,8 +185,6 @@ impl BarApp {
     fn handle_platform_effect(&self, effect: BarEffect) {
         match effect {
             BarEffect::ApplyMonitorGeometry(geometry) => {
-                self.glass_origin.set((geometry.x, geometry.y));
-                self.refresh_glass();
                 self.resize_window_to_monitor(geometry.width);
             }
             BarEffect::ClearMonitorGeometry => {
@@ -225,21 +217,6 @@ impl BarApp {
         self.surface.sync(presentation);
     }
 
-    fn refresh_glass(&self) {
-        let mut glass = self.glass.borrow_mut();
-        let Some(strip) = glass.as_mut() else {
-            return;
-        };
-        // Only the origin comes from the window manager: GTK4 deliberately
-        // exposes no window position, and the size is better read from the
-        // window itself.
-        self.backdrop.refresh(
-            strip,
-            self.glass_origin.get(),
-            xbar_gtk::window_size_px(&self.window),
-        );
-    }
-
     fn resize_window_to_monitor(&self, expected_width: u32) {
         let scale_factor = self.window.scale_factor().max(1);
         let logical_width = (f64::from(expected_width) / f64::from(scale_factor))
@@ -255,10 +232,12 @@ impl BarApp {
 
     fn show(&self) {
         self.window.present();
-        if let Some(surface) = self.window.surface() {
-            surface.set_opaque_region(None);
+        if self.translucent {
+            if let Some(surface) = self.window.surface() {
+                surface.set_opaque_region(None);
+            }
+            self.window.queue_draw();
         }
-        self.window.queue_draw();
     }
 }
 

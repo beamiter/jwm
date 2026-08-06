@@ -21,11 +21,17 @@ fn main() -> anyhow::Result<()> {
     // A compositing manager means the bar can present per-pixel alpha and have
     // the desktop blurred behind it. Asking for a transparent window is what
     // gets winit to pick a 32-bit visual, which is in turn what makes JWM's
-    // compositor treat the bar as translucent. Without a compositor the window
-    // stays opaque and the bar frosts its own wallpaper strip instead.
+    // compositor treat the bar as translucent — but only if the wgpu surface
+    // eframe builds can composite alpha at all, which the probe answers up
+    // front. Both facts are sampled once, here, because transparency is a
+    // creation-time decision: a compositor toggled later is not noticed until
+    // the bar restarts, and the claimed selection promises compositing, not
+    // that anything is blurred. When either check fails the bar paints the
+    // opaque fallback colour instead.
     let translucent = x11
         .as_ref()
-        .is_some_and(platform::X11Session::compositor_active);
+        .is_some_and(platform::X11Session::compositor_active)
+        && platform::surface_alpha_capable();
     info!("starting {BAR_NAME} (translucent: {translucent})");
 
     let config = xbar_core::config::BarConfig::load_default().unwrap_or_default();

@@ -1,21 +1,26 @@
-//! Frosted-glass backdrop shared by every bar frontend.
+//! Frosted-glass backdrop, baked now only for the Tauri webview bridge.
 //!
 //! A bar cannot see through itself: whatever "glass" it shows is something it
-//! draws.  Two ways exist to get there, and a frontend picks by what its
-//! platform offers:
+//! draws.  Two ways exist to get there:
 //!
 //! * A compositor blurs what lies behind a translucent window.  Nothing in
-//!   this module is involved — the bar just needs per-pixel alpha.
-//! * Nobody blurs anything, so the bar bakes the backdrop itself: sample the
-//!   wallpaper where the bar sits, blur and saturate that strip, and draw the
-//!   scene over it.  That is what lives here.
+//!   this module beyond [`fallback_rgb`] and [`DEFAULT_BACKGROUND_OPACITY`]
+//!   is involved — the bar just needs per-pixel alpha.  Every non-Tauri bar
+//!   takes this path, deciding once at startup whether a compositing manager
+//!   owns `_NET_WM_CM_Sn` and the pipeline can deliver alpha; when either
+//!   fails it paints an opaque [`fallback_rgb`] background instead.
+//! * A webview cannot take that path: `backdrop-filter` blurs only what is
+//!   inside the page, never the desktop behind the window.  So the Tauri
+//!   bridge still bakes the backdrop — sample the wallpaper where the bar
+//!   sits, blur and saturate that strip, and hand it to the page as an
+//!   image.  That is what lives here, and it is this module's one remaining
+//!   baking consumer.
 //!
-//! Only the second path is portable, and none of it is X11-specific or
-//! Cairo-specific: [`frost`] is integer pixel math over a premultiplied
-//! `ARgb32` buffer — the same byte layout
+//! The baked path stays free of anything X11-specific or Cairo-specific:
+//! [`frost`] is integer pixel math over a premultiplied `ARgb32` buffer —
+//! the same byte layout
 //! [`CairoBar::render_into_bgra`](crate::render::cairo::CairoBar::render_into_bgra)
-//! already fills, and what softbuffer, pixels, and a wgpu texture upload all
-//! want.  Where the wallpaper pixels come from is the one genuinely
+//! already fills.  Where the wallpaper pixels come from is the one genuinely
 //! platform-dependent step, so it is a trait: see [`WallpaperSource`], and
 //! [`wallpaper::WallpaperFile`] for the file-backed implementation that works
 //! on any windowing system.

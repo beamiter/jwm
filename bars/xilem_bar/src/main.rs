@@ -14,16 +14,28 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::c_void;
 use std::fs;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
+use raw_window_handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle, XcbDisplayHandle, XcbWindowHandle,
+};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{
+    ColormapAlloc, ConnectionExt as _, CreateWindowAux, VisualClass, WindowClass,
+};
+use x11rb::xcb_ffi::XCBConnection;
+
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
@@ -35,7 +47,7 @@ use xbar_linux_actions::ProcessActionHandler;
 use masonry::core::{ErasedAction, WidgetId};
 use masonry::kurbo::Axis;
 use masonry::layout::{Dim, Length};
-use masonry::peniko::{Color, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+use masonry::peniko::Color;
 use masonry::properties::{Dimensions, Padding};
 use masonry_winit::app::{AppDriver, DriverCtx, MasonryState, WgpuContext, WindowId};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -43,29 +55,14 @@ use winit::window::WindowLevel;
 use xilem::core::{MessageProxy, NoElement, View, fork};
 use xilem::style::Style;
 use xilem::view::{
-    CrossAxisAlignment, FlexSpacer, ObjectFit, PointerButton, button, button_any_pointer, flex,
-    image, label, sized_box, task_raw, zstack,
+    CrossAxisAlignment, FlexSpacer, PointerButton, button, button_any_pointer, flex, label,
+    sized_box, task_raw,
 };
 use xilem::{EventLoop, ViewCtx, WidgetView, WindowOptions, Xilem};
 
 // -------- Constants (mirror iced_bar) ----------------------------------------
 
 const NERD_FONT: &str = "JetBrainsMono Nerd Font";
-
-/// Alpha the bar's background keeps once a frosted backdrop shows through it.
-const GLASS_TINT_ALPHA: f32 = 0.55;
-
-/// A single transparent pixel, standing in for a backdrop that has not been
-/// frosted yet.
-fn empty_brush() -> ImageBrush {
-    ImageBrush::new(ImageData {
-        data: vec![0_u8; 4].into(),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width: 1,
-        height: 1,
-    })
-}
 
 const TAG_ICONS: [&str; 9] = [
     "\u{F0A1E}",
@@ -115,10 +112,6 @@ struct GeometryBridgeState {
     generation: u64,
     geometry: Option<MonitorGeometry>,
     scale_factor: f64,
-    /// Where the window actually ended up, in physical pixels. The frosted
-    /// backdrop samples the wallpaper there, and only the driver — which holds
-    /// the winit handle — can see it.
-    window_rect: Option<(i32, i32, u32, u32)>,
 }
 
 impl Default for GeometryBridgeState {
@@ -127,7 +120,6 @@ impl Default for GeometryBridgeState {
             generation: 0,
             geometry: None,
             scale_factor: 1.0,
-            window_rect: None,
         }
     }
 }
@@ -145,14 +137,6 @@ impl GeometryBridge {
         });
         state.generation = state.generation.wrapping_add(1).max(1);
         state.geometry = geometry;
-    }
-
-    fn update_window_rect(&self, rect: (i32, i32, u32, u32)) {
-        let mut state = self.state.lock().unwrap_or_else(|error| {
-            warn!("xilem geometry bridge mutex was poisoned");
-            error.into_inner()
-        });
-        state.window_rect = Some(rect);
     }
 
     fn update_scale_factor(&self, scale_factor: f64) {
@@ -203,11 +187,6 @@ impl<D> GeometryDriver<D> {
         let window = ctx.window(window_id).handle();
         let scale_factor = window.scale_factor().max(f64::EPSILON);
         self.bridge.update_scale_factor(scale_factor);
-        if let Ok(position) = window.outer_position() {
-            let size = window.inner_size();
-            self.bridge
-                .update_window_rect((position.x, position.y, size.width, size.height));
-        }
 
         let applied = self.windows.entry(window_id).or_insert_with(|| {
             let physical_size = window.inner_size();
@@ -293,6 +272,163 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
 fn pill_padding() -> Padding {
     Padding::from_vh(Length::px(0.0), Length::px(2.0))
 }
+
+// -------- Compositor coupling ------------------------------------------------
+//
+// Whether the bar gets a translucent or a solid window is decided once, in
+// `main`, because window transparency is a creation-time choice in winit. The
+// decision does not follow a compositor that starts or stops afterwards — a
+// restarted bar picks up the change — and owning `_NET_WM_CM_S{n}` only says
+// compositing is on, not that anything blurs behind the bar.
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection. Any failure along the way reads as "no compositor" so the bar
+/// lands on the solid side, which is always safe to paint.
+fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
+}
+
+/// Raw-handle wrapper for the probe window, so wgpu can build a surface on a
+/// window masonry knows nothing about.
+struct ProbeTarget {
+    conn: *mut c_void,
+    screen: i32,
+    window: u32,
+    visual_id: u32,
+}
+
+unsafe impl Send for ProbeTarget {}
+unsafe impl Sync for ProbeTarget {}
+
+impl HasDisplayHandle for ProbeTarget {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, raw_window_handle::HandleError> {
+        let conn = NonNull::new(self.conn).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let handle = XcbDisplayHandle::new(Some(conn), self.screen);
+        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(handle)) })
+    }
+}
+
+impl HasWindowHandle for ProbeTarget {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, raw_window_handle::HandleError> {
+        let window =
+            NonZeroU32::new(self.window).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let mut handle = XcbWindowHandle::new(window);
+        handle.visual_id = NonZeroU32::new(self.visual_id);
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xcb(handle)) })
+    }
+}
+
+/// Whether a wgpu surface on this display can actually deliver per-pixel
+/// alpha. Masonry picks its surface alpha mode internally and never reports
+/// the outcome, so the bar asks the same question ahead of time: build a
+/// throwaway depth-32 window, get the surface capabilities, and accept only
+/// what masonry itself would blit transparently — `PostMultiplied` or
+/// `PreMultiplied`. Anything less and a transparent window would compose
+/// garbage, so the bar must stay solid.
+fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
+    let Some(screen) = conn.setup().roots.get(screen_num) else {
+        return false;
+    };
+    let Some(visual_id) = screen
+        .allowed_depths
+        .iter()
+        .find(|depth| depth.depth == 32)
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
+        })
+        .map(|visual| visual.visual_id)
+    else {
+        return false;
+    };
+    let (Ok(colormap), Ok(window)) = (conn.generate_id(), conn.generate_id()) else {
+        return false;
+    };
+    if conn
+        .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
+        .ok()
+        .and_then(|cookie| cookie.check().ok())
+        .is_none()
+    {
+        return false;
+    }
+    // The window is never mapped; it exists only so the surface has a real
+    // depth-32 drawable to be judged against.
+    let aux = CreateWindowAux::new()
+        .background_pixel(0)
+        .border_pixel(0)
+        .override_redirect(1)
+        .colormap(colormap);
+    if conn
+        .create_window(
+            32,
+            window,
+            screen.root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual_id,
+            &aux,
+        )
+        .ok()
+        .and_then(|cookie| cookie.check().ok())
+        .is_none()
+    {
+        let _ = conn.free_colormap(colormap);
+        return false;
+    }
+
+    let target = ProbeTarget {
+        conn: conn.get_raw_xcb_connection(),
+        screen: screen_num as i32,
+        window,
+        visual_id,
+    };
+    // Env-aware, like the instance masonry itself will build: a `WGPU_BACKEND`
+    // override must steer the probe onto the same backend it steers vello onto.
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::from_env_or_default());
+    let capable = instance
+        .create_surface(target)
+        .ok()
+        .and_then(|surface| {
+            let adapter = futures_lite::future::block_on(instance.request_adapter(
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                },
+            ))
+            .ok()?;
+            let modes = surface.get_capabilities(&adapter).alpha_modes;
+            Some(
+                modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+                    || modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied),
+            )
+        })
+        .unwrap_or(false);
+
+    let _ = conn.destroy_window(window);
+    let _ = conn.free_colormap(colormap);
+    let _ = conn.flush();
+    capable
+}
+
 // -------- App state ----------------------------------------------------------
 
 #[derive(Debug, Default)]
@@ -313,17 +449,15 @@ struct XilemBar {
     geometry_bridge: Arc<GeometryBridge>,
     theme: Theme,
 
-    // --- Frosted glass ---
-    /// Wallpaper source and frosting cache, absent when no wallpaper is
-    /// configured. The bar then keeps its opaque background.
-    glass: Option<GlassStrip<WallpaperFile>>,
-    /// The frosted strip as a brush, rebuilt only when the cache says so.
-    glass_brush: Option<ImageBrush>,
-    glass_generation: u64,
+    /// The startup decision from `main`: a translucent window washes its
+    /// background to `background_opacity`, a solid one paints it opaque.
+    translucent: bool,
+    /// Alpha of the bar's background while translucent; ignored when solid.
+    background_opacity: f64,
 }
 
 impl XilemBar {
-    fn new(geometry_bridge: Arc<GeometryBridge>) -> Self {
+    fn new(geometry_bridge: Arc<GeometryBridge>, translucent: bool) -> Self {
         let args: Vec<String> = env::args().collect();
         let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
 
@@ -342,17 +476,15 @@ impl XilemBar {
             BarRuntime::with_managed_transport(config, recovery)
         };
         let runtime = runtime.expect("xilem bar model configuration is valid");
-        // Only the `[glass]` section applies here; the rest of this bar's
+        // Only `background_opacity` applies here; the rest of this bar's
         // appearance is its own theme.
         let app_config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
             warn!("falling back to the default bar config: {error}");
             xbar_core::config::BarConfig::default()
         });
-        // A provisional screen size; `refresh_glass` corrects it from the
-        // window manager's monitor geometry as soon as one arrives.
-        let glass = app_config
-            .glass
-            .file_strip(1920, 1080, fallback_rgb(theme_mode));
+        let background_opacity = app_config
+            .background_opacity
+            .unwrap_or(DEFAULT_BACKGROUND_OPACITY);
         Self {
             tab_colors: [
                 rgb(0xFF, 0x6B, 0x6B),
@@ -370,45 +502,9 @@ impl XilemBar {
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
             theme: Theme::from_mode(theme_mode),
-            glass,
-            glass_brush: None,
-            glass_generation: 0,
+            translucent,
+            background_opacity,
         }
-    }
-
-    /// Re-frost the wallpaper under the bar and rebuild the brush when it
-    /// changed. Cheap on an unchanged wallpaper and geometry: the cache hands
-    /// back the same generation and the brush is left alone.
-    fn refresh_glass(&mut self) {
-        let bridge = self.geometry_bridge.snapshot();
-        // The wallpaper is laid out across the monitor, and the bar samples
-        // the part of it the window actually covers.
-        if let (Some(strip), Some(geometry)) = (self.glass.as_mut(), bridge.geometry) {
-            strip
-                .source_mut()
-                .set_screen(geometry.width.max(1), geometry.height.max(1));
-        }
-        let Some((x, y, width, height)) = bridge.window_rect else {
-            return;
-        };
-        let Some(strip) = self.glass.as_mut() else {
-            return;
-        };
-        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
-            return;
-        };
-        if generation == self.glass_generation && self.glass_brush.is_some() {
-            return;
-        }
-        self.glass_brush = Some(ImageBrush::new(ImageData {
-            data: image.to_rgba8().into(),
-            format: ImageFormat::Rgba8,
-            // `to_rgba8` un-premultiplies on the way out.
-            alpha_type: ImageAlphaType::Alpha,
-            width: image.width(),
-            height: image.height(),
-        }));
-        self.glass_generation = generation;
     }
 
     fn toggle_theme(&mut self) {
@@ -538,7 +634,6 @@ where
 // Catppuccin Mocha (dark) / Latte (light) palettes, swapped at runtime.
 #[derive(Copy, Clone)]
 struct Theme {
-    bar_bg: Color,
     fg: Color,
     subtle: Color,
     tag_inactive_bg: Color,
@@ -559,7 +654,6 @@ struct Theme {
 impl Theme {
     const fn mocha() -> Self {
         Self {
-            bar_bg: Color::from_rgba8(0x1E, 0x20, 0x32, 128),
             fg: Color::from_rgba8(0xCD, 0xD6, 0xF4, 255),
             subtle: Color::from_rgba8(0x9C, 0xA0, 0xB0, 255),
             tag_inactive_bg: Color::from_rgba8(0x45, 0x47, 0x5A, 217),
@@ -579,7 +673,6 @@ impl Theme {
     }
     const fn latte() -> Self {
         Self {
-            bar_bg: Color::from_rgba8(0xEF, 0xF1, 0xF5, 160),
             fg: Color::from_rgba8(0x4C, 0x4F, 0x69, 255),
             subtle: Color::from_rgba8(0x6C, 0x6F, 0x85, 255),
             tag_inactive_bg: Color::from_rgba8(0xCC, 0xD0, 0xDA, 217),
@@ -1081,31 +1174,20 @@ fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<
 
 // Top-level view: fork attaches the background tasks to the visible tree.
 fn root(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
-    state.refresh_glass();
-    // Whether the backdrop view exists is decided once, by whether a wallpaper
-    // is configured at all: a `zstack` whose sequence changes shape between
-    // rebuilds leaves Masonry looking for a child that is no longer there.
-    // Until the first strip is frosted, the view holds a transparent
-    // placeholder rather than being absent.
-    let backdrop = state
-        .glass
-        .is_some()
-        .then(|| state.glass_brush.clone().unwrap_or_else(empty_brush));
-    // With a backdrop the bar's own background becomes a tint over it; without
-    // one it stays exactly as opaque as it was.
-    let bar_bg = match backdrop {
-        Some(_) => state.theme.bar_bg.multiply_alpha(GLASS_TINT_ALPHA),
-        None => state.theme.bar_bg,
+    // The background is `fallback_rgb` for the live theme in both modes —
+    // re-derived on every rebuild so a ToggleTheme click repaints it — and
+    // only the alpha differs: washed to the configured opacity when the
+    // compositor blends what lies behind the window, opaque when it does not.
+    let [r, g, b] = fallback_rgb(state.runtime.view().theme);
+    let bar_bg = if state.translucent {
+        with_alpha(rgb(r, g, b), state.background_opacity as f32)
+    } else {
+        rgb(r, g, b)
     };
     fork(
-        zstack((
-            // The backdrop is built at the window's pixel size, so it must
-            // land on it one-to-one rather than be letterboxed.
-            backdrop.map(|brush| image(brush).decorative(true).fit(ObjectFit::Stretch)),
-            sized_box(app_logic(state))
-                .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
-                .background(bar_bg),
-        )),
+        sized_box(app_logic(state))
+            .padding(Padding::from_vh(Length::px(0.0), Length::px(6.0)))
+            .background(bar_bg),
         (driver_task(),),
     )
 }
@@ -1117,17 +1199,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shared_path = args.iter().skip(1).last().cloned().unwrap_or_default();
     let _ = initialize_logging("xilem_bar", &shared_path);
 
+    // A session without a compositor — or without a surface that can carry
+    // alpha — gets a solid window; anything else would paint a wash over
+    // undefined memory. A failed X connection (native Wayland, no Xwayland)
+    // counts as "no compositor" for the same reason.
+    let translucent = match XCBConnection::connect(None) {
+        Ok((conn, screen_num)) => {
+            compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+        }
+        Err(_) => false,
+    };
+    info!("startup mode: translucent={translucent}");
+
     let opts = WindowOptions::new("xilem_bar")
         .with_initial_inner_size(LogicalSize::new(800.0, 26.0))
         .with_decorations(false)
-        .with_transparent(true)
+        .with_transparent(translucent)
         .with_window_level(WindowLevel::AlwaysOnTop)
         .with_resizable(false);
 
+    // The widget layer paints the authoritative background; the base color
+    // only covers what nothing else draws, so it is clear on a translucent
+    // window and the solid fallback color on an opaque one.
+    let base_color = if translucent {
+        Color::TRANSPARENT
+    } else {
+        let [r, g, b] = fallback_rgb(load_theme_mode());
+        rgb(r, g, b)
+    };
+
     let _ = NERD_FONT;
     let geometry_bridge = Arc::new(GeometryBridge::default());
-    let app = Xilem::new_simple(XilemBar::new(Arc::clone(&geometry_bridge)), root, opts)
-        .with_default_base_color(Color::TRANSPARENT);
+    let app = Xilem::new_simple(
+        XilemBar::new(Arc::clone(&geometry_bridge), translucent),
+        root,
+        opts,
+    )
+    .with_default_base_color(base_color);
     let event_loop = EventLoop::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let (driver, windows) =

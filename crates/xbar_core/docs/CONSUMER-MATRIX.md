@@ -71,10 +71,14 @@ and typed command validation.
   it consumes.
 - `render-cairo` is limited to native scene consumers; toolkit and Tauri bars
   consume model snapshots directly.
-- `glass` carries no toolkit dependency on purpose: a frosted backdrop is
-  pixels, and every consumer — Cairo, softbuffer, pixels, a GPU upload, or a
-  webview handed a PNG — needs the same ones. `glass-wallpaper` is separate
-  because only the file-backed source needs an image decoder.
+- `glass` is down to its constants for every non-Tauri bar: translucency is
+  compositor-coupled (detect `_NET_WM_CM_S<n>` once at startup, verify the
+  pipeline can deliver alpha, otherwise paint opaque `fallback_rgb`; see
+  `MIGRATION-0.9.md`), so those bars consume only `fallback_rgb` and
+  `DEFAULT_BACKGROUND_OPACITY`. The baked-strip machinery and
+  `glass-wallpaper` (the file-backed source with its image decoder) remain
+  for the Tauri webview bridge, whose pages cannot blur the desktop behind
+  the window.
 - `runtime-linux` is limited to consumers registering timerfd/eventfd handles.
 - `transport-shared` is the only dependency path to `shared_structures`.
 - Battery and brightness remain independent provider features; GTK/Relm do

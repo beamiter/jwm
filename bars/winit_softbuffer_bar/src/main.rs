@@ -13,9 +13,8 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{Window, WindowAttributes, WindowId},
 };
-use xbar_core::config::GlassConfig;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassBackdrop, fallback_rgb};
+use x11rb::rust_connection::RustConnection;
+use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
@@ -49,11 +48,11 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
-    /// Frosted backdrop, present only when a wallpaper was configured. These
-    /// windows are opaque, so glass here always means a baked strip.
-    glass: Option<GlassBackdrop<WallpaperFile>>,
-    glass_config: GlassConfig,
-    glass_fallback: [u8; 3],
+    /// The startup compositor answer, plus the side connection that gave it —
+    /// kept alive so the window's actual depth can be verified once winit has
+    /// created it.
+    x11: Option<RustConnection>,
+    compositor_active: bool,
 }
 
 impl App {
@@ -62,8 +61,8 @@ impl App {
         logical_size: LogicalSize<f64>,
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
-        glass_config: GlassConfig,
-        glass_fallback: [u8; 3],
+        x11: Option<RustConnection>,
+        compositor_active: bool,
     ) -> Self {
         Self {
             window: None,
@@ -82,18 +81,9 @@ impl App {
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
-            glass: None,
-            glass_config,
-            glass_fallback,
+            x11,
+            compositor_active,
         }
-    }
-
-    /// Window position in screen coordinates, where the wallpaper is sampled.
-    fn bar_origin(&self) -> (i32, i32) {
-        self.window
-            .as_ref()
-            .and_then(|window| window.outer_position().ok())
-            .map_or((0, 0), |position| (position.x, position.y))
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -103,14 +93,9 @@ impl App {
             return Ok(());
         }
 
-        let (origin_x, origin_y) = self.bar_origin();
-        let backdrop = self
-            .glass
-            .as_mut()
-            .and_then(|glass| glass.ensure(origin_x, origin_y, width, height));
-        let frame =
-            self.canvas
-                .render_over(&mut self.bar, width, height, self.scale_factor, backdrop)?;
+        let frame = self
+            .canvas
+            .render(&mut self.bar, width, height, self.scale_factor)?;
         let surface = match self.soft_surface.as_mut() {
             Some(surface) => surface,
             None => return Ok(()),
@@ -219,24 +204,12 @@ impl App {
     }
 
     fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
-        self.relayout_wallpaper(geometry.width, geometry.height);
         if let Some(window) = &self.window {
             let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
                 .round()
                 .clamp(1.0, f64::from(u32::MAX)) as u32;
             window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
             let _ = window.request_inner_size(PhysicalSize::new(geometry.width, height));
-        }
-    }
-
-    /// Lay the wallpaper out on the display the window manager just described.
-    ///
-    /// This size is authoritative: the platform's own monitor query is only a
-    /// startup guess, and a wrong one would leave the backdrop wrong for the
-    /// life of the process because nothing else re-lays it.
-    fn relayout_wallpaper(&mut self, width: u32, height: u32) {
-        if let Some(glass) = self.glass.as_mut() {
-            glass.source_mut().set_screen(width, height);
         }
     }
 }
@@ -263,13 +236,6 @@ impl ApplicationHandler<UserEvent> for App {
             f64::from(self.bar.config().bar_height),
         );
         self.default_logical_size = self.logical_size;
-        // The wallpaper is laid out across the whole screen, so the strip the
-        // bar frosts depends on the screen size, not the bar's.
-        self.glass = self.glass_config.file_backdrop(
-            screen_size.width,
-            screen_size.height,
-            self.glass_fallback,
-        );
 
         let attributes = WindowAttributes::default()
             .with_title("winit_softbuffer_bar")
@@ -277,12 +243,23 @@ impl ApplicationHandler<UserEvent> for App {
             .with_decorations(false)
             .with_resizable(true)
             .with_visible(true)
-            .with_transparent(false);
+            .with_transparent(self.compositor_active);
         let window = Rc::new(
             event_loop
                 .create_window(attributes)
                 .expect("create_window failed"),
         );
+        // A transparent window is a request, not a guarantee: winit falls
+        // back to an opaque visual silently, and only a depth-32 window
+        // carries the frame's alpha to the compositor. Anything else drops
+        // the bar back to the fully opaque background.
+        let translucent = self.compositor_active
+            && self.x11.as_ref().is_some_and(|conn| {
+                window_xid(window.as_ref()).is_some_and(|xid| window_is_argb(conn, xid))
+            });
+        if !translucent {
+            self.bar.renderer_mut().set_background_opacity(None);
+        }
         let context = softbuffer::Context::new(event_loop.owned_display_handle())
             .map_err(|error| anyhow::anyhow!("softbuffer context initialization failed: {error}"))
             .expect("softbuffer context");
@@ -407,11 +384,53 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 /// A monitor size is only usable when the platform really knows one. An X
-/// server without real RandR outputs answers `1x1`, and a wallpaper laid out on
-/// that leaves the bar showing a flat fallback color instead of glass, with
-/// nothing to correct it later.
+/// server without real RandR outputs answers `1x1`, and a bar sized from that
+/// would stay invisible until the window manager corrects it.
 fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
     (size.width > 1 && size.height > 1).then_some(size)
+}
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection.
+///
+/// Sampled once, before the window exists: transparency is a creation-time
+/// choice in winit, so a compositor started or stopped after launch is not
+/// followed until the bar restarts. Owning the selection also only promises
+/// compositing — whether anything blurs behind the bar is the compositor's
+/// own policy.
+fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
+}
+
+/// The X11 window id behind the winit window, if this is an X11 session.
+fn window_xid(handle: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
+    use raw_window_handle::RawWindowHandle;
+    match handle.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        _ => None,
+    }
+}
+
+fn window_is_argb(conn: &impl x11rb::connection::Connection, xid: u32) -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    conn.get_geometry(xid)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|geometry| geometry.depth == 32)
+        .unwrap_or(false)
 }
 
 fn main() -> Result<()> {
@@ -438,15 +457,26 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
-    // A frosted backdrop only reads as a material if the bar's own background
-    // lets some of it through, so glass changes what "no opacity configured"
-    // should mean.
-    match app_config.background_opacity {
-        Some(opacity) => bar.renderer_mut().set_background_opacity(Some(opacity)),
-        None if app_config.glass.wallpaper.is_some() => bar
-            .renderer_mut()
-            .set_background_opacity(Some(DEFAULT_BACKGROUND_OPACITY)),
-        None => {}
+    // One side connection answers the compositor question and later verifies
+    // the window's depth; losing the display entirely just means solid mode.
+    let (x11, compositor_active) = match x11rb::connect(None) {
+        Ok((conn, screen_num)) => {
+            let active = compositor_active(&conn, screen_num);
+            (Some(conn), active)
+        }
+        Err(_) => (None, false),
+    };
+    // A translucent background only reads as a material when a compositor is
+    // there to blend the desktop behind it; without one the bar keeps the
+    // palette background at full opacity.
+    if compositor_active {
+        bar.renderer_mut().set_background_opacity(Some(
+            app_config
+                .background_opacity
+                .unwrap_or(DEFAULT_BACKGROUND_OPACITY),
+        ));
+    } else {
+        bar.renderer_mut().set_background_opacity(None);
     }
 
     let event_loop: EventLoop<UserEvent> = EventLoop::with_user_event().build()?;
@@ -459,8 +489,8 @@ fn main() -> Result<()> {
         LogicalSize::new(800.0, 38.0),
         1.0,
         proxy,
-        app_config.glass.clone(),
-        fallback_rgb(app_config.theme),
+        x11,
+        compositor_active,
     );
     event_loop.run_app(&mut app)?;
     Ok(())

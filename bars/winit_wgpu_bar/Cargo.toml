@@ -10,7 +10,7 @@ log = "0.4.33"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
     "config-toml",
-    "glass-wallpaper",
+    "glass",
     "logging-flexi",
     "provider-alsa",
     "provider-battery-sysfs",
@@ -27,3 +27,4 @@ cairo-rs = "0.22.0"
 pango = "0.22.8"
 winit = "0.30.13"
 raw-window-handle = "0.6.2"
+x11rb = "0.13"

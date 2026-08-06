@@ -2,24 +2,22 @@ use std::env;
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, MouseButton, ObjectFit, ParentElement, Pixels,
-    Render, RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, img, point,
-    prelude::*, px, rgb, rgba, size,
+    App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
+    Rgba, ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
+    px, rgb, size,
 };
 use gpui_component::{
-    Root, Selectable, Sizable, Size, black, blue_400, blue_500, cyan_500, emerald_500, emerald_600,
-    gray_500, green_500, indigo_500, orange_500, red_500, rose_500, slate_100, slate_300,
-    slate_700, slate_800, slate_900, tag::Tag, white,
+    Root, Selectable, Sizable, Size, Theme, black, blue_400, blue_500, cyan_500, emerald_500,
+    emerald_600, gray_500, green_500, indigo_500, orange_500, red_500, rose_500, slate_100,
+    slate_300, slate_700, slate_800, slate_900, tag::Tag, white,
 };
 use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     init as init_components,
 };
 use log::{debug, warn};
-use std::sync::Arc;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{GlassStrip, fallback_rgb};
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
@@ -73,16 +71,15 @@ struct GpuiComponentBar {
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
 
-    // --- Frosted glass ---
-    /// Wallpaper source and frosting cache, absent when no wallpaper is
-    /// configured. The bar then keeps its opaque background.
-    glass: Option<GlassStrip<WallpaperFile>>,
-    glass_image: Option<Arc<RenderImage>>,
-    glass_generation: u64,
+    // --- Compositor coupling ---
+    /// The panel's one background: the shared fallback color at the
+    /// configured opacity when a compositor blends the bar into the desktop,
+    /// fully opaque when nothing would.
+    panel_background: Rgba,
 }
 
 impl GpuiComponentBar {
-    fn new(cx: &mut Context<Self>) -> Self {
+    fn new(panel_background: Rgba, cx: &mut Context<Self>) -> Self {
         let shared_path = env::args().skip(1).last().unwrap_or_default();
         let config = ModelConfig {
             show_seconds: true,
@@ -103,9 +100,7 @@ impl GpuiComponentBar {
             runtime,
             process_actions: ProcessActionHandler::default(),
             active_geometry: None,
-            glass: glass_strip(),
-            glass_image: None,
-            glass_generation: 0,
+            panel_background,
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
@@ -536,45 +531,6 @@ impl GpuiComponentBar {
     }
 }
 
-impl GpuiComponentBar {
-    /// Re-frost the wallpaper under the bar and rebuild the render image when
-    /// it changed. Cheap on an unchanged wallpaper and geometry.
-    fn refresh_glass(&mut self, window: &Window) {
-        let scale = window.scale_factor().max(f32::EPSILON);
-        let bounds = window.bounds();
-        let width = (f32::from(bounds.size.width) * scale).round().max(1.0) as u32;
-        let height = (f32::from(bounds.size.height) * scale).round().max(1.0) as u32;
-        // GPUI exposes no window position on X11, so the origin is the one the
-        // window manager assigned; the wallpaper is laid out on that monitor.
-        let geometry = self.active_geometry;
-        let Some(strip) = self.glass.as_mut() else {
-            return;
-        };
-        if let Some(geometry) = geometry {
-            strip
-                .source_mut()
-                .set_screen(geometry.width.max(1), geometry.height.max(1));
-        }
-        let (x, y) = geometry.map_or((0, 0), |geometry| (geometry.x, geometry.y));
-
-        let Some((generation, image)) = strip.ensure(x, y, width, height) else {
-            return;
-        };
-        if generation == self.glass_generation && self.glass_image.is_some() {
-            return;
-        }
-        // GPUI's `RenderImage` carries BGRA despite its `RgbaImage` container,
-        // which is exactly the byte order a `GlassImage` already holds.
-        let Some(buffer) =
-            image::RgbaImage::from_raw(image.width(), image.height(), image.data().to_vec())
-        else {
-            return;
-        };
-        self.glass_image = Some(Arc::new(RenderImage::new([image::Frame::new(buffer)])));
-        self.glass_generation = generation;
-    }
-}
-
 impl Render for GpuiComponentBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale_factor = window.scale_factor().max(f32::EPSILON);
@@ -615,27 +571,12 @@ impl Render for GpuiComponentBar {
             .child(div().w(px(1.)).h(px(24.)).bg(slate_700()))
             .child(self.render_interactive_pills(cx));
 
-        // With a backdrop the bar's own background becomes a tint over it;
-        // without one it stays exactly as opaque as it was.
-        let mut root = div()
+        let root = div()
             .relative()
             .size_full()
             .overflow_hidden()
             .font_family(NERD_FONT)
             .text_color(white());
-        if let Some(backdrop) = self.glass_image.clone() {
-            // Built at the window's own pixel size, so it must land on it
-            // one-to-one rather than be letterboxed.
-            root = root.child(
-                img(backdrop)
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Fill),
-            );
-        }
         let panel = div()
             .relative()
             .size_full()
@@ -647,12 +588,9 @@ impl Render for GpuiComponentBar {
             .justify_between()
             .border_b_1()
             .border_color(slate_800())
+            .bg(self.panel_background)
             .child(left)
             .child(right);
-        let panel = match self.glass_image {
-            Some(_) => panel.bg(rgba(GLASS_TINT)),
-            None => panel.bg(slate_900()),
-        };
         root.child(panel)
     }
 }
@@ -681,8 +619,38 @@ fn main() {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     let _ = initialize_logging("gpui_component_bar", &shared_path);
 
-    Application::new().run(|cx: &mut App| {
+    // Only `theme` and `background_opacity` of the shared bar config apply
+    // here; the rest of this bar's appearance is gpui-component's own theme.
+    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
+        warn!("falling back to the default bar config: {error}");
+        xbar_core::config::BarConfig::default()
+    });
+
+    let translucent = compositor_active() && RENDERER_ALPHA_CAPABLE;
+    let [red, green, blue] = fallback_rgb(config.theme);
+    let opacity = if translucent {
+        config.background_opacity.unwrap_or(DEFAULT_BACKGROUND_OPACITY)
+    } else {
+        1.0
+    };
+    let panel_background = Rgba {
+        r: f32::from(red) / 255.0,
+        g: f32::from(green) / 255.0,
+        b: f32::from(blue) / 255.0,
+        a: opacity as f32,
+    };
+
+    Application::new().run(move |cx: &mut App| {
         init_components(cx);
+        // Root paints the whole window in the component theme's background.
+        // Solid mode recolors that sheet to the shared fallback; translucent
+        // mode clears it entirely so the panel's own wash is the only alpha
+        // the compositor gets to see.
+        Theme::global_mut(cx).background = if translucent {
+            gpui::transparent_black()
+        } else {
+            panel_background.into()
+        };
         let height: Pixels = px(42.);
         let width: Pixels = cx
             .primary_display()
@@ -695,7 +663,11 @@ fn main() {
                 size: size(width, height),
             })),
             titlebar: None,
-            window_background: WindowBackgroundAppearance::Transparent,
+            window_background: if translucent {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             kind: WindowKind::Normal,
             is_resizable: false,
             is_minimizable: false,
@@ -703,8 +675,8 @@ fn main() {
             ..Default::default()
         };
 
-        cx.open_window(options, |window, cx| {
-            let view = cx.new(GpuiComponentBar::new);
+        cx.open_window(options, move |window, cx| {
+            let view = cx.new(move |cx| GpuiComponentBar::new(panel_background, cx));
             cx.new(|cx| Root::new(view, window, cx))
         })
         .expect("failed to open gpui_component_bar window");
@@ -712,22 +684,42 @@ fn main() {
     });
 }
 
-/// The panel colour once a frosted backdrop shows through it: the same slate
-/// as `slate_900`, at the alpha that reads as a material rather than a panel.
-const GLASS_TINT: u32 = 0x0F172A8C;
+// -------- Compositor coupling ------------------------------------------------
 
-/// The wallpaper source this bar's configuration asks for, if any.
+/// Whether this bar's renderer can hand per-pixel alpha to the compositor at
+/// all. It cannot: gpui's blade renderer (blade-graphics 0.7.1,
+/// `src/vulkan/surface.rs:174-206`) only takes `POST_MULTIPLIED` or
+/// `PRE_MULTIPLIED` swapchain alpha — never `INHERIT`, which is all the usual
+/// X11 Vulkan drivers advertise — and gpui gives the app no way to learn what
+/// was negotiated. So the bar ships solid until a gpui/blade upgrade changes
+/// that; every mode seam is already in place, and flipping this const is the
+/// whole migration.
+const RENDERER_ALPHA_CAPABLE: bool = false;
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection.
 ///
-/// Only the `[glass]` section of the shared bar config applies here; the rest
-/// of this bar's appearance is its own theme.
-fn glass_strip() -> Option<GlassStrip<WallpaperFile>> {
-    let config = xbar_core::config::BarConfig::load_default().unwrap_or_else(|error| {
-        warn!("falling back to the default bar config: {error}");
-        xbar_core::config::BarConfig::default()
-    });
-    // A provisional screen size; `refresh_glass` corrects it from the window
-    // manager's monitor geometry as soon as one arrives.
-    config
-        .glass
-        .file_strip(1920, 1080, fallback_rgb(config.theme))
+/// Sampled once, on a throwaway side connection, before gpui runs: per-pixel
+/// alpha is a window-creation decision, so a compositor started or stopped
+/// later goes unnoticed until the bar restarts. Ownership also only promises
+/// compositing — whether the compositor blurs behind the bar is its own
+/// affair.
+fn compositor_active() -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    let Ok((conn, screen_num)) = x11rb::connect(None) else {
+        return false;
+    };
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
 }

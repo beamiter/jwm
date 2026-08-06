@@ -70,10 +70,14 @@ impl CairoRenderer {
     /// Render `scene` over `backdrop` — a frosted wallpaper strip, typically
     /// from [`glass::GlassBackdrop`](crate::glass).
     ///
-    /// The backdrop is painted first and the scene's background node then
-    /// blends *over* it instead of replacing it, so the bar's background
-    /// opacity decides how much of the backdrop shows through.  `None` renders
-    /// exactly like [`render`](Self::render).
+    /// Since translucency became compositor-coupled the native bars call
+    /// [`render`](Self::render) directly; the baked-strip path survives for
+    /// the Tauri bridge, and `None` renders exactly like `render`, so
+    /// retained call sites keep compiling either way.
+    ///
+    /// With a backdrop it is painted first and the scene's background node
+    /// then blends *over* it instead of replacing it, so the bar's background
+    /// opacity decides how much of the backdrop shows through.
     ///
     /// The backdrop is mapped onto the scene viewport, so an image built in
     /// device pixels lands one-to-one under any frontend transform.

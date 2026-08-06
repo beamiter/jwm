@@ -15,9 +15,24 @@ use iced::{
 
 use log::{debug, info, warn};
 use std::env;
-use std::sync::Once;
+use std::ffi::c_void;
+use std::num::NonZeroU32;
+use std::ptr::NonNull;
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
+use raw_window_handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle, XcbDisplayHandle, XcbWindowHandle,
+};
+use x11rb::connection::Connection as _;
+use x11rb::protocol::xproto::{
+    ColormapAlloc, ConnectionExt as _, CreateWindowAux, VisualClass, WindowClass,
+};
+use x11rb::xcb_ffi::XCBConnection;
+
+use xbar_core::config::BarConfig;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule,
@@ -61,6 +76,165 @@ const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const WINDOW_METRICS_READY: u8 = 0b111;
 
+// ---------------- Compositor coupling ----------------
+//
+// Whether the bar gets a translucent or a solid window is decided once, in
+// `main`, because window transparency is a creation-time choice in iced. The
+// decision does not follow a compositor that starts or stops afterwards — a
+// restarted bar picks up the change — and owning `_NET_WM_CM_S{n}` only says
+// compositing is on, not that anything blurs behind the bar.
+static TRANSLUCENT: OnceLock<bool> = OnceLock::new();
+
+/// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
+/// selection. Any failure along the way reads as "no compositor" so the bar
+/// lands on the solid side, which is always safe to paint.
+fn compositor_active(conn: &XCBConnection, screen_num: usize) -> bool {
+    let name = format!("_NET_WM_CM_S{screen_num}");
+    let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
+        return false;
+    };
+    let Ok(atom) = cookie.reply() else {
+        return false;
+    };
+    conn.get_selection_owner(atom.atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.owner != x11rb::NONE)
+        .unwrap_or(false)
+}
+
+/// Raw-handle wrapper for the probe window, so wgpu can build a surface on a
+/// window iced knows nothing about.
+struct ProbeTarget {
+    conn: *mut c_void,
+    screen: i32,
+    window: u32,
+    visual_id: u32,
+}
+
+unsafe impl Send for ProbeTarget {}
+unsafe impl Sync for ProbeTarget {}
+
+impl HasDisplayHandle for ProbeTarget {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, raw_window_handle::HandleError> {
+        let conn = NonNull::new(self.conn).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let handle = XcbDisplayHandle::new(Some(conn), self.screen);
+        Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(handle)) })
+    }
+}
+
+impl HasWindowHandle for ProbeTarget {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, raw_window_handle::HandleError> {
+        let window =
+            NonZeroU32::new(self.window).ok_or(raw_window_handle::HandleError::Unavailable)?;
+        let mut handle = XcbWindowHandle::new(window);
+        handle.visual_id = NonZeroU32::new(self.visual_id);
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xcb(handle)) })
+    }
+}
+
+/// Whether a wgpu surface on this display can actually deliver per-pixel
+/// alpha. iced picks its surface alpha mode internally and never reports the
+/// outcome, so the bar asks the same question ahead of time: build a throwaway
+/// depth-32 window, get the surface capabilities, and accept only what
+/// iced_wgpu itself would upgrade to a transparent surface — `PreMultiplied`.
+/// Anything less and a transparent window would compose garbage, so the bar
+/// must stay solid.
+fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
+    let Some(screen) = conn.setup().roots.get(screen_num) else {
+        return false;
+    };
+    let Some(visual_id) = screen
+        .allowed_depths
+        .iter()
+        .find(|depth| depth.depth == 32)
+        .and_then(|depth| {
+            depth
+                .visuals
+                .iter()
+                .find(|visual| visual.class == VisualClass::TRUE_COLOR)
+        })
+        .map(|visual| visual.visual_id)
+    else {
+        return false;
+    };
+    let (Ok(colormap), Ok(window)) = (conn.generate_id(), conn.generate_id()) else {
+        return false;
+    };
+    if conn
+        .create_colormap(ColormapAlloc::NONE, colormap, screen.root, visual_id)
+        .ok()
+        .and_then(|cookie| cookie.check().ok())
+        .is_none()
+    {
+        return false;
+    }
+    // The window is never mapped; it exists only so the surface has a real
+    // depth-32 drawable to be judged against.
+    let aux = CreateWindowAux::new()
+        .background_pixel(0)
+        .border_pixel(0)
+        .override_redirect(1)
+        .colormap(colormap);
+    if conn
+        .create_window(
+            32,
+            window,
+            screen.root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual_id,
+            &aux,
+        )
+        .ok()
+        .and_then(|cookie| cookie.check().ok())
+        .is_none()
+    {
+        let _ = conn.free_colormap(colormap);
+        return false;
+    }
+
+    let target = ProbeTarget {
+        conn: conn.get_raw_xcb_connection(),
+        screen: screen_num as i32,
+        window,
+        visual_id,
+    };
+    // Env-aware, like the instance iced itself will build: a `WGPU_BACKEND`
+    // override must steer the probe onto the same backend it steers iced onto.
+    let instance =
+        wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+    let capable = instance
+        .create_surface(target)
+        .ok()
+        .and_then(|surface| {
+            let adapter = futures_lite::future::block_on(instance.request_adapter(
+                &wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                },
+            ))
+            .ok()?;
+            Some(
+                surface
+                    .get_capabilities(&adapter)
+                    .alpha_modes
+                    .contains(&wgpu::CompositeAlphaMode::PreMultiplied),
+            )
+        })
+        .unwrap_or(false);
+
+    let _ = conn.destroy_window(window);
+    let _ = conn.free_colormap(colormap);
+    let _ = conn.flush();
+    capable
+}
+
 fn main() -> iced::Result {
     let args: Vec<String> = env::args().collect();
     let application_id = "dev.iced.bar".to_string();
@@ -71,6 +245,19 @@ fn main() -> iced::Result {
         std::process::exit(1);
     }
 
+    // A session without a compositor — or without a surface that can carry
+    // alpha — gets a solid window; anything else would paint a wash over
+    // undefined memory. A failed X connection (native Wayland, no Xwayland)
+    // counts as "no compositor" for the same reason.
+    let translucent = match XCBConnection::connect(None) {
+        Ok((conn, screen_num)) => {
+            compositor_active(&conn, screen_num) && surface_alpha_capable(&conn, screen_num)
+        }
+        Err(_) => false,
+    };
+    info!("startup mode: translucent={translucent}");
+    let _ = TRANSLUCENT.set(translucent);
+
     iced::application(IcedBar::new, IcedBar::update, IcedBar::view)
         .window(window::Settings {
             platform_specific: window::settings::PlatformSpecific {
@@ -79,12 +266,13 @@ fn main() -> iced::Result {
             },
             size: Size::from([800., 40.]),
             decorations: false,
-            transparent: true,
+            transparent: translucent,
             level: window::Level::AlwaysOnTop,
             ..Default::default()
         })
         .default_font(NERD_FONT)
         .subscription(IcedBar::subscription)
+        .style(IcedBar::style)
         .title("iced_bar")
         .run()
 }
@@ -141,7 +329,7 @@ struct IcedBar {
     initial_window_position: Option<iced::Point>,
     is_hovered: bool,
     mouse_position: Option<iced::Point>,
-    transparent: bool,
+    background: Color,
 }
 
 impl Default for IcedBar {
@@ -174,6 +362,24 @@ impl IcedBar {
         }
         .expect("iced bar model configuration is valid");
 
+        // The bar's background is `fallback_rgb` for the configured theme in
+        // both modes; only the alpha differs. Translucent windows wash it to
+        // the configured opacity so the compositor's blur shows through, solid
+        // windows paint it fully opaque and ignore `background_opacity`.
+        let bar_config = BarConfig::load_default().unwrap_or_else(|error| {
+            warn!("falling back to the default bar config: {error}");
+            BarConfig::default()
+        });
+        let translucent = TRANSLUCENT.get().copied().unwrap_or(false);
+        let [r, g, b] = fallback_rgb(bar_config.theme);
+        let alpha = if translucent {
+            bar_config
+                .background_opacity
+                .unwrap_or(DEFAULT_BACKGROUND_OPACITY) as f32
+        } else {
+            1.0
+        };
+
         Self {
             tabs: TAG_ICONS,
             tab_colors: [
@@ -197,7 +403,7 @@ impl IcedBar {
             initial_window_position: None,
             is_hovered: false,
             mouse_position: None,
-            transparent: true,
+            background: Color::from_rgba8(r, g, b, alpha),
         }
     }
 
@@ -399,15 +605,10 @@ impl IcedBar {
         }
     }
 
-    #[allow(dead_code)]
     fn style(&self, theme: &Theme) -> theme::Style {
-        if self.transparent {
-            theme::Style {
-                background_color: Color::TRANSPARENT,
-                text_color: theme.palette().background.base.text,
-            }
-        } else {
-            theme::default(theme)
+        theme::Style {
+            background_color: self.background,
+            text_color: theme.palette().background.base.text,
         }
     }
 

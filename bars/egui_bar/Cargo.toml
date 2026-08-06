@@ -8,16 +8,24 @@ description = "A modern system status bar built with egui"
 [dependencies]
 log = "0.4.33"
 anyhow = "1.0.104"
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
 
 # egui has no system font fallback, so the Nerd Font and CJK faces are loaded
 # by name and registered explicitly; see `src/fonts.rs`.
 font-kit = "0.14"
 
-# Compositor detection and the EWMH dock properties eframe does not set.
-x11rb = "0.14.0"
+# Compositor detection and the EWMH dock properties eframe does not set. The
+# unsafe-code features expose `xcb_ffi`, whose raw connection handle is what
+# the startup surface probe builds its scratch wgpu surface on.
+x11rb = { version = "0.14.0", features = ["allow-unsafe-code", "dl-libxcb"] }
 raw-window-handle = "0.6"
+
+# The startup probe asks the same question egui-wgpu will answer internally:
+# can a surface here composite alpha? Versions match eframe's own wgpu and
+# executor so neither crate is compiled twice.
+wgpu = "30"
+pollster = "1"
 
 eframe = "0.36.0"
 egui = "0.36.0"

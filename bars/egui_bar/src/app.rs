@@ -12,8 +12,7 @@ use anyhow::Result;
 use egui::{Color32, FontFamily, Pos2};
 use log::{debug, warn};
 use x11rb::protocol::xproto::Window;
-use xbar_core::glass::wallpaper::WallpaperFile;
-use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, fallback_rgb};
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::presentation::{
     InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, PresentationLabels,
     Scene, Size,
@@ -45,21 +44,17 @@ pub struct EguiBarApp {
     interaction: InteractionState,
     scene: Scene,
     style: SceneStyle,
-    /// Painted behind the scene when nothing frosted is available.
+    /// The window's clear colour when it is opaque: the solid background the
+    /// scene is painted over.
     fallback: Color32,
-    /// True when a compositor blurs behind this window and the bar therefore
-    /// presents real per-pixel alpha instead of baking a frosted strip.
+    /// True when a compositor blends behind this window and the wgpu surface
+    /// can deliver alpha, so the bar presents real per-pixel transparency.
     translucent: bool,
     process_actions: ProcessActionHandler,
     x11: Option<X11Session>,
     window: Option<Window>,
     active_monitor_geometry: Option<MonitorGeometry>,
     last_pixels_per_point: f32,
-
-    // --- Baked frosted glass, for sessions with no compositor ---
-    glass: Option<GlassStrip<WallpaperFile>>,
-    glass_texture: Option<egui::TextureHandle>,
-    glass_generation: u64,
 }
 
 impl EguiBarApp {
@@ -94,18 +89,6 @@ impl EguiBarApp {
         };
 
         let fallback = fallback_rgb(config.theme);
-        // Only a bar nobody will blur behind has to frost the wallpaper
-        // itself; under a compositor the strip would be a second, staler blur
-        // underneath the real one.
-        let glass = (!translucent)
-            .then(|| {
-                let (width, height) = x11
-                    .as_ref()
-                    .map(X11Session::screen_size)
-                    .unwrap_or((1920, 1080));
-                config.glass.file_strip(width, height, fallback)
-            })
-            .flatten();
 
         let window = crate::platform::window_id(cc)
             .inspect_err(|error| debug!("no X11 window to mark as a dock: {error}"))
@@ -132,9 +115,17 @@ impl EguiBarApp {
             },
             style: SceneStyle {
                 family: FontFamily::Proportional,
-                background_opacity: config
-                    .background_opacity
-                    .unwrap_or(DEFAULT_BACKGROUND_OPACITY) as f32,
+                // The configured opacity is only meaningful when a compositor
+                // blends behind the window. Solid mode writes the background
+                // at full alpha outright, rather than washing 0.55 over a
+                // clear colour that merely happens to match it.
+                background_opacity: if translucent {
+                    config
+                        .background_opacity
+                        .unwrap_or(DEFAULT_BACKGROUND_OPACITY) as f32
+                } else {
+                    1.0
+                },
             },
             fallback: Color32::from_rgb(fallback[0], fallback[1], fallback[2]),
             translucent,
@@ -143,9 +134,6 @@ impl EguiBarApp {
             window,
             active_monitor_geometry: None,
             last_pixels_per_point: cc.egui_ctx.pixels_per_point(),
-            glass,
-            glass_texture: None,
-            glass_generation: 0,
         })
     }
 
@@ -291,52 +279,6 @@ impl EguiBarApp {
         }
     }
 
-    /// Re-frost the wallpaper under the bar and re-upload it when it changed.
-    ///
-    /// Cheap on an unchanged wallpaper and geometry: the cache hands back the
-    /// same generation and the texture is left alone.
-    fn refresh_glass(&mut self, ctx: &egui::Context) {
-        let Some(strip) = self.glass.as_mut() else {
-            return;
-        };
-        // The window manager's own geometry is the trustworthy screen size —
-        // eframe reports a placeholder on X11. Read every frame so a
-        // resolution change is picked up.
-        let (screen_width, screen_height) = self
-            .active_monitor_geometry
-            .map(|geometry| (geometry.width.max(1), geometry.height.max(1)))
-            .or_else(|| self.x11.as_ref().map(X11Session::screen_size))
-            .unwrap_or((1920, 1080));
-        strip.source_mut().set_screen(screen_width, screen_height);
-
-        let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
-        let outer = ctx.input(|input| input.viewport().outer_rect);
-        let origin = outer.map_or((0, 0), |rect| {
-            (
-                (rect.min.x * pixels_per_point).round() as i32,
-                (rect.min.y * pixels_per_point).round() as i32,
-            )
-        });
-        let size = ctx.viewport_rect().size() * pixels_per_point;
-        let (width, height) = (size.x.round() as u32, size.y.round() as u32);
-        if width == 0 || height == 0 {
-            return;
-        }
-
-        let Some((generation, image)) = strip.ensure(origin.0, origin.1, width, height) else {
-            return;
-        };
-        if generation == self.glass_generation && self.glass_texture.is_some() {
-            return;
-        }
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(
-            [image.width() as usize, image.height() as usize],
-            &image.to_rgba8(),
-        );
-        self.glass_texture =
-            Some(ctx.load_texture("glass_backdrop", color_image, egui::TextureOptions::LINEAR));
-        self.glass_generation = generation;
-    }
 }
 
 fn dock_spec(x: i32, y: i32, width: u32, height: f32) -> DockWindowSpec {
@@ -366,10 +308,6 @@ impl eframe::App for EguiBarApp {
         let update = self.schedule.service(&mut self.runtime);
         self.apply_runtime_update(&ctx, update);
 
-        if !self.translucent {
-            self.refresh_glass(&ctx);
-        }
-
         let viewport = ctx.viewport_rect();
         let size = Size::new(viewport.width(), viewport.height());
         // A window manager may hand the bar a different height than it asked
@@ -386,14 +324,6 @@ impl eframe::App for EguiBarApp {
         // of the bar, so a panel frame would only add margins the layout
         // engine has already accounted for.
         let painter = ctx.layer_painter(egui::LayerId::background());
-        if let Some(texture) = &self.glass_texture {
-            painter.image(
-                texture.id(),
-                viewport,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
         crate::scene::paint(&painter, viewport.min, &self.scene, &self.style);
 
         ctx.request_repaint_after(HEARTBEAT);

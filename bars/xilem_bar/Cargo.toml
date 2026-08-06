@@ -11,5 +11,9 @@ winit = "0.30"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 log = "0.4"
 anyhow = "1"
-xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass-wallpaper", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
+futures-lite = "2"
+raw-window-handle = "0.6"
+wgpu = "28"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dl-libxcb"] }
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }

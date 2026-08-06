@@ -158,50 +158,34 @@ if let Some(envelope) = cursor.update_frame(&frame) {
 | `transport-shared` | typed JWM transport plus core-managed bounded recovery |
 | `runtime-linux` | `AlignedTimer`, owned token-based `Epoll`, reconnect-aware notifier ownership, and owned wake forwarding |
 | `render-cairo` | Scene-based `CairoRenderer`, text measurer, `CairoBar`, and validated CPU-frame rendering (`render_into_bgra`, `CpuCanvas`) |
-| `glass` | Toolkit-neutral frosted backdrop: `frost`, `GlassCache`, the `WallpaperSource` trait, and Cairo surface conversions when `render-cairo` is on |
-| `glass-wallpaper` | `glass` plus the file-backed `WallpaperFile` source and PNG/data-URL export for webview frontends (adds an image codec) |
+| `glass` | Compositor-coupling constants (`fallback_rgb`, `DEFAULT_BACKGROUND_OPACITY`) for every native and toolkit bar, plus the baked-backdrop machinery (`frost`, `GlassCache`, the `WallpaperSource` trait, Cairo surface conversions when `render-cairo` is on) that only the Tauri bridge still consumes |
+| `glass-wallpaper` | `glass` plus the file-backed `WallpaperFile` source and PNG/data-URL export (adds an image codec); consumed only by the Tauri webview frontends |
 
 ### Frosted glass
 
-A bar cannot see through itself, so "glass" is something it draws. Under a
-compositor that blurs behind translucent windows the bar only needs per-pixel
-alpha and none of this. Everywhere else it bakes the backdrop: sample the
-wallpaper where the bar sits, blur and saturate that strip, draw the scene over
-it. `glass` is the second path, and it is deliberately free of any toolkit — it
-works on the same premultiplied `ARgb32` buffers `render_into_bgra` fills, so
-softbuffer, pixels, a GPU texture upload, and Cairo all consume it unchanged.
+A bar cannot see through itself, so real glass is the compositor's to provide.
+Every non-Tauri bar decides its mode once at startup, detection first: is a
+compositing manager active (`_NET_WM_CM_S<screen>` has an owner, or the
+toolkit's equivalent signal), and can this pipeline actually deliver per-pixel
+alpha to the server? When both hold, the bar creates a translucent window and
+paints its background at `background_opacity` (default
+`glass::DEFAULT_BACKGROUND_OPACITY`, 0.55) so the compositor blends — and,
+under JWM, blurs — the desktop behind it. When either fails, the bar paints
+`glass::fallback_rgb(theme)` fully opaque; the opacity key is ignored rather
+than washed over an undefined clear. The check is startup-only (the visual is
+a creation-time decision), and owning the CM selection only proves compositing
+is on, not that any blur is configured behind the bar.
 
-A Cairo frontend needs three lines: build the backdrop from configuration, ask
-it for the strip under the bar, and render over it.
-
-```rust,ignore
-let config = xbar_core::config::BarConfig::load_default()?;
-let mut glass = config.glass.file_backdrop(1920, 1080, xbar_core::glass::fallback_rgb(config.theme));
-
-// Per frame, in device pixels:
-let backdrop = glass.as_mut().and_then(|glass| glass.ensure(bar_x, bar_y, width, height));
-bar.render_over(&context, viewport, backdrop)?;          // or:
-canvas.render_over(&mut bar, width, height, scale, backdrop)?;
-```
-
-`render_over(None)` is exactly `render`, so a frontend keeps one call site
-whether or not the wallpaper was readable. With a backdrop the scene's
-background node blends *over* it rather than replacing the buffer, which is what
-`background_opacity` then means; frosting without lowering that opacity produces
-an opaque bar with an invisible backdrop.
-
-A webview frontend takes the same strip as an image file instead: `to_png` and
-`to_png_data_uri` exist because a page cannot be handed a pixel buffer, and
-because `backdrop-filter` blurs only what is inside the page — never the
-desktop behind the window. The page then composites its own tint over the
-backdrop in CSS.
-
-Where the wallpaper comes from is the one platform-dependent step, so it is the
-`WallpaperSource` trait. The file source is the portable one and the only one
-that works when a compositor draws the wallpaper from its own configuration
-instead of publishing an X root pixmap; point `glass.wallpaper` at the same file
-the compositor draws. `GlassCache` and `frost` are available directly for a
-frontend that is not Cairo-based.
+The baked path — sample the wallpaper where the bar sits, blur and saturate
+that strip, draw the scene over it — still lives in this module, but only the
+Tauri webview bridge takes it: `backdrop-filter` blurs what is inside the
+page, never the desktop behind the window, so the page is handed a pre-frosted
+strip as a PNG (`to_png`, `to_png_data_uri`) and composites its own tint over
+it in CSS. Point `glass.wallpaper` at the file the compositor draws;
+`GlassStrip`, `WallpaperFile`, `GlassCache`, `frost`, and the Cairo
+conversions remain for that consumer and should not gain new ones.
+`render_over(None)` is still exactly `render`, so retained Cairo call sites
+keep compiling either way.
 
 ## Shell surface
 
@@ -280,7 +264,9 @@ cargo doc --no-default-features --no-deps
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for module ownership,
 [docs/CONSUMER-MATRIX.md](docs/CONSUMER-MATRIX.md) for every JWM bar family,
 [docs/COMPANION-CRATES.md](docs/COMPANION-CRATES.md) for adapter boundaries,
-and [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md) for the network/media states
+[docs/MIGRATION-0.9.md](docs/MIGRATION-0.9.md) for compositor-coupled
+translucency, and [docs/MIGRATION-0.7.md](docs/MIGRATION-0.7.md) for the
+network/media states
 ([0.6 presentation/config](docs/MIGRATION-0.6.md),
 [0.5 host-integration](docs/MIGRATION-0.5.md),
 [0.4 projection/bridge](docs/MIGRATION-0.4.md), and
