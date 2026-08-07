@@ -1880,6 +1880,10 @@ impl EventHandler for Jwm {
 
         self.tick_animations(backend);
 
+        // A capture the pointer was busy for retries here rather than from a
+        // sleep, so waiting for a status bar's click to end costs no frames.
+        self.tick_pending_capture(backend, now);
+
         // _NET_WM_PING: send pings every 2 seconds, check for timeouts
         self.tick_ping_check(backend, now);
 
@@ -1908,6 +1912,7 @@ impl EventHandler for Jwm {
             || self.features.overview.active
             || self.features.expose_active
             || self.features.system_ui.is_layout_picker()
+            || self.has_pending_capture()
             || self.config_reload_deadline_is_due(std::time::Instant::now())
     }
 
@@ -1917,9 +1922,16 @@ impl EventHandler for Jwm {
         // The picker's countdown bar has to advance, and it commits when the
         // countdown runs out, so it wants a frame long before the config
         // reload poll would come round.
-        Some(match self.layout_picker_wakeup(now) {
+        let base = match self.layout_picker_wakeup(now) {
             Some(remaining) => config_reload.min(remaining).min(FRAME_INTERVAL),
             None => config_reload,
+        };
+        // A capture waiting on the pointer has to poll: the button release
+        // that frees it goes to the client holding the grab, not here.
+        Some(if self.has_pending_capture() {
+            base.min(crate::jwm::features::capture::PENDING_CAPTURE_RETRY)
+        } else {
+            base
         })
     }
 

@@ -6,7 +6,7 @@ use crate::backend::compositor_common::screenshot_toolbar::{
     ScreenshotToolbar, ToolbarButton, ToolbarIcon,
 };
 use crate::core::types::Rect;
-use crate::jwm::features::capture::CaptureTarget;
+use crate::jwm::features::capture::{CaptureTarget, PENDING_CAPTURE_TIMEOUT, PendingCapture};
 use crate::jwm::types::WMArgEnum;
 use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
@@ -885,6 +885,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // If already in selection mode, cancel it first
         if self.features.screenshot.active {
+            self.features.capture.pending_screenshot = None;
             self.cancel_screenshot_select(backend);
             return Ok(());
         }
@@ -898,6 +899,32 @@ impl Jwm {
             return Err("interactive screenshots require an active compositor".into());
         }
 
+        if self.begin_interactive_capture(backend, &screenshot_path)? {
+            return Ok(());
+        }
+
+        // The pointer belongs to somebody else for the moment. The usual
+        // somebody is the status bar whose screenshot pill was just clicked:
+        // X11 gives a client an implicit pointer grab for as long as the
+        // button it was pressed in stays down, and this request arrives over
+        // the socket in well under the time a human holds a click. Refusing
+        // here is what made the pill look broken — so wait for the button to
+        // come up instead, from the event loop, without blocking a frame.
+        self.features.capture.pending_screenshot = Some(PendingCapture {
+            output_path: screenshot_path,
+            deadline: std::time::Instant::now() + PENDING_CAPTURE_TIMEOUT,
+        });
+        Ok(())
+    }
+
+    /// Take the grabs and enter selection mode. `Ok(false)` means the pointer
+    /// was not available *yet* — a retryable condition, distinct from the
+    /// hard errors, which still propagate.
+    fn begin_interactive_capture(
+        &mut self,
+        backend: &mut dyn Backend,
+        screenshot_path: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         let keyboard_grabbed = if let Some(root) = backend.root_window() {
             backend.key_ops().grab_keyboard(root)?;
             true
@@ -920,10 +947,12 @@ impl Jwm {
         {
             Ok(true) => {}
             Ok(false) => {
+                // Do not sit on the keyboard while waiting for the pointer, or
+                // every retry would swallow the user's typing.
                 if keyboard_grabbed {
                     let _ = backend.key_ops().ungrab_keyboard();
                 }
-                return Err("could not grab pointer for screenshot selection".into());
+                return Ok(false);
             }
             Err(error) => {
                 if keyboard_grabbed {
@@ -937,12 +966,53 @@ impl Jwm {
         self.features.capture.screenshot = CaptureTarget::Region;
         self.features
             .screenshot
-            .set_output_path(screenshot_path.clone());
+            .set_output_path(screenshot_path.to_owned());
         info!(
             "[take_screenshot] interactive capture → {} (G/W/M/D or Tab selects source)",
             screenshot_path
         );
-        Ok(())
+        Ok(true)
+    }
+
+    /// Retry a capture that was waiting for the pointer to come free.
+    pub(crate) fn tick_pending_capture(
+        &mut self,
+        backend: &mut dyn Backend,
+        now: std::time::Instant,
+    ) {
+        let Some(pending) = self.features.capture.pending_screenshot.as_ref() else {
+            return;
+        };
+        // Something else claimed the mode in the meantime; the request is stale.
+        if self.features.screenshot.active {
+            self.features.capture.pending_screenshot = None;
+            return;
+        }
+        if now >= pending.deadline {
+            warn!(
+                "[take_screenshot] gave up waiting for the pointer; another client still holds it"
+            );
+            self.features.capture.pending_screenshot = None;
+            return;
+        }
+
+        let path = pending.output_path.clone();
+        match self.begin_interactive_capture(backend, &path) {
+            Ok(true) => self.features.capture.pending_screenshot = None,
+            // Still held — leave the request in place for the next tick.
+            Ok(false) => {}
+            Err(error) => {
+                error!("[take_screenshot] could not start interactive capture: {error}");
+                self.features.capture.pending_screenshot = None;
+            }
+        }
+    }
+
+    /// Whether a capture is still waiting for the pointer, so the event loop
+    /// knows to keep ticking.
+    #[must_use]
+    pub(crate) fn has_pending_capture(&self) -> bool {
+        self.features.capture.pending_screenshot.is_some()
     }
 
     /// Alt+Shift+S: 立即截取全屏
