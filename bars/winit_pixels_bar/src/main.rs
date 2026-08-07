@@ -14,6 +14,7 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{WindowAttributes, WindowId},
 };
+use x11rb::rust_connection::RustConnection;
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
@@ -47,9 +48,12 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
-    /// The startup compositor answer; the surface's own alpha-mode probe in
-    /// `resumed` finishes the translucency decision.
+    /// The startup compositor answer; the window's depth and the surface's
+    /// own alpha-mode probe in `resumed` finish the translucency decision.
     compositor_active: bool,
+    /// The detection connection, kept open to ask the server what depth the
+    /// window winit built actually got and how large it currently is.
+    x11: Option<RustConnection>,
 }
 
 impl App {
@@ -59,6 +63,7 @@ impl App {
         scale_factor: f64,
         proxy: EventLoopProxy<UserEvent>,
         compositor_active: bool,
+        x11: Option<RustConnection>,
     ) -> Self {
         Self {
             window_id: None,
@@ -79,6 +84,36 @@ impl App {
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
             compositor_active,
+            x11,
+        }
+    }
+
+    /// Bring the swapchain back in step with the window before presenting.
+    ///
+    /// `pixels` retries a refused surface acquisition forever, reconfiguring
+    /// each time with the size it was last told about. So presenting into a
+    /// swapchain that the window manager has already resized past does not
+    /// fail — it spins inside `render`, and the resize event that would have
+    /// corrected the size is never drained, because draining it needs the
+    /// event loop this very call is blocking. winit happens to deliver the
+    /// resize before the first redraw today, which is the only reason this
+    /// bar has not wedged the way its tao twin does.
+    ///
+    /// The X server is the authority the driver compares the swapchain
+    /// against, so ask it rather than the toolkit's cached allocation, which
+    /// is only as fresh as the last configure the toolkit has processed.
+    fn sync_surface_to_window(&mut self) {
+        let Some(size) = self
+            .window
+            .as_deref()
+            .and_then(window_xid)
+            .zip(self.x11.as_ref())
+            .and_then(|(xid, conn)| window_size(conn, xid))
+        else {
+            return;
+        };
+        if size.width != self.pixels_width || size.height != self.pixels_height {
+            self.resize_pixels(size);
         }
     }
 
@@ -86,6 +121,7 @@ impl App {
         if self.window_id.is_none() || self.pixels.is_none() {
             return Ok(());
         }
+        self.sync_surface_to_window();
 
         let width = self.last_physical_size.width;
         let height = self.last_physical_size.height;
@@ -254,12 +290,23 @@ impl ApplicationHandler<UserEvent> for App {
             }
             builder.build()
         };
+        // Transparency was only requested above; whether winit found a
+        // depth-32 visual is a separate question, and one the surface cannot
+        // answer for us — wgpu reads its alpha modes from the driver, never
+        // from the window's visual. A swapchain is committed once, so unlike
+        // the bars that renegotiate every frame this has to be right the
+        // first time: no depth answer means no alpha.
+        let want_alpha = self.compositor_active
+            && window_xid(window.as_ref())
+                .zip(self.x11.as_ref())
+                .map(|(xid, conn)| window_is_argb(conn, xid))
+                .unwrap_or(false);
         // With a compositor around, ask the surface for premultiplied alpha
         // outright — pixels' default `Auto` resolves to Opaque on X11, which
         // would discard the frame's alpha channel. A refusal is the
         // capability answer: the bar then paints the fully opaque background
         // instead of a translucent wash over an undefined clear.
-        let (pixels, translucent) = if self.compositor_active {
+        let (pixels, translucent) = if want_alpha {
             match build(true) {
                 Ok(pixels) => (Ok(pixels), true),
                 Err(pixels::Error::InvalidAlphaMode(_)) => (build(false), false),
@@ -395,11 +442,8 @@ fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
 /// followed until the bar restarts. Owning the selection also only promises
 /// compositing — whether anything blurs behind the bar is the compositor's
 /// own policy.
-fn compositor_active() -> bool {
+fn compositor_active(conn: &RustConnection, screen_num: usize) -> bool {
     use x11rb::protocol::xproto::ConnectionExt as _;
-    let Ok((conn, screen_num)) = x11rb::connect(None) else {
-        return false;
-    };
     let name = format!("_NET_WM_CM_S{screen_num}");
     let Ok(cookie) = conn.intern_atom(false, name.as_bytes()) else {
         return false;
@@ -412,6 +456,39 @@ fn compositor_active() -> bool {
         .and_then(|cookie| cookie.reply().ok())
         .map(|reply| reply.owner != x11rb::NONE)
         .unwrap_or(false)
+}
+
+/// Whether the window winit built really sits on a depth-32 visual. winit
+/// falls back to an opaque visual silently, and translucent pixels painted
+/// into one of those would render as a dark wash instead of glass.
+fn window_is_argb(conn: &RustConnection, xid: u32) -> bool {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    conn.get_geometry(xid)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|geometry| geometry.depth == 32)
+        .unwrap_or(false)
+}
+
+/// The size the X server currently believes the window has — the size the
+/// presentation driver validates the swapchain against.
+fn window_size(conn: &RustConnection, xid: u32) -> Option<PhysicalSize<u32>> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+    let geometry = conn.get_geometry(xid).ok()?.reply().ok()?;
+    Some(PhysicalSize::new(
+        u32::from(geometry.width),
+        u32::from(geometry.height),
+    ))
+}
+
+/// The X11 window id behind the winit window, if this is an X11 session.
+fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
+    use raw_window_handle::RawWindowHandle;
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        _ => None,
+    }
 }
 
 fn main() -> Result<()> {
@@ -438,11 +515,21 @@ fn main() -> Result<()> {
         presentation,
         FontDescription::from_string(&app_config.font),
     );
+    // One side connection answers the compositor question and later verifies
+    // the window's depth and size; losing the display entirely just means
+    // solid mode.
+    let (x11, compositor_active) = match x11rb::connect(None) {
+        Ok((conn, screen_num)) => {
+            let active = compositor_active(&conn, screen_num);
+            (Some(conn), active)
+        }
+        Err(_) => (None, false),
+    };
     // A translucent background only reads as a material when a compositor is
     // there to blend the desktop behind it; without one the bar keeps the
-    // palette background at full opacity. The surface itself may still
-    // refuse premultiplied alpha — `resumed` downgrades to solid if it does.
-    let compositor_active = compositor_active();
+    // palette background at full opacity. The window's depth and the surface
+    // itself still get a veto — `resumed` downgrades to solid if either
+    // refuses alpha.
     if compositor_active {
         bar.renderer_mut().set_background_opacity(Some(
             app_config
@@ -464,6 +551,7 @@ fn main() -> Result<()> {
         1.0,
         proxy,
         compositor_active,
+        x11,
     );
     event_loop.run_app(&mut app)?;
     Ok(())
