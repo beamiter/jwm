@@ -74,7 +74,11 @@ impl Jwm {
         }
     }
 
-    pub(super) fn ensure_secondary_bars_running(&mut self, now: Instant) {
+    pub(super) fn ensure_secondary_bars_running(
+        &mut self,
+        backend: &mut dyn Backend,
+        now: Instant,
+    ) {
         // Get all monitor IDs sorted
         let mut all_mon_ids: Vec<i32> = self.state.monitors.values().map(|m| m.num).collect();
         all_mon_ids.sort_unstable();
@@ -92,30 +96,42 @@ impl Jwm {
             if self.secondary_bars.contains_key(&mon_id) {
                 let mut remove_reason: Option<String> = None;
                 let mut waiting_for_map = false;
+                let lost_managed_window = self
+                    .secondary_bars
+                    .get(&mon_id)
+                    .and_then(|bar| bar.client_key)
+                    .is_some_and(|client_key| !self.state.clients.contains_key(client_key));
 
                 // Check if process is still alive
                 if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
-                    match bar.child.try_wait() {
-                        Ok(Some(status)) => {
-                            remove_reason = Some(format!("exited: {status}"));
-                        }
-                        Ok(None) => {
-                            // Process still running. If it never maps a window, treat it as a
-                            // failed bar after a short grace period and let the WM keep going.
-                            if bar.window.is_none() {
-                                if now.saturating_duration_since(bar.last_spawn) > BAR_MAP_TIMEOUT {
-                                    let _ = bar.child.kill();
-                                    remove_reason = Some(format!(
-                                        "did not map a window within {}s",
-                                        BAR_MAP_TIMEOUT.as_secs()
-                                    ));
-                                } else {
-                                    waiting_for_map = true;
+                    if lost_managed_window {
+                        let _ = bar.child.kill();
+                        remove_reason = Some("managed bar window disappeared".to_owned());
+                    } else {
+                        match bar.child.try_wait() {
+                            Ok(Some(status)) => {
+                                remove_reason = Some(format!("exited: {status}"));
+                            }
+                            Ok(None) => {
+                                // Process still running. If it never maps a window, treat it as a
+                                // failed bar after a short grace period and let the WM keep going.
+                                if bar.window.is_none() {
+                                    if now.saturating_duration_since(bar.last_spawn)
+                                        > BAR_MAP_TIMEOUT
+                                    {
+                                        let _ = bar.child.kill();
+                                        remove_reason = Some(format!(
+                                            "did not map a window within {}s",
+                                            BAR_MAP_TIMEOUT.as_secs()
+                                        ));
+                                    } else {
+                                        waiting_for_map = true;
+                                    }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            remove_reason = Some(format!("try_wait failed: {e}"));
+                            Err(e) => {
+                                remove_reason = Some(format!("try_wait failed: {e}"));
+                            }
                         }
                     }
                 }
@@ -123,6 +139,7 @@ impl Jwm {
                 if let Some(reason) = remove_reason {
                     info!("Bar for monitor {} failed: {}", mon_id, reason);
                     self.secondary_bars.remove(&mon_id);
+                    self.clear_minimized_dock_for_monitor(backend, mon_id);
                     self.note_secondary_bar_failure(mon_id, now, &reason);
                     continue;
                 }
@@ -144,6 +161,15 @@ impl Jwm {
 
         // Remove bars for monitors that no longer exist
         let existing_monitors: HashSet<i32> = self.state.monitors.values().map(|m| m.num).collect();
+        let removed_monitors: Vec<_> = self
+            .secondary_bars
+            .keys()
+            .copied()
+            .filter(|monitor| !existing_monitors.contains(monitor))
+            .collect();
+        for monitor in removed_monitors {
+            self.clear_minimized_dock_for_monitor(backend, monitor);
+        }
         self.secondary_bars
             .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
         self.secondary_bar_failures
@@ -188,6 +214,10 @@ impl Jwm {
         // mapping whose creator died before Drop could unlink its flink, then
         // atomically create a replacement.
         let ring_buffer = match SharedRingBufferOptions::new()
+            // A full minimized shelf publishes one shelf anchor plus up to
+            // MAX_MINIMIZED_WINDOWS item anchors. Leave headroom for hover
+            // and restore commands while that geometry snapshot is queued.
+            .command_capacity(32)
             .reclaim_stale(true)
             .open_or_create(&shared_path)
         {
@@ -311,7 +341,16 @@ impl Jwm {
 
                 // Send message to this monitor's bar via shared memory
                 if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
-                    let _ = bar.shmem.try_write_message(&self.message);
+                    // Bar state is an authoritative snapshot, not an event
+                    // stream. If a slow bar fills its ring, preserving an old
+                    // title/Dock list while silently dropping the newest one
+                    // is the wrong failure mode; overwrite the oldest unread
+                    // snapshot so `try_read_latest_message` always converges.
+                    if let Err(error) = bar.shmem.write_message_overwrite(&self.message) {
+                        log::warn!(
+                            "failed to publish status-bar snapshot for monitor {mon_id}: {error}"
+                        );
+                    }
                 }
             }
         }

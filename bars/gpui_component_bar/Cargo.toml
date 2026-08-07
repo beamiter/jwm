@@ -13,3 +13,10 @@ xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions"
 # The startup compositor check rides a plain side connection; the version
 # matches the 0.13.2 already in this bar's lock so nothing compiles twice.
 x11rb = "0.13"
+
+# GPUI's exact macOS-only crates need to resolve even though this bar is built
+# on Linux. Reuse the inert stubs maintained by the sibling GPUI frontend.
+[patch.crates-io]
+cocoa = { path = "../gpui_bar/vendor/cocoa-stub" }
+cocoa-foundation = { path = "../gpui_bar/vendor/cocoa-foundation-stub" }
+core-foundation = { path = "../gpui_bar/vendor/core-foundation-stub" }

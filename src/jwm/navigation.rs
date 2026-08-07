@@ -158,7 +158,7 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        let mut monitor_num_opt: Option<i32> = None;
+        let mut monitor_num_opt: Option<(i32, bool)> = None;
         {
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
                 if let Some(ref mut pertag) = monitor.pertag {
@@ -169,14 +169,23 @@ impl Jwm {
                             "[togglebar] show_bar[mon={}, tag={}] -> {}",
                             monitor.num, cur_tag, show_bar
                         );
-                        monitor_num_opt = Some(monitor.num);
+                        monitor_num_opt = Some((monitor.num, *show_bar));
                     }
                 }
             }
         }
 
-        if let Some(mon_num) = monitor_num_opt {
+        if let Some((mon_num, bar_visible)) = monitor_num_opt {
             self.mark_bar_update_needed_if_visible(Some(mon_num));
+
+            if !bar_visible {
+                // Cached minimized thumbnails are compositor overlays drawn
+                // over the thin bar window. Withdraw their targets when the
+                // per-tag bar is hidden so they cannot remain floating over a
+                // fullscreen client; a visible bar republishes fresh targets
+                // on its next scene build.
+                self.clear_minimized_dock_for_monitor(backend, mon_num);
+            }
 
             // Reposition the status bar window (hide or show) and update its strut.
             let bar_info = self

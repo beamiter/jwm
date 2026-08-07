@@ -344,6 +344,9 @@ pub struct ClientState {
     pub is_maximized_vert: bool,
     pub is_maximized_horz: bool,
     pub is_hidden: bool,
+    /// Session-local insertion order in the minimized-window Dock. Zero means
+    /// the client is not currently represented there.
+    pub minimized_order: u64,
     /// True when this client is a terminal that has been "swallowed" by a child
     /// process (e.g. mpv launched from a shell). Excluded from arrange and from
     /// visibility queries until the swallowing child unmaps.

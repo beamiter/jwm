@@ -8,7 +8,7 @@ use crate::backend::x11::compositor_common::BootstrapState;
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 #[allow(unused_imports)]
 use std::ffi::CString;
 #[allow(unused_imports)]
@@ -674,6 +674,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 uv_rect: gl.get_uniform_location(genie_program, "u_uv_rect"),
                 progress: gl.get_uniform_location(genie_program, "u_progress"),
                 dock_pos: gl.get_uniform_location(genie_program, "u_dock_pos"),
+                dock_size: gl.get_uniform_location(genie_program, "u_dock_size"),
                 grid_size: gl.get_uniform_location(genie_program, "u_grid_size"),
             }
         };
@@ -1254,6 +1255,10 @@ impl<C: CompositorConnection> Compositor<C> {
             genie_minimize: behavior.genie_minimize,
             genie_duration_ms: behavior.genie_duration_ms.clamp(1, 30_000),
             genie_active: Vec::new(),
+            genie_targets: HashMap::new(),
+            minimized_windows: HashSet::new(),
+            minimized_visuals: HashMap::new(),
+            dock_preview: None,
             dock_position: (0.5 * screen_w as f32, screen_h as f32),
             // Phase 3.3: Ripple on open
             ripple_on_open: behavior.ripple_on_open,

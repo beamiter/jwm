@@ -112,6 +112,13 @@ impl Jwm {
             .map(|(k, _)| k);
 
         if let Some(mon_key) = mon_key_opt {
+            if let Some(monitor_num) = self.state.monitors.get(mon_key).map(|monitor| monitor.num) {
+                // Withdraw compositor-owned Dock overlays while the source
+                // monitor and its hidden-client list are still addressable.
+                // Waiting until after removal loses both pieces of lookup
+                // state and leaves stale thumbnails at the unplugged output.
+                self.clear_minimized_dock_for_monitor(backend, monitor_num);
+            }
             self.move_clients_to_first_monitor(mon_key);
 
             // 移除数据
@@ -129,6 +136,7 @@ impl Jwm {
             }
 
             self.arrange(backend, None);
+            self.mark_bar_update_needed_if_visible(None);
             if dropped_scrolling_states > 0 {
                 info!(
                     "[handle_output_removed] Dropped {} scrolling states for removed monitor {:?}",
@@ -170,13 +178,13 @@ impl Jwm {
         let outputs = backend.output_ops().enumerate_outputs();
 
         let dirty = if outputs.len() <= 1 {
-            self.setup_single_monitor()
+            self.setup_single_monitor(backend)
         } else {
             let mons: Vec<(i32, i32, i32, i32)> = outputs
                 .iter()
                 .map(|o| (o.x, o.y, o.width, o.height))
                 .collect();
-            self.setup_multiple_monitors(mons)
+            self.setup_multiple_monitors(backend, mons)
         };
 
         if dirty {
@@ -218,7 +226,7 @@ impl Jwm {
         backend.compositor_set_monitors(&mon_list);
     }
 
-    pub(crate) fn setup_single_monitor(&mut self) -> bool {
+    pub(crate) fn setup_single_monitor(&mut self, backend: &mut dyn Backend) -> bool {
         let mut dirty = false;
 
         if self.state.monitor_order.is_empty() {
@@ -245,10 +253,19 @@ impl Jwm {
             }
         }
 
+        if self.state.monitor_order.len() > 1 {
+            self.remove_excess_monitors(backend, 1);
+            dirty = true;
+        }
+
         dirty
     }
 
-    pub(crate) fn setup_multiple_monitors(&mut self, monitors: Vec<(i32, i32, i32, i32)>) -> bool {
+    pub(crate) fn setup_multiple_monitors(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitors: Vec<(i32, i32, i32, i32)>,
+    ) -> bool {
         let mut dirty = false;
         let num_detected_monitors = monitors.len();
         let current_num_monitors = self.state.monitor_order.len();
@@ -290,15 +307,27 @@ impl Jwm {
 
         if num_detected_monitors < current_num_monitors {
             dirty = true;
-            self.remove_excess_monitors(num_detected_monitors);
+            self.remove_excess_monitors(backend, num_detected_monitors);
         }
 
         dirty
     }
 
-    pub(crate) fn remove_excess_monitors(&mut self, target_count: usize) {
+    pub(crate) fn remove_excess_monitors(
+        &mut self,
+        backend: &mut dyn Backend,
+        target_count: usize,
+    ) {
         while self.state.monitor_order.len() > target_count {
             if let Some(mon_key_to_remove) = self.state.monitor_order.pop() {
+                if let Some(monitor_num) = self
+                    .state
+                    .monitors
+                    .get(mon_key_to_remove)
+                    .map(|monitor| monitor.num)
+                {
+                    self.clear_minimized_dock_for_monitor(backend, monitor_num);
+                }
                 self.move_clients_to_first_monitor(mon_key_to_remove);
 
                 if self.state.sel_mon == Some(mon_key_to_remove) {
@@ -318,6 +347,7 @@ impl Jwm {
                 );
             }
         }
+        self.mark_bar_update_needed_if_visible(None);
     }
 
     pub(crate) fn move_clients_to_first_monitor(&mut self, from_monitor_key: MonitorKey) {

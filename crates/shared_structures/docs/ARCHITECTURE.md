@@ -22,7 +22,7 @@ SharedMessage / SharedCommand        公开领域类型
 WireMessage / WireCommand            固定、可验证的共享表示（WireSafe）
               │
               ▼
-TypedRingBuffer<M, C>                泛型双通道核心 + 协议 v11 header
+TypedRingBuffer<M, C>                泛型双通道核心 + 协议 v12 header
               │
               ▼
 Futex / Semaphore / EventFd          等待与唤醒后端（共享 WaiterGate 握手）
@@ -32,7 +32,7 @@ Futex / Semaphore / EventFd          等待与唤醒后端（共享 WaiterGate �
 
 公开领域类型用于正常 Rust 代码；内部 wire 类型用于共享内存。二者分离可避免把 Rust 的 `bool` 有效位模式、公开字段演进和共享协议布局绑在一起。写入时领域值被编码到固定大小槽位，读取时先验证再转换回来。因此当前传输路径是固定大小内存复制，不是借用共享槽位的零复制 API，也不使用 serde 或 rkyv 做队列传输。
 
-## 协议 v11 布局
+## 协议 v12 布局
 
 映射按以下顺序布局，各区域按自身对齐要求向上取整：
 
@@ -57,7 +57,9 @@ Futex / Semaphore / EventFd          等待与唤醒后端（共享 WaiterGate �
 
 `open_auto` 先读取稳定 header，校验 magic、版本、总长度、容量、槽大小和布局标记，再选择当前构建中对应的后端。显式指定策略的旧打开入口也必须验证策略与 header 一致。任何验证失败都应在构造 slot 裸指针前返回错误。
 
-v11 不直接打开 v10 或更早的映射。升级双方需要先停止旧进程、移除旧 flink，再共同创建 v11 映射。
+v12 的 `WireMessage` 增加 WM session、最小化列表 generation 和最多 16 个固定长度窗口条目；`WireCommand` 为无 padding 的 56 字节结构，可携带窗口/session 标识与动效 anchor 矩形。
+
+v12 不直接打开 v11 或更早的映射。升级双方需要先停止旧进程、移除旧 flink，再共同创建 v12 映射。
 
 ## 游标、方向锁与内存顺序
 
@@ -91,7 +93,7 @@ feature 决定二进制包含哪些后端，`SyncStrategy` 决定创建映射时
 ## 创建、打开与生命周期
 
 - `create` 创建并初始化新映射；容量和轮询参数可通过 `SharedRingBufferOptions` 设置。
-- `open_auto` 从 v11 header 自动发现后端与容量。
+- `open_auto` 从 v12 header 自动发现后端与容量。
 - `open_or_create` 只在 flink 确实不存在时创建；权限、协议或布局错误不会触发覆盖创建。
 - `SharedRingBufferOptions::reclaim_stale(true)` 是唯一的例外：`open_or_create` 打开映射后发现 `creator_pid` 对应的进程已不存在时，移除残留 flink 并重建。该选项应只由单一监督者角色开启。
 - `capacity` 返回经验证的消息容量，`stats` 提供当前队列状态快照。

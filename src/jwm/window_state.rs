@@ -2,8 +2,17 @@ use crate::backend::api::Backend;
 use crate::backend::api::{StackMode, WindowChanges, WindowType};
 use crate::backend::common_define::{SchemeType, WindowId};
 use crate::core::models::ClientKey;
+use std::sync::atomic::{AtomicU64, Ordering};
+use xbar_core::shared_structures::MAX_MINIMIZED_WINDOWS;
 
 use super::Jwm;
+use super::statusbar::StatusBarBuilder;
+
+static NEXT_MINIMIZED_ORDER: AtomicU64 = AtomicU64::new(1);
+
+fn next_minimized_order() -> u64 {
+    NEXT_MINIMIZED_ORDER.fetch_add(1, Ordering::Relaxed).max(1)
+}
 
 fn wm_hint_urgency_policy(
     hinted_urgent: bool,
@@ -310,6 +319,36 @@ impl Jwm {
 
         if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.is_hidden = minimized;
+            client.state.minimized_order = if minimized { next_minimized_order() } else { 0 };
+        }
+
+        // A minimized client is represented in the bar's Dock even when it
+        // was not focused.  Focus changes used to refresh the bar only for
+        // the selected-window path, which left foreign-toplevel and EWMH
+        // minimization of background windows invisible until an unrelated
+        // status update happened.
+        let monitor_num = monitor
+            .and_then(|key| self.state.monitors.get(key))
+            .map(|monitor| monitor.num);
+        self.mark_bar_update_needed_if_visible(monitor_num);
+
+        if minimized && let (Some(monitor_key), Some(monitor_num)) = (monitor, monitor_num) {
+            let monitor_clients = self
+                .state
+                .monitor_clients
+                .get(monitor_key)
+                .map_or(&[][..], Vec::as_slice);
+            let windows = StatusBarBuilder::get_minimized_windows(
+                &self.state.clients,
+                monitor_clients,
+                monitor_num,
+            );
+            let omitted = windows.len().saturating_sub(MAX_MINIMIZED_WINDOWS);
+            for window in windows.into_iter().take(omitted) {
+                let window = WindowId::from_raw(window.window_id);
+                self.clear_minimized_preview_for(backend, monitor_num, Some(window));
+                backend.compositor_set_window_dock_geometry(window, None);
+            }
         }
         let _ = backend.property_ops().set_net_wm_state_flag(
             win,
@@ -318,6 +357,12 @@ impl Jwm {
         );
 
         if minimized {
+            if let Some(target) = monitor_num
+                .and_then(|monitor_num| self.minimized_dock_shelves.get(&monitor_num))
+                .copied()
+            {
+                backend.compositor_set_window_dock_geometry(win, Some(target));
+            }
             backend.compositor_set_window_minimized(win, true);
         }
         if minimized_window_relinquishes_focus(minimized, was_selected) {
@@ -325,6 +370,9 @@ impl Jwm {
         }
         let _ = self.arrange(backend, monitor);
         if !minimized {
+            if let Some(monitor_num) = monitor_num {
+                self.clear_minimized_preview_for(backend, monitor_num, Some(win));
+            }
             backend.compositor_set_window_minimized(win, false);
             // Restoring is always someone asking for *this* window back, so it
             // takes the focus. `focusin` cannot do that job — it is the

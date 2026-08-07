@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
 
@@ -38,21 +38,34 @@ use x11rb::xcb_ffi::XCBConnection;
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig,
-    UserAction,
+    BarEffect, BarRuntime, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH,
+    DockBridge, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule,
+    RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig, UserAction, WindowToken,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
-use masonry::core::{ErasedAction, WidgetId};
-use masonry::kurbo::Axis;
-use masonry::layout::{Dim, Length};
+use masonry::accesskit::{Node, Role};
+use masonry::core::{
+    AccessCtx, ChildrenIds, ErasedAction, LayerType, LayoutCtx, MeasureCtx, NewWidget, PaintCtx,
+    PropertiesMut, PropertiesRef, PropertySet, RegisterCtx, Update, UpdateCtx, Widget, WidgetId,
+    WidgetMut, WidgetPod,
+};
+use masonry::imaging::Painter;
+use masonry::kurbo::{Axis, Point, Size};
+use masonry::layers::Tooltip;
+use masonry::layout::{Dim, LenReq, Length};
 use masonry::peniko::Color;
-use masonry::properties::{Dimensions, Padding};
+use masonry::properties::{
+    Background, BorderColor, BorderWidth, ContentColor, CornerRadius, Dimensions, Padding,
+};
+use masonry::widgets::Label as MasonryLabel;
 use masonry_winit::app::{AppDriver, DriverCtx, MasonryState, WgpuContext, WindowId};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::window::WindowLevel;
-use xilem::core::{MessageProxy, NoElement, View, fork};
+use xilem::core::{
+    MessageCtx, MessageProxy, MessageResult, Mut, NoElement, View, ViewId, ViewMarker,
+    ViewPathTracker, fork,
+};
 use xilem::style::Style;
 use xilem::view::{
     CrossAxisAlignment, FlexSpacer, PointerButton, button, button_any_pointer, flex, label,
@@ -447,6 +460,7 @@ struct XilemBar {
     schedule: RuntimeSchedule,
     process_actions: ProcessActionHandler,
     geometry_bridge: Arc<GeometryBridge>,
+    dock: DockBridge,
     theme: Theme,
 
     /// The startup decision from `main`: a translucent window washes its
@@ -501,6 +515,7 @@ impl XilemBar {
             schedule: RuntimeSchedule::default(),
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
+            dock: DockBridge::new(),
             theme: Theme::from_mode(theme_mode),
             translucent,
             background_opacity,
@@ -524,6 +539,48 @@ impl XilemBar {
             return;
         }
         self.dispatch(action);
+    }
+
+    fn service_dock(&mut self) {
+        let scale_factor = self.geometry_bridge.snapshot().scale_factor;
+        let snapshot = self.runtime.snapshot();
+        self.dock.synchronize(
+            &snapshot,
+            self.runtime.transport_generation(),
+            scale_factor,
+            40.0,
+            6.0,
+        );
+        let now = Instant::now();
+        for action in self.dock.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            self.handle_runtime_update(update);
+            if accepted {
+                self.dock.acknowledge(action, now);
+            } else {
+                self.dock.record_failure(now);
+                break;
+            }
+        }
+    }
+
+    fn restore_minimized(&mut self, token: WindowToken, wm_session_id: u64) {
+        let _ = self.dock.request_restore(token, wm_session_id);
+        self.service_dock();
+    }
+
+    fn hover_minimized(&mut self, token: WindowToken, wm_session_id: u64, hovered: bool) {
+        let changed = if hovered {
+            self.dock.enter(token, wm_session_id)
+        } else {
+            self.dock.leave(token, wm_session_id)
+        };
+        if changed {
+            // Rebuild immediately so the hovered card and its two neighbours
+            // magnify in the same frame, and send/withdraw the preview lease.
+            self.service_dock();
+        }
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -552,6 +609,7 @@ impl XilemBar {
             WorkerEvent::Drive(signal) => {
                 let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update);
+                self.service_dock();
                 signal.pending.store(false, Ordering::Release);
             }
         }
@@ -1080,9 +1138,323 @@ fn scale_pill_view(theme: &Theme, scale: f32) -> impl WidgetView<XilemBar> + use
     ))
 }
 
+// Xilem's public button view intentionally exposes only its press callback.
+// This transparent Masonry container retains that button as its child and
+// turns the container's HoveredChanged update into a normal Xilem message.
+// Keeping the press action source in the child means keyboard/accessibility
+// activation and the existing restore path remain exactly as before.
+struct HoverSensorWidget {
+    child: WidgetPod<dyn Widget>,
+    title: String,
+}
+
+impl HoverSensorWidget {
+    fn new(child: NewWidget<impl Widget + ?Sized>, title: String) -> Self {
+        Self {
+            child: child.erased().to_pod(),
+            title,
+        }
+    }
+
+    fn child_mut<'a>(this: &'a mut WidgetMut<'_, Self>) -> WidgetMut<'a, dyn Widget> {
+        this.ctx.get_mut(&mut this.widget.child)
+    }
+
+    fn set_title(this: &mut WidgetMut<'_, Self>, title: String) {
+        this.widget.title = title;
+    }
+}
+
+#[derive(Debug)]
+struct HoverChanged(bool);
+
+impl Widget for HoverSensorWidget {
+    type Action = HoverChanged;
+
+    fn register_children(&mut self, ctx: &mut RegisterCtx<'_>) {
+        ctx.register_child(&mut self.child);
+    }
+
+    fn update(&mut self, ctx: &mut UpdateCtx<'_>, _props: &mut PropertiesMut<'_>, event: &Update) {
+        if let Update::HoveredChanged(hovered) = event {
+            if *hovered {
+                // The bar has no spare vertical area, so present the complete
+                // title in a compact overlay immediately to the card's left.
+                let text = NewWidget::new(MasonryLabel::new(self.title.clone())).with_props(
+                    PropertySet::one(ContentColor::new(Color::from_rgb8(0xf5, 0xf5, 0xf7))),
+                );
+                let tooltip = NewWidget::new(Tooltip::new(text)).with_props(PropertySet::from((
+                    Padding::from_vh(Length::px(2.0), Length::px(6.0)),
+                    Background::Color(Color::from_rgba8(0x24, 0x24, 0x2a, 0xf2)),
+                    BorderColor::new(Color::from_rgba8(0xff, 0xff, 0xff, 0x38)),
+                    BorderWidth::all(Length::px(1.0)),
+                    CornerRadius::all(Length::px(5.0)),
+                )));
+                let card = ctx.bounding_box();
+                let estimated_width = self.title.chars().count() as f64 * 7.0 + 14.0;
+                let position = Point::new((card.x0 - estimated_width - 6.0).max(0.0), 1.0);
+                ctx.create_attached_layer(
+                    LayerType::Tooltip(self.title.clone()),
+                    tooltip,
+                    position,
+                );
+            }
+            ctx.submit_action::<Self::Action>(HoverChanged(*hovered));
+        }
+    }
+
+    fn measure(
+        &mut self,
+        ctx: &mut MeasureCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        axis: Axis,
+        _len_req: LenReq,
+        cross_length: Option<Length>,
+    ) -> Length {
+        ctx.redirect_measurement(&mut self.child, axis, cross_length)
+    }
+
+    fn layout(&mut self, ctx: &mut LayoutCtx<'_>, _props: &PropertiesRef<'_>, size: Size) {
+        ctx.run_layout(&mut self.child, size);
+        ctx.place_child(&mut self.child, Point::ORIGIN);
+        ctx.derive_baselines(&self.child);
+    }
+
+    fn paint(
+        &mut self,
+        _ctx: &mut PaintCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _painter: &mut Painter<'_>,
+    ) {
+    }
+
+    fn accessibility_role(&self) -> Role {
+        Role::GenericContainer
+    }
+
+    fn accessibility(
+        &mut self,
+        _ctx: &mut AccessCtx<'_>,
+        _props: &PropertiesRef<'_>,
+        _node: &mut Node,
+    ) {
+    }
+
+    fn children_ids(&self) -> ChildrenIds {
+        ChildrenIds::from_slice(&[self.child.id()])
+    }
+}
+
+fn hover_sensor<State, Action, V, F>(
+    inner: V,
+    title: String,
+    on_hover: F,
+) -> HoverSensor<V, F, State, Action>
+where
+    State: 'static,
+    Action: 'static,
+    V: WidgetView<State, Action>,
+    F: Fn(&mut State, bool) -> Action + Send + Sync + 'static,
+{
+    HoverSensor {
+        inner,
+        title,
+        on_hover,
+        phantom: std::marker::PhantomData,
+    }
+}
+
+struct HoverSensor<V, F, State, Action> {
+    inner: V,
+    title: String,
+    on_hover: F,
+    phantom: std::marker::PhantomData<fn() -> (State, Action)>,
+}
+
+const HOVER_SENSOR_CONTENT_VIEW_ID: ViewId = ViewId::new(0x791f9be3);
+
+impl<V, F, State, Action> ViewMarker for HoverSensor<V, F, State, Action> {}
+
+impl<V, F, State, Action> View<State, Action, ViewCtx> for HoverSensor<V, F, State, Action>
+where
+    State: 'static,
+    Action: 'static,
+    V: WidgetView<State, Action>,
+    F: Fn(&mut State, bool) -> Action + Send + Sync + 'static,
+{
+    type Element = xilem::Pod<HoverSensorWidget>;
+    type ViewState = V::ViewState;
+
+    fn build(&self, ctx: &mut ViewCtx, app_state: &mut State) -> (Self::Element, Self::ViewState) {
+        let (child, child_state) = ctx.with_id(HOVER_SENSOR_CONTENT_VIEW_ID, |ctx| {
+            self.inner.build(ctx, app_state)
+        });
+        (
+            ctx.with_action_widget(|ctx| {
+                ctx.create_pod(HoverSensorWidget::new(child.new_widget, self.title.clone()))
+            }),
+            child_state,
+        )
+    }
+
+    fn rebuild(
+        &self,
+        prev: &Self,
+        view_state: &mut Self::ViewState,
+        ctx: &mut ViewCtx,
+        mut element: Mut<'_, Self::Element>,
+        app_state: &mut State,
+    ) {
+        if self.title != prev.title {
+            HoverSensorWidget::set_title(&mut element, self.title.clone());
+        }
+        ctx.with_id(HOVER_SENSOR_CONTENT_VIEW_ID, |ctx| {
+            View::<State, Action, _>::rebuild(
+                &self.inner,
+                &prev.inner,
+                view_state,
+                ctx,
+                HoverSensorWidget::child_mut(&mut element).downcast(),
+                app_state,
+            );
+        });
+    }
+
+    fn teardown(
+        &self,
+        view_state: &mut Self::ViewState,
+        ctx: &mut ViewCtx,
+        mut element: Mut<'_, Self::Element>,
+    ) {
+        ctx.with_id(HOVER_SENSOR_CONTENT_VIEW_ID, |ctx| {
+            View::<State, Action, _>::teardown(
+                &self.inner,
+                view_state,
+                ctx,
+                HoverSensorWidget::child_mut(&mut element).downcast(),
+            );
+        });
+        ctx.teardown_action_source(element);
+    }
+
+    fn message(
+        &self,
+        view_state: &mut Self::ViewState,
+        message: &mut MessageCtx,
+        mut element: Mut<'_, Self::Element>,
+        app_state: &mut State,
+    ) -> MessageResult<Action> {
+        match message.take_first() {
+            Some(HOVER_SENSOR_CONTENT_VIEW_ID) => self.inner.message(
+                view_state,
+                message,
+                HoverSensorWidget::child_mut(&mut element).downcast(),
+                app_state,
+            ),
+            None => match message.take_message::<HoverChanged>() {
+                Some(hovered) => MessageResult::Action((self.on_hover)(app_state, hovered.0)),
+                None => MessageResult::Stale,
+            },
+            _ => MessageResult::Stale,
+        }
+    }
+}
+
+fn minimized_item(state: &XilemBar, index: usize) -> Option<impl WidgetView<XilemBar> + use<>> {
+    let minimized = state.dock.visible_windows().nth(index)?.clone();
+    let token = minimized.token;
+    let session = state.runtime.view().wm_session_id;
+    let scale = state.dock.scale_for(token);
+    let background = if minimized.urgent() {
+        state.theme.urgent_bg
+    } else {
+        with_alpha(state.theme.blue, 0.92)
+    };
+    let border = if minimized.urgent() {
+        state.theme.urgent_border
+    } else {
+        with_alpha(state.theme.fg, 0.55)
+    };
+    let title = if minimized.title.trim().is_empty() {
+        minimized.app_id.clone()
+    } else {
+        minimized.title.clone()
+    };
+    let tooltip_title = title.clone();
+    let card = sized_box(hover_sensor(
+        button(
+            label(minimized.initial().to_string())
+                .text_size(PILL_FONT_SIZE)
+                .color(Color::WHITE),
+            move |state: &mut XilemBar| {
+                info!("restore minimized window {title}");
+                state.restore_minimized(token, session);
+            },
+        ),
+        tooltip_title,
+        move |state: &mut XilemBar, hovered| {
+            state.hover_minimized(token, session, hovered);
+        },
+    ))
+    .dims(Dimensions::new(
+        Dim::Fixed(Length::px(f64::from(DOCK_ITEM_WIDTH * scale))),
+        Dim::Fixed(Length::px(f64::from(DOCK_ITEM_HEIGHT * scale))),
+    ))
+    .background(background)
+    .border(border, Length::px(1.0))
+    .corner_radius(Length::px(5.0));
+    Some(
+        sized_box(card)
+            .dims(Dimensions::new(
+                Dim::Fixed(Length::px(f64::from(DOCK_SLOT_WIDTH))),
+                Dim::Stretch,
+            ))
+            .padding(Padding::from_vh(
+                Length::px(f64::from((40.0 - DOCK_ITEM_HEIGHT * scale) * 0.5)),
+                Length::px(f64::from((DOCK_SLOT_WIDTH - DOCK_ITEM_WIDTH * scale) * 0.5)),
+            )),
+    )
+}
+
+fn minimized_dock(state: &XilemBar) -> impl WidgetView<XilemBar> + use<> {
+    let subtle = with_alpha(state.theme.subtle, 0.45);
+    let overflow = state.dock.overflow() || state.dock.collapsed();
+    let cards: Vec<_> = (0..16)
+        .filter_map(|index| minimized_item(state, index))
+        .collect();
+    let overflow_label = overflow.then(|| {
+        sized_box(
+            label("+")
+                .text_size(PILL_FONT_SIZE)
+                .color(state.theme.subtle),
+        )
+        .width(Dim::Fixed(Length::px(12.0)))
+        .height(Dim::Stretch)
+    });
+    sized_box(
+        flex(
+            Axis::Horizontal,
+            (
+                flex(Axis::Horizontal, cards)
+                    .cross_axis_alignment(CrossAxisAlignment::Center)
+                    .gap(Length::px(f64::from(DOCK_ITEM_GAP))),
+                overflow_label,
+            ),
+        )
+        .cross_axis_alignment(CrossAxisAlignment::Center)
+        .gap(Length::px(f64::from(DOCK_ITEM_GAP))),
+    )
+    .width(Dim::Fixed(Length::px(f64::from(state.dock.shelf_width()))))
+    .height(Dim::Stretch)
+    .padding(Padding::from_vh(Length::ZERO, Length::px(2.0)))
+    .border(subtle, Length::px(1.0))
+    .corner_radius(Length::px(5.0))
+}
+
 // -------- Top-level view -----------------------------------------------------
 
 fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
+    state.service_dock();
     let view = state.runtime.view();
     let cpu = view.system.cpu_percent.map_or(0.0, |value| value.as_f32());
     let mem = view
@@ -1135,6 +1507,8 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
                 monitor_pill_view(&theme, monitor_num),
                 FlexSpacer::Fixed(Length::px(RIGHTMOST_SECTION_GAP)),
                 scale_pill_view(&theme, 1.0),
+                FlexSpacer::Fixed(Length::px(4.0)),
+                minimized_dock(state),
             ),
         ),
     )

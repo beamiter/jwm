@@ -62,6 +62,47 @@ pub enum HitTarget {
     Background { output: Option<OutputId> },
 }
 
+/// A rectangle in the compositor's global physical-pixel coordinate space.
+///
+/// Bars use this for Dock slots and hover anchors.  Keeping the coordinate
+/// contract at the backend boundary avoids making either compositor guess a
+/// toolkit's logical scale or a Wayland surface's global position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompositorRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl CompositorRect {
+    #[must_use]
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[must_use]
+    pub fn normalized(self) -> Option<Self> {
+        (self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width > 0.0
+            && self.height > 0.0)
+            .then_some(self)
+    }
+
+    #[must_use]
+    pub fn center(self) -> (f32, f32) {
+        (self.x + self.width * 0.5, self.y + self.height * 0.5)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OutputIdentity {
     pub connector: String,
@@ -1446,6 +1487,21 @@ pub trait CompositorWindowEffects: Send {
     fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
     fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
     fn compositor_set_window_minimized(&mut self, _window: WindowId, _minimized: bool) {}
+    /// Set or withdraw one window's Dock slot in global physical pixels.
+    fn compositor_set_window_dock_geometry(
+        &mut self,
+        _window: WindowId,
+        _target: Option<CompositorRect>,
+    ) {
+    }
+    /// Show, move, replace, or hide the compositor-owned minimized preview.
+    /// `None` for either value hides it; repeated identical updates are cheap.
+    fn compositor_set_minimized_window_preview(
+        &mut self,
+        _window: Option<WindowId>,
+        _anchor: Option<CompositorRect>,
+    ) {
+    }
     fn compositor_set_dock_position(&mut self, _x: f32, _y: f32) {}
     fn compositor_set_peek_mode(&mut self, _active: bool) {}
     /// Hand the compositor the tab bars to paint. Each group carries the strip

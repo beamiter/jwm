@@ -161,6 +161,7 @@ impl SimpleComponent for AppModel {
                 self.handle_runtime_update(update);
             }
         }
+        self.surface.maintain();
     }
 }
 
@@ -223,7 +224,7 @@ impl AppModel {
         let presentation =
             PresentationProjector::project(self.snapshot.view(), &self.theme.presentation);
         xbar_gtk::apply_theme_class(&self.root_window, presentation.theme);
-        self.surface.sync(presentation);
+        self.surface.sync(&self.snapshot, presentation);
     }
 }
 

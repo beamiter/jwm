@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -30,8 +30,25 @@ interface BatteryState {
   present: boolean;
 }
 
+interface MinimizedWindow {
+  token: number;
+  monitor: number;
+  title: string;
+  app_id: string;
+  flags: number;
+}
+
+interface DockGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface BarSnapshot {
   wm_available: boolean;
+  wm_session_id: number;
+  geometry: DockGeometry | null;
   tags: TagState[];
   monitor: number;
   layout_symbol: string;
@@ -43,6 +60,8 @@ interface BarSnapshot {
   system_details: SystemDetails;
   brightness: { percent: number | null };
   battery: BatteryState;
+  minimized_windows: MinimizedWindow[];
+  minimized_overflow: boolean;
 }
 
 interface FrontendEnvelope {
@@ -81,10 +100,31 @@ type ActionRequest =
   | { action: "adjust_volume"; delta: number }
   | { action: "adjust_brightness"; delta: number }
   | { action: "screenshot" }
+  | {
+      action: "restore_window";
+      wm_session_id: number;
+      window_id: number;
+      geometry?: DockGeometry;
+    }
+  | {
+      action: "preview_window";
+      wm_session_id: number;
+      window_id: number;
+      visible: boolean;
+      geometry?: DockGeometry;
+    }
+  | {
+      action: "set_dock_geometry";
+      wm_session_id: number;
+      window_id?: number | null;
+      geometry?: DockGeometry;
+    }
   | { action: "open_shell_hub"; route: ShellRoute };
 
 const dispatchAction = (request: ActionRequest): Promise<void> =>
   invoke("dispatch_action", { request });
+
+let snapshotBarOrigin: Pick<DockGeometry, "x" | "y"> | null = null;
 
 const TAG_ICONS = [
   "\u{F0A1E}",
@@ -142,6 +182,274 @@ const volumeIcon = (device: AudioDeviceInfo | null): string => {
   if (device.volume < 67) return ICON_VOL_MID;
   return ICON_VOL_HIGH;
 };
+
+const minimizedInitial = (window: MinimizedWindow): string => {
+  const label = window.app_id.trim() || window.title.trim();
+  return Array.from(label)[0]?.toLocaleUpperCase() ?? "•";
+};
+
+type WindowMetrics = { x: number; y: number; scale: number };
+
+const windowMetrics = async (): Promise<WindowMetrics | null> => {
+  try {
+    const appWindow = getCurrentWindow();
+    const scale = await appWindow.scaleFactor();
+    if (snapshotBarOrigin) {
+      return { x: snapshotBarOrigin.x, y: snapshotBarOrigin.y, scale };
+    }
+    const origin = await appWindow.innerPosition();
+    return { x: origin.x, y: origin.y, scale };
+  } catch (error) {
+    console.error("Failed to resolve dock geometry:", error);
+    return null;
+  }
+};
+
+export const projectDockGeometry = (
+  rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
+  metrics: WindowMetrics,
+): DockGeometry => {
+  return {
+    x: metrics.x + Math.round(rect.left * metrics.scale),
+    y: metrics.y + Math.round(rect.top * metrics.scale),
+    width: Math.max(0, Math.round(rect.width * metrics.scale)),
+    height: Math.max(0, Math.round(rect.height * metrics.scale)),
+  };
+};
+
+const physicalGeometry = (element: HTMLElement, metrics: WindowMetrics): DockGeometry =>
+  projectDockGeometry(element.getBoundingClientRect(), metrics);
+
+const restingItemGeometry = (
+  item: HTMLElement,
+  dock: HTMLElement,
+  metrics: WindowMetrics,
+): DockGeometry => {
+  const dockRect = dock.getBoundingClientRect();
+  return projectDockGeometry(
+    {
+      left: dockRect.left + item.offsetLeft,
+      top: dockRect.top + item.offsetTop,
+      width: item.offsetWidth,
+      height: item.offsetHeight,
+    },
+    metrics,
+  );
+};
+
+const geometryForElement = async (element: HTMLElement): Promise<DockGeometry | undefined> => {
+  const metrics = await windowMetrics();
+  return metrics ? physicalGeometry(element, metrics) : undefined;
+};
+
+const restoreMinimized = async (
+  windowId: number,
+  wmSessionId: number,
+  element: HTMLElement,
+) => {
+  const geometry = await geometryForElement(element);
+  await dispatchAction({
+    action: "restore_window",
+    wm_session_id: wmSessionId,
+    window_id: windowId,
+    geometry,
+  });
+};
+
+const previewMinimized = async (
+  windowId: number,
+  wmSessionId: number,
+  visible: boolean,
+  element: HTMLElement,
+) => {
+  const geometry = await geometryForElement(element);
+  if (visible && !element.matches(":hover")) return;
+  await dispatchAction({
+    action: "preview_window",
+    wm_session_id: wmSessionId,
+    window_id: windowId,
+    visible,
+    geometry,
+  });
+};
+
+const previewRenewals = new Map<number, number>();
+
+const stopPreviewRenewal = (windowId: number) => {
+  const renewal = previewRenewals.get(windowId);
+  if (renewal !== undefined) window.clearInterval(renewal);
+  previewRenewals.delete(windowId);
+};
+
+const beginPreview = (windowId: number, wmSessionId: number, element: HTMLElement) => {
+  stopPreviewRenewal(windowId);
+  previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
+  const renewal = window.setInterval(() => {
+    if (!element.isConnected || !element.matches(":hover")) {
+      stopPreviewRenewal(windowId);
+      previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+      return;
+    }
+    previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
+  }, 2_000);
+  previewRenewals.set(windowId, renewal);
+};
+
+const endPreview = (windowId: number, wmSessionId: number, element: HTMLElement) => {
+  stopPreviewRenewal(windowId);
+  previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+};
+
+const publishDockGeometry = async (dock: HTMLElement, wmSessionId: number) => {
+  const metrics = await windowMetrics();
+  if (!dock.isConnected) return;
+  if (!metrics) throw new Error("Dock window metrics are temporarily unavailable");
+  await dispatchAction({
+    action: "set_dock_geometry",
+    wm_session_id: wmSessionId,
+    window_id: null,
+    geometry: physicalGeometry(dock, metrics),
+  });
+  for (const item of dock.querySelectorAll<HTMLElement>("[data-window-id]")) {
+    const windowId = Number(item.dataset.windowId);
+    if (!Number.isFinite(windowId)) continue;
+    await dispatchAction({
+      action: "set_dock_geometry",
+      wm_session_id: wmSessionId,
+      window_id: windowId,
+      geometry: restingItemGeometry(item, dock, metrics),
+    });
+  }
+};
+
+function MinimizedDock({
+  windows,
+  overflow,
+  available,
+  wmSessionId,
+  barGeometry,
+}: {
+  windows: MinimizedWindow[];
+  overflow: boolean;
+  available: boolean;
+  wmSessionId: number;
+  barGeometry: DockGeometry | null;
+}) {
+  const dockRef = useRef<HTMLDivElement>(null);
+  const geometrySignature = useMemo(
+    () =>
+      `${available}|${wmSessionId}|${barGeometry?.x},${barGeometry?.y},${barGeometry?.width},${barGeometry?.height}|${windows
+        .map((window) => window.token)
+        .join(",")}|${overflow}`,
+    [available, wmSessionId, barGeometry, windows, overflow],
+  );
+
+  useEffect(() => {
+    let retryTimer: number | undefined;
+    let publishInFlight = false;
+    let republishRequested = false;
+    let disposed = false;
+
+    const scheduleRetry = () => {
+      if (
+        disposed ||
+        !available ||
+        wmSessionId === 0 ||
+        retryTimer !== undefined ||
+        !dockRef.current?.isConnected
+      ) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        publish();
+      }, 100);
+    };
+    const publish = () => {
+      if (disposed || !available || wmSessionId === 0 || !dockRef.current?.isConnected) return;
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
+      if (publishInFlight) {
+        republishRequested = true;
+        return;
+      }
+      publishInFlight = true;
+      publishDockGeometry(dockRef.current, wmSessionId)
+        .then(() => {
+          publishInFlight = false;
+          if (republishRequested) {
+            republishRequested = false;
+            publish();
+          }
+        })
+        .catch((error) => {
+          publishInFlight = false;
+          republishRequested = false;
+          console.error("Failed to publish minimized Dock geometry; retrying:", error);
+          scheduleRetry();
+        });
+    };
+    const frame = window.requestAnimationFrame(publish);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(publish);
+    if (dockRef.current) observer?.observe(dockRef.current);
+    window.addEventListener("resize", publish);
+    return () => {
+      disposed = true;
+      window.cancelAnimationFrame(frame);
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      observer?.disconnect();
+      window.removeEventListener("resize", publish);
+      windows.forEach((window) => stopPreviewRenewal(window.token));
+    };
+  }, [geometrySignature]);
+
+  const empty = windows.length === 0 && !overflow;
+
+  return (
+    <div
+      ref={dockRef}
+      className={`minimized-dock${empty ? " is-empty" : ""}`}
+      aria-label="Minimized windows"
+    >
+      <span className="minimized-divider" aria-hidden="true" />
+      {windows.map((window) => {
+        const label = window.title.trim() || window.app_id.trim() || "Minimized window";
+        const urgent = (window.flags & 2) !== 0;
+        const previewAvailable = (window.flags & 1) !== 0;
+        return (
+          <button
+            key={window.token}
+            className={`minimized-item${urgent ? " is-urgent" : ""}`}
+            data-window-id={window.token}
+            disabled={!available}
+            onClick={(event) =>
+              restoreMinimized(window.token, wmSessionId, event.currentTarget).catch(console.error)
+            }
+            onMouseEnter={(event) => {
+              if (previewAvailable) beginPreview(window.token, wmSessionId, event.currentTarget);
+            }}
+            onMouseLeave={(event) => {
+              if (previewAvailable) endPreview(window.token, wmSessionId, event.currentTarget);
+            }}
+            title={`${label} — click to restore`}
+            aria-label={`Restore ${label}`}
+          >
+            <span className="minimized-thumbnail" aria-hidden="true">
+              <span className="minimized-traffic-lights" />
+              <span className="minimized-initial">{minimizedInitial(window)}</span>
+            </span>
+            {urgent && <span className="minimized-urgent-dot" aria-label="Urgent" />}
+          </button>
+        );
+      })}
+      {overflow && (
+        <span className="minimized-overflow" title="More minimized windows">
+          …
+        </span>
+      )}
+    </div>
+  );
+}
 
 function TagButtons({ tags, monitor }: { tags: TagState[]; monitor: number }) {
   const [pressedButton, setPressedButton] = useState<number | null>(null);
@@ -392,6 +700,7 @@ function App() {
         if (cancelled) return;
         if (revision.current !== null && event.payload.revision < revision.current) return;
         revision.current = event.payload.revision;
+        snapshotBarOrigin = event.payload.snapshot.geometry;
         setSnapshot(event.payload.snapshot);
       });
       if (cancelled) {
@@ -424,6 +733,13 @@ function App() {
       </div>
       <div className="spacer" />
       <div className="right-info-container">
+        <MinimizedDock
+          windows={snapshot.minimized_windows}
+          overflow={snapshot.minimized_overflow}
+          available={snapshot.wm_available}
+          wmSessionId={snapshot.wm_session_id}
+          barGeometry={snapshot.geometry}
+        />
         <SystemInfoDisplay snapshot={snapshot} />
         <BrightnessControl percent={snapshot.brightness.percent} />
         <VolumeControl device={snapshot.audio_device} />

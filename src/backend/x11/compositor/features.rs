@@ -383,6 +383,120 @@ impl<C: CompositorConnection> Compositor<C> {
         self.dock_position = (x, y);
     }
 
+    /// Set the exact Dock slot for one managed window.  A bar can publish the
+    /// fallback region first and refine it after laying out the new item; an
+    /// in-flight mesh follows the updated slot instead of finishing at stale
+    /// geometry.
+    pub(crate) fn set_window_dock_geometry(
+        &mut self,
+        x11_win: u32,
+        target: Option<crate::backend::api::CompositorRect>,
+    ) {
+        match target.and_then(crate::backend::api::CompositorRect::normalized) {
+            Some(target) => {
+                self.genie_targets.insert(x11_win, target);
+                if let Some(animation) = self
+                    .genie_active
+                    .iter_mut()
+                    .find(|animation| animation.x11_win == x11_win)
+                {
+                    animation.target = target;
+                }
+                if let Some(visual) = self.minimized_visuals.get_mut(&x11_win) {
+                    visual.target = Some(target);
+                }
+            }
+            None => {
+                self.genie_targets.remove(&x11_win);
+                let fallback = self.genie_target_for(x11_win);
+                if let Some(animation) = self
+                    .genie_active
+                    .iter_mut()
+                    .find(|animation| animation.x11_win == x11_win)
+                {
+                    animation.target = fallback;
+                }
+                if let Some(visual) = self.minimized_visuals.get_mut(&x11_win) {
+                    visual.target = None;
+                }
+                if self
+                    .dock_preview
+                    .is_some_and(|preview| preview.x11_win == x11_win)
+                {
+                    self.set_minimized_window_preview(None);
+                }
+            }
+        }
+        self.needs_render = true;
+    }
+
+    /// Animate the compositor-owned preview rather than asking every bar
+    /// toolkit to transport and upload window pixels independently.
+    pub(crate) fn set_minimized_window_preview(
+        &mut self,
+        request: Option<(u32, crate::backend::api::CompositorRect)>,
+    ) {
+        use crate::backend::compositor_common::genie::{PreviewDirection, preview_motion};
+
+        let request = request
+            .and_then(|(x11_win, anchor)| anchor.normalized().map(|anchor| (x11_win, anchor)))
+            .filter(|(x11_win, _)| {
+                self.minimized_visuals.contains_key(x11_win)
+                    || self
+                        .genie_active
+                        .iter()
+                        .any(|animation| animation.x11_win == *x11_win)
+                    || self.windows.contains_key(x11_win)
+            });
+        let now = std::time::Instant::now();
+        match request {
+            Some((x11_win, anchor)) => {
+                if self.dock_preview.is_some_and(|preview| {
+                    preview.x11_win == x11_win
+                        && preview.anchor == anchor
+                        && preview.direction == PreviewDirection::Show
+                }) {
+                    if let Some(preview) = self.dock_preview.as_mut() {
+                        preview.lease_deadline = now + std::time::Duration::from_secs(4);
+                    }
+                    return;
+                }
+                self.dock_preview = Some(DockPreview {
+                    x11_win,
+                    anchor,
+                    started: now,
+                    lease_deadline: now + std::time::Duration::from_secs(4),
+                    start_opacity: 0.0,
+                    start_scale: 0.86,
+                    direction: PreviewDirection::Show,
+                    opacity: 0.0,
+                    scale: 0.86,
+                });
+            }
+            None => {
+                let Some(preview) = self.dock_preview.as_mut() else {
+                    return;
+                };
+                if preview.direction == PreviewDirection::Hide {
+                    return;
+                }
+                let (opacity, scale, _) = preview_motion(
+                    preview.start_opacity,
+                    preview.start_scale,
+                    preview.direction,
+                    now.duration_since(preview.started).as_secs_f32(),
+                );
+                preview.started = now;
+                preview.start_opacity = opacity;
+                preview.start_scale = scale;
+                preview.opacity = opacity;
+                preview.scale = scale;
+                preview.direction = PreviewDirection::Hide;
+            }
+        }
+        self.needs_render = true;
+    }
+
     #[allow(dead_code)]
     pub(crate) fn has_window(&self, x11_win: u32) -> bool {
         self.windows.contains_key(&x11_win)
@@ -791,6 +905,7 @@ impl<C: CompositorConnection> Compositor<C> {
                                 uv_rect: self.gl.get_uniform_location(new_program, "u_uv_rect"),
                                 progress: self.gl.get_uniform_location(new_program, "u_progress"),
                                 dock_pos: self.gl.get_uniform_location(new_program, "u_dock_pos"),
+                                dock_size: self.gl.get_uniform_location(new_program, "u_dock_size"),
                                 grid_size: self.gl.get_uniform_location(new_program, "u_grid_size"),
                             };
                             let old_program =

@@ -754,6 +754,11 @@ impl Jwm {
         self.setup_statusbar_window_by_key(backend, client_key)?;
 
         backend.window_ops().map_window(win)?;
+        // A freshly spawned/reconnected bar must receive an authoritative
+        // snapshot even if the platform never produces an Expose event. This
+        // is what repopulates minimized-window metadata and lets the new bar
+        // withdraw/re-report every compositor target after a crash.
+        self.mark_bar_update_needed_if_visible(Some(monitor_id));
         Ok(())
     }
 

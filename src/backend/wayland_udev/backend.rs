@@ -9,10 +9,10 @@ use self::kms::KmsState;
 use super::compositor::WaylandCompositor;
 use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
-    CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
-    CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
-    KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
-    SystemUiOverlay, WindowOps, WindowType,
+    CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
+    CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
+    EventHandler, HitTarget, InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler,
+    ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
@@ -3434,10 +3434,33 @@ impl CompositorWindowEffects for UdevBackend {
             if minimized {
                 compositor.minimize_window(window.raw());
             } else {
-                // The next live texture update cancels an in-flight minimize
-                // retirement for this id.
-                compositor.force_full_redraw();
+                compositor.restore_window(window.raw());
             }
+        }
+        self.request_render();
+    }
+
+    fn compositor_set_window_dock_geometry(
+        &mut self,
+        window: WindowId,
+        target: Option<CompositorRect>,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.set_window_dock_geometry(window.raw(), target);
+        }
+        self.request_render();
+    }
+
+    fn compositor_set_minimized_window_preview(
+        &mut self,
+        window: Option<WindowId>,
+        anchor: Option<CompositorRect>,
+    ) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            let request = window
+                .zip(anchor)
+                .map(|(window, anchor)| (window.raw(), anchor));
+            compositor.set_minimized_window_preview(request);
         }
         self.request_render();
     }
@@ -4987,11 +5010,19 @@ impl Backend for UdevBackend {
             // Session/DRM events will wake us; the overdue deadline is then
             // consumed as soon as `can_present` becomes true.
             let handler_wakeup = handler_wakeup_timeout(can_present, handler.next_wakeup());
+            let compositor_wakeup = can_present
+                .then(|| {
+                    self.compositor
+                        .as_ref()
+                        .and_then(|compositor| compositor.next_wakeup())
+                })
+                .flatten();
             let timeout = [
                 has_pending_events.then_some(std::time::Duration::ZERO),
                 poll_session_activation.then_some(std::time::Duration::from_millis(100)),
                 render_work_pending.then_some(std::time::Duration::from_millis(16)),
                 handler_wakeup,
+                compositor_wakeup,
             ]
             .into_iter()
             .flatten()

@@ -53,6 +53,38 @@
     <div class="spacer"></div>
 
     <div class="right-info-container">
+      <div
+        class="minimized-dock"
+        :class="{ 'is-empty': !monitorSnapshot.minimized_windows.length && !monitorSnapshot.minimized_overflow }"
+        aria-label="Minimized windows"
+      >
+        <span class="minimized-divider" aria-hidden="true"></span>
+        <button
+          v-for="item in monitorSnapshot.minimized_windows"
+          :key="item.token"
+          class="minimized-item"
+          :class="{ 'is-urgent': (item.flags & 2) !== 0 }"
+          :data-window-id="item.token"
+          :disabled="!wmAvailable"
+          :title="`${item.title.trim() || item.app_id.trim() || 'Minimized window'} — click to restore`"
+          :aria-label="`Restore ${item.title.trim() || item.app_id.trim() || 'Minimized window'}`"
+          @click="onRestoreWindow(item.token, monitorSnapshot.wm_session_id, $event)"
+          @mouseenter="(item.flags & 1) !== 0 && beginPreviewWindow(item.token, monitorSnapshot.wm_session_id, $event)"
+          @mouseleave="(item.flags & 1) !== 0 && endPreviewWindow(item.token, monitorSnapshot.wm_session_id, $event)"
+        >
+          <span class="minimized-thumbnail" aria-hidden="true">
+            <span class="minimized-traffic-lights"></span>
+            <span class="minimized-initial">{{ minimizedInitial(item) }}</span>
+          </span>
+          <span v-if="(item.flags & 2) !== 0" class="minimized-urgent-dot"></span>
+        </button>
+        <span
+          v-if="monitorSnapshot.minimized_overflow"
+          class="minimized-overflow"
+          title="More minimized windows"
+        >…</span>
+      </div>
+
       <!-- 系统信息 -->
       <template v-if="systemSnapshot">
         <div class="system-info-container">
@@ -198,8 +230,25 @@ interface BatteryState {
   present: boolean;
 }
 
+interface MinimizedWindow {
+  token: number;
+  monitor: number;
+  title: string;
+  app_id: string;
+  flags: number;
+}
+
+interface DockGeometry {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 interface BarSnapshot {
   wm_available: boolean;
+  wm_session_id: number;
+  geometry: DockGeometry | null;
   tags: TagState[];
   monitor: number;
   layout_symbol: string;
@@ -211,6 +260,8 @@ interface BarSnapshot {
   system_details: SystemDetails;
   brightness: { percent: number | null };
   battery: BatteryState;
+  minimized_windows: MinimizedWindow[];
+  minimized_overflow: boolean;
 }
 
 interface FrontendEnvelope {
@@ -237,10 +288,33 @@ type ActionRequest =
   | { action: 'adjust_volume'; delta: number }
   | { action: 'adjust_brightness'; delta: number }
   | { action: 'screenshot' }
+  | {
+      action: 'restore_window';
+      wm_session_id: number;
+      window_id: number;
+      geometry?: DockGeometry;
+    }
+  | {
+      action: 'preview_window';
+      wm_session_id: number;
+      window_id: number;
+      visible: boolean;
+      geometry?: DockGeometry;
+    }
+  | {
+      action: 'set_dock_geometry';
+      wm_session_id: number;
+      window_id?: number | null;
+      geometry?: DockGeometry;
+    }
   | { action: 'open_shell_hub'; route: ShellRoute };
 
 const dispatchAction = (request: ActionRequest): Promise<void> =>
   invoke('dispatch_action', { request });
+
+let snapshotBarOrigin: Pick<DockGeometry, 'x' | 'y'> | null = null;
+let currentWmSessionId = 0;
+let currentWmAvailable = false;
 
 // --- Nerd Font 图标 ---
 const TAG_ICONS = [
@@ -306,6 +380,88 @@ function monitorIcon(num: number) {
   return `M${num}`;
 }
 
+function minimizedInitial(item: MinimizedWindow): string {
+  const label = item.app_id.trim() || item.title.trim();
+  return Array.from(label)[0]?.toLocaleUpperCase() ?? '•';
+}
+
+type WindowMetrics = { x: number; y: number; scale: number };
+
+async function windowMetrics(): Promise<WindowMetrics | null> {
+  try {
+    const appWindow = getCurrentWindow();
+    const scale = await appWindow.scaleFactor();
+    if (snapshotBarOrigin) {
+      return { x: snapshotBarOrigin.x, y: snapshotBarOrigin.y, scale };
+    }
+    const origin = await appWindow.innerPosition();
+    return { x: origin.x, y: origin.y, scale };
+  } catch (error) {
+    console.error('Failed to resolve dock geometry:', error);
+    return null;
+  }
+}
+
+function projectDockGeometry(
+  rect: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
+  metrics: WindowMetrics,
+): DockGeometry {
+  return {
+    x: metrics.x + Math.round(rect.left * metrics.scale),
+    y: metrics.y + Math.round(rect.top * metrics.scale),
+    width: Math.max(0, Math.round(rect.width * metrics.scale)),
+    height: Math.max(0, Math.round(rect.height * metrics.scale)),
+  };
+}
+
+function physicalGeometry(element: HTMLElement, metrics: WindowMetrics): DockGeometry {
+  return projectDockGeometry(element.getBoundingClientRect(), metrics);
+}
+
+function restingItemGeometry(
+  item: HTMLElement,
+  dock: HTMLElement,
+  metrics: WindowMetrics,
+): DockGeometry {
+  const dockRect = dock.getBoundingClientRect();
+  return projectDockGeometry(
+    {
+      left: dockRect.left + item.offsetLeft,
+      top: dockRect.top + item.offsetTop,
+      width: item.offsetWidth,
+      height: item.offsetHeight,
+    },
+    metrics,
+  );
+}
+
+async function geometryForElement(element: HTMLElement): Promise<DockGeometry | undefined> {
+  const metrics = await windowMetrics();
+  return metrics ? physicalGeometry(element, metrics) : undefined;
+}
+
+async function publishDockGeometry(dock: HTMLElement, wmSessionId: number) {
+  const metrics = await windowMetrics();
+  if (!dock.isConnected) return;
+  if (!metrics) throw new Error('Dock window metrics are temporarily unavailable');
+  await dispatchAction({
+    action: 'set_dock_geometry',
+    wm_session_id: wmSessionId,
+    window_id: null,
+    geometry: physicalGeometry(dock, metrics),
+  });
+  for (const item of dock.querySelectorAll<HTMLElement>('[data-window-id]')) {
+    const windowId = Number(item.dataset.windowId);
+    if (!Number.isFinite(windowId)) continue;
+    await dispatchAction({
+      action: 'set_dock_geometry',
+      wm_session_id: wmSessionId,
+      window_id: windowId,
+      geometry: restingItemGeometry(item, dock, metrics),
+    });
+  }
+}
+
 // --- 响应式状态 ---
 const snapshot = ref<BarSnapshot | null>(null);
 const scaleFactor = ref<number | null>(null);
@@ -315,15 +471,120 @@ const isTaking = ref(false);
 let cancelled = false;
 let revision: number | null = null;
 let unlisten: UnlistenFn | undefined;
+let dockGeometrySignature = '';
+let dockResizeObserver: ResizeObserver | undefined;
+let dockRetryTimer: number | undefined;
+let dockPublishGeneration = 0;
+let dockPublishInFlight = false;
+let dockRepublishRequested = false;
+const previewRenewals = new Map<number, number>();
+
+function cancelDockGeometryRetry() {
+  dockPublishGeneration += 1;
+  if (dockRetryTimer !== undefined) window.clearTimeout(dockRetryTimer);
+  dockRetryTimer = undefined;
+  dockPublishInFlight = false;
+  dockRepublishRequested = false;
+}
+
+function requestDockGeometryPublish(dock: HTMLElement, wmSessionId: number) {
+  if (
+    !dock.isConnected ||
+    !currentWmAvailable ||
+    wmSessionId === 0 ||
+    wmSessionId !== currentWmSessionId
+  ) return;
+  const generation = dockPublishGeneration;
+  if (dockRetryTimer !== undefined) {
+    window.clearTimeout(dockRetryTimer);
+    dockRetryTimer = undefined;
+  }
+  if (dockPublishInFlight) {
+    dockRepublishRequested = true;
+    return;
+  }
+  dockPublishInFlight = true;
+  publishDockGeometry(dock, wmSessionId)
+    .then(() => {
+      if (generation !== dockPublishGeneration) return;
+      dockPublishInFlight = false;
+      if (dockRepublishRequested) {
+        dockRepublishRequested = false;
+        requestDockGeometryPublish(dock, wmSessionId);
+      }
+    })
+    .catch((error) => {
+      if (generation !== dockPublishGeneration) return;
+      dockPublishInFlight = false;
+      dockRepublishRequested = false;
+      console.error('Failed to publish minimized Dock geometry; retrying:', error);
+      if (
+        dockRetryTimer === undefined &&
+        dock.isConnected &&
+        currentWmAvailable &&
+        wmSessionId !== 0 &&
+        wmSessionId === currentWmSessionId
+      ) {
+        dockRetryTimer = window.setTimeout(() => {
+          dockRetryTimer = undefined;
+          requestDockGeometryPublish(dock, wmSessionId);
+        }, 100);
+      }
+    });
+}
+
+function scheduleDockGeometry(current: BarSnapshot) {
+  if (!current.wm_available || current.wm_session_id === 0) {
+    cancelDockGeometryRetry();
+    dockResizeObserver?.disconnect();
+    dockGeometrySignature = '';
+    return;
+  }
+  const signature = `${current.wm_session_id}|${current.geometry?.x},${current.geometry?.y},${current.geometry?.width},${current.geometry?.height}|${current.minimized_windows.map((item) => item.token).join(',')}|${current.minimized_overflow}`;
+  if (signature === dockGeometrySignature) return;
+  dockGeometrySignature = signature;
+  window.requestAnimationFrame(() => {
+    const dock = document.querySelector<HTMLElement>('.minimized-dock');
+    if (!dock) return;
+    requestDockGeometryPublish(dock, current.wm_session_id);
+    dockResizeObserver?.disconnect();
+    if (typeof ResizeObserver !== 'undefined') {
+      dockResizeObserver = new ResizeObserver(() =>
+        requestDockGeometryPublish(dock, current.wm_session_id),
+      );
+      dockResizeObserver.observe(dock);
+    }
+  });
+}
+
+function handleDockResize() {
+  const dock = document.querySelector<HTMLElement>('.minimized-dock');
+  if (dock && snapshot.value) {
+    requestDockGeometryPublish(dock, snapshot.value.wm_session_id);
+  }
+}
 
 // --- 事件监听（Tauri） ---
 onMounted(() => {
+  window.addEventListener('resize', handleDockResize);
   (async () => {
     const stopListening = await listen<FrontendEnvelope>('xbar-state', (event) => {
       if (cancelled) return;
       if (revision !== null && event.payload.revision < revision) return;
       revision = event.payload.revision;
+      snapshotBarOrigin = event.payload.snapshot.geometry;
+      if (
+        currentWmSessionId !== event.payload.snapshot.wm_session_id ||
+        currentWmAvailable !== event.payload.snapshot.wm_available
+      ) {
+        cancelDockGeometryRetry();
+        previewRenewals.forEach((renewal) => window.clearInterval(renewal));
+        previewRenewals.clear();
+      }
+      currentWmSessionId = event.payload.snapshot.wm_session_id;
+      currentWmAvailable = event.payload.snapshot.wm_available;
       snapshot.value = event.payload.snapshot;
+      scheduleDockGeometry(event.payload.snapshot);
     });
     if (cancelled) {
       stopListening();
@@ -345,6 +606,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelled = true;
   unlisten?.();
+  window.removeEventListener('resize', handleDockResize);
+  dockResizeObserver?.disconnect();
+  cancelDockGeometryRetry();
+  previewRenewals.forEach((renewal) => window.clearInterval(renewal));
+  previewRenewals.clear();
 });
 
 // --- 计算属性 ---
@@ -476,6 +742,62 @@ function onOpenShell(route: ShellRoute) {
   // nowhere to go; the pill is grayed out rather than silently inert.
   if (!wmAvailable.value) return;
   dispatchAction({ action: 'open_shell_hub', route }).catch(console.error);
+}
+
+async function onRestoreWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  const geometry = await geometryForElement(event.currentTarget);
+  await dispatchAction({
+    action: 'restore_window',
+    wm_session_id: wmSessionId,
+    window_id: windowId,
+    geometry,
+  });
+}
+
+async function sendPreviewWindow(
+  windowId: number,
+  wmSessionId: number,
+  visible: boolean,
+  element: HTMLElement,
+) {
+  const geometry = await geometryForElement(element);
+  if (visible && !element.matches(':hover')) return;
+  await dispatchAction({
+    action: 'preview_window',
+    wm_session_id: wmSessionId,
+    window_id: windowId,
+    visible,
+    geometry,
+  });
+}
+
+function stopPreviewRenewal(windowId: number) {
+  const renewal = previewRenewals.get(windowId);
+  if (renewal !== undefined) window.clearInterval(renewal);
+  previewRenewals.delete(windowId);
+}
+
+function beginPreviewWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  const element = event.currentTarget;
+  stopPreviewRenewal(windowId);
+  sendPreviewWindow(windowId, wmSessionId, true, element).catch(console.error);
+  const renewal = window.setInterval(() => {
+    if (!element.isConnected || !element.matches(':hover')) {
+      stopPreviewRenewal(windowId);
+      sendPreviewWindow(windowId, wmSessionId, false, element).catch(console.error);
+      return;
+    }
+    sendPreviewWindow(windowId, wmSessionId, true, element).catch(console.error);
+  }, 2_000);
+  previewRenewals.set(windowId, renewal);
+}
+
+function endPreviewWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  stopPreviewRenewal(windowId);
+  sendPreviewWindow(windowId, wmSessionId, false, event.currentTarget).catch(console.error);
 }
 
 async function onScreenshot() {
@@ -1021,4 +1343,71 @@ body {
 .spacer {
   flex: 1 1 auto;
 }
+
+/* macOS-inspired minimized-window shelf (shared across Tauri web frontends). */
+:root {
+  --dock-shelf-bg: rgba(246, 247, 250, 0.78);
+  --dock-shelf-border: rgba(79, 88, 105, 0.24);
+  --dock-item-border: rgba(17, 24, 39, 0.34);
+  --dock-item-shadow: 0 2px 5px rgba(15, 23, 42, 0.22);
+  --dock-motion: 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dock-urgent: #ff453a;
+}
+
+.minimized-dock {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 34px;
+  padding: 3px 5px;
+  flex: 0 0 auto;
+  border: 1px solid var(--dock-shelf-border);
+  border-radius: 10px;
+  background: var(--dock-shelf-bg);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.78), 0 2px 7px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(16px) saturate(1.3);
+  -webkit-backdrop-filter: blur(16px) saturate(1.3);
+  isolation: isolate;
+}
+.minimized-divider { width: 1px; height: 22px; margin: 0 3px 1px 0; background: rgba(60, 67, 79, 0.3); box-shadow: 1px 0 rgba(255, 255, 255, 0.78); }
+.minimized-item {
+  position: relative;
+  width: 30px;
+  height: 20px;
+  min-width: 30px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(0) scale(1);
+  transform-origin: 50% 100%;
+  transition: transform var(--dock-motion), filter var(--dock-motion);
+  will-change: transform;
+  z-index: 1;
+}
+.minimized-item:disabled { cursor: default; opacity: 0.48; filter: grayscale(0.45); }
+.minimized-thumbnail { position: absolute; inset: 0; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--dock-item-border); border-radius: 6px; color: rgba(255, 255, 255, 0.96); background: linear-gradient(145deg, #4077a8 0%, #27364e 55%, #18202f 100%); box-shadow: inset 0 1px rgba(255, 255, 255, 0.42), var(--dock-item-shadow); }
+.minimized-item:nth-of-type(6n + 2) .minimized-thumbnail { background: linear-gradient(145deg, #9d5c63, #513548 60%, #252238); }
+.minimized-item:nth-of-type(6n + 3) .minimized-thumbnail { background: linear-gradient(145deg, #4f8b72, #285c5a 60%, #18333c); }
+.minimized-item:nth-of-type(6n + 4) .minimized-thumbnail { background: linear-gradient(145deg, #a66c43, #6e4438 60%, #30262b); }
+.minimized-item:nth-of-type(6n + 5) .minimized-thumbnail { background: linear-gradient(145deg, #6e64ad, #424176 60%, #24283e); }
+.minimized-item:nth-of-type(6n) .minimized-thumbnail { background: linear-gradient(145deg, #4d88a1, #315269 60%, #222c3b); }
+.minimized-traffic-lights { position: absolute; top: 3px; left: 4px; width: 3px; height: 3px; border-radius: 50%; background: #ff5f57; box-shadow: 5px 0 #febc2e, 10px 0 #28c840; opacity: 0.92; }
+.minimized-initial { margin-top: 4px; font: 700 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); }
+.minimized-item:has(+ .minimized-item + .minimized-item:hover),
+.minimized-item:hover + .minimized-item + .minimized-item { transform: translateY(-1px) scale(1.08); z-index: 2; }
+.minimized-item:has(+ .minimized-item:hover),
+.minimized-item:hover + .minimized-item { transform: translateY(-1px) scale(1.25); z-index: 3; }
+.minimized-item:hover:not(:disabled) { transform: translateY(-1px) scale(1.55); filter: brightness(1.08) saturate(1.08); z-index: 4; }
+.minimized-urgent-dot { position: absolute; right: -2px; bottom: -2px; width: 7px; height: 7px; border: 1px solid white; border-radius: 50%; background: var(--dock-urgent); box-shadow: 0 0 0 2px rgba(255, 69, 58, 0.2); animation: minimized-urgent-pulse 1.35s ease-in-out infinite; z-index: 5; }
+.minimized-overflow { display: grid; place-items: center; width: 18px; height: 24px; color: #4b5563; font: 700 15px/1 system-ui, sans-serif; user-select: none; }
+@keyframes minimized-urgent-pulse { 50% { box-shadow: 0 0 0 4px rgba(255, 69, 58, 0.08); } }
+@media (prefers-reduced-motion: reduce) {
+  .minimized-item { transition: none; }
+  .minimized-urgent-dot { animation: none; }
+}
+.minimized-dock.is-empty { padding-right: 0; border-color: transparent; background: transparent; box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; }
 </style>

@@ -18,6 +18,7 @@ mod cairo_renderer;
 pub mod config;
 pub mod controls;
 pub mod display;
+pub mod dock;
 pub mod frontend;
 #[cfg(feature = "glass")]
 pub mod glass;
@@ -35,6 +36,7 @@ pub mod presentation;
 pub mod runtime;
 #[cfg(feature = "provider-system")]
 pub mod system_monitor;
+pub mod toolkit_dock;
 #[cfg(feature = "transport-shared")]
 pub mod transport;
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
@@ -59,16 +61,22 @@ pub use display::{
     canonical_layout_id, canonical_layout_symbol, compact_monitor_label, format_bytes,
     format_transfer_rate, usage_tone, volume_level, volume_level_for_device,
 };
+pub use dock::{
+    DOCK_PREVIEW_LEASE_INTERVAL, DOCK_RETRY_INTERVAL, DockGeometryReport, DockReporter,
+    DockReporterInput, dock_geometry_reports, global_physical_geometry,
+    interactive_dock_geometry_reports,
+};
 pub use frontend::{
     ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
     SessionOutput, SnapshotCursor, snapshot_changes,
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
-    BrightnessState, ClockState, LayoutId, MediaPlayback, MediaState, ModelConfig, ModelError,
-    ModelUpdate, MonitorGeometry, MonitorId, NetworkState, Percent, PercentError, ShellRoute,
-    SystemDetails, SystemLoadAverage, SystemState, TagId, TagState, UserAction, WmCommand,
-    WmSnapshot,
+    BrightnessState, ClockState, DockItemGeometry, LayoutId, MAX_MODEL_MINIMIZED_WINDOWS,
+    MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MINIMIZED_WINDOW_FLAG_URGENT, MediaPlayback,
+    MediaState, MinimizedWindow, ModelConfig, ModelError, ModelUpdate, MonitorGeometry, MonitorId,
+    NetworkState, Percent, PercentError, ShellRoute, SystemDetails, SystemLoadAverage, SystemState,
+    TagId, TagState, UserAction, WindowToken, WmCommand, WmSnapshot,
 };
 pub use placement::{
     BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, LayerShellAnchors,
@@ -80,7 +88,15 @@ pub use runtime::{
     RuntimeSchedule, RuntimeUpdate,
 };
 #[cfg(feature = "transport-shared")]
-pub use runtime::{DEFAULT_TRANSPORT_RETRY_INTERVAL, TransportRecoveryConfig, TransportStatus};
+pub use runtime::{
+    CRITICAL_RESTORE_RETRY_INTERVAL, DEFAULT_TRANSPORT_RETRY_INTERVAL, TransportRecoveryConfig,
+    TransportStatus,
+};
+pub use toolkit_dock::{
+    DOCK_HOVER_SCALE, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_NEIGHBOUR_SCALE,
+    DOCK_OVERFLOW_WIDTH, DOCK_SECOND_NEIGHBOUR_SCALE, DOCK_SEPARATOR_WIDTH, DOCK_SHELF_PADDING,
+    DOCK_SLOT_WIDTH, DockBridge, shelf_width as toolkit_dock_shelf_width,
+};
 
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]
 pub use notifier::{NotifierChange, SharedEventNotifier, TransportNotifierSlot};
@@ -133,6 +149,8 @@ impl DirtyBits {
     pub const GEOMETRY_CHANGED: u32 = 1 << 10;
     pub const NETWORK_CHANGED: u32 = 1 << 11;
     pub const MEDIA_CHANGED: u32 = 1 << 12;
+    /// The minimized-window shelf or its session identity changed.
+    pub const MINIMIZED_CHANGED: u32 = 1 << 13;
 
     const KNOWN: u32 = Self::TIME_CHANGED
         | Self::HOVER_CHANGED
@@ -146,7 +164,8 @@ impl DirtyBits {
         | Self::CLIENT_CHANGED
         | Self::GEOMETRY_CHANGED
         | Self::NETWORK_CHANGED
-        | Self::MEDIA_CHANGED;
+        | Self::MEDIA_CHANGED
+        | Self::MINIMIZED_CHANGED;
 
     #[must_use]
     pub const fn new(bits: u32) -> Self {

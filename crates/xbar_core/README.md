@@ -1,6 +1,6 @@
 # xbar_core
 
-`xbar_core` 0.8 is the backend-neutral status-bar kernel shared by the XCB,
+`xbar_core` 0.9 is the backend-neutral status-bar kernel shared by the XCB,
 x11rb, winit, tao, wgpu, pixels, softbuffer, toolkit, and web bars in JWM.
 
 The default build has no window-system, Cairo, ALSA, sysfs, logging, or shared
@@ -57,6 +57,9 @@ native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
   monotonic cadence.
 - `LayoutEngine` produces a renderer-neutral retained `Scene` and semantic hit
   map. `Scene::damage_from` invalidates both old and new component bounds.
+- `DockReporter` owns acknowledged shelf/item geometry, hover leases, and
+  bounded retries. `toolkit_dock::DockBridge` adds the shared retained-toolkit
+  layout without coupling one bar package to another.
 - `CairoBar` is the high-level native facade combining runtime, layout,
   interaction, and Cairo rendering. Its `handle_pointer` API owns hover and
   matching press/release semantics.

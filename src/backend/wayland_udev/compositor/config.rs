@@ -54,6 +54,45 @@ enum WindowRetirement {
     ExplicitlyMinimized,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DisabledGenieAction {
+    CacheMinimized,
+    CompleteRestore,
+}
+
+/// Resolve in-flight state when Genie is disabled at runtime. A queued
+/// restore is the newest user intent and therefore wins over an older active
+/// minimize. `None` means there is no work for this window.
+fn disabled_genie_action(
+    active_direction: Option<crate::backend::compositor_common::genie::GenieDirection>,
+    restore_pending: bool,
+) -> Option<DisabledGenieAction> {
+    use crate::backend::compositor_common::genie::GenieDirection;
+
+    match (active_direction, restore_pending) {
+        (_, true) | (Some(GenieDirection::Restore), false) => {
+            Some(DisabledGenieAction::CompleteRestore)
+        }
+        (Some(GenieDirection::Minimize), false) => Some(DisabledGenieAction::CacheMinimized),
+        (None, false) => None,
+    }
+}
+
+fn clear_immediate_restore_collections<Visual, Target>(
+    window_id: u64,
+    minimized_visuals: &mut std::collections::HashMap<u64, Visual>,
+    minimized_windows: &mut HashSet<u64>,
+    pending_restores: &mut HashSet<u64>,
+    genie_targets: &mut std::collections::HashMap<u64, Target>,
+    preview_window: Option<u64>,
+) -> bool {
+    minimized_visuals.remove(&window_id);
+    minimized_windows.remove(&window_id);
+    pending_restores.remove(&window_id);
+    genie_targets.remove(&window_id);
+    preview_window == Some(window_id)
+}
+
 fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool {
     genie_enabled && reason == WindowRetirement::ExplicitlyMinimized
 }
@@ -286,6 +325,7 @@ impl WaylandCompositor {
 
         if disabling_fading {
             self.windows.retain(|_, win| !win.fading_out);
+            self.refresh_any_color_transform_active();
             for win in self.windows.values_mut() {
                 win.fade_opacity = 1.0;
             }
@@ -307,9 +347,36 @@ impl WaylandCompositor {
             }
         }
         if disabling_genie {
-            for animation in self.genie_active.drain(..) {
-                self.windows.remove(&animation.window_id);
+            // A restore may be queued before its remapped surface reaches the
+            // next render. Drain that queue as part of the hot-disable
+            // transition; otherwise the provisional restoring marker and Dock
+            // cache can survive forever and unnecessarily block direct
+            // scanout. Pending restore intent takes precedence over an active
+            // minimize for the same window.
+            let mut pending_restores = std::mem::take(&mut self.pending_genie_restores);
+            let animations = std::mem::take(&mut self.genie_active);
+            for animation in animations {
+                let restore_pending = pending_restores.remove(&animation.window_id);
+                match disabled_genie_action(Some(animation.direction), restore_pending) {
+                    Some(DisabledGenieAction::CacheMinimized) => {
+                        let window_id = animation.window_id;
+                        self.cache_minimized_visual(animation);
+                        self.windows.remove(&window_id);
+                    }
+                    Some(DisabledGenieAction::CompleteRestore) => {
+                        self.complete_genie_restore_immediately(animation.window_id);
+                    }
+                    None => unreachable!("an active Genie always needs a disable action"),
+                }
             }
+            for window_id in pending_restores {
+                debug_assert_eq!(
+                    disabled_genie_action(None, true),
+                    Some(DisabledGenieAction::CompleteRestore)
+                );
+                self.complete_genie_restore_immediately(window_id);
+            }
+            self.refresh_any_color_transform_active();
         }
         if disabling_ripple {
             for win in self.windows.values_mut() {
@@ -593,6 +660,182 @@ impl WaylandCompositor {
     pub(crate) fn set_dock_position(&mut self, x: f32, y: f32) {
         self.dock_x = x;
         self.dock_y = y;
+    }
+
+    pub(crate) fn set_window_dock_geometry(
+        &mut self,
+        window_id: u64,
+        target: Option<crate::backend::api::CompositorRect>,
+    ) {
+        let target = target.and_then(crate::backend::api::CompositorRect::normalized);
+        match target {
+            Some(target) => {
+                self.genie_targets.insert(window_id, target);
+                if let Some(animation) = self
+                    .genie_active
+                    .iter_mut()
+                    .find(|animation| animation.window_id == window_id)
+                {
+                    // Geometry can arrive after the minimize command. Updating
+                    // the live animation lets the fallback endpoint converge
+                    // smoothly onto the actual Dock slot on the next frame.
+                    animation.target = target;
+                }
+                if let Some(visual) = self.minimized_visuals.get_mut(&window_id) {
+                    visual.target = Some(target);
+                }
+            }
+            None => {
+                self.genie_targets.remove(&window_id);
+                if let Some(animation) = self
+                    .genie_active
+                    .iter_mut()
+                    .find(|animation| animation.window_id == window_id)
+                {
+                    animation.target = crate::backend::api::CompositorRect::new(
+                        self.dock_x,
+                        self.dock_y,
+                        1.0,
+                        1.0,
+                    );
+                }
+                if let Some(visual) = self.minimized_visuals.get_mut(&window_id) {
+                    visual.target = None;
+                }
+                if self
+                    .dock_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.window_id == window_id)
+                {
+                    self.set_minimized_window_preview(None);
+                }
+            }
+        }
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
+    pub(crate) fn set_minimized_window_preview(
+        &mut self,
+        request: Option<(u64, crate::backend::api::CompositorRect)>,
+    ) {
+        use crate::backend::compositor_common::genie::{PreviewDirection, preview_motion};
+
+        let request = request
+            .and_then(|(window_id, anchor)| anchor.normalized().map(|anchor| (window_id, anchor)))
+            .filter(|(window_id, _)| {
+                self.minimized_visuals.contains_key(window_id)
+                    || self
+                        .genie_active
+                        .iter()
+                        .any(|animation| animation.window_id == *window_id)
+                    || self.windows.contains_key(window_id)
+            });
+        let now = Instant::now();
+        match request {
+            Some((window_id, anchor)) => {
+                if self.dock_preview.as_ref().is_some_and(|preview| {
+                    preview.window_id == window_id
+                        && preview.anchor == anchor
+                        && preview.direction == PreviewDirection::Show
+                }) {
+                    if let Some(preview) = self.dock_preview.as_mut() {
+                        preview.lease_deadline = now + std::time::Duration::from_secs(4);
+                    }
+                    return;
+                }
+                self.dock_preview = Some(super::DockPreview {
+                    window_id,
+                    anchor,
+                    started: now,
+                    lease_deadline: now + std::time::Duration::from_secs(4),
+                    start_opacity: 0.0,
+                    start_scale: 0.86,
+                    direction: PreviewDirection::Show,
+                    opacity: 0.0,
+                    scale: 0.86,
+                });
+            }
+            None => {
+                let Some(preview) = self.dock_preview.as_mut() else {
+                    return;
+                };
+                if preview.direction == PreviewDirection::Hide {
+                    return;
+                }
+                let (opacity, scale, _) = preview_motion(
+                    preview.start_opacity,
+                    preview.start_scale,
+                    preview.direction,
+                    now.duration_since(preview.started).as_secs_f32(),
+                );
+                preview.started = now;
+                preview.start_opacity = opacity;
+                preview.start_scale = scale;
+                preview.opacity = opacity;
+                preview.scale = scale;
+                preview.direction = PreviewDirection::Hide;
+            }
+        }
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
+    /// Queue the reverse Genie until the restored surface has a live texture
+    /// and its final scene geometry. This avoids animating stale minimize-time
+    /// pixels to a guessed layout rectangle.
+    pub(crate) fn restore_window(&mut self, window_id: u64) {
+        if !self.minimized_windows.contains(&window_id)
+            && !self.minimized_visuals.contains_key(&window_id)
+            && !self
+                .genie_active
+                .iter()
+                .any(|animation| animation.window_id == window_id)
+        {
+            return;
+        }
+
+        if !self.genie_minimize_enabled {
+            self.complete_genie_restore_immediately(window_id);
+        } else {
+            self.pending_genie_restores.insert(window_id);
+        }
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
+    /// Finish a restore without leaving any animation-owned state behind.
+    /// This is intentionally stronger than the normal animated completion:
+    /// the preview disappears immediately so a runtime feature disable can
+    /// make the window eligible for direct scanout on the very next frame.
+    fn complete_genie_restore_immediately(&mut self, window_id: u64) {
+        self.genie_active
+            .retain(|animation| animation.window_id != window_id);
+        let clear_preview = clear_immediate_restore_collections(
+            window_id,
+            &mut self.minimized_visuals,
+            &mut self.minimized_windows,
+            &mut self.pending_genie_restores,
+            &mut self.genie_targets,
+            self.dock_preview.as_ref().map(|preview| preview.window_id),
+        );
+        if clear_preview {
+            self.dock_preview = None;
+        }
+        if let Some(window) = self.windows.get_mut(&window_id) {
+            window.fading_out = false;
+            window.is_genie_minimizing = false;
+            window.is_genie_restoring = false;
+            window.fade_opacity = 1.0;
+            window.anim_scale = 1.0;
+            window.anim_scale_target = 1.0;
+            window.closing_rect = None;
+            window.ripple_active = false;
+            window.ripple_progress = 0.0;
+        }
+        self.refresh_any_color_transform_active();
+        self.force_full_damage_next = true;
+        self.needs_render = true;
     }
 
     pub(crate) fn set_window_groups(
@@ -901,6 +1144,7 @@ impl WaylandCompositor {
                 content_uv: [0.0, 0.0, 1.0, 1.0],
                 closing_rect: None,
                 is_genie_minimizing: false,
+                is_genie_restoring: false,
                 color_transform: None,
             }
         });
@@ -924,6 +1168,7 @@ impl WaylandCompositor {
     /// may use the close fade but never targets the Dock with a genie effect.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         self.pending_window_urgency.discard(window_id);
+        self.discard_minimized_visual(window_id);
         if let Some(win) = self.windows.get_mut(&window_id) {
             // A close-fading WindowState can outlive its client. Clear the
             // flag now so an ID reused before fade retirement cannot inherit
@@ -939,6 +1184,10 @@ impl WaylandCompositor {
     /// Strong `GlesTexture` handles keep either animation path safe after the
     /// live surface/offscreen cache releases its owner.
     pub(crate) fn minimize_window(&mut self, window_id: u64) {
+        self.minimized_windows.insert(window_id);
+        if self.prepare_genie_minimize(window_id) {
+            return;
+        }
         self.retire_window(window_id, WindowRetirement::ExplicitlyMinimized);
     }
 
@@ -955,7 +1204,7 @@ impl WaylandCompositor {
         if self
             .windows
             .get(&window_id)
-            .is_some_and(|win| win.fading_out || win.is_genie_minimizing)
+            .is_some_and(|win| win.fading_out || win.is_genie_minimizing || win.is_genie_restoring)
         {
             return;
         }
@@ -968,20 +1217,26 @@ impl WaylandCompositor {
         let closing_rect =
             closing_scene_rect.map(|(x, y, w, h)| (x as f32, y as f32, w as f32, h as f32));
 
-        if let Some((x, y, w, h)) = closing_scene_rect {
+        if reason == WindowRetirement::Closed
+            && let Some((x, y, w, h)) = closing_scene_rect
+        {
             self.spawn_particles_for_window(x, y, w, h);
         }
 
         let mut started_genie = false;
         if retirement_uses_genie(reason, self.genie_minimize_enabled) {
             if let Some((x, y, w, h)) = closing_rect {
+                let target = self.genie_target_for(window_id);
                 if let Some(win) = self.windows.get_mut(&window_id) {
                     if let Some(texture_owner) = win.texture_owner.clone() {
                         win.is_genie_minimizing = true;
                         win.closing_rect = Some((x, y, w, h));
-                        self.genie_active.push(super::GenieAnimation {
+                        let animation = super::GenieAnimation {
                             window_id,
                             start: Instant::now(),
+                            start_progress: 0.0,
+                            direction:
+                                crate::backend::compositor_common::genie::GenieDirection::Minimize,
                             x,
                             y,
                             w,
@@ -990,13 +1245,43 @@ impl WaylandCompositor {
                             has_alpha: win.has_alpha,
                             y_inverted: win.y_inverted,
                             content_uv: win.content_uv,
-                        });
+                            color_transform: win.color_transform,
+                            target,
+                        };
+                        self.genie_active.push(animation);
                         started_genie = true;
                     }
                 }
             }
         }
-        if !started_genie {
+        if reason == WindowRetirement::ExplicitlyMinimized && !started_genie {
+            // The Dock still needs real pixels when the mesh animation is
+            // disabled. Detach a strong texture clone into the same bounded
+            // cache and retire the live compositor state immediately.
+            if let (Some((x, y, w, h)), Some(win)) = (closing_rect, self.windows.get(&window_id))
+                && let Some(texture_owner) = win.texture_owner.clone()
+            {
+                let animation = super::GenieAnimation {
+                    window_id,
+                    start: Instant::now(),
+                    start_progress: 1.0,
+                    direction: crate::backend::compositor_common::genie::GenieDirection::Minimize,
+                    x,
+                    y,
+                    w,
+                    h,
+                    texture_owner,
+                    has_alpha: win.has_alpha,
+                    y_inverted: win.y_inverted,
+                    content_uv: win.content_uv,
+                    color_transform: win.color_transform,
+                    target: self.genie_target_for(window_id),
+                };
+                self.cache_minimized_visual(animation);
+            }
+            self.windows.remove(&window_id);
+            self.refresh_any_color_transform_active();
+        } else if !started_genie {
             if let Some(win) = self.windows.get_mut(&window_id) {
                 win.fading_out = true;
                 win.closing_rect = closing_rect;
@@ -1055,11 +1340,19 @@ impl WaylandCompositor {
         let window_animation_scale = self.window_animation_scale;
         let ripple_enabled = self.ripple_on_open_enabled;
         let initial_urgency = self.pending_window_urgency.take_for_new_window(window_id);
+        let restore_requested = self.pending_genie_restores.contains(&window_id)
+            || self.genie_active.iter().any(|animation| {
+                animation.window_id == window_id
+                    && animation.direction
+                        == crate::backend::compositor_common::genie::GenieDirection::Restore
+            });
+        let remains_minimized = self.minimized_windows.contains(&window_id) && !restore_requested;
         let was_retiring = self
             .windows
             .get(&window_id)
             .is_some_and(|win| win.fading_out || win.is_genie_minimizing);
-        if was_retiring {
+        let cancel_stale_retirement = was_retiring && !remains_minimized && !restore_requested;
+        if cancel_stale_retirement {
             // A Wayland/XWayland surface may attach a new buffer with the same
             // id after unmapping. Cancel the stale retirement before updating
             // its texture so tick_fades/tick_genie cannot delete the remap.
@@ -1100,21 +1393,31 @@ impl WaylandCompositor {
                 content_uv: [0.0, 0.0, 1.0, 1.0],
                 closing_rect: None,
                 is_genie_minimizing: false,
+                is_genie_restoring: false,
                 color_transform: None,
             }
         });
         if inserted {
-            win.fade_opacity = if fading_enabled { 0.0 } else { 1.0 };
-            win.anim_scale = if window_animation_enabled {
+            win.fade_opacity = if restore_requested {
+                1.0
+            } else if fading_enabled {
+                0.0
+            } else {
+                1.0
+            };
+            win.anim_scale = if restore_requested {
+                1.0
+            } else if window_animation_enabled {
                 window_animation_scale
             } else {
                 1.0
             };
-            win.ripple_active = ripple_enabled;
+            win.ripple_active = ripple_enabled && !restore_requested;
             win.ripple_progress = 0.0;
-        } else if was_retiring {
+        } else if cancel_stale_retirement {
             win.fading_out = false;
             win.is_genie_minimizing = false;
+            win.is_genie_restoring = false;
             win.closing_rect = None;
             win.fade_opacity = if fading_enabled {
                 win.fade_opacity.max(0.0)
@@ -1125,7 +1428,18 @@ impl WaylandCompositor {
             win.ripple_active = ripple_enabled;
             win.ripple_progress = 0.0;
         }
-        if inserted || was_retiring {
+        if restore_requested {
+            win.fading_out = false;
+            win.is_genie_minimizing = false;
+            win.is_genie_restoring = true;
+            win.closing_rect = None;
+            win.fade_opacity = 1.0;
+            win.anim_scale = 1.0;
+            win.anim_scale_target = 1.0;
+            win.ripple_active = false;
+            win.ripple_progress = 0.0;
+        }
+        if inserted || cancel_stale_retirement || restore_requested {
             self.predictive_render_mgr.register_window(window_id);
         }
         let tex_id = texture_owner.tex_id();
@@ -1194,11 +1508,18 @@ impl WaylandCompositor {
             }
         }
         if removed_active_transform {
-            self.any_color_transform_active = self
-                .windows
-                .values()
-                .any(|win| win.color_transform.is_some());
+            self.refresh_any_color_transform_active();
         }
+    }
+
+    /// Rebuild the fast-path flag after live WindowState retirement. Retained
+    /// Genie/Dock textures have their own composition blockers, so this flag
+    /// deliberately tracks live surfaces only.
+    pub(super) fn refresh_any_color_transform_active(&mut self) {
+        self.any_color_transform_active = self
+            .windows
+            .values()
+            .any(|window| window.color_transform.is_some());
     }
 
     /// Clear every window's color transform in a single pass and reset the
@@ -1286,11 +1607,13 @@ impl WaylandCompositor {
 #[cfg(test)]
 mod tests {
     use super::{
-        IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency, WindowRetirement,
-        XDG_POPUP_WINDOW_ID_PREFIX, collect_absent_auxiliary_window_ids, is_auxiliary_window_id,
+        DisabledGenieAction, IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency, WindowRetirement,
+        XDG_POPUP_WINDOW_ID_PREFIX, clear_immediate_restore_collections,
+        collect_absent_auxiliary_window_ids, disabled_genie_action, is_auxiliary_window_id,
         mouse_position_requires_render, postprocess_is_active, retirement_uses_genie,
     };
-    use std::collections::HashSet;
+    use crate::backend::compositor_common::genie::GenieDirection;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn postprocess_activation_tracks_runtime_controls() {
@@ -1419,5 +1742,66 @@ mod tests {
             WindowRetirement::ExplicitlyMinimized,
             true
         ));
+    }
+
+    #[test]
+    fn genie_hot_disable_completes_a_pending_only_restore() {
+        assert_eq!(
+            disabled_genie_action(None, true),
+            Some(DisabledGenieAction::CompleteRestore)
+        );
+    }
+
+    #[test]
+    fn immediate_restore_cleanup_removes_only_the_restored_windows_dock_state() {
+        let restored = 42;
+        let untouched = 7;
+        let mut visuals = HashMap::from([(restored, "restored"), (untouched, "untouched")]);
+        let mut minimized = HashSet::from([restored, untouched]);
+        let mut pending = HashSet::from([restored, untouched]);
+        let mut targets = HashMap::from([(restored, 1), (untouched, 2)]);
+
+        assert!(clear_immediate_restore_collections(
+            restored,
+            &mut visuals,
+            &mut minimized,
+            &mut pending,
+            &mut targets,
+            Some(restored),
+        ));
+        assert_eq!(visuals, HashMap::from([(untouched, "untouched")]));
+        assert_eq!(minimized, HashSet::from([untouched]));
+        assert_eq!(pending, HashSet::from([untouched]));
+        assert_eq!(targets, HashMap::from([(untouched, 2)]));
+
+        assert!(!clear_immediate_restore_collections(
+            restored,
+            &mut visuals,
+            &mut minimized,
+            &mut pending,
+            &mut targets,
+            Some(untouched),
+        ));
+    }
+
+    #[test]
+    fn genie_hot_disable_prioritizes_newer_restore_over_active_minimize() {
+        assert_eq!(
+            disabled_genie_action(Some(GenieDirection::Minimize), true),
+            Some(DisabledGenieAction::CompleteRestore)
+        );
+        assert_eq!(
+            disabled_genie_action(Some(GenieDirection::Minimize), false),
+            Some(DisabledGenieAction::CacheMinimized)
+        );
+    }
+
+    #[test]
+    fn genie_hot_disable_completes_an_active_restore_without_pending_marker() {
+        assert_eq!(
+            disabled_genie_action(Some(GenieDirection::Restore), false),
+            Some(DisabledGenieAction::CompleteRestore)
+        );
+        assert_eq!(disabled_genie_action(None, false), None);
     }
 }

@@ -1,5 +1,5 @@
 use std::env;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Application, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render,
@@ -15,13 +15,15 @@ use gpui_component::{
 use gpui_component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
     init as init_components,
+    tooltip::Tooltip,
 };
 use log::{debug, warn};
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
+    LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate, ShellRoute,
+    TagId, TransportRecoveryConfig, UserAction, WindowToken,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -68,6 +70,7 @@ struct GpuiComponentBar {
     default_size: Option<gpui::Size<Pixels>>,
     last_scale_factor: Option<f32>,
     geometry_dirty: bool,
+    dock: DockBridge,
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
 
@@ -104,6 +107,7 @@ impl GpuiComponentBar {
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
+            dock: DockBridge::new(),
             _timer_task: None,
             _transport_task: None,
         };
@@ -119,7 +123,9 @@ impl GpuiComponentBar {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let _ = this.update(cx, |this, cx| {
-                    let update = this.runtime.tick();
+                    let mut update = this.runtime.tick();
+                    let dock_update = this.service_dock();
+                    update.merge(dock_update);
                     this.handle_runtime_update(update);
                     cx.notify();
                 });
@@ -135,7 +141,9 @@ impl GpuiComponentBar {
                     .timer(TRANSPORT_POLL_INTERVAL)
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let update = this.runtime.poll_transport();
+                    let mut update = this.runtime.poll_transport();
+                    let dock_update = this.service_dock();
+                    update.merge(dock_update);
                     this.handle_runtime_update(update);
                     cx.notify();
                 });
@@ -155,6 +163,48 @@ impl GpuiComponentBar {
             return;
         }
         self.dispatch(action);
+    }
+
+    fn service_dock(&mut self) -> RuntimeUpdate {
+        let scale_factor = f64::from(self.last_scale_factor.unwrap_or(1.0));
+        let snapshot = self.runtime.snapshot();
+        self.dock.synchronize(
+            &snapshot,
+            self.runtime.transport_generation(),
+            scale_factor,
+            42.0,
+            10.0,
+        );
+        let now = Instant::now();
+        let mut combined = RuntimeUpdate::default();
+        for action in self.dock.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            combined.merge(update);
+            if accepted {
+                self.dock.acknowledge(action, now);
+            } else {
+                self.dock.record_failure(now);
+                break;
+            }
+        }
+        combined
+    }
+
+    fn dock_hover(&mut self, token: WindowToken, session: u64, hovered: bool) {
+        if hovered {
+            let _ = self.dock.enter(token, session);
+        } else {
+            let _ = self.dock.leave(token, session);
+        }
+        let update = self.service_dock();
+        self.handle_runtime_update(update);
+    }
+
+    fn dock_restore(&mut self, token: WindowToken, session: u64) {
+        let _ = self.dock.request_restore(token, session);
+        let update = self.service_dock();
+        self.handle_runtime_update(update);
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -529,6 +579,88 @@ impl GpuiComponentBar {
             .child(self.chip_tag(monitor, indigo_500(), white(), indigo_500()))
             .child(self.chip_tag("s: 1.00", slate_700(), slate_100(), slate_700()))
     }
+
+    fn render_minimized_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let session = self.runtime.view().wm_session_id;
+        let windows: Vec<_> = self.dock.visible_windows().cloned().collect();
+        let mut shelf = div()
+            .id("minimized-dock")
+            .w(px(self.dock.shelf_width()))
+            .h_full()
+            .pl(px(5.0))
+            .pr(px(2.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .border_l_1()
+            .border_color(slate_700());
+        for minimized in windows {
+            let token = minimized.token;
+            let scale = self.dock.scale_for(token);
+            let title = if minimized.title.trim().is_empty() {
+                minimized.app_id.clone()
+            } else {
+                minimized.title.clone()
+            };
+            let hover_title = title.clone();
+            let tooltip_title = SharedString::from(title);
+            let background = if minimized.urgent() {
+                red_500()
+            } else {
+                blue_500()
+            };
+            let card = div()
+                .id(SharedString::from(format!(
+                    "minimized-card-{}",
+                    token.get()
+                )))
+                .w(px(DOCK_ITEM_WIDTH * scale))
+                .h(px(DOCK_ITEM_HEIGHT * scale))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(if minimized.urgent() {
+                    rose_500()
+                } else {
+                    slate_300()
+                })
+                .bg(background)
+                .text_color(white())
+                .text_size(px(11.0))
+                .child(minimized.initial().to_string())
+                .tooltip(move |window, cx| Tooltip::new(tooltip_title.clone()).build(window, cx))
+                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                    this.dock_hover(token, session, *hovered);
+                    if *hovered {
+                        debug!("minimized Dock hover: {hover_title}");
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.dock_restore(token, session);
+                        cx.notify();
+                    }),
+                );
+            shelf = shelf.child(
+                div()
+                    .w(px(DOCK_SLOT_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(card),
+            );
+        }
+        if self.dock.overflow() || self.dock.collapsed() {
+            shelf = shelf.child(div().w(px(12.0)).text_color(slate_300()).child("+"));
+        }
+        shelf
+    }
 }
 
 impl Render for GpuiComponentBar {
@@ -553,6 +685,8 @@ impl Render for GpuiComponentBar {
             self.geometry_dirty = false;
             self.last_scale_factor = Some(scale_factor);
         }
+        let dock_update = self.service_dock();
+        self.handle_runtime_update(dock_update);
         let left = div()
             .flex()
             .flex_row()
@@ -569,7 +703,8 @@ impl Render for GpuiComponentBar {
             .gap(px(8.))
             .child(self.render_usage_pills())
             .child(div().w(px(1.)).h(px(24.)).bg(slate_700()))
-            .child(self.render_interactive_pills(cx));
+            .child(self.render_interactive_pills(cx))
+            .child(self.render_minimized_dock(cx));
 
         let root = div()
             .relative()
@@ -629,7 +764,9 @@ fn main() {
     let translucent = compositor_active() && RENDERER_ALPHA_CAPABLE;
     let [red, green, blue] = fallback_rgb(config.theme);
     let opacity = if translucent {
-        config.background_opacity.unwrap_or(DEFAULT_BACKGROUND_OPACITY)
+        config
+            .background_opacity
+            .unwrap_or(DEFAULT_BACKGROUND_OPACITY)
     } else {
         1.0
     };

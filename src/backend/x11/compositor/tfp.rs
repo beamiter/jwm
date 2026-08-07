@@ -101,6 +101,7 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         let confirm_pixmap_on_damage = self.graphics.is_gles();
+        let restoring = self.minimized_windows.contains(&x11_win);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.fading_out {
                 // A client can remap the same XID before its unmap fade has
@@ -125,25 +126,16 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.needs_render = true;
             }
+            if restoring {
+                let (rx, ry, rw, rh) = (x as f32, y as f32, w as f32, h as f32);
+                self.start_genie_restore(x11_win, rx, ry, rw, rh);
+            }
             return;
         }
 
-        // A minimize animation owns the old pixmap independently. If the
-        // client remaps before it reaches the dock, retire that stale copy so
-        // the newly mapped live window is not drawn twice.
-        if let Some(index) = self
-            .genie_active
-            .iter()
-            .position(|animation| animation.x11_win == x11_win)
-        {
-            let animation = self.genie_active.remove(index);
-            self.free_texture_resources(
-                animation.gl_texture,
-                animation.binding,
-                animation.pixmap,
-                animation.damage,
-            );
-        }
+        // A restoring window may still have a detached minimize texture. Keep
+        // it until the reverse mesh finishes; the newly imported live entry is
+        // filtered out of ordinary passes meanwhile.
         log::debug!(
             "compositor: add_window START 0x{:x} {}x{} at ({},{})",
             x11_win,
@@ -294,6 +286,9 @@ impl<C: CompositorConnection> Compositor<C> {
             });
         }
         self.needs_render = true;
+        if restoring {
+            self.start_genie_restore(x11_win, x as f32, y as f32, w as f32, h as f32);
+        }
         log::debug!(
             "compositor: add_window 0x{:x} {}x{} at ({},{}) via {}",
             x11_win,
@@ -399,6 +394,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// close fade (and close particles), but must never target the Dock with a
     /// genie animation merely because that effect is configured.
     pub(crate) fn remove_window(&mut self, x11_win: u32) {
+        self.discard_minimized_visual(x11_win);
         self.retire_window(x11_win, WindowRetirement::Closed);
     }
 
@@ -408,6 +404,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// native pixmap resources into a genie animation. Restoring the same XID
     /// through `add_window` cancels that detached animation safely.
     pub(crate) fn minimize_window(&mut self, x11_win: u32) {
+        self.minimized_windows.insert(x11_win);
         self.retire_window(x11_win, WindowRetirement::ExplicitlyMinimized);
     }
 
@@ -428,20 +425,25 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        // A genie is reserved for an explicit minimize request. It takes
-        // ownership of the window's GPU/X resources and frees them when the
-        // animation completes, so do not fall through to the close cleanup.
-        if retirement_uses_genie(reason, self.genie_minimize) {
+        // Every explicit minimize retains one bounded compositor-owned visual
+        // for the Dock.  The preference only controls whether that visual
+        // travels through the genie mesh or is cached immediately.
+        if reason == WindowRetirement::ExplicitlyMinimized {
             if let Some(wt) = self.windows.get(&x11_win) {
                 let (gx, gy, gw, gh) = (wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32);
-                self.start_genie_animation(x11_win, gx, gy, gw, gh);
+                self.start_genie_animation(
+                    x11_win,
+                    gx,
+                    gy,
+                    gw,
+                    gh,
+                    retirement_uses_genie(reason, self.genie_minimize),
+                );
                 return;
             }
-        }
-        if reason == WindowRetirement::ExplicitlyMinimized {
-            // With the genie disabled there is no detached minimize visual to
-            // keep alive. A close fade would race the subsequent off-screen
-            // arrange and either disappear or animate at the hidden geometry.
+            // A texture-less/stale client has no pixels that can be retained.
+            // Retire it immediately rather than manufacturing a placeholder in
+            // the compositor layer; the bar owns its fallback presentation.
             self.remove_window_immediate(x11_win);
             return;
         }

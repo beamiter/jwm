@@ -20,7 +20,9 @@ use crate::BrightnessState;
 #[cfg(feature = "provider-alsa")]
 use crate::{AudioDeviceInfo, AudioState, Percent};
 #[cfg(feature = "transport-shared")]
-use crate::{SendOutcome, SharedTransport};
+use crate::{
+    DockItemGeometry, MAX_MODEL_MINIMIZED_WINDOWS, SendOutcome, SharedTransport, WindowToken,
+};
 #[cfg(feature = "provider-system")]
 use crate::{SystemDetails, SystemLoadAverage, SystemState};
 
@@ -157,6 +159,12 @@ pub const DEFAULT_RUNTIME_TICK_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(feature = "transport-shared")]
 pub const DEFAULT_TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Retry cadence for restore commands retained after bounded transport
+/// backpressure. Restore is user-critical and must not disappear merely
+/// because geometry/preview traffic briefly filled the shared command ring.
+#[cfg(feature = "transport-shared")]
+pub const CRITICAL_RESTORE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Portable scheduling state for event loops that poll frequently but only
 /// want to refresh providers at a lower cadence.
 ///
@@ -208,10 +216,18 @@ impl RuntimeSchedule {
         let deadline = self.next_tick.unwrap_or(now);
 
         #[cfg(feature = "transport-shared")]
+        let mut deadline = deadline;
+
+        #[cfg(feature = "transport-shared")]
+        if let Some(retry) = runtime.pending_restore_retry_at {
+            deadline = deadline.min(retry);
+        }
+
+        #[cfg(feature = "transport-shared")]
         if runtime.transport.is_none()
             && let Some(recovery) = runtime.transport_recovery.as_ref()
         {
-            return deadline.min(recovery.next_attempt.unwrap_or(now));
+            deadline = deadline.min(recovery.next_attempt.unwrap_or(now));
         }
 
         #[cfg(not(feature = "transport-shared"))]
@@ -319,6 +335,37 @@ struct TransportRecoveryState {
     config: TransportRecoveryConfig,
     /// `None` means the next disconnected poll may attempt immediately.
     next_attempt: Option<Instant>,
+}
+
+#[cfg(feature = "transport-shared")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRestore {
+    window: WindowToken,
+    wm_session_id: u64,
+    geometry: DockItemGeometry,
+}
+
+#[cfg(feature = "transport-shared")]
+impl PendingRestore {
+    fn from_command(command: WmCommand) -> Option<Self> {
+        match command {
+            WmCommand::RestoreWindow {
+                window,
+                wm_session_id,
+                geometry,
+                ..
+            } => Some(Self {
+                window,
+                wm_session_id,
+                geometry,
+            }),
+            _ => None,
+        }
+    }
+
+    fn matches(self, other: Self) -> bool {
+        self.window == other.window && self.wm_session_id == other.wm_session_id
+    }
 }
 
 /// Result of one runtime operation.
@@ -524,6 +571,10 @@ pub struct BarRuntime {
     transport_generation: u64,
     #[cfg(feature = "transport-shared")]
     transport_recovery: Option<TransportRecoveryState>,
+    #[cfg(feature = "transport-shared")]
+    pending_restores: Vec<PendingRestore>,
+    #[cfg(feature = "transport-shared")]
+    pending_restore_retry_at: Option<Instant>,
     #[cfg(feature = "provider-alsa")]
     audio: crate::audio_manager::AudioManager,
     #[cfg(feature = "provider-system")]
@@ -554,6 +605,10 @@ impl BarRuntime {
             transport_generation: 0,
             #[cfg(feature = "transport-shared")]
             transport_recovery: None,
+            #[cfg(feature = "transport-shared")]
+            pending_restores: Vec::new(),
+            #[cfg(feature = "transport-shared")]
+            pending_restore_retry_at: None,
             #[cfg(feature = "provider-alsa")]
             audio: crate::audio_manager::AudioManager::new(),
             #[cfg(feature = "provider-system")]
@@ -603,6 +658,9 @@ impl BarRuntime {
         let previous = std::mem::replace(&mut self.transport, transport);
         if replacing_handle {
             self.bump_transport_generation();
+        }
+        if self.transport.is_none() {
+            self.clear_pending_restores();
         }
         if let Some(recovery) = self.transport_recovery.as_mut() {
             if self.transport.is_some() {
@@ -860,7 +918,10 @@ impl BarRuntime {
             let mut update = self.reconnect_transport_at(now);
             let result = match self.transport.as_ref() {
                 Some(transport) => transport.drain_latest(),
-                None => return update,
+                None => {
+                    self.clear_pending_restores();
+                    return update;
+                }
             };
 
             match result {
@@ -878,6 +939,9 @@ impl BarRuntime {
                         message: error.to_string(),
                     });
                 }
+            }
+            if self.transport.is_some() {
+                update.merge(self.retry_pending_restores_at(now));
             }
             update
         }
@@ -934,6 +998,7 @@ impl BarRuntime {
 
     #[cfg(feature = "transport-shared")]
     fn drop_transport(&mut self) {
+        self.clear_pending_restores();
         if self.transport.take().is_some() {
             self.bump_transport_generation();
         }
@@ -953,6 +1018,9 @@ impl BarRuntime {
     fn consume_model_update(&mut self, update: ModelUpdate) -> RuntimeUpdate {
         let ModelUpdate { dirty, effects } = update;
         self.pending_changes |= dirty;
+
+        #[cfg(feature = "transport-shared")]
+        self.prune_pending_restores();
 
         let mut runtime_update = RuntimeUpdate {
             changes: dirty,
@@ -984,14 +1052,25 @@ impl BarRuntime {
 
         #[cfg(feature = "transport-shared")]
         if self.transport.is_some() {
+            let pending_restore = PendingRestore::from_command(command);
             let result = self
                 .transport
                 .as_ref()
                 .expect("transport presence was checked")
                 .execute(command);
             return match result {
-                Ok(SendOutcome::Sent) => RuntimeUpdate::default(),
-                Ok(SendOutcome::Full) => RuntimeUpdate::issue(RuntimeIssue::QueueFull { command }),
+                Ok(SendOutcome::Sent) => {
+                    if let Some(restore) = pending_restore {
+                        self.remove_pending_restore(restore);
+                    }
+                    RuntimeUpdate::default()
+                }
+                Ok(SendOutcome::Full) => match pending_restore {
+                    Some(restore) if self.enqueue_pending_restore(restore, Instant::now()) => {
+                        RuntimeUpdate::default()
+                    }
+                    _ => RuntimeUpdate::issue(RuntimeIssue::QueueFull { command }),
+                },
                 Err(error) => {
                     self.drop_transport();
                     self.schedule_transport_retry_at(Instant::now());
@@ -1007,6 +1086,120 @@ impl BarRuntime {
         }
 
         RuntimeUpdate::platform(BarEffect::WindowManager(command))
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn enqueue_pending_restore(&mut self, restore: PendingRestore, now: Instant) -> bool {
+        self.prune_pending_restores();
+        if let Some(existing) = self
+            .pending_restores
+            .iter_mut()
+            .find(|existing| existing.matches(restore))
+        {
+            *existing = restore;
+        } else if self.pending_restores.len() < MAX_MODEL_MINIMIZED_WINDOWS {
+            self.pending_restores.push(restore);
+        } else {
+            return false;
+        }
+
+        let deadline = runtime_deadline(now, CRITICAL_RESTORE_RETRY_INTERVAL);
+        self.pending_restore_retry_at = Some(
+            self.pending_restore_retry_at
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        true
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn remove_pending_restore(&mut self, restore: PendingRestore) {
+        self.pending_restores
+            .retain(|pending| !pending.matches(restore));
+        if self.pending_restores.is_empty() {
+            self.pending_restore_retry_at = None;
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn clear_pending_restores(&mut self) {
+        self.pending_restores.clear();
+        self.pending_restore_retry_at = None;
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn prune_pending_restores(&mut self) {
+        let view = self.model.view();
+        if !view.wm_available {
+            self.clear_pending_restores();
+            return;
+        }
+        self.pending_restores.retain(|pending| {
+            pending.wm_session_id == view.wm_session_id
+                && view
+                    .minimized_windows
+                    .iter()
+                    .any(|window| window.token == pending.window)
+        });
+        if self.pending_restores.is_empty() {
+            self.pending_restore_retry_at = None;
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn retry_pending_restores_at(&mut self, now: Instant) -> RuntimeUpdate {
+        self.prune_pending_restores();
+        if self.pending_restores.is_empty()
+            || self
+                .pending_restore_retry_at
+                .is_some_and(|deadline| now < deadline)
+        {
+            return RuntimeUpdate::default();
+        }
+
+        while let Some(restore) = self.pending_restores.first().copied() {
+            let monitor = self
+                .model
+                .view()
+                .minimized_windows
+                .iter()
+                .find(|window| window.token == restore.window)
+                .map(|window| window.monitor)
+                .expect("pending restores were pruned against the current model");
+            let command = WmCommand::RestoreWindow {
+                window: restore.window,
+                wm_session_id: restore.wm_session_id,
+                monitor,
+                geometry: restore.geometry,
+            };
+            let result = self
+                .transport
+                .as_ref()
+                .expect("pending restore retry requires a transport")
+                .execute(command);
+            match result {
+                Ok(SendOutcome::Sent) => {
+                    self.pending_restores.remove(0);
+                }
+                Ok(SendOutcome::Full) => {
+                    self.pending_restore_retry_at =
+                        Some(runtime_deadline(now, CRITICAL_RESTORE_RETRY_INTERVAL));
+                    return RuntimeUpdate::default();
+                }
+                Err(error) => {
+                    self.drop_transport();
+                    self.schedule_transport_retry_at(now);
+                    let mut update = self.apply_event(BarEvent::WindowManagerUnavailable);
+                    update.issues.push(RuntimeIssue::AdapterFailed {
+                        adapter: RuntimeAdapter::Transport,
+                        operation: "execute",
+                        message: error.to_string(),
+                    });
+                    return update;
+                }
+            }
+        }
+        self.pending_restore_retry_at = None;
+        RuntimeUpdate::default()
     }
 
     fn execute_audio(&mut self, effect: BarEffect) -> RuntimeUpdate {
@@ -1234,10 +1427,82 @@ mod tests {
     use super::*;
     use crate::{LayoutId, MonitorGeometry, MonitorId, TagId, ThemeMode, WmSnapshot};
     #[cfg(feature = "transport-shared")]
+    use crate::{MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MinimizedWindow, WindowToken};
+    #[cfg(feature = "transport-shared")]
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(feature = "transport-shared")]
     static NEXT_TRANSPORT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(feature = "transport-shared")]
+    fn critical_restore_runtime(
+        wm_session_id: u64,
+        tokens: &[u64],
+    ) -> (BarRuntime, shared_structures::SharedRingBuffer) {
+        let sequence = NEXT_TRANSPORT_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-runtime-critical-restore-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .command_capacity(2)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .expect("create small critical-restore transport");
+        let transport = SharedTransport::open(&path).unwrap();
+        let mut runtime =
+            BarRuntime::with_transport(ModelConfig::default(), Some(transport)).unwrap();
+        let minimized_windows = tokens
+            .iter()
+            .copied()
+            .map(|token| MinimizedWindow {
+                token: WindowToken(token),
+                monitor: MonitorId(4),
+                title: format!("window {token}"),
+                app_id: "test".to_owned(),
+                flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            })
+            .collect();
+        let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            sequence: Some(1),
+            wm_session_id,
+            monitor: MonitorId(4),
+            geometry: Some(MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
+            layout_symbol: "[]=".to_owned(),
+            minimized_windows,
+            ..WmSnapshot::default()
+        }));
+        (runtime, owner)
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn fill_command_ring(runtime: &BarRuntime, owner: &shared_structures::SharedRingBuffer) {
+        let filler = WmCommand::SetLayout {
+            layout: LayoutId(1),
+            monitor: MonitorId(4),
+        };
+        for _ in 0..owner.command_capacity() {
+            assert_eq!(
+                runtime.transport().unwrap().execute(filler).unwrap(),
+                SendOutcome::Sent
+            );
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn restore_action(window: u64, wm_session_id: u64, x: i32) -> UserAction {
+        UserAction::RestoreWindow {
+            window: WindowToken(window),
+            wm_session_id,
+            geometry: DockItemGeometry::new(x, 20, 36, 24),
+        }
+    }
 
     #[test]
     fn lifecycle_intervals_are_validated_and_schedule_is_monotonic() {
@@ -1300,6 +1565,160 @@ mod tests {
             schedule.next_service_deadline(&runtime, start),
             start + retry
         );
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn critical_restore_survives_full_ring_and_retries_once_at_its_deadline() {
+        let (mut runtime, owner) = critical_restore_runtime(91, &[41]);
+        fill_command_ring(&runtime, &owner);
+
+        let update = runtime.dispatch(restore_action(41, 91, 10));
+        assert!(update.is_empty(), "a safely buffered restore is accepted");
+        assert_eq!(runtime.pending_restores.len(), 1);
+        let deadline = runtime
+            .pending_restore_retry_at
+            .expect("buffered restore has a retry deadline");
+        let schedule = RuntimeSchedule {
+            tick_interval: Duration::from_secs(10),
+            next_tick: Some(deadline + Duration::from_secs(1)),
+        };
+        assert_eq!(
+            schedule.next_service_deadline(&runtime, deadline - Duration::from_millis(50)),
+            deadline
+        );
+
+        for _ in 0..owner.command_capacity() {
+            assert!(owner.try_receive_command().unwrap().is_some());
+        }
+        assert!(owner.try_receive_command().unwrap().is_none());
+
+        let early = runtime.poll_transport_at(deadline - Duration::from_nanos(1));
+        assert!(early.is_empty());
+        assert!(owner.try_receive_command().unwrap().is_none());
+
+        let retried = runtime.poll_transport_at(deadline);
+        assert!(retried.is_empty());
+        let command = owner
+            .try_receive_command()
+            .unwrap()
+            .expect("restore is sent at the exact retry boundary");
+        assert_eq!(
+            command.get_command_type(),
+            shared_structures::CommandType::RestoreMinimized
+        );
+        assert_eq!(command.get_window_id(), 41);
+        assert_eq!(command.get_wm_session_id(), 91);
+        assert!(owner.try_receive_command().unwrap().is_none());
+        assert!(runtime.pending_restores.is_empty());
+        assert!(runtime.pending_restore_retry_at.is_none());
+
+        let later = runtime.poll_transport_at(deadline + CRITICAL_RESTORE_RETRY_INTERVAL);
+        assert!(later.is_empty());
+        assert!(owner.try_receive_command().unwrap().is_none());
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn critical_restore_is_cancelled_when_window_or_session_changes() {
+        let (mut runtime, owner) = critical_restore_runtime(71, &[1, 2]);
+        fill_command_ring(&runtime, &owner);
+        assert!(runtime.dispatch(restore_action(1, 71, 10)).is_empty());
+        assert!(runtime.dispatch(restore_action(2, 71, 20)).is_empty());
+        assert_eq!(runtime.pending_restores.len(), 2);
+
+        let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            sequence: Some(2),
+            wm_session_id: 71,
+            monitor: MonitorId(4),
+            minimized_windows: vec![MinimizedWindow {
+                token: WindowToken(2),
+                monitor: MonitorId(4),
+                title: "still minimized".to_owned(),
+                app_id: "test".to_owned(),
+                flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            }],
+            ..WmSnapshot::default()
+        }));
+        assert_eq!(runtime.pending_restores.len(), 1);
+        assert_eq!(runtime.pending_restores[0].window, WindowToken(2));
+
+        let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            sequence: Some(3),
+            wm_session_id: 72,
+            monitor: MonitorId(4),
+            minimized_windows: vec![MinimizedWindow {
+                token: WindowToken(2),
+                monitor: MonitorId(4),
+                title: "reused token".to_owned(),
+                app_id: "other".to_owned(),
+                flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            }],
+            ..WmSnapshot::default()
+        }));
+        assert!(runtime.pending_restores.is_empty());
+        assert!(runtime.pending_restore_retry_at.is_none());
+
+        while owner.try_receive_command().unwrap().is_some() {}
+        let update = runtime.poll_transport_at(Instant::now() + Duration::from_secs(1));
+        assert!(update.is_empty());
+        assert!(owner.try_receive_command().unwrap().is_none());
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn critical_restore_queue_is_bounded_deduplicated_and_restore_only() {
+        let tokens: Vec<_> = (1..=MAX_MODEL_MINIMIZED_WINDOWS as u64).collect();
+        let (mut runtime, owner) = critical_restore_runtime(81, &tokens);
+        fill_command_ring(&runtime, &owner);
+
+        for token in &tokens {
+            let update = runtime.dispatch(restore_action(*token, 81, *token as i32));
+            assert!(update.is_empty());
+        }
+        assert_eq!(runtime.pending_restores.len(), MAX_MODEL_MINIMIZED_WINDOWS);
+
+        let replacement = restore_action(1, 81, 999);
+        assert!(runtime.dispatch(replacement).is_empty());
+        assert_eq!(runtime.pending_restores.len(), MAX_MODEL_MINIMIZED_WINDOWS);
+        assert_eq!(
+            runtime
+                .pending_restores
+                .iter()
+                .find(|pending| pending.window == WindowToken(1))
+                .unwrap()
+                .geometry
+                .x,
+            999
+        );
+
+        let preview = runtime.dispatch(UserAction::PreviewWindow {
+            window: WindowToken(1),
+            wm_session_id: 81,
+            visible: true,
+            geometry: DockItemGeometry::new(10, 20, 36, 24),
+        });
+        assert!(matches!(
+            preview.issues.as_slice(),
+            [RuntimeIssue::QueueFull {
+                command: WmCommand::PreviewWindow { .. }
+            }]
+        ));
+        let geometry = runtime.dispatch(UserAction::SetDockGeometry {
+            window: Some(WindowToken(1)),
+            wm_session_id: 81,
+            geometry: DockItemGeometry::new(10, 20, 36, 24),
+        });
+        assert!(matches!(
+            geometry.issues.as_slice(),
+            [RuntimeIssue::QueueFull {
+                command: WmCommand::SetDockGeometry { .. }
+            }]
+        ));
+        assert_eq!(runtime.pending_restores.len(), MAX_MODEL_MINIMIZED_WINDOWS);
+        owner.destroy().unwrap();
     }
 
     #[test]
@@ -1458,7 +1877,10 @@ mod tests {
         let early = runtime.poll_transport_at(start + Duration::from_secs(1));
         assert!(early.is_empty());
 
-        let owner = shared_structures::SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated transport");
         let mut monitor_info = shared_structures::MonitorInfo {
             monitor_num: 4,
@@ -1468,6 +1890,7 @@ mod tests {
         let message = shared_structures::SharedMessage {
             timestamp: 91,
             monitor_info,
+            ..shared_structures::SharedMessage::default()
         };
         assert!(owner.try_write_message(&message).unwrap());
 
@@ -1532,6 +1955,7 @@ mod tests {
             layout_symbol: "[]=".into(),
             client_name: String::new(),
             tags: Vec::new(),
+            ..WmSnapshot::default()
         }));
         let update = runtime.dispatch(UserAction::SetLayout(LayoutId(2)));
         assert_eq!(
@@ -1559,6 +1983,7 @@ mod tests {
             layout_symbol: "[M]".into(),
             client_name: "terminal".into(),
             tags: Vec::new(),
+            ..WmSnapshot::default()
         }));
 
         assert_eq!(runtime.view().geometry, Some(geometry));
@@ -1648,7 +2073,10 @@ mod tests {
             "/tmp/xbar-core-runtime-reopen-gate-{}-{sequence}",
             std::process::id()
         );
-        let owner = shared_structures::SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated transport");
         let transport = SharedTransport::open(&path).unwrap();
         let mut runtime =
@@ -1688,7 +2116,10 @@ mod tests {
             "/tmp/xbar-core-runtime-transport-{}-{sequence}",
             std::process::id()
         );
-        let owner = shared_structures::SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated transport");
         let transport = SharedTransport::open(&path).unwrap();
         let mut runtime =
@@ -1705,6 +2136,7 @@ mod tests {
             layout_symbol: "[]=".into(),
             client_name: String::new(),
             tags: Vec::new(),
+            ..WmSnapshot::default()
         }));
         owner.destroy().unwrap();
 
@@ -1733,7 +2165,10 @@ mod tests {
             "/tmp/xbar-core-runtime-command-{}-{sequence}",
             std::process::id()
         );
-        let owner = shared_structures::SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated transport");
         let transport = SharedTransport::open(&path).unwrap();
         let mut runtime =
@@ -1750,6 +2185,7 @@ mod tests {
             layout_symbol: "[]=".into(),
             client_name: String::new(),
             tags: Vec::new(),
+            ..WmSnapshot::default()
         }));
         owner.destroy().unwrap();
 

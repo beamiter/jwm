@@ -42,6 +42,16 @@ pub struct Metrics {
     pub pill_height: f32,
     pub corner_radius: f32,
     pub item_gap: i32,
+    /// Resting compositor thumbnail dimensions.
+    pub dock_item_width: i32,
+    pub dock_item_height: i32,
+    /// A fixed peak-width slot prevents horizontal layout movement while the
+    /// pointer crosses the Dock. Vertical magnification may breathe into the
+    /// bar's padding, just like the renderer-neutral scene.
+    pub dock_slot_width: i32,
+    pub dock_slot_height: i32,
+    pub dock_item_gap: i32,
+    pub dock_separator_width: i32,
 }
 
 impl Metrics {
@@ -50,11 +60,29 @@ impl Metrics {
         let bar_height = config.bar_height.max(1.0);
         let vertical_padding = config.vertical_padding.max(0.0).min(bar_height * 0.5);
         let pill_height = (bar_height - 2.0 * vertical_padding).max(1.0);
+        let dock_item_height = config.dock_item_size.max(1.0).min(bar_height);
+        let dock_aspect = if config.dock_item_aspect_ratio.is_finite() {
+            config.dock_item_aspect_ratio.max(1.0)
+        } else {
+            1.5
+        };
+        let dock_hover_scale = if config.dock_hover_scale.is_finite() {
+            config.dock_hover_scale.max(1.0)
+        } else {
+            1.55
+        };
+        let dock_item_width = dock_item_height * dock_aspect;
         Self {
             bar_height: bar_height.round() as i32,
             pill_height,
             corner_radius: config.corner_radius.max(0.0).min(pill_height * 0.5),
             item_gap: config.item_gap.max(0.0).round() as i32,
+            dock_item_width: dock_item_width.round().max(1.0) as i32,
+            dock_item_height: dock_item_height.round().max(1.0) as i32,
+            dock_slot_width: (dock_item_width * dock_hover_scale).ceil().max(1.0) as i32,
+            dock_slot_height: dock_item_height.round().max(1.0) as i32,
+            dock_item_gap: config.dock_item_gap.max(0.0).round() as i32,
+            dock_separator_width: config.dock_separator_width.max(1.0).round() as i32,
         }
     }
 }
@@ -155,6 +183,16 @@ pub fn stylesheet(
     // layout engine hands the same control.
     let pill_padding = (config.pill_horizontal_padding.max(0.0) - 1.0).max(0.0);
     let inner_height = (metrics.pill_height - 2.0).max(1.0);
+    let dock_radius = config
+        .dock_corner_radius
+        .max(0.0)
+        .min(config.dock_item_size.max(1.0) * 0.5);
+    let dock_padding = config.dock_shelf_padding.max(0.0);
+    let dock_hover_scale = if config.dock_hover_scale.is_finite() {
+        config.dock_hover_scale.max(1.0)
+    } else {
+        1.55
+    };
 
     // Translucent windows must not carry GTK's default opaque background —
     // per-pixel alpha is what lets the compositor blend behind the bar. Solid
@@ -209,10 +247,61 @@ window.theme-dark {{
 .client-name {{
 {font}}}
 
+/* Fixed peak-size slots give GTK's retained widgets the same stable Dock
+ * geometry as the renderer-neutral scene. The compositor supplies the real
+ * cached thumbnail at the resting rectangle; this card is its fallback and
+ * its pointer target. */
+.dock-shelf {{
+  padding: 0 {dock_padding}px;
+  background: transparent;
+}}
+
+.dock-separator {{
+  opacity: 0.48;
+}}
+
+.dock-slot,
+.dock-empty-slot {{
+  padding: 0;
+}}
+
+.minimized-card {{
+  min-width: {dock_item_width}px;
+  min-height: {dock_item_height}px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.22);
+  border-radius: {dock_radius}px;
+  background-image: linear-gradient(to bottom, rgba(255,255,255,0.22), rgba(255,255,255,0.08));
+  box-shadow: 0 2px 5px rgba(0,0,0,0.28);
+  transform: scale(1);
+  transition: 180ms cubic-bezier(0.20, 0.78, 0.22, 1.08);
+}}
+
+.minimized-card.magnified {{
+  transform: scale({dock_hover_scale});
+}}
+
+.minimized-card.urgent {{
+  border-color: rgba(255,99,88,0.96);
+  box-shadow: 0 0 0 1px rgba(255,99,88,0.42), 0 3px 8px rgba(0,0,0,0.32);
+}}
+
+.minimized-card.unavailable {{
+  opacity: 0.52;
+}}
+
+.dock-overflow {{
+{font}}}
+
 {dark}
 {light}",
         font = font_rules(font, config.font_size.max(1.0)),
         corner_radius = metrics.corner_radius,
+        dock_item_width = metrics.dock_item_width,
+        dock_item_height = metrics.dock_item_height,
+        dock_radius = dock_radius,
+        dock_padding = dock_padding,
+        dock_hover_scale = dock_hover_scale,
         dark = theme_rules(ThemeMode::Dark, background_opacity, translucent),
         light = theme_rules(ThemeMode::Light, background_opacity, translucent),
     )

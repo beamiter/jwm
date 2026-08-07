@@ -56,9 +56,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::env;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::backend::api::Backend;
+use crate::backend::api::CompositorRect;
 use crate::backend::api::StrutPartial;
 use crate::backend::api::WindowChanges;
 use crate::backend::api::WindowType;
@@ -75,11 +78,36 @@ use crate::ipc_server::IpcServer;
 use crate::core::animation::AnimationManager;
 use xbar_core::shared_structures::CommandType;
 use xbar_core::shared_structures::SharedCommand;
-use xbar_core::shared_structures::{MonitorInfo, SharedMessage, TagStatus};
+use xbar_core::shared_structures::{
+    MonitorInfo, PREVIEW_MINIMIZED_FLAG_VISIBLE, SharedMessage, TagStatus,
+};
 
 lazy_static::lazy_static! {
     pub static ref BUTTONMASK: EventMaskBits  = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE;
     pub static ref MOUSEMASK: EventMaskBits   = EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE | EventMaskBits::POINTER_MOTION;
+}
+
+static WM_SESSION_ID: OnceLock<u64> = OnceLock::new();
+static BAR_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// A window id is intentionally only meaningful for one WM lifetime.  Mixing
+/// a queued click from a previous JWM process with a recycled backend id could
+/// otherwise restore an unrelated window after a restart.
+fn wm_session_id() -> u64 {
+    *WM_SESSION_ID.get_or_init(|| {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let process = u64::from(std::process::id()).rotate_left(32);
+        // Keep the opaque token exactly representable by JavaScript-backed
+        // bars while retaining 53 bits of per-process entropy. Web frontends
+        // must echo this value; rounding a general u64 would defeat the stale
+        // action guard at the Rust boundary.
+        const JS_SAFE_INTEGER_MASK: u64 = (1_u64 << 53) - 1;
+        let id = (epoch ^ process ^ 0x4a57_4d44_4f43_4b31) & JS_SAFE_INTEGER_MASK;
+        id.max(1)
+    })
 }
 
 pub struct Jwm {
@@ -112,6 +140,15 @@ pub struct Jwm {
     pub last_key_grab_refresh_at: Option<std::time::Instant>,
 
     pub pending_bar_updates: HashSet<MonitorIndex>,
+
+    /// Last physical minimized-window shelf reported by each monitor's bar.
+    /// This lets a new minimize receive the correct monitor-specific fallback
+    /// before its own item exists in the next bar frame.
+    pub(crate) minimized_dock_shelves: HashMap<MonitorIndex, CompositorRect>,
+
+    /// Preview ownership is mirrored in the WM so a delayed LEAVE from one
+    /// bar cannot dismiss a newer preview opened on another monitor.
+    pub(crate) active_minimized_preview: Option<(MonitorIndex, WindowId)>,
 
     pub suppress_mouse_focus_until: Option<std::time::Instant>,
     /// When true, resizeclient() skips layout animations (used during tag
@@ -617,6 +654,8 @@ impl Jwm {
 
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),
+            minimized_dock_shelves: HashMap::new(),
+            active_minimized_preview: None,
 
             suppress_mouse_focus_until: None,
             suppress_layout_animation: false,
@@ -969,6 +1008,44 @@ impl Jwm {
         }
     }
 
+    fn clear_minimized_preview_for(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor_id: MonitorIndex,
+        window: Option<WindowId>,
+    ) {
+        let owns_preview =
+            minimized_preview_owned_by(self.active_minimized_preview, monitor_id, window);
+        if owns_preview {
+            backend.compositor_set_minimized_window_preview(None, None);
+            self.active_minimized_preview = None;
+        }
+    }
+
+    /// Withdraw every compositor overlay whose input surface was this bar.
+    /// The minimized textures stay cached and will be retargeted if the bar
+    /// returns, but nothing is painted over an absent/hidden bar meanwhile.
+    fn clear_minimized_dock_for_monitor(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor_id: MonitorIndex,
+    ) {
+        self.clear_minimized_preview_for(backend, monitor_id, None);
+        self.minimized_dock_shelves.remove(&monitor_id);
+        let hidden_windows: Vec<_> = self
+            .get_monitor_by_id(monitor_id)
+            .and_then(|monitor| self.state.monitor_clients.get(monitor))
+            .into_iter()
+            .flatten()
+            .filter_map(|key| self.state.clients.get(*key))
+            .filter(|client| client.state.is_hidden)
+            .map(|client| client.win)
+            .collect();
+        for window in hidden_windows {
+            backend.compositor_set_window_dock_geometry(window, None);
+        }
+    }
+
     fn get_wm_class(
         &self,
         backend: &mut dyn Backend,
@@ -1240,13 +1317,13 @@ impl Jwm {
     }
 
     fn process_commands_from_status_bar(&mut self, backend: &mut dyn Backend) {
-        let mut commands_to_process: Vec<SharedCommand> = Vec::new();
+        let mut commands_to_process: Vec<(i32, SharedCommand)> = Vec::new();
 
         // Read commands from all per-monitor status bars
-        for bar in self.secondary_bars.values_mut() {
+        for (&source_monitor, bar) in &mut self.secondary_bars {
             loop {
                 match bar.shmem.try_receive_command() {
-                    Ok(Some(cmd)) => commands_to_process.push(cmd),
+                    Ok(Some(cmd)) => commands_to_process.push((source_monitor, cmd)),
                     Ok(None) => break,
                     Err(e) => {
                         warn!("[process_commands] failed to receive bar command: {}", e);
@@ -1257,7 +1334,7 @@ impl Jwm {
         }
 
         // Process all collected commands
-        for cmd in commands_to_process {
+        for (source_monitor, cmd) in commands_to_process {
             match cmd.cmd_type.into() {
                 CommandType::ViewTag => {
                     info!(
@@ -1293,6 +1370,115 @@ impl Jwm {
                     );
                     if let Err(error) = self.open_shell_from_status_bar(backend, page) {
                         warn!("[process_commands] could not open the shell: {error}");
+                    }
+                }
+                CommandType::SetMinimizedGeometry => {
+                    if !valid_dock_command_source(source_monitor, &cmd) {
+                        warn!(
+                            "[process_commands] rejected stale Dock geometry from monitor {}",
+                            source_monitor
+                        );
+                        continue;
+                    }
+                    let anchor = compositor_rect_from_bar_command(&cmd);
+                    if cmd.window_id == 0 {
+                        if let Some(anchor) = anchor {
+                            // The shelf centre is the first-minimize fallback:
+                            // the new item does not exist in the preceding bar
+                            // frame, so a two-process layout cannot yet name
+                            // its final slot.
+                            self.minimized_dock_shelves.insert(source_monitor, anchor);
+                        } else {
+                            self.minimized_dock_shelves.remove(&source_monitor);
+                        }
+                    } else {
+                        let window = WindowId::from_raw(cmd.window_id);
+                        let valid_client = self.wintoclient(window).is_some_and(|key| {
+                            self.state.clients.get(key).is_some_and(|client| {
+                                client.state.is_hidden
+                                    && client
+                                        .mon
+                                        .and_then(|key| self.state.monitors.get(key))
+                                        .map(|monitor| monitor.num)
+                                        == Some(source_monitor)
+                            })
+                        });
+                        if valid_client {
+                            // A zero-sized geometry is an explicit withdrawal
+                            // when a responsive shelf stops realizing a slot.
+                            backend.compositor_set_window_dock_geometry(window, anchor);
+                        }
+                    }
+                }
+                CommandType::PreviewMinimized => {
+                    if !valid_dock_command_source(source_monitor, &cmd) {
+                        warn!(
+                            "[process_commands] rejected stale minimized preview from monitor {}",
+                            source_monitor
+                        );
+                        continue;
+                    }
+                    if cmd.flags & PREVIEW_MINIMIZED_FLAG_VISIBLE == 0 {
+                        let window =
+                            (cmd.window_id != 0).then(|| WindowId::from_raw(cmd.window_id));
+                        self.clear_minimized_preview_for(backend, source_monitor, window);
+                        continue;
+                    }
+                    let window = WindowId::from_raw(cmd.window_id);
+                    let Some(client_key) = self.wintoclient(window) else {
+                        continue;
+                    };
+                    let valid_client = self.state.clients.get(client_key).is_some_and(|client| {
+                        client.state.is_hidden
+                            && client
+                                .mon
+                                .and_then(|key| self.state.monitors.get(key))
+                                .map(|m| m.num)
+                                == Some(source_monitor)
+                    });
+                    let Some(anchor) = compositor_rect_from_bar_command(&cmd) else {
+                        continue;
+                    };
+                    if valid_client {
+                        // Hover cards may magnify visually. Their live anchor
+                        // positions the floating preview only; the resting
+                        // Genie/static-thumbnail target remains the stable
+                        // geometry last published by SetMinimizedGeometry.
+                        backend.compositor_set_minimized_window_preview(Some(window), Some(anchor));
+                        self.active_minimized_preview = Some((source_monitor, window));
+                    }
+                }
+                CommandType::RestoreMinimized => {
+                    if !valid_dock_command_source(source_monitor, &cmd) {
+                        warn!(
+                            "[process_commands] rejected stale minimized restore from monitor {}",
+                            source_monitor
+                        );
+                        continue;
+                    }
+                    let window = WindowId::from_raw(cmd.window_id);
+                    let Some(client_key) = self.wintoclient(window) else {
+                        continue;
+                    };
+                    let valid_client = self.state.clients.get(client_key).is_some_and(|client| {
+                        client.state.is_hidden
+                            && client
+                                .mon
+                                .and_then(|key| self.state.monitors.get(key))
+                                .map(|m| m.num)
+                                == Some(source_monitor)
+                    });
+                    if !valid_client {
+                        continue;
+                    }
+                    self.clear_minimized_preview_for(backend, source_monitor, Some(window));
+                    if let Some(anchor) = compositor_rect_from_bar_command(&cmd) {
+                        backend.compositor_set_window_dock_geometry(window, Some(anchor));
+                    }
+                    if let Err(error) = self.reveal_and_focus(backend, window) {
+                        warn!(
+                            "[process_commands] could not restore Dock window {window:?}: {error}"
+                        );
                     }
                 }
                 CommandType::None => {}
@@ -1551,10 +1737,28 @@ impl Jwm {
         self.message = SharedMessage::default();
         let mut monitor_info_for_message = MonitorInfo::default();
 
-        monitor_info_for_message.monitor_x = monitor.geometry.w_x;
-        monitor_info_for_message.monitor_y = monitor.geometry.w_y;
-        monitor_info_for_message.monitor_width = monitor.geometry.w_w;
-        monitor_info_for_message.monitor_height = monitor.geometry.w_h;
+        // Publish the actual bar outer origin when it is managed. Before its
+        // first map, use the same monitor+padding formula as
+        // `position_secondary_bar_on_monitor`. Never publish the client work
+        // area (`w_y`): that includes the bar's own strut and feeds a +height
+        // offset back into both placement and Dock anchor conversion.
+        let configured_pad = CONFIG.load().status_bar_padding();
+        let bar_geometry = self
+            .secondary_bars
+            .get(&monitor.num)
+            .and_then(|bar| bar.client_key)
+            .and_then(|key| self.state.clients.get(key))
+            .filter(|client| client.geometry.w > 0)
+            .map(|client| (client.geometry.x, client.geometry.y, client.geometry.w));
+        let (bar_x, bar_y, bar_width) = bar_geometry.unwrap_or((
+            monitor.geometry.m_x + configured_pad,
+            monitor.geometry.m_y + configured_pad,
+            (monitor.geometry.m_w - 2 * configured_pad).max(1),
+        ));
+        monitor_info_for_message.monitor_x = bar_x;
+        monitor_info_for_message.monitor_y = bar_y;
+        monitor_info_for_message.monitor_width = bar_width;
+        monitor_info_for_message.monitor_height = monitor.geometry.m_h;
         monitor_info_for_message.monitor_num = monitor.num;
         monitor_info_for_message.set_ltsymbol(&monitor.lt_symbol);
 
@@ -1580,6 +1784,22 @@ impl Jwm {
         let selected_client_name = self.get_selected_client_name(mon_key);
         monitor_info_for_message.set_client_name(&selected_client_name);
         self.message.monitor_info = monitor_info_for_message;
+
+        let monitor_clients = self
+            .state
+            .monitor_clients
+            .get(mon_key)
+            .map_or(&[][..], Vec::as_slice);
+        let mut minimized = StatusBarBuilder::get_minimized_windows(
+            &self.state.clients,
+            monitor_clients,
+            monitor.num,
+        );
+        StatusBarBuilder::prioritize_snapshot_capacity(&mut minimized);
+        self.message.set_minimized_windows(&minimized);
+        self.message.wm_session_id = wm_session_id();
+        self.message.minimized_generation = BAR_SNAPSHOT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        self.message.update_timestamp();
     }
 
     fn calculate_tag_masks(&self, mon_key: MonitorKey) -> (u32, u32) {
@@ -1632,10 +1852,38 @@ fn shell_page_for(
     }
 }
 
+/// Reject delayed commands from a previous WM lifetime and commands injected
+/// through a different monitor's queue. Both checks matter because window ids
+/// and bar shared-memory paths are intentionally reused after restart.
+fn valid_dock_command_source(source_monitor: i32, command: &SharedCommand) -> bool {
+    command.monitor_id == source_monitor && command.wm_session_id == wm_session_id()
+}
+
+fn minimized_preview_owned_by(
+    active: Option<(MonitorIndex, WindowId)>,
+    source_monitor: MonitorIndex,
+    window: Option<WindowId>,
+) -> bool {
+    active.is_some_and(|(active_monitor, active_window)| {
+        active_monitor == source_monitor && window.is_none_or(|window| window == active_window)
+    })
+}
+
+fn compositor_rect_from_bar_command(command: &SharedCommand) -> Option<CompositorRect> {
+    CompositorRect::new(
+        command.anchor_x as f32,
+        command.anchor_y as f32,
+        command.anchor_w as f32,
+        command.anchor_h as f32,
+    )
+    .normalized()
+}
+
 #[cfg(test)]
 mod shell_hub_command_tests {
     use super::*;
     use crate::jwm::features::ShellHubRoute;
+    use xbar_core::shared_structures::MinimizedWindowAnchor;
     use xbar_core::shared_structures::ShellHubRoute as Wire;
 
     #[test]
@@ -1668,5 +1916,56 @@ mod shell_hub_command_tests {
         );
         // Commands from the tag/layout paths never look like shell requests.
         assert_eq!(SharedCommand::view_tag(1, 0).shell_hub_route(), None);
+    }
+
+    #[test]
+    fn dock_commands_are_scoped_to_session_and_source_monitor() {
+        assert!(wm_session_id() <= (1_u64 << 53) - 1);
+
+        let command = SharedCommand::preview_minimized(
+            0xfeed,
+            wm_session_id(),
+            2,
+            PREVIEW_MINIMIZED_FLAG_VISIBLE,
+            MinimizedWindowAnchor::new(-120, 4, 36, 28),
+        );
+        assert!(valid_dock_command_source(2, &command));
+        assert!(!valid_dock_command_source(1, &command));
+
+        let stale = SharedCommand::preview_minimized(
+            0xfeed,
+            wm_session_id().wrapping_add(1),
+            2,
+            PREVIEW_MINIMIZED_FLAG_VISIBLE,
+            MinimizedWindowAnchor::new(-120, 4, 36, 28),
+        );
+        assert!(!valid_dock_command_source(2, &stale));
+
+        let rect = compositor_rect_from_bar_command(&command).unwrap();
+        assert_eq!(rect.x, -120.0);
+        assert_eq!(rect.width, 36.0);
+    }
+
+    #[test]
+    fn empty_dock_anchor_never_reaches_the_compositor() {
+        let command = SharedCommand::set_minimized_geometry(
+            0,
+            wm_session_id(),
+            0,
+            MinimizedWindowAnchor::new(0, 0, 0, 38),
+        );
+        assert!(compositor_rect_from_bar_command(&command).is_none());
+    }
+
+    #[test]
+    fn delayed_preview_leave_cannot_dismiss_another_monitor_or_window() {
+        let first = WindowId::from_raw(11);
+        let second = WindowId::from_raw(22);
+        let active = Some((2, second));
+
+        assert!(!minimized_preview_owned_by(active, 1, Some(first)));
+        assert!(!minimized_preview_owned_by(active, 2, Some(first)));
+        assert!(minimized_preview_owned_by(active, 2, Some(second)));
+        assert!(minimized_preview_owned_by(active, 2, None));
     }
 }

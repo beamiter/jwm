@@ -230,6 +230,14 @@ struct FilePresentation {
     pill_horizontal_padding: Option<f32>,
     corner_radius: Option<f32>,
     font_size: Option<f32>,
+    dock_item_size: Option<f32>,
+    dock_item_aspect_ratio: Option<f32>,
+    dock_item_gap: Option<f32>,
+    dock_shelf_padding: Option<f32>,
+    dock_corner_radius: Option<f32>,
+    dock_hover_scale: Option<f32>,
+    dock_influence_radius: Option<f32>,
+    dock_separator_width: Option<f32>,
     left_fraction: Option<f32>,
     tag_labels: Option<Vec<String>>,
 }
@@ -372,6 +380,54 @@ impl BarConfig {
             file.presentation.font_size,
             &mut presentation.font_size,
         )?;
+        apply_positive(
+            "presentation.dock_item_size",
+            file.presentation.dock_item_size,
+            &mut presentation.dock_item_size,
+        )?;
+        if let Some(aspect_ratio) = file.presentation.dock_item_aspect_ratio {
+            if !aspect_ratio.is_finite() || aspect_ratio < 1.0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "presentation.dock_item_aspect_ratio",
+                    reason: "must be a finite value greater than or equal to one",
+                });
+            }
+            presentation.dock_item_aspect_ratio = aspect_ratio;
+        }
+        apply_non_negative(
+            "presentation.dock_item_gap",
+            file.presentation.dock_item_gap,
+            &mut presentation.dock_item_gap,
+        )?;
+        apply_non_negative(
+            "presentation.dock_shelf_padding",
+            file.presentation.dock_shelf_padding,
+            &mut presentation.dock_shelf_padding,
+        )?;
+        apply_non_negative(
+            "presentation.dock_corner_radius",
+            file.presentation.dock_corner_radius,
+            &mut presentation.dock_corner_radius,
+        )?;
+        if let Some(scale) = file.presentation.dock_hover_scale {
+            if !scale.is_finite() || scale < 1.0 {
+                return Err(ConfigError::InvalidValue {
+                    field: "presentation.dock_hover_scale",
+                    reason: "must be a finite value greater than or equal to one",
+                });
+            }
+            presentation.dock_hover_scale = scale;
+        }
+        apply_positive(
+            "presentation.dock_influence_radius",
+            file.presentation.dock_influence_radius,
+            &mut presentation.dock_influence_radius,
+        )?;
+        apply_non_negative(
+            "presentation.dock_separator_width",
+            file.presentation.dock_separator_width,
+            &mut presentation.dock_separator_width,
+        )?;
         if let Some(fraction) = file.presentation.left_fraction {
             if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
                 return Err(ConfigError::InvalidValue {
@@ -502,6 +558,10 @@ background_opacity = 0.85
 [presentation]
 bar_height = 42.0
 font_size = 14.5
+dock_item_size = 20.0
+dock_item_aspect_ratio = 1.6
+dock_hover_scale = 1.7
+dock_influence_radius = 60.0
 tag_labels = ["a", "b", "c"]
 "#,
         )
@@ -512,6 +572,10 @@ tag_labels = ["a", "b", "c"]
         assert_eq!(config.background_opacity, Some(0.85));
         assert_eq!(config.presentation.bar_height, 42.0);
         assert_eq!(config.presentation.font_size, 14.5);
+        assert_eq!(config.presentation.dock_item_size, 20.0);
+        assert_eq!(config.presentation.dock_item_aspect_ratio, 1.6);
+        assert_eq!(config.presentation.dock_hover_scale, 1.7);
+        assert_eq!(config.presentation.dock_influence_radius, 60.0);
         assert_eq!(config.presentation.tag_labels, vec!["a", "b", "c"]);
         // Untouched fields keep their defaults.
         assert_eq!(
@@ -540,6 +604,20 @@ tag_labels = ["a", "b", "c"]
             BarConfig::from_toml("[presentation]\ntag_labels = []"),
             Err(ConfigError::InvalidValue {
                 field: "presentation.tag_labels",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[presentation]\ndock_item_aspect_ratio = 0.75"),
+            Err(ConfigError::InvalidValue {
+                field: "presentation.dock_item_aspect_ratio",
+                ..
+            })
+        ));
+        assert!(matches!(
+            BarConfig::from_toml("[presentation]\ndock_hover_scale = 0.99"),
+            Err(ConfigError::InvalidValue {
+                field: "presentation.dock_hover_scale",
                 ..
             })
         ));

@@ -30,8 +30,25 @@
     present: boolean;
   }
 
+  interface MinimizedWindow {
+    token: number;
+    monitor: number;
+    title: string;
+    app_id: string;
+    flags: number;
+  }
+
+  interface DockGeometry {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }
+
   interface BarSnapshot {
     wm_available: boolean;
+    wm_session_id: number;
+    geometry: DockGeometry | null;
     tags: TagState[];
     monitor: number;
     layout_symbol: string;
@@ -43,6 +60,8 @@
     system_details: SystemDetails;
     brightness: { percent: number | null };
     battery: BatteryState;
+    minimized_windows: MinimizedWindow[];
+    minimized_overflow: boolean;
   }
 
   interface FrontendEnvelope {
@@ -81,10 +100,33 @@
     | { action: "adjust_volume"; delta: number }
     | { action: "adjust_brightness"; delta: number }
     | { action: "screenshot" }
+    | {
+        action: "restore_window";
+        wm_session_id: number;
+        window_id: number;
+        geometry?: DockGeometry;
+      }
+    | {
+        action: "preview_window";
+        wm_session_id: number;
+        window_id: number;
+        visible: boolean;
+        geometry?: DockGeometry;
+      }
+    | {
+        action: "set_dock_geometry";
+        wm_session_id: number;
+        window_id?: number | null;
+        geometry?: DockGeometry;
+      }
     | { action: "open_shell_hub"; route: ShellRoute };
 
   const dispatchAction = (request: ActionRequest): Promise<void> =>
     invoke("dispatch_action", { request });
+
+  let snapshotBarOrigin: Pick<DockGeometry, "x" | "y"> | null = null;
+  let currentWmSessionId = 0;
+  let currentWmAvailable = false;
 
   const TAG_ICONS = [
     "\u{F0A1E}",
@@ -119,6 +161,13 @@
   let cancelled = false;
   let revision: number | null = null;
   let unlisten: UnlistenFn | undefined;
+  let dockGeometrySignature = "";
+  let dockResizeObserver: ResizeObserver | undefined;
+  let dockRetryTimer: number | undefined;
+  let dockPublishGeneration = 0;
+  let dockPublishInFlight = false;
+  let dockRepublishRequested = false;
+  const previewRenewals = new Map<number, number>();
 
   function getButtonClass(tag: TagState): string {
     if (tag.filled) return "emoji-button state-filtered";
@@ -164,6 +213,226 @@
     if (device.volume < 34) return ICON_VOL_LOW;
     if (device.volume < 67) return ICON_VOL_MID;
     return ICON_VOL_HIGH;
+  }
+
+  function minimizedInitial(item: MinimizedWindow): string {
+    const label = item.app_id.trim() || item.title.trim();
+    return Array.from(label)[0]?.toLocaleUpperCase() ?? "•";
+  }
+
+  type WindowMetrics = { x: number; y: number; scale: number };
+
+  async function windowMetrics(): Promise<WindowMetrics | null> {
+    try {
+      const appWindow = getCurrentWindow();
+      const scale = await appWindow.scaleFactor();
+      if (snapshotBarOrigin) {
+        return { x: snapshotBarOrigin.x, y: snapshotBarOrigin.y, scale };
+      }
+      const origin = await appWindow.innerPosition();
+      return { x: origin.x, y: origin.y, scale };
+    } catch (error) {
+      console.error("Failed to resolve dock geometry:", error);
+      return null;
+    }
+  }
+
+  function projectDockGeometry(
+    rect: Pick<DOMRect, "left" | "top" | "width" | "height">,
+    metrics: WindowMetrics,
+  ): DockGeometry {
+    return {
+      x: metrics.x + Math.round(rect.left * metrics.scale),
+      y: metrics.y + Math.round(rect.top * metrics.scale),
+      width: Math.max(0, Math.round(rect.width * metrics.scale)),
+      height: Math.max(0, Math.round(rect.height * metrics.scale)),
+    };
+  }
+
+  function physicalGeometry(element: HTMLElement, metrics: WindowMetrics): DockGeometry {
+    return projectDockGeometry(element.getBoundingClientRect(), metrics);
+  }
+
+  function restingItemGeometry(
+    item: HTMLElement,
+    dock: HTMLElement,
+    metrics: WindowMetrics,
+  ): DockGeometry {
+    const dockRect = dock.getBoundingClientRect();
+    return projectDockGeometry(
+      {
+        left: dockRect.left + item.offsetLeft,
+        top: dockRect.top + item.offsetTop,
+        width: item.offsetWidth,
+        height: item.offsetHeight,
+      },
+      metrics,
+    );
+  }
+
+  async function geometryForElement(
+    element: HTMLElement,
+  ): Promise<DockGeometry | undefined> {
+    const metrics = await windowMetrics();
+    return metrics ? physicalGeometry(element, metrics) : undefined;
+  }
+
+  async function restoreMinimized(
+    windowId: number,
+    wmSessionId: number,
+    element: HTMLElement,
+  ) {
+    const geometry = await geometryForElement(element);
+    await dispatchAction({
+      action: "restore_window",
+      wm_session_id: wmSessionId,
+      window_id: windowId,
+      geometry,
+    });
+  }
+
+  async function previewMinimized(
+    windowId: number,
+    wmSessionId: number,
+    visible: boolean,
+    element: HTMLElement,
+  ) {
+    const geometry = await geometryForElement(element);
+    if (visible && !element.matches(":hover")) return;
+    await dispatchAction({
+      action: "preview_window",
+      wm_session_id: wmSessionId,
+      window_id: windowId,
+      visible,
+      geometry,
+    });
+  }
+
+  function stopPreviewRenewal(windowId: number) {
+    const renewal = previewRenewals.get(windowId);
+    if (renewal !== undefined) window.clearInterval(renewal);
+    previewRenewals.delete(windowId);
+  }
+
+  function beginPreview(windowId: number, wmSessionId: number, element: HTMLElement) {
+    stopPreviewRenewal(windowId);
+    previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
+    const renewal = window.setInterval(() => {
+      if (!element.isConnected || !element.matches(":hover")) {
+        stopPreviewRenewal(windowId);
+        previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+        return;
+      }
+      previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
+    }, 2_000);
+    previewRenewals.set(windowId, renewal);
+  }
+
+  function endPreview(windowId: number, wmSessionId: number, element: HTMLElement) {
+    stopPreviewRenewal(windowId);
+    previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+  }
+
+  async function publishDockGeometry(dock: HTMLElement, wmSessionId: number) {
+    const metrics = await windowMetrics();
+    if (!dock.isConnected) return;
+    if (!metrics) throw new Error("Dock window metrics are temporarily unavailable");
+    await dispatchAction({
+      action: "set_dock_geometry",
+      wm_session_id: wmSessionId,
+      window_id: null,
+      geometry: physicalGeometry(dock, metrics),
+    });
+    for (const item of dock.querySelectorAll<HTMLElement>("[data-window-id]")) {
+      const windowId = Number(item.dataset.windowId);
+      if (!Number.isFinite(windowId)) continue;
+      await dispatchAction({
+        action: "set_dock_geometry",
+        wm_session_id: wmSessionId,
+        window_id: windowId,
+        geometry: restingItemGeometry(item, dock, metrics),
+      });
+    }
+  }
+
+  function cancelDockGeometryRetry() {
+    dockPublishGeneration += 1;
+    if (dockRetryTimer !== undefined) window.clearTimeout(dockRetryTimer);
+    dockRetryTimer = undefined;
+    dockPublishInFlight = false;
+    dockRepublishRequested = false;
+  }
+
+  function requestDockGeometryPublish(dock: HTMLElement, wmSessionId: number) {
+    if (
+      !dock.isConnected ||
+      !currentWmAvailable ||
+      wmSessionId === 0 ||
+      wmSessionId !== currentWmSessionId
+    ) return;
+    const generation = dockPublishGeneration;
+    if (dockRetryTimer !== undefined) {
+      window.clearTimeout(dockRetryTimer);
+      dockRetryTimer = undefined;
+    }
+    if (dockPublishInFlight) {
+      dockRepublishRequested = true;
+      return;
+    }
+    dockPublishInFlight = true;
+    publishDockGeometry(dock, wmSessionId)
+      .then(() => {
+        if (generation !== dockPublishGeneration) return;
+        dockPublishInFlight = false;
+        if (dockRepublishRequested) {
+          dockRepublishRequested = false;
+          requestDockGeometryPublish(dock, wmSessionId);
+        }
+      })
+      .catch((error) => {
+        if (generation !== dockPublishGeneration) return;
+        dockPublishInFlight = false;
+        dockRepublishRequested = false;
+        console.error("Failed to publish minimized Dock geometry; retrying:", error);
+        if (
+          dockRetryTimer === undefined &&
+          dock.isConnected &&
+          currentWmAvailable &&
+          wmSessionId !== 0 &&
+          wmSessionId === currentWmSessionId
+        ) {
+          dockRetryTimer = window.setTimeout(() => {
+            dockRetryTimer = undefined;
+            requestDockGeometryPublish(dock, wmSessionId);
+          }, 100);
+        }
+      });
+  }
+
+  function scheduleDockGeometry(current: BarSnapshot) {
+    if (!current.wm_available || current.wm_session_id === 0) {
+      cancelDockGeometryRetry();
+      dockResizeObserver?.disconnect();
+      dockGeometrySignature = "";
+      return;
+    }
+    const signature = `${current.wm_session_id}|${current.geometry?.x},${current.geometry?.y},${current.geometry?.width},${current.geometry?.height}|${current.minimized_windows
+      .map((item) => item.token)
+      .join(",")}|${current.minimized_overflow}`;
+    if (signature === dockGeometrySignature) return;
+    dockGeometrySignature = signature;
+    window.requestAnimationFrame(() => {
+      const dock = document.querySelector<HTMLElement>(".minimized-dock");
+      if (!dock) return;
+      requestDockGeometryPublish(dock, current.wm_session_id);
+      dockResizeObserver?.disconnect();
+      if (typeof ResizeObserver !== "undefined") {
+        dockResizeObserver = new ResizeObserver(() =>
+          requestDockGeometryPublish(dock, current.wm_session_id),
+        );
+        dockResizeObserver.observe(dock);
+      }
+    });
   }
 
   function batteryPercent(current: BarSnapshot): number | null {
@@ -244,6 +513,13 @@
   }
 
   onMount(() => {
+    const handleResize = () => {
+      const dock = document.querySelector<HTMLElement>(".minimized-dock");
+      if (dock && snapshot) {
+        requestDockGeometryPublish(dock, snapshot.wm_session_id);
+      }
+    };
+    window.addEventListener("resize", handleResize);
     const initialize = async () => {
       const stopListening = await listen<FrontendEnvelope>(
         "xbar-state",
@@ -251,7 +527,19 @@
           if (cancelled) return;
           if (revision !== null && event.payload.revision < revision) return;
           revision = event.payload.revision;
+          snapshotBarOrigin = event.payload.snapshot.geometry;
+          if (
+            currentWmSessionId !== event.payload.snapshot.wm_session_id ||
+            currentWmAvailable !== event.payload.snapshot.wm_available
+          ) {
+            cancelDockGeometryRetry();
+            previewRenewals.forEach((renewal) => window.clearInterval(renewal));
+            previewRenewals.clear();
+          }
+          currentWmSessionId = event.payload.snapshot.wm_session_id;
+          currentWmAvailable = event.payload.snapshot.wm_available;
           snapshot = event.payload.snapshot;
+          scheduleDockGeometry(event.payload.snapshot);
         },
       );
       if (cancelled) {
@@ -271,11 +559,17 @@
     initialize().catch((error) => {
       console.error("Failed to initialize xbar Tauri bridge:", error);
     });
+
+    return () => window.removeEventListener("resize", handleResize);
   });
 
   onDestroy(() => {
     cancelled = true;
     unlisten?.();
+    dockResizeObserver?.disconnect();
+    cancelDockGeometryRetry();
+    previewRenewals.forEach((renewal) => window.clearInterval(renewal));
+    previewRenewals.clear();
   });
 </script>
 
@@ -283,6 +577,7 @@
   <div class="button-row">Loading...</div>
 {:else}
   {@const monitorId = snapshot.monitor}
+  {@const wmSessionId = snapshot.wm_session_id}
   <div class="button-row">
     <div class="buttons-container">
       {#each TAG_ICONS as icon, index}
@@ -355,6 +650,51 @@
     <div class="spacer"></div>
 
     <div class="right-info-container">
+        <div
+          class="minimized-dock"
+          class:is-empty={snapshot.minimized_windows.length === 0 && !snapshot.minimized_overflow}
+          aria-label="Minimized windows"
+        >
+          <span class="minimized-divider" aria-hidden="true"></span>
+          {#each snapshot.minimized_windows as item (item.token)}
+            {@const label = item.title.trim() || item.app_id.trim() || "Minimized window"}
+            {@const urgent = (item.flags & 2) !== 0}
+            {@const previewAvailable = (item.flags & 1) !== 0}
+            <button
+              class:is-urgent={urgent}
+              class="minimized-item"
+              data-window-id={item.token}
+              disabled={!snapshot.wm_available}
+              onclick={(event) =>
+                restoreMinimized(
+                  item.token,
+                  wmSessionId,
+                  event.currentTarget,
+                ).catch(console.error)}
+              onmouseenter={(event) => {
+                if (previewAvailable) {
+                  beginPreview(item.token, wmSessionId, event.currentTarget);
+                }
+              }}
+              onmouseleave={(event) => {
+                if (previewAvailable) {
+                  endPreview(item.token, wmSessionId, event.currentTarget);
+                }
+              }}
+              title={`${label} — click to restore`}
+              aria-label={`Restore ${label}`}
+            >
+              <span class="minimized-thumbnail" aria-hidden="true">
+                <span class="minimized-traffic-lights"></span>
+                <span class="minimized-initial">{minimizedInitial(item)}</span>
+              </span>
+              {#if urgent}<span class="minimized-urgent-dot"></span>{/if}
+            </button>
+          {/each}
+          {#if snapshot.minimized_overflow}
+            <span class="minimized-overflow" title="More minimized windows">…</span>
+          {/if}
+        </div>
       <div class="system-info-container">
         <div
           class={`pill usage-pill ${severity(snapshot.system_details.cpu_average)}`}

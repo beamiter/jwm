@@ -11,7 +11,9 @@ use std::collections::HashSet;
 use crate::ThemeMode;
 use crate::controls::{BarPresentation, ControlSpec, PresentationProjector};
 use crate::display::{BatteryThresholds, IconSet, UsageThresholds, VolumeThresholds};
-use crate::model::{BarView, LayoutId, MAX_MODEL_TAGS, Percent, ShellRoute, TagId, UserAction};
+use crate::model::{
+    BarView, LayoutId, MAX_MODEL_TAGS, Percent, ShellRoute, TagId, UserAction, WindowToken,
+};
 
 /// A point in logical (DPI-independent) coordinates.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -207,6 +209,8 @@ pub enum NodeId {
     Theme,
     Screenshot,
     Clock,
+    DockShelf,
+    MinimizedWindow(WindowToken),
     /// One entry point into the window manager's own shell surface. Carrying
     /// the route makes each page a distinct node, so hover, damage tracking
     /// and hit testing keep working when a bar shows several of them.
@@ -438,6 +442,13 @@ impl Scene {
         self.nodes.iter().filter(move |node| node.id() == id)
     }
 
+    /// Union of all primitives carrying one semantic identity.
+    #[must_use]
+    pub fn bounds_for(&self, id: NodeId) -> Option<Rect> {
+        let nodes: Vec<_> = self.nodes_for(id).collect();
+        component_bounds(&nodes)
+    }
+
     /// Compute paint damage from stable semantic node identities.
     ///
     /// When a component changes, both its previous and current bounds are
@@ -498,10 +509,41 @@ fn component_bounds(nodes: &[&SceneNode]) -> Option<Rect> {
 }
 
 /// Pointer state retained by a frontend between scene builds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct InteractionState {
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
+    #[serde(default)]
+    pointer: Option<Point>,
+}
+
+/// Detailed hover result used by Dock presenters to deduplicate enter/leave
+/// commands while still redrawing proximity magnification within one item.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HoverTransition {
+    pub previous: Option<NodeId>,
+    pub current: Option<NodeId>,
+    pub pointer_changed: bool,
+}
+
+impl HoverTransition {
+    #[must_use]
+    pub fn target_changed(self) -> bool {
+        self.previous != self.current
+    }
+
+    #[must_use]
+    pub fn needs_redraw(self) -> bool {
+        self.target_changed()
+            || (self.pointer_changed
+                && matches!(
+                    (self.previous, self.current),
+                    (
+                        Some(NodeId::MinimizedWindow(_)),
+                        Some(NodeId::MinimizedWindow(_))
+                    )
+                ))
+    }
 }
 
 impl InteractionState {
@@ -515,18 +557,35 @@ impl InteractionState {
         self.pressed
     }
 
+    #[must_use]
+    pub const fn pointer(&self) -> Option<Point> {
+        self.pointer
+    }
+
+    /// Update exact pointer position and semantic target in one hit test.
+    pub fn update_hover_transition(&mut self, scene: &Scene, point: Point) -> HoverTransition {
+        let previous = self.hovered;
+        let current = scene.hit_test(point).map(|region| region.id);
+        let pointer_changed = self.pointer != Some(point);
+        self.pointer = Some(point);
+        self.hovered = current;
+        HoverTransition {
+            previous,
+            current,
+            pointer_changed,
+        }
+    }
+
     /// Updates hover state and returns whether a redraw is needed.
     pub fn update_hover(&mut self, scene: &Scene, point: Point) -> bool {
-        let next = scene.hit_test(point).map(|region| region.id);
-        let changed = self.hovered != next;
-        self.hovered = next;
-        changed
+        self.update_hover_transition(scene, point).needs_redraw()
     }
 
     pub fn clear_hover(&mut self) -> bool {
         let hover_changed = self.hovered.take().is_some();
         let press_changed = self.pressed.take().is_some();
-        hover_changed || press_changed
+        let pointer_changed = self.pointer.take().is_some();
+        hover_changed || press_changed || pointer_changed
     }
 
     /// Cancel a pending activation without changing hover state.
@@ -535,6 +594,7 @@ impl InteractionState {
     }
 
     pub fn press(&mut self, scene: &Scene, point: Point) -> bool {
+        self.pointer = Some(point);
         let next = scene.hit_test(point).map(|region| region.id);
         let changed = self.pressed != next;
         self.pressed = next;
@@ -677,6 +737,8 @@ impl PresentationLabels {
 #[serde(default)]
 pub struct PresentationVisibility {
     pub client_name: bool,
+    /// macOS-style shelf containing windows minimized by the WM.
+    pub minimized_windows: bool,
     pub monitor: bool,
     pub system: bool,
     pub audio: bool,
@@ -698,6 +760,7 @@ impl Default for PresentationVisibility {
     fn default() -> Self {
         Self {
             client_name: true,
+            minimized_windows: true,
             monitor: true,
             system: true,
             audio: true,
@@ -726,6 +789,20 @@ pub struct PresentationConfig {
     pub corner_radius: f32,
     pub font_size: f32,
     pub minimum_visible_width: f32,
+    /// Resting height for minimized-window thumbnail cards.
+    pub dock_item_size: f32,
+    /// Window-like thumbnail width divided by height.
+    pub dock_item_aspect_ratio: f32,
+    /// Gap between fixed Dock slots. Slot size reserves peak magnification so
+    /// client/status content never jumps while the pointer moves.
+    pub dock_item_gap: f32,
+    pub dock_shelf_padding: f32,
+    pub dock_corner_radius: f32,
+    /// Peak scale of the card directly under the pointer.
+    pub dock_hover_scale: f32,
+    /// Logical horizontal distance over which neighbouring cards magnify.
+    pub dock_influence_radius: f32,
+    pub dock_separator_width: f32,
     /// Preferred fraction reserved for tags/layout before right-side items.
     pub left_fraction: f32,
     pub tag_labels: Vec<String>,
@@ -758,6 +835,14 @@ impl Default for PresentationConfig {
             corner_radius: 12.0,
             font_size: 13.0,
             minimum_visible_width: 8.0,
+            dock_item_size: 18.0,
+            dock_item_aspect_ratio: 1.5,
+            dock_item_gap: 4.0,
+            dock_shelf_padding: 2.0,
+            dock_corner_radius: 6.0,
+            dock_hover_scale: 1.55,
+            dock_influence_radius: 52.0,
+            dock_separator_width: 1.0,
             left_fraction: 0.42,
             tag_labels: ["🖥", "🌐", "📁", "💬", "📝", "🎵", "⚙", "📊", "🏠"]
                 .into_iter()
@@ -893,6 +978,8 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             layout_button,
             layout_choices,
             client_name,
+            minimized_windows,
+            minimized_overflow,
             status,
         } = PresentationProjector::project(view, &self.config);
         let viewport = viewport.normalized();
@@ -937,10 +1024,19 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         };
         let right_floor = content_left + (content_right - content_left) * left_fraction;
         let mut right_cursor = content_right;
+        let mut dock_bounds = None;
+        let dock_enabled = self.config.visibility.minimized_windows && view.wm_available;
+        let dock_reserve = if dock_enabled {
+            self.preferred_dock_width(minimized_windows.len(), minimized_overflow, bar.height)
+                .min((content_right - right_floor).max(0.0))
+        } else {
+            0.0
+        };
+        let dock_gap = if dock_reserve > 0.0 { gap } else { 0.0 };
 
         for control in status {
             let spec = PillSpec::from(control);
-            let available = (right_cursor - right_floor).max(0.0);
+            let available = (right_cursor - right_floor - dock_reserve - dock_gap).max(0.0);
             if available < self.minimum_visible_width() {
                 break;
             }
@@ -952,6 +1048,21 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             };
             self.push_pill(&mut scene, bounds, spec, interaction, palette, Some(bar));
             right_cursor = (bounds.x - gap).max(content_left);
+        }
+
+        if dock_enabled {
+            let available = (right_cursor - right_floor).max(0.0);
+            if let Some(bounds) = self.push_dock(
+                &mut scene,
+                Rect::new(right_floor, bar.y, available, bar.height),
+                minimized_windows,
+                minimized_overflow,
+                interaction,
+                palette,
+            ) {
+                dock_bounds = Some(bounds);
+                right_cursor = (bounds.x - gap).max(content_left);
+            }
         }
 
         let left_limit = (right_cursor - gap).max(content_left);
@@ -1029,7 +1140,313 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             }
         }
 
+        if let Some(bounds) = dock_bounds {
+            self.push_dock_hover_title(&mut scene, bounds, view, interaction, left_cursor, gap);
+        }
+
         scene
+    }
+
+    fn push_dock_hover_title(
+        &self,
+        scene: &mut Scene,
+        dock: Rect,
+        view: BarView<'_>,
+        interaction: &InteractionState,
+        content_left: f32,
+        gap: f32,
+    ) {
+        let Some(NodeId::MinimizedWindow(token)) = interaction.hovered() else {
+            return;
+        };
+        let Some(window) = view
+            .minimized_windows
+            .iter()
+            .find(|window| window.token == token)
+        else {
+            return;
+        };
+        let title = window.title.trim();
+        if title.is_empty() {
+            return;
+        }
+        let available = (dock.x - gap - content_left).max(0.0);
+        if available < self.minimum_visible_width() {
+            return;
+        }
+        let padding = self.horizontal_text_padding().min(8.0);
+        let natural = self.measurer.measure(title, self.font_size()).width + padding * 2.0;
+        let width = natural.min(180.0).min(available);
+        let bounds = Rect::new(dock.x - gap - width, dock.y, width, dock.height);
+        let text = self.fit_text(title, width, padding);
+        if text.is_empty() {
+            return;
+        }
+        let state = VisualState {
+            hovered: true,
+            ..VisualState::default()
+        };
+        let palette = Palette::for_theme(view.theme);
+        scene.nodes.push(SceneNode::RoundedRect {
+            id: NodeId::MinimizedWindow(token),
+            bounds,
+            radius: finite_non_negative(self.config.dock_corner_radius).min(bounds.height * 0.5),
+            fill: palette.occupied,
+            stroke: None,
+            state,
+        });
+        scene.nodes.push(SceneNode::Text {
+            id: NodeId::MinimizedWindow(token),
+            bounds: bounds.inset(padding, 0.0),
+            text,
+            size: self.font_size(),
+            color: palette.text,
+            align: TextAlign::Center,
+            state,
+        });
+    }
+
+    /// Paint a right-aligned macOS-style minimized-window shelf.
+    ///
+    /// Every card owns a fixed slot large enough for peak magnification. The
+    /// pointer therefore grows the hovered card and its neighbours without
+    /// shifting client text or status controls between frames.
+    fn push_dock(
+        &self,
+        scene: &mut Scene,
+        available: Rect,
+        controls: Vec<ControlSpec>,
+        upstream_overflow: bool,
+        interaction: &InteractionState,
+        palette: Palette,
+    ) -> Option<Rect> {
+        let padding = finite_non_negative(self.config.dock_shelf_padding);
+        let gap = finite_non_negative(self.config.dock_item_gap);
+        let separator_width = finite_non_negative(self.config.dock_separator_width);
+        let usable_height = (available.height - padding * 2.0).max(0.0);
+        let item_height = finite_non_negative(self.config.dock_item_size).min(usable_height);
+        let aspect_ratio = if self.config.dock_item_aspect_ratio.is_finite() {
+            self.config.dock_item_aspect_ratio.max(1.0)
+        } else {
+            1.0
+        };
+        let item_width = item_height * aspect_ratio;
+        if available.is_empty() || item_height < 1.0 {
+            return None;
+        }
+
+        let configured_scale = if self.config.dock_hover_scale.is_finite() {
+            self.config.dock_hover_scale.max(1.0)
+        } else {
+            1.0
+        };
+        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
+        let slot_width = item_width * peak_scale;
+        let slot_pitch = slot_width + gap;
+        let fixed_width = padding * 3.0 + separator_width;
+        let max_slots =
+            (((available.width - fixed_width + gap).max(0.0)) / slot_pitch).floor() as usize;
+        if max_slots == 0 {
+            return None;
+        }
+
+        let empty_fallback = controls.is_empty() && !upstream_overflow;
+        let local_overflow = controls.len() > max_slots;
+        let show_overflow = upstream_overflow || local_overflow;
+        let item_capacity = max_slots.saturating_sub(usize::from(show_overflow));
+        let first = controls.len().saturating_sub(item_capacity);
+        let visible = &controls[first..];
+        let slot_count = visible.len() + usize::from(show_overflow || empty_fallback);
+
+        let width = fixed_width
+            + slot_count as f32 * slot_width
+            + slot_count.saturating_sub(1) as f32 * gap;
+        let candidate = Rect::new(
+            available.right() - width,
+            available.y,
+            width,
+            available.height,
+        );
+        let bounds = candidate.intersection(available)?;
+        if bounds.is_empty() {
+            return None;
+        }
+
+        scene.nodes.push(SceneNode::RoundedRect {
+            id: NodeId::DockShelf,
+            bounds,
+            radius: finite_non_negative(self.config.dock_corner_radius).min(bounds.height * 0.5),
+            // An empty shelf is still a full animation target for the first
+            // minimized window, but macOS only exposes its separator until a
+            // real thumbnail arrives.
+            fill: if empty_fallback {
+                Rgba::new(0.0, 0.0, 0.0, 0.0)
+            } else {
+                palette.occupied
+            },
+            stroke: None,
+            state: VisualState::default(),
+        });
+
+        if separator_width > 0.0 {
+            let x = bounds.x + padding + separator_width * 0.5;
+            let start = Point::new(x, bounds.y + padding);
+            let end = Point::new(x, bounds.bottom() - padding);
+            scene.nodes.push(SceneNode::Polyline {
+                id: NodeId::DockShelf,
+                bounds: Rect::new(
+                    x - separator_width * 0.5,
+                    start.y,
+                    separator_width,
+                    (end.y - start.y).max(0.0),
+                ),
+                points: vec![start, end],
+                color: palette.muted_text,
+                width: separator_width,
+                state: VisualState::default(),
+            });
+        }
+
+        let mut slot_x = bounds.x + padding * 2.0 + separator_width;
+        let dock_pointer = match interaction.hovered() {
+            Some(NodeId::MinimizedWindow(_)) => interaction.pointer(),
+            _ => None,
+        };
+        for control in visible {
+            let id = control.id;
+            let center_x = slot_x + slot_width * 0.5;
+            let scale = self.dock_scale(center_x, peak_scale, dock_pointer);
+            let width = item_width * scale;
+            let height = item_height * scale;
+            let item_bounds = Rect::new(
+                center_x - width * 0.5,
+                bounds.y + (bounds.height - height) * 0.5,
+                width,
+                height,
+            );
+            let hovered = interaction.hovered() == Some(id);
+            let state = VisualState {
+                hovered,
+                urgent: control.state.urgent,
+                ..VisualState::default()
+            };
+            let fill = if state.urgent {
+                palette.urgent
+            } else if hovered {
+                palette.selected
+            } else {
+                palette.hovered
+            };
+            scene.nodes.push(SceneNode::RoundedRect {
+                id,
+                bounds: item_bounds,
+                radius: finite_non_negative(self.config.dock_corner_radius)
+                    .min(item_bounds.height * 0.5),
+                fill,
+                stroke: state.urgent.then_some(Stroke {
+                    color: palette.urgent_stroke,
+                    width: 1.0,
+                }),
+                state,
+            });
+            scene.nodes.push(SceneNode::Text {
+                id,
+                bounds: item_bounds,
+                text: control.icon.clone(),
+                size: (height * 0.56).max(1.0),
+                color: if hovered {
+                    palette.selected_text
+                } else {
+                    palette.text
+                },
+                align: TextAlign::Center,
+                state,
+            });
+
+            let bindings = if control.state.enabled {
+                control.bindings
+            } else {
+                crate::controls::InputBindings::default()
+            };
+            scene.hits.push(HitRegion {
+                id,
+                bounds: item_bounds,
+                primary: bindings.primary,
+                secondary: bindings.secondary,
+                scroll_up: bindings.scroll_up,
+                scroll_down: bindings.scroll_down,
+            });
+            slot_x += slot_pitch;
+        }
+
+        if show_overflow {
+            let overflow_bounds = Rect::new(
+                slot_x + (slot_width - item_width) * 0.5,
+                bounds.y + (bounds.height - item_height) * 0.5,
+                item_width,
+                item_height,
+            );
+            scene.nodes.push(SceneNode::Text {
+                id: NodeId::DockShelf,
+                bounds: overflow_bounds,
+                text: "…".to_owned(),
+                size: (item_height * 0.65).max(1.0),
+                color: palette.muted_text,
+                align: TextAlign::Center,
+                state: VisualState::default(),
+            });
+        }
+
+        Some(bounds)
+    }
+
+    fn preferred_dock_width(
+        &self,
+        item_count: usize,
+        upstream_overflow: bool,
+        available_height: f32,
+    ) -> f32 {
+        let padding = finite_non_negative(self.config.dock_shelf_padding);
+        let gap = finite_non_negative(self.config.dock_item_gap);
+        let separator_width = finite_non_negative(self.config.dock_separator_width);
+        let usable_height = (available_height - padding * 2.0).max(0.0);
+        let item_height = finite_non_negative(self.config.dock_item_size).min(usable_height);
+        if item_height < 1.0 {
+            return 0.0;
+        }
+        let aspect_ratio = if self.config.dock_item_aspect_ratio.is_finite() {
+            self.config.dock_item_aspect_ratio.max(1.0)
+        } else {
+            1.0
+        };
+        let configured_scale = if self.config.dock_hover_scale.is_finite() {
+            self.config.dock_hover_scale.max(1.0)
+        } else {
+            1.0
+        };
+        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
+        let slot_width = item_height * aspect_ratio * peak_scale;
+        let slot_count =
+            item_count.saturating_add(usize::from(upstream_overflow || item_count == 0));
+        if slot_count == 0 {
+            return 0.0;
+        }
+        padding * 3.0
+            + separator_width
+            + slot_count as f32 * slot_width
+            + slot_count.saturating_sub(1) as f32 * gap
+    }
+
+    fn dock_scale(&self, center_x: f32, peak_scale: f32, pointer: Option<Point>) -> f32 {
+        let Some(pointer) = pointer else {
+            return 1.0;
+        };
+        let radius = finite_non_negative(self.config.dock_influence_radius).max(1.0);
+        let normalized = (1.0 - (pointer.x - center_x).abs() / radius).clamp(0.0, 1.0);
+        // Smoothstep gives the centre a macOS-like soft plateau while keeping
+        // the edge derivative zero, so neighbours settle without a snap.
+        let influence = normalized * normalized * (3.0 - 2.0 * normalized);
+        1.0 + (peak_scale - 1.0) * influence
     }
 
     fn push_pill(
@@ -1292,7 +1709,8 @@ fn finite_non_negative(value: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::model::{
-        AudioState, BatteryState, BrightnessState, MonitorId, SystemDetails, SystemState, TagState,
+        AudioState, BatteryState, BrightnessState, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+        MinimizedWindow, MonitorId, SystemDetails, SystemState, TagState, WindowToken,
     };
     use std::sync::LazyLock;
 
@@ -1407,6 +1825,7 @@ mod tests {
             media: &MEDIA,
             wm_available: true,
             wm_sequence: Some(1),
+            wm_session_id: 7,
             tags,
             active_tag: tags
                 .iter()
@@ -1416,6 +1835,8 @@ mod tests {
             geometry: None,
             layout_symbol: "[]=",
             client_name,
+            minimized_windows: &[],
+            minimized_overflow: false,
             time: "2026-07-14 12:34",
             show_seconds: false,
             layout_selector_open: false,
@@ -1438,6 +1859,40 @@ mod tests {
             PresentationConfig::default(),
             ApproximateTextMeasurer::default(),
         )
+    }
+
+    fn dock_engine() -> LayoutEngine<ApproximateTextMeasurer> {
+        LayoutEngine::new(
+            PresentationConfig {
+                visibility: PresentationVisibility {
+                    client_name: false,
+                    monitor: false,
+                    system: false,
+                    audio: false,
+                    brightness: false,
+                    battery: false,
+                    network: false,
+                    media: false,
+                    theme: false,
+                    screenshot: false,
+                    clock: false,
+                    shell_hub: false,
+                    ..PresentationVisibility::default()
+                },
+                ..PresentationConfig::default()
+            },
+            ApproximateTextMeasurer::default(),
+        )
+    }
+
+    fn minimized(token: u64, title: &str, app_id: &str) -> MinimizedWindow {
+        MinimizedWindow {
+            token: WindowToken(token),
+            monitor: MonitorId(2),
+            title: title.to_owned(),
+            app_id: app_id.to_owned(),
+            flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+        }
     }
 
     #[test]
@@ -1475,6 +1930,166 @@ mod tests {
         assert_eq!(
             scene.action_at(point, PointerAction::ScrollUp),
             Some(UserAction::VolumeUp)
+        );
+    }
+
+    #[test]
+    fn empty_dock_keeps_a_transparent_shelf_target_and_only_shows_separator() {
+        let tags = Vec::new();
+        let scene = dock_engine().build(
+            view(&tags, ""),
+            Size::new(640.0, 38.0),
+            &InteractionState::default(),
+        );
+        let bounds = scene
+            .bounds_for(NodeId::DockShelf)
+            .expect("empty WM shelf remains reportable");
+        assert!(bounds.width > 0.0 && bounds.height == 38.0);
+        assert!(
+            !scene
+                .hits
+                .iter()
+                .any(|hit| matches!(hit.id, NodeId::MinimizedWindow(_)))
+        );
+        assert!(scene.nodes.iter().any(|node| {
+            matches!(
+                node,
+                SceneNode::Polyline {
+                    id: NodeId::DockShelf,
+                    ..
+                }
+            )
+        }));
+        assert!(scene.nodes.iter().any(|node| {
+            matches!(
+                node,
+                SceneNode::RoundedRect {
+                    id: NodeId::DockShelf,
+                    fill,
+                    ..
+                } if fill.alpha == 0.0
+            )
+        }));
+    }
+
+    #[test]
+    fn dock_cards_are_window_shaped_restore_targets_and_overflow_is_explicit() {
+        let tags = Vec::new();
+        let windows = vec![
+            minimized(11, "Terminal", "foot"),
+            minimized(12, "Browser", "firefox"),
+        ];
+        let base = view(&tags, "");
+        let scene = dock_engine().build(
+            BarView {
+                minimized_windows: &windows,
+                minimized_overflow: true,
+                ..base
+            },
+            Size::new(800.0, 38.0),
+            &InteractionState::default(),
+        );
+        let hit = scene
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(11)))
+            .expect("first minimized card");
+        assert!((hit.bounds.width / hit.bounds.height - 1.5).abs() < 0.01);
+        assert_eq!(
+            hit.primary,
+            Some(UserAction::RestoreWindow {
+                window: WindowToken(11),
+                wm_session_id: 7,
+                geometry: crate::DockItemGeometry::default(),
+            })
+        );
+        assert!(scene.nodes.iter().any(|node| {
+            matches!(
+                node,
+                SceneNode::Text {
+                    id: NodeId::DockShelf,
+                    text,
+                    ..
+                } if text == "…"
+            )
+        }));
+    }
+
+    #[test]
+    fn dock_hover_magnifies_neighbours_and_adds_title_without_layout_shift() {
+        let tags = Vec::new();
+        let windows = vec![
+            minimized(21, "Terminal", "foot"),
+            minimized(22, "Browser", "firefox"),
+        ];
+        let dock = dock_engine();
+        let base = view(&tags, "");
+        let dock_view = BarView {
+            minimized_windows: &windows,
+            ..base
+        };
+        let initial = dock.build(
+            dock_view,
+            Size::new(800.0, 38.0),
+            &InteractionState::default(),
+        );
+        let first = initial
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(21)))
+            .unwrap();
+        let second = initial
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(22)))
+            .unwrap();
+        let point = Point::new(
+            first.bounds.x + first.bounds.width * 0.5,
+            first.bounds.y + first.bounds.height * 0.5,
+        );
+        assert!(
+            !initial
+                .nodes
+                .iter()
+                .any(|node| { matches!(node, SceneNode::Text { text, .. } if text == "Terminal") })
+        );
+
+        let mut interaction = InteractionState::default();
+        let entered = interaction.update_hover_transition(&initial, point);
+        assert_eq!(entered.previous, None);
+        assert_eq!(
+            entered.current,
+            Some(NodeId::MinimizedWindow(WindowToken(21)))
+        );
+        assert!(entered.target_changed() && entered.pointer_changed);
+        let same_target =
+            interaction.update_hover_transition(&initial, Point::new(point.x + 1.0, point.y));
+        assert!(!same_target.target_changed());
+        assert!(same_target.pointer_changed && same_target.needs_redraw());
+
+        let hovered = dock.build(dock_view, Size::new(800.0, 38.0), &interaction);
+        let hovered_first = hovered
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(21)))
+            .unwrap();
+        let hovered_second = hovered
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(22)))
+            .unwrap();
+        assert!(hovered_first.bounds.width > first.bounds.width * 1.45);
+        assert!(hovered_second.bounds.width > second.bounds.width);
+        assert!(
+            hovered
+                .nodes
+                .iter()
+                .any(|node| { matches!(node, SceneNode::Text { text, .. } if text == "Terminal") })
+        );
+        assert_eq!(
+            hovered.bounds_for(NodeId::DockShelf),
+            initial.bounds_for(NodeId::DockShelf),
+            "fixed slots keep the shelf and adjacent layout stationary"
         );
     }
 
@@ -1627,6 +2242,7 @@ mod tests {
                 screenshot: false,
                 clock: false,
                 shell_hub: false,
+                ..PresentationVisibility::default()
             },
             ..PresentationConfig::default()
         };

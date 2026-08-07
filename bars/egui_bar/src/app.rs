@@ -17,8 +17,9 @@ use xbar_core::presentation::{
     InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, Scene, Size,
 };
 use xbar_core::{
-    BarEffect, BarPlacement, BarRuntime, DockWindowSpec, ModelConfig, MonitorGeometry,
-    PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate, TransportRecoveryConfig, UserAction,
+    BarEffect, BarPlacement, BarRuntime, DockReporter, DockReporterInput, DockWindowSpec,
+    ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate,
+    TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -41,6 +42,7 @@ pub struct EguiBarApp {
     /// actually gave us so the scene always fills it.
     configured_height: f32,
     interaction: InteractionState,
+    pressed_pointer_button: Option<egui::PointerButton>,
     scene: Scene,
     style: SceneStyle,
     /// The window's clear colour when it is opaque: the solid background the
@@ -54,6 +56,7 @@ pub struct EguiBarApp {
     window: Option<Window>,
     active_monitor_geometry: Option<MonitorGeometry>,
     last_pixels_per_point: f32,
+    dock_reporter: DockReporter,
 }
 
 impl EguiBarApp {
@@ -101,6 +104,7 @@ impl EguiBarApp {
             presentation,
             configured_height,
             interaction: InteractionState::default(),
+            pressed_pointer_button: None,
             scene: Scene {
                 viewport: Size::new(0.0, 0.0),
                 clip: xbar_core::presentation::Rect::new(0.0, 0.0, 0.0, 0.0),
@@ -128,6 +132,7 @@ impl EguiBarApp {
             window,
             active_monitor_geometry: None,
             last_pixels_per_point: cc.egui_ctx.pixels_per_point(),
+            dock_reporter: DockReporter::new(),
         })
     }
 
@@ -178,13 +183,14 @@ impl EguiBarApp {
         });
         let logical = pointer.map(|pos| Point::new(pos.x - origin.x, pos.y - origin.y));
 
+        let mut interaction = self.interaction;
         let mut actions = Vec::new();
         for event in ctx.input(|input| input.events.clone()) {
             match event {
                 egui::Event::PointerButton {
                     pos,
                     button,
-                    pressed: true,
+                    pressed,
                     ..
                 } => {
                     let input = match button {
@@ -194,35 +200,95 @@ impl EguiBarApp {
                     };
                     if let Some(input) = input {
                         let point = Point::new(pos.x - origin.x, pos.y - origin.y);
-                        actions.extend(self.scene.action_at(point, input));
+                        if pressed {
+                            interaction.press(&self.scene, point);
+                            self.pressed_pointer_button = Some(button);
+                        } else if self.pressed_pointer_button != Some(button) {
+                            interaction.cancel_press();
+                            self.pressed_pointer_button = None;
+                        } else {
+                            self.pressed_pointer_button = None;
+                            if let Some(action) = interaction.release(&self.scene, point, input) {
+                                actions.push(action);
+                            }
+                        }
                     }
                 }
                 egui::Event::MouseWheel { delta, .. } => {
-                    if let (Some(point), Some(input)) =
-                        (logical, PointerAction::from_vertical_delta(f64::from(delta.y)))
-                    {
+                    if let (Some(point), Some(input)) = (
+                        logical,
+                        PointerAction::from_vertical_delta(f64::from(delta.y)),
+                    ) {
                         actions.extend(self.scene.action_at(point, input));
                     }
                 }
                 _ => {}
             }
         }
+
+        let changed = match logical {
+            Some(point) => interaction.update_hover(&self.scene, point),
+            None => {
+                self.pressed_pointer_button = None;
+                interaction.clear_hover()
+            }
+        };
+        self.interaction = interaction;
         for action in actions {
             self.dispatch(ctx, action);
         }
-
-        let mut interaction = self.interaction;
-        let changed = match logical {
-            Some(point) => interaction.update_hover(&self.scene, point),
-            None => interaction.clear_hover(),
-        };
-        self.interaction = interaction;
         changed
     }
 
     fn dispatch(&mut self, ctx: &egui::Context, action: UserAction) {
+        let action = match action {
+            UserAction::RestoreWindow {
+                window,
+                wm_session_id,
+                geometry,
+            } if geometry.is_empty() => UserAction::RestoreWindow {
+                window,
+                wm_session_id,
+                geometry: self.dock_reporter.geometry_for(window),
+            },
+            action => action,
+        };
         let update = self.runtime.dispatch(action);
         self.apply_runtime_update(ctx, update);
+    }
+
+    fn synchronize_dock(&mut self) {
+        let view = self.runtime.view();
+        self.dock_reporter.synchronize(DockReporterInput {
+            wm_available: view.wm_available,
+            wm_session_id: view.wm_session_id,
+            transport_generation: self.runtime.transport_generation(),
+            monitor_geometry: view.geometry,
+            minimized_windows: view.minimized_windows,
+            scene: &self.scene,
+            presentation: &self.presentation,
+            hovered: self.interaction.hovered(),
+            scale_factor: f64::from(self.last_pixels_per_point),
+        });
+    }
+
+    fn flush_dock_commands(&mut self, ctx: &egui::Context) {
+        let now = std::time::Instant::now();
+        for action in self.dock_reporter.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            self.apply_runtime_update(ctx, update);
+            if accepted {
+                let _ = self.dock_reporter.acknowledge(action, now);
+            } else {
+                if self.runtime.view().wm_available {
+                    self.dock_reporter.record_failure(now);
+                } else {
+                    self.dock_reporter.reset();
+                }
+                break;
+            }
+        }
     }
 
     fn apply_runtime_update(&mut self, ctx: &egui::Context, update: RuntimeUpdate) {
@@ -272,7 +338,6 @@ impl EguiBarApp {
             }
         }
     }
-
 }
 
 fn dock_spec(x: i32, y: i32, width: u32, height: f32) -> DockWindowSpec {
@@ -310,9 +375,12 @@ impl eframe::App for EguiBarApp {
         self.presentation.bar_height = size.height;
 
         self.scene = self.build_scene(&ctx, size);
+        self.synchronize_dock();
         if self.handle_pointer(&ctx, viewport.min) {
             self.scene = self.build_scene(&ctx, size);
+            self.synchronize_dock();
         }
+        self.flush_dock_commands(&ctx);
 
         // Paint straight onto the background layer: the scene owns every pixel
         // of the bar, so a panel frame would only add margins the layout

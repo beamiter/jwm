@@ -1,11 +1,23 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::Rc,
+};
 
 use gloo_console::error;
+use gloo_timers::callback::{Interval, Timeout};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::*;
 use web_sys::{MouseEvent, WheelEvent};
+
+thread_local! {
+    static PREVIEW_RENEWALS: RefCell<HashMap<u64, Interval>> = RefCell::new(HashMap::new());
+    static BAR_ORIGIN: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+    static WM_SESSION_ID: Cell<u64> = const { Cell::new(0) };
+    static DOCK_GEOMETRY_RETRY: RefCell<Option<Timeout>> = const { RefCell::new(None) };
+}
 
 #[wasm_bindgen]
 extern "C" {
@@ -25,6 +37,9 @@ extern "C" {
 
     #[wasm_bindgen(method, js_name = scaleFactor, catch)]
     async fn scale_factor(this: &TauriWindow) -> Result<JsValue, JsValue>;
+
+    #[wasm_bindgen(method, js_name = innerPosition, catch)]
+    async fn inner_position(this: &TauriWindow) -> Result<JsValue, JsValue>;
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
@@ -63,7 +78,36 @@ struct BatteryState {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+struct MinimizedWindow {
+    token: u64,
+    monitor: i32,
+    title: String,
+    app_id: String,
+    #[serde(default)]
+    flags: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct DockGeometry {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Deserialize)]
+struct PhysicalPosition {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 struct BarSnapshot {
+    wm_available: bool,
+    #[serde(default)]
+    wm_session_id: u64,
+    #[serde(default)]
+    geometry: Option<DockGeometry>,
     tags: Vec<TagState>,
     monitor: i32,
     layout_symbol: String,
@@ -75,6 +119,10 @@ struct BarSnapshot {
     system_details: SystemDetails,
     brightness: BrightnessState,
     battery: BatteryState,
+    #[serde(default)]
+    minimized_windows: Vec<MinimizedWindow>,
+    #[serde(default)]
+    minimized_overflow: bool,
 }
 
 #[derive(Deserialize)]
@@ -91,15 +139,47 @@ struct EventPayload<T> {
 #[derive(Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum ActionRequest {
-    ViewTagOn { tag_index: usize, monitor_id: i32 },
+    ViewTagOn {
+        tag_index: usize,
+        monitor_id: i32,
+    },
     ToggleLayoutSelector,
-    SetLayoutOn { layout_id: u32, monitor_id: i32 },
+    SetLayoutOn {
+        layout_id: u32,
+        monitor_id: i32,
+    },
     ToggleSeconds,
     ToggleMute,
-    AdjustVolume { delta: i32 },
-    AdjustBrightness { delta: i32 },
+    AdjustVolume {
+        delta: i32,
+    },
+    AdjustBrightness {
+        delta: i32,
+    },
     Screenshot,
-    OpenShellHub { route: ShellRoute },
+    RestoreWindow {
+        wm_session_id: u64,
+        window_id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        geometry: Option<DockGeometry>,
+    },
+    PreviewWindow {
+        wm_session_id: u64,
+        window_id: u64,
+        visible: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        geometry: Option<DockGeometry>,
+    },
+    SetDockGeometry {
+        wm_session_id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        window_id: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        geometry: Option<DockGeometry>,
+    },
+    OpenShellHub {
+        route: ShellRoute,
+    },
 }
 
 /// Pages of JWM's own shell surface. The bar renders none of them: each entry
@@ -213,14 +293,294 @@ fn volume_icon(device: Option<&AudioDeviceInfo>) -> &'static str {
     }
 }
 
+fn minimized_label(window: &MinimizedWindow) -> String {
+    let title = window.title.trim();
+    if !title.is_empty() {
+        title.to_owned()
+    } else {
+        let app_id = window.app_id.trim();
+        if app_id.is_empty() {
+            "Minimized window".to_owned()
+        } else {
+            app_id.to_owned()
+        }
+    }
+}
+
+fn minimized_initial(window: &MinimizedWindow) -> String {
+    window
+        .app_id
+        .trim()
+        .chars()
+        .next()
+        .or_else(|| window.title.trim().chars().next())
+        .unwrap_or('•')
+        .to_uppercase()
+        .collect()
+}
+
+async fn window_metrics() -> Option<(PhysicalPosition, f64)> {
+    let window = get_current_window();
+    let scale = window.scale_factor().await.ok()?.as_f64()?;
+    if let Some((x, y)) = BAR_ORIGIN.with(Cell::get) {
+        return Some((PhysicalPosition { x, y }, scale));
+    }
+    let origin = window.inner_position().await.ok()?;
+    let origin = serde_wasm_bindgen::from_value(origin).ok()?;
+    Some((origin, scale))
+}
+
+fn project_dock_geometry(
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+    origin: &PhysicalPosition,
+    scale: f64,
+) -> DockGeometry {
+    let x = f64::from(origin.x) + left * scale;
+    let y = f64::from(origin.y) + top * scale;
+    let width = (width * scale).round().clamp(0.0, f64::from(u32::MAX));
+    let height = (height * scale).round().clamp(0.0, f64::from(u32::MAX));
+    DockGeometry {
+        x: x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+        y: y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
+        width: width as u32,
+        height: height as u32,
+    }
+}
+
+fn physical_geometry(
+    element: &web_sys::Element,
+    origin: &PhysicalPosition,
+    scale: f64,
+) -> DockGeometry {
+    let rect = element.get_bounding_client_rect();
+    project_dock_geometry(
+        rect.left(),
+        rect.top(),
+        rect.width(),
+        rect.height(),
+        origin,
+        scale,
+    )
+}
+
+fn resting_item_geometry(
+    item: &web_sys::HtmlElement,
+    dock: &web_sys::Element,
+    origin: &PhysicalPosition,
+    scale: f64,
+) -> DockGeometry {
+    let dock_rect = dock.get_bounding_client_rect();
+    project_dock_geometry(
+        dock_rect.left() + f64::from(item.offset_left()),
+        dock_rect.top() + f64::from(item.offset_top()),
+        f64::from(item.offset_width()),
+        f64::from(item.offset_height()),
+        origin,
+        scale,
+    )
+}
+
+fn event_element(event: &MouseEvent) -> Option<web_sys::Element> {
+    event.current_target()?.dyn_into().ok()
+}
+
+fn restore_minimized(window_id: u64, event: MouseEvent) {
+    let Some(element) = event_element(&event) else {
+        return;
+    };
+    let wm_session_id = WM_SESSION_ID.with(Cell::get);
+    wasm_bindgen_futures::spawn_local(async move {
+        let geometry = window_metrics()
+            .await
+            .map(|(origin, scale)| physical_geometry(&element, &origin, scale));
+        dispatch_action(ActionRequest::RestoreWindow {
+            wm_session_id,
+            window_id,
+            geometry,
+        });
+    });
+}
+
+fn preview_element(window_id: u64, visible: bool, element: web_sys::Element) {
+    let wm_session_id = WM_SESSION_ID.with(Cell::get);
+    wasm_bindgen_futures::spawn_local(async move {
+        let geometry = window_metrics()
+            .await
+            .map(|(origin, scale)| physical_geometry(&element, &origin, scale));
+        if visible && !element.matches(":hover").unwrap_or(false) {
+            return;
+        }
+        dispatch_action(ActionRequest::PreviewWindow {
+            wm_session_id,
+            window_id,
+            visible,
+            geometry,
+        });
+    });
+}
+
+fn begin_preview(window_id: u64, event: MouseEvent) {
+    let Some(element) = event_element(&event) else {
+        return;
+    };
+    PREVIEW_RENEWALS.with(|renewals| {
+        renewals.borrow_mut().remove(&window_id);
+    });
+    preview_element(window_id, true, element.clone());
+    let renewal_element = element;
+    let renewal = Interval::new(2_000, move || {
+        if renewal_element.matches(":hover").unwrap_or(false) {
+            preview_element(window_id, true, renewal_element.clone());
+        }
+    });
+    PREVIEW_RENEWALS.with(|renewals| {
+        renewals.borrow_mut().insert(window_id, renewal);
+    });
+}
+
+fn end_preview(window_id: u64, event: MouseEvent) {
+    PREVIEW_RENEWALS.with(|renewals| {
+        renewals.borrow_mut().remove(&window_id);
+    });
+    if let Some(element) = event_element(&event) {
+        preview_element(window_id, false, element);
+    }
+}
+
+fn dock_retry_allowed(expected_session: u64, current_session: u64, dock_connected: bool) -> bool {
+    expected_session != 0 && expected_session == current_session && dock_connected
+}
+
+fn cancel_dock_geometry_retry() {
+    DOCK_GEOMETRY_RETRY.with(|retry| {
+        retry.borrow_mut().take();
+    });
+}
+
+fn schedule_dock_geometry_retry(wm_session_id: u64) {
+    let connected = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.query_selector(".minimized-dock").ok().flatten())
+        .is_some_and(|dock| dock.is_connected());
+    if !dock_retry_allowed(wm_session_id, WM_SESSION_ID.with(Cell::get), connected) {
+        return;
+    }
+    DOCK_GEOMETRY_RETRY.with(|retry| {
+        let mut retry = retry.borrow_mut();
+        if retry.is_some() {
+            return;
+        }
+        *retry = Some(Timeout::new(100, move || {
+            cancel_dock_geometry_retry();
+            let connected = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.query_selector(".minimized-dock").ok().flatten())
+                .is_some_and(|dock| dock.is_connected());
+            if dock_retry_allowed(wm_session_id, WM_SESSION_ID.with(Cell::get), connected) {
+                start_dock_geometry_publish(wm_session_id, false);
+            }
+        }));
+    });
+}
+
+fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if defer_one_turn {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(dock) = document.query_selector(".minimized-dock").ok().flatten() else {
+            return;
+        };
+        let Some((origin, scale)) = window_metrics().await else {
+            schedule_dock_geometry_retry(wm_session_id);
+            return;
+        };
+        if !dock_retry_allowed(
+            wm_session_id,
+            WM_SESSION_ID.with(Cell::get),
+            dock.is_connected(),
+        ) {
+            return;
+        }
+        if let Err(error) = dispatch_action_result(ActionRequest::SetDockGeometry {
+            wm_session_id,
+            window_id: None,
+            geometry: Some(physical_geometry(&dock, &origin, scale)),
+        })
+        .await
+        {
+            error!(format!(
+                "failed to publish minimized Dock geometry; retrying: {error:?}"
+            ));
+            schedule_dock_geometry_retry(wm_session_id);
+            return;
+        }
+        let Ok(items) = dock.query_selector_all("[data-window-id]") else {
+            return;
+        };
+        for index in 0..items.length() {
+            let item = items
+                .item(index)
+                .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok());
+            let Some(item) = item else {
+                continue;
+            };
+            let Some(window_id) = item
+                .get_attribute("data-window-id")
+                .and_then(|value| value.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if let Err(error) = dispatch_action_result(ActionRequest::SetDockGeometry {
+                wm_session_id,
+                window_id: Some(window_id),
+                geometry: Some(resting_item_geometry(&item, &dock, &origin, scale)),
+            })
+            .await
+            {
+                error!(format!(
+                    "failed to publish minimized Dock item geometry; retrying: {error:?}"
+                ));
+                schedule_dock_geometry_retry(wm_session_id);
+                return;
+            }
+        }
+    });
+}
+
+fn publish_dock_geometry_later() {
+    cancel_dock_geometry_retry();
+    start_dock_geometry_publish(WM_SESSION_ID.with(Cell::get), true);
+}
+
+fn install_geometry_resize_listener() {
+    let callback = Closure::<dyn FnMut()>::new(publish_dock_geometry_later);
+    if let Some(window) = web_sys::window() {
+        let _ =
+            window.add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref());
+        callback.forget();
+    }
+}
+
 fn dispatch_args(request: ActionRequest) -> JsValue {
     serde_wasm_bindgen::to_value(&DispatchArgs { request }).unwrap_or(JsValue::NULL)
 }
 
+async fn dispatch_action_result(request: ActionRequest) -> Result<(), JsValue> {
+    tauri_invoke("dispatch_action", dispatch_args(request))
+        .await
+        .map(|_| ())
+}
+
 fn dispatch_action(request: ActionRequest) {
-    let args = dispatch_args(request);
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(error) = tauri_invoke("dispatch_action", args).await {
+        if let Err(error) = dispatch_action_result(request).await {
             error!(format!("dispatch_action failed: {error:?}"));
         }
     });
@@ -236,6 +596,8 @@ fn App() -> impl IntoView {
     Effect::new(move |_| {
         let latest_revision = Rc::new(Cell::new(None::<u64>));
         let callback_revision = Rc::clone(&latest_revision);
+        let dock_signature = Rc::new(RefCell::new(String::new()));
+        let callback_dock_signature = Rc::clone(&dock_signature);
         let state_callback = Closure::<dyn FnMut(JsValue)>::new(move |event: JsValue| {
             match serde_wasm_bindgen::from_value::<EventPayload<FrontendEnvelope>>(event) {
                 Ok(event) => {
@@ -247,7 +609,53 @@ fn App() -> impl IntoView {
                         return;
                     }
                     callback_revision.set(Some(envelope.revision));
+                    let session_changed = WM_SESSION_ID.with(|session| {
+                        let changed = session.get() != envelope.snapshot.wm_session_id;
+                        session.set(envelope.snapshot.wm_session_id);
+                        changed
+                    });
+                    if session_changed {
+                        cancel_dock_geometry_retry();
+                        PREVIEW_RENEWALS.with(|renewals| renewals.borrow_mut().clear());
+                    }
+                    BAR_ORIGIN.with(|origin| {
+                        origin.set(
+                            envelope
+                                .snapshot
+                                .geometry
+                                .map(|geometry| (geometry.x, geometry.y)),
+                        );
+                    });
+                    let signature = format!(
+                        "{}|{:?}|{}|{}",
+                        envelope.snapshot.wm_session_id,
+                        envelope.snapshot.geometry,
+                        envelope
+                            .snapshot
+                            .minimized_windows
+                            .iter()
+                            .map(|window| window.token.to_string())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        envelope.snapshot.minimized_overflow,
+                    );
+                    let geometry_changed = *callback_dock_signature.borrow() != signature;
+                    if geometry_changed {
+                        *callback_dock_signature.borrow_mut() = signature;
+                    }
+                    PREVIEW_RENEWALS.with(|renewals| {
+                        renewals.borrow_mut().retain(|window_id, _| {
+                            envelope
+                                .snapshot
+                                .minimized_windows
+                                .iter()
+                                .any(|window| window.token == *window_id)
+                        });
+                    });
                     set_snapshot.set(Some(envelope.snapshot));
+                    if geometry_changed {
+                        publish_dock_geometry_later();
+                    }
                 }
                 Err(error) => error!(format!("failed to decode xbar-state: {error}")),
             }
@@ -256,6 +664,7 @@ fn App() -> impl IntoView {
         wasm_bindgen_futures::spawn_local(async move {
             let registration = async {
                 tauri_listen("xbar-state", &state_callback).await?;
+                install_geometry_resize_listener();
 
                 let window = get_current_window();
                 match window.scale_factor().await {
@@ -296,6 +705,7 @@ fn App() -> impl IntoView {
         >
             {move || {
                 let current = snapshot.get().expect("snapshot is present inside Show");
+                let wm_available = current.wm_available;
                 let monitor = current.monitor;
                 let tags = current.tags;
                 let layout_symbol = current.layout_symbol;
@@ -306,6 +716,15 @@ fn App() -> impl IntoView {
                 let brightness = current.brightness.percent;
                 let time = current.time;
                 let show_seconds = current.show_seconds;
+                let minimized_windows = current.minimized_windows;
+                let minimized_overflow = current.minimized_overflow;
+                let show_minimized_dock =
+                    !minimized_windows.is_empty() || minimized_overflow;
+                let minimized_dock_class = if show_minimized_dock {
+                    "minimized-dock"
+                } else {
+                    "minimized-dock is-empty"
+                };
                 let monitor_title = if current.client_name.is_empty() {
                     "显示器".to_owned()
                 } else {
@@ -442,6 +861,62 @@ fn App() -> impl IntoView {
                         <div class="spacer"></div>
 
                         <div class="right-info-container">
+                                <div class=minimized_dock_class aria-label="Minimized windows">
+                                    <span class="minimized-divider" aria-hidden="true"></span>
+                                    {minimized_windows
+                                        .into_iter()
+                                        .map(|window| {
+                                            let window_id = window.token;
+                                            let label = minimized_label(&window);
+                                            let title = format!("{label} — click to restore");
+                                            let aria_label = format!("Restore {label}");
+                                            let initial = minimized_initial(&window);
+                                            let urgent = window.flags & 2 != 0;
+                                            let preview_available = window.flags & 1 != 0;
+                                            let class = if urgent {
+                                                "minimized-item is-urgent"
+                                            } else {
+                                                "minimized-item"
+                                            };
+                                            view! {
+                                                <button
+                                                    class=class
+                                                    data-window-id=window_id.to_string()
+                                                    disabled=!wm_available
+                                                    title=title
+                                                    aria-label=aria_label
+                                                    on:click=move |event: MouseEvent| {
+                                                        restore_minimized(window_id, event)
+                                                    }
+                                                    on:mouseenter=move |event: MouseEvent| {
+                                                        if preview_available {
+                                                            begin_preview(window_id, event);
+                                                        }
+                                                    }
+                                                    on:mouseleave=move |event: MouseEvent| {
+                                                        if preview_available {
+                                                            end_preview(window_id, event);
+                                                        }
+                                                    }
+                                                >
+                                                    <span class="minimized-thumbnail" aria-hidden="true">
+                                                        <span class="minimized-traffic-lights"></span>
+                                                        <span class="minimized-initial">{initial}</span>
+                                                    </span>
+                                                    {urgent.then(|| view! {
+                                                        <span class="minimized-urgent-dot"></span>
+                                                    })}
+                                                </button>
+                                            }
+                                        })
+                                        .collect_view()}
+                                    {minimized_overflow.then(|| view! {
+                                        <span
+                                            class="minimized-overflow"
+                                            title="More minimized windows"
+                                        >"…"</span>
+                                    })}
+                                </div>
                             <div class="system-info-container">
                                 <div class=cpu_class title="CPU 平均使用率">
                                     <span class="nf-icon">{ICON_CPU}</span>
@@ -579,4 +1054,37 @@ fn main() {
         App,
     )
     .forget();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dock_geometry_projects_negative_origin_at_two_x_scale() {
+        assert_eq!(
+            project_dock_geometry(
+                10.0,
+                5.0,
+                30.0,
+                20.0,
+                &PhysicalPosition { x: -300, y: 40 },
+                2.0,
+            ),
+            DockGeometry {
+                x: -280,
+                y: 50,
+                width: 60,
+                height: 40,
+            },
+        );
+    }
+
+    #[test]
+    fn dock_retry_is_bound_to_the_live_session_and_dom() {
+        assert!(dock_retry_allowed(41, 41, true));
+        assert!(!dock_retry_allowed(41, 42, true));
+        assert!(!dock_retry_allowed(41, 41, false));
+        assert!(!dock_retry_allowed(0, 0, true));
+    }
 }

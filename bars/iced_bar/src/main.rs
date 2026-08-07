@@ -2,13 +2,14 @@ use iced::futures::{SinkExt, Stream};
 use iced::mouse;
 use iced::time;
 use iced::widget::container;
-use iced::widget::{Space, button, rich_text};
+use iced::widget::{Space, button, rich_text, tooltip};
 use iced::widget::{mouse_area, span};
 use iced::{Font, stream, theme};
 
 use iced::window::Id;
 use iced::{
-    Background, Border, Color, Element, Length, Size, Subscription, Task, Theme, border, color,
+    Background, Border, Color, Element, Length, Padding, Size, Subscription, Task, Theme, border,
+    color,
     widget::{Column, Row, text},
     window,
 };
@@ -20,6 +21,7 @@ use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::sync::{Once, OnceLock};
 use std::time::Duration;
+use std::time::Instant;
 
 use raw_window_handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
@@ -35,8 +37,9 @@ use xbar_core::config::BarConfig;
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule,
-    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
+    LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate, ShellRoute,
+    TagId, TransportRecoveryConfig, UserAction, WindowToken,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -74,7 +77,6 @@ const ICON_M0: &str = "\u{F02DA}";
 const ICON_M1: &str = "\u{F02DB}";
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-const WINDOW_METRICS_READY: u8 = 0b111;
 
 // ---------------- Compositor coupling ----------------
 //
@@ -314,6 +316,16 @@ enum Message {
 
     // Brightness
     BrightnessAdjust(i32),
+
+    DockHover {
+        token: WindowToken,
+        wm_session_id: u64,
+        hovered: bool,
+    },
+    DockRestore {
+        token: WindowToken,
+        wm_session_id: u64,
+    },
 }
 
 struct IcedBar {
@@ -330,6 +342,7 @@ struct IcedBar {
     is_hovered: bool,
     mouse_position: Option<iced::Point>,
     background: Color,
+    dock: DockBridge,
 }
 
 impl Default for IcedBar {
@@ -404,6 +417,7 @@ impl IcedBar {
             is_hovered: false,
             mouse_position: None,
             background: Color::from_rgba8(r, g, b, alpha),
+            dock: DockBridge::new(),
         }
     }
 
@@ -414,7 +428,7 @@ impl IcedBar {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
+        let task = match message {
             Message::TabSelected(tab_index) => {
                 info!("Tab selected: {}", tab_index);
                 TagId::new(tab_index)
@@ -479,6 +493,27 @@ impl IcedBar {
 
             Message::BrightnessAdjust(delta) => self.dispatch(UserAction::AdjustBrightness(delta)),
 
+            Message::DockHover {
+                token,
+                wm_session_id,
+                hovered,
+            } => {
+                if hovered {
+                    let _ = self.dock.enter(token, wm_session_id);
+                } else {
+                    let _ = self.dock.leave(token, wm_session_id);
+                }
+                Task::none()
+            }
+
+            Message::DockRestore {
+                token,
+                wm_session_id,
+            } => {
+                let _ = self.dock.request_restore(token, wm_session_id);
+                Task::none()
+            }
+
             Message::GetScaleFactor(scale_factor) => {
                 info!("scale_factor: {}", scale_factor);
                 self.scale_factor = scale_factor;
@@ -522,7 +557,33 @@ impl IcedBar {
                 let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update)
             }
+        };
+        Task::batch([task, self.service_dock()])
+    }
+
+    fn service_dock(&mut self) -> Task<Message> {
+        let snapshot = self.runtime.snapshot();
+        self.dock.synchronize(
+            &snapshot,
+            self.runtime.transport_generation(),
+            f64::from(self.scale_factor),
+            40.0,
+            4.0,
+        );
+        let now = Instant::now();
+        let mut tasks = Vec::new();
+        for action in self.dock.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            tasks.push(self.handle_runtime_update(update));
+            if accepted {
+                self.dock.acknowledge(action, now);
+            } else {
+                self.dock.record_failure(now);
+                break;
+            }
         }
+        Task::batch(tasks)
     }
 
     fn dispatch(&mut self, action: UserAction) -> Task<Message> {
@@ -596,12 +657,11 @@ impl IcedBar {
             Subscription::run(Self::prepare_worker)
         } else {
             let window_events = window::events().map(|(id, event)| Message::WindowEvent(id, event));
-            if self.window_metrics_received == WINDOW_METRICS_READY {
-                let shared = time::every(TRANSPORT_POLL_INTERVAL).map(|_| Message::TransportPoll);
-                Subscription::batch(vec![shared, window_events])
-            } else {
-                window_events
-            }
+            // Keep this wake active even while initial size/position/scale
+            // queries are in flight. Dock geometry and preview retries must
+            // never silently fall back to the one-second provider tick.
+            let shared = time::every(TRANSPORT_POLL_INTERVAL).map(|_| Message::TransportPoll);
+            Subscription::batch(vec![shared, window_events])
         }
     }
 
@@ -1045,6 +1105,100 @@ impl IcedBar {
         row.into()
     }
 
+    fn minimized_dock(&self) -> Element<'_, Message> {
+        let session = self.runtime.view().wm_session_id;
+        let mut items = Row::new().spacing(4).align_y(iced::Alignment::Center);
+        for minimized in self.dock.visible_windows() {
+            let token = minimized.token;
+            let magnification = self.dock.scale_for(token);
+            let urgent = minimized.urgent();
+            let title = if minimized.title.trim().is_empty() {
+                minimized.app_id.clone()
+            } else {
+                minimized.title.clone()
+            };
+            let fill = if urgent {
+                Color::from_rgba(0.85, 0.20, 0.30, 0.96)
+            } else {
+                Color::from_rgba(0.28, 0.47, 0.79, 0.96)
+            };
+            let card = container(
+                text(minimized.initial().to_string())
+                    .size(11)
+                    .color(Color::WHITE),
+            )
+            .width(DOCK_ITEM_WIDTH * magnification)
+            .height(DOCK_ITEM_HEIGHT * magnification)
+            .align_x(iced::Alignment::Center)
+            .align_y(iced::Alignment::Center)
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(Background::Color(fill)),
+                border: Border {
+                    color: if urgent {
+                        Color::from_rgb(1.0, 0.82, 0.84)
+                    } else {
+                        Color::from_rgba(1.0, 1.0, 1.0, 0.42)
+                    },
+                    width: 1.0,
+                    radius: border::radius(5.0),
+                },
+                ..Default::default()
+            });
+            let titled = tooltip(
+                card,
+                container(text(title).size(12)).padding([4, 8]),
+                tooltip::Position::Top,
+            );
+            let interactive = mouse_area(titled)
+                .on_enter(Message::DockHover {
+                    token,
+                    wm_session_id: session,
+                    hovered: true,
+                })
+                .on_exit(Message::DockHover {
+                    token,
+                    wm_session_id: session,
+                    hovered: false,
+                })
+                .on_press(Message::DockRestore {
+                    token,
+                    wm_session_id: session,
+                });
+            items = items.push(
+                container(interactive)
+                    .width(DOCK_SLOT_WIDTH)
+                    .height(32)
+                    .align_x(iced::Alignment::Center)
+                    .align_y(iced::Alignment::Center),
+            );
+        }
+        if self.dock.overflow() || self.dock.collapsed() {
+            items = items.push(
+                container(text("+").size(12).color(Color::WHITE.scale_alpha(0.72)))
+                    .width(12)
+                    .align_x(iced::Alignment::Center),
+            );
+        }
+        container(items)
+            .width(self.dock.shelf_width())
+            .height(32)
+            .padding(Padding {
+                top: 0.0,
+                right: 2.0,
+                bottom: 0.0,
+                left: 5.0,
+            })
+            .style(|_theme: &Theme| container::Style {
+                border: Border {
+                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.20),
+                    width: 0.0,
+                    radius: border::radius(0.0),
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn view_work_space(&self) -> Element<'_, Message> {
         // Workspace tag buttons
         let mut tags_row = Row::new().spacing(Self::TAB_SPACING * 0.5);
@@ -1080,6 +1234,7 @@ impl IcedBar {
         let monitor_pill = self.monitor_pill(monitor_num);
 
         let scale_pill = self.scale_pill(Some(self.scale_factor));
+        let minimized_dock = self.minimized_dock();
 
         Row::new()
             .push(tags_row)
@@ -1107,6 +1262,8 @@ impl IcedBar {
             .push(monitor_pill)
             .push(Space::new().width(6).height(Length::Fill))
             .push(scale_pill)
+            .push(Space::new().width(4).height(Length::Fill))
+            .push(minimized_dock)
             .align_y(iced::Alignment::Center)
             .into()
     }

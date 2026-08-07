@@ -479,10 +479,9 @@ macro_rules! delegate_compositor_capabilities {
                 let frame_extents = self.property_ops.get_gtk_frame_extents(window);
 
                 if let Some(compositor) = self.compositor.as_mut() {
-                    // add_window cancels and frees a detached genie copy for this
-                    // XID, or cancels an in-flight fallback fade. update_geometry
-                    // also refreshes an already tracked window when the effect was
-                    // disabled.
+                    // Reimport the live texture before starting the reverse genie.
+                    // update_geometry also refreshes an already tracked window when
+                    // the effect was disabled.
                     compositor
                         .add_window(x11_window, geometry.x, geometry.y, geometry.w, geometry.h);
                     compositor.update_geometry(
@@ -501,6 +500,31 @@ macro_rules! delegate_compositor_capabilities {
                     if let Some([left, right, top, bottom]) = frame_extents {
                         compositor.set_frame_extents(x11_window, left, right, top, bottom);
                     }
+                }
+            }
+
+            fn compositor_set_window_dock_geometry(
+                &mut self,
+                window: crate::backend::common_define::WindowId,
+                target: Option<crate::backend::api::CompositorRect>,
+            ) {
+                if let (Some(compositor), Ok(x11_window)) =
+                    (self.compositor.as_mut(), self.ids.x11(window))
+                {
+                    compositor.set_window_dock_geometry(x11_window, target);
+                }
+            }
+
+            fn compositor_set_minimized_window_preview(
+                &mut self,
+                window: Option<crate::backend::common_define::WindowId>,
+                anchor: Option<crate::backend::api::CompositorRect>,
+            ) {
+                let request = window.zip(anchor).and_then(|(window, anchor)| {
+                    self.ids.x11(window).ok().map(|window| (window, anchor))
+                });
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_minimized_window_preview(request);
                 }
             }
 

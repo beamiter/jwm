@@ -7,12 +7,15 @@ use anyhow::Result;
 use cairo::{Context, Extend, Filter, ImageSurface, LineCap, LineJoin, Operator};
 use pango::prelude::FontMapExt as _;
 use pango::{FontDescription, Layout};
+use std::time::Instant;
 
 use crate::presentation::{
     Damage, InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene, SceneNode,
     Size, Stroke, TextAlign, TextMeasurer,
 };
-use crate::{BarModel, BarRuntime, BarSnapshot, RuntimeUpdate};
+use crate::{
+    BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate, UserAction,
+};
 
 /// Renders a [`Scene`] into an existing Cairo context.
 #[derive(Debug, Clone)]
@@ -349,6 +352,8 @@ pub struct CairoBar {
     scene: Scene,
     renderer: CairoRenderer,
     last_damage: Damage,
+    pending_runtime: RuntimeUpdate,
+    dock_reporter: DockReporter,
 }
 
 impl CairoBar {
@@ -367,6 +372,8 @@ impl CairoBar {
             scene: empty_scene(),
             renderer: CairoRenderer::new(font),
             last_damage: Damage::default(),
+            pending_runtime: RuntimeUpdate::default(),
+            dock_reporter: DockReporter::new(),
         }
     }
 
@@ -397,6 +404,22 @@ impl CairoBar {
         &self.scene
     }
 
+    /// Toolkit-neutral Dock delivery state owned by this presenter.
+    ///
+    /// Native adapters that do not use [`CairoBar`] can own a
+    /// [`DockReporter`] directly and feed it their shared presentation scene.
+    #[must_use]
+    pub const fn dock_reporter(&self) -> &DockReporter {
+        &self.dock_reporter
+    }
+
+    /// Earliest time a native event loop should service Dock backpressure or
+    /// renew an active compositor preview lease.
+    #[must_use]
+    pub fn next_dock_deadline(&self, now: Instant) -> Option<Instant> {
+        self.dock_reporter.next_retry_deadline(now)
+    }
+
     #[must_use]
     pub const fn config(&self) -> &crate::presentation::PresentationConfig {
         &self.config
@@ -420,7 +443,7 @@ impl CairoBar {
     /// Cairo context. This keeps layout and drawing on the same Pango font map,
     /// resolution, transform, and font options.
     pub fn render(&mut self, context: &Context, viewport: Size) -> Result<()> {
-        self.render_frame(context, viewport, None)
+        self.render_frame(context, viewport, None, 1.0)
     }
 
     /// Render over a frosted backdrop; see
@@ -433,7 +456,7 @@ impl CairoBar {
         viewport: Size,
         backdrop: Option<&ImageSurface>,
     ) -> Result<()> {
-        self.render_frame(context, viewport, backdrop)
+        self.render_frame(context, viewport, backdrop, 1.0)
     }
 
     fn render_frame(
@@ -441,6 +464,7 @@ impl CairoBar {
         context: &Context,
         viewport: Size,
         backdrop: Option<&ImageSurface>,
+        scale_factor: f64,
     ) -> Result<()> {
         let measurer = self.renderer.text_measurer(context);
         let layout = LayoutEngine::new(self.config.clone(), measurer);
@@ -455,6 +479,8 @@ impl CairoBar {
         self.last_damage = next_scene.damage_from(&self.scene);
         self.interaction = next_interaction;
         self.scene = next_scene;
+        self.synchronize_dock_scene(scale_factor);
+        self.flush_dock_commands(Instant::now());
         Ok(())
     }
 
@@ -550,34 +576,155 @@ impl CairoBar {
             (f64::from(physical_width) / scale_factor) as f32,
             (f64::from(physical_height) / scale_factor) as f32,
         );
-        self.render_over(&context, viewport, backdrop)?;
+        self.render_frame(&context, viewport, backdrop, scale_factor)?;
         drop(context);
         surface.flush();
         Ok(())
+    }
+
+    fn transport_generation(&self) -> u64 {
+        #[cfg(feature = "transport-shared")]
+        {
+            self.runtime.transport_generation()
+        }
+        #[cfg(not(feature = "transport-shared"))]
+        {
+            0
+        }
+    }
+
+    fn synchronize_dock_scene(&mut self, scale_factor: f64) {
+        let transport_generation = self.transport_generation();
+        let view = self.runtime.view();
+        self.dock_reporter.synchronize(DockReporterInput {
+            wm_available: view.wm_available,
+            wm_session_id: view.wm_session_id,
+            transport_generation,
+            monitor_geometry: view.geometry,
+            minimized_windows: view.minimized_windows,
+            scene: &self.scene,
+            presentation: &self.config,
+            hovered: self.interaction.hovered(),
+            scale_factor,
+        });
+    }
+
+    fn synchronize_dock_model(&mut self) {
+        let transport_generation = self.transport_generation();
+        let view = self.runtime.view();
+        self.dock_reporter.synchronize_model(
+            view.wm_available,
+            view.wm_session_id,
+            transport_generation,
+            view.minimized_windows,
+            self.interaction.hovered(),
+        );
+    }
+
+    fn dispatch_internal(&mut self, action: UserAction) -> bool {
+        let update = self.runtime.dispatch(action);
+        let accepted = !update.has_issues();
+        self.pending_runtime.merge(update);
+        // Pointer storms must never turn repeated backpressure into an
+        // unbounded diagnostics allocation before the next service turn.
+        if self.pending_runtime.issues.len() > 64 {
+            let excess = self.pending_runtime.issues.len() - 64;
+            self.pending_runtime.issues.drain(..excess);
+        }
+        if !self.runtime.view().wm_available {
+            self.dock_reporter.reset();
+        }
+        accepted
+    }
+
+    fn flush_dock_commands(&mut self, now: Instant) {
+        self.synchronize_dock_model();
+        let actions = self.dock_reporter.pending_actions(now);
+        for action in actions {
+            if self.dispatch_internal(action) {
+                let _ = self.dock_reporter.acknowledge(action, now);
+            } else {
+                if self.runtime.view().wm_available {
+                    self.dock_reporter.record_failure(now);
+                }
+                return;
+            }
+        }
+    }
+
+    fn enrich_scene_action(&self, action: UserAction) -> UserAction {
+        match action {
+            UserAction::RestoreWindow {
+                window,
+                wm_session_id,
+                geometry,
+            } if geometry.is_empty() => UserAction::RestoreWindow {
+                window,
+                wm_session_id,
+                geometry: self.dock_reporter.geometry_for(window),
+            },
+            action => action,
+        }
+    }
+
+    fn dispatch_scene_action(&mut self, action: UserAction) -> RuntimeUpdate {
+        let action = self.enrich_scene_action(action);
+        let mut update = std::mem::take(&mut self.pending_runtime);
+        let dispatched = self.runtime.dispatch(action);
+        let model_rejected = dispatched
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, crate::RuntimeIssue::Model(_)));
+        let action_delivered = !dispatched.has_issues();
+        update.merge(dispatched);
+        if matches!(action, UserAction::RestoreWindow { .. }) && !model_rejected && action_delivered
+        {
+            // A successful restore owns this pointer gesture. Do not let the
+            // stationary cursor immediately reacquire the old scene node and
+            // reopen its preview before the next WM snapshot removes it.
+            self.last_pointer = None;
+            let _ = self.interaction.clear_hover();
+            self.dock_reporter.clear_preview();
+            self.flush_dock_commands(Instant::now());
+            update.merge(std::mem::take(&mut self.pending_runtime));
+        }
+        update
+    }
+
+    fn finish_runtime_turn(&mut self, mut update: RuntimeUpdate) -> RuntimeUpdate {
+        self.synchronize_dock_model();
+        self.flush_dock_commands(Instant::now());
+        update.merge(std::mem::take(&mut self.pending_runtime));
+        update
     }
 
     /// Update the semantic hover target. `true` means the frontend should
     /// schedule a render so node visual states can be rebuilt.
     pub fn pointer_motion(&mut self, point: Point) -> bool {
         self.last_pointer = Some(point);
-        self.interaction.update_hover(&self.scene, point)
+        let transition = self.interaction.update_hover_transition(&self.scene, point);
+        self.synchronize_dock_model();
+        self.flush_dock_commands(Instant::now());
+        transition.needs_redraw()
     }
 
     /// Clear all pointer state. `true` means the visible hover state changed.
     pub fn pointer_leave(&mut self) -> bool {
         self.last_pointer = None;
         self.pressed_button = None;
-        self.interaction.clear_hover()
+        let changed = self.interaction.clear_hover();
+        self.synchronize_dock_model();
+        self.flush_dock_commands(Instant::now());
+        changed
     }
 
     /// Hit-test the last rendered scene and dispatch its semantic action.
     pub fn pointer_action(&mut self, point: Point, input: PointerAction) -> RuntimeUpdate {
         self.last_pointer = Some(point);
-        self.scene
-            .action_at(point, input)
-            .map_or_else(RuntimeUpdate::default, |action| {
-                self.runtime.dispatch(action)
-            })
+        match self.scene.action_at(point, input) {
+            Some(action) => self.dispatch_scene_action(action),
+            None => std::mem::take(&mut self.pending_runtime),
+        }
     }
 
     /// Process a complete pointer state transition.
@@ -589,20 +736,22 @@ impl CairoBar {
         match input {
             PointerInput::Move(point) => PointerUpdate {
                 redraw: self.pointer_motion(point),
-                ..PointerUpdate::default()
+                runtime: std::mem::take(&mut self.pending_runtime),
             },
             PointerInput::Leave => PointerUpdate {
                 redraw: self.pointer_leave(),
-                ..PointerUpdate::default()
+                runtime: std::mem::take(&mut self.pending_runtime),
             },
             PointerInput::Press { point, button } => {
                 self.last_pointer = Some(point);
                 let hover_changed = self.interaction.update_hover(&self.scene, point);
                 let press_changed = self.interaction.press(&self.scene, point);
                 self.pressed_button = Some(button);
+                self.synchronize_dock_model();
+                self.flush_dock_commands(Instant::now());
                 PointerUpdate {
                     redraw: hover_changed || press_changed,
-                    ..PointerUpdate::default()
+                    runtime: std::mem::take(&mut self.pending_runtime),
                 }
             }
             PointerInput::Release { point, button } => {
@@ -617,9 +766,12 @@ impl CairoBar {
                     None
                 };
                 self.pressed_button = None;
-                let runtime = action.map_or_else(RuntimeUpdate::default, |action| {
-                    self.runtime.dispatch(action)
-                });
+                self.synchronize_dock_model();
+                self.flush_dock_commands(Instant::now());
+                let runtime = match action {
+                    Some(action) => self.dispatch_scene_action(action),
+                    None => std::mem::take(&mut self.pending_runtime),
+                };
                 PointerUpdate {
                     redraw: hover_changed || had_press || runtime.needs_redraw(),
                     runtime,
@@ -628,11 +780,15 @@ impl CairoBar {
             PointerInput::Scroll { point, delta_y } => {
                 self.last_pointer = Some(point);
                 let hover_changed = self.interaction.update_hover(&self.scene, point);
-                let runtime = PointerAction::from_vertical_delta(delta_y)
+                let action = PointerAction::from_vertical_delta(delta_y)
                     .and_then(|action| self.scene.action_at(point, action))
-                    .map_or_else(RuntimeUpdate::default, |action| {
-                        self.runtime.dispatch(action)
-                    });
+                    .map(|action| self.enrich_scene_action(action));
+                self.synchronize_dock_model();
+                self.flush_dock_commands(Instant::now());
+                let runtime = match action {
+                    Some(action) => self.dispatch_scene_action(action),
+                    None => std::mem::take(&mut self.pending_runtime),
+                };
                 PointerUpdate {
                     redraw: hover_changed || runtime.needs_redraw(),
                     runtime,
@@ -642,16 +798,19 @@ impl CairoBar {
     }
 
     pub fn tick(&mut self) -> RuntimeUpdate {
-        self.runtime.tick()
+        let update = self.runtime.tick();
+        self.finish_runtime_turn(update)
     }
 
     /// Poll/recover transport and refresh providers in one service pass.
     pub fn service(&mut self) -> RuntimeUpdate {
-        self.runtime.service()
+        let update = self.runtime.service();
+        self.finish_runtime_turn(update)
     }
 
     pub fn poll_transport(&mut self) -> RuntimeUpdate {
-        self.runtime.poll_transport()
+        let update = self.runtime.poll_transport();
+        self.finish_runtime_turn(update)
     }
 }
 
@@ -1108,9 +1267,97 @@ fn with_preserved_path<T>(context: &Context, draw: impl FnOnce() -> Result<T>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "transport-shared")]
+    use crate::WindowToken;
     use crate::presentation::{NodeId, Point, PresentationVisibility, VisualState};
     use crate::{DirtyBits, ThemeMode, UserAction};
     use cairo::{Format, ImageSurface};
+    #[cfg(feature = "transport-shared")]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(feature = "transport-shared")]
+    static NEXT_DOCK_TRANSPORT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(feature = "transport-shared")]
+    fn transport_dock_bar() -> (CairoBar, shared_structures::SharedRingBuffer) {
+        let sequence = NEXT_DOCK_TRANSPORT_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-cairo-dock-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .expect("create isolated Dock transport");
+        let transport = crate::SharedTransport::open(&path).unwrap();
+        let mut runtime =
+            crate::BarRuntime::with_transport(crate::ModelConfig::default(), Some(transport))
+                .unwrap();
+
+        let mut monitor_info = shared_structures::MonitorInfo {
+            monitor_num: 2,
+            monitor_x: 300,
+            monitor_y: 400,
+            monitor_width: 1600,
+            monitor_height: 900,
+            ..shared_structures::MonitorInfo::default()
+        };
+        monitor_info.set_ltsymbol("[]=");
+        let mut window = shared_structures::MinimizedWindowInfo::new(
+            41,
+            2,
+            shared_structures::MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+        );
+        window.set_title("Terminal");
+        window.set_app_id("foot");
+        let mut message = shared_structures::SharedMessage {
+            timestamp: 1,
+            wm_session_id: 91,
+            minimized_generation: 2,
+            monitor_info,
+            ..shared_structures::SharedMessage::default()
+        };
+        message.set_minimized_windows(&[window]);
+        message.minimized_flags |= shared_structures::MINIMIZED_LIST_FLAG_OVERFLOW;
+        assert!(owner.try_write_message(&message).unwrap());
+        let update = runtime.poll_transport();
+        assert!(!update.has_issues());
+
+        let config = crate::presentation::PresentationConfig {
+            visibility: PresentationVisibility {
+                client_name: false,
+                monitor: false,
+                system: false,
+                audio: false,
+                brightness: false,
+                battery: false,
+                network: false,
+                media: false,
+                theme: false,
+                screenshot: false,
+                clock: false,
+                shell_hub: false,
+                ..PresentationVisibility::default()
+            },
+            ..crate::presentation::PresentationConfig::default()
+        };
+        (
+            CairoBar::new(runtime, config, FontDescription::from_string("Sans")),
+            owner,
+        )
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn drain_dock_commands(
+        owner: &shared_structures::SharedRingBuffer,
+    ) -> Vec<shared_structures::SharedCommand> {
+        let mut commands = Vec::new();
+        while let Some(command) = owner.try_receive_command().unwrap() {
+            commands.push(command);
+        }
+        commands
+    }
 
     #[test]
     fn image_surface_smoke_renders_all_primitives_and_honors_clip() {
@@ -1311,6 +1558,7 @@ mod tests {
                 screenshot: false,
                 clock: false,
                 shell_hub: false,
+                ..PresentationVisibility::default()
             },
             labels: crate::presentation::PresentationLabels {
                 theme_dark: "dark".to_owned(),
@@ -1507,6 +1755,7 @@ mod tests {
                 screenshot: false,
                 clock: false,
                 shell_hub: false,
+                ..PresentationVisibility::default()
             },
             ..crate::presentation::PresentationConfig::default()
         };
@@ -1577,6 +1826,217 @@ mod tests {
         assert!(bar.render(&broken, viewport).is_err());
 
         assert_eq!(bar.scene(), &before);
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn cairo_dock_reports_stable_physical_geometry_and_leases_hover_preview() {
+        let (mut bar, owner) = transport_dock_bar();
+        let mut frame = vec![0_u8; 1600 * 76 * 4];
+        bar.render_into_bgra(&mut frame, 1600, 76, 1600 * 4, 2.0)
+            .unwrap();
+
+        let geometry_commands = drain_dock_commands(&owner);
+        assert_eq!(geometry_commands.len(), 2, "shelf plus one item");
+        assert!(geometry_commands.iter().all(|command| {
+            command.get_command_type() == shared_structures::CommandType::SetMinimizedGeometry
+                && command.get_wm_session_id() == 91
+        }));
+        let item_report = bar
+            .dock_reporter
+            .desired_geometry()
+            .iter()
+            .find(|report| report.window == Some(WindowToken(41)))
+            .copied()
+            .unwrap();
+        assert_eq!(
+            (item_report.geometry.width, item_report.geometry.height),
+            (54, 36)
+        );
+        assert!(item_report.geometry.x >= 300 && item_report.geometry.y >= 400);
+        let item_command = geometry_commands
+            .iter()
+            .find(|command| command.get_window_id() == 41)
+            .unwrap();
+        assert_eq!(
+            item_command.anchor(),
+            shared_structures::MinimizedWindowAnchor::new(
+                item_report.geometry.x,
+                item_report.geometry.y,
+                item_report.geometry.width,
+                item_report.geometry.height,
+            )
+        );
+
+        let hit = bar
+            .scene()
+            .hits
+            .iter()
+            .find(|hit| hit.id == NodeId::MinimizedWindow(WindowToken(41)))
+            .unwrap();
+        let point = Point::new(
+            hit.bounds.x + hit.bounds.width * 0.5,
+            hit.bounds.y + hit.bounds.height * 0.5,
+        );
+        let entered = bar.handle_pointer(PointerInput::Move(point));
+        assert!(entered.redraw && !entered.runtime.has_issues());
+        assert!(
+            drain_dock_commands(&owner).is_empty(),
+            "preview waits for the frame containing hover magnification"
+        );
+        bar.render_into_bgra(&mut frame, 1600, 76, 1600 * 4, 2.0)
+            .unwrap();
+        let commands = drain_dock_commands(&owner);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            commands[0].get_command_type(),
+            shared_structures::CommandType::PreviewMinimized
+        );
+        assert_eq!(
+            commands[0].get_flags(),
+            shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+        );
+        assert!(commands[0].anchor().width > item_command.anchor().width);
+        assert!(commands[0].anchor().height > item_command.anchor().height);
+
+        let moved = bar.handle_pointer(PointerInput::Move(Point::new(point.x + 1.0, point.y)));
+        assert!(moved.redraw);
+        assert!(drain_dock_commands(&owner).is_empty());
+        bar.render_into_bgra(&mut frame, 1600, 76, 1600 * 4, 2.0)
+            .unwrap();
+        assert!(
+            drain_dock_commands(&owner).is_empty(),
+            "hover magnification must not churn stable target geometry"
+        );
+
+        let lease_start = bar.dock_reporter.preview_last_sent().unwrap();
+        bar.flush_dock_commands(lease_start + crate::DOCK_PREVIEW_LEASE_INTERVAL);
+        let renewed = drain_dock_commands(&owner);
+        assert_eq!(renewed.len(), 1);
+        assert_eq!(
+            renewed[0].get_flags(),
+            shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+        );
+
+        let left = bar.handle_pointer(PointerInput::Leave);
+        assert!(left.redraw);
+        let hidden = drain_dock_commands(&owner);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].get_flags(), 0);
+
+        let _ = bar.handle_pointer(PointerInput::Move(point));
+        assert!(drain_dock_commands(&owner).is_empty());
+        bar.render_into_bgra(&mut frame, 1600, 76, 1600 * 4, 2.0)
+            .unwrap();
+        let preview = drain_dock_commands(&owner);
+        assert_eq!(preview.len(), 1);
+        let restore_geometry = bar.dock_reporter.geometry_for(WindowToken(41));
+        let restored = bar.pointer_action(point, PointerAction::Primary);
+        assert!(!restored.has_issues());
+        let commands = drain_dock_commands(&owner);
+        assert_eq!(commands.len(), 2, "restore also tears down preview intent");
+        assert_eq!(
+            commands[0].get_command_type(),
+            shared_structures::CommandType::RestoreMinimized
+        );
+        assert_eq!(
+            commands[0].anchor(),
+            shared_structures::MinimizedWindowAnchor::new(
+                restore_geometry.x,
+                restore_geometry.y,
+                restore_geometry.width,
+                restore_geometry.height,
+            )
+        );
+        assert_eq!(
+            commands[1].get_command_type(),
+            shared_structures::CommandType::PreviewMinimized
+        );
+        assert_eq!(commands[1].get_flags(), 0);
+
+        let mut narrow = vec![0_u8; 130 * 38 * 4];
+        bar.render_into_bgra(&mut narrow, 130, 38, 130 * 4, 1.0)
+            .unwrap();
+        let withdrawn = drain_dock_commands(&owner);
+        assert!(withdrawn.iter().any(|command| {
+            command.get_command_type() == shared_structures::CommandType::SetMinimizedGeometry
+                && command.get_window_id() == 41
+                && command.anchor() == shared_structures::MinimizedWindowAnchor::default()
+        }));
+
+        bar.render_into_bgra(&mut frame, 1600, 76, 1600 * 4, 2.0)
+            .unwrap();
+        let restored_target = drain_dock_commands(&owner);
+        assert!(restored_target.iter().any(|command| {
+            command.get_command_type() == shared_structures::CommandType::SetMinimizedGeometry
+                && command.get_window_id() == 41
+                && command.anchor().width == 54
+        }));
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn cairo_dock_retries_queue_full_and_clears_state_on_disconnect() {
+        let (mut bar, owner) = transport_dock_bar();
+        let filler = crate::WmCommand::SetLayout {
+            layout: crate::LayoutId(1),
+            monitor: crate::MonitorId(2),
+        };
+        for _ in 0..owner.command_capacity() {
+            assert_eq!(
+                bar.runtime().transport().unwrap().execute(filler).unwrap(),
+                crate::SendOutcome::Sent
+            );
+        }
+
+        let mut frame = vec![0_u8; 800 * 38 * 4];
+        bar.render_into_bgra(&mut frame, 800, 38, 800 * 4, 1.0)
+            .unwrap();
+        assert!(bar.dock_reporter.acknowledged_geometry().is_empty());
+        assert_eq!(
+            bar.pending_runtime
+                .issues
+                .iter()
+                .filter(|issue| matches!(issue, crate::RuntimeIssue::QueueFull { .. }))
+                .count(),
+            1,
+            "one failed burst must not emit an issue per item"
+        );
+        assert_eq!(drain_dock_commands(&owner).len(), owner.command_capacity());
+
+        let retry = bar.tick();
+        assert_eq!(
+            retry
+                .issues
+                .iter()
+                .filter(|issue| matches!(issue, crate::RuntimeIssue::QueueFull { .. }))
+                .count(),
+            1,
+            "the original backpressure remains observable"
+        );
+        let retry_at = bar
+            .next_dock_deadline(Instant::now())
+            .expect("unacknowledged Dock targets remain scheduled");
+        bar.flush_dock_commands(retry_at);
+        let retried = drain_dock_commands(&owner);
+        assert_eq!(retried.len(), 2);
+        assert!(retried.iter().all(|command| {
+            command.get_command_type() == shared_structures::CommandType::SetMinimizedGeometry
+        }));
+        assert_eq!(bar.dock_reporter.acknowledged_geometry().len(), 2);
+
+        owner.destroy().unwrap();
+        bar.config_mut().dock_item_size = 19.0;
+        bar.render_into_bgra(&mut frame, 800, 38, 800 * 4, 1.0)
+            .unwrap();
+        assert!(!bar.runtime().view().wm_available);
+        assert!(bar.dock_reporter.state_key().is_none());
+        assert!(bar.dock_reporter.desired_preview().is_none());
+        assert!(bar.dock_reporter.acknowledged_preview().is_none());
+        assert!(bar.dock_reporter.desired_geometry().is_empty());
+        assert!(bar.dock_reporter.acknowledged_geometry().is_empty());
+        assert!(bar.pending_runtime.has_issues());
     }
 
     fn scene_background(scene: &Scene) -> Rgba {

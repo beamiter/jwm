@@ -137,7 +137,19 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.particle_systems.is_empty() {
             return true;
         }
-        if !self.genie_active.is_empty() || !self.ripple_active.is_empty() {
+        if !self.genie_active.is_empty()
+            || !self.ripple_active.is_empty()
+            || self.dock_preview.is_some_and(|preview| {
+                preview.direction
+                    == crate::backend::compositor_common::genie::PreviewDirection::Hide
+                    || preview.started.elapsed().as_secs_f32() < 0.22
+                    || crate::backend::compositor_common::genie::preview_lease_timeout(
+                        preview.direction,
+                        std::time::Instant::now(),
+                        preview.lease_deadline,
+                    ) == Some(std::time::Duration::ZERO)
+            })
+        {
             return true;
         }
         if self.motion_trail_enabled && self.windows.values().any(|wt| !wt.motion_trail.is_empty())
@@ -759,12 +771,32 @@ impl<C: CompositorConnection> Compositor<C> {
         if disabling_genie {
             let animations = std::mem::take(&mut self.genie_active);
             for animation in animations {
-                self.free_texture_resources(
-                    animation.gl_texture,
-                    animation.binding,
-                    animation.pixmap,
-                    animation.damage,
-                );
+                match animation.direction {
+                    crate::backend::compositor_common::genie::GenieDirection::Minimize
+                        if animation.owns_resources =>
+                    {
+                        self.cache_minimized_visual(animation);
+                    }
+                    crate::backend::compositor_common::genie::GenieDirection::Restore => {
+                        if animation.owns_resources {
+                            self.free_texture_resources(
+                                animation.gl_texture,
+                                animation.binding,
+                                animation.pixmap,
+                                animation.damage,
+                            );
+                        }
+                        self.minimized_windows.remove(&animation.x11_win);
+                        self.genie_targets.remove(&animation.x11_win);
+                        if self
+                            .dock_preview
+                            .is_some_and(|preview| preview.x11_win == animation.x11_win)
+                        {
+                            self.set_minimized_window_preview(None);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         if disabling_ripple {

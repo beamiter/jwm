@@ -303,6 +303,8 @@ fn node_class(id: NodeId) -> &'static str {
         NodeId::Theme => "theme",
         NodeId::Screenshot => "screenshot",
         NodeId::Clock => "clock",
+        NodeId::DockShelf => "dock-shelf",
+        NodeId::MinimizedWindow(_) => "minimized-window",
         NodeId::ShellHub(route) => shell_class(route),
     }
 }

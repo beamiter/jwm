@@ -8,6 +8,9 @@ use crate::backend::compositor_common::attention::{
 };
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::IslandDock;
+use crate::backend::compositor_common::genie::{
+    GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect,
+};
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{
     WindowGlowSettings, WindowGlowStyle, WindowGlowTarget,
@@ -32,6 +35,13 @@ fn transformed_overlays_require_full_redraw(
     has_expose_entries: bool,
 ) -> bool {
     overview_active || overview_closing || expose_active || has_expose_entries
+}
+
+fn minimized_dock_requires_composition(
+    has_targeted_cached_visual: bool,
+    has_preview: bool,
+) -> bool {
+    has_targeted_cached_visual || has_preview
 }
 
 /// Whether a composited window participates in the smart-border rule (a lone
@@ -2457,6 +2467,12 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.zoom_to_fit_window.is_some()
             || !self.particle_systems.is_empty()
             || !self.genie_active.is_empty()
+            || minimized_dock_requires_composition(
+                self.minimized_visuals
+                    .values()
+                    .any(|visual| visual.target.is_some()),
+                self.dock_preview.is_some(),
+            )
             || !self.ripple_active.is_empty()
             || self.tickless_focus_or_wallpaper_animation_active()
             || self.pending_wallpaper.is_some()
@@ -2694,6 +2710,208 @@ impl<C: CompositorConnection> Compositor<C> {
         scene.hash(&mut hasher);
         focused.hash(&mut hasher);
         hasher.finish()
+    }
+
+    fn render_dock_preview(&self, projection: &[f32; 16]) {
+        let Some(preview) = self.dock_preview else {
+            return;
+        };
+        if preview.opacity <= 0.001 {
+            return;
+        }
+        let source = self
+            .minimized_visuals
+            .get(&preview.x11_win)
+            .map(|visual| (visual.gl_texture, visual.has_rgba, visual.w, visual.h))
+            .or_else(|| {
+                self.genie_active
+                    .iter()
+                    .find(|animation| animation.x11_win == preview.x11_win)
+                    .map(|animation| {
+                        (
+                            animation.gl_texture,
+                            animation.has_rgba,
+                            animation.w,
+                            animation.h,
+                        )
+                    })
+            })
+            .or_else(|| {
+                self.windows.get(&preview.x11_win).map(|window| {
+                    (
+                        window.gl_texture,
+                        window.has_rgba,
+                        window.w as f32,
+                        window.h as f32,
+                    )
+                })
+            });
+        let Some((texture, has_rgba, source_w, source_h)) = source else {
+            return;
+        };
+        let output_bounds = output_bounds_for_anchor(
+            preview.anchor,
+            self.monitor_rects.iter().map(|&(_, x, y, w, h)| {
+                crate::backend::api::CompositorRect::new(x as f32, y as f32, w as f32, h as f32)
+            }),
+            crate::backend::api::CompositorRect::new(
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            ),
+        );
+        let Some(rect) = preview_rect(
+            preview.anchor,
+            source_w,
+            source_h,
+            output_bounds,
+            preview.scale,
+        ) else {
+            return;
+        };
+        let (x, y, w, h) = (
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+        );
+
+        unsafe {
+            // A compact shadow separates the preview from both light and dark
+            // wallpapers while retaining the rounded macOS floating-card
+            // silhouette.
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.shadow_color.as_ref(),
+                0.0,
+                0.0,
+                0.0,
+                0.32 * preview.opacity,
+            );
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), 16.0);
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), 14.0);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.rect.as_ref(),
+                x - 16.0,
+                y - 12.0,
+                w + 32.0,
+                h + 32.0,
+            );
+            self.gl
+                .uniform_2_f32(self.shadow_uniforms.size.as_ref(), w, h);
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.gl.use_program(Some(self.program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.win_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl
+                .uniform_4_f32(self.win_uniforms.rect.as_ref(), x, y, w, h);
+            self.gl.uniform_2_f32(self.win_uniforms.size.as_ref(), w, h);
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_1_f32(
+                self.win_uniforms.opacity.as_ref(),
+                if has_rgba {
+                    -preview.opacity
+                } else {
+                    preview.opacity
+                },
+            );
+            self.gl
+                .uniform_1_f32(self.win_uniforms.radius.as_ref(), 14.0);
+            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    fn render_minimized_dock_items(&self, projection: &[f32; 16]) {
+        if !self
+            .minimized_visuals
+            .values()
+            .any(|visual| visual.target.is_some())
+        {
+            return;
+        }
+        unsafe {
+            self.gl.use_program(Some(self.program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.win_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+            self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), 0.0);
+            self.gl
+                .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.active_texture(glow::TEXTURE0);
+
+            let preview = self
+                .dock_preview
+                .map(|preview| (u64::from(preview.x11_win), preview.anchor, preview.opacity));
+            for (&x11_win, visual) in &self.minimized_visuals {
+                let Some(stable_target) = visual.target else {
+                    continue;
+                };
+                let Some(target) =
+                    dock_item_preview_target(u64::from(x11_win), stable_target, preview)
+                else {
+                    continue;
+                };
+                if visual.w <= 0.0 || visual.h <= 0.0 {
+                    continue;
+                }
+                let fit = (target.width / visual.w).min(target.height / visual.h);
+                let width = (visual.w * fit).max(1.0);
+                let height = (visual.h * fit).max(1.0);
+                let x = target.x + (target.width - width) * 0.5;
+                let y = target.y + (target.height - height) * 0.5;
+                self.gl
+                    .uniform_4_f32(self.win_uniforms.rect.as_ref(), x, y, width, height);
+                self.gl
+                    .uniform_2_f32(self.win_uniforms.size.as_ref(), width, height);
+                self.gl.uniform_1_f32(
+                    self.win_uniforms.opacity.as_ref(),
+                    if visual.has_rgba { -1.0 } else { 1.0 },
+                );
+                self.gl
+                    .uniform_1_f32(self.win_uniforms.radius.as_ref(), 5.0_f32.min(height * 0.5));
+                self.gl
+                    .bind_texture(glow::TEXTURE_2D, Some(visual.gl_texture));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
     }
 
     fn draw_wallpaper_layer(
@@ -3691,7 +3909,31 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        let visible_scene = &scene[first_visible..];
+        // A restored X window is already at its final server-side geometry so
+        // input works, but its live texture must not be drawn underneath the
+        // reverse Genie mesh. Filtering once here covers shadows, blur,
+        // borders and the main pass without sprinkling state checks through
+        // every renderer stage.
+        let restoring_scene;
+        let has_restoring = self
+            .genie_active
+            .iter()
+            .any(|animation| animation.direction == GenieDirection::Restore);
+        let visible_scene = if has_restoring {
+            restoring_scene = scene[first_visible..]
+                .iter()
+                .copied()
+                .filter(|(window, ..)| {
+                    !self.genie_active.iter().any(|animation| {
+                        animation.x11_win == *window
+                            && animation.direction == GenieDirection::Restore
+                    })
+                })
+                .collect::<Vec<_>>();
+            restoring_scene.as_slice()
+        } else {
+            &scene[first_visible..]
+        };
 
         // When overview is active, skip rendering windows that belong to the
         // overview monitor — they would be hidden behind the opaque overview
@@ -4820,7 +5062,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
         // === Pass 2b: Genie minimize animations ===
         if !self.genie_active.is_empty() {
-            let genie_duration_ms = self.genie_duration_ms.max(1);
+            let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
+            let now = std::time::Instant::now();
             unsafe {
                 self.gl.use_program(Some(self.genie_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -4839,11 +5082,11 @@ impl<C: CompositorConnection> Compositor<C> {
                     .uniform_1_i32(self.genie_uniforms.grid_size.as_ref(), grid);
                 self.gl.bind_vertex_array(Some(self.quad_vao));
 
-                let dock = self.dock_position;
                 for ga in &self.genie_active {
-                    let elapsed = ga.start.elapsed().as_millis() as f32;
-                    let progress = (elapsed / genie_duration_ms as f32).min(1.0);
+                    let (progress, _) =
+                        super::effects::genie_animation_progress(ga, now, duration_secs);
                     let opacity = 1.0 - progress;
+                    let dock = ga.target.center();
                     self.gl.uniform_4_f32(
                         self.genie_uniforms.rect.as_ref(),
                         ga.x,
@@ -4857,6 +5100,11 @@ impl<C: CompositorConnection> Compositor<C> {
                         .uniform_1_f32(self.genie_uniforms.progress.as_ref(), progress);
                     self.gl
                         .uniform_2_f32(self.genie_uniforms.dock_pos.as_ref(), dock.0, dock.1);
+                    self.gl.uniform_2_f32(
+                        self.genie_uniforms.dock_size.as_ref(),
+                        ga.target.width as f32,
+                        ga.target.height as f32,
+                    );
                     self.gl.uniform_1_f32(
                         self.genie_uniforms.opacity.as_ref(),
                         if ga.has_rgba { -opacity } else { opacity },
@@ -4871,6 +5119,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.gl.use_program(None);
             }
         }
+
+        self.render_minimized_dock_items(&proj);
+        self.render_dock_preview(&proj);
 
         // === Pass 3c: Window tab bars ===
         if self.window_tabs_enabled && !self.window_groups.is_empty() {
@@ -5856,8 +6107,9 @@ mod tests {
         blur_sampling_margin, counts_for_smart_borders, dirty_below_affects_backdrop,
         dirty_below_requires_full_blur_redraw, edge_effects_require_composition,
         focus_highlight_style, intersect_gl_scissors, is_opaque_occluder,
-        presented_scene_copy_plan, rect_covers_output, transformed_overlays_require_full_redraw,
-        transition_capture_plan, wallpaper_blend_plan, window_prefers_direct_presentation,
+        minimized_dock_requires_composition, presented_scene_copy_plan, rect_covers_output,
+        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
+        window_prefers_direct_presentation,
     };
 
     #[test]
@@ -5868,6 +6120,13 @@ mod tests {
         assert!(counts_for_smart_borders("Alacritty", "jwm-bar", false));
         assert!(!counts_for_smart_borders("fcitx", "jwm-bar", true));
         assert!(!counts_for_smart_borders("jwm-bar", "jwm-bar", false));
+    }
+
+    #[test]
+    fn hidden_bar_geometry_does_not_keep_x11_cache_composited() {
+        assert!(minimized_dock_requires_composition(true, false));
+        assert!(minimized_dock_requires_composition(false, true));
+        assert!(!minimized_dock_requires_composition(false, false));
     }
 
     #[test]

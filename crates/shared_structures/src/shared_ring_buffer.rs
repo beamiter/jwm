@@ -5,7 +5,9 @@
 //! [`WireSafe`](crate::WireSafe) 契约的 wire 表示后进出泛型核心。
 
 use crate::backends::common::SyncStrategy;
-use crate::shared_message::{SharedCommand, SharedMessage, TagStatus, MAX_TAGS};
+use crate::shared_message::{
+    MinimizedWindowInfo, SharedCommand, SharedMessage, TagStatus, MAX_MINIMIZED_WINDOWS, MAX_TAGS,
+};
 use crate::typed_ring_buffer::{
     SharedRingBufferOptions, SharedRingBufferStats, TypedRingBuffer, WaitOutcome, WireSafe,
     DEFAULT_BUFFER_SIZE, DEFAULT_CMD_BUFFER_SIZE,
@@ -15,15 +17,69 @@ use log::{error, info, warn};
 use std::io::Result;
 use std::time::Duration;
 
+/// 共享内存中的一个最小化窗口条目。
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct WireMinimizedWindowInfo {
+    window_id: u64,
+    monitor_id: i32,
+    flags: u32,
+    title: [u8; crate::MAX_WINDOW_TITLE_LEN],
+    app_id: [u8; crate::MAX_APP_ID_LEN],
+}
+
+const _: () = assert!(
+    std::mem::size_of::<WireMinimizedWindowInfo>()
+        == 8 + 4 + 4 + crate::MAX_WINDOW_TITLE_LEN + crate::MAX_APP_ID_LEN
+);
+
+impl Default for WireMinimizedWindowInfo {
+    fn default() -> Self {
+        Self {
+            window_id: 0,
+            monitor_id: 0,
+            flags: 0,
+            title: [0; crate::MAX_WINDOW_TITLE_LEN],
+            app_id: [0; crate::MAX_APP_ID_LEN],
+        }
+    }
+}
+
+impl From<MinimizedWindowInfo> for WireMinimizedWindowInfo {
+    fn from(window: MinimizedWindowInfo) -> Self {
+        Self {
+            window_id: window.window_id,
+            monitor_id: window.monitor_id,
+            flags: window.flags,
+            title: window.title,
+            app_id: window.app_id,
+        }
+    }
+}
+
+impl From<WireMinimizedWindowInfo> for MinimizedWindowInfo {
+    fn from(window: WireMinimizedWindowInfo) -> Self {
+        Self {
+            window_id: window.window_id,
+            monitor_id: window.monitor_id,
+            flags: window.flags,
+            title: window.title,
+            app_id: window.app_id,
+        }
+    }
+}
+
 /// 共享内存中不含 `bool` 的稳定消息表示。
 ///
 /// 所有位模式都是有效的 Rust 值；只有在 checksum 通过后才会转换成
-/// 领域对象中的 `bool`。`_reserved` 补齐尾部，使结构体不含 padding，
+/// 领域对象中的 `bool`。`_reserved` 补齐后续字段的对齐，使结构体不含 padding，
 /// 满足 [`WireSafe`] 的整体字节校验和要求。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WireMessage {
     timestamp: u64,
+    wm_session_id: u64,
+    minimized_generation: u64,
     monitor_num: i32,
     monitor_width: i32,
     monitor_height: i32,
@@ -33,12 +89,22 @@ pub(crate) struct WireMessage {
     client_name: [u8; crate::MAX_CLIENT_NAME_LEN],
     ltsymbol: [u8; crate::MAX_LT_SYMBOL_LEN],
     _reserved: [u8; 3],
+    minimized_count: u32,
+    minimized_flags: u32,
+    minimized_windows: [WireMinimizedWindowInfo; MAX_MINIMIZED_WINDOWS],
 }
 
 // 布局守卫：字段字节数之和等于结构体大小 ⇒ 无 padding。
 const _: () = assert!(
     std::mem::size_of::<WireMessage>()
-        == 8 + 4 * 5 + MAX_TAGS + crate::MAX_CLIENT_NAME_LEN + crate::MAX_LT_SYMBOL_LEN + 3
+        == 8 * 3
+            + 4 * 5
+            + MAX_TAGS
+            + crate::MAX_CLIENT_NAME_LEN
+            + crate::MAX_LT_SYMBOL_LEN
+            + 3
+            + 4 * 2
+            + std::mem::size_of::<WireMinimizedWindowInfo>() * MAX_MINIMIZED_WINDOWS
 );
 
 // SAFETY: repr(C)；上方 const 断言证明无 padding；全部字段为整数与
@@ -47,20 +113,24 @@ unsafe impl WireSafe for WireMessage {}
 
 /// 共享内存中的稳定命令表示。
 ///
-/// `SharedCommand` 的字段布局含 4 字节 padding（`monitor_id` 与
-/// `timestamp` 之间），不能直接按整体字节做校验和；`_reserved` 把
-/// 该空隙变成显式字段。
+/// 字段顺序与显式整数类型使整个 56-byte payload 不含 padding。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WireCommand {
     cmd_type: u32,
     pub(crate) parameter: u32,
     monitor_id: i32,
-    _reserved: u32,
+    flags: u32,
+    window_id: u64,
+    wm_session_id: u64,
+    anchor_x: i32,
+    anchor_y: i32,
+    anchor_w: u32,
+    anchor_h: u32,
     timestamp: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<WireCommand>() == 4 * 4 + 8);
+const _: () = assert!(std::mem::size_of::<WireCommand>() == 56);
 
 // SAFETY: repr(C)；上方 const 断言证明无 padding；全部字段为整数，
 // 任意位模式有效；无内部可变性。
@@ -72,7 +142,13 @@ impl From<SharedCommand> for WireCommand {
             cmd_type: command.cmd_type,
             parameter: command.parameter,
             monitor_id: command.monitor_id,
-            _reserved: 0,
+            flags: command.flags,
+            window_id: command.window_id,
+            wm_session_id: command.wm_session_id,
+            anchor_x: command.anchor_x,
+            anchor_y: command.anchor_y,
+            anchor_w: command.anchor_w,
+            anchor_h: command.anchor_h,
             timestamp: command.timestamp,
         }
     }
@@ -84,6 +160,13 @@ impl From<WireCommand> for SharedCommand {
             cmd_type: command.cmd_type,
             parameter: command.parameter,
             monitor_id: command.monitor_id,
+            flags: command.flags,
+            window_id: command.window_id,
+            wm_session_id: command.wm_session_id,
+            anchor_x: command.anchor_x,
+            anchor_y: command.anchor_y,
+            anchor_w: command.anchor_w,
+            anchor_h: command.anchor_h,
             timestamp: command.timestamp,
         }
     }
@@ -101,8 +184,11 @@ impl From<&SharedMessage> for WireMessage {
                 | ((status.is_filled as u8) << 2)
                 | ((status.is_occ as u8) << 3);
         }
+        let minimized_windows = message.minimized_windows.map(Into::into);
         Self {
             timestamp: message.timestamp,
+            wm_session_id: message.wm_session_id,
+            minimized_generation: message.minimized_generation,
             monitor_num: message.monitor_info.monitor_num,
             monitor_width: message.monitor_info.monitor_width,
             monitor_height: message.monitor_info.monitor_height,
@@ -112,6 +198,9 @@ impl From<&SharedMessage> for WireMessage {
             client_name: message.monitor_info.client_name,
             ltsymbol: message.monitor_info.ltsymbol,
             _reserved: [0; 3],
+            minimized_count: message.minimized_count.min(MAX_MINIMIZED_WINDOWS as u32),
+            minimized_flags: message.minimized_flags,
+            minimized_windows,
         }
     }
 }
@@ -142,7 +231,12 @@ impl From<WireMessage> for SharedMessage {
         }
         Self {
             timestamp: message.timestamp,
+            wm_session_id: message.wm_session_id,
+            minimized_generation: message.minimized_generation,
             monitor_info,
+            minimized_count: message.minimized_count.min(MAX_MINIMIZED_WINDOWS as u32),
+            minimized_flags: message.minimized_flags,
+            minimized_windows: message.minimized_windows.map(Into::into),
         }
     }
 }
@@ -538,7 +632,8 @@ impl SharedRingBuffer {
 mod tests {
     use super::*;
     use crate::shared_message::{
-        CommandType, MonitorInfo, SharedCommand, SharedMessage, TagStatus,
+        CommandType, MinimizedWindowAnchor, MinimizedWindowInfo, MonitorInfo, SharedCommand,
+        SharedMessage, TagStatus, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
     };
     use crate::typed_ring_buffer::CursorGuard;
     use std::io::ErrorKind;
@@ -561,6 +656,24 @@ mod tests {
         let mut m = SharedMessage::default();
         m.get_monitor_info_mut().monitor_num = num;
         m
+    }
+
+    #[test]
+    fn v12_wire_layout_is_exact_and_padding_free() {
+        assert_eq!(std::mem::size_of::<WireMinimizedWindowInfo>(), 176);
+        assert_eq!(std::mem::size_of::<WireMessage>(), 3040);
+        assert_eq!(std::mem::size_of::<WireCommand>(), 56);
+        assert_eq!(std::mem::offset_of!(WireCommand, cmd_type), 0);
+        assert_eq!(std::mem::offset_of!(WireCommand, parameter), 4);
+        assert_eq!(std::mem::offset_of!(WireCommand, monitor_id), 8);
+        assert_eq!(std::mem::offset_of!(WireCommand, flags), 12);
+        assert_eq!(std::mem::offset_of!(WireCommand, window_id), 16);
+        assert_eq!(std::mem::offset_of!(WireCommand, wm_session_id), 24);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_x), 32);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_y), 36);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 40);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 44);
+        assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 48);
     }
 
     // ── 创建 / 打开 ──────────────────────────────────────────────────────────
@@ -763,7 +876,18 @@ mod tests {
         mi.set_client_name("test_wm");
         mi.set_ltsymbol("[M]");
         mi.set_tag_status(0, TagStatus::new(true, false, true, false));
-        let msg = SharedMessage::with_monitor_info(mi);
+        let mut msg = SharedMessage::with_monitor_info(mi);
+        msg.wm_session_id = 0x0102_0304_0506_0708;
+        msg.minimized_generation = 73;
+        msg.minimized_flags = 0x80;
+        let mut minimized = MinimizedWindowInfo::new(
+            0x8877_6655_4433_2211,
+            -4,
+            MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+        );
+        minimized.set_title("终端 — build");
+        minimized.set_app_id("org.example.Terminal");
+        msg.set_minimized_windows(&[minimized]);
 
         buf.try_write_message(&msg).unwrap();
         let got = buf.try_read_next_message().unwrap().unwrap();
@@ -778,6 +902,10 @@ mod tests {
             got_mi.get_tag_status(0),
             Some(TagStatus::new(true, false, true, false))
         );
+        assert_eq!(got.wm_session_id, 0x0102_0304_0506_0708);
+        assert_eq!(got.minimized_generation, 73);
+        assert_eq!(got.minimized_flags, 0x80);
+        assert_eq!(got.minimized_windows(), &[minimized]);
     }
 
     #[test]
@@ -900,6 +1028,50 @@ mod tests {
         let got = buf.receive_command().unwrap();
         assert_eq!(got.get_command_type(), CommandType::ViewTag);
         assert_eq!(got.get_parameter(), 1 << 3);
+    }
+
+    #[test]
+    fn minimized_command_roundtrip_preserves_every_v12_field() {
+        let path = mk_path("minimized_cmd_roundtrip");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        let anchor = MinimizedWindowAnchor::new(-101, 202, 303, 404);
+        let mut command = SharedCommand::preview_minimized(
+            0xfedc_ba98_7654_3210,
+            0x0123_4567_89ab_cdef,
+            -7,
+            0xa5a5_5a5a,
+            anchor,
+        );
+        command.parameter = 0x1020_3040;
+        command.timestamp = 0x1122_3344_5566_7788;
+
+        assert!(buf.try_send_command(command).unwrap());
+        assert_eq!(buf.try_receive_command().unwrap(), Some(command));
+    }
+
+    #[test]
+    fn unknown_command_wire_roundtrip_preserves_raw_value_and_payload() {
+        let path = mk_path("unknown_cmd_roundtrip");
+        let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
+        let command = SharedCommand {
+            cmd_type: 0xffff_fffe,
+            parameter: 0x1020_3040,
+            monitor_id: -11,
+            flags: 0x5566_7788,
+            window_id: 0x0123_4567_89ab_cdef,
+            wm_session_id: 0xfedc_ba98_7654_3210,
+            anchor_x: -1,
+            anchor_y: -2,
+            anchor_w: 3,
+            anchor_h: 4,
+            timestamp: 0x8877_6655_4433_2211,
+        };
+
+        assert!(buf.try_send_command(command).unwrap());
+        let received = buf.try_receive_command().unwrap().unwrap();
+        assert_eq!(received, command);
+        assert_eq!(received.command_type_checked(), None);
+        assert_eq!(received.get_command_type(), CommandType::None);
     }
 
     #[test]

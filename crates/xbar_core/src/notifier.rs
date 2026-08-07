@@ -396,7 +396,10 @@ mod tests {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-notifier-{}-{sequence}", std::process::id());
         let buffer = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+            shared_structures::SharedRingBufferOptions::new()
+                .capacity(8)
+                .adaptive_poll_spins(0)
+                .create(&path)
                 .expect("create isolated shared ring"),
         );
         let notifier = SharedEventNotifier::spawn(Arc::clone(&buffer), true).unwrap();
@@ -443,7 +446,10 @@ mod tests {
             std::process::id()
         );
         let buffer = Arc::new(
-            SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+            shared_structures::SharedRingBufferOptions::new()
+                .capacity(8)
+                .adaptive_poll_spins(0)
+                .create(&path)
                 .expect("create isolated shared ring"),
         );
         let notifier = SharedEventNotifier::spawn(Arc::clone(&buffer), true).unwrap();
@@ -465,7 +471,10 @@ mod tests {
             "/tmp/xbar-core-notifier-slot-{}-{sequence}",
             std::process::id()
         );
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated shared ring");
         let mut runtime = crate::BarRuntime::default();
         let mut slot = TransportNotifierSlot::new(true);
@@ -530,7 +539,10 @@ mod tests {
             "/tmp/xbar-core-notifier-slot-failure-{}-{sequence}",
             std::process::id()
         );
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0))
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
             .expect("create isolated shared ring");
         let initial = crate::SharedTransport::open(&path).unwrap();
         let mut runtime =

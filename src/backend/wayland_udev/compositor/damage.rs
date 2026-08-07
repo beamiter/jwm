@@ -57,6 +57,10 @@ impl WaylandCompositor {
             return false;
         }
 
+        // Genie and both minimized-Dock passes are intentionally absent here:
+        // they use the shared window fragment shader with `u_scene_linear`
+        // wired to the hardware-OETF state. The preview shadow is fixed black,
+        // whose RGB value is identical in encoded and linear domains.
         let encoded_overlay_active = self.transition_active
             || self.snap_preview.is_some()
             || self.snap_preview_opacity > 0.0
@@ -147,6 +151,14 @@ impl WaylandCompositor {
         }
         if !self.genie_active.is_empty() {
             return Some("genie minimize requires composition");
+        }
+        if minimized_dock_requires_composition(
+            self.minimized_visuals
+                .values()
+                .any(|visual| visual.target.is_some()),
+            self.dock_preview.is_some(),
+        ) {
+            return Some("minimized Dock visual requires composition");
         }
         if !self.particle_systems.is_empty() {
             return Some("particle effects require composition");
@@ -253,6 +265,17 @@ impl WaylandCompositor {
         if !self.genie_active.is_empty() {
             return true;
         }
+        if self.dock_preview.as_ref().is_some_and(|preview| {
+            preview.direction == crate::backend::compositor_common::genie::PreviewDirection::Hide
+                || preview.started.elapsed().as_secs_f32() < 0.22
+                || crate::backend::compositor_common::genie::preview_lease_timeout(
+                    preview.direction,
+                    std::time::Instant::now(),
+                    preview.lease_deadline,
+                ) == Some(std::time::Duration::ZERO)
+        }) {
+            return true;
+        }
         // Check transition
         if self.transition_active {
             return true;
@@ -349,12 +372,19 @@ impl WaylandCompositor {
     }
 }
 
+fn minimized_dock_requires_composition(
+    has_targeted_cached_visual: bool,
+    has_preview: bool,
+) -> bool {
+    has_targeted_cached_visual || has_preview
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         attention_requires_composition, border_requires_composition, expose_animation_pending,
-        inactive_window_styling_requires_composition, overview_animation_pending,
-        rect_animation_pending,
+        inactive_window_styling_requires_composition, minimized_dock_requires_composition,
+        overview_animation_pending, rect_animation_pending,
     };
 
     #[test]
@@ -370,6 +400,13 @@ mod tests {
         assert!(!border_requires_composition(false, 1.0));
         assert!(!border_requires_composition(true, 0.0));
         assert!(border_requires_composition(true, f32::INFINITY));
+    }
+
+    #[test]
+    fn hidden_bar_geometry_does_not_keep_cached_visual_composited() {
+        assert!(minimized_dock_requires_composition(true, false));
+        assert!(minimized_dock_requires_composition(false, true));
+        assert!(!minimized_dock_requires_composition(false, false));
     }
 
     #[test]

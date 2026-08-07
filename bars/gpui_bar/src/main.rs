@@ -14,22 +14,22 @@
 // `cx.listener(|this, ev, window, cx| { ... cx.notify(); })`.
 
 use std::env;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{debug, warn};
 
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
-    BarEffect, BarRuntime, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
-    RuntimeUpdate, ShellRoute, TagId, TransportRecoveryConfig, UserAction,
+    BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
+    LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate, ShellRoute,
+    TagId, TransportRecoveryConfig, UserAction, WindowToken,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
     App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
-    px, size,
+    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::sync::Arc;
@@ -84,6 +84,7 @@ struct GpuiBar {
     default_size: Option<gpui::Size<Pixels>>,
     last_scale_factor: Option<f32>,
     geometry_dirty: bool,
+    dock: DockBridge,
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
 
@@ -92,6 +93,23 @@ struct GpuiBar {
     /// the configured opacity when a compositor blends the bar into the
     /// desktop, fully opaque when nothing would.
     background: Rgba,
+}
+
+struct DockTitleTooltip(SharedString);
+
+impl Render for DockTitleTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(7.0))
+            .py(px(4.0))
+            .rounded(px(5.0))
+            .border_1()
+            .border_color(rgba_alpha(0xFFFFFF, 0.28))
+            .bg(rgba_alpha(0x16171A, 0.96))
+            .text_color(rgba_alpha(0xFFFFFF, 0.96))
+            .text_size(px(11.0))
+            .child(self.0.clone())
+    }
 }
 
 impl GpuiBar {
@@ -121,6 +139,7 @@ impl GpuiBar {
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
+            dock: DockBridge::new(),
             _timer_task: None,
             _transport_task: None,
         };
@@ -134,7 +153,9 @@ impl GpuiBar {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let _ = this.update(cx, |this, cx| {
-                    let update = this.runtime.tick();
+                    let mut update = this.runtime.tick();
+                    let dock_update = this.service_dock();
+                    update.merge(dock_update);
                     this.handle_runtime_update(update);
                     cx.notify();
                 });
@@ -150,7 +171,9 @@ impl GpuiBar {
                     .timer(TRANSPORT_POLL_INTERVAL)
                     .await;
                 let _ = this.update(cx, |this, cx| {
-                    let update = this.runtime.poll_transport();
+                    let mut update = this.runtime.poll_transport();
+                    let dock_update = this.service_dock();
+                    update.merge(dock_update);
                     this.handle_runtime_update(update);
                     cx.notify();
                 });
@@ -170,6 +193,48 @@ impl GpuiBar {
             return;
         }
         self.dispatch(action);
+    }
+
+    fn service_dock(&mut self) -> RuntimeUpdate {
+        let scale_factor = f64::from(self.last_scale_factor.unwrap_or(1.0));
+        let snapshot = self.runtime.snapshot();
+        self.dock.synchronize(
+            &snapshot,
+            self.runtime.transport_generation(),
+            scale_factor,
+            42.0,
+            2.0,
+        );
+        let now = Instant::now();
+        let mut combined = RuntimeUpdate::default();
+        for action in self.dock.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            combined.merge(update);
+            if accepted {
+                self.dock.acknowledge(action, now);
+            } else {
+                self.dock.record_failure(now);
+                break;
+            }
+        }
+        combined
+    }
+
+    fn dock_hover(&mut self, token: WindowToken, session: u64, hovered: bool) {
+        if hovered {
+            let _ = self.dock.enter(token, session);
+        } else {
+            let _ = self.dock.leave(token, session);
+        }
+        let update = self.service_dock();
+        self.handle_runtime_update(update);
+    }
+
+    fn dock_restore(&mut self, token: WindowToken, session: u64) {
+        let _ = self.dock.request_restore(token, session);
+        let update = self.service_dock();
+        self.handle_runtime_update(update);
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -658,6 +723,95 @@ impl GpuiBar {
             "s: 1.00".to_string(),
         )
     }
+
+    fn render_minimized_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let session = self.runtime.view().wm_session_id;
+        let windows: Vec<_> = self.dock.visible_windows().cloned().collect();
+        let mut shelf = div()
+            .id("minimized-dock")
+            .w(px(self.dock.shelf_width()))
+            .h_full()
+            .pl(px(5.0))
+            .pr(px(2.0))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .border_l_1()
+            .border_color(rgba_alpha(0xFFFFFF, 0.20));
+
+        for window in windows {
+            let token = window.token;
+            let scale = self.dock.scale_for(token);
+            let background = if window.urgent() {
+                rgba_alpha(0xD9364B, 0.96)
+            } else {
+                rgba_alpha(0x4777C9, 0.96)
+            };
+            let title = if window.title.trim().is_empty() {
+                window.app_id.clone()
+            } else {
+                window.title.clone()
+            };
+            let hover_title = title.clone();
+            let tooltip_title = SharedString::from(title);
+            let card = div()
+                .id(SharedString::from(format!(
+                    "minimized-card-{}",
+                    token.get()
+                )))
+                .w(px(DOCK_ITEM_WIDTH * scale))
+                .h(px(DOCK_ITEM_HEIGHT * scale))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(rgba_alpha(
+                    0xFFFFFF,
+                    if window.urgent() { 0.9 } else { 0.42 },
+                ))
+                .bg(background)
+                .text_color(rgba_alpha(0xFFFFFF, 0.96))
+                .text_size(px(11.0))
+                .child(window.initial().to_string())
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| DockTitleTooltip(tooltip_title.clone())).into()
+                })
+                .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+                    this.dock_hover(token, session, *hovered);
+                    if *hovered {
+                        debug!("minimized Dock hover: {hover_title}");
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.dock_restore(token, session);
+                        cx.notify();
+                    }),
+                );
+            shelf = shelf.child(
+                div()
+                    .w(px(DOCK_SLOT_WIDTH))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(card),
+            );
+        }
+        if self.dock.overflow() || self.dock.collapsed() {
+            shelf = shelf.child(
+                div()
+                    .w(px(12.0))
+                    .text_color(rgba_alpha(0xFFFFFF, 0.72))
+                    .child("+"),
+            );
+        }
+        shelf
+    }
 }
 
 impl Render for GpuiBar {
@@ -682,6 +836,8 @@ impl Render for GpuiBar {
             self.geometry_dirty = false;
             self.last_scale_factor = Some(scale_factor);
         }
+        let dock_update = self.service_dock();
+        self.handle_runtime_update(dock_update);
         let system = self.runtime.view().system;
         let cpu = system.cpu_percent.map_or(0.0, |value| value.as_f32());
         let mem = system.memory_percent.map_or(0.0, |value| value.as_f32());
@@ -715,7 +871,8 @@ impl Render for GpuiBar {
             .child(self.render_screenshot_pill(cx))
             .child(self.render_time_pill(cx))
             .child(self.render_monitor_pill())
-            .child(self.render_scale_pill());
+            .child(self.render_scale_pill())
+            .child(self.render_minimized_dock(cx));
 
         // Left cluster: tags + spacing + layout toggle (+ optional options)
         let mut left = div()
@@ -770,7 +927,9 @@ fn main() {
     let translucent = detect_translucency();
     let [red, green, blue] = fallback_rgb(config.theme);
     let opacity = if translucent {
-        config.background_opacity.unwrap_or(DEFAULT_BACKGROUND_OPACITY)
+        config
+            .background_opacity
+            .unwrap_or(DEFAULT_BACKGROUND_OPACITY)
     } else {
         1.0
     };
@@ -889,7 +1048,9 @@ fn find_argb_visual(screen: &x11rb::protocol::xproto::Screen) -> Option<u32> {
 /// (`wgpu_renderer.rs`): `PreMultiplied` or `Inherit` — anything else and the
 /// renderer would quietly composite opaque.
 fn renderer_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
-    use x11rb::protocol::xproto::{ColormapAlloc, ConnectionExt as _, CreateWindowAux, WindowClass};
+    use x11rb::protocol::xproto::{
+        ColormapAlloc, ConnectionExt as _, CreateWindowAux, WindowClass,
+    };
 
     let screen = &conn.setup().roots[screen_num];
     let Some(visual_id) = find_argb_visual(screen) else {
@@ -984,8 +1145,10 @@ impl raw_window_handle::HasDisplayHandle for ProbeTarget {
     fn display_handle(
         &self,
     ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
-        let handle =
-            raw_window_handle::XcbDisplayHandle::new(std::ptr::NonNull::new(self.conn), self.screen);
+        let handle = raw_window_handle::XcbDisplayHandle::new(
+            std::ptr::NonNull::new(self.conn),
+            self.screen,
+        );
         Ok(unsafe {
             raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Xcb(
                 handle,

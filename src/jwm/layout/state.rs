@@ -344,6 +344,9 @@ impl Jwm {
                     }
                 }
             }
+            if let Some(monitor_num) = self.state.monitors.get(mon_key).map(|monitor| monitor.num) {
+                self.clear_minimized_dock_for_monitor(backend, monitor_num);
+            }
         } else {
             // Leaving fullscreen layout: show bar, restore border_w
             if let Some(monitor) = self.state.monitors.get_mut(mon_key) {
@@ -371,6 +374,8 @@ impl Jwm {
                     }
                 }
             }
+            let monitor_num = self.state.monitors.get(mon_key).map(|monitor| monitor.num);
+            self.mark_bar_update_needed_if_visible(monitor_num);
         }
 
         // The flag alone only stops the work area from reserving the bar's

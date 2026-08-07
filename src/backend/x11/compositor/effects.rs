@@ -4,6 +4,9 @@ use crate::backend::compositor_common::effects::{
     MAX_PARTICLE_SYSTEMS, MotionTrailParams, clamp_effect_dt, effect_noise, motion_trail_lifetime,
     particle_burst_count, sanitize_animation_dt, smoothing_alpha,
 };
+use crate::backend::compositor_common::genie::{
+    GenieDirection, PreviewDirection, genie_progress, preview_motion, retarget_genie_timeline,
+};
 use glow::HasContext;
 
 use super::CompositorConnection;
@@ -381,23 +384,44 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Tick genie animations. Returns true if any are active.
     pub(super) fn tick_genie(&mut self) -> bool {
-        if self.genie_active.is_empty() {
-            return false;
-        }
-        let duration = std::time::Duration::from_millis(self.genie_duration_ms.max(1));
+        let preview_active = self.tick_dock_preview();
+        let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
         let now = std::time::Instant::now();
-        // Remove completed animations and free the GPU/X resources they own.
         let mut i = 0;
         while i < self.genie_active.len() {
-            if now.duration_since(self.genie_active[i].start) >= duration {
+            let (_, done) = genie_animation_progress(&self.genie_active[i], now, duration_secs);
+            if done {
                 let ga = self.genie_active.remove(i);
-                self.free_texture_resources(ga.gl_texture, ga.binding, ga.pixmap, ga.damage);
+                match ga.direction {
+                    GenieDirection::Minimize if ga.owns_resources => {
+                        self.cache_minimized_visual(ga);
+                    }
+                    GenieDirection::Restore => {
+                        if ga.owns_resources {
+                            self.free_texture_resources(
+                                ga.gl_texture,
+                                ga.binding,
+                                ga.pixmap,
+                                ga.damage,
+                            );
+                        }
+                        self.minimized_windows.remove(&ga.x11_win);
+                        self.genie_targets.remove(&ga.x11_win);
+                        if self
+                            .dock_preview
+                            .is_some_and(|preview| preview.x11_win == ga.x11_win)
+                        {
+                            self.set_minimized_window_preview(None);
+                        }
+                    }
+                    GenieDirection::Minimize => {}
+                }
                 self.needs_render = true;
             } else {
                 i += 1;
             }
         }
-        !self.genie_active.is_empty()
+        !self.genie_active.is_empty() || preview_active
     }
 
     /// Start a genie animation for a window explicitly being minimized.
@@ -406,29 +430,314 @@ impl<C: CompositorConnection> Compositor<C> {
     /// removing the WindowTexture from the live set and moving its resources
     /// into the animation. `tick_genie` frees them when the animation ends.
     /// This avoids both double-drawing the window and sampling a freed texture.
-    pub(super) fn start_genie_animation(&mut self, x11_win: u32, x: f32, y: f32, w: f32, h: f32) {
-        if !self.genie_minimize {
-            return;
-        }
+    pub(super) fn start_genie_animation(
+        &mut self,
+        x11_win: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        animate: bool,
+    ) {
         if let Some(wt) = self.windows.remove(&x11_win) {
             if self.unredirected_window == Some(x11_win) {
                 self.unredirected_window = None;
             }
             self.needs_render = true;
-            self.genie_active.push(super::GenieAnimation {
+
+            // Restore -> Minimize is a reversal of the one existing mesh, not
+            // a second animation.  In the cached-visual branch the restore
+            // already owns its old detached texture, so this newly imported
+            // live entry must be released.  In the cache-eviction branch the
+            // restore merely borrowed the live texture; removing WindowTexture
+            // here transfers every native resource into that same animation.
+            if let Some(index) = self
+                .genie_active
+                .iter()
+                .position(|animation| animation.x11_win == x11_win)
+            {
+                let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
+                let now = std::time::Instant::now();
+                let action =
+                    reverse_restore_resource_action(self.genie_active[index].owns_resources);
+                if self.genie_active[index].direction == GenieDirection::Restore {
+                    let animation = &mut self.genie_active[index];
+                    retarget_genie_timeline(
+                        &mut animation.start,
+                        &mut animation.start_progress,
+                        &mut animation.direction,
+                        GenieDirection::Minimize,
+                        now,
+                        duration_secs,
+                    );
+                }
+
+                match action {
+                    ReverseRestoreResourceAction::ReleaseLive => {
+                        self.free_texture_resources(
+                            wt.gl_texture,
+                            wt.binding,
+                            wt.pixmap,
+                            wt.damage,
+                        );
+                    }
+                    ReverseRestoreResourceAction::AdoptLive => {
+                        let animation = &mut self.genie_active[index];
+                        animation.gl_texture = wt.gl_texture;
+                        animation.has_rgba = wt.has_rgba;
+                        animation.binding = wt.binding;
+                        animation.pixmap = wt.pixmap;
+                        animation.damage = wt.damage;
+                        animation.owns_resources = true;
+                    }
+                }
+                return;
+            }
+
+            let animation = super::GenieAnimation {
                 x11_win,
                 start: std::time::Instant::now(),
+                start_progress: 0.0,
+                direction: GenieDirection::Minimize,
                 x,
                 y,
                 w,
                 h,
                 gl_texture: wt.gl_texture,
                 has_rgba: wt.has_rgba,
+                target: self.genie_target_for(x11_win),
+                owns_resources: true,
                 binding: wt.binding,
                 pixmap: wt.pixmap,
                 damage: wt.damage,
-            });
+            };
+            if animate {
+                self.genie_active.push(animation);
+            } else {
+                self.cache_minimized_visual(animation);
+            }
         }
+    }
+
+    pub(super) fn genie_target_for(&self, x11_win: u32) -> crate::backend::api::CompositorRect {
+        self.genie_targets
+            .get(&x11_win)
+            .copied()
+            .unwrap_or_else(|| {
+                crate::backend::api::CompositorRect::new(
+                    (self.screen_w / 2) as f32,
+                    self.screen_h.saturating_sub(1) as f32,
+                    1.0,
+                    1.0,
+                )
+                .normalized()
+                .expect("one-pixel fallback Dock target is valid")
+            })
+    }
+
+    /// Start or reverse the visual after the X window has been restored to
+    /// its final live geometry by `add_window`.
+    pub(super) fn start_genie_restore(&mut self, x11_win: u32, x: f32, y: f32, w: f32, h: f32) {
+        if !self.minimized_windows.contains(&x11_win) {
+            return;
+        }
+        if !self.genie_minimize {
+            if let Some(visual) = self.minimized_visuals.remove(&x11_win) {
+                self.free_texture_resources(
+                    visual.gl_texture,
+                    visual.binding,
+                    visual.pixmap,
+                    visual.damage,
+                );
+            }
+            self.minimized_windows.remove(&x11_win);
+            self.genie_targets.remove(&x11_win);
+            if self
+                .dock_preview
+                .is_some_and(|preview| preview.x11_win == x11_win)
+            {
+                self.set_minimized_window_preview(None);
+            }
+            self.needs_render = true;
+            return;
+        }
+        let now = std::time::Instant::now();
+        let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
+        let target = self.genie_target_for(x11_win);
+        if let Some(animation) = self
+            .genie_active
+            .iter_mut()
+            .find(|animation| animation.x11_win == x11_win)
+        {
+            let (progress, _) = genie_animation_progress(animation, now, duration_secs);
+            animation.start = now;
+            animation.start_progress = progress;
+            animation.direction = GenieDirection::Restore;
+            animation.x = x;
+            animation.y = y;
+            animation.w = w;
+            animation.h = h;
+            animation.target = target;
+            self.needs_render = true;
+            return;
+        }
+
+        if let Some(visual) = self.minimized_visuals.remove(&x11_win) {
+            self.genie_active.push(super::GenieAnimation {
+                x11_win,
+                start: now,
+                start_progress: 1.0,
+                direction: GenieDirection::Restore,
+                x,
+                y,
+                w,
+                h,
+                gl_texture: visual.gl_texture,
+                has_rgba: visual.has_rgba,
+                target,
+                owns_resources: true,
+                binding: visual.binding,
+                pixmap: visual.pixmap,
+                damage: visual.damage,
+            });
+            self.needs_render = true;
+            return;
+        }
+
+        // Cache eviction must not turn restore into a hard pop. Borrow the
+        // freshly imported live texture and suppress its ordinary scene draw
+        // until this animation reaches progress zero.
+        if let Some(wt) = self.windows.get(&x11_win) {
+            self.genie_active.push(super::GenieAnimation {
+                x11_win,
+                start: now,
+                start_progress: 1.0,
+                direction: GenieDirection::Restore,
+                x,
+                y,
+                w,
+                h,
+                gl_texture: wt.gl_texture,
+                has_rgba: wt.has_rgba,
+                target,
+                owns_resources: false,
+                binding: None,
+                pixmap: 0,
+                damage: 0,
+            });
+            self.needs_render = true;
+        }
+    }
+
+    pub(super) fn cache_minimized_visual(&mut self, ga: super::GenieAnimation) {
+        let newest_window = ga.x11_win;
+        let estimated_bytes =
+            crate::backend::compositor_common::genie::estimated_visual_bytes(ga.w, ga.h);
+        let visual = super::MinimizedVisual {
+            w: ga.w,
+            h: ga.h,
+            gl_texture: ga.gl_texture,
+            has_rgba: ga.has_rgba,
+            target: self.genie_targets.get(&ga.x11_win).copied(),
+            binding: ga.binding,
+            pixmap: ga.pixmap,
+            damage: ga.damage,
+            cached_at: std::time::Instant::now(),
+            estimated_bytes,
+        };
+        if let Some(old) = self.minimized_visuals.insert(newest_window, visual) {
+            self.free_texture_resources(old.gl_texture, old.binding, old.pixmap, old.damage);
+        }
+        while crate::backend::compositor_common::genie::minimized_cache_over_budget(
+            self.minimized_visuals.len(),
+            self.minimized_visuals
+                .values()
+                .map(|visual| visual.estimated_bytes)
+                .fold(0u64, u64::saturating_add),
+        ) {
+            let Some(oldest) = self
+                .minimized_visuals
+                .iter()
+                .filter(|(window, _)| **window != newest_window)
+                .min_by_key(|(_, visual)| visual.cached_at)
+                .map(|(&window, _)| window)
+            else {
+                break;
+            };
+            if let Some(old) = self.minimized_visuals.remove(&oldest) {
+                self.free_texture_resources(old.gl_texture, old.binding, old.pixmap, old.damage);
+            }
+        }
+    }
+
+    pub(super) fn discard_minimized_visual(&mut self, x11_win: u32) {
+        self.minimized_windows.remove(&x11_win);
+        self.genie_targets.remove(&x11_win);
+        if let Some(index) = self
+            .genie_active
+            .iter()
+            .position(|animation| animation.x11_win == x11_win)
+        {
+            let animation = self.genie_active.remove(index);
+            if animation.owns_resources {
+                self.free_texture_resources(
+                    animation.gl_texture,
+                    animation.binding,
+                    animation.pixmap,
+                    animation.damage,
+                );
+            }
+        }
+        if let Some(visual) = self.minimized_visuals.remove(&x11_win) {
+            self.free_texture_resources(
+                visual.gl_texture,
+                visual.binding,
+                visual.pixmap,
+                visual.damage,
+            );
+        }
+        if self
+            .dock_preview
+            .is_some_and(|preview| preview.x11_win == x11_win)
+        {
+            self.dock_preview = None;
+        }
+    }
+
+    fn tick_dock_preview(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self.dock_preview.is_some_and(|preview| {
+            crate::backend::compositor_common::genie::preview_lease_timeout(
+                preview.direction,
+                now,
+                preview.lease_deadline,
+            ) == Some(std::time::Duration::ZERO)
+        }) {
+            self.set_minimized_window_preview(None);
+        }
+        let Some(preview) = self.dock_preview.as_mut() else {
+            return false;
+        };
+        let (opacity, scale, done) = preview_motion(
+            preview.start_opacity,
+            preview.start_scale,
+            preview.direction,
+            now.saturating_duration_since(preview.started).as_secs_f32(),
+        );
+        preview.opacity = opacity;
+        preview.scale = scale;
+        if !done {
+            return true;
+        }
+        if preview.direction == PreviewDirection::Hide {
+            self.dock_preview = None;
+        } else {
+            preview.start_opacity = 1.0;
+            preview.start_scale = 1.0;
+            preview.opacity = 1.0;
+            preview.scale = 1.0;
+        }
+        false
     }
 
     // =================================================================
@@ -513,9 +822,43 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReverseRestoreResourceAction {
+    /// The reverse animation owns a detached minimized visual; the separate
+    /// live entry removed for this minimize request must be released.
+    ReleaseLive,
+    /// The reverse animation borrowed this live entry; adopt all of it.
+    AdoptLive,
+}
+
+const fn reverse_restore_resource_action(
+    animation_owns_resources: bool,
+) -> ReverseRestoreResourceAction {
+    if animation_owns_resources {
+        ReverseRestoreResourceAction::ReleaseLive
+    } else {
+        ReverseRestoreResourceAction::AdoptLive
+    }
+}
+
+pub(super) fn genie_animation_progress(
+    animation: &super::GenieAnimation,
+    now: std::time::Instant,
+    duration_secs: f32,
+) -> (f32, bool) {
+    genie_progress(
+        animation.start_progress,
+        animation.direction,
+        now.saturating_duration_since(animation.start).as_secs_f32(),
+        duration_secs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EffectTickClock, FadeTick};
+    use super::{
+        EffectTickClock, FadeTick, ReverseRestoreResourceAction, reverse_restore_resource_action,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -571,5 +914,21 @@ mod tests {
         assert_eq!(clock.delta(start, true), 0.0);
         clock.finish_frame(false);
         assert_eq!(clock.delta(start + Duration::from_secs(10), true), 0.0);
+    }
+
+    #[test]
+    fn restore_reversal_releases_an_unrelated_live_texture_when_animation_owns_pixels() {
+        assert_eq!(
+            reverse_restore_resource_action(true),
+            ReverseRestoreResourceAction::ReleaseLive
+        );
+    }
+
+    #[test]
+    fn restore_reversal_adopts_the_live_texture_when_animation_only_borrowed_pixels() {
+        assert_eq!(
+            reverse_restore_resource_action(false),
+            ReverseRestoreResourceAction::AdoptLive
+        );
     }
 }

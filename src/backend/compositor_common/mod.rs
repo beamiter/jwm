@@ -8,6 +8,7 @@ pub(crate) mod dynamic_island;
 pub mod effects;
 pub mod event_coalescer;
 pub mod expose;
+pub(crate) mod genie;
 pub mod layout_strip;
 pub mod math;
 pub mod media;

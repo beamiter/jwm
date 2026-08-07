@@ -5,7 +5,10 @@
 
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
-use xbar_core::shared_structures::{MonitorInfo, SharedMessage, TagStatus};
+use xbar_core::shared_structures::{
+    MAX_MINIMIZED_WINDOWS, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MINIMIZED_WINDOW_FLAG_URGENT,
+    MinimizedWindowInfo, MonitorInfo, SharedMessage, TagStatus,
+};
 
 /// 状态栏消息构建器
 pub struct StatusBarBuilder;
@@ -120,6 +123,64 @@ impl StatusBarBuilder {
         String::new()
     }
 
+    /// Project the hidden clients owned by one monitor into the fixed-size
+    /// wire records consumed by every bar frontend.
+    ///
+    /// `skip_taskbar` is honoured just like a desktop Dock/task switcher. Dock
+    /// windows and swallowed terminals are implementation surfaces rather
+    /// than user-restorable minimized windows and are excluded as well.
+    pub fn get_minimized_windows(
+        clients: &slotmap::SlotMap<ClientKey, WMClient>,
+        monitor_clients: &[ClientKey],
+        monitor_id: i32,
+    ) -> Vec<MinimizedWindowInfo> {
+        let mut windows: Vec<_> = monitor_clients
+            .iter()
+            .filter_map(|client_key| clients.get(*client_key))
+            .filter(|client| {
+                client.state.is_hidden
+                    && !client.state.skip_taskbar
+                    && !client.state.is_dock
+                    && !client.state.is_swallowed
+            })
+            .map(|client| {
+                // The compositor captures/retains the live window visual at
+                // minimize time even when the Genie preference is disabled,
+                // so every ordinary minimized client can service a hover
+                // preview. Backends without composition safely no-op the
+                // request while keeping the cross-bar model identical.
+                let mut flags = MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE;
+                if client.state.is_urgent || client.state.demands_attention {
+                    flags |= MINIMIZED_WINDOW_FLAG_URGENT;
+                }
+                let mut info = MinimizedWindowInfo::new(client.win.raw(), monitor_id, flags);
+                info.set_title(&client.name);
+                let app_id = if !client.class.is_empty() {
+                    &client.class
+                } else {
+                    &client.instance
+                };
+                info.set_app_id(app_id);
+                (client.state.minimized_order, client.win.raw(), info)
+            })
+            .collect();
+        // Focus/restack operations may reorder the WM's client vector. Dock
+        // slots instead follow minimize insertion order like macOS and use the
+        // session window id only as a deterministic tie-break for legacy
+        // clients whose order predates this field.
+        windows.sort_by_key(|(order, window_id, _)| (*order, *window_id));
+        windows.into_iter().map(|(_, _, info)| info).collect()
+    }
+
+    /// Keep the newest representable Dock entries while preserving their
+    /// insertion order. Omitted older entries are appended only so the shared
+    /// message setter can still observe the true length and raise OVERFLOW.
+    pub fn prioritize_snapshot_capacity(windows: &mut [MinimizedWindowInfo]) {
+        if windows.len() > MAX_MINIMIZED_WINDOWS {
+            windows.rotate_left(windows.len() - MAX_MINIMIZED_WINDOWS);
+        }
+    }
+
     /// 构建监视器的状态栏消息
     ///
     /// # 参数
@@ -140,10 +201,11 @@ impl StatusBarBuilder {
         let mut monitor_info = MonitorInfo::default();
 
         // 设置监视器几何信息
-        monitor_info.monitor_x = monitor.geometry.w_x;
-        monitor_info.monitor_y = monitor.geometry.w_y;
-        monitor_info.monitor_width = monitor.geometry.w_w;
-        monitor_info.monitor_height = monitor.geometry.w_h;
+        let pad = CONFIG.load().status_bar_padding();
+        monitor_info.monitor_x = monitor.geometry.m_x + pad;
+        monitor_info.monitor_y = monitor.geometry.m_y + pad;
+        monitor_info.monitor_width = (monitor.geometry.m_w - 2 * pad).max(1);
+        monitor_info.monitor_height = monitor.geometry.m_h;
         monitor_info.monitor_num = monitor.num;
         monitor_info.set_ltsymbol(&monitor.lt_symbol);
 
@@ -172,6 +234,9 @@ impl StatusBarBuilder {
         monitor_info.set_client_name(&selected_client_name);
 
         message.monitor_info = monitor_info;
+        let mut minimized = Self::get_minimized_windows(clients, monitor_clients, monitor.num);
+        Self::prioritize_snapshot_capacity(&mut minimized);
+        message.set_minimized_windows(&minimized);
         message
     }
 }
@@ -256,8 +321,7 @@ mod tests {
     use crate::backend::common_define::WindowId;
 
     fn create_test_client(tags: u32, is_urgent: bool, name: &str) -> WMClient {
-        // Use a default WindowId - the actual value doesn't matter for these tests
-        let win = unsafe { std::mem::zeroed::<WindowId>() };
+        let win = WindowId::from_raw(0x42);
         let mut client = WMClient::new(win);
         client.state.tags = tags;
         client.state.is_urgent = is_urgent;
@@ -333,6 +397,81 @@ mod tests {
 
         let name = StatusBarBuilder::get_selected_client_name(&clients, &monitor);
         assert_eq!(name, "");
+    }
+
+    #[test]
+    fn minimized_projection_keeps_metadata_and_honours_taskbar_policy() {
+        let mut clients = slotmap::SlotMap::new();
+        let mut hidden = create_test_client(0b0010, true, "Terminal — build");
+        hidden.state.is_hidden = true;
+        hidden.class = "Alacritty".to_owned();
+        let hidden_key = clients.insert(hidden);
+
+        let visible_key = clients.insert(create_test_client(0b0001, false, "Visible"));
+        let mut skipped = create_test_client(0b0100, false, "Private helper");
+        skipped.state.is_hidden = true;
+        skipped.state.skip_taskbar = true;
+        let skipped_key = clients.insert(skipped);
+
+        let windows = StatusBarBuilder::get_minimized_windows(
+            &clients,
+            &[hidden_key, visible_key, skipped_key],
+            7,
+        );
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].window_id, 0x42);
+        assert_eq!(windows[0].monitor_id, 7);
+        assert_eq!(windows[0].get_title(), "Terminal — build");
+        assert_eq!(windows[0].get_app_id(), "Alacritty");
+        assert_ne!(
+            windows[0].flags & MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            0
+        );
+        assert_ne!(windows[0].flags & MINIMIZED_WINDOW_FLAG_URGENT, 0);
+    }
+
+    #[test]
+    fn minimized_projection_uses_insertion_order_not_client_vector_order() {
+        let mut clients = slotmap::SlotMap::new();
+        let mut later = create_test_client(1, false, "Later");
+        later.win = WindowId::from_raw(0x51);
+        later.state.is_hidden = true;
+        later.state.minimized_order = 9;
+        let later_key = clients.insert(later);
+
+        let mut earlier = create_test_client(1, false, "Earlier");
+        earlier.win = WindowId::from_raw(0x52);
+        earlier.state.is_hidden = true;
+        earlier.state.minimized_order = 3;
+        let earlier_key = clients.insert(earlier);
+
+        let windows =
+            StatusBarBuilder::get_minimized_windows(&clients, &[later_key, earlier_key], 0);
+        let ids: Vec<_> = windows.iter().map(|window| window.window_id).collect();
+        assert_eq!(ids, vec![0x52, 0x51]);
+    }
+
+    #[test]
+    fn overflow_snapshot_keeps_the_newest_slots_in_stable_order() {
+        let mut windows: Vec<_> = (1..=(MAX_MINIMIZED_WINDOWS as u64 + 2))
+            .map(|window| MinimizedWindowInfo::new(window, 0, 0))
+            .collect();
+        StatusBarBuilder::prioritize_snapshot_capacity(&mut windows);
+
+        let mut message = SharedMessage::default();
+        message.set_minimized_windows(&windows);
+        let ids: Vec<_> = message
+            .minimized_windows()
+            .iter()
+            .map(|window| window.window_id)
+            .collect();
+        assert_eq!(ids.first(), Some(&3));
+        assert_eq!(ids.last(), Some(&(MAX_MINIMIZED_WINDOWS as u64 + 2)));
+        assert_ne!(
+            message.minimized_flags & xbar_core::shared_structures::MINIMIZED_LIST_FLAG_OVERFLOW,
+            0
+        );
     }
 
     #[test]

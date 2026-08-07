@@ -758,7 +758,11 @@ mod tests {
             "/tmp/xbar-core-wake-{label}-{}-{sequence}",
             std::process::id()
         );
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
         (path, owner)
     }
 

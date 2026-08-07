@@ -5,7 +5,10 @@ use std::sync::Arc;
 
 use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer};
 
-use crate::{MonitorGeometry, MonitorId, ShellRoute, TagState, WmCommand, WmSnapshot};
+use crate::{
+    DockItemGeometry, MinimizedWindow, MonitorGeometry, MonitorId, ShellRoute, TagState,
+    WindowToken, WmCommand, WmSnapshot,
+};
 
 /// Result of submitting a command to the bounded shared command queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,10 +78,30 @@ impl SharedTransport {
 }
 
 fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
-    let sequence = message.timestamp;
+    let sequence = if message.minimized_generation != 0 {
+        message.minimized_generation
+    } else {
+        message.timestamp
+    };
+    let wm_session_id = message.wm_session_id;
+    let minimized_overflow =
+        message.minimized_flags & shared_structures::MINIMIZED_LIST_FLAG_OVERFLOW != 0;
+    let minimized_windows = message
+        .minimized_windows()
+        .iter()
+        .filter(|window| window.window_id != 0)
+        .map(|window| MinimizedWindow {
+            token: WindowToken(window.window_id),
+            monitor: MonitorId(window.monitor_id),
+            title: window.title_lossy().into_owned(),
+            app_id: window.app_id_lossy().into_owned(),
+            flags: window.flags,
+        })
+        .collect();
     let info = message.monitor_info;
     WmSnapshot {
         sequence: Some(sequence),
+        wm_session_id,
         monitor: MonitorId(info.monitor_num),
         geometry: MonitorGeometry::from_raw(
             info.monitor_x,
@@ -98,6 +121,8 @@ fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
                 occupied: tag.is_occ,
             })
             .collect(),
+        minimized_windows,
+        minimized_overflow,
     }
 }
 
@@ -109,7 +134,55 @@ fn command_to_shared(command: WmCommand) -> SharedCommand {
         WmCommand::OpenShellHub { route, monitor } => {
             SharedCommand::shell_hub(shell_route_to_shared(route), monitor.0)
         }
+        WmCommand::RestoreWindow {
+            window,
+            wm_session_id,
+            monitor,
+            geometry,
+        } => SharedCommand::restore_minimized(
+            window.get(),
+            wm_session_id,
+            monitor.0,
+            geometry_to_shared(geometry),
+        ),
+        WmCommand::PreviewWindow {
+            window,
+            wm_session_id,
+            monitor,
+            visible,
+            geometry,
+        } => SharedCommand::preview_minimized(
+            window.get(),
+            wm_session_id,
+            monitor.0,
+            if visible {
+                shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+            } else {
+                0
+            },
+            geometry_to_shared(geometry),
+        ),
+        WmCommand::SetDockGeometry {
+            window,
+            wm_session_id,
+            monitor,
+            geometry,
+        } => SharedCommand::set_minimized_geometry(
+            window.map_or(0, WindowToken::get),
+            wm_session_id,
+            monitor.0,
+            geometry_to_shared(geometry),
+        ),
     }
+}
+
+fn geometry_to_shared(geometry: DockItemGeometry) -> shared_structures::MinimizedWindowAnchor {
+    shared_structures::MinimizedWindowAnchor::new(
+        geometry.x,
+        geometry.y,
+        geometry.width,
+        geometry.height,
+    )
 }
 
 /// The two enums stay separate types on purpose: `ShellRoute` belongs to the
@@ -140,7 +213,11 @@ mod tests {
     fn dropping_transport_never_unlinks_the_owner_ring() {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
 
         let transport = SharedTransport::open(&path).unwrap();
         drop(transport);
@@ -155,7 +232,11 @@ mod tests {
     fn transport_converts_messages_and_submits_typed_commands() {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
         let transport = SharedTransport::open(&path).unwrap();
         let mut monitor_info = shared_structures::MonitorInfo {
             monitor_num: 3,
@@ -165,19 +246,45 @@ mod tests {
         monitor_info.set_ltsymbol("[M]");
         monitor_info.tag_status_vec[2].is_selected = true;
         monitor_info.tag_status_vec[2].is_occ = true;
-        let message = shared_structures::SharedMessage {
+        let mut minimized = shared_structures::MinimizedWindowInfo::new(
+            0x1234_5678_9abc_def0,
+            -2,
+            shared_structures::MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE
+                | shared_structures::MINIMIZED_WINDOW_FLAG_URGENT,
+        );
+        minimized.set_title("Terminal");
+        minimized.set_app_id("foot");
+        let mut message = shared_structures::SharedMessage {
             timestamp: 44,
+            wm_session_id: 901,
+            minimized_generation: 45,
             monitor_info,
+            ..shared_structures::SharedMessage::default()
         };
+        assert_eq!(message.set_minimized_windows(&[minimized]), 1);
+        message.minimized_flags |= shared_structures::MINIMIZED_LIST_FLAG_OVERFLOW;
         assert!(owner.try_write_message(&message).unwrap());
 
         let snapshot = transport.drain_latest().unwrap().unwrap();
-        assert_eq!(snapshot.sequence, Some(44));
+        assert_eq!(snapshot.sequence, Some(45));
         assert_eq!(snapshot.monitor, crate::MonitorId(3));
         assert_eq!(snapshot.client_name, "terminal");
         assert_eq!(snapshot.layout_symbol, "[M]");
         assert!(snapshot.tags[2].selected);
         assert!(snapshot.tags[2].occupied);
+        assert_eq!(snapshot.wm_session_id, 901);
+        assert!(snapshot.minimized_overflow);
+        assert_eq!(
+            snapshot.minimized_windows,
+            vec![MinimizedWindow {
+                token: WindowToken(0x1234_5678_9abc_def0),
+                monitor: MonitorId(-2),
+                title: "Terminal".into(),
+                app_id: "foot".into(),
+                flags: shared_structures::MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE
+                    | shared_structures::MINIMIZED_WINDOW_FLAG_URGENT,
+            }]
+        );
 
         let command = WmCommand::SetLayout {
             layout: crate::LayoutId(2),
@@ -192,10 +299,90 @@ mod tests {
     }
 
     #[test]
+    fn minimized_commands_preserve_session_window_monitor_flags_and_anchor() {
+        let geometry = DockItemGeometry::new(-100, 240, 54, 36);
+        let anchor = geometry_to_shared(geometry);
+        let token = WindowToken(0xdead_beef_cafe_babe);
+
+        let restore = command_to_shared(WmCommand::RestoreWindow {
+            window: token,
+            wm_session_id: 71,
+            monitor: MonitorId(-3),
+            geometry,
+        });
+        assert_eq!(
+            restore.get_command_type(),
+            shared_structures::CommandType::RestoreMinimized
+        );
+        assert_eq!(restore.get_window_id(), token.get());
+        assert_eq!(restore.get_wm_session_id(), 71);
+        assert_eq!(restore.get_monitor_id(), -3);
+        assert_eq!(restore.anchor(), anchor);
+
+        for visible in [false, true] {
+            let preview = command_to_shared(WmCommand::PreviewWindow {
+                window: token,
+                wm_session_id: 72,
+                monitor: MonitorId(4),
+                visible,
+                geometry,
+            });
+            assert_eq!(
+                preview.get_command_type(),
+                shared_structures::CommandType::PreviewMinimized
+            );
+            assert_eq!(preview.minimized_window_id(), Some(token.get()));
+            assert_eq!(preview.get_wm_session_id(), 72);
+            assert_eq!(preview.get_monitor_id(), 4);
+            assert_eq!(preview.anchor(), anchor);
+            assert_eq!(
+                preview.get_flags(),
+                if visible {
+                    shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+                } else {
+                    0
+                }
+            );
+        }
+
+        for window in [None, Some(token)] {
+            let report = command_to_shared(WmCommand::SetDockGeometry {
+                window,
+                wm_session_id: 73,
+                monitor: MonitorId(5),
+                geometry,
+            });
+            assert_eq!(
+                report.get_command_type(),
+                shared_structures::CommandType::SetMinimizedGeometry
+            );
+            assert_eq!(report.get_window_id(), window.map_or(0, WindowToken::get));
+            assert_eq!(report.minimized_window_id(), window.map(WindowToken::get));
+            assert_eq!(report.get_wm_session_id(), 73);
+            assert_eq!(report.get_monitor_id(), 5);
+            assert_eq!(report.anchor(), anchor);
+        }
+    }
+
+    #[test]
+    fn legacy_snapshot_sequence_falls_back_to_timestamp() {
+        let snapshot = snapshot_from_shared(SharedMessage {
+            timestamp: 77,
+            minimized_generation: 0,
+            ..SharedMessage::default()
+        });
+        assert_eq!(snapshot.sequence, Some(77));
+    }
+
+    #[test]
     fn every_shell_route_survives_the_wire_round_trip() {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
         let transport = SharedTransport::open(&path).unwrap();
 
         for route in ShellRoute::ALL {
@@ -218,7 +405,11 @@ mod tests {
     fn destroyed_transport_is_a_broken_pipe() {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
         let transport = SharedTransport::open(&path).unwrap();
         owner.destroy().unwrap();
 
@@ -232,7 +423,11 @@ mod tests {
     fn bounded_command_queue_reports_full_without_hiding_it() {
         let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
         let path = format!("/tmp/xbar-core-transport-{}-{sequence}", std::process::id());
-        let owner = SharedRingBuffer::create_aux(&path, Some(8), Some(0)).unwrap();
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .unwrap();
         let transport = SharedTransport::open(&path).unwrap();
         let command = WmCommand::SetLayout {
             layout: crate::LayoutId(1),

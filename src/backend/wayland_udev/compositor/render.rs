@@ -8,6 +8,9 @@ use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::IslandDock;
 use crate::backend::compositor_common::effects::MotionTrailParams;
+use crate::backend::compositor_common::genie::{
+    dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect,
+};
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
@@ -27,6 +30,58 @@ fn premultiplied_blend_factors() -> (u32, u32) {
 
 fn overlay_output_is_scene_linear(scene_linear_active: bool, hw_encode_active: bool) -> bool {
     scene_linear_active && hw_encode_active
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedTexturePass {
+    Genie,
+    StaticDockItem,
+    DockPreview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedTextureProgram {
+    Window,
+    Genie,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RetainedColorPlan {
+    program: RetainedTextureProgram,
+    transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+    scene_linear: bool,
+}
+
+/// Produce the exact same color-management policy for every path that samples
+/// a retained minimized-window texture. Keeping pass selection in this pure
+/// plan prevents Genie, the static Dock item and hover preview from silently
+/// drifting apart as their draw loops evolve.
+fn retained_color_plan(
+    pass: RetainedTexturePass,
+    transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+    scene_linear: bool,
+) -> RetainedColorPlan {
+    RetainedColorPlan {
+        program: match pass {
+            RetainedTexturePass::Genie => RetainedTextureProgram::Genie,
+            RetainedTexturePass::StaticDockItem | RetainedTexturePass::DockPreview => {
+                RetainedTextureProgram::Window
+            }
+        },
+        transform,
+        scene_linear,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ColorUniformLocations {
+    managed: i32,
+    matrix: i32,
+    decode_tf: i32,
+    decode_gamma: i32,
+    encode_tf: i32,
+    encode_gamma: i32,
+    scene_linear: i32,
 }
 
 fn postprocess_requires_continuous_frames(
@@ -95,11 +150,12 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OcclusionCandidate, attention_requires_continuous_frames,
-        edge_glow_requires_continuous_frames, is_opaque_output_occluder, oriented_content_uv,
-        overlay_output_is_scene_linear, postprocess_requires_continuous_frames,
-        premultiplied_blend_factors,
+        OcclusionCandidate, RetainedTexturePass, RetainedTextureProgram,
+        attention_requires_continuous_frames, edge_glow_requires_continuous_frames,
+        is_opaque_output_occluder, oriented_content_uv, overlay_output_is_scene_linear,
+        postprocess_requires_continuous_frames, premultiplied_blend_factors, retained_color_plan,
     };
+    use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
     use smithay::backend::renderer::gles::ffi;
 
     #[test]
@@ -133,6 +189,32 @@ mod tests {
         assert!(!overlay_output_is_scene_linear(false, true));
         assert!(!overlay_output_is_scene_linear(true, false));
         assert!(overlay_output_is_scene_linear(true, true));
+    }
+
+    #[test]
+    fn every_retained_dock_texture_path_consumes_nonidentity_color_transform() {
+        let transform = ColorTransform {
+            inverse_eotf: TransferKind::St2084Pq,
+            matrix_row_major: [0.63, 0.29, 0.08, 0.07, 0.92, 0.01, 0.02, 0.08, 0.90],
+            forward_eotf: TransferKind::Srgb,
+        };
+
+        for (pass, expected_program) in [
+            (RetainedTexturePass::Genie, RetainedTextureProgram::Genie),
+            (
+                RetainedTexturePass::StaticDockItem,
+                RetainedTextureProgram::Window,
+            ),
+            (
+                RetainedTexturePass::DockPreview,
+                RetainedTextureProgram::Window,
+            ),
+        ] {
+            let plan = retained_color_plan(pass, Some(transform), true);
+            assert_eq!(plan.program, expected_program);
+            assert_eq!(plan.transform, Some(transform));
+            assert!(plan.scene_linear);
+        }
     }
 
     #[test]
@@ -264,6 +346,66 @@ impl WaylandCompositor {
         unsafe {
             gl.Enable(ffi::BLEND);
             gl.BlendFunc(src, dst);
+        }
+    }
+
+    unsafe fn upload_retained_color_plan(&self, gl: &ffi::Gles2, plan: RetainedColorPlan) {
+        let locations = match plan.program {
+            RetainedTextureProgram::Window => ColorUniformLocations {
+                managed: self.win_uniforms.color_managed,
+                matrix: self.win_uniforms.color_matrix,
+                decode_tf: self.win_uniforms.decode_tf,
+                decode_gamma: self.win_uniforms.decode_gamma,
+                encode_tf: self.win_uniforms.encode_tf,
+                encode_gamma: self.win_uniforms.encode_gamma,
+                scene_linear: self.win_uniforms.scene_linear,
+            },
+            RetainedTextureProgram::Genie => ColorUniformLocations {
+                managed: self.genie_uniforms.color_managed,
+                matrix: self.genie_uniforms.color_matrix,
+                decode_tf: self.genie_uniforms.decode_tf,
+                decode_gamma: self.genie_uniforms.decode_gamma,
+                encode_tf: self.genie_uniforms.encode_tf,
+                encode_gamma: self.genie_uniforms.encode_gamma,
+                scene_linear: self.genie_uniforms.scene_linear,
+            },
+        };
+
+        unsafe {
+            gl.Uniform1i(locations.scene_linear, i32::from(plan.scene_linear));
+            if let Some(transform) = plan.transform {
+                gl.Uniform1i(locations.managed, 1);
+                gl.UniformMatrix3fv(
+                    locations.matrix,
+                    1,
+                    ffi::TRUE,
+                    transform.matrix_row_major.as_ptr(),
+                );
+                gl.Uniform1i(locations.decode_tf, transform.inverse_eotf.shader_id());
+                gl.Uniform1f(
+                    locations.decode_gamma,
+                    transform.inverse_eotf.gamma_for_shader(),
+                );
+                gl.Uniform1i(locations.encode_tf, transform.forward_eotf.shader_id());
+                gl.Uniform1f(
+                    locations.encode_gamma,
+                    transform.forward_eotf.gamma_for_shader(),
+                );
+            } else {
+                gl.Uniform1i(locations.managed, 0);
+            }
+        }
+    }
+
+    unsafe fn reset_retained_color_plan(&self, gl: &ffi::Gles2, plan: RetainedColorPlan) {
+        let managed = match plan.program {
+            RetainedTextureProgram::Window => self.win_uniforms.color_managed,
+            RetainedTextureProgram::Genie => self.genie_uniforms.color_managed,
+        };
+        unsafe {
+            // Reset after every retained item, including identity items. This
+            // makes the loop robust against reordering and early additions.
+            gl.Uniform1i(managed, 0);
         }
     }
 
@@ -447,6 +589,232 @@ impl WaylandCompositor {
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             }
 
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
+    fn render_minimized_dock_items(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear_output: bool,
+    ) {
+        if !self
+            .minimized_visuals
+            .values()
+            .any(|visual| visual.target.is_some())
+        {
+            return;
+        }
+        unsafe {
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            gl.Uniform1i(
+                self.win_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.BindVertexArray(self.quad_vao);
+            gl.ActiveTexture(ffi::TEXTURE0);
+
+            let preview = self
+                .dock_preview
+                .as_ref()
+                .map(|preview| (preview.window_id, preview.anchor, preview.opacity));
+            for (&window_id, visual) in &self.minimized_visuals {
+                let Some(stable_target) = visual.target else {
+                    continue;
+                };
+                let Some(target) = dock_item_preview_target(window_id, stable_target, preview)
+                else {
+                    continue;
+                };
+                if visual.w <= 0.0 || visual.h <= 0.0 {
+                    continue;
+                }
+                let fit = (target.width / visual.w).min(target.height / visual.h);
+                let width = (visual.w * fit).max(1.0);
+                let height = (visual.h * fit).max(1.0);
+                let x = target.x + (target.width - width) * 0.5;
+                let y = target.y + (target.height - height) * 0.5;
+                let [uv_x, uv_y, uv_w, uv_h] =
+                    oriented_content_uv(visual.content_uv, visual.y_inverted);
+                self.set_rect_uniform(gl, self.win_uniforms.rect, x, y, width, height);
+                gl.Uniform2f(self.win_uniforms.size, width, height);
+                gl.Uniform1f(
+                    self.win_uniforms.opacity,
+                    if visual.has_alpha { -1.0 } else { 1.0 },
+                );
+                gl.Uniform1f(self.win_uniforms.radius, 5.0_f32.min(height * 0.5));
+                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                let color_plan = retained_color_plan(
+                    RetainedTexturePass::StaticDockItem,
+                    visual.color_transform,
+                    scene_linear_output,
+                );
+                self.upload_retained_color_plan(gl, color_plan);
+                self.bind_window_texture(gl, visual.texture_owner.tex_id());
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.reset_retained_color_plan(gl, color_plan);
+            }
+
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
+    fn render_dock_preview(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear_output: bool,
+    ) {
+        let Some(preview) = self.dock_preview.as_ref() else {
+            return;
+        };
+        if preview.opacity <= 0.001 {
+            return;
+        }
+        let source = self
+            .minimized_visuals
+            .get(&preview.window_id)
+            .map(|visual| {
+                (
+                    visual.texture_owner.tex_id(),
+                    visual.has_alpha,
+                    visual.y_inverted,
+                    visual.content_uv,
+                    visual.w,
+                    visual.h,
+                    visual.color_transform,
+                )
+            })
+            .or_else(|| {
+                self.genie_active
+                    .iter()
+                    .find(|animation| animation.window_id == preview.window_id)
+                    .map(|animation| {
+                        (
+                            animation.texture_owner.tex_id(),
+                            animation.has_alpha,
+                            animation.y_inverted,
+                            animation.content_uv,
+                            animation.w,
+                            animation.h,
+                            animation.color_transform,
+                        )
+                    })
+            })
+            .or_else(|| {
+                self.windows.get(&preview.window_id).and_then(|window| {
+                    window.texture_owner.as_ref().map(|texture| {
+                        (
+                            texture.tex_id(),
+                            window.has_alpha,
+                            window.y_inverted,
+                            window.content_uv,
+                            window.width as f32,
+                            window.height as f32,
+                            window.color_transform,
+                        )
+                    })
+                })
+            });
+        let Some((texture, has_alpha, y_inverted, content_uv, source_w, source_h, color_transform)) =
+            source
+        else {
+            return;
+        };
+        let output_bounds = output_bounds_for_anchor(
+            preview.anchor,
+            self.monitors.iter().map(|&(_, x, y, w, h, _)| {
+                crate::backend::api::CompositorRect::new(x as f32, y as f32, w as f32, h as f32)
+            }),
+            crate::backend::api::CompositorRect::new(
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            ),
+        );
+        let Some(rect) = preview_rect(
+            preview.anchor,
+            source_w,
+            source_h,
+            output_bounds,
+            preview.scale,
+        ) else {
+            return;
+        };
+        let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(content_uv, y_inverted);
+
+        unsafe {
+            let spread = 16.0;
+            gl.UseProgram(self.shadow_program);
+            self.set_projection_uniform(gl, self.shadow_uniforms.projection, projection);
+            gl.Uniform1f(self.shadow_uniforms.spread, spread);
+            gl.Uniform4f(
+                self.shadow_uniforms.shadow_color,
+                0.0,
+                0.0,
+                0.0,
+                0.32 * preview.opacity,
+            );
+            gl.Uniform1f(self.shadow_uniforms.radius, 14.0);
+            gl.Uniform2f(self.shadow_uniforms.size, rect.width, rect.height);
+            self.set_rect_uniform(
+                gl,
+                self.shadow_uniforms.rect,
+                rect.x - spread,
+                rect.y - spread,
+                rect.width + spread * 2.0,
+                rect.height + spread * 2.0,
+            );
+            gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            let color_plan = retained_color_plan(
+                RetainedTexturePass::DockPreview,
+                color_transform,
+                scene_linear_output,
+            );
+            self.upload_retained_color_plan(gl, color_plan);
+            self.set_rect_uniform(
+                gl,
+                self.win_uniforms.rect,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+            );
+            gl.Uniform2f(self.win_uniforms.size, rect.width, rect.height);
+            gl.Uniform1f(
+                self.win_uniforms.opacity,
+                if has_alpha {
+                    -preview.opacity
+                } else {
+                    preview.opacity
+                },
+            );
+            gl.Uniform1f(self.win_uniforms.radius, 14.0);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
+            gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+            gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            self.bind_window_texture(gl, texture);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            self.reset_retained_color_plan(gl, color_plan);
             gl.BindVertexArray(0);
             gl.UseProgram(0);
         }
@@ -701,6 +1069,7 @@ impl WaylandCompositor {
         shader_encode_tf: i32,
         shader_encode_gamma: f32,
     ) -> bool {
+        self.start_pending_genie_restores(scene);
         // Last frame's frosted-glass backdrop describes a framebuffer that is
         // about to be overwritten; the first panel that needs one recaptures.
         self.glass_backdrop = None;
@@ -928,6 +1297,29 @@ impl WaylandCompositor {
         // =================================================================
         self.tick_fades(effect_dt);
         self.tick_genie();
+        // Tick first so a restore that reaches progress zero can return to the
+        // ordinary scene in this same frame. Filtering before the tick would
+        // otherwise leave a one-frame hole between mesh retirement and the
+        // live window draw.
+        let filtered_scene;
+        let scene = if self.genie_active.iter().any(|animation| {
+            animation.direction == crate::backend::compositor_common::genie::GenieDirection::Restore
+        }) {
+            filtered_scene = scene
+                .iter()
+                .copied()
+                .filter(|(window_id, ..)| {
+                    !self.genie_active.iter().any(|animation| {
+                        animation.window_id == *window_id
+                            && animation.direction
+                                == crate::backend::compositor_common::genie::GenieDirection::Restore
+                    })
+                })
+                .collect::<Vec<_>>();
+            filtered_scene.as_slice()
+        } else {
+            scene
+        };
         self.tick_wobbly(effect_dt);
         self.tick_particles(effect_dt);
         self.tick_motion_trails();
@@ -1915,8 +2307,7 @@ impl WaylandCompositor {
         // =================================================================
         if !self.genie_active.is_empty() {
             self.frame_profiler.zone_start("genie");
-            let genie_duration_ms = self.genie_duration_ms.max(1);
-            let dock = (self.dock_x, self.dock_y);
+            let genie_duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
             unsafe {
                 gl.UseProgram(self.genie_program);
                 self.set_projection_uniform(gl, self.genie_uniforms.projection, &projection);
@@ -1938,13 +2329,29 @@ impl WaylandCompositor {
                 gl.BindVertexArray(self.quad_vao);
 
                 for ga in &self.genie_active {
-                    let elapsed = ga.start.elapsed().as_millis() as f32;
-                    let progress = (elapsed / genie_duration_ms as f32).min(1.0);
+                    let color_plan = retained_color_plan(
+                        RetainedTexturePass::Genie,
+                        ga.color_transform,
+                        scene_linear_active && hw_encode_active,
+                    );
+                    self.upload_retained_color_plan(gl, color_plan);
+                    let (progress, _) = genie_progress(
+                        ga.start_progress,
+                        ga.direction,
+                        ga.start.elapsed().as_secs_f32(),
+                        genie_duration_secs,
+                    );
                     let opacity = 1.0 - progress;
                     self.set_rect_uniform(gl, self.genie_uniforms.rect, ga.x, ga.y, ga.w, ga.h);
                     gl.Uniform2f(self.genie_uniforms.size, ga.w, ga.h);
                     gl.Uniform1f(self.genie_uniforms.progress, progress);
-                    gl.Uniform2f(self.genie_uniforms.dock_pos, dock.0, dock.1);
+                    let (dock_x, dock_y) = ga.target.center();
+                    gl.Uniform2f(self.genie_uniforms.dock_pos, dock_x, dock_y);
+                    gl.Uniform2f(
+                        self.genie_uniforms.dock_size,
+                        ga.target.width,
+                        ga.target.height,
+                    );
                     let [uv_x, uv_y, uv_w, uv_h] =
                         oriented_content_uv(ga.content_uv, ga.y_inverted);
                     gl.Uniform4f(self.genie_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
@@ -1958,6 +2365,7 @@ impl WaylandCompositor {
                     gl.ActiveTexture(ffi::TEXTURE0);
                     self.bind_window_texture(gl, ga.texture_owner.tex_id());
                     gl.DrawArrays(ffi::TRIANGLES, 0, grid * grid * 6);
+                    self.reset_retained_color_plan(gl, color_plan);
                 }
 
                 gl.BindVertexArray(0);
@@ -1965,6 +2373,10 @@ impl WaylandCompositor {
             }
             self.frame_profiler.zone_end();
         }
+
+        let overlay_scene_linear = scene_linear_active && hw_encode_active;
+        self.render_minimized_dock_items(gl, &projection, overlay_scene_linear);
+        self.render_dock_preview(gl, &projection, overlay_scene_linear);
 
         // =================================================================
         // 10. Draw borders (focused and urgent windows)

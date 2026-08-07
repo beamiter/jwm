@@ -263,12 +263,21 @@ impl Jwm {
         if was_hidden {
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.is_hidden = false;
+                client.state.minimized_order = 0;
             }
             let _ = backend.property_ops().set_net_wm_state_flag(
                 win,
                 crate::backend::api::NetWmState::Hidden,
                 false,
             );
+            let monitor_num = self
+                .state
+                .clients
+                .get(client_key)
+                .and_then(|client| client.mon)
+                .and_then(|mon_key| self.state.monitors.get(mon_key))
+                .map(|monitor| monitor.num);
+            self.mark_bar_update_needed_if_visible(monitor_num);
         }
 
         // The monitor has to move before the tag does: `view` acts on the
@@ -296,6 +305,12 @@ impl Jwm {
             // The inverse of the minimise order: arrange establishes the live
             // geometry first, then the compositor rebuilds its entry.
             let _ = self.arrange(backend, self.state.sel_mon);
+            if let Some(monitor_num) = client_monitor
+                .and_then(|monitor| self.state.monitors.get(monitor))
+                .map(|monitor| monitor.num)
+            {
+                self.clear_minimized_preview_for(backend, monitor_num, Some(win));
+            }
             backend.compositor_set_window_minimized(win, false);
         }
         Ok(true)

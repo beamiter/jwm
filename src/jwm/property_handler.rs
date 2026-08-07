@@ -145,7 +145,12 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.updatetitle_by_key(backend, client_key);
 
-        let should_update_bar = self.is_client_selected(client_key);
+        let should_update_bar = self.is_client_selected(client_key)
+            || self
+                .state
+                .clients
+                .get(client_key)
+                .is_some_and(|client| client.state.is_hidden);
 
         if should_update_bar {
             let monitor_id = self
@@ -161,7 +166,7 @@ impl Jwm {
 
                 if let Some(client) = self.state.clients.get(client_key) {
                     debug!(
-                        "Title updated for selected window {:?}, updating status bar",
+                        "Title updated for selected/minimized window {:?}, updating status bar",
                         client.win
                     );
                 }
@@ -205,6 +210,21 @@ impl Jwm {
             if !cls.is_empty() {
                 client.class = cls;
             }
+        }
+
+        // The Dock uses the class/app-id as its stable visual label. Hidden
+        // clients therefore need the same refresh as the selected title even
+        // though they cannot be the monitor's focused client.
+        let monitor_id = self
+            .state
+            .clients
+            .get(client_key)
+            .filter(|client| client.state.is_hidden)
+            .and_then(|client| client.mon)
+            .and_then(|mon_key| self.state.monitors.get(mon_key))
+            .map(|monitor| monitor.num);
+        if monitor_id.is_some() {
+            self.mark_bar_update_needed_if_visible(monitor_id);
         }
         Ok(())
     }

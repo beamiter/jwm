@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DirtyBits,
-    model::{BarSnapshot, LayoutId, MAX_MODEL_TAGS, MonitorId, ShellRoute, TagId, UserAction},
+    model::{
+        BarSnapshot, DockItemGeometry, LayoutId, MAX_MODEL_TAGS, MonitorId, ShellRoute, TagId,
+        UserAction, WindowToken,
+    },
     runtime::{BarRuntime, RuntimeFrame, RuntimeSchedule, RuntimeUpdate},
 };
 
@@ -89,7 +92,8 @@ impl FrontendPartitions {
         DirtyBits::MONITOR_CHANGED
             | DirtyBits::GEOMETRY_CHANGED
             | DirtyBits::LAYOUT_CHANGED
-            | DirtyBits::CLIENT_CHANGED,
+            | DirtyBits::CLIENT_CHANGED
+            | DirtyBits::MINIMIZED_CHANGED,
     );
     const SYSTEM_DIRTY: DirtyBits =
         DirtyBits::new(DirtyBits::SYSTEM_CHANGED | DirtyBits::BATTERY_CHANGED);
@@ -413,6 +417,12 @@ pub fn snapshot_changes(previous: &BarSnapshot, current: &BarSnapshot) -> DirtyB
     if previous.client_name != current.client_name {
         changes.set(DirtyBits::CLIENT_CHANGED);
     }
+    if previous.wm_session_id != current.wm_session_id
+        || previous.minimized_windows != current.minimized_windows
+        || previous.minimized_overflow != current.minimized_overflow
+    {
+        changes.set(DirtyBits::MINIMIZED_CHANGED);
+    }
     if previous.time != current.time || previous.show_seconds != current.show_seconds {
         changes.set(DirtyBits::TIME_CHANGED);
     }
@@ -448,26 +458,67 @@ pub fn snapshot_changes(previous: &BarSnapshot, current: &BarSnapshot) -> DirtyB
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ActionRequest {
-    ViewTag { tag_index: usize },
-    ToggleTag { tag_index: usize },
-    ViewTagOn { tag_index: usize, monitor_id: i32 },
-    ToggleTagOn { tag_index: usize, monitor_id: i32 },
+    ViewTag {
+        tag_index: usize,
+    },
+    ToggleTag {
+        tag_index: usize,
+    },
+    ViewTagOn {
+        tag_index: usize,
+        monitor_id: i32,
+    },
+    ToggleTagOn {
+        tag_index: usize,
+        monitor_id: i32,
+    },
     ToggleLayoutSelector,
-    SetLayout { layout_id: u32 },
-    SetLayoutOn { layout_id: u32, monitor_id: i32 },
+    SetLayout {
+        layout_id: u32,
+    },
+    SetLayoutOn {
+        layout_id: u32,
+        monitor_id: i32,
+    },
     ToggleSeconds,
     ToggleTheme,
     ToggleMute,
     VolumeUp,
     VolumeDown,
-    AdjustVolume { delta: i32 },
+    AdjustVolume {
+        delta: i32,
+    },
     BrightnessUp,
     BrightnessDown,
-    AdjustBrightness { delta: i32 },
+    AdjustBrightness {
+        delta: i32,
+    },
     RefreshBattery,
     Screenshot,
     OpenAudioControl,
-    OpenShellHub { route: ShellRoute },
+    RestoreWindow {
+        window_id: u64,
+        wm_session_id: u64,
+        #[serde(default)]
+        geometry: DockItemGeometry,
+    },
+    PreviewWindow {
+        window_id: u64,
+        wm_session_id: u64,
+        visible: bool,
+        #[serde(default)]
+        geometry: DockItemGeometry,
+    },
+    SetDockGeometry {
+        #[serde(default)]
+        window_id: Option<u64>,
+        wm_session_id: u64,
+        #[serde(default)]
+        geometry: DockItemGeometry,
+    },
+    OpenShellHub {
+        route: ShellRoute,
+    },
 }
 
 impl ActionRequest {
@@ -556,6 +607,35 @@ impl TryFrom<ActionRequest> for UserAction {
             ActionRequest::RefreshBattery => Self::RefreshBattery,
             ActionRequest::Screenshot => Self::Screenshot,
             ActionRequest::OpenAudioControl => Self::OpenAudioControl,
+            ActionRequest::RestoreWindow {
+                window_id,
+                wm_session_id,
+                geometry,
+            } => Self::RestoreWindow {
+                window: WindowToken(window_id),
+                wm_session_id,
+                geometry,
+            },
+            ActionRequest::PreviewWindow {
+                window_id,
+                wm_session_id,
+                visible,
+                geometry,
+            } => Self::PreviewWindow {
+                window: WindowToken(window_id),
+                wm_session_id,
+                visible,
+                geometry,
+            },
+            ActionRequest::SetDockGeometry {
+                window_id,
+                wm_session_id,
+                geometry,
+            } => Self::SetDockGeometry {
+                window: window_id.map(WindowToken),
+                wm_session_id,
+                geometry,
+            },
             ActionRequest::OpenShellHub { route } => Self::OpenShellHub(route),
         })
     }
@@ -578,8 +658,9 @@ mod tests {
         SnapshotCursor, snapshot_changes,
     };
     use crate::{
-        AudioState, BarModel, BatteryState, BrightnessState, DirtyBits, LayoutId, MonitorGeometry,
-        MonitorId, Percent, ShellRoute, SystemState, TagId, ThemeMode, UserAction,
+        AudioState, BarModel, BatteryState, BrightnessState, DirtyBits, DockItemGeometry, LayoutId,
+        MinimizedWindow, MonitorGeometry, MonitorId, Percent, ShellRoute, SystemState, TagId,
+        ThemeMode, UserAction, WindowToken,
         model::MAX_MODEL_TAGS,
         runtime::{RuntimeFrame, RuntimeUpdate},
     };
@@ -629,6 +710,33 @@ mod tests {
             ActionRequest::RefreshBattery,
             ActionRequest::Screenshot,
             ActionRequest::OpenAudioControl,
+            ActionRequest::RestoreWindow {
+                window_id: 0x1234_5678_9abc_def0,
+                wm_session_id: 91,
+                geometry: DockItemGeometry::new(-20, 40, 54, 36),
+            },
+            ActionRequest::PreviewWindow {
+                window_id: 77,
+                wm_session_id: 91,
+                visible: true,
+                geometry: DockItemGeometry::new(100, 200, 27, 18),
+            },
+            ActionRequest::PreviewWindow {
+                window_id: 77,
+                wm_session_id: 91,
+                visible: false,
+                geometry: DockItemGeometry::default(),
+            },
+            ActionRequest::SetDockGeometry {
+                window_id: None,
+                wm_session_id: 91,
+                geometry: DockItemGeometry::new(1, 2, 80, 38),
+            },
+            ActionRequest::SetDockGeometry {
+                window_id: Some(77),
+                wm_session_id: 91,
+                geometry: DockItemGeometry::new(10, 20, 27, 18),
+            },
         ]);
         cases.extend(
             ShellRoute::ALL
@@ -678,6 +786,11 @@ mod tests {
             r#"{"action":"view_tag"}"#,
             r#"{"action":"view_tag_on","tag_index":1}"#,
             r#"{"action":"adjust_volume"}"#,
+            r#"{"action":"restore_window"}"#,
+            r#"{"action":"restore_window","window_id":1}"#,
+            r#"{"action":"preview_window","window_id":1}"#,
+            r#"{"action":"preview_window","window_id":1,"visible":true}"#,
+            r#"{"action":"set_dock_geometry"}"#,
             // Wrong payload types.
             r#"{"action":"view_tag","tag_index":"one"}"#,
             r#"{"action":"view_tag","tag_index":-1}"#,
@@ -691,6 +804,66 @@ mod tests {
                 "accepted malformed request: {payload}"
             );
         }
+    }
+
+    #[test]
+    fn minimized_wire_shape_is_flat_and_geometry_defaults_are_compatible() {
+        let item = MinimizedWindow {
+            token: WindowToken(0x1234),
+            monitor: MonitorId(-2),
+            title: "Editor".into(),
+            app_id: "code".into(),
+            flags: 3,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["token"], 0x1234_u64);
+        assert_eq!(json["monitor"], -2);
+        assert_eq!(json["title"], "Editor");
+
+        let restore: ActionRequest =
+            serde_json::from_str(r#"{"action":"restore_window","window_id":9,"wm_session_id":91}"#)
+                .unwrap();
+        assert_eq!(
+            restore.into_user_action().unwrap(),
+            UserAction::RestoreWindow {
+                window: WindowToken(9),
+                wm_session_id: 91,
+                geometry: DockItemGeometry::default(),
+            }
+        );
+        let preview: ActionRequest = serde_json::from_str(
+            r#"{"action":"preview_window","window_id":9,"wm_session_id":91,"visible":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            preview.into_user_action().unwrap(),
+            UserAction::PreviewWindow {
+                window: WindowToken(9),
+                wm_session_id: 91,
+                visible: true,
+                geometry: DockItemGeometry::default(),
+            }
+        );
+        let shelf: ActionRequest =
+            serde_json::from_str(r#"{"action":"set_dock_geometry","wm_session_id":91}"#).unwrap();
+        assert_eq!(
+            shelf.into_user_action().unwrap(),
+            UserAction::SetDockGeometry {
+                window: None,
+                wm_session_id: 91,
+                geometry: DockItemGeometry::default(),
+            }
+        );
+
+        let mut legacy = serde_json::to_value(snapshot()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("wm_session_id");
+        object.remove("minimized_windows");
+        object.remove("minimized_overflow");
+        let decoded: crate::BarSnapshot = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.wm_session_id, 0);
+        assert!(decoded.minimized_windows.is_empty());
+        assert!(!decoded.minimized_overflow);
     }
 
     #[test]
@@ -736,7 +909,8 @@ mod tests {
             DirtyBits::MONITOR_CHANGED
                 | DirtyBits::GEOMETRY_CHANGED
                 | DirtyBits::LAYOUT_CHANGED
-                | DirtyBits::CLIENT_CHANGED,
+                | DirtyBits::CLIENT_CHANGED
+                | DirtyBits::MINIMIZED_CHANGED,
         ));
         assert_eq!(monitor.bits(), FrontendPartitions::MONITOR);
 
@@ -884,6 +1058,24 @@ mod tests {
         assert_exact(changed, DirtyBits::CLIENT_CHANGED);
 
         let mut changed = original.clone();
+        changed.wm_session_id = 91;
+        assert_exact(changed, DirtyBits::MINIMIZED_CHANGED);
+
+        let mut changed = original.clone();
+        changed.minimized_windows.push(MinimizedWindow {
+            token: WindowToken(7),
+            monitor: MonitorId(1),
+            title: "Terminal".into(),
+            app_id: "foot".into(),
+            flags: 0,
+        });
+        assert_exact(changed, DirtyBits::MINIMIZED_CHANGED);
+
+        let mut changed = original.clone();
+        changed.minimized_overflow = true;
+        assert_exact(changed, DirtyBits::MINIMIZED_CHANGED);
+
+        let mut changed = original.clone();
         changed.time = "12:34".to_owned();
         assert_exact(changed, DirtyBits::TIME_CHANGED);
 
@@ -979,6 +1171,56 @@ mod tests {
                 ActionRequest::OpenAudioControl,
                 UserAction::OpenAudioControl,
             ),
+            (
+                ActionRequest::RestoreWindow {
+                    window_id: 17,
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(1, 2, 27, 18),
+                },
+                UserAction::RestoreWindow {
+                    window: WindowToken(17),
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(1, 2, 27, 18),
+                },
+            ),
+            (
+                ActionRequest::PreviewWindow {
+                    window_id: 17,
+                    wm_session_id: 91,
+                    visible: false,
+                    geometry: DockItemGeometry::new(3, 4, 54, 36),
+                },
+                UserAction::PreviewWindow {
+                    window: WindowToken(17),
+                    wm_session_id: 91,
+                    visible: false,
+                    geometry: DockItemGeometry::new(3, 4, 54, 36),
+                },
+            ),
+            (
+                ActionRequest::SetDockGeometry {
+                    window_id: Some(17),
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(5, 6, 27, 18),
+                },
+                UserAction::SetDockGeometry {
+                    window: Some(WindowToken(17)),
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(5, 6, 27, 18),
+                },
+            ),
+            (
+                ActionRequest::SetDockGeometry {
+                    window_id: None,
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(7, 8, 60, 38),
+                },
+                UserAction::SetDockGeometry {
+                    window: None,
+                    wm_session_id: 91,
+                    geometry: DockItemGeometry::new(7, 8, 60, 38),
+                },
+            ),
         ];
 
         for (request, expected) in cases {
@@ -1018,6 +1260,40 @@ mod tests {
 
         assert_eq!(frame.snapshot.theme, ThemeMode::Light);
         assert!(frame.changes().contains(DirtyBits::THEME_CHANGED));
+    }
+
+    #[test]
+    fn minimized_action_request_cannot_rebind_a_token_from_an_old_session() {
+        let mut runtime = crate::BarRuntime::default();
+        runtime.apply_event(crate::BarEvent::WindowManager(crate::WmSnapshot {
+            wm_session_id: 92,
+            minimized_windows: vec![MinimizedWindow {
+                token: WindowToken(17),
+                monitor: MonitorId(2),
+                title: "new owner of reused token".into(),
+                app_id: "test".into(),
+                flags: 0,
+            }],
+            ..crate::WmSnapshot::default()
+        }));
+
+        let update = ActionRequest::RestoreWindow {
+            window_id: 17,
+            wm_session_id: 91,
+            geometry: DockItemGeometry::new(1, 2, 27, 18),
+        }
+        .dispatch(&mut runtime)
+        .unwrap();
+        assert_eq!(
+            update.issues,
+            vec![crate::RuntimeIssue::Model(
+                crate::ModelError::StaleWmSession {
+                    requested: 91,
+                    current: 92,
+                }
+            )]
+        );
+        assert!(update.platform_effects.is_empty());
     }
 
     #[test]

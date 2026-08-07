@@ -10,16 +10,17 @@ use log::{error, info, warn};
 use std::{
     env,
     sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::presentation::{Palette, Rgba};
 use xbar_core::{
-    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, LayoutId, ModelConfig, MonitorGeometry,
-    Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails, TagId, TagState,
-    TransportRecoveryConfig, UserAction,
+    AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH,
+    DOCK_SLOT_WIDTH, DockBridge, LayoutId, MinimizedWindow, ModelConfig, MonitorGeometry, Percent,
+    PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails, TagId, TagState,
+    TransportRecoveryConfig, UserAction, WindowToken,
 };
 use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
 
@@ -75,6 +76,7 @@ fn volume_icon(snap: Option<&AudioDeviceInfo>) -> &'static str {
 
 struct RuntimeOwner {
     runtime: BarRuntime,
+    dock: DockBridge,
 }
 
 impl RuntimeOwner {
@@ -92,26 +94,107 @@ impl RuntimeOwner {
         }
         .expect("dioxus bar model configuration is valid");
 
-        Self { runtime }
+        Self {
+            runtime,
+            dock: DockBridge::new(),
+        }
     }
 
     fn snapshot(&self) -> BarSnapshot {
         self.runtime.snapshot()
     }
 
-    fn tick(&mut self) -> (RuntimeUpdate, BarSnapshot) {
-        let update = self.runtime.tick();
+    fn tick(&mut self, scale_factor: f64) -> (RuntimeUpdate, BarSnapshot) {
+        let mut update = self.runtime.tick();
+        let dock_update = self.service_dock(scale_factor);
+        update.merge(dock_update);
         (update, self.runtime.snapshot())
     }
 
-    fn poll_transport(&mut self) -> (RuntimeUpdate, BarSnapshot) {
-        let update = self.runtime.poll_transport();
+    fn poll_transport(&mut self, scale_factor: f64) -> (RuntimeUpdate, BarSnapshot) {
+        let mut update = self.runtime.poll_transport();
+        let dock_update = self.service_dock(scale_factor);
+        update.merge(dock_update);
         (update, self.runtime.snapshot())
     }
 
     fn dispatch(&mut self, action: UserAction) -> (RuntimeUpdate, BarSnapshot) {
         let update = self.runtime.dispatch(action);
         (update, self.runtime.snapshot())
+    }
+
+    fn service_dock(&mut self, scale_factor: f64) -> RuntimeUpdate {
+        let snapshot = self.runtime.snapshot();
+        self.dock.synchronize(
+            &snapshot,
+            self.runtime.transport_generation(),
+            scale_factor,
+            BAR_LOGICAL_HEIGHT as f32,
+            6.0,
+        );
+        let now = Instant::now();
+        let mut combined = RuntimeUpdate::default();
+        for action in self.dock.pending_actions(now) {
+            let update = self.runtime.dispatch(action);
+            let accepted = !update.has_issues();
+            combined.merge(update);
+            if accepted {
+                self.dock.acknowledge(action, now);
+            } else {
+                self.dock.record_failure(now);
+                break;
+            }
+        }
+        combined
+    }
+
+    fn dock_enter(
+        &mut self,
+        token: WindowToken,
+        wm_session_id: u64,
+        scale_factor: f64,
+    ) -> (RuntimeUpdate, BarSnapshot) {
+        let _ = self.dock.enter(token, wm_session_id);
+        let update = self.service_dock(scale_factor);
+        (update, self.runtime.snapshot())
+    }
+
+    fn dock_leave(
+        &mut self,
+        token: WindowToken,
+        wm_session_id: u64,
+        scale_factor: f64,
+    ) -> (RuntimeUpdate, BarSnapshot) {
+        let _ = self.dock.leave(token, wm_session_id);
+        let update = self.service_dock(scale_factor);
+        (update, self.runtime.snapshot())
+    }
+
+    fn dock_restore(
+        &mut self,
+        token: WindowToken,
+        wm_session_id: u64,
+        scale_factor: f64,
+    ) -> (RuntimeUpdate, BarSnapshot) {
+        let _ = self.dock.request_restore(token, wm_session_id);
+        let update = self.service_dock(scale_factor);
+        (update, self.runtime.snapshot())
+    }
+
+    fn dock_ui(&self) -> (Vec<(MinimizedWindow, f32)>, bool, bool, f32) {
+        (
+            self.dock
+                .visible_windows()
+                .cloned()
+                .map(|window| {
+                    let scale = self.dock.scale_for(window.token);
+                    (window, scale)
+                })
+                .collect(),
+            self.dock.overflow(),
+            self.dock.collapsed(),
+            self.dock.shelf_width(),
+        )
     }
 }
 
@@ -708,7 +791,10 @@ fn App() -> Element {
             let mut observed_scale_factor = window.scale_factor();
             spawn(async move {
                 loop {
-                    let result = runtime.lock().ok().map(|mut runtime| runtime.tick());
+                    let result = runtime
+                        .lock()
+                        .ok()
+                        .map(|mut runtime| runtime.tick(window.scale_factor()));
                     if let Some((update, snapshot)) = result {
                         handle_runtime_update(update, &window, window_baseline);
 
@@ -745,7 +831,7 @@ fn App() -> Element {
                     let result = runtime
                         .lock()
                         .ok()
-                        .map(|mut runtime| runtime.poll_transport());
+                        .map(|mut runtime| runtime.poll_transport(window.scale_factor()));
                     if let Some((update, snapshot)) = result {
                         let needs_redraw = update.needs_redraw();
                         handle_runtime_update(update, &window, window_baseline);
@@ -778,6 +864,49 @@ fn App() -> Element {
         })
     };
 
+    let dispatch_dock_enter = {
+        let runtime = runtime.read().clone();
+        let window = window.clone();
+        use_callback(move |(token, session): (WindowToken, u64)| {
+            let result = runtime
+                .lock()
+                .ok()
+                .map(|mut runtime| runtime.dock_enter(token, session, window.scale_factor()));
+            if let Some((update, snapshot)) = result {
+                handle_runtime_update(update, &window, window_baseline);
+                bar_snapshot.set(snapshot);
+            }
+        })
+    };
+    let dispatch_dock_leave = {
+        let runtime = runtime.read().clone();
+        let window = window.clone();
+        use_callback(move |(token, session): (WindowToken, u64)| {
+            let result = runtime
+                .lock()
+                .ok()
+                .map(|mut runtime| runtime.dock_leave(token, session, window.scale_factor()));
+            if let Some((update, snapshot)) = result {
+                handle_runtime_update(update, &window, window_baseline);
+                bar_snapshot.set(snapshot);
+            }
+        })
+    };
+    let dispatch_dock_restore = {
+        let runtime = runtime.read().clone();
+        let window = window.clone();
+        use_callback(move |(token, session): (WindowToken, u64)| {
+            let result = runtime
+                .lock()
+                .ok()
+                .map(|mut runtime| runtime.dock_restore(token, session, window.scale_factor()));
+            if let Some((update, snapshot)) = result {
+                handle_runtime_update(update, &window, window_baseline);
+                bar_snapshot.set(snapshot);
+            }
+        })
+    };
+
     let state = bar_snapshot();
     let wm_available = state.wm_available;
     let wm_tags = if state.wm_available {
@@ -790,6 +919,13 @@ fn App() -> Element {
     } else {
         "[]="
     };
+    let (dock_windows, dock_overflow, dock_collapsed, dock_width) = runtime
+        .read()
+        .lock()
+        .ok()
+        .map(|runtime| runtime.dock_ui())
+        .unwrap_or_default();
+    let dock_session = state.wm_session_id;
 
     let mut handle_button_press = move |index: usize| {
         info!("Button {} pressed", index);
@@ -924,6 +1060,48 @@ fn App() -> Element {
                 }
 
                 div { class: "pill scale-pill", {format!("s: {:.2}", scale_factor())} }
+
+                div {
+                    class: "minimized-dock",
+                    style: "width: {dock_width}px",
+                    title: if dock_collapsed { "Minimized windows hidden on this narrow bar" } else { "Minimized windows" },
+                    for (window, magnification) in dock_windows {
+                        {
+                            let token = window.token;
+                            let title = if window.title.trim().is_empty() {
+                                window.app_id.clone()
+                            } else {
+                                window.title.clone()
+                            };
+                            let class = if window.urgent() {
+                                "minimized-dock-card urgent"
+                            } else {
+                                "minimized-dock-card"
+                            };
+                            let width = DOCK_ITEM_WIDTH * magnification;
+                            let height = DOCK_ITEM_HEIGHT * magnification;
+                            rsx! {
+                                div {
+                                    key: "{token.get()}",
+                                    class: "minimized-dock-slot",
+                                    style: "width: {DOCK_SLOT_WIDTH}px",
+                                    onmouseenter: move |_| dispatch_dock_enter.call((token, dock_session)),
+                                    onmouseleave: move |_| dispatch_dock_leave.call((token, dock_session)),
+                                    onclick: move |_| dispatch_dock_restore.call((token, dock_session)),
+                                    div {
+                                        class: "{class}",
+                                        title: "{title}",
+                                        style: "width: {width}px; height: {height}px",
+                                        span { "{window.initial()}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if dock_overflow || dock_collapsed {
+                        span { class: "minimized-dock-overflow", title: "More minimized windows", "+" }
+                    }
+                }
             }
         }
     }

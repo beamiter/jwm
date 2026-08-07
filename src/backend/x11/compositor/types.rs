@@ -1,4 +1,6 @@
+use crate::backend::api::CompositorRect;
 use crate::backend::compositor_common::effects::MotionTrail;
+use crate::backend::compositor_common::genie::{GenieDirection, PreviewDirection};
 use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
 pub(super) use crate::backend::x11::compositor_common::effects::{
     Particle, ParticleSystem, RippleState,
@@ -622,19 +624,51 @@ pub(super) struct GenieUniforms {
     pub(super) uv_rect: Option<glow::UniformLocation>,
     pub(super) progress: Option<glow::UniformLocation>,
     pub(super) dock_pos: Option<glow::UniformLocation>,
+    pub(super) dock_size: Option<glow::UniformLocation>,
     pub(super) grid_size: Option<glow::UniformLocation>,
 }
 
 pub(super) struct GenieAnimation {
     pub(super) x11_win: u32,
     pub(super) start: std::time::Instant,
+    pub(super) start_progress: f32,
+    pub(super) direction: GenieDirection,
     pub(super) x: f32,
     pub(super) y: f32,
     pub(super) w: f32,
     pub(super) h: f32,
     pub(super) gl_texture: glow::Texture,
     pub(super) has_rgba: bool,
+    pub(super) target: CompositorRect,
+    /// False when a restore animation borrows the newly-created live entry.
+    pub(super) owns_resources: bool,
     pub(super) binding: Option<PixmapBinding>,
     pub(super) pixmap: u32,
     pub(super) damage: u32,
+}
+
+pub(super) struct MinimizedVisual {
+    pub(super) w: f32,
+    pub(super) h: f32,
+    pub(super) gl_texture: glow::Texture,
+    pub(super) has_rgba: bool,
+    pub(super) target: Option<CompositorRect>,
+    pub(super) binding: Option<PixmapBinding>,
+    pub(super) pixmap: u32,
+    pub(super) damage: u32,
+    pub(super) cached_at: std::time::Instant,
+    pub(super) estimated_bytes: u64,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DockPreview {
+    pub(super) x11_win: u32,
+    pub(super) anchor: CompositorRect,
+    pub(super) started: std::time::Instant,
+    pub(super) lease_deadline: std::time::Instant,
+    pub(super) start_opacity: f32,
+    pub(super) start_scale: f32,
+    pub(super) direction: PreviewDirection,
+    pub(super) opacity: f32,
+    pub(super) scale: f32,
 }

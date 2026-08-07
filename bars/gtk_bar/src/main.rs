@@ -145,6 +145,7 @@ impl BarApp {
                 };
                 let update = app.runtime.borrow_mut().tick();
                 app.handle_runtime_update(update);
+                app.surface.maintain();
                 glib::ControlFlow::Continue
             }
         });
@@ -157,6 +158,7 @@ impl BarApp {
                 };
                 let update = app.runtime.borrow_mut().poll_transport();
                 app.handle_runtime_update(update);
+                app.surface.maintain();
                 glib::ControlFlow::Continue
             }
         });
@@ -214,7 +216,7 @@ impl BarApp {
         let presentation =
             PresentationProjector::project(snapshot.view(), &self.theme.presentation);
         xbar_gtk::apply_theme_class(&self.window, presentation.theme);
-        self.surface.sync(presentation);
+        self.surface.sync(&snapshot, presentation);
     }
 
     fn resize_window_to_monitor(&self, expected_width: u32) {

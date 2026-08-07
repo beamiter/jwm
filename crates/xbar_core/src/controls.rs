@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::ThemeMode;
 use crate::display::{MetricTone, VolumeLevel};
 use crate::model::{
-    BarView, MediaPlayback, MediaState, NetworkState, Percent, ShellRoute, TagId, UserAction,
+    BarView, DockItemGeometry, MediaPlayback, MediaState, NetworkState, Percent, ShellRoute, TagId,
+    UserAction,
 };
 use crate::presentation::{NodeId, PresentationConfig};
 
@@ -129,6 +130,10 @@ pub struct BarPresentation {
     pub layout_choices: Vec<ControlSpec>,
     /// Omitted when hidden or empty, matching the current layout behavior.
     pub client_name: Option<ControlSpec>,
+    /// Stable minimized-window controls in compositor-provided order.
+    pub minimized_windows: Vec<ControlSpec>,
+    /// The shared fixed-capacity list omitted additional minimized windows.
+    pub minimized_overflow: bool,
     /// Visible subset of [`STATUS_ORDER_RIGHT_TO_LEFT`] in right-to-left order.
     pub status: Vec<ControlSpec>,
 }
@@ -242,12 +247,46 @@ impl PresentationProjector {
                 )
             });
 
+        let minimized_windows = if config.visibility.minimized_windows {
+            view.minimized_windows
+                .iter()
+                .map(|window| {
+                    control(
+                        NodeId::MinimizedWindow(window.token),
+                        window.initial().to_string(),
+                        window.title.clone(),
+                        None,
+                        None,
+                        None,
+                        ControlState {
+                            urgent: window.urgent(),
+                            ..ControlState::default()
+                        },
+                        InputBindings {
+                            primary: Some(UserAction::RestoreWindow {
+                                window: window.token,
+                                wm_session_id: view.wm_session_id,
+                                geometry: DockItemGeometry::default(),
+                            }),
+                            ..InputBindings::default()
+                        },
+                    )
+                    .with_availability(view.wm_available)
+                    .with_enabled(view.wm_available)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         BarPresentation {
             theme: view.theme,
             tags,
             layout_button,
             layout_choices,
             client_name,
+            minimized_windows,
+            minimized_overflow: view.minimized_overflow,
             status: status_controls(view, config),
         }
     }
@@ -560,7 +599,7 @@ mod tests {
     use super::*;
     use crate::model::{
         AudioState, BarSnapshot, BatteryState, BrightnessState, LayoutId, MonitorId, SystemState,
-        TagState,
+        TagState, WindowToken,
     };
     use crate::presentation::{LayoutChoice, PresentationVisibility};
 
@@ -572,12 +611,15 @@ mod tests {
         BarSnapshot {
             wm_available: true,
             wm_sequence: Some(7),
+            wm_session_id: 11,
             tags: vec![TagState::default()],
             active_tag: None,
             monitor: MonitorId(2),
             geometry: None,
             layout_symbol: "[]=".to_owned(),
             client_name: "terminal".to_owned(),
+            minimized_windows: Vec::new(),
+            minimized_overflow: false,
             time: "12:34".to_owned(),
             show_seconds: false,
             layout_selector_open: false,
@@ -714,6 +756,53 @@ mod tests {
     }
 
     #[test]
+    fn minimized_projection_preserves_order_title_urgency_and_restore_binding() {
+        let mut snapshot = snapshot();
+        snapshot.minimized_overflow = true;
+        snapshot.minimized_windows = vec![
+            crate::MinimizedWindow {
+                token: WindowToken(11),
+                monitor: MonitorId(2),
+                title: "Terminal".into(),
+                app_id: "foot".into(),
+                flags: crate::MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            },
+            crate::MinimizedWindow {
+                token: WindowToken(12),
+                monitor: MonitorId(3),
+                title: "Urgent chat".into(),
+                app_id: String::new(),
+                flags: crate::MINIMIZED_WINDOW_FLAG_URGENT,
+            },
+        ];
+
+        let projected =
+            PresentationProjector::project(snapshot.view(), &PresentationConfig::default());
+        assert!(projected.minimized_overflow);
+        assert_eq!(
+            projected
+                .minimized_windows
+                .iter()
+                .map(|control| (control.id, control.icon.as_str(), control.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (NodeId::MinimizedWindow(WindowToken(11)), "F", "Terminal"),
+                (NodeId::MinimizedWindow(WindowToken(12)), "U", "Urgent chat"),
+            ]
+        );
+        assert!(!projected.minimized_windows[0].state.urgent);
+        assert!(projected.minimized_windows[1].state.urgent);
+        assert_eq!(
+            projected.minimized_windows[0].bindings.primary,
+            Some(UserAction::RestoreWindow {
+                window: WindowToken(11),
+                wm_session_id: 11,
+                geometry: DockItemGeometry::default(),
+            })
+        );
+    }
+
+    #[test]
     fn network_and_media_pills_track_connection_and_activity() {
         let mut snapshot = snapshot();
         let config = PresentationConfig::default();
@@ -797,6 +886,7 @@ mod tests {
             screenshot: true,
             clock: false,
             shell_hub: false,
+            ..PresentationVisibility::default()
         };
         let filtered = PresentationProjector::project(snapshot.view(), &config);
         assert_eq!(

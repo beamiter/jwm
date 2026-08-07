@@ -196,7 +196,7 @@ use crate::backend::x11::compositor_common::{
     X11TextureSourceOps, X11WindowResourceOps,
 };
 use glow::HasContext;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc;
 
@@ -772,6 +772,10 @@ where
     genie_minimize: bool,
     genie_duration_ms: u64,
     genie_active: Vec<GenieAnimation>,
+    genie_targets: HashMap<u32, crate::backend::api::CompositorRect>,
+    minimized_windows: HashSet<u32>,
+    minimized_visuals: HashMap<u32, MinimizedVisual>,
+    dock_preview: Option<DockPreview>,
     dock_position: (f32, f32),
 
     // --- Phase 3.3: Window open ripple ---
@@ -1063,11 +1067,22 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         // textures, X pixmaps, and Damage objects immediately instead.
         let animations = std::mem::take(&mut self.genie_active);
         for animation in animations {
+            if animation.owns_resources {
+                self.free_texture_resources(
+                    animation.gl_texture,
+                    animation.binding,
+                    animation.pixmap,
+                    animation.damage,
+                );
+            }
+        }
+        let minimized = std::mem::take(&mut self.minimized_visuals);
+        for (_, visual) in minimized {
             self.free_texture_resources(
-                animation.gl_texture,
-                animation.binding,
-                animation.pixmap,
-                animation.damage,
+                visual.gl_texture,
+                visual.binding,
+                visual.pixmap,
+                visual.damage,
             );
         }
         let wins: Vec<u32> = self.windows.keys().copied().collect();

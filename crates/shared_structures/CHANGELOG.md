@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- 协议 v12 新增固定上限的最小化窗口投影：`SharedMessage` 携带 WM session、generation、overflow 状态及最多 16 个 `MinimizedWindowInfo`（窗口 ID、monitor、flags、title、app-id/class）。
+- 新增 `RestoreMinimized`、`PreviewMinimized` 和 `SetMinimizedGeometry` 命令；56 字节命令 payload 保留旧 `parameter` 并新增窗口/session 标识、flags 和 anchor 矩形。`SetMinimizedGeometry` 的窗口 ID 为 0 时表示 tray/shelf，非 0 时表示具体 item。
+
+### Changed
+
+- 共享内存协议提升到 v12；消息与命令 slot 布局已改变，与 v11 及更早映射不兼容，需协调重启并重建映射。
+
 ### Fixed
 
 - 进程存活探测改为读取 `/proc/<pid>/stat`，把尚未被父进程 `wait` 的 zombie/dead 进程视为已退出；方向锁崩溃恢复、`creator_alive()` 与 `reclaim_stale(true)` 不再被永久存在的僵尸 PID 卡住。共享布局和公开 API 不变。

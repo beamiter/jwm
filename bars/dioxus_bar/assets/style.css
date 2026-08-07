@@ -109,6 +109,59 @@ body {
   flex: 1 1 auto;
 }
 
+/* ===== Minimized-window Dock ===== */
+.minimized-dock {
+  height: 40px;
+  min-width: 7px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px 0 5px;
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
+  overflow: visible;
+}
+
+.minimized-dock-slot {
+  height: 40px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  cursor: pointer;
+}
+
+.minimized-dock-card {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: rgba(255, 255, 255, 0.96);
+  background: linear-gradient(145deg, rgba(109, 168, 255, 0.95), rgba(52, 88, 164, 0.95));
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.28);
+  transition: width 180ms cubic-bezier(0.2, 0.85, 0.25, 1),
+    height 180ms cubic-bezier(0.2, 0.85, 0.25, 1),
+    box-shadow 180ms ease;
+  transform-origin: center center;
+}
+
+.minimized-dock-card.urgent {
+  background: linear-gradient(145deg, #ff7676, #c72d42);
+  border-color: rgba(255, 216, 216, 0.95);
+  box-shadow: 0 0 0 2px rgba(255, 79, 98, 0.3), 0 3px 10px rgba(0, 0, 0, 0.3);
+}
+
+.minimized-dock-overflow {
+  width: 12px;
+  flex: 0 0 12px;
+  color: rgba(255, 255, 255, 0.72);
+  text-align: center;
+  font-weight: 700;
+}
+
 /* ===== Tag buttons ===== */
 .emoji-button {
   width: 38px;

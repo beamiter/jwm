@@ -5,6 +5,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const MAX_CLIENT_NAME_LEN: usize = 128;
 pub const MAX_LT_SYMBOL_LEN: usize = 32;
 pub const MAX_TAGS: usize = 9;
+/// Maximum number of minimized windows carried by one monitor snapshot.
+pub const MAX_MINIMIZED_WINDOWS: usize = 16;
+/// Fixed wire storage for a minimized window title, including its NUL terminator.
+pub const MAX_WINDOW_TITLE_LEN: usize = 96;
+/// Fixed wire storage for a Wayland app-id or X11 class, including its NUL terminator.
+pub const MAX_APP_ID_LEN: usize = 64;
+
+/// `MinimizedWindowInfo::flags`: the compositor can present a cached preview.
+pub const MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE: u32 = 1 << 0;
+/// `MinimizedWindowInfo::flags`: the minimized window currently demands attention.
+pub const MINIMIZED_WINDOW_FLAG_URGENT: u32 = 1 << 1;
+/// `SharedMessage::minimized_flags`: more entries exist than fit in the snapshot.
+pub const MINIMIZED_LIST_FLAG_OVERFLOW: u32 = 1 << 0;
+/// `SharedCommand::flags`: show (rather than dismiss) a minimized preview.
+pub const PREVIEW_MINIMIZED_FLAG_VISIBLE: u32 = 1 << 0;
 
 #[inline]
 fn now_millis() -> u64 {
@@ -12,6 +27,23 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn copy_utf8_truncated(destination: &mut [u8], value: &str) {
+    let mut len = value.len().min(destination.len().saturating_sub(1));
+    while !value.is_char_boundary(len) {
+        len -= 1;
+    }
+    destination.fill(0);
+    destination[..len].copy_from_slice(&value.as_bytes()[..len]);
+}
+
+fn bytes_lossy(bytes: &[u8]) -> Cow<'_, str> {
+    let null_pos = bytes
+        .iter()
+        .position(|&value| value == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..null_pos])
 }
 
 // 使用合理对齐
@@ -77,17 +109,8 @@ impl Default for MonitorInfo {
 }
 
 impl MonitorInfo {
-    fn copy_utf8_truncated(destination: &mut [u8], value: &str) {
-        let mut len = value.len().min(destination.len().saturating_sub(1));
-        while !value.is_char_boundary(len) {
-            len -= 1;
-        }
-        destination.fill(0);
-        destination[..len].copy_from_slice(&value.as_bytes()[..len]);
-    }
-
     pub fn set_client_name(&mut self, name: &str) {
-        Self::copy_utf8_truncated(&mut self.client_name, name);
+        copy_utf8_truncated(&mut self.client_name, name);
     }
 
     #[must_use]
@@ -99,16 +122,11 @@ impl MonitorInfo {
     /// 才会分配并做损坏替换。
     #[must_use]
     pub fn client_name_lossy(&self) -> Cow<'_, str> {
-        let null_pos = self
-            .client_name
-            .iter()
-            .position(|&x| x == 0)
-            .unwrap_or(MAX_CLIENT_NAME_LEN);
-        String::from_utf8_lossy(&self.client_name[..null_pos])
+        bytes_lossy(&self.client_name)
     }
 
     pub fn set_ltsymbol(&mut self, symbol: &str) {
-        Self::copy_utf8_truncated(&mut self.ltsymbol, symbol);
+        copy_utf8_truncated(&mut self.ltsymbol, symbol);
     }
 
     #[must_use]
@@ -119,12 +137,7 @@ impl MonitorInfo {
     /// 以零拷贝形式返回 layout symbol，非 UTF-8 时做损坏替换。
     #[must_use]
     pub fn ltsymbol_lossy(&self) -> Cow<'_, str> {
-        let null_pos = self
-            .ltsymbol
-            .iter()
-            .position(|&x| x == 0)
-            .unwrap_or(MAX_LT_SYMBOL_LEN);
-        String::from_utf8_lossy(&self.ltsymbol[..null_pos])
+        bytes_lossy(&self.ltsymbol)
     }
 
     pub fn set_tag_status(&mut self, index: usize, status: TagStatus) {
@@ -146,6 +159,80 @@ impl MonitorInfo {
     }
 }
 
+/// One minimized window exposed to a status bar.
+///
+/// `window_id` is stable only within the `wm_session_id` carried by the
+/// surrounding [`SharedMessage`]. `app_id` contains the Wayland app-id or the
+/// X11 class, depending on the backend.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct MinimizedWindowInfo {
+    pub window_id: u64,
+    pub monitor_id: i32,
+    pub flags: u32,
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
+    pub title: [u8; MAX_WINDOW_TITLE_LEN],
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
+    pub app_id: [u8; MAX_APP_ID_LEN],
+}
+
+impl Default for MinimizedWindowInfo {
+    fn default() -> Self {
+        Self {
+            window_id: 0,
+            monitor_id: 0,
+            flags: 0,
+            title: [0; MAX_WINDOW_TITLE_LEN],
+            app_id: [0; MAX_APP_ID_LEN],
+        }
+    }
+}
+
+impl MinimizedWindowInfo {
+    #[must_use]
+    pub fn new(window_id: u64, monitor_id: i32, flags: u32) -> Self {
+        Self {
+            window_id,
+            monitor_id,
+            flags,
+            ..Self::default()
+        }
+    }
+
+    pub fn set_title(&mut self, title: &str) {
+        copy_utf8_truncated(&mut self.title, title);
+    }
+
+    #[must_use]
+    pub fn get_title(&self) -> String {
+        self.title_lossy().into_owned()
+    }
+
+    #[must_use]
+    pub fn title_lossy(&self) -> Cow<'_, str> {
+        bytes_lossy(&self.title)
+    }
+
+    pub fn set_app_id(&mut self, app_id: &str) {
+        copy_utf8_truncated(&mut self.app_id, app_id);
+    }
+
+    #[must_use]
+    pub fn get_app_id(&self) -> String {
+        self.app_id_lossy().into_owned()
+    }
+
+    #[must_use]
+    pub fn app_id_lossy(&self) -> Cow<'_, str> {
+        bytes_lossy(&self.app_id)
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -155,7 +242,14 @@ impl MonitorInfo {
 )]
 pub struct SharedMessage {
     pub timestamp: u64,
+    /// Identifies one window-manager lifetime; window ids are scoped to it.
+    pub wm_session_id: u64,
+    /// Monotonic revision of the minimized-window projection.
+    pub minimized_generation: u64,
     pub monitor_info: MonitorInfo,
+    pub minimized_count: u32,
+    pub minimized_flags: u32,
+    pub minimized_windows: [MinimizedWindowInfo; MAX_MINIMIZED_WINDOWS],
 }
 
 /// `Default` 是廉价、可复现的零值（`timestamp == 0`），不含时钟副作用；
@@ -165,7 +259,12 @@ impl Default for SharedMessage {
     fn default() -> Self {
         Self {
             timestamp: 0,
+            wm_session_id: 0,
+            minimized_generation: 0,
             monitor_info: MonitorInfo::default(),
+            minimized_count: 0,
+            minimized_flags: 0,
+            minimized_windows: [MinimizedWindowInfo::default(); MAX_MINIMIZED_WINDOWS],
         }
     }
 }
@@ -176,7 +275,7 @@ impl SharedMessage {
     pub fn new() -> Self {
         Self {
             timestamp: now_millis(),
-            monitor_info: MonitorInfo::default(),
+            ..Self::default()
         }
     }
 
@@ -185,6 +284,7 @@ impl SharedMessage {
         Self {
             timestamp: now_millis(),
             monitor_info,
+            ..Self::default()
         }
     }
 
@@ -205,6 +305,30 @@ impl SharedMessage {
     pub fn get_monitor_info_mut(&mut self) -> &mut MonitorInfo {
         &mut self.monitor_info
     }
+
+    /// Replace the minimized-window projection and return the number stored.
+    /// Extra entries are truncated and reflected in `MINIMIZED_LIST_FLAG_OVERFLOW`.
+    pub fn set_minimized_windows(&mut self, windows: &[MinimizedWindowInfo]) -> usize {
+        let count = windows.len().min(MAX_MINIMIZED_WINDOWS);
+        self.minimized_windows.fill(MinimizedWindowInfo::default());
+        self.minimized_windows[..count].copy_from_slice(&windows[..count]);
+        self.minimized_count = count as u32;
+        if windows.len() > MAX_MINIMIZED_WINDOWS {
+            self.minimized_flags |= MINIMIZED_LIST_FLAG_OVERFLOW;
+        } else {
+            self.minimized_flags &= !MINIMIZED_LIST_FLAG_OVERFLOW;
+        }
+        count
+    }
+
+    /// Return only validated initialized entries; corrupt oversized counts are clamped.
+    #[must_use]
+    pub fn minimized_windows(&self) -> &[MinimizedWindowInfo] {
+        let count = usize::try_from(self.minimized_count)
+            .unwrap_or(usize::MAX)
+            .min(MAX_MINIMIZED_WINDOWS);
+        &self.minimized_windows[..count]
+    }
 }
 
 // 命令相关定义
@@ -224,6 +348,12 @@ pub enum CommandType {
     /// 状态栏请求窗口管理器打开自带的 Shell Hub。`parameter` 携带路由编号，
     /// 由 `ShellHubRoute` 定义；未知路由退化为 Hub 首页而不是被丢弃。
     ShellHub = 4,
+    /// Restore one minimized window identified by `SharedCommand::window_id`.
+    RestoreMinimized = 5,
+    /// Show or dismiss a compositor-owned preview for a minimized window.
+    PreviewMinimized = 6,
+    /// Publish a minimized-window shelf or item geometry.
+    SetMinimizedGeometry = 7,
 }
 
 impl From<u32> for CommandType {
@@ -233,6 +363,9 @@ impl From<u32> for CommandType {
             2 => CommandType::ToggleTag,
             3 => CommandType::SetLayout,
             4 => CommandType::ShellHub,
+            5 => CommandType::RestoreMinimized,
+            6 => CommandType::PreviewMinimized,
+            7 => CommandType::SetMinimizedGeometry,
             _ => CommandType::None,
         }
     }
@@ -248,6 +381,9 @@ impl CommandType {
             2 => Some(Self::ToggleTag),
             3 => Some(Self::SetLayout),
             4 => Some(Self::ShellHub),
+            5 => Some(Self::RestoreMinimized),
+            6 => Some(Self::PreviewMinimized),
+            7 => Some(Self::SetMinimizedGeometry),
             _ => None,
         }
     }
@@ -333,6 +469,33 @@ impl From<CommandType> for u32 {
     }
 }
 
+/// A rectangle in global physical pixels used to anchor minimize and preview effects.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct MinimizedWindowAnchor {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MinimizedWindowAnchor {
+    #[must_use]
+    pub const fn new(x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -344,6 +507,13 @@ pub struct SharedCommand {
     pub cmd_type: u32,
     pub parameter: u32,
     pub monitor_id: i32,
+    pub flags: u32,
+    pub window_id: u64,
+    pub wm_session_id: u64,
+    pub anchor_x: i32,
+    pub anchor_y: i32,
+    pub anchor_w: u32,
+    pub anchor_h: u32,
     pub timestamp: u64,
 }
 
@@ -354,6 +524,13 @@ impl SharedCommand {
             cmd_type: cmd_type.into(),
             parameter,
             monitor_id,
+            flags: 0,
+            window_id: 0,
+            wm_session_id: 0,
+            anchor_x: 0,
+            anchor_y: 0,
+            anchor_w: 0,
+            anchor_h: 0,
             timestamp: now_millis(),
         }
     }
@@ -387,6 +564,94 @@ impl SharedCommand {
     #[must_use]
     pub fn shell_hub(route: ShellHubRoute, monitor_id: i32) -> Self {
         Self::new(CommandType::ShellHub, route.as_raw(), monitor_id)
+    }
+
+    #[must_use]
+    pub fn restore_minimized(
+        window_id: u64,
+        wm_session_id: u64,
+        monitor_id: i32,
+        anchor: MinimizedWindowAnchor,
+    ) -> Self {
+        Self {
+            window_id,
+            wm_session_id,
+            anchor_x: anchor.x,
+            anchor_y: anchor.y,
+            anchor_w: anchor.width,
+            anchor_h: anchor.height,
+            ..Self::new(CommandType::RestoreMinimized, 0, monitor_id)
+        }
+    }
+
+    #[must_use]
+    pub fn preview_minimized(
+        window_id: u64,
+        wm_session_id: u64,
+        monitor_id: i32,
+        flags: u32,
+        anchor: MinimizedWindowAnchor,
+    ) -> Self {
+        Self {
+            flags,
+            window_id,
+            wm_session_id,
+            anchor_x: anchor.x,
+            anchor_y: anchor.y,
+            anchor_w: anchor.width,
+            anchor_h: anchor.height,
+            ..Self::new(CommandType::PreviewMinimized, 0, monitor_id)
+        }
+    }
+
+    #[must_use]
+    pub fn set_minimized_geometry(
+        window_id: u64,
+        wm_session_id: u64,
+        monitor_id: i32,
+        anchor: MinimizedWindowAnchor,
+    ) -> Self {
+        Self {
+            window_id,
+            wm_session_id,
+            anchor_x: anchor.x,
+            anchor_y: anchor.y,
+            anchor_w: anchor.width,
+            anchor_h: anchor.height,
+            ..Self::new(CommandType::SetMinimizedGeometry, 0, monitor_id)
+        }
+    }
+
+    /// Return a minimized-window target only for commands that name one.
+    #[must_use]
+    pub const fn minimized_window_id(&self) -> Option<u64> {
+        match CommandType::from_raw(self.cmd_type) {
+            Some(CommandType::RestoreMinimized | CommandType::PreviewMinimized) => {
+                Some(self.window_id)
+            }
+            Some(CommandType::SetMinimizedGeometry) if self.window_id != 0 => Some(self.window_id),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn anchor(&self) -> MinimizedWindowAnchor {
+        MinimizedWindowAnchor::new(self.anchor_x, self.anchor_y, self.anchor_w, self.anchor_h)
+    }
+
+    #[must_use]
+    pub const fn get_flags(&self) -> u32 {
+        self.flags
+    }
+
+    #[must_use]
+    pub const fn get_window_id(&self) -> u64 {
+        self.window_id
+    }
+
+    #[must_use]
+    pub const fn get_wm_session_id(&self) -> u64 {
+        self.wm_session_id
     }
 
     /// 命令是 `ShellHub` 时返回它的路由，其它命令返回 `None`。
@@ -603,6 +868,30 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    // ── MinimizedWindowInfo ─────────────────────────────────────────────────
+
+    #[test]
+    fn minimized_window_strings_truncate_on_utf8_boundaries_and_clear_old_bytes() {
+        let mut window = MinimizedWindowInfo::new(
+            0xfeed_beef,
+            -2,
+            MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE | MINIMIZED_WINDOW_FLAG_URGENT,
+        );
+        window.set_title(&"界".repeat(MAX_WINDOW_TITLE_LEN));
+        window.set_app_id(&"应用".repeat(MAX_APP_ID_LEN));
+
+        assert!(window.get_title().len() < MAX_WINDOW_TITLE_LEN);
+        assert!(window.get_app_id().len() < MAX_APP_ID_LEN);
+        assert!(!window.get_title().contains('\u{fffd}'));
+        assert!(!window.get_app_id().contains('\u{fffd}'));
+
+        window.set_title("term");
+        window.set_app_id("org.example.Terminal");
+        assert_eq!(window.title_lossy(), "term");
+        assert_eq!(window.app_id_lossy(), "org.example.Terminal");
+        assert!(window.title[5..].iter().all(|byte| *byte == 0));
+    }
+
     // ── SharedMessage ────────────────────────────────────────────────────────
 
     #[test]
@@ -679,6 +968,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn minimized_window_projection_is_bounded_and_reports_overflow() {
+        let windows: Vec<_> = (0..MAX_MINIMIZED_WINDOWS + 3)
+            .map(|index| MinimizedWindowInfo::new(index as u64 + 1, index as i32, 0))
+            .collect();
+        let mut message = SharedMessage::default();
+        assert_eq!(
+            message.set_minimized_windows(&windows),
+            MAX_MINIMIZED_WINDOWS
+        );
+        assert_eq!(
+            message.minimized_windows(),
+            &windows[..MAX_MINIMIZED_WINDOWS]
+        );
+        assert_ne!(message.minimized_flags & MINIMIZED_LIST_FLAG_OVERFLOW, 0);
+
+        assert_eq!(message.set_minimized_windows(&windows[..2]), 2);
+        assert_eq!(message.minimized_windows(), &windows[..2]);
+        assert_eq!(message.minimized_flags & MINIMIZED_LIST_FLAG_OVERFLOW, 0);
+        assert_eq!(message.minimized_windows[2], MinimizedWindowInfo::default());
+
+        message.minimized_count = u32::MAX;
+        assert_eq!(message.minimized_windows().len(), MAX_MINIMIZED_WINDOWS);
+    }
+
     // ── CommandType ──────────────────────────────────────────────────────────
 
     #[test]
@@ -693,6 +1007,9 @@ mod tests {
         assert_eq!(u32::from(CommandType::ToggleTag), 2);
         assert_eq!(u32::from(CommandType::SetLayout), 3);
         assert_eq!(u32::from(CommandType::ShellHub), 4);
+        assert_eq!(u32::from(CommandType::RestoreMinimized), 5);
+        assert_eq!(u32::from(CommandType::PreviewMinimized), 6);
+        assert_eq!(u32::from(CommandType::SetMinimizedGeometry), 7);
     }
 
     #[test]
@@ -702,14 +1019,17 @@ mod tests {
         assert_eq!(CommandType::from(2u32), CommandType::ToggleTag);
         assert_eq!(CommandType::from(3u32), CommandType::SetLayout);
         assert_eq!(CommandType::from(4u32), CommandType::ShellHub);
+        assert_eq!(CommandType::from(5u32), CommandType::RestoreMinimized);
+        assert_eq!(CommandType::from(6u32), CommandType::PreviewMinimized);
+        assert_eq!(CommandType::from(7u32), CommandType::SetMinimizedGeometry);
     }
 
     #[test]
     fn test_command_type_unknown_values_map_to_none() {
-        assert_eq!(CommandType::from(5u32), CommandType::None);
+        assert_eq!(CommandType::from(8u32), CommandType::None);
         assert_eq!(CommandType::from(u32::MAX), CommandType::None);
         assert_eq!(CommandType::from(100u32), CommandType::None);
-        assert_eq!(CommandType::from_raw(5), None);
+        assert_eq!(CommandType::from_raw(8), None);
         assert_eq!(CommandType::from_raw(u32::MAX), None);
     }
 
@@ -721,6 +1041,9 @@ mod tests {
             CommandType::ToggleTag,
             CommandType::SetLayout,
             CommandType::ShellHub,
+            CommandType::RestoreMinimized,
+            CommandType::PreviewMinimized,
+            CommandType::SetMinimizedGeometry,
         ];
         for &ct in &types {
             let v: u32 = ct.into();
@@ -812,11 +1135,54 @@ mod tests {
     }
 
     #[test]
+    fn minimized_command_constructors_preserve_target_session_flags_and_anchor() {
+        let anchor = MinimizedWindowAnchor::new(-12, 34, 56, 78);
+        let restore = SharedCommand::restore_minimized(0x1234_5678_9abc_def0, 91, -3, anchor);
+        assert_eq!(
+            restore.command_type_checked(),
+            Some(CommandType::RestoreMinimized)
+        );
+        assert_eq!(restore.minimized_window_id(), Some(0x1234_5678_9abc_def0));
+        assert_eq!(restore.get_window_id(), 0x1234_5678_9abc_def0);
+        assert_eq!(restore.get_wm_session_id(), 91);
+        assert_eq!(restore.get_monitor_id(), -3);
+        assert_eq!(restore.get_flags(), 0);
+        assert_eq!(restore.anchor(), anchor);
+
+        let preview =
+            SharedCommand::preview_minimized(44, 91, 2, PREVIEW_MINIMIZED_FLAG_VISIBLE, anchor);
+        assert_eq!(
+            preview.command_type_checked(),
+            Some(CommandType::PreviewMinimized)
+        );
+        assert_eq!(preview.minimized_window_id(), Some(44));
+        assert_eq!(preview.get_flags(), PREVIEW_MINIMIZED_FLAG_VISIBLE);
+        assert_eq!(preview.anchor(), anchor);
+
+        let geometry = SharedCommand::set_minimized_geometry(44, 91, 2, anchor);
+        assert_eq!(
+            geometry.command_type_checked(),
+            Some(CommandType::SetMinimizedGeometry)
+        );
+        assert_eq!(geometry.minimized_window_id(), Some(44));
+        assert_eq!(geometry.get_window_id(), 44);
+        assert_eq!(geometry.get_wm_session_id(), 91);
+        assert_eq!(geometry.anchor(), anchor);
+
+        let shelf = SharedCommand::set_minimized_geometry(0, 91, 2, anchor);
+        assert_eq!(shelf.minimized_window_id(), None);
+    }
+
+    #[test]
     fn test_all_shared_command_constructors_have_nonzero_timestamp() {
         assert!(SharedCommand::view_tag(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::toggle_tag(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::set_layout(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::shell_hub(ShellHubRoute::Hub, 0).get_timestamp() > 0);
+        let anchor = MinimizedWindowAnchor::default();
+        assert!(SharedCommand::restore_minimized(1, 2, 0, anchor).get_timestamp() > 0);
+        assert!(SharedCommand::preview_minimized(1, 2, 0, 0, anchor).get_timestamp() > 0);
+        assert!(SharedCommand::set_minimized_geometry(0, 2, 0, anchor).get_timestamp() > 0);
         assert!(SharedCommand::new(CommandType::None, 0, 0).get_timestamp() > 0);
     }
 
@@ -831,8 +1197,10 @@ mod tests {
         let sz_cmd = std::mem::size_of::<SharedCommand>();
         assert!(sz_tag > 0);
         assert!(sz_mi >= sz_tag * MAX_TAGS + MAX_CLIENT_NAME_LEN + MAX_LT_SYMBOL_LEN);
-        assert!(sz_msg >= sz_mi + 8); // timestamp (u64) + MonitorInfo
-        assert!(sz_cmd >= 16); // cmd_type + parameter + monitor_id + timestamp
+        assert_eq!(std::mem::size_of::<MinimizedWindowInfo>(), 176);
+        assert_eq!(std::mem::size_of::<MinimizedWindowAnchor>(), 16);
+        assert_eq!(sz_msg, 3064);
+        assert_eq!(sz_cmd, 56);
     }
 
     #[test]
@@ -843,7 +1211,16 @@ mod tests {
 
     #[test]
     fn test_shared_command_field_offsets_stable() {
-        // SharedCommand 是 repr(C)，字段顺序固定：cmd_type(4) + parameter(4) + monitor_id(4) + _pad(4) + timestamp(8)
-        assert!(std::mem::size_of::<SharedCommand>() >= 20);
+        assert_eq!(std::mem::offset_of!(SharedCommand, cmd_type), 0);
+        assert_eq!(std::mem::offset_of!(SharedCommand, parameter), 4);
+        assert_eq!(std::mem::offset_of!(SharedCommand, monitor_id), 8);
+        assert_eq!(std::mem::offset_of!(SharedCommand, flags), 12);
+        assert_eq!(std::mem::offset_of!(SharedCommand, window_id), 16);
+        assert_eq!(std::mem::offset_of!(SharedCommand, wm_session_id), 24);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_x), 32);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_y), 36);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_w), 40);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_h), 44);
+        assert_eq!(std::mem::offset_of!(SharedCommand, timestamp), 48);
     }
 }

@@ -10,16 +10,17 @@
 //! crate owns what the bar looks like and how a click becomes a
 //! [`UserAction`](xbar_core::UserAction).
 
+mod dock;
 pub mod pill;
 pub mod theme;
 
 use gtk4::prelude::*;
 use gtk4::{Label, Orientation};
-use xbar_core::ThemeMode;
 use xbar_core::config::BarConfig;
 use xbar_core::controls::BarPresentation;
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
+use xbar_core::{BarSnapshot, ThemeMode};
 
 pub use crate::pill::{Dispatch, Pill, PillRow, PillStyle};
 pub use crate::theme::Metrics;
@@ -102,13 +103,14 @@ pub struct BarSurface {
     leading: PillRow,
     trailing: PillRow,
     client_name: Label,
+    minimized_dock: dock::MinimizedDock,
 }
 
 impl BarSurface {
     #[must_use]
     pub fn new(theme: &BarTheme, dispatch: Dispatch) -> Self {
         let leading = PillRow::new(theme.pill_style.clone(), dispatch.clone());
-        let trailing = PillRow::new(theme.pill_style.clone(), dispatch);
+        let trailing = PillRow::new(theme.pill_style.clone(), dispatch.clone());
         trailing.widget().set_halign(gtk4::Align::End);
 
         let client_name = Label::new(None);
@@ -120,8 +122,10 @@ impl BarSurface {
 
         let root = gtk4::Box::new(Orientation::Horizontal, theme.metrics.item_gap);
         root.add_css_class("bar-root");
+        let minimized_dock = dock::MinimizedDock::new(&root, theme, dispatch);
         root.append(leading.widget());
         root.append(&client_name);
+        root.append(minimized_dock.widget());
         root.append(trailing.widget());
 
         Self {
@@ -129,6 +133,7 @@ impl BarSurface {
             leading,
             trailing,
             client_name,
+            minimized_dock,
         }
     }
 
@@ -141,12 +146,14 @@ impl BarSurface {
     ///
     /// Which cells exist, their order, their glyphs and their state are all
     /// decided by `xbar_core`; this only spends that decision on widgets.
-    pub fn sync(&self, presentation: BarPresentation) {
+    pub fn sync(&self, snapshot: &BarSnapshot, presentation: BarPresentation) {
         let BarPresentation {
             tags,
             layout_button,
             layout_choices,
             client_name,
+            minimized_windows,
+            minimized_overflow,
             status,
             ..
         } = presentation;
@@ -170,6 +177,15 @@ impl BarSurface {
                 .as_ref()
                 .map_or("", |client| client.value.as_str()),
         );
+
+        self.minimized_dock
+            .sync(snapshot, &minimized_windows, minimized_overflow);
+    }
+
+    /// Service the minimized-window geometry/preview lease. Calling this from
+    /// a fast native event loop is cheap; the Dock limits traffic itself.
+    pub fn maintain(&self) {
+        self.minimized_dock.maintain();
     }
 }
 

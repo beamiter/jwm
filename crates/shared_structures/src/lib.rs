@@ -24,8 +24,11 @@
 
 mod shared_message;
 pub use shared_message::{
-    CommandType, MonitorInfo, SharedCommand, SharedMessage, ShellHubRoute, TagStatus,
-    MAX_CLIENT_NAME_LEN, MAX_LT_SYMBOL_LEN, MAX_TAGS,
+    CommandType, MinimizedWindowAnchor, MinimizedWindowInfo, MonitorInfo, SharedCommand,
+    SharedMessage, ShellHubRoute, TagStatus, MAX_APP_ID_LEN, MAX_CLIENT_NAME_LEN,
+    MAX_LT_SYMBOL_LEN, MAX_MINIMIZED_WINDOWS, MAX_TAGS, MAX_WINDOW_TITLE_LEN,
+    MINIMIZED_LIST_FLAG_OVERFLOW, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+    MINIMIZED_WINDOW_FLAG_URGENT, PREVIEW_MINIMIZED_FLAG_VISIBLE,
 };
 
 mod typed_ring_buffer;

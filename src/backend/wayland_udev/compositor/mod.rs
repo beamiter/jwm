@@ -69,7 +69,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::backend::api::CompositorRect;
 use crate::backend::compositor_common::effects::MotionTrail;
+use crate::backend::compositor_common::genie::{GenieDirection, PreviewDirection};
 use crate::backend::compositor_common::math;
 use crate::backend::compositor_common::rules::{CornerRadiusRule, OpacityRule, ScaleRule};
 use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
@@ -398,10 +400,16 @@ pub(crate) struct GenieUniforms {
     pub uv_rect: i32,
     pub progress: i32,
     pub dock_pos: i32,
+    pub dock_size: i32,
     pub grid_size: i32,
     pub ripple_progress: i32,
     pub ripple_amplitude: i32,
     pub color_managed: i32,
+    pub color_matrix: i32,
+    pub decode_tf: i32,
+    pub decode_gamma: i32,
+    pub encode_tf: i32,
+    pub encode_gamma: i32,
     pub scene_linear: i32,
 }
 
@@ -511,11 +519,16 @@ pub(crate) struct WindowState {
     /// WindowState and GenieAnimation both retain strong texture owners until
     /// `tick_genie` removes them.
     pub is_genie_minimizing: bool,
+    /// The live surface exists at its final geometry but is suppressed while
+    /// the reverse Genie mesh expands out of its Dock slot.
+    pub is_genie_restoring: bool,
     /// wp-color-management transform to apply in the window fragment shader
     /// for this frame. `None` = identity / bypass. Refreshed each frame in
     /// `compositor_render_frame` from `(surface_params, output_params)`; the
-    /// stored value is read once in the draw loop and then becomes stale —
-    /// do not rely on its lifetime beyond a single frame.
+    /// live value is read once in the draw loop and then becomes stale. The
+    /// minimize path is the sole exception: it snapshots this `Copy` value
+    /// together with the retained texture because the unmapped surface can no
+    /// longer receive a per-frame refresh.
     pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
 }
 
@@ -555,6 +568,8 @@ impl PendingWindowUrgency {
 pub(crate) struct GenieAnimation {
     pub window_id: u64,
     pub start: Instant,
+    pub start_progress: f32,
+    pub direction: GenieDirection,
     pub x: f32,
     pub y: f32,
     pub w: f32,
@@ -563,6 +578,38 @@ pub(crate) struct GenieAnimation {
     pub has_alpha: bool,
     pub y_inverted: bool,
     pub content_uv: [f32; 4],
+    /// Surface-to-output transform captured with the retained texture. The
+    /// live WindowState refreshes this every frame, but a minimized surface no
+    /// longer participates in that refresh and must carry its last valid
+    /// transform alongside its pixels.
+    pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+    pub target: CompositorRect,
+}
+
+pub(crate) struct MinimizedVisual {
+    pub w: f32,
+    pub h: f32,
+    pub texture_owner: GlesTexture,
+    pub has_alpha: bool,
+    pub y_inverted: bool,
+    pub content_uv: [f32; 4],
+    pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+    pub target: Option<CompositorRect>,
+    pub cached_at: Instant,
+    pub estimated_bytes: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct DockPreview {
+    pub window_id: u64,
+    pub anchor: CompositorRect,
+    pub started: Instant,
+    pub lease_deadline: Instant,
+    pub start_opacity: f32,
+    pub start_scale: f32,
+    pub direction: PreviewDirection,
+    pub opacity: f32,
+    pub scale: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -854,6 +901,11 @@ pub(crate) struct WaylandCompositor {
 
     // Active genie minimize animations
     pub(crate) genie_active: Vec<GenieAnimation>,
+    genie_targets: HashMap<u64, CompositorRect>,
+    minimized_windows: HashSet<u64>,
+    minimized_visuals: HashMap<u64, MinimizedVisual>,
+    pending_genie_restores: HashSet<u64>,
+    dock_preview: Option<DockPreview>,
 
     // Window groups (tabs): the bars the window manager reserved, strip
     // geometry included, plus one (texture, w, h) per cell rebuilt only when
@@ -1497,10 +1549,16 @@ impl WaylandCompositor {
                 uv_rect: get_uniform_loc(gl, genie_program, "u_uv_rect"),
                 progress: get_uniform_loc(gl, genie_program, "u_progress"),
                 dock_pos: get_uniform_loc(gl, genie_program, "u_dock_pos"),
+                dock_size: get_uniform_loc(gl, genie_program, "u_dock_size"),
                 grid_size: get_uniform_loc(gl, genie_program, "u_grid_size"),
                 ripple_progress: get_uniform_loc(gl, genie_program, "u_ripple_progress"),
                 ripple_amplitude: get_uniform_loc(gl, genie_program, "u_ripple_amplitude"),
                 color_managed: get_uniform_loc(gl, genie_program, "u_color_managed"),
+                color_matrix: get_uniform_loc(gl, genie_program, "u_color_matrix"),
+                decode_tf: get_uniform_loc(gl, genie_program, "u_decode_tf"),
+                decode_gamma: get_uniform_loc(gl, genie_program, "u_decode_gamma"),
+                encode_tf: get_uniform_loc(gl, genie_program, "u_encode_tf"),
+                encode_gamma: get_uniform_loc(gl, genie_program, "u_encode_gamma"),
                 scene_linear: get_uniform_loc(gl, genie_program, "u_scene_linear"),
             };
 
@@ -1817,11 +1875,16 @@ impl WaylandCompositor {
                 scratch_retired_aux_ids: Vec::new(),
 
                 // Dock position
-                dock_x: 0.0,
-                dock_y: 0.0,
+                dock_x: screen_w as f32 * 0.5,
+                dock_y: screen_h.saturating_sub(1) as f32,
 
                 // Genie animations
                 genie_active: Vec::new(),
+                genie_targets: HashMap::new(),
+                minimized_windows: HashSet::new(),
+                minimized_visuals: HashMap::new(),
+                pending_genie_restores: HashSet::new(),
+                dock_preview: None,
 
                 // Window groups
                 window_groups: Vec::new(),
@@ -2052,6 +2115,25 @@ impl WaylandCompositor {
     /// Returns true if the compositor has pending work that requires a new frame.
     pub(crate) fn needs_render(&self) -> bool {
         self.needs_render
+            || self.dock_preview.as_ref().is_some_and(|preview| {
+                crate::backend::compositor_common::genie::preview_lease_timeout(
+                    preview.direction,
+                    Instant::now(),
+                    preview.lease_deadline,
+                ) == Some(std::time::Duration::ZERO)
+            })
+    }
+
+    /// Nearest wall-clock wakeup owned by a settled compositor overlay. Active
+    /// transitions already use the regular 16 ms animation cadence; this is
+    /// only needed so a crashed bar or lost LEAVE cannot strand a preview.
+    pub(crate) fn next_wakeup(&self) -> Option<std::time::Duration> {
+        let preview = self.dock_preview.as_ref()?;
+        crate::backend::compositor_common::genie::preview_lease_timeout(
+            preview.direction,
+            Instant::now(),
+            preview.lease_deadline,
+        )
     }
 
     /// Clear the needs_render flag after a frame has been rendered.

@@ -946,11 +946,11 @@ impl WMController for Jwm {
                         let on = requested_attention_state(action, c.state.demands_attention);
                         c.state.demands_attention = on;
                         c.state.is_urgent = on;
-                        Some(on)
+                        Some((on, c.mon))
                     } else {
                         None
                     };
-                    if let Some(on) = requested {
+                    if let Some((on, monitor)) = requested {
                         let _ = backend.property_ops().set_net_wm_state_flag(
                             win,
                             NetWmState::DemandsAttention,
@@ -959,6 +959,10 @@ impl WMController for Jwm {
                         if backend.has_compositor() {
                             backend.compositor_set_window_urgent(win, on);
                         }
+                        let monitor_num = monitor
+                            .and_then(|key| self.state.monitors.get(key))
+                            .map(|monitor| monitor.num);
+                        self.mark_bar_update_needed_if_visible(monitor_num);
                     }
                 }
                 NetWmState::Above => {
@@ -1023,19 +1027,40 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::SkipTaskbar => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
+                    let mut hide_minimized_dock_item = false;
+                    let monitor = if let Some(c) = self.state.clients.get_mut(ck) {
                         let on = match action {
                             NetWmAction::Add => true,
                             NetWmAction::Remove => false,
                             NetWmAction::Toggle => !c.state.skip_taskbar,
                         };
                         c.state.skip_taskbar = on;
+                        hide_minimized_dock_item =
+                            skip_taskbar_withdraws_minimized(on, c.state.is_hidden);
                         let _ = backend.property_ops().set_net_wm_state_flag(
                             win,
                             NetWmState::SkipTaskbar,
                             on,
                         );
+                        c.mon
+                    } else {
+                        None
+                    };
+                    let monitor_num = monitor
+                        .and_then(|key| self.state.monitors.get(key))
+                        .map(|monitor| monitor.num);
+                    if hide_minimized_dock_item {
+                        if let Some(monitor_num) = monitor_num {
+                            self.clear_minimized_preview_for(backend, monitor_num, Some(win));
+                        }
+                        // Once SKIP_TASKBAR removes a still-minimized client
+                        // from the authoritative Dock model, no bar can name
+                        // it in a normal non-zero geometry command. Withdraw
+                        // the compositor target at the state transition so a
+                        // stale thumbnail cannot survive or block scanout.
+                        backend.compositor_set_window_dock_geometry(win, None);
                     }
+                    self.mark_bar_update_needed_if_visible(monitor_num);
                 }
                 NetWmState::SkipPager => {
                     if let Some(c) = self.state.clients.get_mut(ck) {
@@ -1196,6 +1221,14 @@ impl Jwm {
     }
 }
 
+/// A visible window has no retained Dock target, while removing
+/// `SKIP_TASKBAR` makes a hidden window eligible for publication again.  Only
+/// the transition that excludes an already-minimized window needs an eager
+/// compositor withdrawal.
+fn skip_taskbar_withdraws_minimized(skip_taskbar: bool, minimized: bool) -> bool {
+    skip_taskbar && minimized
+}
+
 #[cfg(test)]
 // Kept next to the event-handler implementation it protects; this file also
 // contains later inherent helpers used by unrelated event families.
@@ -1223,6 +1256,14 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::AtomicBool;
     use xbar_core::shared_structures::SharedMessage;
+
+    #[test]
+    fn skip_taskbar_only_withdraws_an_already_minimized_dock_item() {
+        assert!(skip_taskbar_withdraws_minimized(true, true));
+        assert!(!skip_taskbar_withdraws_minimized(true, false));
+        assert!(!skip_taskbar_withdraws_minimized(false, true));
+        assert!(!skip_taskbar_withdraws_minimized(false, false));
+    }
 
     struct RenderSpyBackend {
         window_ops: DummyWindowOps,
@@ -1370,6 +1411,8 @@ mod tests {
             secondary_bar_retry_after: HashMap::new(),
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),
+            minimized_dock_shelves: HashMap::new(),
+            active_minimized_preview: None,
             suppress_mouse_focus_until: None,
             suppress_layout_animation: false,
             last_stacking: SecondaryMap::new(),
@@ -1939,7 +1982,7 @@ impl EventHandler for Jwm {
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
         // Ensure all monitor bars are running (sequential creation)
         let now = std::time::Instant::now();
-        self.ensure_secondary_bars_running(now);
+        self.ensure_secondary_bars_running(backend, now);
 
         self.process_commands_from_status_bar(backend);
         self.process_ipc(backend);

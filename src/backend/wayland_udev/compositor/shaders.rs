@@ -1372,6 +1372,7 @@ uniform vec4 u_rect;       // x, y, w, h in pixels
 uniform mat4 u_projection;
 uniform float u_progress;  // 0.0 = normal, 1.0 = fully minimized
 uniform vec2 u_dock_pos;   // dock target position in pixels
+uniform vec2 u_dock_size;  // dock target slot size in pixels
 uniform int u_grid_size;   // grid subdivisions
 
 out vec2 v_uv;
@@ -1398,14 +1399,17 @@ void main() {
     // Bottom rows lead the deformation, but every row reaches the dock at
     // progress=1. The previous row-weighted formula left the top edge behind.
     float t = smoothstep(0.0, 1.0, clamp(u_progress, 0.0, 1.0));
-    float delay = (1.0 - fy) * 0.22;
+    float window_center_y = u_rect.y + u_rect.w * 0.5;
+    float leading_row = u_dock_pos.y < window_center_y ? (1.0 - fy) : fy;
+    float delay = (1.0 - leading_row) * 0.22;
     float collapse = smoothstep(0.0, 1.0, clamp((t - delay) / (1.0 - delay), 0.0, 1.0));
     float center_x = u_rect.x + u_rect.z * 0.5;
     float target_x = mix(center_x, u_dock_pos.x, collapse);
-    float half_w = u_rect.z * 0.5 * mix(1.0, 0.015, collapse);
+    float half_w = mix(u_rect.z * 0.5, max(u_dock_size.x, 1.0) * 0.5, collapse);
     float px = target_x + (fx - 0.5) * half_w * 2.0;
     float original_y = u_rect.y + fy * u_rect.w;
-    float py = mix(original_y, u_dock_pos.y, collapse);
+    float target_y = u_dock_pos.y + (fy - 0.5) * max(u_dock_size.y, 1.0);
+    float py = mix(original_y, target_y, collapse);
 
     gl_Position = u_projection * vec4(px, py, 0.0, 1.0);
 }
@@ -1478,3 +1482,18 @@ void main() {
     frag_color = vec4(u_color.rgb * u_color.a, u_color.a);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::{FRAGMENT_SHADER, GENIE_VERTEX_SHADER};
+
+    #[test]
+    fn genie_and_dock_texture_shader_can_write_into_a_linear_output() {
+        // Genie is linked with FRAGMENT_SHADER, and the static/hover Dock
+        // passes use the same program. Keep the hardware OETF safety contract
+        // explicit: legacy sRGB pixels must be decoded before that output LUT.
+        assert!(FRAGMENT_SHADER.contains("uniform int   u_scene_linear"));
+        assert!(FRAGMENT_SHADER.contains("else if (u_scene_linear == 1)"));
+        assert!(GENIE_VERTEX_SHADER.contains("u_dock_size"));
+    }
+}
