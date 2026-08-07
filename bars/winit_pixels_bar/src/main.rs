@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::warn;
+use log::{info, warn};
 use pango::FontDescription;
 use pixels::wgpu::TextureFormat;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
@@ -268,7 +268,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
-        let build = |want_alpha: bool| {
+        let build = |alpha: Option<pixels::wgpu::CompositeAlphaMode>| {
             let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
             let mut builder = PixelsBuilder::new(safe_width, safe_height, surface_texture)
                 .texture_format(TextureFormat::Bgra8UnormSrgb)
@@ -277,9 +277,9 @@ impl ApplicationHandler<UserEvent> for App {
                     power_preference: pixels::wgpu::PowerPreference::LowPower,
                     ..Default::default()
                 });
-            if want_alpha {
+            if let Some(alpha) = alpha {
                 builder = builder
-                    .alpha_mode(pixels::wgpu::CompositeAlphaMode::PreMultiplied)
+                    .alpha_mode(alpha)
                     .clear_color(pixels::wgpu::Color::TRANSPARENT)
                     // Cairo hands us premultiplied pixels, and pixels' default
                     // blend would multiply them by their alpha a second time,
@@ -291,29 +291,44 @@ impl ApplicationHandler<UserEvent> for App {
             builder.build()
         };
         // Transparency was only requested above; whether winit found a
-        // depth-32 visual is a separate question, and one the surface cannot
-        // answer for us — wgpu reads its alpha modes from the driver, never
-        // from the window's visual. A swapchain is committed once, so unlike
-        // the bars that renegotiate every frame this has to be right the
-        // first time: no depth answer means no alpha.
-        let want_alpha = self.compositor_active
-            && window_xid(window.as_ref())
-                .zip(self.x11.as_ref())
-                .map(|(xid, conn)| window_is_argb(conn, xid))
-                .unwrap_or(false);
-        // With a compositor around, ask the surface for premultiplied alpha
-        // outright — pixels' default `Auto` resolves to Opaque on X11, which
-        // would discard the frame's alpha channel. A refusal is the
-        // capability answer: the bar then paints the fully opaque background
-        // instead of a translucent wash over an undefined clear.
+        // depth-32 visual is a separate question, and the one that decides the
+        // outcome. On X11 the visual is what carries a frame's alpha to the
+        // compositor, so this — not anything the surface reports — is the
+        // translucency gate. A swapchain is committed once, so unlike the bars
+        // that renegotiate every frame it has to be right the first time: no
+        // depth answer means no alpha.
+        let argb = window_xid(window.as_ref())
+            .zip(self.x11.as_ref())
+            .map(|(xid, conn)| window_is_argb(conn, xid))
+            .unwrap_or(false);
+        let want_alpha = self.compositor_active && argb;
+        // Ask for premultiplied alpha first: it says exactly what the frame
+        // contains, and Mesa's X11 WSI offers it for an ARGB visual.
+        //
+        // A refusal is *not* the capability answer, though — on X11 the
+        // window's visual is what carries alpha to the compositor, and
+        // `supportedCompositeAlpha` is close to a formality. Mesa derives it
+        // from the visual (depth 32 -> PreMultiplied|Inherit, depth 24 ->
+        // Opaque|Inherit) while NVIDIA's X11 driver reports Opaque and nothing
+        // else whatever the window is, and wgpu's GL backend hard-codes Opaque
+        // for everyone. Measured on NVIDIA 570: a swapchain created Opaque,
+        // cleared to premultiplied 50 %, still leaves alpha 127 in a depth-32
+        // window's pixmap. So a bar that downgraded here would give up glass
+        // on an entire vendor over a reporting quirk.
+        //
+        // `Auto` is the way through: pixels only validates a mode that isn't
+        // `Auto`, and wgpu then resolves it against the surface — Opaque on
+        // NVIDIA, Inherit on Mesa. Both deliver the same bytes.
         let (pixels, translucent) = if want_alpha {
-            match build(true) {
+            match build(Some(pixels::wgpu::CompositeAlphaMode::PreMultiplied)) {
                 Ok(pixels) => (Ok(pixels), true),
-                Err(pixels::Error::InvalidAlphaMode(_)) => (build(false), false),
+                Err(pixels::Error::InvalidAlphaMode(_)) => {
+                    (build(Some(pixels::wgpu::CompositeAlphaMode::Auto)), true)
+                }
                 Err(error) => (Err(error), false),
             }
         } else {
-            (build(false), false)
+            (build(None), false)
         };
         let pixels = pixels
             .map_err(|error| anyhow::anyhow!("pixels initialization failed: {error}"))
@@ -321,6 +336,14 @@ impl ApplicationHandler<UserEvent> for App {
         if !translucent {
             self.bar.renderer_mut().set_background_opacity(None);
         }
+        // The one line that says which bargain the bar struck. Without it a
+        // solid bar is indistinguishable from a translucent one over a dark
+        // desktop, and the reason — no compositor, an opaque visual, or a
+        // surface that refused — is invisible.
+        info!(
+            "glass: translucent={translucent} (compositor={}, argb_visual={argb})",
+            self.compositor_active
+        );
 
         self.window_id = Some(window_id);
         self.window = Some(window);
