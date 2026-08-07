@@ -1,18 +1,28 @@
-//! Process-backed Linux desktop actions for `xbar_core` hosts.
+//! Linux desktop actions for `xbar_core` hosts.
 //!
 //! This companion crate deliberately stays outside `xbar_core`: executable
-//! names, process spawning, and child reaping are host policy rather than bar
-//! model semantics.
+//! names, process spawning, child reaping — and which compositor to ask for a
+//! screenshot — are host policy rather than bar model semantics.
+//!
+//! Two destinations live here. Most effects end in a spawned process
+//! ([`ProcessActionHandler`]); the screenshot pill instead goes over jwm's
+//! control socket ([`jwm_ipc`]) to the compositor's own region capture, which
+//! is what [`ScreenshotAction`] selects between.
 
 use std::{
     ffi::{OsStr, OsString},
     fmt, io,
+    path::PathBuf,
     process::{Child, Command, ExitStatus, Output},
     sync::mpsc,
     thread,
 };
 
 use xbar_core::{BarEffect, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate};
+
+pub mod jwm_ipc;
+
+pub use jwm_ipc::{JwmIpc, JwmIpcError};
 
 /// One executable and its fixed argument list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,10 +133,43 @@ impl CommandRunner {
     }
 }
 
-/// Configurable process policy for the effects this adapter understands.
+/// Where a screenshot request goes.
+///
+/// The default is jwm's own capture, reached over its control socket, rather
+/// than an external grabber. The compositor already owns the framebuffer, the
+/// pointer grab and the region editor, so asking it is both fewer moving parts
+/// and the only route that works when no third-party tool is installed — and
+/// under a Wayland session, where an X11 grabber cannot see the screen at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenshotAction {
+    /// Ask the running jwm for its interactive region capture. `socket` is
+    /// normally `None`, meaning "wherever the compositor binds"; a nested
+    /// session sets it to reach a private compositor.
+    Jwm { socket: Option<PathBuf> },
+    /// Launch an external grabber instead, e.g. `flameshot gui`.
+    Command(CommandSpec),
+    /// The pill does nothing.
+    Disabled,
+}
+
+impl ScreenshotAction {
+    /// Ask whichever jwm this session belongs to.
+    #[must_use]
+    pub const fn jwm() -> Self {
+        Self::Jwm { socket: None }
+    }
+}
+
+impl Default for ScreenshotAction {
+    fn default() -> Self {
+        Self::jwm()
+    }
+}
+
+/// Configurable policy for the effects this adapter understands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessActionConfig {
-    pub screenshot: Option<CommandSpec>,
+    pub screenshot: ScreenshotAction,
     pub audio_control: Option<CommandSpec>,
     pub waiter_thread_prefix: String,
 }
@@ -134,18 +177,23 @@ pub struct ProcessActionConfig {
 impl Default for ProcessActionConfig {
     fn default() -> Self {
         Self {
-            screenshot: Some(CommandSpec::new("flameshot").with_arg("gui")),
+            screenshot: ScreenshotAction::jwm(),
             audio_control: Some(CommandSpec::new("pavucontrol")),
             waiter_thread_prefix: "xbar-wait".to_owned(),
         }
     }
 }
 
-/// Failure to accept or launch a process-backed effect.
+/// Failure to accept, launch or forward one effect.
 #[derive(Debug)]
 pub enum ProcessActionError {
     UnsupportedEffect(BarEffect),
     DisabledEffect(BarEffect),
+    /// The effect is handled, but not by spawning anything — asked for as a
+    /// command by a caller that wanted a [`CommandSpec`].
+    NotAProcess(BarEffect),
+    /// jwm was asked for the capture and could not take it.
+    Jwm(JwmIpcError),
     Spawn {
         program: OsString,
         source: io::Error,
@@ -168,6 +216,10 @@ impl fmt::Display for ProcessActionError {
             Self::DisabledEffect(effect) => {
                 write!(f, "process command is disabled for {effect:?}")
             }
+            Self::NotAProcess(effect) => {
+                write!(f, "{effect:?} is not handled by spawning a process")
+            }
+            Self::Jwm(source) => write!(f, "screenshot request failed: {source}"),
             Self::Spawn { program, source } => {
                 write!(
                     f,
@@ -193,9 +245,11 @@ impl std::error::Error for ProcessActionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn { source, .. } | Self::SpawnWaiter { source, .. } => Some(source),
-            Self::UnsupportedEffect(_) | Self::DisabledEffect(_) | Self::WaiterStopped { .. } => {
-                None
-            }
+            Self::Jwm(source) => Some(source),
+            Self::UnsupportedEffect(_)
+            | Self::DisabledEffect(_)
+            | Self::NotAProcess(_)
+            | Self::WaiterStopped { .. } => None,
         }
     }
 }
@@ -226,18 +280,37 @@ impl ProcessActionHandler {
         matches!(effect, BarEffect::Screenshot | BarEffect::OpenAudioControl)
     }
 
+    /// The executable this effect would spawn.
+    ///
+    /// A screenshot that goes to jwm has no executable, which is
+    /// [`ProcessActionError::NotAProcess`] rather than a failure: the caller
+    /// asked the wrong question, not for something impossible.
     pub fn command_for_effect(
         &self,
         effect: BarEffect,
     ) -> Result<&CommandSpec, ProcessActionError> {
-        let command = match effect {
-            BarEffect::Screenshot => &self.config.screenshot,
-            BarEffect::OpenAudioControl => &self.config.audio_control,
-            _ => return Err(ProcessActionError::UnsupportedEffect(effect)),
+        match effect {
+            BarEffect::Screenshot => match &self.config.screenshot {
+                ScreenshotAction::Command(command) => Ok(command),
+                ScreenshotAction::Jwm { .. } => Err(ProcessActionError::NotAProcess(effect)),
+                ScreenshotAction::Disabled => Err(ProcessActionError::DisabledEffect(effect)),
+            },
+            BarEffect::OpenAudioControl => self
+                .config
+                .audio_control
+                .as_ref()
+                .ok_or(ProcessActionError::DisabledEffect(effect)),
+            _ => Err(ProcessActionError::UnsupportedEffect(effect)),
+        }
+    }
+
+    /// Ask jwm for its interactive region capture.
+    fn request_jwm_screenshot(socket: Option<&PathBuf>) -> Result<(), ProcessActionError> {
+        let ipc = match socket {
+            Some(socket) => JwmIpc::at(socket.clone()),
+            None => JwmIpc::new(),
         };
-        command
-            .as_ref()
-            .ok_or(ProcessActionError::DisabledEffect(effect))
+        ipc.take_screenshot().map_err(ProcessActionError::Jwm)
     }
 
     /// Launch a configured command and transfer child ownership to a bounded
@@ -279,6 +352,11 @@ impl PlatformEffectHandler for ProcessActionHandler {
     type Error = ProcessActionError;
 
     fn handle(&mut self, effect: BarEffect) -> Result<(), Self::Error> {
+        if let (BarEffect::Screenshot, ScreenshotAction::Jwm { socket }) =
+            (effect, &self.config.screenshot)
+        {
+            return Self::request_jwm_screenshot(socket.as_ref());
+        }
         let command = self.command_for_effect(effect)?.clone();
         self.launch(&command)
     }
@@ -365,13 +443,17 @@ fn reap_child(program: &OsStr, child: &mut Child) {
 mod tests {
     use super::*;
 
+    /// The screenshot pill's default is jwm's own capture, not a spawned
+    /// grabber — which is why asking for its *command* is a category error
+    /// rather than a disabled effect.
     #[test]
-    fn defaults_map_only_the_two_process_effects() {
+    fn the_default_screenshot_goes_to_jwm_rather_than_to_a_process() {
         let handler = ProcessActionHandler::default();
-        assert_eq!(
-            handler.command_for_effect(BarEffect::Screenshot).unwrap(),
-            &CommandSpec::new("flameshot").with_arg("gui")
-        );
+        assert_eq!(handler.config().screenshot, ScreenshotAction::jwm());
+        assert!(matches!(
+            handler.command_for_effect(BarEffect::Screenshot),
+            Err(ProcessActionError::NotAProcess(BarEffect::Screenshot))
+        ));
         assert_eq!(
             handler
                 .command_for_effect(BarEffect::OpenAudioControl)
@@ -386,10 +468,24 @@ mod tests {
         ));
     }
 
+    /// A host that would rather keep an external grabber can still say so, and
+    /// gets exactly the pre-IPC behaviour back.
+    #[test]
+    fn an_external_grabber_can_still_be_configured() {
+        let handler = ProcessActionHandler::new(ProcessActionConfig {
+            screenshot: ScreenshotAction::Command(CommandSpec::new("flameshot").with_arg("gui")),
+            ..ProcessActionConfig::default()
+        });
+        assert_eq!(
+            handler.command_for_effect(BarEffect::Screenshot).unwrap(),
+            &CommandSpec::new("flameshot").with_arg("gui")
+        );
+    }
+
     #[test]
     fn configured_effect_can_be_disabled_without_affecting_the_other() {
         let handler = ProcessActionHandler::new(ProcessActionConfig {
-            screenshot: None,
+            screenshot: ScreenshotAction::Disabled,
             ..ProcessActionConfig::default()
         });
 
@@ -401,6 +497,29 @@ mod tests {
             handler
                 .command_for_effect(BarEffect::OpenAudioControl)
                 .is_ok()
+        );
+    }
+
+    /// The routing decision itself: a screenshot effect must reach the socket,
+    /// never a `Command`. Pointing at a socket nothing is listening on is how
+    /// we observe *that* it was attempted without needing a compositor.
+    #[test]
+    fn a_screenshot_effect_is_forwarded_to_jwm_not_spawned() {
+        let mut handler = ProcessActionHandler::new(ProcessActionConfig {
+            screenshot: ScreenshotAction::Jwm {
+                socket: Some("/definitely/missing/xbar-actions-jwm.sock".into()),
+            },
+            audio_control: None,
+            waiter_thread_prefix: "xbar-jwm-test".to_owned(),
+        });
+
+        let error = PlatformEffectHandler::handle(&mut handler, BarEffect::Screenshot).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ProcessActionError::Jwm(crate::jwm_ipc::JwmIpcError::Unreachable { .. })
+            ),
+            "expected an IPC attempt, got {error:?}"
         );
     }
 
@@ -450,7 +569,7 @@ mod tests {
     #[test]
     fn effect_router_forwards_geometry_and_absorbs_process_failures() {
         let mut router = EffectRouter::new(ProcessActionHandler::new(ProcessActionConfig {
-            screenshot: Some(CommandSpec::new("/bin/true")),
+            screenshot: ScreenshotAction::Command(CommandSpec::new("/bin/true")),
             audio_control: None,
             waiter_thread_prefix: "xbar-router-test".to_owned(),
         }));
@@ -501,7 +620,7 @@ mod tests {
     #[test]
     fn platform_handler_launches_and_reaps_a_real_child() {
         let mut handler = ProcessActionHandler::new(ProcessActionConfig {
-            screenshot: Some(CommandSpec::new("/bin/true")),
+            screenshot: ScreenshotAction::Command(CommandSpec::new("/bin/true")),
             audio_control: None,
             waiter_thread_prefix: "xbar-actions-test".to_owned(),
         });

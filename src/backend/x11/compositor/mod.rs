@@ -7,6 +7,7 @@ mod pipeline;
 mod platform;
 mod postprocess;
 mod prism;
+mod screenshot_toolbar;
 mod tfp;
 mod transitions;
 mod types;
@@ -710,8 +711,27 @@ where
     // --- Phase 6.2: Screen annotations ---
     annotation_active: bool,
     annotation_strokes: Vec<annotations_common::AnnotationStroke>,
+    /// Filled shapes the strokes cannot express — redaction bars, counter
+    /// bubbles. Cleared with the strokes.
+    annotation_quads: Vec<crate::backend::compositor_common::annotation_overlay::AnnotationQuad>,
+    /// Text runs, plus their rasterised textures. The textures are rebuilt
+    /// only when the list changes, the same bargain `tab_title_textures`
+    /// strikes: a CPU raster per frame for text that is not moving is pure
+    /// waste.
+    annotation_labels: Vec<crate::backend::compositor_common::annotation_overlay::AnnotationLabel>,
+    annotation_label_textures: Vec<Option<(glow::Texture, u32, u32)>>,
+    annotation_labels_dirty: bool,
     annotation_color: [f32; 4],
     annotation_line_width: f32,
+
+    // --- Screenshot editor toolbar ---
+    /// The strip the window manager published, or `None` when no capture is
+    /// being edited. Its icons are rasterised once per change into
+    /// `screenshot_toolbar_icons`, one slot per button.
+    screenshot_toolbar:
+        Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
+    screenshot_toolbar_icons: Vec<Option<(glow::Texture, u32, u32)>>,
+    screenshot_toolbar_dirty: bool,
 
     // --- Phase 6.3: Zoom to fit ---
     zoom_to_fit_window: Option<u32>,

@@ -158,6 +158,50 @@ saves a screenshot or starts/commits recording. Arrow keys nudge a committed
 selection (`Shift` uses 10-pixel steps), while `Escape`, right-click, or the
 recording shortcut again cancels safely.
 
+### The screenshot editor
+
+Once a screenshot region is committed the selection becomes an editor, and a
+toolbar floats just outside it — below the selection, or above when there is no
+room below. Every tool has both a button and a key, so neither the mouse nor
+the keyboard is required:
+
+| Tool | Key | Draws |
+|---|---|---|
+| Pencil | `P` / `F` | Freehand stroke |
+| Line | `L` | Straight line |
+| Arrow | `A` | Line with a head |
+| Rectangle | `R` | Hollow rectangle |
+| Filled rectangle | `B` | Solid redaction bar |
+| Ellipse | `C` / `O` | Hollow ellipse |
+| Marker | `H` | Translucent highlighter |
+| Text | `T` | Typed label — click, then type |
+| Counter | `N` | Auto-numbered bubble; click to place the next one |
+| Pixelate | `X` | Drag a region down to blocks |
+| Invert | `I` | Invert a region's colors |
+
+The rest of the strip is the selection's pixel size, the stroke controls, the
+ink swatch, and the four ways out:
+
+| Control | Key |
+|---|---|
+| Thinner / thicker stroke | `-` / `+`, `Ctrl+Down` / `Ctrl+Up`, or the wheel |
+| Ink (8-colour ring) | `1`…`8`, or click the swatch to step |
+| Undo / redo | `Ctrl+Z`, `Backspace` / `Ctrl+Shift+Z`, `Ctrl+Y` |
+| Save to file | `Enter` or `Ctrl+S` |
+| Copy to clipboard | `Ctrl+C` |
+| Cancel | `Escape` |
+
+While a text label is open every key is text; `Enter` commits it, `Escape`
+drops it, and switching tools commits it. A control with nothing to do — undo
+with an empty history, thinner at the minimum width — is dimmed rather than
+removed, so the row never reflows under the pointer.
+
+The status bars' screenshot pill drives exactly this editor over the control
+socket (the `take_screenshot` IPC command) rather than launching an external
+grabber, so it works identically under X11 and Wayland and needs nothing
+installed. `take_screenshot_fullscreen` captures the whole desktop with no
+interaction.
+
 ## Portal and diagnostics
 
 The optional `portal/` crate provides JWM's screencast portal backend. Its

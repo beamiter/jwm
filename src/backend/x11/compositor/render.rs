@@ -2449,6 +2449,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.peek_active
             || self.annotation_active
             || !self.annotation_strokes.is_empty()
+            || self.screenshot_toolbar.is_some()
             || self.edge_glow_active
             || self.zoom_to_fit_window.is_some()
             || !self.particle_systems.is_empty()
@@ -5282,8 +5283,19 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // === Pass 5e: Annotations overlay ===
-        if self.annotation_active && !self.annotation_strokes.is_empty() {
-            self.render_annotations(&proj);
+        // Shapes first, then strokes over them: a redaction bar must not land
+        // on top of the arrow that points at it. The toolbar comes last of
+        // all, since it floats above everything it edits.
+        if self.annotation_active {
+            self.refresh_annotation_labels();
+            self.render_annotation_shapes(&proj);
+            if !self.annotation_strokes.is_empty() {
+                self.render_annotations(&proj);
+            }
+        }
+        if !has_pending_screenshot && self.screenshot_toolbar.is_some() {
+            self.refresh_screenshot_toolbar();
+            self.render_screenshot_toolbar(&proj);
         }
 
         // === Tag-switch transition overlay ===

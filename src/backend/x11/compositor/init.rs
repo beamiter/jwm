@@ -1209,8 +1209,15 @@ impl<C: CompositorConnection> Compositor<C> {
             // Phase 6.2: Annotations
             annotation_active: false,
             annotation_strokes: Vec::new(),
+            annotation_quads: Vec::new(),
+            annotation_labels: Vec::new(),
+            annotation_label_textures: Vec::new(),
+            annotation_labels_dirty: false,
             annotation_color: behavior.annotation_color,
             annotation_line_width: behavior.annotation_line_width,
+            screenshot_toolbar: None,
+            screenshot_toolbar_icons: Vec::new(),
+            screenshot_toolbar_dirty: false,
             // Phase 6.3: Zoom to fit
             zoom_to_fit_window: None,
             zoom_to_fit_scale: 1.0,

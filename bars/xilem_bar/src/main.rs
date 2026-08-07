@@ -5,7 +5,7 @@
 //   * Layout toggle button + 3-option selector
 //   * Pills: CPU, memory, battery, brightness, volume, screenshot, time, monitor, scale
 //   * Click semantics: tag → view-tag command; volume scroll/click/right-click;
-//     brightness scroll/click/right-click; screenshot pill spawns `flameshot gui`
+//     brightness scroll/click/right-click; screenshot pill asks jwm for its own region capture over IPC
 //   * Nonblocking transport polling with reconnect; 1Hz core runtime tick
 //
 // xilem is closure-based (no Message enum), so each interactive view directly

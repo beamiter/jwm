@@ -2348,11 +2348,27 @@ impl WaylandCompositor {
         // =================================================================
         // 19c. Annotations overlay
         // =================================================================
-        if self.annotation_active && !self.annotation_strokes.is_empty() {
+        // Shapes first, then strokes over them: a redaction bar must not land
+        // on top of the arrow that points at it. The screenshot toolbar comes
+        // last of all, since it floats above everything it edits.
+        if self.annotation_active {
             unsafe {
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
-                self.render_annotations(gl, &projection);
             }
+            self.refresh_annotation_labels(gl);
+            self.render_annotation_shapes(gl, &projection);
+            if !self.annotation_strokes.is_empty() {
+                unsafe {
+                    self.render_annotations(gl, &projection);
+                }
+            }
+        }
+        if self.screenshot_toolbar.is_some() {
+            unsafe {
+                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            }
+            self.refresh_screenshot_toolbar(gl);
+            self.render_screenshot_toolbar(gl, &projection);
         }
 
         // Toast cards sit above clients but under the modal system UI (its

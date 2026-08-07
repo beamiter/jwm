@@ -334,6 +334,9 @@ impl WMController for Jwm {
                         .map(|r| (r.x as f32, r.y as f32, r.w as f32, r.h as f32)),
                 );
                 self.sync_screenshot_annotation_overlay(backend, false);
+                // A finished mark is what makes undo available, so the strip
+                // has to be rebuilt before the next click can reach it.
+                self.sync_screenshot_toolbar(backend);
             }
             return;
         }
@@ -359,6 +362,8 @@ impl WMController for Jwm {
             self.sync_screenshot_annotation_style(backend);
             backend.compositor_set_annotation_mode(true);
             self.sync_screenshot_annotation_overlay(backend, false);
+            // The selection is now an editor, so it gets its tools.
+            self.sync_screenshot_toolbar(backend);
             // Keep the snap preview visible so the user can see the selection
             return;
         }
@@ -573,14 +578,23 @@ impl WMController for Jwm {
                 .screenshot
                 .update_annotation(root_x as f32, root_y as f32);
             if backend.has_compositor() {
+                use crate::jwm::features::screenshot::ScreenshotTool;
                 match self.features.screenshot.tool {
-                    crate::jwm::features::screenshot::ScreenshotTool::Pencil => {
+                    // Freehand strokes grow a point at a time — rebuilding the
+                    // whole overlay per motion event would re-upload every
+                    // finished mark on every pixel of the drag.
+                    ScreenshotTool::Pencil | ScreenshotTool::Marker => {
                         backend.compositor_annotation_add_point(root_x as f32, root_y as f32);
                     }
-                    crate::jwm::features::screenshot::ScreenshotTool::Rectangle
-                    | crate::jwm::features::screenshot::ScreenshotTool::Ellipse
-                    | crate::jwm::features::screenshot::ScreenshotTool::Line
-                    | crate::jwm::features::screenshot::ScreenshotTool::Arrow => {
+                    // Everything else is defined by its two endpoints, so the
+                    // in-flight shape has to be redrawn from scratch.
+                    ScreenshotTool::Rectangle
+                    | ScreenshotTool::FilledRectangle
+                    | ScreenshotTool::Ellipse
+                    | ScreenshotTool::Line
+                    | ScreenshotTool::Arrow
+                    | ScreenshotTool::Pixelate
+                    | ScreenshotTool::Invert => {
                         backend.compositor_set_snap_preview(
                             self.features
                                 .screenshot
@@ -589,11 +603,30 @@ impl WMController for Jwm {
                         );
                         self.sync_screenshot_annotation_overlay(backend, true);
                     }
-                    crate::jwm::features::screenshot::ScreenshotTool::Select => {}
+                    // Click-placed tools and the selection mode draw nothing
+                    // while the pointer moves.
+                    ScreenshotTool::Select | ScreenshotTool::Text | ScreenshotTool::Counter => {}
                 }
                 backend.compositor_force_full_redraw();
             }
             return;
+        }
+
+        // A finished selection with nothing being drawn is the state the
+        // toolbar lives in, so this is where its hover highlight is tracked.
+        // Without this branch the pointer would fall through to the generic
+        // motion path and the strip would never light up.
+        if self.features.screenshot.active && self.features.screenshot.committed {
+            self.last_mouse_root = (root_x, root_y);
+            let hovered = self.screenshot_toolbar_hit(root_x, root_y);
+            if self.features.screenshot.hovered_button != hovered {
+                self.features.screenshot.hovered_button = hovered;
+                self.sync_screenshot_toolbar(backend);
+            }
+            if self.screenshot_toolbar_contains(root_x, root_y) {
+                backend.compositor_set_mouse_position(root_x as f32, root_y as f32);
+                return;
+            }
         }
 
         // Annotation drawing: while the pen is down, feed points into the current stroke.

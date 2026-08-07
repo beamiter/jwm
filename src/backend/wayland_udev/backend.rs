@@ -2244,35 +2244,20 @@ impl UdevBackend {
                                                     binding.keysym == keysym
                                                         && binding.mods == clean_mods
                                                 });
-                                            let is_screenshot_control = s.screenshot_grab_active
-                                                && matches!(
-                                                    keysym,
-                                                    crate::backend::common_define::keys::KEY_Escape
-                                                        | crate::backend::common_define::keys::KEY_Return
-                                                        | crate::backend::common_define::keys::KEY_s
-                                                        | crate::backend::common_define::keys::KEY_c
-                                                        | crate::backend::common_define::keys::KEY_p
-                                                        | crate::backend::common_define::keys::KEY_f
-                                                        | crate::backend::common_define::keys::KEY_l
-                                                        | crate::backend::common_define::keys::KEY_a
-                                                        | crate::backend::common_define::keys::KEY_r
-                                                        | crate::backend::common_define::keys::KEY_o
-                                                        | crate::backend::common_define::keys::KEY_z
-                                                        | crate::backend::common_define::keys::KEY_BackSpace
-                                                        | crate::backend::common_define::keys::KEY_Delete
-                                                        | crate::backend::common_define::keys::KEY_Left
-                                                        | crate::backend::common_define::keys::KEY_Right
-                                                        | crate::backend::common_define::keys::KEY_Up
-                                                        | crate::backend::common_define::keys::KEY_Down
-                                                        | crate::backend::common_define::keys::KEY_1
-                                                        | crate::backend::common_define::keys::KEY_2
-                                                        | crate::backend::common_define::keys::KEY_3
-                                                        | crate::backend::common_define::keys::KEY_4
-                                                        | crate::backend::common_define::keys::KEY_5
-                                                        | crate::backend::common_define::keys::KEY_6
-                                                        | crate::backend::common_define::keys::KEY_7
-                                                        | crate::backend::common_define::keys::KEY_8
-                                            );
+                                            // An interactive capture is modal:
+                                            // X11 takes the keyboard with
+                                            // `owner_events = false`, so this
+                                            // backend has to match by keeping
+                                            // *everything*. An allowlist used
+                                            // to live here, and it leaked the
+                                            // keys it did not name — Tab and
+                                            // the g/w/m/d source pickers went
+                                            // to the focused client — while
+                                            // making the text tool impossible,
+                                            // since typing a label means every
+                                            // printable key is a screenshot
+                                            // control.
+                                            let is_screenshot_control = s.screenshot_grab_active;
                                             let should_suppress = s.system_ui_grab_active
                                                 || is_screenshot_control
                                                 || (!session_locked
@@ -3546,6 +3531,32 @@ impl CompositorAnnotation for UdevBackend {
     fn compositor_annotation_begin_stroke(&mut self) {
         if let Some(c) = self.compositor.as_mut() {
             c.annotation_new_stroke();
+        }
+    }
+    fn compositor_annotation_add_quad(
+        &mut self,
+        quad: crate::backend::compositor_common::annotation_overlay::AnnotationQuad,
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_quad(quad);
+        }
+    }
+    fn compositor_annotation_add_text(
+        &mut self,
+        label: crate::backend::compositor_common::annotation_overlay::AnnotationLabel,
+    ) {
+        if let Some(c) = self.compositor.as_mut() {
+            c.annotation_add_text(label);
+        }
+    }
+    fn compositor_set_screenshot_toolbar(
+        &mut self,
+        toolbar: Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
+    ) {
+        // Rectangles, icons and flags only — the window manager keeps the hit
+        // test, so nothing here can resolve to the wrong tool.
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_screenshot_toolbar(toolbar);
         }
     }
 }

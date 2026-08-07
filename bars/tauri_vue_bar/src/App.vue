@@ -141,7 +141,7 @@
         class="pill screenshot-pill"
         :class="{ taking: isTaking }"
         @click="onScreenshot"
-        title="截图 (Flameshot)"
+        title="截图 (jwm)"
       >
         <span class="nf-icon">{{ ICON_SHOT }}</span>
       </div>

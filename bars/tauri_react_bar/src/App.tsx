@@ -320,7 +320,7 @@ function ScreenshotButton() {
     <div
       className={`pill screenshot-pill ${isTaking ? "taking" : ""}`}
       onClick={takeScreenshot}
-      title="截图 (Flameshot)"
+      title="截图 (jwm)"
     >
       <span className="nf-icon">{ICON_SHOT}</span>
     </div>

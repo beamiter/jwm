@@ -374,7 +374,7 @@ fn ScreenshotButton(on_action: EventHandler<UserAction>) -> Element {
         div {
             class: "pill screenshot-pill",
             onclick: move |_| on_action.call(UserAction::Screenshot),
-            title: "截图 (Flameshot)",
+            title: "截图 (jwm)",
             span { class: "nf-icon", "{ICON_SHOT}" }
         }
     }

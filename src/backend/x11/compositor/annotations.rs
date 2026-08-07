@@ -1,4 +1,6 @@
 use super::Compositor;
+use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
+use crate::backend::compositor_font;
 use crate::backend::x11::compositor_common::annotations::{AnnotationPoint, AnnotationStroke};
 use glow::HasContext;
 
@@ -9,8 +11,177 @@ impl<C: CompositorConnection> Compositor<C> {
         self.annotation_active = active;
         if !active {
             self.annotation_strokes.clear();
+            self.annotation_quads.clear();
+            if !self.annotation_labels.is_empty() {
+                self.annotation_labels.clear();
+                self.annotation_labels_dirty = true;
+            }
         }
         self.needs_render = true;
+    }
+
+    pub(crate) fn annotation_add_quad(&mut self, quad: AnnotationQuad) {
+        if !self.annotation_active || !quad.is_drawable() {
+            return;
+        }
+        self.annotation_quads.push(quad);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn annotation_add_text(&mut self, label: AnnotationLabel) {
+        if !self.annotation_active || !label.is_drawable() {
+            return;
+        }
+        self.annotation_labels.push(label);
+        self.annotation_labels_dirty = true;
+        self.needs_render = true;
+    }
+
+    /// Rasterise and upload every label, once per change.
+    pub(super) fn refresh_annotation_labels(&mut self) {
+        if !self.annotation_labels_dirty {
+            return;
+        }
+        self.annotation_labels_dirty = false;
+
+        let stale = std::mem::take(&mut self.annotation_label_textures);
+        unsafe {
+            for (texture, _, _) in stale.into_iter().flatten() {
+                self.gl.delete_texture(texture);
+            }
+        }
+
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let mut textures = Vec::with_capacity(self.annotation_labels.len());
+        for label in &self.annotation_labels {
+            let ink = [
+                (label.color[0] * 255.0).clamp(0.0, 255.0) as u8,
+                (label.color[1] * 255.0).clamp(0.0, 255.0) as u8,
+                (label.color[2] * 255.0).clamp(0.0, 255.0) as u8,
+                (label.color[3] * 255.0).clamp(0.0, 255.0) as u8,
+            ];
+            let (pixels, w, h) =
+                compositor_font::render_ui_text_to_rgba(&label.text, font, label.size, ink);
+            textures.push(if w == 0 || h == 0 {
+                None
+            } else {
+                unsafe { self.upload_overlay_texture(&pixels, w, h) }.map(|t| (t, w, h))
+            });
+        }
+        self.annotation_label_textures = textures;
+    }
+
+    /// Paint the filled shapes, then the labels over them.
+    pub(super) fn render_annotation_shapes(&mut self, proj: &[f32; 16]) {
+        if self.annotation_quads.is_empty() && self.annotation_label_textures.is_empty() {
+            return;
+        }
+        unsafe {
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            // `sysui_fill_rounded` fills through the border program and takes
+            // the binding as given — the tab bar gets it from the
+            // `ui_fill_island` that draws its track. Nothing binds it for us,
+            // so a redaction bar drew in whatever colour the last pass left
+            // behind and a counter bubble did not appear at all.
+            if !self.annotation_quads.is_empty() {
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                for quad in &self.annotation_quads {
+                    self.sysui_fill_rounded(
+                        quad.x,
+                        quad.y,
+                        quad.w,
+                        quad.h,
+                        quad.radius,
+                        quad.color,
+                    );
+                }
+            }
+
+            if !self.annotation_label_textures.is_empty() {
+                self.gl.use_program(Some(self.hud_text_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.hud_text_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                self.gl
+                    .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+                self.gl
+                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+                self.gl.active_texture(glow::TEXTURE0);
+                for (label, slot) in self
+                    .annotation_labels
+                    .iter()
+                    .zip(self.annotation_label_textures.iter())
+                {
+                    let Some((texture, w, h)) = slot else {
+                        continue;
+                    };
+                    let (w, h) = (*w as f32, *h as f32);
+                    let (x, y) = label.origin(w, h);
+                    self.gl
+                        .uniform_4_f32(self.hud_text_uniforms.rect.as_ref(), x, y, w, h);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(*texture));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+        }
+    }
+
+    /// Upload a straight-alpha RGBA buffer as a linearly filtered texture.
+    /// Shared by the overlay's labels and the toolbar's icons.
+    pub(super) unsafe fn upload_overlay_texture(
+        &self,
+        pixels: &[u8],
+        w: u32,
+        h: u32,
+    ) -> Option<glow::Texture> {
+        unsafe {
+            let texture = self.gl.create_texture().ok()?;
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(pixels)),
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MIN_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAG_FILTER,
+                glow::LINEAR as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_S,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_WRAP_T,
+                glow::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            Some(texture)
+        }
     }
 
     pub(crate) fn annotation_add_point(&mut self, x: f32, y: f32) {

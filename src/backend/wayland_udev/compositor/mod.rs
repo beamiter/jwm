@@ -48,6 +48,7 @@ mod render_batcher;
 mod render_stats;
 mod rules;
 mod screenshot_readback;
+mod screenshot_toolbar;
 #[allow(dead_code, unreachable_pub)]
 mod shader_cache;
 #[allow(dead_code, unreachable_pub)]
@@ -843,8 +844,24 @@ pub(crate) struct WaylandCompositor {
     // Annotations
     annotation_active: bool,
     annotation_strokes: Vec<AnnotationStroke>,
+    /// Filled shapes the strokes cannot express — redaction bars, counter
+    /// bubbles. Cleared with the strokes.
+    annotation_quads: Vec<crate::backend::compositor_common::annotation_overlay::AnnotationQuad>,
+    /// Text runs, plus their rasterised textures. Rebuilt only when the list
+    /// changes, the same bargain `tab_title_textures` strikes.
+    annotation_labels: Vec<crate::backend::compositor_common::annotation_overlay::AnnotationLabel>,
+    annotation_label_textures: Vec<Option<(u32, u32, u32)>>,
+    annotation_labels_dirty: bool,
     annotation_color: [f32; 4],
     annotation_line_width: f32,
+
+    // Screenshot editor toolbar
+    /// The strip the window manager published, or `None` when no capture is
+    /// being edited; one rasterised glyph per button.
+    screenshot_toolbar:
+        Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
+    screenshot_toolbar_icons: Vec<Option<(u32, u32, u32)>>,
+    screenshot_toolbar_dirty: bool,
     line_program: u32,
     line_uniform_projection: i32,
     line_uniform_color: i32,
@@ -1792,8 +1809,15 @@ impl WaylandCompositor {
                 // Annotations
                 annotation_active: false,
                 annotation_strokes: Vec::new(),
+                annotation_quads: Vec::new(),
+                annotation_labels: Vec::new(),
+                annotation_label_textures: Vec::new(),
+                annotation_labels_dirty: false,
                 annotation_color: [1.0, 0.0, 0.0, 1.0],
                 annotation_line_width: 3.0,
+                screenshot_toolbar: None,
+                screenshot_toolbar_icons: Vec::new(),
+                screenshot_toolbar_dirty: false,
                 line_program,
                 line_uniform_projection,
                 line_uniform_color,

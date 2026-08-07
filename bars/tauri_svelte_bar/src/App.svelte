@@ -457,7 +457,7 @@
         role="button"
         tabindex="0"
         onkeydown={(event) => event.key === "Enter" && takeScreenshot()}
-        title="截图 (Flameshot)"
+        title="截图 (jwm)"
       >
         <span class="nf-icon">{ICON_SHOT}</span>
       </div>

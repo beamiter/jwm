@@ -70,6 +70,7 @@ impl WaylandCompositor {
             || self.debug_hud_enabled
             || self.debug_hud_extended
             || (self.annotation_active && !self.annotation_strokes.is_empty())
+            || self.screenshot_toolbar.is_some()
             || self.system_ui.is_some()
             || !self.toast_stack.is_empty()
             || !self.osd_slot.is_empty()
@@ -193,6 +194,9 @@ impl WaylandCompositor {
         }
         if self.annotation_active && !self.annotation_strokes.is_empty() {
             return Some("annotations require composition");
+        }
+        if self.screenshot_toolbar.is_some() {
+            return Some("the screenshot toolbar requires composition");
         }
         if self.debug_hud_enabled || self.debug_hud_extended {
             return Some("debug HUD requires composition");

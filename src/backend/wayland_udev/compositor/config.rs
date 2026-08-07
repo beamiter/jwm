@@ -756,7 +756,48 @@ impl WaylandCompositor {
         self.annotation_active = active;
         if !active {
             self.annotation_strokes.clear();
+            self.annotation_quads.clear();
+            if !self.annotation_labels.is_empty() {
+                self.annotation_labels.clear();
+                self.annotation_labels_dirty = true;
+            }
         }
+        self.needs_render = true;
+    }
+
+    pub(crate) fn annotation_add_quad(
+        &mut self,
+        quad: crate::backend::compositor_common::annotation_overlay::AnnotationQuad,
+    ) {
+        if !self.annotation_active || !quad.is_drawable() {
+            return;
+        }
+        self.annotation_quads.push(quad);
+        self.needs_render = true;
+    }
+
+    pub(crate) fn annotation_add_text(
+        &mut self,
+        label: crate::backend::compositor_common::annotation_overlay::AnnotationLabel,
+    ) {
+        if !self.annotation_active || !label.is_drawable() {
+            return;
+        }
+        self.annotation_labels.push(label);
+        self.annotation_labels_dirty = true;
+        self.needs_render = true;
+    }
+
+    /// Take the screenshot editor's toolbar, or withdraw it.
+    pub(crate) fn set_screenshot_toolbar(
+        &mut self,
+        toolbar: Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
+    ) {
+        if self.screenshot_toolbar == toolbar {
+            return;
+        }
+        self.screenshot_toolbar = toolbar;
+        self.screenshot_toolbar_dirty = true;
         self.needs_render = true;
     }
 

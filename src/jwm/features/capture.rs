@@ -192,6 +192,10 @@ impl Jwm {
             self.sync_screenshot_annotation_style(backend);
             self.sync_screenshot_annotation_overlay(backend, false);
         }
+        // Picking a window, a monitor or the desktop commits a selection
+        // without a drag, so this is the other door into the editor and it
+        // needs its tools too.
+        self.sync_screenshot_toolbar(backend);
         true
     }
 
@@ -202,6 +206,9 @@ impl Jwm {
     ) {
         self.features.capture.screenshot = target;
         self.features.screenshot.reset_selection();
+        // Switching source drops the selection, so the strip that belonged to
+        // it has to go with it rather than hang over an empty canvas.
+        backend.compositor_set_screenshot_toolbar(None);
         backend.compositor_set_annotation_mode(false);
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);

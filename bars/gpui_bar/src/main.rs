@@ -5,7 +5,7 @@
 //   * Layout toggle + 3-option selector
 //   * Pills: CPU, memory, battery, brightness, volume, screenshot, time, monitor, scale
 //   * Click semantics: tag → view-tag command; volume left-click mute + wheel adjust; brightness left/right click;
-//     screenshot pill spawns `flameshot gui`; clock toggles seconds
+//     screenshot pill asks jwm for its own region capture over IPC; clock toggles seconds
 //   * A nonblocking transport poller reconnects after WM restarts; a 1Hz timer
 //     drives the core runtime
 //

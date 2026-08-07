@@ -631,6 +631,37 @@ macro_rules! delegate_compositor_capabilities {
                     c.annotation_new_stroke();
                 }
             }
+
+            fn compositor_annotation_add_quad(
+                &mut self,
+                quad: crate::backend::compositor_common::annotation_overlay::AnnotationQuad,
+            ) {
+                if let Some(c) = self.compositor.as_mut() {
+                    c.annotation_add_quad(quad);
+                }
+            }
+
+            fn compositor_annotation_add_text(
+                &mut self,
+                label: crate::backend::compositor_common::annotation_overlay::AnnotationLabel,
+            ) {
+                if let Some(c) = self.compositor.as_mut() {
+                    c.annotation_add_text(label);
+                }
+            }
+
+            fn compositor_set_screenshot_toolbar(
+                &mut self,
+                toolbar: Option<
+                    crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar,
+                >,
+            ) {
+                // Rectangles, icons and flags only — the window manager keeps
+                // the hit test, so nothing here can resolve to the wrong tool.
+                if let Some(c) = self.compositor.as_mut() {
+                    c.set_screenshot_toolbar(toolbar);
+                }
+            }
         }
     };
 }

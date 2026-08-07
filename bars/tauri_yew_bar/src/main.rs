@@ -551,7 +551,7 @@ fn app() -> Html {
                 <div
                     class={if *is_taking { "pill screenshot-pill taking" } else { "pill screenshot-pill" }}
                     onclick={take_screenshot}
-                    title="截图 (Flameshot)"
+                    title="截图 (jwm)"
                 >
                     <span class="nf-icon">{ICON_SHOT}</span>
                 </div>

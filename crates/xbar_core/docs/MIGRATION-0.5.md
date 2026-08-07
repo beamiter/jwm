@@ -96,8 +96,9 @@ let needs_redraw = router.route(update, |request| match request {
 })?;
 ```
 
-Only the geometry closure can fail the route; process-launch failures are
-logged so a missing `flameshot` cannot wedge a frame. The returned flag is the
+Only the geometry closure can fail the route; action failures are logged so a
+missing `pavucontrol` — or a compositor that is not listening on its control
+socket — cannot wedge a frame. The returned flag is the
 `needs_redraw` value bars previously computed by hand. Effect handling that is
 not the standard Linux policy should keep using
 `RuntimeUpdate::handle_platform_effects` directly.

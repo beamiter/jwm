@@ -8,3 +8,10 @@ repository = "https://github.com/beamiter/xbar_core"
 [dependencies]
 log = "0.4.33"
 xbar_core = { path = "../..", default-features = false }
+
+# The jwm control socket: JSON lines over AF_UNIX, and `geteuid` for the
+# per-uid fallback directory the compositor binds in when XDG_RUNTIME_DIR is
+# unset. Both are what it takes to ask the running compositor for a screenshot
+# instead of shelling out to an external grabber.
+libc = "0.2.186"
+serde_json = "1"

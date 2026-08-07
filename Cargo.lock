@@ -5607,7 +5607,9 @@ dependencies = [
 name = "xbar_linux_actions"
 version = "0.2.0"
 dependencies = [
+ "libc 0.2.189",
  "log",
+ "serde_json",
  "xbar_core",
 ]
 

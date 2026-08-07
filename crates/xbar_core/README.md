@@ -238,10 +238,16 @@ let output = CommandRunner::output(
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Executable policy is configurable through `ProcessActionConfig`; the defaults
-are `flameshot gui` and `pavucontrol`. Window placement, provider effects, and
-WM commands are rejected as unsupported so another host adapter can handle
-them explicitly. `CommandRunner` reuses `CommandSpec` for output-producing
+Action policy is configurable through `ProcessActionConfig`. The screenshot
+pill defaults to `ScreenshotAction::Jwm`, which asks the running compositor for
+its own interactive region capture over jwm's control socket rather than
+spawning an external grabber — the compositor already owns the framebuffer and
+the pointer grab, and under Wayland an X11 grabber cannot see the screen at
+all. `ScreenshotAction::Command(spec)` restores the old behaviour (e.g.
+`flameshot gui`) for hosts that want it, and `ScreenshotAction::Disabled` turns
+the pill off. Audio control still defaults to `pavucontrol`. Window placement,
+provider effects, and WM commands are rejected as unsupported so another host
+adapter can handle them explicitly. `CommandRunner` reuses `CommandSpec` for output-producing
 host probes, rejects non-zero exits, retains stderr in its error, and never
 invokes a shell implicitly.
 

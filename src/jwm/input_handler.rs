@@ -6,14 +6,50 @@ use crate::backend::api::{
     WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
+use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
+use crate::backend::compositor_common::screenshot_toolbar::{
+    self, ScreenshotToolbar, ToolbarButton,
+};
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
 use crate::jwm::features::expose_plan;
-use crate::jwm::features::screenshot::{ScreenshotAnnotation, ScreenshotTool};
+use crate::jwm::features::screenshot::{
+    ScreenshotAnnotation, ScreenshotTool, ToolbarCommand, marker_ink,
+};
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
 use crate::jwm::types::{WMArgEnum, WMClickType};
 use log::{error, info};
+
+/// A rectangle from two corners in any order, as `[x, y, w, h]`.
+fn normalized_rect(from: (f32, f32), to: (f32, f32)) -> [f32; 4] {
+    let x = from.0.min(to.0);
+    let y = from.1.min(to.1);
+    [x, y, (from.0 - to.0).abs(), (from.1 - to.1).abs()]
+}
+
+/// 0-255 ink as the 0-1 floats the compositor draws with.
+fn linear_rgba(color: [u8; 4]) -> [f32; 4] {
+    [
+        f32::from(color[0]) / 255.0,
+        f32::from(color[1]) / 255.0,
+        f32::from(color[2]) / 255.0,
+        f32::from(color[3]) / 255.0,
+    ]
+}
+
+/// Black or white, whichever reads against a counter bubble of this color.
+/// Rec. 601 luma, matching what the baked PNG uses so the preview and the file
+/// never disagree about a numeral's color.
+fn counter_ink(color: [u8; 4]) -> [f32; 4] {
+    let luma =
+        0.299 * f32::from(color[0]) + 0.587 * f32::from(color[1]) + 0.114 * f32::from(color[2]);
+    if luma > 140.0 {
+        [0.08, 0.08, 0.08, 1.0]
+    } else {
+        [1.0, 1.0, 1.0, 1.0]
+    }
+}
 
 /// Split one launcher command line into argv without involving a shell.
 ///
@@ -361,6 +397,109 @@ impl Jwm {
                 }
                 Self::emit_screenshot_polyline(backend, *color, *width, &points);
             }
+            ScreenshotAnnotation::Marker {
+                points,
+                color,
+                width,
+            } => Self::emit_screenshot_polyline(backend, *color, *width, points),
+            ScreenshotAnnotation::FilledRectangle { from, to, color } => {
+                let [x, y, w, h] = normalized_rect(*from, *to);
+                backend.compositor_annotation_add_quad(AnnotationQuad {
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius: 0.0,
+                    color: linear_rgba(*color),
+                });
+            }
+            ScreenshotAnnotation::Pixelate { from, to, block } => {
+                // Blocks are baked into the PNG, not previewed one by one — a
+                // large region would be thousands of quads redrawn on every
+                // pointer motion. A scrim plus a sampled grid says "this will
+                // become blocks this big" for two draw calls.
+                let rect = normalized_rect(*from, *to);
+                backend.compositor_annotation_add_quad(AnnotationQuad {
+                    x: rect[0],
+                    y: rect[1],
+                    w: rect[2],
+                    h: rect[3],
+                    radius: 0.0,
+                    color: [0.05, 0.05, 0.07, 0.55],
+                });
+                Self::emit_region_grid(backend, rect, *block as f32);
+            }
+            ScreenshotAnnotation::Invert { from, to } => {
+                let [x, y, w, h] = normalized_rect(*from, *to);
+                backend.compositor_annotation_add_quad(AnnotationQuad {
+                    x,
+                    y,
+                    w,
+                    h,
+                    radius: 0.0,
+                    color: [0.85, 0.85, 0.9, 0.45],
+                });
+                Self::emit_screenshot_polyline(
+                    backend,
+                    [255, 255, 255, 255],
+                    1,
+                    &[(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)],
+                );
+            }
+            ScreenshotAnnotation::Counter {
+                at,
+                number,
+                color,
+                radius,
+            } => {
+                backend.compositor_annotation_add_quad(AnnotationQuad::disc(
+                    at.0,
+                    at.1,
+                    *radius,
+                    linear_rgba(*color),
+                ));
+                backend.compositor_annotation_add_text(AnnotationLabel {
+                    x: at.0,
+                    y: at.1,
+                    size: (*radius * 1.15).max(8.0),
+                    color: counter_ink(*color),
+                    text: number.to_string(),
+                    anchor_center: true,
+                });
+            }
+            ScreenshotAnnotation::Text {
+                at,
+                text,
+                color,
+                size,
+            } => backend.compositor_annotation_add_text(AnnotationLabel {
+                x: at.0,
+                y: at.1,
+                size: *size,
+                color: linear_rgba(*color),
+                text: text.clone(),
+                anchor_center: false,
+            }),
+        }
+    }
+
+    /// Draw a grid over `rect` with roughly `stride`-pixel cells, sampled down
+    /// so a large region never turns into hundreds of strokes.
+    fn emit_region_grid(backend: &mut dyn Backend, rect: [f32; 4], stride: f32) {
+        const MAX_LINES: f32 = 24.0;
+        let [x, y, w, h] = rect;
+        let stride_x = stride.max(w / MAX_LINES).max(2.0);
+        let stride_y = stride.max(h / MAX_LINES).max(2.0);
+        let ink = [255, 255, 255, 150];
+        let mut gx = x + stride_x;
+        while gx < x + w {
+            Self::emit_screenshot_polyline(backend, ink, 1, &[(gx, y), (gx, y + h)]);
+            gx += stride_x;
+        }
+        let mut gy = y + stride_y;
+        while gy < y + h {
+            Self::emit_screenshot_polyline(backend, ink, 1, &[(x, gy), (x + w, gy)]);
+            gy += stride_y;
         }
     }
 
@@ -385,8 +524,133 @@ impl Jwm {
                 Self::emit_screenshot_annotation(backend, &annotation);
             }
         }
+        // The label being typed is always shown, drag or no drag: you cannot
+        // type blind.
+        if let Some(annotation) = self.features.screenshot.text_draft_preview() {
+            Self::emit_screenshot_annotation(backend, &annotation);
+        }
         self.sync_screenshot_annotation_style(backend);
         backend.compositor_force_full_redraw();
+    }
+
+    /// Rebuild the toolbar from the current editor state and publish it.
+    ///
+    /// The model is stored back into `ScreenshotState` because the hit test
+    /// has to run against exactly the rectangles that were painted — deriving
+    /// them a second time at click time is how a button ends up doing its
+    /// neighbour's job.
+    pub(crate) fn sync_screenshot_toolbar(&mut self, backend: &mut dyn Backend) {
+        if !self.features.screenshot.active || !self.features.screenshot.committed {
+            if self.features.screenshot.toolbar.take().is_some() {
+                backend.compositor_set_screenshot_toolbar(None);
+            }
+            return;
+        }
+        let Some(selection) = self.features.screenshot.get_selection_rect() else {
+            if self.features.screenshot.toolbar.take().is_some() {
+                backend.compositor_set_screenshot_toolbar(None);
+            }
+            return;
+        };
+
+        let entries = self.features.screenshot.toolbar_entries();
+        let hovered = self.features.screenshot.hovered_button;
+        let mut buttons: Vec<ToolbarButton> = entries.into_iter().map(|e| e.button).collect();
+        if let Some(index) = hovered {
+            if let Some(button) = buttons.get_mut(index) {
+                button.hovered = true;
+            }
+        }
+
+        let screen = [0.0, 0.0, self.s_w as f32, self.s_h as f32];
+        let button_size = screenshot_toolbar::fit_button_size(
+            &buttons,
+            screen[2] - 2.0 * screenshot_toolbar::SCREEN_MARGIN,
+        );
+        let extent = screenshot_toolbar::track_extent(&buttons, button_size);
+        let bar = screenshot_toolbar::place(
+            [
+                selection.x as f32,
+                selection.y as f32,
+                selection.w as f32,
+                selection.h as f32,
+            ],
+            screen,
+            extent,
+        );
+
+        let toolbar = ScreenshotToolbar {
+            bar,
+            button_size,
+            buttons,
+        };
+        if self.features.screenshot.toolbar.as_ref() == Some(&toolbar) {
+            return;
+        }
+        self.features.screenshot.toolbar = Some(toolbar.clone());
+        backend.compositor_set_screenshot_toolbar(Some(toolbar));
+        backend.compositor_force_full_redraw();
+    }
+
+    /// Run one toolbar command and republish everything it changed.
+    ///
+    /// The three commands that end the capture return early: `finish` and
+    /// `cancel` already tear the editor down, and re-syncing an overlay that
+    /// no longer exists would put the strip back on screen for a frame — the
+    /// frame the compositor captures.
+    pub(crate) fn apply_screenshot_toolbar_command(
+        &mut self,
+        backend: &mut dyn Backend,
+        command: ToolbarCommand,
+    ) {
+        match command {
+            ToolbarCommand::SelectTool(tool) => {
+                // Leaving the text tool finishes whatever was being typed
+                // rather than dropping it on the floor.
+                if self.features.screenshot.tool == ScreenshotTool::Text
+                    && tool != ScreenshotTool::Text
+                {
+                    self.features.screenshot.commit_text_draft();
+                }
+                self.features.screenshot.set_tool(tool);
+            }
+            ToolbarCommand::Thinner => self.features.screenshot.decrease_line_width(),
+            ToolbarCommand::Thicker => self.features.screenshot.increase_line_width(),
+            ToolbarCommand::NextColor => self.features.screenshot.next_palette_color(),
+            ToolbarCommand::Undo => self.features.screenshot.undo_annotation(),
+            ToolbarCommand::Redo => self.features.screenshot.redo_annotation(),
+            ToolbarCommand::Copy => return self.finish_screenshot_select(backend, true),
+            ToolbarCommand::Save => return self.finish_screenshot_select(backend, false),
+            ToolbarCommand::Cancel => return self.cancel_screenshot_select(backend),
+        }
+        self.sync_screenshot_annotation_style(backend);
+        self.sync_screenshot_annotation_overlay(backend, true);
+        self.sync_screenshot_toolbar(backend);
+    }
+
+    /// Which toolbar button, if any, is under `(x, y)`.
+    pub(crate) fn screenshot_toolbar_hit(&self, x: f64, y: f64) -> Option<usize> {
+        let toolbar = self.features.screenshot.toolbar.as_ref()?;
+        screenshot_toolbar::button_at(
+            toolbar.bar,
+            &toolbar.buttons,
+            toolbar.button_size,
+            x as f32,
+            y as f32,
+        )
+    }
+
+    /// Whether `(x, y)` is anywhere on the toolbar, button or padding. A press
+    /// in the gap between two buttons still belongs to the strip and must not
+    /// start drawing on the canvas underneath it.
+    pub(crate) fn screenshot_toolbar_contains(&self, x: f64, y: f64) -> bool {
+        self.features
+            .screenshot
+            .toolbar
+            .as_ref()
+            .is_some_and(|toolbar| {
+                screenshot_toolbar::hits_toolbar(toolbar.bar, x as f32, y as f32)
+            })
     }
 
     /// Key handling while the control center is open: Up/Down move between
@@ -1149,6 +1413,31 @@ impl Jwm {
 
         // Screenshot region selection mode
         if self.features.screenshot.active {
+            // A label under construction owns the keyboard: every printable
+            // key is text, so no tool shortcut may fire while one is open.
+            if self.features.screenshot.is_typing() {
+                match keysym {
+                    keys::KEY_Escape => {
+                        self.features.screenshot.cancel_text_draft();
+                    }
+                    keys::KEY_Return | keys::KEY_KP_Enter => {
+                        self.features.screenshot.commit_text_draft();
+                    }
+                    keys::KEY_BackSpace => self.features.screenshot.text_backspace(),
+                    _ => {
+                        // ASCII only: composing CJK needs an input method, and
+                        // the window manager does not host one. The baked PNG
+                        // renders whatever does arrive in the full UI font.
+                        if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
+                            self.features.screenshot.text_input(ch);
+                        }
+                    }
+                }
+                self.sync_screenshot_annotation_overlay(backend, true);
+                self.sync_screenshot_toolbar(backend);
+                return Ok(());
+            }
+
             if keysym == keys::KEY_Escape {
                 self.cancel_screenshot_select(backend);
                 return Ok(());
@@ -1179,29 +1468,33 @@ impl Jwm {
                 return Ok(());
             }
 
-            let tool_changed = if !ctrl && (keysym == keys::KEY_p || keysym == keys::KEY_f) {
-                self.features.screenshot.set_tool(ScreenshotTool::Pencil);
-                true
-            } else if !ctrl && keysym == keys::KEY_l {
-                self.features.screenshot.set_tool(ScreenshotTool::Line);
-                true
-            } else if !ctrl && keysym == keys::KEY_a {
-                self.features.screenshot.set_tool(ScreenshotTool::Arrow);
-                true
-            } else if !ctrl && keysym == keys::KEY_r {
-                self.features.screenshot.set_tool(ScreenshotTool::Rectangle);
-                true
-            } else if !ctrl && (keysym == keys::KEY_c || keysym == keys::KEY_o) {
-                self.features.screenshot.set_tool(ScreenshotTool::Ellipse);
-                true
+            // Every tool has a letter, and the letters are the toolbar read
+            // left to right wherever one was free.
+            let requested_tool = if ctrl {
+                None
             } else {
-                false
+                match keysym {
+                    keys::KEY_p | keys::KEY_f => Some(ScreenshotTool::Pencil),
+                    keys::KEY_l => Some(ScreenshotTool::Line),
+                    keys::KEY_a => Some(ScreenshotTool::Arrow),
+                    keys::KEY_r => Some(ScreenshotTool::Rectangle),
+                    keys::KEY_b => Some(ScreenshotTool::FilledRectangle),
+                    keys::KEY_c | keys::KEY_o => Some(ScreenshotTool::Ellipse),
+                    keys::KEY_h => Some(ScreenshotTool::Marker),
+                    keys::KEY_t => Some(ScreenshotTool::Text),
+                    keys::KEY_n => Some(ScreenshotTool::Counter),
+                    keys::KEY_x => Some(ScreenshotTool::Pixelate),
+                    keys::KEY_i => Some(ScreenshotTool::Invert),
+                    _ => None,
+                }
             };
-            if tool_changed {
+            if let Some(tool) = requested_tool {
+                self.features.screenshot.set_tool(tool);
                 if backend.has_compositor() {
                     self.sync_screenshot_annotation_style(backend);
                     self.sync_screenshot_annotation_overlay(backend, true);
                 }
+                self.sync_screenshot_toolbar(backend);
                 return Ok(());
             }
 
@@ -1213,30 +1506,45 @@ impl Jwm {
                     self.sync_screenshot_annotation_style(backend);
                     self.sync_screenshot_annotation_overlay(backend, true);
                 }
+                self.sync_screenshot_toolbar(backend);
                 return Ok(());
             }
 
             if self.features.screenshot.committed {
                 let nudge = if shift { 10.0 } else { 1.0 };
 
-                if keysym == keys::KEY_Return || (ctrl && keysym == keys::KEY_s) {
+                if keysym == keys::KEY_Return
+                    || keysym == keys::KEY_KP_Enter
+                    || (ctrl && keysym == keys::KEY_s)
+                {
                     self.finish_screenshot_select(backend, false);
                 } else if ctrl && keysym == keys::KEY_c {
                     self.finish_screenshot_select(backend, true);
+                } else if ctrl && (keysym == keys::KEY_y || (shift && keysym == keys::KEY_z)) {
+                    self.features.screenshot.redo_annotation();
+                    self.sync_screenshot_annotation_overlay(backend, false);
+                    self.sync_screenshot_toolbar(backend);
                 } else if ctrl && keysym == keys::KEY_z {
                     self.features.screenshot.undo_annotation();
                     self.sync_screenshot_annotation_overlay(backend, false);
+                    self.sync_screenshot_toolbar(backend);
                 } else if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
                     self.features.screenshot.undo_annotation();
                     self.sync_screenshot_annotation_overlay(backend, false);
-                } else if ctrl && keysym == keys::KEY_Up {
+                    self.sync_screenshot_toolbar(backend);
+                } else if (ctrl && keysym == keys::KEY_Up)
+                    || keysym == keys::KEY_plus
+                    || keysym == keys::KEY_equal
+                {
                     self.features.screenshot.increase_line_width();
                     self.sync_screenshot_annotation_style(backend);
                     self.sync_screenshot_annotation_overlay(backend, true);
-                } else if ctrl && keysym == keys::KEY_Down {
+                    self.sync_screenshot_toolbar(backend);
+                } else if (ctrl && keysym == keys::KEY_Down) || keysym == keys::KEY_minus {
                     self.features.screenshot.decrease_line_width();
                     self.sync_screenshot_annotation_style(backend);
                     self.sync_screenshot_annotation_overlay(backend, true);
+                    self.sync_screenshot_toolbar(backend);
                 } else if keysym == keys::KEY_Left
                     || keysym == keys::KEY_Right
                     || keysym == keys::KEY_Up
@@ -1263,6 +1571,8 @@ impl Jwm {
                         );
                         backend.compositor_force_full_redraw();
                     }
+                    // The strip follows the selection it belongs to.
+                    self.sync_screenshot_toolbar(backend);
                 }
                 // Other keys are consumed silently
             }
@@ -1463,17 +1773,72 @@ impl Jwm {
         // Screenshot region selection intercept
         if self.features.screenshot.active {
             let btn = MouseButton::from_u8(detail_btn);
+            let (px, py) = self.last_mouse_root;
+
+            // The wheel adjusts the stroke instead of cancelling the capture,
+            // which is what every other annotation tool does with it — and
+            // losing a half-annotated selection to a stray scroll was a nasty
+            // way to find out otherwise.
+            if self.features.screenshot.committed && matches!(btn, MouseButton::Other(4 | 5)) {
+                self.features.capture.swallow_next_button_release();
+                if btn == MouseButton::Other(4) {
+                    self.features.screenshot.increase_line_width();
+                } else {
+                    self.features.screenshot.decrease_line_width();
+                }
+                self.sync_screenshot_annotation_style(backend);
+                self.sync_screenshot_annotation_overlay(backend, true);
+                self.sync_screenshot_toolbar(backend);
+                return Ok(());
+            }
+
+            // The toolbar floats over the canvas, so a left press inside it is
+            // the toolbar's — including a press in the padding between two
+            // buttons, which must not start a stroke through the strip. Other
+            // buttons deliberately fall through, so right-click still cancels
+            // the capture wherever the pointer happens to be.
+            if btn == MouseButton::Left
+                && self.features.screenshot.committed
+                && self.screenshot_toolbar_contains(px, py)
+            {
+                self.features.capture.swallow_next_button_release();
+                if let Some(command) = self
+                    .screenshot_toolbar_hit(px, py)
+                    .and_then(|index| self.features.screenshot.toolbar_command(index))
+                {
+                    self.apply_screenshot_toolbar_command(backend, command);
+                }
+                return Ok(());
+            }
+
             if btn == MouseButton::Left && self.features.screenshot.committed {
-                let (x, y) = self.last_mouse_root;
+                let (x, y) = (px, py);
                 self.features
                     .screenshot
                     .begin_annotation(x as f32, y as f32);
-                if self.features.screenshot.tool == ScreenshotTool::Pencil
-                    && backend.has_compositor()
+                if matches!(
+                    self.features.screenshot.tool,
+                    ScreenshotTool::Pencil | ScreenshotTool::Marker
+                ) && backend.has_compositor()
                 {
-                    backend.compositor_annotation_begin_stroke();
-                    backend.compositor_annotation_add_point(x as f32, y as f32);
+                    let ink = if self.features.screenshot.tool == ScreenshotTool::Marker {
+                        marker_ink(self.features.screenshot.color)
+                    } else {
+                        self.features.screenshot.color
+                    };
+                    Self::emit_screenshot_polyline(
+                        backend,
+                        ink,
+                        self.features.screenshot.stroke_width(),
+                        &[(x as f32, y as f32), (x as f32, y as f32)],
+                    );
                     backend.compositor_force_full_redraw();
+                } else if self.features.screenshot.tool.is_click_placed() {
+                    // A click-placed mark is finished the moment it lands, so
+                    // the overlay and the toolbar have to catch up now rather
+                    // than on a motion that may never come.
+                    self.sync_screenshot_annotation_overlay(backend, true);
+                    self.sync_screenshot_toolbar(backend);
                 }
             } else if btn == MouseButton::Left
                 && self.features.capture.screenshot != CaptureTarget::Region

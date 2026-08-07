@@ -1469,6 +1469,40 @@ pub trait CompositorAnnotation: Send {
     fn compositor_set_annotation_line_width(&mut self, _width: f32) {}
     fn compositor_annotation_add_point(&mut self, _x: f32, _y: f32) {}
     fn compositor_annotation_begin_stroke(&mut self) {}
+
+    /// Add a filled (optionally rounded) rectangle to the overlay.
+    ///
+    /// Strokes cannot express a redaction bar or a counter bubble without
+    /// degenerating into hundreds of hatch segments rebuilt on every motion
+    /// event, so those travel as shapes and are drawn with the same rounded
+    /// rect program the compositor uses for the rest of its own UI. Cleared
+    /// with the strokes by `compositor_set_annotation_mode(false)`.
+    fn compositor_annotation_add_quad(
+        &mut self,
+        _quad: crate::backend::compositor_common::annotation_overlay::AnnotationQuad,
+    ) {
+    }
+
+    /// Add a run of text to the overlay, rasterised by the compositor in the
+    /// configured UI font — the same one the baked PNG uses, so what the
+    /// selection shows is what the file gets.
+    fn compositor_annotation_add_text(
+        &mut self,
+        _label: crate::backend::compositor_common::annotation_overlay::AnnotationLabel,
+    ) {
+    }
+
+    /// Publish (or withdraw, with `None`) the screenshot editor's toolbar.
+    ///
+    /// The window manager owns the model and the hit test; the compositor only
+    /// paints what it is handed, exactly as it does for window tab bars. No
+    /// window id and no tool identity crosses this boundary — just rectangles,
+    /// icons and flags.
+    fn compositor_set_screenshot_toolbar(
+        &mut self,
+        _toolbar: Option<crate::backend::compositor_common::screenshot_toolbar::ScreenshotToolbar>,
+    ) {
+    }
 }
 
 /// Output hardware capabilities and runtime display controls.

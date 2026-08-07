@@ -132,6 +132,8 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "spawn",
         "tag",
         "tagmon",
+        "take_screenshot",
+        "take_screenshot_fullscreen",
         "toggle_annotation",
         "adjust_recording_region",
         "toggle_audio_recording",
@@ -502,6 +504,18 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             let cmd = parse_string_vec_arg(args).map_err(|e| format!("spawn: {e}"))?;
             Ok((Jwm::spawn, WMArgEnum::StringVec(cmd)))
         }
+
+        // --- Capture ---
+        // The status bars' screenshot pill comes through here, which is why
+        // both of these are dispatch commands rather than key bindings only:
+        // a bar asks the compositor that owns the screen to run its own
+        // capture, instead of shelling out to whatever external grabber
+        // happens to be installed.
+        "take_screenshot" => Ok((Jwm::take_screenshot as WMFuncType, WMArgEnum::Int(0))),
+        "take_screenshot_fullscreen" => Ok((
+            Jwm::take_screenshot_fullscreen as WMFuncType,
+            WMArgEnum::Int(0),
+        )),
 
         // --- Misc ---
         "quit" => Ok((Jwm::quit, parse_int_arg(args, 0)?)),

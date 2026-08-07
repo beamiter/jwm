@@ -8,7 +8,7 @@
 - layout toggle plus 3 layout selection actions
 - CPU, memory, and battery usage chips
 - brightness and volume controls with left/right click actions
-- screenshot launcher via `flameshot gui`
+- screenshot launcher via jwm's built-in region capture (IPC `take_screenshot`)
 - time display with seconds toggle
 - monitor indicator and scale chip
 - provider state, WM snapshots, and typed commands through `xbar_core::BarRuntime`

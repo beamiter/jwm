@@ -2,6 +2,9 @@
 
 use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind};
+use crate::backend::compositor_common::screenshot_toolbar::{
+    ScreenshotToolbar, ToolbarButton, ToolbarIcon,
+};
 use crate::core::types::Rect;
 use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::types::WMArgEnum;
@@ -9,20 +12,116 @@ use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
 use std::process::{Command, Stdio};
 
+/// Stroke width bounds. The floor keeps a stroke visible; the ceiling keeps a
+/// held-down key from turning the whole selection into one blob.
+pub const MIN_LINE_WIDTH: u32 = 1;
+pub const MAX_LINE_WIDTH: u32 = 24;
+
+/// The same ink at highlighter transparency.
+#[must_use]
+pub fn marker_ink(color: [u8; 4]) -> [u8; 4] {
+    [color[0], color[1], color[2], MARKER_ALPHA]
+}
+
+/// What a drag (or a click) inside a committed selection draws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenshotTool {
+    /// Not drawing — the state the selection drag itself runs in.
     Select,
     Pencil,
     Line,
     Arrow,
     Rectangle,
+    FilledRectangle,
     Ellipse,
+    /// Translucent highlighter: a freehand stroke that lets the pixels under
+    /// it show through, which is what makes it read as marker rather than
+    /// paint.
+    Marker,
+    /// Click to place a typed label.
+    Text,
+    /// Click to place the next number in a sequence.
+    Counter,
+    /// Drag a region down to blocks — the tool for redacting a password field
+    /// without leaving a black hole that says "something was here".
+    Pixelate,
+    /// Drag a region to invert its colors.
+    Invert,
 }
 
 impl Default for ScreenshotTool {
     fn default() -> Self {
         Self::Select
     }
+}
+
+impl ScreenshotTool {
+    /// Whether this tool is placed with a single click rather than a drag.
+    /// Click-placed tools commit on press, so they never wait for a motion
+    /// that a careful click will not produce.
+    #[must_use]
+    pub const fn is_click_placed(self) -> bool {
+        matches!(self, Self::Text | Self::Counter)
+    }
+
+    /// The toolbar icon that stands for this tool.
+    #[must_use]
+    pub const fn icon(self) -> ToolbarIcon {
+        match self {
+            // `Select` never appears in the toolbar; the pencil is the tool the
+            // editor opens in, so it is the honest stand-in.
+            Self::Select | Self::Pencil => ToolbarIcon::Pencil,
+            Self::Line => ToolbarIcon::Line,
+            Self::Arrow => ToolbarIcon::Arrow,
+            Self::Rectangle => ToolbarIcon::RectOutline,
+            Self::FilledRectangle => ToolbarIcon::RectFilled,
+            Self::Ellipse => ToolbarIcon::Ellipse,
+            Self::Marker => ToolbarIcon::Marker,
+            Self::Text => ToolbarIcon::Text,
+            Self::Counter => ToolbarIcon::Counter,
+            Self::Pixelate => ToolbarIcon::Pixelate,
+            Self::Invert => ToolbarIcon::Invert,
+        }
+    }
+
+    /// The tools the toolbar offers, left to right. `Select` is absent by
+    /// design — it is a mode, not something to draw with.
+    pub const PALETTE: [Self; 11] = [
+        Self::Pencil,
+        Self::Line,
+        Self::Arrow,
+        Self::Rectangle,
+        Self::FilledRectangle,
+        Self::Ellipse,
+        Self::Marker,
+        Self::Text,
+        Self::Counter,
+        Self::Pixelate,
+        Self::Invert,
+    ];
+}
+
+/// What clicking a toolbar button does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolbarCommand {
+    SelectTool(ScreenshotTool),
+    Thinner,
+    Thicker,
+    NextColor,
+    Undo,
+    Redo,
+    Copy,
+    Save,
+    Cancel,
+}
+
+/// One toolbar cell: what it looks like, and what it does. Built together so
+/// the index a click resolves to cannot drift from the index that was painted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolbarEntry {
+    pub button: ToolbarButton,
+    /// `None` for the read-only size readout.
+    pub command: Option<ToolbarCommand>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +155,60 @@ pub enum ScreenshotAnnotation {
         color: [u8; 4],
         width: u32,
     },
+    /// A solid rectangle — the redaction bar.
+    FilledRectangle {
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+    },
+    /// A freehand stroke laid down translucently, so what is under it stays
+    /// readable.
+    Marker {
+        points: Vec<(f32, f32)>,
+        color: [u8; 4],
+        width: u32,
+    },
+    /// A region reduced to blocks of `block` pixels a side.
+    Pixelate {
+        from: (f32, f32),
+        to: (f32, f32),
+        block: u32,
+    },
+    /// A region with its colors inverted.
+    Invert { from: (f32, f32), to: (f32, f32) },
+    /// A filled disc carrying the next number in the sequence.
+    Counter {
+        at: (f32, f32),
+        number: u32,
+        color: [u8; 4],
+        radius: f32,
+    },
+    /// A typed label with its baseline-left corner at `at`.
+    Text {
+        at: (f32, f32),
+        text: String,
+        color: [u8; 4],
+        size: f32,
+    },
 }
+
+/// Marker ink is laid down at this alpha regardless of the palette, which is
+/// what separates "highlight" from "paint over".
+pub const MARKER_ALPHA: u8 = 96;
+/// Marker strokes are this many times the nominal line width — a highlighter
+/// that was as thin as a pen would just look like a faded pen.
+pub const MARKER_WIDTH_FACTOR: u32 = 4;
+/// Counter bubbles scale with the line width so they stay proportional to
+/// whatever else is being drawn.
+pub const COUNTER_RADIUS_FACTOR: f32 = 2.6;
+pub const COUNTER_MIN_RADIUS: f32 = 9.0;
+/// Text is sized off the line width for the same reason.
+pub const TEXT_SIZE_FACTOR: f32 = 4.5;
+pub const TEXT_MIN_SIZE: f32 = 11.0;
+/// Mosaic block size, likewise derived from the line width so the thickness
+/// control means "coarser" for the pixelate tool too.
+pub const PIXELATE_BLOCK_FACTOR: u32 = 3;
+pub const PIXELATE_MIN_BLOCK: u32 = 4;
 
 impl ScreenshotAnnotation {
     fn translate(&mut self, dx: f32, dy: f32) {
@@ -65,7 +217,7 @@ impl ScreenshotAnnotation {
             point.1 += dy;
         };
         match self {
-            Self::Freehand { points, .. } => {
+            Self::Freehand { points, .. } | Self::Marker { points, .. } => {
                 for point in points {
                     translate_point(point);
                 }
@@ -73,13 +225,31 @@ impl ScreenshotAnnotation {
             Self::Line { from, to, .. }
             | Self::Arrow { from, to, .. }
             | Self::Rectangle { from, to, .. }
-            | Self::Ellipse { from, to, .. } => {
+            | Self::Ellipse { from, to, .. }
+            | Self::FilledRectangle { from, to, .. }
+            | Self::Pixelate { from, to, .. }
+            | Self::Invert { from, to } => {
                 translate_point(from);
                 translate_point(to);
             }
+            Self::Counter { at, .. } | Self::Text { at, .. } => translate_point(at),
         }
     }
 }
+
+/// The ink ring, reachable with `1`..`8` and by stepping with the toolbar's
+/// swatch. Ordered warm-to-cool then neutral, so the two most-reached-for
+/// colors (red, then yellow) are the first two keys.
+pub const PALETTE: [[u8; 4]; 8] = [
+    [255, 70, 70, 255],
+    [255, 190, 60, 255],
+    [85, 215, 110, 255],
+    [80, 170, 255, 255],
+    [180, 110, 255, 255],
+    [255, 255, 255, 255],
+    [30, 30, 30, 255],
+    [255, 90, 180, 255],
+];
 
 /// 截图选择状态
 #[derive(Debug, Default, Clone)]
@@ -104,6 +274,9 @@ pub struct ScreenshotState {
     pub line_width: u32,
     /// 已完成的标注
     pub annotations: Vec<ScreenshotAnnotation>,
+    /// Annotations taken back by undo, newest last, waiting for a redo. Any
+    /// fresh annotation clears them — the usual editor contract.
+    pub undone: Vec<ScreenshotAnnotation>,
     /// 正在绘制标注
     pub drawing_annotation: bool,
     /// 当前标注起点
@@ -112,6 +285,25 @@ pub struct ScreenshotState {
     pub annotation_end: (f32, f32),
     /// 当前自由绘制点集
     pub current_points: Vec<(f32, f32)>,
+    /// Which palette entry `color` came from, so the toolbar's swatch can walk
+    /// the ring rather than guessing from the RGBA.
+    pub palette_index: usize,
+    /// The number the next counter bubble will carry.
+    pub counter_next: u32,
+    /// The label being typed, if the text tool has an open draft.
+    pub text_draft: Option<TextDraft>,
+    /// The toolbar as last published to the compositor. Kept here because the
+    /// hit test must run against exactly the rectangles that were painted.
+    pub toolbar: Option<ScreenshotToolbar>,
+    /// Which toolbar button the pointer is over, if any.
+    pub hovered_button: Option<usize>,
+}
+
+/// A label under construction: where it goes and what has been typed so far.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TextDraft {
+    pub at: (f32, f32),
+    pub buffer: String,
 }
 
 impl ScreenshotState {
@@ -127,11 +319,10 @@ impl ScreenshotState {
         self.start = (0.0, 0.0);
         self.end = (0.0, 0.0);
         self.tool = ScreenshotTool::Select;
-        self.color = [255, 70, 70, 255];
+        self.palette_index = 0;
+        self.color = PALETTE[0];
         self.line_width = 4;
-        self.annotations.clear();
-        self.drawing_annotation = false;
-        self.current_points.clear();
+        self.clear_annotations();
     }
 
     pub fn reset_selection(&mut self) {
@@ -140,9 +331,20 @@ impl ScreenshotState {
         self.start = (0.0, 0.0);
         self.end = (0.0, 0.0);
         self.tool = ScreenshotTool::Select;
+        self.clear_annotations();
+    }
+
+    /// Drop every mark and everything that was mid-flight, including the
+    /// toolbar: a selection that is being redrawn has nothing to annotate yet.
+    fn clear_annotations(&mut self) {
         self.annotations.clear();
+        self.undone.clear();
         self.drawing_annotation = false;
         self.current_points.clear();
+        self.counter_next = 1;
+        self.text_draft = None;
+        self.toolbar = None;
+        self.hovered_button = None;
     }
 
     pub fn select_rect(&mut self, rect: Rect) {
@@ -191,27 +393,24 @@ impl ScreenshotState {
     }
 
     pub fn set_palette_color(&mut self, idx: usize) {
-        const COLORS: [[u8; 4]; 8] = [
-            [255, 70, 70, 255],
-            [255, 190, 60, 255],
-            [85, 215, 110, 255],
-            [80, 170, 255, 255],
-            [180, 110, 255, 255],
-            [255, 255, 255, 255],
-            [30, 30, 30, 255],
-            [255, 90, 180, 255],
-        ];
-        if let Some(color) = COLORS.get(idx) {
+        if let Some(color) = PALETTE.get(idx) {
             self.color = *color;
+            self.palette_index = idx;
         }
     }
 
+    /// Step to the next ink. This is what the toolbar's swatch does, since a
+    /// full color picker would be a second popup to dismiss.
+    pub fn next_palette_color(&mut self) {
+        self.set_palette_color((self.palette_index + 1) % PALETTE.len());
+    }
+
     pub fn increase_line_width(&mut self) {
-        self.line_width = (self.line_width + 1).min(24);
+        self.line_width = (self.line_width + 1).min(MAX_LINE_WIDTH);
     }
 
     pub fn decrease_line_width(&mut self) {
-        self.line_width = self.line_width.saturating_sub(1).max(1);
+        self.line_width = self.line_width.saturating_sub(1).max(MIN_LINE_WIDTH);
     }
 
     fn translate_selection(&mut self, dx: f64, dy: f64) {
@@ -259,14 +458,133 @@ impl ScreenshotState {
         self.translate_selection(next_x - f64::from(rect.x), next_y - f64::from(rect.y));
     }
 
+    /// Freehand tools accumulate points; everything else works from the two
+    /// endpoints, so only the freehand pair seeds the point list.
+    fn is_freehand(tool: ScreenshotTool) -> bool {
+        matches!(tool, ScreenshotTool::Pencil | ScreenshotTool::Marker)
+    }
+
     pub fn begin_annotation(&mut self, x: f32, y: f32) {
+        // A click-placed tool has nothing to drag: it lands the mark now, so a
+        // click that never moves still produces one.
+        if self.tool.is_click_placed() {
+            self.place_at(x, y);
+            return;
+        }
         self.drawing_annotation = true;
         self.annotation_start = (x, y);
         self.annotation_end = (x, y);
         self.current_points.clear();
-        if self.tool == ScreenshotTool::Pencil {
+        if Self::is_freehand(self.tool) {
             self.current_points.push((x, y));
         }
+    }
+
+    /// Land a click-placed mark: the next counter bubble, or an open text
+    /// draft. An existing draft is committed first, so clicking elsewhere
+    /// finishes the label you were typing instead of losing it.
+    fn place_at(&mut self, x: f32, y: f32) {
+        match self.tool {
+            ScreenshotTool::Counter => {
+                let annotation = ScreenshotAnnotation::Counter {
+                    at: (x, y),
+                    number: self.counter_next,
+                    color: self.color,
+                    radius: self.counter_radius(),
+                };
+                self.counter_next = self.counter_next.saturating_add(1);
+                self.push_annotation(annotation);
+            }
+            ScreenshotTool::Text => {
+                self.commit_text_draft();
+                self.text_draft = Some(TextDraft {
+                    at: (x, y),
+                    buffer: String::new(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// Radius of the next counter bubble, and the point size of the next
+    /// label: both track the line width so one control scales every tool.
+    #[must_use]
+    pub fn counter_radius(&self) -> f32 {
+        (self.line_width as f32 * COUNTER_RADIUS_FACTOR).max(COUNTER_MIN_RADIUS)
+    }
+
+    #[must_use]
+    pub fn text_size(&self) -> f32 {
+        (self.line_width as f32 * TEXT_SIZE_FACTOR).max(TEXT_MIN_SIZE)
+    }
+
+    /// The width a stroke of the *current* tool is drawn at. Only the
+    /// highlighter differs, and it differs a lot — a marker as thin as the pen
+    /// would just look like faded ink.
+    #[must_use]
+    pub fn stroke_width(&self) -> u32 {
+        if self.tool == ScreenshotTool::Marker {
+            self.line_width * MARKER_WIDTH_FACTOR
+        } else {
+            self.line_width
+        }
+    }
+
+    #[must_use]
+    pub fn pixelate_block(&self) -> u32 {
+        (self.line_width * PIXELATE_BLOCK_FACTOR).max(PIXELATE_MIN_BLOCK)
+    }
+
+    /// Add a finished mark. Doing this in one place is what guarantees a new
+    /// mark always invalidates the redo stack.
+    fn push_annotation(&mut self, annotation: ScreenshotAnnotation) {
+        self.annotations.push(annotation);
+        self.undone.clear();
+    }
+
+    /// Append one character to the open label.
+    pub fn text_input(&mut self, ch: char) {
+        if let Some(draft) = self.text_draft.as_mut() {
+            draft.buffer.push(ch);
+        }
+    }
+
+    /// Remove the last character of the open label. Pops a whole `char`, not a
+    /// byte, so a CJK label does not end up half-deleted and invalid.
+    pub fn text_backspace(&mut self) {
+        if let Some(draft) = self.text_draft.as_mut() {
+            draft.buffer.pop();
+        }
+    }
+
+    /// Whether keystrokes are currently going into a label rather than into
+    /// the tool shortcuts.
+    #[must_use]
+    pub fn is_typing(&self) -> bool {
+        self.text_draft.is_some()
+    }
+
+    /// Finish the open label. An empty one is discarded rather than committed,
+    /// so a stray click with the text tool leaves nothing behind.
+    pub fn commit_text_draft(&mut self) {
+        let Some(draft) = self.text_draft.take() else {
+            return;
+        };
+        if draft.buffer.trim().is_empty() {
+            return;
+        }
+        let annotation = ScreenshotAnnotation::Text {
+            at: draft.at,
+            text: draft.buffer,
+            color: self.color,
+            size: self.text_size(),
+        };
+        self.push_annotation(annotation);
+    }
+
+    /// Abandon the open label without committing it.
+    pub fn cancel_text_draft(&mut self) -> bool {
+        self.text_draft.take().is_some()
     }
 
     pub fn update_annotation(&mut self, x: f32, y: f32) {
@@ -274,7 +592,7 @@ impl ScreenshotState {
             return;
         }
         self.annotation_end = (x, y);
-        if self.tool == ScreenshotTool::Pencil {
+        if Self::is_freehand(self.tool) {
             self.current_points.push((x, y));
         }
     }
@@ -286,7 +604,7 @@ impl ScreenshotState {
         let annotation = self.current_annotation_preview();
         self.drawing_annotation = false;
         if let Some(annotation) = annotation {
-            self.annotations.push(annotation);
+            self.push_annotation(annotation);
         }
         self.current_points.clear();
     }
@@ -307,6 +625,13 @@ impl ScreenshotState {
                     width,
                 })
             }
+            ScreenshotTool::Marker if self.current_points.len() > 1 => {
+                Some(ScreenshotAnnotation::Marker {
+                    points: self.current_points.clone(),
+                    color: marker_ink(color),
+                    width: width * MARKER_WIDTH_FACTOR,
+                })
+            }
             ScreenshotTool::Line => Some(ScreenshotAnnotation::Line {
                 from,
                 to,
@@ -325,18 +650,135 @@ impl ScreenshotState {
                 color,
                 width,
             }),
+            ScreenshotTool::FilledRectangle => {
+                Some(ScreenshotAnnotation::FilledRectangle { from, to, color })
+            }
             ScreenshotTool::Ellipse => Some(ScreenshotAnnotation::Ellipse {
                 from,
                 to,
                 color,
                 width,
             }),
+            ScreenshotTool::Pixelate => Some(ScreenshotAnnotation::Pixelate {
+                from,
+                to,
+                block: self.pixelate_block(),
+            }),
+            ScreenshotTool::Invert => Some(ScreenshotAnnotation::Invert { from, to }),
             _ => None,
         }
     }
 
+    /// The label being typed, shown live so you can see what you are writing.
+    #[must_use]
+    pub fn text_draft_preview(&self) -> Option<ScreenshotAnnotation> {
+        let draft = self.text_draft.as_ref()?;
+        if draft.buffer.is_empty() {
+            return None;
+        }
+        Some(ScreenshotAnnotation::Text {
+            at: draft.at,
+            text: draft.buffer.clone(),
+            color: self.color,
+            size: self.text_size(),
+        })
+    }
+
+    /// Take back the last mark. An open label counts as the newest thing on
+    /// the canvas, so undo cancels it first rather than reaching past it.
     pub fn undo_annotation(&mut self) {
-        self.annotations.pop();
+        if self.cancel_text_draft() {
+            return;
+        }
+        if let Some(annotation) = self.annotations.pop() {
+            // A counter that was undone should hand its number back, or the
+            // sequence gains a gap the user never sees a reason for.
+            if let ScreenshotAnnotation::Counter { number, .. } = &annotation {
+                self.counter_next = (*number).max(1);
+            }
+            self.undone.push(annotation);
+        }
+    }
+
+    /// Put back the last undone mark.
+    pub fn redo_annotation(&mut self) {
+        if let Some(annotation) = self.undone.pop() {
+            if let ScreenshotAnnotation::Counter { number, .. } = &annotation {
+                self.counter_next = number.saturating_add(1);
+            }
+            self.annotations.push(annotation);
+        }
+    }
+
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        !self.annotations.is_empty() || self.is_typing()
+    }
+
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
+    }
+
+    /// The toolbar's cells, left to right: the tool ring, the selection's
+    /// size, the stroke and ink controls, then the four things that end the
+    /// capture. Built in one pass so a cell's look and its action cannot drift
+    /// apart.
+    #[must_use]
+    pub fn toolbar_entries(&self) -> Vec<ToolbarEntry> {
+        let mut entries = Vec::with_capacity(ScreenshotTool::PALETTE.len() + 9);
+        for tool in ScreenshotTool::PALETTE {
+            entries.push(ToolbarEntry {
+                button: ToolbarButton::icon(tool.icon()).selected(self.tool == tool),
+                command: Some(ToolbarCommand::SelectTool(tool)),
+            });
+        }
+
+        let size = self
+            .get_selection_rect()
+            .map_or_else(|| "—".to_owned(), |rect| format!("{}×{}", rect.w, rect.h));
+        entries.push(ToolbarEntry {
+            button: ToolbarButton::label(size),
+            command: None,
+        });
+
+        // Stroke and ink together, then the four ways out. A control that
+        // cannot do anything right now is present but disabled, so the row
+        // never reflows under the pointer mid-edit.
+        for (icon, command, enabled) in [
+            (
+                ToolbarIcon::Thinner,
+                ToolbarCommand::Thinner,
+                self.line_width > MIN_LINE_WIDTH,
+            ),
+            (
+                ToolbarIcon::Thicker,
+                ToolbarCommand::Thicker,
+                self.line_width < MAX_LINE_WIDTH,
+            ),
+            (ToolbarIcon::Color, ToolbarCommand::NextColor, true),
+            (ToolbarIcon::Undo, ToolbarCommand::Undo, self.can_undo()),
+            (ToolbarIcon::Redo, ToolbarCommand::Redo, self.can_redo()),
+            (ToolbarIcon::Copy, ToolbarCommand::Copy, true),
+            (ToolbarIcon::Save, ToolbarCommand::Save, true),
+            (ToolbarIcon::Close, ToolbarCommand::Cancel, true),
+        ] {
+            let mut button = ToolbarButton::icon(icon).available(enabled);
+            if icon == ToolbarIcon::Color {
+                button = button.tinted(self.color);
+            }
+            entries.push(ToolbarEntry {
+                button,
+                command: Some(command),
+            });
+        }
+        entries
+    }
+
+    /// What the button at `index` of the last published toolbar does.
+    #[must_use]
+    pub fn toolbar_command(&self, index: usize) -> Option<ToolbarCommand> {
+        self.toolbar_entries().get(index)?.command
     }
 
     /// 获取选择区域矩形
@@ -539,6 +981,7 @@ impl Jwm {
         info!("[take_screenshot] cancelling region selection");
         self.features.screenshot.cancel();
         backend.compositor_set_annotation_mode(false);
+        backend.compositor_set_screenshot_toolbar(None);
         if backend.has_compositor() {
             backend.compositor_set_snap_preview(None);
         }
@@ -567,7 +1010,10 @@ impl Jwm {
             plan_capture_completion,
         };
 
+        // A label still being typed counts as part of the capture — finishing
+        // with text half-entered should keep the text, not discard it.
         self.features.screenshot.commit_annotation();
+        self.features.screenshot.commit_text_draft();
         let annotations = self.features.screenshot.annotations.clone();
         let completion = plan_capture_completion(
             self.features.screenshot.output_path.take(),
@@ -589,9 +1035,12 @@ impl Jwm {
                 return;
             }
             other => {
-                // Clear state before capturing
+                // Clear state before capturing. The toolbar has to go with
+                // it: the compositor captures the very next frame, and a strip
+                // still on screen would be baked into the PNG.
                 self.features.screenshot.cancel();
                 backend.compositor_set_annotation_mode(false);
+                backend.compositor_set_screenshot_toolbar(None);
                 if backend.has_compositor() {
                     backend.compositor_clear_snap_preview_immediate();
                 }
@@ -755,7 +1204,281 @@ impl Jwm {
                 color,
                 width,
             } => Self::draw_ellipse(image, region_origin, *from, *to, *color, *width),
+            ScreenshotAnnotation::FilledRectangle { from, to, color } => {
+                Self::fill_region(image, region_origin, *from, *to, |pixel| {
+                    *pixel = Rgba(*color);
+                });
+            }
+            ScreenshotAnnotation::Marker {
+                points,
+                color,
+                width,
+            } => {
+                // A highlighter that overlapped itself would darken at every
+                // crossing, so the stroke is masked first and composited once.
+                Self::draw_translucent_polyline(image, region_origin, points, *color, *width);
+            }
+            ScreenshotAnnotation::Pixelate { from, to, block } => {
+                Self::pixelate_region(image, region_origin, *from, *to, *block);
+            }
+            ScreenshotAnnotation::Invert { from, to } => {
+                Self::fill_region(image, region_origin, *from, *to, |pixel| {
+                    pixel[0] = 255 - pixel[0];
+                    pixel[1] = 255 - pixel[1];
+                    pixel[2] = 255 - pixel[2];
+                });
+            }
+            ScreenshotAnnotation::Counter {
+                at,
+                number,
+                color,
+                radius,
+            } => Self::draw_counter(image, region_origin, *at, *number, *color, *radius),
+            ScreenshotAnnotation::Text {
+                at,
+                text,
+                color,
+                size,
+            } => Self::draw_text(image, region_origin, *at, text, *color, *size),
         }
+    }
+
+    /// Clip a global-coordinate rectangle to the captured image and apply
+    /// `f` to every pixel inside it. The clip is what keeps a drag that ran
+    /// off the selection from panicking on an out-of-bounds put.
+    fn fill_region(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        mut f: impl FnMut(&mut Rgba<u8>),
+    ) {
+        let Some((x0, y0, x1, y1)) = Self::clipped_region(image, region_origin, from, to) else {
+            return;
+        };
+        for y in y0..y1 {
+            for x in x0..x1 {
+                f(image.get_pixel_mut(x, y));
+            }
+        }
+    }
+
+    /// The half-open pixel range a global rectangle covers in the captured
+    /// image, or `None` when it misses the image entirely.
+    fn clipped_region(
+        image: &RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+    ) -> Option<(u32, u32, u32, u32)> {
+        let (ax, ay) = Self::local_point(region_origin, from);
+        let (bx, by) = Self::local_point(region_origin, to);
+        let x0 = ax.min(bx).max(0);
+        let y0 = ay.min(by).max(0);
+        let x1 = ax.max(bx).min(image.width() as i32);
+        let y1 = ay.max(by).min(image.height() as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some((x0 as u32, y0 as u32, x1 as u32, y1 as u32))
+    }
+
+    /// Average each `block`×`block` tile and paint the tile that color.
+    fn pixelate_region(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        block: u32,
+    ) {
+        let Some((x0, y0, x1, y1)) = Self::clipped_region(image, region_origin, from, to) else {
+            return;
+        };
+        let block = block.max(1);
+        let mut ty = y0;
+        while ty < y1 {
+            let mut tx = x0;
+            let bottom = (ty + block).min(y1);
+            while tx < x1 {
+                let right = (tx + block).min(x1);
+                let mut sum = [0u64; 3];
+                let mut count = 0u64;
+                for y in ty..bottom {
+                    for x in tx..right {
+                        let pixel = image.get_pixel(x, y);
+                        sum[0] += u64::from(pixel[0]);
+                        sum[1] += u64::from(pixel[1]);
+                        sum[2] += u64::from(pixel[2]);
+                        count += 1;
+                    }
+                }
+                if count > 0 {
+                    let average = [
+                        (sum[0] / count) as u8,
+                        (sum[1] / count) as u8,
+                        (sum[2] / count) as u8,
+                    ];
+                    for y in ty..bottom {
+                        for x in tx..right {
+                            let pixel = image.get_pixel_mut(x, y);
+                            pixel[0] = average[0];
+                            pixel[1] = average[1];
+                            pixel[2] = average[2];
+                        }
+                    }
+                }
+                tx = right;
+            }
+            ty = bottom;
+        }
+    }
+
+    /// Lay a translucent stroke down exactly once per pixel.
+    ///
+    /// Compositing segment by segment would darken every place the stroke
+    /// crosses itself — and a freehand stroke crosses itself constantly — so
+    /// coverage is collected into a mask first and blended in one pass.
+    fn draw_translucent_polyline(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        points: &[(f32, f32)],
+        color: [u8; 4],
+        width: u32,
+    ) {
+        if points.len() < 2 {
+            return;
+        }
+        let (w, h) = (image.width(), image.height());
+        let mut mask = vec![false; (w as usize) * (h as usize)];
+        for pair in points.windows(2) {
+            Self::trace_line(region_origin, pair[0], pair[1], width, |x, y| {
+                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                    mask[y as usize * w as usize + x as usize] = true;
+                }
+            });
+        }
+        let alpha = f32::from(color[3]) / 255.0;
+        for y in 0..h {
+            for x in 0..w {
+                if !mask[y as usize * w as usize + x as usize] {
+                    continue;
+                }
+                let pixel = image.get_pixel_mut(x, y);
+                for c in 0..3 {
+                    pixel[c] = (f32::from(pixel[c]) * (1.0 - alpha) + f32::from(color[c]) * alpha)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    /// A numbered bubble: a filled disc with the number centred in it.
+    fn draw_counter(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        at: (f32, f32),
+        number: u32,
+        color: [u8; 4],
+        radius: f32,
+    ) {
+        let (cx, cy) = Self::local_point(region_origin, at);
+        let radius = radius.max(1.0);
+        let r = radius.ceil() as i32;
+        let rgba = Rgba(color);
+        for y in cy - r..=cy + r {
+            for x in cx - r..=cx + r {
+                let dx = (x - cx) as f32;
+                let dy = (y - cy) as f32;
+                if dx * dx + dy * dy > radius * radius {
+                    continue;
+                }
+                if x >= 0 && y >= 0 && (x as u32) < image.width() && (y as u32) < image.height() {
+                    image.put_pixel(x as u32, y as u32, rgba);
+                }
+            }
+        }
+        // The numeral goes on in the ink that reads against the bubble.
+        let ink = if Self::is_light(color) {
+            [20, 20, 20, 255]
+        } else {
+            [255, 255, 255, 255]
+        };
+        let label = number.to_string();
+        let scale = ((radius * 1.1) as u32 / crate::backend::compositor_font::GLYPH_H).max(1);
+        let (pixels, tw, th) =
+            crate::backend::compositor_font::render_text_to_rgba(&label, scale, ink);
+        Self::blend_rgba(
+            image,
+            pixels.as_slice(),
+            tw,
+            th,
+            cx - tw as i32 / 2,
+            cy - th as i32 / 2,
+        );
+    }
+
+    /// A typed label, rasterised with the same UI font the compositor draws it
+    /// in so the baked PNG matches the live preview.
+    fn draw_text(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        at: (f32, f32),
+        text: &str,
+        color: [u8; 4],
+        size: f32,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let (x, y) = Self::local_point(region_origin, at);
+        let config = crate::config::CONFIG.load();
+        let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
+            text,
+            config.system_ui_font(),
+            size,
+            color,
+        );
+        Self::blend_rgba(image, pixels.as_slice(), w, h, x, y);
+    }
+
+    /// Source-over composite of a straight-alpha RGBA buffer at `(ox, oy)`,
+    /// clipped to the image.
+    fn blend_rgba(image: &mut RgbaImage, pixels: &[u8], w: u32, h: u32, ox: i32, oy: i32) {
+        if w == 0 || h == 0 || pixels.len() < (w * h * 4) as usize {
+            return;
+        }
+        for y in 0..h {
+            let ty = oy + y as i32;
+            if ty < 0 || ty as u32 >= image.height() {
+                continue;
+            }
+            for x in 0..w {
+                let tx = ox + x as i32;
+                if tx < 0 || tx as u32 >= image.width() {
+                    continue;
+                }
+                let offset = ((y * w + x) * 4) as usize;
+                let alpha = f32::from(pixels[offset + 3]) / 255.0;
+                if alpha <= 0.0 {
+                    continue;
+                }
+                let pixel = image.get_pixel_mut(tx as u32, ty as u32);
+                for c in 0..3 {
+                    pixel[c] = (f32::from(pixel[c]) * (1.0 - alpha)
+                        + f32::from(pixels[offset + c]) * alpha)
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    /// Rec. 601 luma, used only to pick black or white ink for a bubble.
+    fn is_light(color: [u8; 4]) -> bool {
+        let luma =
+            0.299 * f32::from(color[0]) + 0.587 * f32::from(color[1]) + 0.114 * f32::from(color[2]);
+        luma > 140.0
     }
 
     fn local_point(region_origin: (i32, i32), p: (f32, f32)) -> (i32, i32) {
@@ -765,9 +1488,9 @@ impl Jwm {
         )
     }
 
-    fn put_brush(image: &mut RgbaImage, x: i32, y: i32, color: [u8; 4], width: u32) {
+    /// Visit every pixel a round brush of `width` covers, centred on `(x, y)`.
+    fn visit_brush(x: i32, y: i32, width: u32, visit: &mut impl FnMut(i32, i32)) {
         let radius = (width as i32).max(1) / 2;
-        let rgba = Rgba(color);
         for yy in y - radius..=y + radius {
             for xx in x - radius..=x + radius {
                 let dx = xx - x;
@@ -775,20 +1498,20 @@ impl Jwm {
                 if dx * dx + dy * dy > radius * radius + radius {
                     continue;
                 }
-                if xx >= 0 && yy >= 0 && xx < image.width() as i32 && yy < image.height() as i32 {
-                    image.put_pixel(xx as u32, yy as u32, rgba);
-                }
+                visit(xx, yy);
             }
         }
     }
 
-    fn draw_line(
-        image: &mut RgbaImage,
+    /// Walk the brushed pixels of a line without deciding what to do with
+    /// them. Opaque strokes paint as they go; the highlighter instead collects
+    /// coverage into a mask so overlaps do not stack.
+    fn trace_line(
         region_origin: (i32, i32),
         from: (f32, f32),
         to: (f32, f32),
-        color: [u8; 4],
         width: u32,
+        mut visit: impl FnMut(i32, i32),
     ) {
         let (x0, y0) = Self::local_point(region_origin, from);
         let (x1, y1) = Self::local_point(region_origin, to);
@@ -799,7 +1522,7 @@ impl Jwm {
         let mut err = dx + dy;
         let (mut x, mut y) = (x0, y0);
         loop {
-            Self::put_brush(image, x, y, color, width);
+            Self::visit_brush(x, y, width, &mut visit);
             if x == x1 && y == y1 {
                 break;
             }
@@ -812,6 +1535,27 @@ impl Jwm {
                 err += dx;
                 y += sy;
             }
+        }
+    }
+
+    fn draw_line(
+        image: &mut RgbaImage,
+        region_origin: (i32, i32),
+        from: (f32, f32),
+        to: (f32, f32),
+        color: [u8; 4],
+        width: u32,
+    ) {
+        let (w, h) = (image.width() as i32, image.height() as i32);
+        let rgba = Rgba(color);
+        let mut writes = Vec::new();
+        Self::trace_line(region_origin, from, to, width, |x, y| {
+            if x >= 0 && y >= 0 && x < w && y < h {
+                writes.push((x as u32, y as u32));
+            }
+        });
+        for (x, y) in writes {
+            image.put_pixel(x, y, rgba);
         }
     }
 
@@ -987,6 +1731,7 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::compositor_common::screenshot_toolbar::ButtonFace;
 
     #[test]
     fn test_screenshot_workflow() {
@@ -1124,6 +1869,350 @@ mod tests {
                 assert_eq!(*to, (96.0, 42.0));
             }
             other => panic!("expected arrow annotation, got {other:?}"),
+        }
+    }
+
+    /// Set up an editor with a committed selection — the state every toolbar
+    /// test starts from, since the strip only exists once there is something
+    /// to edit.
+    fn editing(w: i32, h: i32) -> ScreenshotState {
+        let mut state = ScreenshotState::new();
+        state.start();
+        state.select_rect(Rect::new(100, 100, w, h));
+        state
+    }
+
+    #[test]
+    fn undo_and_redo_walk_the_same_marks_in_both_directions() {
+        let mut state = editing(300, 200);
+        for tool in [ScreenshotTool::Line, ScreenshotTool::Arrow] {
+            state.set_tool(tool);
+            state.begin_annotation(110.0, 110.0);
+            state.update_annotation(200.0, 180.0);
+            state.commit_annotation();
+        }
+        assert_eq!(state.annotations.len(), 2);
+        assert!(state.can_undo() && !state.can_redo());
+
+        state.undo_annotation();
+        state.undo_annotation();
+        assert!(state.annotations.is_empty());
+        assert!(!state.can_undo() && state.can_redo());
+
+        state.redo_annotation();
+        state.redo_annotation();
+        assert_eq!(state.annotations.len(), 2);
+        assert!(!state.can_redo());
+    }
+
+    /// The usual editor contract: branching off an undone history throws the
+    /// forward history away rather than leaving a redo that would reappear
+    /// out of order.
+    #[test]
+    fn drawing_after_an_undo_drops_the_redo_history() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Line);
+        state.begin_annotation(110.0, 110.0);
+        state.update_annotation(200.0, 180.0);
+        state.commit_annotation();
+        state.undo_annotation();
+        assert!(state.can_redo());
+
+        state.begin_annotation(120.0, 120.0);
+        state.update_annotation(210.0, 190.0);
+        state.commit_annotation();
+        assert!(!state.can_redo());
+        assert_eq!(state.annotations.len(), 1);
+    }
+
+    #[test]
+    fn counters_number_themselves_and_give_the_number_back_on_undo() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Counter);
+        for expected in 1..=3u32 {
+            state.begin_annotation(110.0 + expected as f32 * 10.0, 120.0);
+            match state.annotations.last().expect("counter placed") {
+                ScreenshotAnnotation::Counter { number, .. } => assert_eq!(*number, expected),
+                other => panic!("expected a counter, got {other:?}"),
+            }
+        }
+        assert_eq!(state.counter_next, 4);
+
+        state.undo_annotation();
+        assert_eq!(state.counter_next, 3, "an undone number must be reusable");
+        state.redo_annotation();
+        assert_eq!(state.counter_next, 4);
+    }
+
+    /// A click-placed tool has no drag, so it must land its mark on press —
+    /// waiting for a motion would lose every careful click.
+    #[test]
+    fn a_click_placed_tool_needs_no_drag() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Counter);
+        state.begin_annotation(150.0, 150.0);
+        assert_eq!(state.annotations.len(), 1);
+        assert!(!state.drawing_annotation, "no drag is in flight");
+    }
+
+    #[test]
+    fn typing_a_label_commits_it_and_an_empty_one_leaves_nothing_behind() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Text);
+
+        state.begin_annotation(140.0, 160.0);
+        assert!(state.is_typing());
+        for ch in "hi!".chars() {
+            state.text_input(ch);
+        }
+        state.text_backspace();
+        assert!(state.text_draft_preview().is_some());
+        state.commit_text_draft();
+        assert!(!state.is_typing());
+        match state.annotations.last().expect("label committed") {
+            ScreenshotAnnotation::Text { at, text, .. } => {
+                assert_eq!(*at, (140.0, 160.0));
+                assert_eq!(text, "hi");
+            }
+            other => panic!("expected text, got {other:?}"),
+        }
+
+        // A stray click with the text tool must not leave an empty label.
+        state.begin_annotation(200.0, 160.0);
+        state.commit_text_draft();
+        assert_eq!(state.annotations.len(), 1);
+    }
+
+    /// Undo reaches the open draft before it reaches the canvas — the draft is
+    /// the newest thing on screen, so anything else would feel like a skip.
+    #[test]
+    fn undo_cancels_an_open_label_before_touching_committed_marks() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Text);
+        state.begin_annotation(140.0, 160.0);
+        state.text_input('a');
+        state.commit_text_draft();
+
+        state.begin_annotation(180.0, 160.0);
+        state.text_input('b');
+        assert!(state.is_typing());
+
+        state.undo_annotation();
+        assert!(!state.is_typing());
+        assert_eq!(state.annotations.len(), 1, "the committed label survives");
+
+        state.undo_annotation();
+        assert!(state.annotations.is_empty());
+    }
+
+    #[test]
+    fn a_marker_stroke_is_translucent_and_much_fatter_than_the_pen() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Marker);
+        assert_eq!(state.stroke_width(), state.line_width * MARKER_WIDTH_FACTOR);
+
+        state.begin_annotation(110.0, 110.0);
+        state.update_annotation(150.0, 140.0);
+        state.commit_annotation();
+        match state.annotations.last().expect("marker stroke") {
+            ScreenshotAnnotation::Marker { color, width, .. } => {
+                assert_eq!(color[3], MARKER_ALPHA);
+                assert_eq!(*width, state.line_width * MARKER_WIDTH_FACTOR);
+            }
+            other => panic!("expected a marker, got {other:?}"),
+        }
+
+        state.set_tool(ScreenshotTool::Pencil);
+        assert_eq!(state.stroke_width(), state.line_width);
+    }
+
+    #[test]
+    fn the_toolbar_offers_every_tool_and_marks_the_current_one() {
+        let mut state = editing(640, 480);
+        state.set_tool(ScreenshotTool::Arrow);
+        let entries = state.toolbar_entries();
+
+        for tool in ScreenshotTool::PALETTE {
+            let found = entries
+                .iter()
+                .find(|entry| entry.command == Some(ToolbarCommand::SelectTool(tool)))
+                .unwrap_or_else(|| panic!("{tool:?} has no button"));
+            assert_eq!(
+                found.button.active,
+                tool == ScreenshotTool::Arrow,
+                "{tool:?} selected state"
+            );
+        }
+
+        // Every ending is reachable without a keyboard.
+        for command in [
+            ToolbarCommand::Undo,
+            ToolbarCommand::Redo,
+            ToolbarCommand::Copy,
+            ToolbarCommand::Save,
+            ToolbarCommand::Cancel,
+            ToolbarCommand::NextColor,
+            ToolbarCommand::Thinner,
+            ToolbarCommand::Thicker,
+        ] {
+            assert!(
+                entries.iter().any(|entry| entry.command == Some(command)),
+                "{command:?} has no button"
+            );
+        }
+    }
+
+    /// The readout is what tells you the capture is 640×480 before you take
+    /// it, and it is the one cell that must never swallow a click.
+    #[test]
+    fn the_size_readout_shows_the_selection_and_is_not_clickable() {
+        let state = editing(640, 480);
+        let entries = state.toolbar_entries();
+        let label = entries
+            .iter()
+            .find(|entry| matches!(entry.button.face, ButtonFace::Label(_)))
+            .expect("a size readout");
+        match &label.button.face {
+            ButtonFace::Label(text) => assert_eq!(text, "640×480"),
+            other => panic!("expected a label, got {other:?}"),
+        }
+        assert!(label.command.is_none());
+        assert!(!label.button.enabled);
+    }
+
+    #[test]
+    fn controls_with_nothing_to_do_are_disabled_rather_than_missing() {
+        let mut state = editing(300, 200);
+        let disabled = |state: &ScreenshotState, command| {
+            state
+                .toolbar_entries()
+                .into_iter()
+                .find(|entry| entry.command == Some(command))
+                .map(|entry| !entry.button.enabled)
+                .expect("button exists")
+        };
+
+        assert!(
+            disabled(&state, ToolbarCommand::Undo),
+            "nothing to undo yet"
+        );
+        assert!(
+            disabled(&state, ToolbarCommand::Redo),
+            "nothing to redo yet"
+        );
+        assert!(!disabled(&state, ToolbarCommand::Thinner));
+        assert!(!disabled(&state, ToolbarCommand::Thicker));
+
+        while state.line_width > MIN_LINE_WIDTH {
+            state.decrease_line_width();
+        }
+        assert!(disabled(&state, ToolbarCommand::Thinner), "at the floor");
+        while state.line_width < MAX_LINE_WIDTH {
+            state.increase_line_width();
+        }
+        assert!(disabled(&state, ToolbarCommand::Thicker), "at the ceiling");
+
+        state.set_tool(ScreenshotTool::Line);
+        state.begin_annotation(110.0, 110.0);
+        state.update_annotation(200.0, 180.0);
+        state.commit_annotation();
+        assert!(!disabled(&state, ToolbarCommand::Undo));
+
+        // …and the row keeps the same number of cells throughout, so it never
+        // reflows under the pointer mid-edit.
+        let count = state.toolbar_entries().len();
+        state.undo_annotation();
+        assert_eq!(state.toolbar_entries().len(), count);
+    }
+
+    #[test]
+    fn the_swatch_walks_the_palette_and_carries_the_current_ink() {
+        let mut state = editing(300, 200);
+        assert_eq!(state.color, PALETTE[0]);
+        state.next_palette_color();
+        assert_eq!(state.color, PALETTE[1]);
+
+        let swatch = state
+            .toolbar_entries()
+            .into_iter()
+            .find(|entry| entry.command == Some(ToolbarCommand::NextColor))
+            .expect("a swatch");
+        assert_eq!(swatch.button.tint, Some(PALETTE[1]));
+
+        for _ in 0..PALETTE.len() {
+            state.next_palette_color();
+        }
+        assert_eq!(state.color, PALETTE[1], "the ring closes");
+    }
+
+    #[test]
+    fn line_width_stays_inside_its_bounds() {
+        let mut state = editing(300, 200);
+        for _ in 0..100 {
+            state.increase_line_width();
+        }
+        assert_eq!(state.line_width, MAX_LINE_WIDTH);
+        for _ in 0..100 {
+            state.decrease_line_width();
+        }
+        assert_eq!(state.line_width, MIN_LINE_WIDTH);
+    }
+
+    /// Every derived metric has to move with the width control, or the one
+    /// slider only reaches half the tools.
+    #[test]
+    fn the_width_control_scales_the_click_placed_tools_too() {
+        let mut state = editing(300, 200);
+        let (radius, size, block) = (
+            state.counter_radius(),
+            state.text_size(),
+            state.pixelate_block(),
+        );
+        for _ in 0..8 {
+            state.increase_line_width();
+        }
+        assert!(state.counter_radius() > radius);
+        assert!(state.text_size() > size);
+        assert!(state.pixelate_block() > block);
+    }
+
+    #[test]
+    fn redrawing_the_selection_clears_the_editor() {
+        let mut state = editing(300, 200);
+        state.set_tool(ScreenshotTool::Counter);
+        state.begin_annotation(150.0, 150.0);
+        state.hovered_button = Some(2);
+        assert!(!state.annotations.is_empty());
+
+        state.reset_selection();
+        assert!(state.annotations.is_empty());
+        assert!(state.undone.is_empty());
+        assert!(state.toolbar.is_none());
+        assert_eq!(state.hovered_button, None);
+        assert_eq!(state.counter_next, 1);
+        assert!(!state.is_typing());
+    }
+
+    /// Moving a committed selection has always carried its marks with it; the
+    /// click-placed ones must not be the exception.
+    #[test]
+    fn moving_the_selection_carries_labels_and_counters_along() {
+        let mut state = editing(60, 60);
+        state.set_tool(ScreenshotTool::Counter);
+        state.begin_annotation(120.0, 130.0);
+        state.set_tool(ScreenshotTool::Text);
+        state.begin_annotation(140.0, 150.0);
+        state.text_input('x');
+        state.commit_text_draft();
+
+        state.move_selection(10.0, -5.0);
+        match &state.annotations[0] {
+            ScreenshotAnnotation::Counter { at, .. } => assert_eq!(*at, (130.0, 125.0)),
+            other => panic!("expected a counter, got {other:?}"),
+        }
+        match &state.annotations[1] {
+            ScreenshotAnnotation::Text { at, .. } => assert_eq!(*at, (150.0, 145.0)),
+            other => panic!("expected text, got {other:?}"),
         }
     }
 

@@ -1,5 +1,6 @@
 //! Protocol-independent compositor helpers shared by Wayland and X11 backends.
 
+pub mod annotation_overlay;
 pub mod capture;
 pub(crate) mod debug_hud;
 pub(crate) mod dynamic_island;
@@ -13,6 +14,7 @@ pub(crate) mod osd;
 pub mod page_curl;
 pub mod rules;
 pub mod screenshot;
+pub mod screenshot_toolbar;
 pub(crate) mod toast;
 pub mod transitions;
 pub(crate) mod ui_theme;
