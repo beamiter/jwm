@@ -19,7 +19,7 @@ use xbar_core::{
     AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
     WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction, PresentationLabels},
+    presentation::{Point, PointerAction},
     render::cairo::{CairoBar, CpuCanvas},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -445,13 +445,8 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
-    // Monochrome Nerd Font glyphs tinted by the text color read like macOS
-    // template icons; only replace the stock emoji so a config that overrides
-    // individual labels keeps its customization. Every other bar makes exactly
-    // this substitution.
-    if presentation.labels == PresentationLabels::default() {
-        presentation.labels = PresentationLabels::nerd_font();
-    }
+    // The macOS-style template icons every bar renders from.
+    presentation.apply_nerd_font_icons_if_stock();
     let mut bar = CairoBar::new(
         runtime,
         presentation,

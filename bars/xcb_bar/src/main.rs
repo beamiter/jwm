@@ -9,7 +9,7 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::time::Duration;
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, PresentationLabels, Size};
+use xbar_core::presentation::{Point, PointerAction, Size};
 use xbar_core::render::cairo::CairoBar;
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
@@ -523,12 +523,8 @@ fn main() -> Result<()> {
     let cairo_xcb = build_cairo_xcb(&conn, screen, window_visual, window_depth)?;
 
     let mut presentation = app_config.presentation.clone();
-    // Monochrome Nerd Font glyphs tinted by the text color read like macOS
-    // template icons; only replace the stock emoji so a config that overrides
-    // individual labels keeps its customization.
-    if presentation.labels == PresentationLabels::default() {
-        presentation.labels = PresentationLabels::nerd_font();
-    }
+    // The macOS-style template icons every bar renders from.
+    presentation.apply_nerd_font_icons_if_stock();
     let bar_height = presentation
         .bar_height
         .round()

@@ -25,7 +25,7 @@ use raw_window_handle::{
 
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, PresentationLabels};
+use xbar_core::presentation::{Point, PointerAction};
 use xbar_core::render::cairo::{CairoBar, CpuCanvas};
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
@@ -280,13 +280,8 @@ fn main() -> Result<()> {
     let screen = &setup.roots[screen_num];
 
     let mut presentation = app_config.presentation.clone();
-    // Monochrome Nerd Font glyphs tinted by the text color read like macOS
-    // template icons; only replace the stock emoji so a config that overrides
-    // individual labels keeps its customization. Every other bar makes exactly
-    // this substitution.
-    if presentation.labels == PresentationLabels::default() {
-        presentation.labels = PresentationLabels::nerd_font();
-    }
+    // The macOS-style template icons every bar renders from.
+    presentation.apply_nerd_font_icons_if_stock();
     let bar_height = presentation
         .bar_height
         .round()

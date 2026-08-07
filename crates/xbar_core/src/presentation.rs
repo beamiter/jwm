@@ -800,6 +800,28 @@ impl PresentationConfig {
         self.apply_icon_set(icons);
         self
     }
+
+    /// Trade the stock emoji preset for the Nerd Font one, tag glyphs included.
+    ///
+    /// Monochrome glyphs tinted by the text colour read like macOS template
+    /// icons, which is what every bar wants; the emoji defaults exist so a host
+    /// with no patched font still shows something recognizable. Bars used to
+    /// swap [`PresentationLabels`] alone, which left `tag_labels` emoji and put
+    /// two icon vocabularies on the same bar — Nerd Font on the right, emoji in
+    /// the tag pills.
+    ///
+    /// Only a wholly untouched preset is replaced. A config that names its own
+    /// labels *or* its own tag labels has said what it wants and keeps it,
+    /// which is why both halves are checked rather than just the one being
+    /// read. Returns whether the swap happened.
+    pub fn apply_nerd_font_icons_if_stock(&mut self) -> bool {
+        let stock = Self::default();
+        if self.labels != stock.labels || self.tag_labels != stock.tag_labels {
+            return false;
+        }
+        self.apply_icon_set(&IconSet::nerd_font());
+        true
+    }
 }
 
 /// Text metrics supplied by the active renderer/font stack.
@@ -1343,6 +1365,38 @@ mod tests {
             config.tag_labels[MAX_MODEL_TAGS - 1],
             MAX_MODEL_TAGS.to_string()
         );
+    }
+
+    #[test]
+    fn nerd_font_swap_replaces_tag_glyphs_not_only_semantic_labels() {
+        let mut config = PresentationConfig::default();
+        assert_eq!(config.tag_labels[0], "🖥", "stock preset is emoji");
+
+        assert!(config.apply_nerd_font_icons_if_stock());
+
+        let icons = IconSet::nerd_font();
+        assert_eq!(config.tag_labels[0], icons.tag_icon(0));
+        assert_eq!(config.labels.cpu, icons.cpu);
+        assert_eq!(config.icon_set.as_ref(), Some(&icons));
+    }
+
+    #[test]
+    fn nerd_font_swap_leaves_a_customized_preset_alone() {
+        // Customizing only the tag labels must still protect them: the guard
+        // reads `labels`, so checking that half alone would silently clobber
+        // the half the caller actually set.
+        let mut config = PresentationConfig {
+            tag_labels: vec!["one".to_owned(), "two".to_owned()],
+            ..PresentationConfig::default()
+        };
+        assert!(!config.apply_nerd_font_icons_if_stock());
+        assert_eq!(config.tag_labels, vec!["one".to_owned(), "two".to_owned()]);
+
+        let mut config = PresentationConfig::default();
+        config.labels.cpu = "CPU".to_owned();
+        assert!(!config.apply_nerd_font_icons_if_stock());
+        assert_eq!(config.labels.cpu, "CPU");
+        assert_eq!(config.tag_labels[0], "🖥");
     }
 
     fn view<'a>(tags: &'a [TagState], client_name: &'a str) -> BarView<'a> {

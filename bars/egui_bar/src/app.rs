@@ -14,8 +14,7 @@ use log::{debug, warn};
 use x11rb::protocol::xproto::Window;
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::presentation::{
-    InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, PresentationLabels,
-    Scene, Size,
+    InteractionState, LayoutEngine, Point, PointerAction, PresentationConfig, Scene, Size,
 };
 use xbar_core::{
     BarEffect, BarPlacement, BarRuntime, DockWindowSpec, ModelConfig, MonitorGeometry,
@@ -72,13 +71,8 @@ impl EguiBarApp {
         crate::fonts::install(&cc.egui_ctx, &config.font);
 
         let mut presentation = config.presentation.clone();
-        // Monochrome Nerd Font glyphs tinted by the text colour read like macOS
-        // template icons. Only the stock emoji are replaced, so a config that
-        // overrides individual labels keeps its customization — the same rule
-        // xcb_bar applies.
-        if presentation.labels == PresentationLabels::default() {
-            presentation.labels = PresentationLabels::nerd_font();
-        }
+        // The macOS-style template icons every bar renders from.
+        presentation.apply_nerd_font_icons_if_stock();
         let configured_height = presentation.bar_height;
 
         let runtime = if shared_path.is_empty() {
