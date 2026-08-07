@@ -3,6 +3,9 @@
 use super::math::ortho;
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::attention::{
+    attention_border_style, attention_signal_active,
+};
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::IslandDock;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
@@ -4041,7 +4044,8 @@ impl<C: CompositorConnection> Compositor<C> {
                         } else {
                             false
                         };
-                    let attention_active_for_win = wt.is_urgent && self.attention_animation;
+                    let attention_active_for_win =
+                        attention_signal_active(self.attention_animation, wt.is_urgent);
                     let has_special_border = attention_active_for_win || wt.is_pip;
 
                     // Phase 5.3: Peek opacity multiplier
@@ -4613,13 +4617,19 @@ impl<C: CompositorConnection> Compositor<C> {
                                 elapsed_ms / dur,
                             )
                         });
+                        let attention_style = attention_active_for_win.then(|| {
+                            attention_border_style(
+                                self.attention_color,
+                                self.compositor_start_time.elapsed().as_secs_f32(),
+                                1.0,
+                                effective_border_enabled,
+                                base_border_width,
+                            )
+                        });
                         let color = if let Some(style) = focus_style {
                             style.color
-                        } else if attention_active_for_win {
-                            let elapsed = self.compositor_start_time.elapsed().as_secs_f32();
-                            let pulse = (elapsed * 4.0).sin() * 0.5 + 0.5;
-                            let [r, g, b, a] = self.attention_color;
-                            [r, g, b, a * pulse]
+                        } else if let Some(style) = attention_style {
+                            style.color
                         } else if wt.is_pip {
                             self.pip_border_color
                         } else if is_focused {
@@ -4630,12 +4640,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
                         let bw = if let Some(style) = focus_style {
                             style.width
-                        } else if attention_active_for_win {
-                            if effective_border_enabled {
-                                base_border_width.max(2.0)
-                            } else {
-                                2.0
-                            }
+                        } else if let Some(style) = attention_style {
+                            style.width
                         } else if wt.is_pip {
                             self.pip_border_width
                         } else {

@@ -17,8 +17,8 @@ use tao::{
 use x11rb::rust_connection::RustConnection;
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
-    AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
-    WakeAck,
+    AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
+    TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, PointerAction},
     render::cairo::{CairoBar, CpuCanvas},
@@ -230,13 +230,21 @@ impl App {
     }
 
     fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
-        let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
-            .round()
-            .clamp(1.0, f64::from(u32::MAX)) as u32;
+        let placement = match BarPlacement::top(
+            geometry,
+            f64::from(self.bar.config().bar_height),
+            self.scale_factor,
+        ) {
+            Ok(placement) => placement,
+            Err(error) => {
+                warn!("ignoring invalid monitor placement: {error}");
+                return;
+            }
+        };
         self.window
-            .set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
+            .set_outer_position(PhysicalPosition::new(placement.x, placement.y));
         self.window
-            .set_inner_size(PhysicalSize::new(geometry.width, height));
+            .set_inner_size(PhysicalSize::new(placement.width, placement.height));
     }
 }
 
@@ -258,6 +266,17 @@ fn resize_soft_surface(
 /// would stay invisible until the window manager corrects it.
 fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
     (size.width > 1 && size.height > 1).then_some(size)
+}
+
+fn initial_logical_size(
+    screen_size: PhysicalSize<u32>,
+    scale_factor: f64,
+    bar_height: f32,
+) -> LogicalSize<f64> {
+    LogicalSize::new(
+        f64::from(screen_size.width) / scale_factor,
+        f64::from(bar_height),
+    )
 }
 
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
@@ -348,7 +367,11 @@ fn main() -> Result<()> {
         .map(MonitorHandle::size)
         .and_then(usable_screen_size)
         .unwrap_or(PhysicalSize::new(1920, 1080));
-    let logical_size = LogicalSize::new(screen_size.width as f64 / scale_factor, 38.0);
+    let logical_size = initial_logical_size(
+        screen_size,
+        scale_factor,
+        app_config.presentation.bar_height,
+    );
 
     let window = Rc::new(
         WindowBuilder::new()
@@ -468,5 +491,18 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("tao event loop exited with status {exit_code}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_size_uses_configured_height_and_monitor_scale() {
+        let size = initial_logical_size(PhysicalSize::new(3840, 2160), 2.0, 52.5);
+
+        assert_eq!(size.width, 1920.0);
+        assert_eq!(size.height, 52.5);
     }
 }

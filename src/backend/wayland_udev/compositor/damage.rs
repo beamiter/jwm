@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::compositor_common::attention::attention_signal_active;
 
 fn inactive_window_styling_requires_composition(opacity: f32, dim: f32) -> bool {
     const EPSILON: f32 = 0.0001;
@@ -7,6 +8,10 @@ fn inactive_window_styling_requires_composition(opacity: f32, dim: f32) -> bool 
 
 fn border_requires_composition(enabled: bool, width: f32) -> bool {
     enabled && width > 0.0001
+}
+
+fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> bool {
+    attention_signal_active(enabled, has_urgent_window)
 }
 
 fn rect_animation_pending(current: [f32; 4], target: [f32; 4]) -> bool {
@@ -181,6 +186,12 @@ impl WaylandCompositor {
         if self.edge_glow_enabled && self.edge_glow_active && !self.edge_glow_suppressed {
             return Some("edge glow requires composition");
         }
+        if attention_requires_composition(
+            self.attention_animation_enabled,
+            self.windows.values().any(|window| window.is_urgent),
+        ) {
+            return Some("urgent-window attention requires composition");
+        }
         if border_requires_composition(self.border_enabled, self.border_width) {
             return Some("window borders require composition");
         }
@@ -341,7 +352,7 @@ impl WaylandCompositor {
 #[cfg(test)]
 mod tests {
     use super::{
-        border_requires_composition, expose_animation_pending,
+        attention_requires_composition, border_requires_composition, expose_animation_pending,
         inactive_window_styling_requires_composition, overview_animation_pending,
         rect_animation_pending,
     };
@@ -359,6 +370,13 @@ mod tests {
         assert!(!border_requires_composition(false, 1.0));
         assert!(!border_requires_composition(true, 0.0));
         assert!(border_requires_composition(true, f32::INFINITY));
+    }
+
+    #[test]
+    fn urgent_attention_blocks_direct_scanout_even_without_ordinary_borders() {
+        assert!(attention_requires_composition(true, true));
+        assert!(!attention_requires_composition(false, true));
+        assert!(!attention_requires_composition(true, false));
     }
 
     #[test]

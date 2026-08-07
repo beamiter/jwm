@@ -1,4 +1,5 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use jwm::core::models::{ClientKey as RuntimeClientKey, ScrollingState};
 use rand::RngExt;
 use slotmap::{SecondaryMap, SlotMap, new_key_type};
 use std::cell::RefCell;
@@ -690,6 +691,36 @@ fn benchmark_swap_clients(c: &mut Criterion) {
     group.finish();
 }
 
+fn setup_scrolling_state(column_count: usize) -> ScrollingState {
+    let mut keys: SlotMap<RuntimeClientKey, ()> = SlotMap::with_key();
+    let mut state = ScrollingState::new();
+
+    for _ in 0..column_count {
+        let key = keys.insert(());
+        state.columns.push(vec![key]);
+        state.column_width_factors.push(1.0);
+        state.focused_clients.push(Some(key));
+    }
+    state.focused_column = Some(column_count / 2);
+    state
+}
+
+fn benchmark_scrolling_state_steady_sync(c: &mut Criterion) {
+    let mut group = c.benchmark_group("Scrolling State Steady Sync");
+
+    for column_count in [16, 256] {
+        let mut state = setup_scrolling_state(column_count);
+        group.bench_function(BenchmarkId::new("retain_no_empty", column_count), |b| {
+            b.iter(|| {
+                state.retain_non_empty_columns();
+                std::hint::black_box(&state);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // 注册所有基准测试
 criterion_group!(
     benches,
@@ -698,6 +729,7 @@ criterion_group!(
     benchmark_find_clients,
     benchmark_remove_clients,
     benchmark_update_clients,
-    benchmark_swap_clients
+    benchmark_swap_clients,
+    benchmark_scrolling_state_steady_sync
 );
 criterion_main!(benches);

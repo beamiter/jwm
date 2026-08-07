@@ -1,6 +1,7 @@
 //! Protocol-independent compositor helpers shared by Wayland and X11 backends.
 
 pub mod annotation_overlay;
+pub(crate) mod attention;
 pub mod capture;
 pub(crate) mod debug_hud;
 pub(crate) mod dynamic_island;

@@ -17,8 +17,8 @@ use tao::{
 use x11rb::rust_connection::RustConnection;
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::{
-    AlignedWakeThread, BarRuntime, RuntimeUpdate, TransportRecoveryConfig, TransportWakeSlot,
-    WakeAck,
+    AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
+    TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, PointerAction},
     render::cairo::CairoBar,
@@ -345,11 +345,19 @@ impl App {
 
     fn apply_monitor_geometry(&mut self, geometry: xbar_core::MonitorGeometry) {
         if let Some(window) = &self.window {
-            let height = (f64::from(self.bar.config().bar_height) * self.scale_factor)
-                .round()
-                .clamp(1.0, f64::from(u32::MAX)) as u32;
-            window.set_outer_position(PhysicalPosition::new(geometry.x, geometry.y));
-            window.set_inner_size(PhysicalSize::new(geometry.width, height));
+            let placement = match BarPlacement::top(
+                geometry,
+                f64::from(self.bar.config().bar_height),
+                self.scale_factor,
+            ) {
+                Ok(placement) => placement,
+                Err(error) => {
+                    warn!("ignoring invalid monitor placement: {error}");
+                    return;
+                }
+            };
+            window.set_outer_position(PhysicalPosition::new(placement.x, placement.y));
+            window.set_inner_size(PhysicalSize::new(placement.width, placement.height));
         }
     }
 

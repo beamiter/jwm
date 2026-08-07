@@ -31,6 +31,14 @@ fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
     }
 }
 
+fn requested_attention_state(action: NetWmAction, currently_requested: bool) -> bool {
+    match action {
+        NetWmAction::Add => true,
+        NetWmAction::Remove => false,
+        NetWmAction::Toggle => !currently_requested,
+    }
+}
+
 fn sync_configured_client_geometry(
     wm: &mut Jwm,
     win: WindowId,
@@ -934,19 +942,23 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::DemandsAttention => {
-                    if let Some(c) = self.state.clients.get_mut(ck) {
-                        let on = match action {
-                            NetWmAction::Add => true,
-                            NetWmAction::Remove => false,
-                            NetWmAction::Toggle => !c.state.demands_attention,
-                        };
+                    let requested = if let Some(c) = self.state.clients.get_mut(ck) {
+                        let on = requested_attention_state(action, c.state.demands_attention);
                         c.state.demands_attention = on;
                         c.state.is_urgent = on;
+                        Some(on)
+                    } else {
+                        None
+                    };
+                    if let Some(on) = requested {
                         let _ = backend.property_ops().set_net_wm_state_flag(
                             win,
                             NetWmState::DemandsAttention,
                             on,
                         );
+                        if backend.has_compositor() {
+                            backend.compositor_set_window_urgent(win, on);
+                        }
                     }
                 }
                 NetWmState::Above => {
@@ -1224,6 +1236,7 @@ mod tests {
         compositor_enabled: bool,
         compositor_supported: bool,
         compositor_transitions: Vec<bool>,
+        compositor_urgency: Vec<(WindowId, bool)>,
     }
 
     impl RenderSpyBackend {
@@ -1240,6 +1253,7 @@ mod tests {
                 compositor_enabled: true,
                 compositor_supported: true,
                 compositor_transitions: Vec::new(),
+                compositor_urgency: Vec::new(),
             }
         }
     }
@@ -1249,7 +1263,11 @@ mod tests {
     impl CompositorControl for RenderSpyBackend {}
     impl CompositorMedia for RenderSpyBackend {}
     impl CompositorWorkspaceEffects for RenderSpyBackend {}
-    impl CompositorWindowEffects for RenderSpyBackend {}
+    impl CompositorWindowEffects for RenderSpyBackend {
+        fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
+            self.compositor_urgency.push((window, urgent));
+        }
+    }
     impl CompositorAnnotation for RenderSpyBackend {}
     impl DisplayControl for RenderSpyBackend {}
 
@@ -1650,6 +1668,63 @@ mod tests {
         assert!(!requested_hidden_state(NetWmAction::Remove, false));
         assert!(requested_hidden_state(NetWmAction::Toggle, false));
         assert!(!requested_hidden_state(NetWmAction::Toggle, true));
+    }
+
+    #[test]
+    fn attention_state_requests_are_idempotent_and_toggle_current_state() {
+        assert!(requested_attention_state(NetWmAction::Add, false));
+        assert!(requested_attention_state(NetWmAction::Add, true));
+        assert!(!requested_attention_state(NetWmAction::Remove, true));
+        assert!(!requested_attention_state(NetWmAction::Remove, false));
+        assert!(requested_attention_state(NetWmAction::Toggle, false));
+        assert!(!requested_attention_state(NetWmAction::Toggle, true));
+    }
+
+    #[test]
+    fn attention_state_requests_sync_the_client_and_compositor() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(42);
+        let client = jwm.insert_client(WMClient::new(window));
+
+        for (action, expected) in [
+            (NetWmAction::Add, true),
+            (NetWmAction::Add, true),
+            (NetWmAction::Remove, false),
+            (NetWmAction::Toggle, true),
+            (NetWmAction::Toggle, false),
+        ] {
+            jwm.on_window_state_request(&mut backend, window, action, NetWmState::DemandsAttention);
+
+            let state = &jwm.state.clients[client].state;
+            assert_eq!(state.demands_attention, expected);
+            assert_eq!(state.is_urgent, expected);
+            assert_eq!(backend.compositor_urgency.last(), Some(&(window, expected)));
+        }
+        assert_eq!(backend.compositor_urgency.len(), 5);
+    }
+
+    #[test]
+    fn icccm_seturgent_is_the_client_and_compositor_sync_point() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let window = WindowId::from_raw(43);
+        let client = jwm.insert_client(WMClient::new(window));
+
+        jwm.seturgent(&mut backend, client, true).unwrap();
+        assert!(jwm.state.clients[client].state.is_urgent);
+        assert_eq!(backend.compositor_urgency, vec![(window, true)]);
+
+        jwm.seturgent(&mut backend, client, false).unwrap();
+        assert!(!jwm.state.clients[client].state.is_urgent);
+        assert_eq!(
+            backend.compositor_urgency,
+            vec![(window, true), (window, false)]
+        );
     }
 }
 

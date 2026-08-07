@@ -37,6 +37,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check bootstrap and installer shell syntax
+        run: |
+          bash -n scripts/bootstrap_deps.sh
+          bash -n scripts/install_jwm_scripts.sh
+
   check-and-test:
     name: Check, Clippy, and test
     runs-on: ubuntu-latest

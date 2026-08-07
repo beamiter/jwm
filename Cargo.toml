@@ -1,8 +1,9 @@
 # Monorepo root: jwm plus its whole protocol stack resolve from one tree, so
 # a protocol change lands atomically in shared_structures, xbar_core, jwm, and
 # every bar in the same commit. The bars stay OUT of this workspace on purpose:
-# their GUI frameworks (gpui, tauri, gtk4, iced, …) keep their own Cargo.lock
-# under bars/<name> so their huge dependency trees never fight this one.
+# their GUI frameworks (gpui, tauri, gtk4, iced, …) keep an independent
+# package boundary (and a per-bar Cargo.lock where one is committed), so their
+# huge dependency trees never fight the core lock.
 # xbar_tauri, xbar_present_wgpu and xbar_gtk are likewise excluded: only bars
 # consume them (via path), and tauri/wgpu/gtk4 don't belong in the core lock.
 [workspace]

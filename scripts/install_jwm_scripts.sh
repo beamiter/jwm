@@ -41,7 +41,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BARS_DIR="$PROJECT_ROOT/bars"
 
 # ============================================================
-# 所有支持的 bar（monorepo 内 bars/ 目录下的 crate）
+# 所有支持的 bar（monorepo 内 bars/ 目录下的独立实现）
 # ============================================================
 ALL_BARS=(
     dioxus_bar
@@ -103,8 +103,8 @@ usage() {
 说明:
   - 所有 bar 的源码都在本仓库 bars/ 目录下，随 jwm 一起版本化，无需克隆外部仓库。
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
-  - 除 dioxus_bar 外，bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
-    dioxus_bar 使用 dx build --release 构建，并把其 Dioxus 产物安装到同一目录。
+  - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
+    dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
   - jwm / jwm-tool / jwm-support 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
@@ -147,7 +147,6 @@ add_selected_bars() {
     local raw_value="$1"
     local candidate=""
     local parsed_bars=()
-    local existing=""
 
     IFS=',' read -r -a parsed_bars <<< "$raw_value"
     for candidate in "${parsed_bars[@]}"; do
@@ -289,7 +288,8 @@ ensure_cargo_bin_dir() {
 }
 
 remove_jwm_cargo_bins() {
-    local bin_dir="$(cargo_bin_dir)"
+    local bin_dir
+    bin_dir="$(cargo_bin_dir)"
     local binary
 
     # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
@@ -316,16 +316,110 @@ install_system_binary() {
 # ============================================================
 # 安装 bar 到 cargo bin
 # ============================================================
+build_tauri_bar() {
+    local bar="$1"
+    local bar_dir="$BARS_DIR/$bar"
+    local tauri_dir="$bar_dir/src-tauri"
+    local target_dir="$tauri_dir/target"
+    local profile="release"
+    local tauri_args=(build --no-bundle)
+    local build_env=(env "CARGO_TARGET_DIR=$target_dir")
+
+    if [[ ! -f "$tauri_dir/Cargo.toml" || ! -f "$tauri_dir/tauri.conf.json" ]]; then
+        err "$bar 缺少完整的 src-tauri 构建入口"
+        exit 1
+    fi
+    if ! command -v pkg-config &>/dev/null || ! pkg-config --exists webkit2gtk-4.1; then
+        err "缺少 Tauri 2 Linux 系统依赖（WebKitGTK 4.1）"
+        err "Debian/Ubuntu 安装：bash $PROJECT_ROOT/scripts/bootstrap_deps.sh --with-tauri --no-rust"
+        exit 1
+    fi
+
+    if [[ "$BUILD_MODE" == "debug" ]]; then
+        profile="debug"
+        tauri_args+=(--debug)
+    fi
+    if [[ -n "$JOBS" ]]; then
+        build_env+=("CARGO_BUILD_JOBS=$JOBS")
+    fi
+
+    info "构建 $bar 前端与 Tauri 后端（$BUILD_MODE 模式）..."
+    if [[ -f "$bar_dir/package.json" ]]; then
+        if ! command -v pnpm &>/dev/null; then
+            err "pnpm 未找到；构建 $bar 需要 Node.js + pnpm"
+            err "安装后重试：corepack enable pnpm"
+            exit 1
+        fi
+
+        (
+            cd "$bar_dir"
+            if [[ -f pnpm-lock.yaml ]]; then
+                pnpm install --frozen-lockfile
+            else
+                # 无锁文件的示例不应在安装 JWM 时改写源码树。
+                pnpm install --lockfile=false
+            fi
+            "${build_env[@]}" pnpm exec tauri "${tauri_args[@]}"
+        )
+    else
+        if [[ ! -f "$bar_dir/Cargo.toml" || ! -f "$bar_dir/Trunk.toml" ]]; then
+            err "$bar 缺少 Rust/Wasm 前端的 Cargo.toml 或 Trunk.toml"
+            exit 1
+        fi
+        if ! command -v trunk &>/dev/null; then
+            err "trunk 未找到；构建 $bar 需要 Trunk"
+            err "安装后重试：cargo install trunk --locked"
+            exit 1
+        fi
+        local tauri_cli_version
+        if ! tauri_cli_version="$(cargo tauri --version 2>/dev/null)"; then
+            err "cargo-tauri 未找到；构建 $bar 需要 Tauri CLI 2"
+            err "安装后重试：cargo install tauri-cli --version '^2' --locked"
+            exit 1
+        fi
+        if [[ ! "$tauri_cli_version" =~ (^|[[:space:]])2\. ]]; then
+            err "检测到不兼容的 Tauri CLI：$tauri_cli_version（需要 major 2）"
+            err "升级后重试：cargo install tauri-cli --version '^2' --locked --force"
+            exit 1
+        fi
+        if command -v rustup &>/dev/null \
+            && ! rustup target list --installed | grep -qx 'wasm32-unknown-unknown'; then
+            err "缺少 wasm32-unknown-unknown Rust target"
+            err "安装后重试：rustup target add wasm32-unknown-unknown"
+            exit 1
+        fi
+
+        (
+            cd "$bar_dir"
+            "${build_env[@]}" cargo tauri "${tauri_args[@]}"
+        )
+    fi
+
+    local output="$target_dir/$profile/$bar"
+    if [[ ! -x "$output" ]]; then
+        err "$bar 构建产物不存在或不可执行: $output"
+        exit 1
+    fi
+
+    install -m755 "$output" "$(cargo_bin_dir)/$bar"
+    ok "$bar 安装完成: $(cargo_bin_dir)/$bar"
+}
+
 build_bar() {
     local bar="$1"
     local bar_dir="$BARS_DIR/$bar"
+
+    ensure_cargo_bin_dir
+
+    if [[ -f "$bar_dir/src-tauri/Cargo.toml" ]]; then
+        build_tauri_bar "$bar"
+        return
+    fi
 
     if [[ ! -f "$bar_dir/Cargo.toml" ]]; then
         err "$bar_dir/Cargo.toml 不存在，无法编译"
         exit 1
     fi
-
-    ensure_cargo_bin_dir
 
     # Dioxus desktop 的最终可执行文件由 dx 输出，而不是 cargo build/install 的默认 target 路径。
     if [[ "$bar" == "dioxus_bar" ]]; then

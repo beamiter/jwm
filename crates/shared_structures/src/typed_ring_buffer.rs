@@ -150,20 +150,39 @@ pub(crate) fn checksum_of<T: WireSafe>(value: &T) -> u32 {
     checksum.finish()
 }
 
-/// 返回给定 PID 的进程当前是否存在。
+/// 从 `/proc/<pid>/stat` 中提取进程状态字段。
 ///
-/// 本 crate 仅支持 Linux，`/proc/<pid>` 是否存在即为权威判据；无须
-/// 关心权限（`kill(pid, 0)` 的 EPERM 歧义在这里不存在）。
+/// 第二个字段 `comm` 被括号包围，但进程名本身可以包含空格和右括号，
+/// 因此必须从末尾的右括号定位第三个字段，不能简单按空白切分。
+fn proc_stat_state(stat: &[u8]) -> Option<u8> {
+    let comm_end = stat.iter().rposition(|byte| *byte == b')')?;
+    stat.get(comm_end + 1..)?
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+}
+
+/// 返回给定 PID 的进程当前是否还能执行用户代码。
 ///
-/// 防御：`/proc` 不可用（未挂载的极简容器等）时无从判断，返回
-/// "存活"——夺锁/回收机制退化为纯等待，绝不基于失明的探测误夺活锁。
-/// 跨 PID namespace 部署的前提要求见 SAFETY.md。
+/// Linux 会为尚未被父进程 `wait` 的僵尸保留 `/proc/<pid>` 目录；只检查
+/// 目录存在会把已经不可能释放方向锁的僵尸误判为存活。因此这里读取
+/// `/proc/<pid>/stat`，把 zombie/dead 状态（Z/X/x）也视为已退出。
+///
+/// 防御：`/proc` 不可用、stat 无法读取或内容无法解析时无从可靠判断，
+/// 返回"存活"——夺锁/回收机制退化为纯等待，绝不基于失明的探测误夺
+/// 活锁。跨 PID namespace 部署的前提要求见 SAFETY.md。
 #[inline]
 pub(crate) fn process_alive(pid: u32) -> bool {
-    if !Path::new("/proc/self").exists() {
+    if std::fs::metadata("/proc/self/stat").is_err() {
         return true;
     }
-    Path::new("/proc").join(pid.to_string()).exists()
+
+    let stat_path = Path::new("/proc").join(pid.to_string()).join("stat");
+    match std::fs::read(stat_path) {
+        Ok(stat) => !matches!(proc_stat_state(&stat), Some(b'Z' | b'X' | b'x')),
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
 }
 
 #[inline]
@@ -1547,8 +1566,8 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
     /// 返回创建者进程当前是否存在。
     ///
-    /// 基于 `/proc/<pid>` 探测；PID 复用可能造成误报"存活"。用于发现
-    /// 创建者崩溃后的僵尸映射（参见
+    /// 基于 `/proc/<pid>/stat` 探测，未回收的僵尸进程也视为已退出；PID
+    /// 复用仍可能造成误报"存活"。用于发现创建者崩溃后的僵尸映射（参见
     /// [`SharedRingBufferOptions::reclaim_stale`]）。
     #[must_use]
     pub fn creator_alive(&self) -> bool {
@@ -1733,5 +1752,51 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn proc_stat_state_handles_spaces_and_parentheses_in_comm() {
+        assert_eq!(proc_stat_state(b"12 (worker) R 1 2 3"), Some(b'R'));
+        assert_eq!(
+            proc_stat_state(b"34 (worker pool (idle)) Z 1 2 3"),
+            Some(b'Z')
+        );
+        assert_eq!(proc_stat_state(b"malformed stat"), None);
+    }
+
+    #[test]
+    fn process_alive_rejects_an_unreaped_zombie() {
+        use std::process::{Command, Stdio};
+
+        // A child remains in state Z until this parent calls `wait`. The old
+        // `/proc/<pid>` existence check incorrectly reported it as alive.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stat_path = Path::new("/proc").join(pid.to_string()).join("stat");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let observed_state = loop {
+            let state = std::fs::read(&stat_path)
+                .ok()
+                .and_then(|stat| proc_stat_state(&stat));
+            if matches!(state, Some(b'Z' | b'X' | b'x')) || Instant::now() >= deadline {
+                break state;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let alive_while_unreaped = process_alive(pid);
+        let status = child.wait().unwrap();
+
+        assert!(status.success());
+        assert!(
+            matches!(observed_state, Some(b'Z' | b'X' | b'x')),
+            "child did not enter a dead state before the deadline: {observed_state:?}"
+        );
+        assert!(!alive_while_unreaped);
     }
 }

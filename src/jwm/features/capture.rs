@@ -416,7 +416,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[test]
     fn capture_target_cycles_in_both_directions() {
         assert_eq!(CaptureTarget::Region.next(), CaptureTarget::Window);
         assert_eq!(CaptureTarget::Window.next(), CaptureTarget::Monitor);

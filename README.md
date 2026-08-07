@@ -36,7 +36,7 @@ older than the 1.89 floor) in one step:
 ```bash
 bash scripts/bootstrap_deps.sh              # apt packages + rustup toolchain
 JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh   # China: rustup + cargo via rsproxy.cn
-bash scripts/bootstrap_deps.sh --help       # options: --no-apt, --no-rust, --with-portal, --cn
+bash scripts/bootstrap_deps.sh --help       # options include --with-portal, --with-tauri, --cn
 ```
 
 `--with-portal` (or `JWM_WITH_PORTAL=1`) adds the PipeWire headers needed by the
@@ -80,6 +80,13 @@ session files, and keeps existing configuration unless `--gen-config` is used:
 ```bash
 scripts/install_jwm_scripts.sh --help
 ```
+
+Native bars need only the default bootstrap dependencies. Selecting a Tauri web
+bar also needs the Tauri 2 Linux libraries (`bootstrap_deps.sh --with-tauri`) and
+builds its frontend: React/Solid/Svelte/Vue variants require Node.js plus
+`pnpm`; Leptos/Yew variants require `trunk`, Tauri CLI 2, and the
+`wasm32-unknown-unknown` Rust target. The helper checks these prerequisites up
+front and prints the exact install command for anything missing.
 
 ## Control JWM
 

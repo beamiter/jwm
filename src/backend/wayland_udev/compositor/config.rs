@@ -458,8 +458,15 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_window_urgent(&mut self, window: u64, urgent: bool) {
-        if let Some(win) = self.windows.get_mut(&window) {
+        let changed = if let Some(win) = self.windows.get_mut(&window) {
+            let changed = win.is_urgent != urgent;
             win.is_urgent = urgent;
+            let pending_changed = self.pending_window_urgency.discard(window);
+            changed || pending_changed
+        } else {
+            self.pending_window_urgency.update(window, urgent)
+        };
+        if changed {
             self.needs_render = true;
         }
     }
@@ -859,6 +866,7 @@ impl WaylandCompositor {
         let window_animation_enabled = self.window_animation_enabled;
         let window_animation_scale = self.window_animation_scale;
         let ripple_enabled = self.ripple_on_open_enabled;
+        let initial_urgency = self.pending_window_urgency.take_for_new_window(window_id);
         let mut inserted = false;
         self.windows.entry(window_id).or_insert_with(|| {
             inserted = true;
@@ -880,7 +888,7 @@ impl WaylandCompositor {
                 frame_extents: [0; 4],
                 is_shaped: false,
                 is_fullscreen: false,
-                is_urgent: false,
+                is_urgent: initial_urgency,
                 is_pip: false,
                 is_moving: false,
                 is_frosted: false,
@@ -915,6 +923,13 @@ impl WaylandCompositor {
     /// Ordinary surface retirement is a close, not a minimize request, so it
     /// may use the close fade but never targets the Dock with a genie effect.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
+        self.pending_window_urgency.discard(window_id);
+        if let Some(win) = self.windows.get_mut(&window_id) {
+            // A close-fading WindowState can outlive its client. Clear the
+            // flag now so an ID reused before fade retirement cannot inherit
+            // stale attention state.
+            win.is_urgent = false;
+        }
         self.retire_window(window_id, WindowRetirement::Closed);
     }
 
@@ -1039,6 +1054,7 @@ impl WaylandCompositor {
         let window_animation_enabled = self.window_animation_enabled;
         let window_animation_scale = self.window_animation_scale;
         let ripple_enabled = self.ripple_on_open_enabled;
+        let initial_urgency = self.pending_window_urgency.take_for_new_window(window_id);
         let was_retiring = self
             .windows
             .get(&window_id)
@@ -1071,7 +1087,7 @@ impl WaylandCompositor {
                 frame_extents: [0; 4],
                 is_shaped: false,
                 is_fullscreen: false,
-                is_urgent: false,
+                is_urgent: initial_urgency,
                 is_pip: false,
                 is_moving: false,
                 is_frosted: false,
@@ -1270,8 +1286,8 @@ impl WaylandCompositor {
 #[cfg(test)]
 mod tests {
     use super::{
-        IME_POPUP_WINDOW_ID_PREFIX, WindowRetirement, XDG_POPUP_WINDOW_ID_PREFIX,
-        collect_absent_auxiliary_window_ids, is_auxiliary_window_id,
+        IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency, WindowRetirement,
+        XDG_POPUP_WINDOW_ID_PREFIX, collect_absent_auxiliary_window_ids, is_auxiliary_window_id,
         mouse_position_requires_render, postprocess_is_active, retirement_uses_genie,
     };
     use std::collections::HashSet;
@@ -1340,6 +1356,32 @@ mod tests {
         assert!(mouse_position_requires_render(
             old, moved, false, false, true
         ));
+    }
+
+    #[test]
+    fn pending_urgency_survives_until_first_window_state_only() {
+        let mut pending = PendingWindowUrgency::default();
+
+        pending.update(42, true);
+
+        let first_window_is_urgent = pending.take_for_new_window(42);
+        assert!(first_window_is_urgent);
+        assert!(!pending.take_for_new_window(42));
+    }
+
+    #[test]
+    fn pending_urgency_clear_or_destroy_prevents_stale_window_ids() {
+        let mut pending = PendingWindowUrgency::default();
+
+        pending.update(42, true);
+        pending.update(42, false);
+        assert!(!pending.take_for_new_window(42));
+
+        pending.update(42, true);
+        pending.update(7, true);
+        pending.discard(42);
+        assert!(!pending.take_for_new_window(42));
+        assert!(pending.take_for_new_window(7));
     }
 
     #[test]

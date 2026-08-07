@@ -5,6 +5,15 @@ use crate::core::models::ClientKey;
 
 use super::Jwm;
 
+fn wm_hint_urgency_policy(
+    hinted_urgent: bool,
+    is_focused: bool,
+    do_not_disturb: bool,
+) -> (bool, bool) {
+    let suppress_hint = hinted_urgent && (is_focused || do_not_disturb);
+    (hinted_urgent && !suppress_hint, suppress_hint)
+}
+
 impl Jwm {
     pub(super) fn update_client_decoration(
         &mut self,
@@ -120,19 +129,30 @@ impl Jwm {
         client_key: ClientKey,
         urgent: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(client) = self.state.clients.get_mut(client_key) {
+        let win = self.sync_client_urgent_state(backend, client_key, urgent)?;
+        Ok(backend.property_ops().set_urgent_hint(win, urgent)?)
+    }
+
+    /// Update the authoritative client state and compositor without writing
+    /// `WM_HINTS`. `PropertyNotify` handling uses this to avoid rewriting the
+    /// property that triggered it and entering a notification loop.
+    fn sync_client_urgent_state(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        urgent: bool,
+    ) -> Result<WindowId, Box<dyn std::error::Error>> {
+        let win = if let Some(client) = self.state.clients.get_mut(client_key) {
             client.state.is_urgent = urgent;
+            client.win
         } else {
             return Err("Client not found".into());
-        }
+        };
 
-        let win = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|c| c.win)
-            .ok_or("Client not found")?;
-        Ok(backend.property_ops().set_urgent_hint(win, urgent)?)
+        if backend.has_compositor() {
+            backend.compositor_set_window_urgent(win, urgent);
+        }
+        Ok(win)
     }
 
     pub(super) fn setclientstate(
@@ -235,33 +255,17 @@ impl Jwm {
             None => return,
         };
         if let Some(hints) = backend.property_ops().get_wm_hints(win) {
-            if hints.urgent {
-                let is_focused = self.is_client_selected(client_key);
-                // Under DND, suppress urgency on unfocused clients to silence
-                // taskbar/tag highlights and prevent focus-stealing chains.
-                if is_focused || self.do_not_disturb {
-                    let _ = backend.property_ops().set_urgent_hint(win, false);
-                    if let Some(c) = self.state.clients.get_mut(client_key) {
-                        c.state.is_urgent = false;
-                    }
-                    if backend.has_compositor() {
-                        backend.compositor_set_window_urgent(win, false);
-                    }
-                } else {
-                    if let Some(c) = self.state.clients.get_mut(client_key) {
-                        c.state.is_urgent = true;
-                    }
-                    if backend.has_compositor() {
-                        backend.compositor_set_window_urgent(win, true);
-                    }
-                }
+            let is_focused = self.is_client_selected(client_key);
+            // Under DND, suppress urgency on unfocused clients to silence
+            // taskbar/tag highlights and prevent focus-stealing chains.
+            let (urgent, clear_hint) =
+                wm_hint_urgency_policy(hints.urgent, is_focused, self.do_not_disturb);
+            if clear_hint {
+                // This is the sole PropertyNotify path that writes WM_HINTS:
+                // an active policy suppression must clear the source flag.
+                let _ = self.seturgent(backend, client_key, false);
             } else {
-                if let Some(c) = self.state.clients.get_mut(client_key) {
-                    c.state.is_urgent = false;
-                }
-                if backend.has_compositor() {
-                    backend.compositor_set_window_urgent(win, false);
-                }
+                let _ = self.sync_client_urgent_state(backend, client_key, urgent);
             }
             if let Some(input_ok) = hints.input {
                 if let Some(c) = self.state.clients.get_mut(client_key) {
@@ -331,6 +335,20 @@ impl Jwm {
             let _ = self.restack(backend, self.state.sel_mon);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod urgency_tests {
+    use super::wm_hint_urgency_policy;
+
+    #[test]
+    fn wm_hint_policy_only_writes_when_an_urgent_hint_is_suppressed() {
+        assert_eq!(wm_hint_urgency_policy(false, false, false), (false, false));
+        assert_eq!(wm_hint_urgency_policy(false, true, true), (false, false));
+        assert_eq!(wm_hint_urgency_policy(true, false, false), (true, false));
+        assert_eq!(wm_hint_urgency_policy(true, true, false), (false, true));
+        assert_eq!(wm_hint_urgency_policy(true, false, true), (false, true));
     }
 }
 

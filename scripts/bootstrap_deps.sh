@@ -10,7 +10,8 @@
 #   bash scripts/bootstrap_deps.sh                 # full bootstrap
 #   bash scripts/bootstrap_deps.sh --no-rust       # skip Rust toolchain install
 #   bash scripts/bootstrap_deps.sh --no-apt        # skip apt packages
-#   JWM_WITH_PORTAL=1 bash scripts/bootstrap_deps.sh   # also add PipeWire portal deps
+#   bash scripts/bootstrap_deps.sh --with-portal  # also add PipeWire portal deps
+#   bash scripts/bootstrap_deps.sh --with-tauri   # also add Tauri 2/WebKitGTK deps
 #   JWM_CN_MIRROR=1 bash scripts/bootstrap_deps.sh     # use rsproxy.cn (China) for rustup + cargo
 #
 # After this succeeds, build/install JWM with:
@@ -32,12 +33,14 @@ err()   { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 DO_APT=true
 DO_RUST=true
 WITH_PORTAL="${JWM_WITH_PORTAL:-0}"
+WITH_TAURI="${JWM_WITH_TAURI:-0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-apt)  DO_APT=false; shift ;;
         --no-rust) DO_RUST=false; shift ;;
         --with-portal) WITH_PORTAL=1; shift ;;
+        --with-tauri) WITH_TAURI=1; shift ;;
         --cn) JWM_CN_MIRROR=1; export JWM_CN_MIRROR; shift ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
@@ -110,7 +113,7 @@ APT_MISC=(
 # …) draw through glib/cairo/pango; cairo needs its XCB surface backend.
 APT_BAR=(
     libglib2.0-dev libcairo2-dev libpango1.0-dev
-    libgdk-pixbuf-2.0-dev libharfbuzz-dev
+    libgdk-pixbuf-2.0-dev libharfbuzz-dev libgtk-3-dev
 )
 
 # Runtime helpers useful for nested testing / running a session.
@@ -124,6 +127,14 @@ APT_RUNTIME=(
 # and prints the PKG_CONFIG_PATH / JWM_PIPEWIRE_PREFIX environment to use.
 APT_PORTAL=(
     libpipewire-0.3-dev libspa-0.2-dev
+)
+
+# Optional: Tauri 2 web bars. Keep this opt-in because WebKitGTK is a large
+# dependency and native bars do not need it.
+APT_TAURI=(
+    libwebkit2gtk-4.1-dev
+    wget file libxdo-dev
+    libayatana-appindicator3-dev librsvg2-dev
 )
 
 install_apt() {
@@ -140,6 +151,9 @@ if [[ "$DO_APT" == true ]]; then
         warn "  x11:       libx11 libxcb + extensions libxkbcommon"
         warn "  wayland:   libwayland libdrm libgbm libEGL libGLES libinput libseat libudev pixman"
         warn "  misc:      libasound2 libdbus-1 fontconfig freetype openssl"
+        if [[ "$WITH_TAURI" == "1" ]]; then
+            warn "  tauri:     WebKitGTK 4.1 libxdo Ayatana AppIndicator librsvg"
+        fi
         exit 1
     fi
 
@@ -156,6 +170,9 @@ if [[ "$DO_APT" == true ]]; then
     )
     if [[ "$WITH_PORTAL" == "1" ]]; then
         ALL_PKGS+=("${APT_PORTAL[@]}")
+    fi
+    if [[ "$WITH_TAURI" == "1" ]]; then
+        ALL_PKGS+=("${APT_TAURI[@]}")
     fi
 
     install_apt "${ALL_PKGS[@]}"

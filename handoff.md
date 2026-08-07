@@ -4,9 +4,18 @@
 
 ---
 
-## TODO: wayland_udev 补齐 attention_animation
+## DONE: wayland_udev 补齐 attention_animation（2026-08-07）
 
-**现状（2026-08-02 核对）**
+`attention_animation` 现在真正控制 Wayland 紧急边框，颜色、脉动周期与
+2 px 最小宽度与 X11 共用同一纯策略。渲染循环在 urgent 状态下持续
+驱动脉动；即使 `border_enabled = false`，KMS direct scanout 也会退回合成，
+不再绕过这条状态信号。纯策略测试覆盖 alpha 节奏、窗口 fade、
+最小宽度和 direct-scanout 门禁。最终状态传播也已闭环：ICCCM `WM_HINTS`
+与 EWMH `_NET_WM_STATE_DEMANDS_ATTENTION` 都同步 WMClient 和 compositor；
+Wayland 在纹理状态尚未创建时暂存 initial urgency，并在首建时消费、销毁时清理。
+下文保留修复前的完整审计记录。
+
+**修复前现状（2026-08-02 核对）**
 
 X11 合成器完整实现了紧急窗口的脉动边框；wayland_udev 只有一条**硬编码的静态红边**，两个配置项读进来了但渲染路径从没读过。
 
@@ -27,7 +36,7 @@ X11 合成器完整实现了紧急窗口的脉动边框；wayland_udev 只有一
 3. **没有脉动** —— X11 用 `(elapsed * 4.0).sin() * 0.5 + 0.5` 调制 alpha（周期约 1.57 s，`render.rs:4494`），wayland 是恒定 alpha 0.9。
 4. **被 `border_enabled` 吞掉** —— wayland 的整个边框块在 `if self.border_enabled` 里（`render.rs:1955`），且不给 urgent 加宽；X11 靠 `has_special_border` 绕过门禁并强制 `max(2.0)` 宽度（`render.rs:4478, 4506-4514`），所以关了边框紧急信号依然可见。这是有意设计，紧急信号不该被边框设置吞掉。
 
-**落点**
+**原计划落点（已实现）**
 
 - 主改：`wayland_udev/compositor/render.rs` 第 10 段 "Draw borders"（1952-2060）。
   - `border_color` 的 `else if wt.is_urgent` 分支改成读 `attention_animation_enabled` + `attention_color` + 同一条 sin 脉动公式；关掉开关时该分支应整体跳过，退回普通聚焦/非聚焦色。
@@ -38,7 +47,7 @@ X11 合成器完整实现了紧急窗口的脉动边框；wayland_udev 只有一
   ⚠️ 代价一并继承：只要有 urgent 窗口没人理，合成器就持续满帧重绘。X11 已经是这个行为，两边保持一致即可，但值得在 commit message 里点明。
 - `render.rs:596-604` 已经把 urgent 窗口塞进 dirty box（注释就是为这条边框写的），改完之后那段防护才真正有意义，不用动。
 
-**验收**
+**验收目标**
 
 - `attention_animation = false` 时 urgent 窗口只有普通边框；`true` 时呈 `attention_color` 呼吸。
 - `border_enabled = false` + urgent → 仍有 2px 脉动边框。

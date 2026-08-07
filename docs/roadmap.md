@@ -192,7 +192,12 @@ mock implementing the complete backend surface. (First met by
   the Wayland tree carried a drifted inline copy (missing division guards,
   no accelerated fade-out once geometry converges); both backends now
   instantiate the single implementation in
-  `backend::compositor_common::expose` over their native window-id types.
+  `backend::compositor_common::expose` over their native window-id types. The
+  urgent-window attention border followed: X11 and Wayland now share its pulse
+  cadence, configured colour and minimum-width policy; Wayland also keeps the
+  pulse scheduled and blocks KMS direct scanout while the signal is visible.
+  ICCCM/EWMH urgency changes now update compositor state through explicit,
+  tested bridges, including Wayland's manage-before-texture creation window.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

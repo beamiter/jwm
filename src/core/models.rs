@@ -84,32 +84,40 @@ impl ScrollingState {
     pub fn retain_non_empty_columns(&mut self) {
         self.ensure_column_metadata();
 
-        let old_columns = std::mem::take(&mut self.columns);
-        let old_widths = std::mem::take(&mut self.column_width_factors);
-        let old_focuses = std::mem::take(&mut self.focused_clients);
-        let mut retained_old_indices = Vec::new();
+        let old_focused_column = self.focused_column;
+        let mut old_idx = 0;
+        let mut retained_len = 0;
+        let mut retained_focused_column = None;
+        let columns = &mut self.columns;
+        let widths = &mut self.column_width_factors;
+        let focuses = &mut self.focused_clients;
 
-        for (idx, col) in old_columns.into_iter().enumerate() {
+        // Compact all three parallel vectors in place. This method runs on
+        // every scrolling-layout sync; rebuilding the vectors made even the
+        // no-change steady state allocate fresh backing storage each time.
+        columns.retain(|col| {
+            let idx = old_idx;
+            old_idx += 1;
             if col.is_empty() {
-                continue;
+                return false;
             }
 
-            let focus = old_focuses
-                .get(idx)
-                .copied()
-                .flatten()
+            let width = widths[idx];
+            let focus = focuses[idx]
                 .filter(|key| col.contains(key))
                 .or_else(|| col.first().copied());
-            retained_old_indices.push(idx);
-            self.columns.push(col);
-            self.column_width_factors
-                .push(old_widths.get(idx).copied().unwrap_or(1.0));
-            self.focused_clients.push(focus);
-        }
+            widths[retained_len] = width;
+            focuses[retained_len] = focus;
+            if old_focused_column == Some(idx) {
+                retained_focused_column = Some(retained_len);
+            }
+            retained_len += 1;
+            true
+        });
+        widths.truncate(retained_len);
+        focuses.truncate(retained_len);
 
-        self.focused_column = self
-            .focused_column
-            .and_then(|old_idx| old_column_index_after_retain(old_idx, &retained_old_indices))
+        self.focused_column = retained_focused_column
             .or_else(|| {
                 self.focused_clients
                     .iter()
@@ -247,10 +255,6 @@ impl ScrollingState {
 
         geometry
     }
-}
-
-fn old_column_index_after_retain(old_idx: usize, retained_old_indices: &[usize]) -> Option<usize> {
-    retained_old_indices.iter().position(|idx| *idx == old_idx)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -941,12 +945,49 @@ mod tests {
         s.columns = vec![vec![a], Vec::new(), vec![b]];
         s.column_width_factors = vec![1.25, 0.75, 1.5];
         s.focused_clients = vec![Some(a), None, Some(b)];
+        s.focused_column = Some(2);
 
         s.retain_non_empty_columns();
 
         assert_eq!(s.columns, vec![vec![a], vec![b]]);
         assert_eq!(s.column_width_factors, vec![1.25, 1.5]);
         assert_eq!(s.focused_clients, vec![Some(a), Some(b)]);
+        assert_eq!(s.focused_column_index(), Some(1));
+    }
+
+    #[test]
+    fn test_scrolling_state_steady_retain_reuses_storage() {
+        let mut keys = slotmap::SlotMap::<ClientKey, ()>::with_key();
+        let mut s = ScrollingState::new();
+        for _ in 0..16 {
+            let key = keys.insert(());
+            s.columns.push(vec![key]);
+            s.column_width_factors.push(1.0);
+            s.focused_clients.push(Some(key));
+        }
+
+        let columns_storage = s.columns.as_ptr();
+        let widths_storage = s.column_width_factors.as_ptr();
+        let focuses_storage = s.focused_clients.as_ptr();
+        let capacities = (
+            s.columns.capacity(),
+            s.column_width_factors.capacity(),
+            s.focused_clients.capacity(),
+        );
+
+        s.retain_non_empty_columns();
+
+        assert_eq!(s.columns.as_ptr(), columns_storage);
+        assert_eq!(s.column_width_factors.as_ptr(), widths_storage);
+        assert_eq!(s.focused_clients.as_ptr(), focuses_storage);
+        assert_eq!(
+            (
+                s.columns.capacity(),
+                s.column_width_factors.capacity(),
+                s.focused_clients.capacity(),
+            ),
+            capacities
+        );
     }
 
     #[test]

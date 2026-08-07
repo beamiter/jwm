@@ -53,15 +53,13 @@ impl Jwm {
             }
         }
 
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            if client.state.is_urgent {
-                client.state.is_urgent = false;
-                let win = client.win;
-                let _ = self.seturgent(backend, client_key, false);
-                if backend.has_compositor() {
-                    backend.compositor_set_window_urgent(win, false);
-                }
-            }
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.is_urgent)
+        {
+            let _ = self.seturgent(backend, client_key, false);
         }
         self.detachstack(client_key);
         self.attachstack(client_key);

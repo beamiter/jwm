@@ -519,6 +519,32 @@ pub(crate) struct WindowState {
     pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
 }
 
+/// Urgency updates may arrive while a surface is being managed but before its
+/// compositor state/texture exists. Keep only positive pending updates: a
+/// later clear cancels the pending value, and first creation consumes it.
+#[derive(Default)]
+struct PendingWindowUrgency {
+    urgent_windows: HashSet<u64>,
+}
+
+impl PendingWindowUrgency {
+    fn update(&mut self, window_id: u64, urgent: bool) -> bool {
+        if urgent {
+            self.urgent_windows.insert(window_id)
+        } else {
+            self.urgent_windows.remove(&window_id)
+        }
+    }
+
+    fn take_for_new_window(&mut self, window_id: u64) -> bool {
+        self.urgent_windows.remove(&window_id)
+    }
+
+    fn discard(&mut self, window_id: u64) -> bool {
+        self.urgent_windows.remove(&window_id)
+    }
+}
+
 /// Active genie minimize animation for one window (Wayland).
 ///
 /// Both this animation and its matching WindowState hold a strong Smithay
@@ -691,6 +717,7 @@ pub(crate) struct WaylandCompositor {
 
     // Per-window state
     windows: HashMap<u64, WindowState>,
+    pending_window_urgency: PendingWindowUrgency,
 
     // Set true while any WindowState carries a non-None color_transform.
     // The gate-off branch of the render path skips its per-window clear loop
@@ -1673,6 +1700,7 @@ impl WaylandCompositor {
 
                 // Per-window state
                 windows: HashMap::new(),
+                pending_window_urgency: PendingWindowUrgency::default(),
                 any_color_transform_active: false,
 
                 // Config defaults — intentionally conservative; apply_config() reads config.toml

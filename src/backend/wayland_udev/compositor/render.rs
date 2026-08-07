@@ -1,6 +1,9 @@
 // render_frame and rendering helpers for the Wayland udev compositor
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::attention::{
+    attention_border_style, attention_signal_active,
+};
 use crate::backend::compositor_common::capture::clip_region;
 use crate::backend::compositor_common::debug_hud as hud;
 use crate::backend::compositor_common::dynamic_island::IslandDock;
@@ -31,6 +34,10 @@ fn postprocess_requires_continuous_frames(
     has_time_varying_input: bool,
 ) -> bool {
     postprocess_active && has_time_varying_input
+}
+
+fn attention_requires_continuous_frames(animation_enabled: bool, has_urgent_window: bool) -> bool {
+    attention_signal_active(animation_enabled, has_urgent_window)
 }
 
 pub(super) fn edge_glow_requires_continuous_frames(
@@ -88,9 +95,10 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OcclusionCandidate, edge_glow_requires_continuous_frames, is_opaque_output_occluder,
-        oriented_content_uv, overlay_output_is_scene_linear,
-        postprocess_requires_continuous_frames, premultiplied_blend_factors,
+        OcclusionCandidate, attention_requires_continuous_frames,
+        edge_glow_requires_continuous_frames, is_opaque_output_occluder, oriented_content_uv,
+        overlay_output_is_scene_linear, postprocess_requires_continuous_frames,
+        premultiplied_blend_factors,
     };
     use smithay::backend::renderer::gles::ffi;
 
@@ -133,6 +141,13 @@ mod tests {
         assert!(!postprocess_requires_continuous_frames(true, false));
         assert!(!postprocess_requires_continuous_frames(false, true));
         assert!(postprocess_requires_continuous_frames(true, true));
+    }
+
+    #[test]
+    fn urgent_attention_keeps_the_frame_scheduler_live_only_while_visible() {
+        assert!(attention_requires_continuous_frames(true, true));
+        assert!(!attention_requires_continuous_frames(false, true));
+        assert!(!attention_requires_continuous_frames(true, false));
     }
 
     #[test]
@@ -709,6 +724,10 @@ impl WaylandCompositor {
             self.edge_glow_active,
             self.edge_glow_suppressed,
         );
+        let attention_active = attention_requires_continuous_frames(
+            self.attention_animation_enabled,
+            self.windows.values().any(|window| window.is_urgent),
+        );
         if !self.needs_render
             && !self.screenshot_requests.has_pending()
             && !self.screenshot_readback.has_pending()
@@ -716,6 +735,7 @@ impl WaylandCompositor {
             && !recording_transition_pending
             && !postprocess_continuous
             && !edge_glow_continuous
+            && !attention_active
             && !self.has_active_animations()
         {
             return false;
@@ -964,6 +984,7 @@ impl WaylandCompositor {
             || self.transition_active
             || focus_highlight_active
             || motion_trail_active
+            || attention_active
             || !self.genie_active.is_empty();
 
         // These operations need a frame even on an otherwise static desktop.
@@ -1949,7 +1970,7 @@ impl WaylandCompositor {
         // 10. Draw borders (focused and urgent windows)
         // =================================================================
         self.frame_profiler.zone_start("borders");
-        if self.border_enabled {
+        if self.border_enabled || attention_active {
             unsafe {
                 gl.UseProgram(self.border_program);
                 self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
@@ -1970,7 +1991,16 @@ impl WaylandCompositor {
                     };
 
                     let is_focused = focused == Some(win_id);
-                    if !is_focused && !wt.is_urgent {
+                    let attention_active_for_win =
+                        attention_signal_active(self.attention_animation_enabled, wt.is_urgent);
+                    // An attention border is an accessibility/status signal,
+                    // not ordinary decoration. It remains visible when normal
+                    // borders are disabled, without accidentally enabling the
+                    // focused border on unrelated windows.
+                    if !self.border_enabled && !attention_active_for_win {
+                        continue;
+                    }
+                    if !is_focused && !attention_active_for_win {
                         continue;
                     }
 
@@ -2005,6 +2035,15 @@ impl WaylandCompositor {
                             .focus_highlight_start
                             .map(|(hw, _)| hw == win_id)
                             .unwrap_or(false);
+                    let attention_style = attention_active_for_win.then(|| {
+                        attention_border_style(
+                            self.attention_color,
+                            self.compositor_start_time.elapsed().as_secs_f32(),
+                            fade,
+                            self.border_enabled,
+                            self.border_width,
+                        )
+                    });
 
                     let border_color = if highlight_for_win {
                         let (_, start) = self.focus_highlight_start.unwrap();
@@ -2013,14 +2052,16 @@ impl WaylandCompositor {
                         let pulse = ((elapsed_ms / dur * std::f32::consts::PI).sin()).abs();
                         let [r, g, b, a] = self.focus_highlight_color;
                         [r, g, b, a * pulse * fade]
-                    } else if wt.is_urgent {
-                        [1.0f32, 0.2, 0.2, 0.9 * fade]
+                    } else if let Some(style) = attention_style {
+                        style.color
                     } else {
                         let c = self.border_color_focused;
                         [c[0], c[1], c[2], c[3] * fade]
                     };
                     let border_width = if highlight_for_win {
                         (self.border_width + 2.0).max(3.0)
+                    } else if let Some(style) = attention_style {
+                        style.width
                     } else {
                         self.border_width
                     };
@@ -2043,8 +2084,9 @@ impl WaylandCompositor {
                     // The focused window's ordinary border upgrades to the
                     // two-color gradient ring. Focus pulse and urgent borders
                     // keep their flat signal colors.
-                    let use_gradient =
-                        self.border_gradient_enabled && !highlight_for_win && !wt.is_urgent;
+                    let use_gradient = self.border_gradient_enabled
+                        && !highlight_for_win
+                        && !attention_active_for_win;
 
                     if use_gradient {
                         let angle = (self.border_gradient_angle

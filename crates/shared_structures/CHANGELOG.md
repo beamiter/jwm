@@ -2,6 +2,12 @@
 
 本项目的显著变更记录在此。0.x 阶段仍可能调整公共 API；共享内存协议的不兼容变化会单独标明。
 
+## [Unreleased]
+
+### Fixed
+
+- 进程存活探测改为读取 `/proc/<pid>/stat`，把尚未被父进程 `wait` 的 zombie/dead 进程视为已退出；方向锁崩溃恢复、`creator_alive()` 与 `reclaim_stale(true)` 不再被永久存在的僵尸 PID 卡住。共享布局和公开 API 不变。
+
 ## [0.3.0] - 2026-08-02
 
 ### Added

@@ -50,6 +50,7 @@
 共享方向锁的锁字存放持有者 PID。持有者进程消失（`SIGKILL`、崩溃、`abort`）后，竞争者通过 `/proc/<pid>` 探测发现并原子夺回锁，因此单个参与者崩溃不会永久卡死方向。前提与已知边界：
 
 - **所有参与进程必须共享同一 PID namespace 并看到同一个 `/proc`**。跨 namespace 部署（容器间共享映射）时，持有者的 PID 在观察者的 `/proc` 中不存在，锁竞争会把活着的持有者误判为已死并夺锁，造成双持有者。`/proc` 完全不可用时探测自动退化为"假定存活"（纯等待，不夺锁），但跨 namespace 且各自挂有 `/proc` 的场景无法自动检测，必须由部署保证。
+- **僵尸进程视为已退出**：Linux 会在父进程 `wait` 前保留僵尸的 `/proc/<pid>` 目录，但僵尸已经不能执行用户代码或释放锁。探测会读取 `/proc/<pid>/stat`，把 Z/X/x 状态视为已死；stat 不可读或无法解析时则保守地假定存活。
 - **PID 复用**：探测可能把复用了同一 PID 的无关进程误判为"持有者仍存活"，此时行为退回等待。反方向的误夺（探测到已死后、CAS 之前，锁恰好被释放又被一个复用了相同 PID 的参与者取得）在理论上存在，概率极低；对正确性要求极端的部署应配备外层监督与重建机制。
 - **半写槽位**：写入者在槽位复制中途死亡时，被夺锁后的消费者会读到校验和不匹配的槽位并将其作为损坏数据消费掉；该消息丢失但队列继续工作。
 
@@ -77,7 +78,7 @@ Futex、Semaphore 和 EventFd 都用共享 sequence 和 waiter 计数完成 SeqC
 - `destroy` 是显式全局关闭；调用开始前已经通过最终 destroyed 检查的并发写操作仍可能完成，随后发起的写入会被拒绝，等待者应尽快返回 closed。
 - 移除 flink 只阻止新的 opener；已经映射的进程仍持有其映射，必须通过 destroyed 状态协调退出。
 
-创建者意外退出会触发普通进程析构的前提只适用于正常展开；`SIGKILL`、`_exit`、断电或进程 abort 不运行 Drop。header 记录 `creator_pid`，`creator_alive()` 可用于探测创建者是否仍存活；`SharedRingBufferOptions::reclaim_stale(true)` 让 `open_or_create` 在确认创建者已死后移除残留 flink 并重建映射。回收应只由单一监督者角色执行：多个进程并发回收同一路径可能互相删除对方刚发布的 flink；PID 复用会让回收退化为打开旧映射（安全方向）。
+创建者意外退出会触发普通进程析构的前提只适用于正常展开；`SIGKILL`、`_exit`、断电或进程 abort 不运行 Drop。header 记录 `creator_pid`，`creator_alive()` 可通过 `/proc/<pid>/stat` 探测创建者是否仍存活（尚未被 `wait` 的僵尸也判定为已退出）；`SharedRingBufferOptions::reclaim_stale(true)` 让 `open_or_create` 在确认创建者已死后移除残留 flink 并重建映射。回收应只由单一监督者角色执行：多个进程并发回收同一路径可能互相删除对方刚发布的 flink；PID 复用会让回收退化为打开旧映射（安全方向）。
 
 ## EventFd 特有条件
 
