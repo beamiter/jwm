@@ -74,7 +74,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="egui_bar"
+JWM_BAR_NAME="tao_pixels_bar"
 JWM_BAR_SET_BY_ARGS=false
 SKIP_BAR=false
 SKIP_JWM=false
