@@ -6,7 +6,8 @@ use crate::backend::compositor_common::screenshot_toolbar::{
     ScreenshotToolbar, ToolbarButton, ToolbarIcon,
 };
 use crate::core::types::Rect;
-use crate::jwm::features::capture::{CaptureTarget, PENDING_CAPTURE_TIMEOUT, PendingCapture};
+use crate::jwm::features::capture::CaptureTarget;
+use crate::jwm::features::deferred_grab::{DeferredGrab, DeferredGrabAction};
 use crate::jwm::types::WMArgEnum;
 use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
@@ -885,7 +886,7 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // If already in selection mode, cancel it first
         if self.features.screenshot.active {
-            self.features.capture.pending_screenshot = None;
+            self.features.deferred_grab = None;
             self.cancel_screenshot_select(backend);
             return Ok(());
         }
@@ -910,10 +911,12 @@ impl Jwm {
         // the socket in well under the time a human holds a click. Refusing
         // here is what made the pill look broken — so wait for the button to
         // come up instead, from the event loop, without blocking a frame.
-        self.features.capture.pending_screenshot = Some(PendingCapture {
-            output_path: screenshot_path,
-            deadline: std::time::Instant::now() + PENDING_CAPTURE_TIMEOUT,
-        });
+        self.features.deferred_grab = Some(DeferredGrab::new(
+            DeferredGrabAction::Screenshot {
+                output_path: screenshot_path,
+            },
+            std::time::Instant::now(),
+        ));
         Ok(())
     }
 
@@ -974,45 +977,57 @@ impl Jwm {
         Ok(true)
     }
 
-    /// Retry a capture that was waiting for the pointer to come free.
-    pub(crate) fn tick_pending_capture(
+    /// Retry a request that was parked waiting for the pointer.
+    ///
+    /// Called every tick while one is parked. Both entry points here start
+    /// from a status bar click, which is exactly when the pointer is held.
+    pub(crate) fn tick_deferred_grab(
         &mut self,
         backend: &mut dyn Backend,
         now: std::time::Instant,
     ) {
-        let Some(pending) = self.features.capture.pending_screenshot.as_ref() else {
+        let Some(parked) = self.features.deferred_grab.as_ref() else {
             return;
         };
-        // Something else claimed the mode in the meantime; the request is stale.
-        if self.features.screenshot.active {
-            self.features.capture.pending_screenshot = None;
+        // Something else claimed the screen meanwhile; the request is stale.
+        if self.features.screenshot.active || self.features.system_ui.is_active() {
+            self.features.deferred_grab = None;
             return;
         }
-        if now >= pending.deadline {
+        if parked.is_expired(now) {
             warn!(
-                "[take_screenshot] gave up waiting for the pointer; another client still holds it"
+                "[deferred_grab] gave up waiting for the pointer to open {}; another client still holds it",
+                parked.action.label()
             );
-            self.features.capture.pending_screenshot = None;
+            self.features.deferred_grab = None;
             return;
         }
 
-        let path = pending.output_path.clone();
-        match self.begin_interactive_capture(backend, &path) {
-            Ok(true) => self.features.capture.pending_screenshot = None,
-            // Still held — leave the request in place for the next tick.
+        let action = parked.action.clone();
+        let outcome = match &action {
+            DeferredGrabAction::Screenshot { output_path } => {
+                self.begin_interactive_capture(backend, output_path)
+            }
+            DeferredGrabAction::ShellHub { route } => {
+                self.begin_shell_from_status_bar(backend, *route)
+            }
+        };
+        match outcome {
+            Ok(true) => self.features.deferred_grab = None,
+            // Still held — leave the request parked for the next tick.
             Ok(false) => {}
             Err(error) => {
-                error!("[take_screenshot] could not start interactive capture: {error}");
-                self.features.capture.pending_screenshot = None;
+                error!("[deferred_grab] could not open {}: {error}", action.label());
+                self.features.deferred_grab = None;
             }
         }
     }
 
-    /// Whether a capture is still waiting for the pointer, so the event loop
+    /// Whether a request is still waiting for the pointer, so the event loop
     /// knows to keep ticking.
     #[must_use]
-    pub(crate) fn has_pending_capture(&self) -> bool {
-        self.features.capture.pending_screenshot.is_some()
+    pub(crate) fn has_deferred_grab(&self) -> bool {
+        self.features.deferred_grab.is_some()
     }
 
     /// Alt+Shift+S: 立即截取全屏

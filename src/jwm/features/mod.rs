@@ -17,6 +17,7 @@ pub mod capture;
 pub mod capture_plan;
 pub mod clipboard;
 pub mod connectivity;
+pub mod deferred_grab;
 pub mod expose_plan;
 pub mod idle;
 pub mod launcher;
@@ -49,6 +50,7 @@ pub use clipboard::{ClipboardEntry, ClipboardHistory};
 pub use connectivity::{
     BluetoothDevice, BluetoothState, ConnectivityState, LinkKind, NetworkState, WifiNetwork,
 };
+pub use deferred_grab::{DeferredGrab, DeferredGrabAction};
 pub use expose_plan::ExposeAction;
 pub use layout_picker::LayoutPickerState;
 pub use magnifier::MagnifierState;
@@ -72,6 +74,9 @@ pub use system_ui::{
 pub struct FeatureStates {
     pub audio_recording: AudioRecordingState,
     pub capture: CaptureInteractionState,
+    /// A request that needs the pointer, parked until whoever holds it — a
+    /// status bar mid-click, most often — lets go. See `deferred_grab`.
+    pub deferred_grab: Option<DeferredGrab>,
     pub screenshot: ScreenshotState,
     pub overview: OverviewState,
     pub recording: RecordingState,

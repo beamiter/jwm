@@ -52,33 +52,10 @@ impl CaptureTarget {
     }
 }
 
-/// An interactive capture that has been asked for but cannot start yet
-/// because another client still holds the pointer.
-///
-/// This is what a status bar's screenshot pill looks like from here: X11 hands
-/// a client an implicit pointer grab for as long as the button pressed inside
-/// it stays down, and a request over the control socket arrives far sooner
-/// than a human lets go. The request waits here until the button comes up.
-#[derive(Debug, Clone)]
-pub struct PendingCapture {
-    pub output_path: String,
-    pub deadline: std::time::Instant,
-}
-
-/// How long to keep retrying before concluding the pointer is held by
-/// something that is not going to let go. Comfortably longer than a slow
-/// click, short enough that a genuinely stuck grab does not linger.
-pub const PENDING_CAPTURE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
-
-/// How often to retry while waiting. One frame: the wait ends on a button
-/// release, which is not an event this side gets told about.
-pub const PENDING_CAPTURE_RETRY: std::time::Duration = std::time::Duration::from_millis(16);
-
 #[derive(Debug, Default)]
 pub struct CaptureInteractionState {
     pub screenshot: CaptureTarget,
     pub recording: CaptureTarget,
-    pub pending_screenshot: Option<PendingCapture>,
     swallow_button_release: bool,
 }
 
@@ -439,31 +416,6 @@ mod tests {
     use super::*;
 
     #[test]
-    /// The regression that made the status bars' screenshot pill look dead:
-    /// a request arriving while the bar still held its implicit pointer grab
-    /// used to be refused outright. It has to be *held*, and it has to expire
-    /// rather than wait forever on a grab nobody is going to release.
-    #[test]
-    fn a_capture_waiting_on_the_pointer_is_held_and_eventually_expires() {
-        let mut state = CaptureInteractionState::default();
-        assert!(state.pending_screenshot.is_none());
-
-        let start = std::time::Instant::now();
-        state.pending_screenshot = Some(PendingCapture {
-            output_path: "/tmp/shot.png".to_owned(),
-            deadline: start + PENDING_CAPTURE_TIMEOUT,
-        });
-
-        let pending = state.pending_screenshot.as_ref().expect("held");
-        // Still waiting one retry in…
-        assert!(start + PENDING_CAPTURE_RETRY < pending.deadline);
-        // …and a slow click, half a second of it, is comfortably inside.
-        assert!(start + std::time::Duration::from_millis(500) < pending.deadline);
-        // But it does not wait forever.
-        assert!(start + std::time::Duration::from_secs(5) > pending.deadline);
-        assert!(PENDING_CAPTURE_RETRY < PENDING_CAPTURE_TIMEOUT);
-    }
-
     #[test]
     fn capture_target_cycles_in_both_directions() {
         assert_eq!(CaptureTarget::Region.next(), CaptureTarget::Window);

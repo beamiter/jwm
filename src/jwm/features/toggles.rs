@@ -234,15 +234,43 @@ impl Jwm {
         backend: &mut dyn Backend,
         route: Option<crate::jwm::features::ShellHubRoute>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.begin_shell_from_status_bar(backend, route)? {
+            return Ok(());
+        }
+
+        // The bar still owns the pointer, because the click that asked for
+        // this is still going on. Park the request and let the event loop
+        // retry it — see `features::deferred_grab`.
+        self.features.deferred_grab = Some(crate::jwm::features::DeferredGrab::new(
+            crate::jwm::features::DeferredGrabAction::ShellHub { route },
+            std::time::Instant::now(),
+        ));
+        Ok(())
+    }
+
+    /// Open the shell, reporting `Ok(false)` when the pointer is not free
+    /// *yet* — a retryable condition, distinct from the hard errors.
+    pub(crate) fn begin_shell_from_status_bar(
+        &mut self,
+        backend: &mut dyn Backend,
+        route: Option<crate::jwm::features::ShellHubRoute>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if self.features.system_ui.is_active() {
             // The user is already in the shell. Re-opening would steal the
             // grabs and throw away the page they are on, so a stray click on
             // the bar does nothing instead.
-            return Ok(());
+            return Ok(true);
         }
 
+        // A status bar click holds an implicit pointer grab for as long as the
+        // button is down, so a busy pointer here means "the click that asked
+        // for this is still going on" — retryable, not a failure. This is the
+        // only caller that wants that distinction; the other fourteen are
+        // keyboard-invoked, where a busy pointer really is an error.
         let label = route.map_or("shell hub (status bar)", |_| "shell page (status bar)");
-        self.prepare_system_ui(backend, label, true)?;
+        if !self.prepare_system_ui_deferrable(backend, label)? {
+            return Ok(false);
+        }
         self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
 
         let Some(route) = route else {
@@ -253,14 +281,16 @@ impl Jwm {
             self.features.system_ui_return_to_hub = false;
             self.features.system_ui = self.build_shell_hub_state();
             self.sync_system_ui(backend);
-            return Ok(());
+            return Ok(true);
         };
 
-        self.open_shell_hub_route(backend, route).inspect_err(|_| {
-            // A disabled route (clipboard history switched off, say) must not
-            // leave the keyboard grabbed with nothing on screen.
-            self.close_system_ui(backend);
-        })
+        self.open_shell_hub_route(backend, route)
+            .inspect_err(|_| {
+                // A disabled route (clipboard history switched off, say) must
+                // not leave the keyboard grabbed with nothing on screen.
+                self.close_system_ui(backend);
+            })
+            .map(|()| true)
     }
 
     /// Rebuild the shell home page after leaving a child page. This path does
@@ -881,12 +911,39 @@ impl Jwm {
     /// then acquire the X11 modal input grabs. If JWM was deliberately running
     /// without compositing, the compositor is leased only for the lifetime of
     /// the panel and restored to off by [`Self::close_system_ui`].
+    /// Acquire the grabs for a shell surface. A pointer that is already taken
+    /// is an error: every keyboard-invoked entry point wants to fail loudly
+    /// rather than open half-grabbed.
     pub(crate) fn prepare_system_ui(
         &mut self,
         backend: &mut dyn Backend,
         label: &str,
         grab_pointer: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.prepare_system_ui_inner(backend, label, grab_pointer)? {
+            return Ok(());
+        }
+        Err(format!("could not grab pointer for {label}").into())
+    }
+
+    /// As [`Self::prepare_system_ui`], but reports a busy pointer as
+    /// `Ok(false)` so the caller can park the request and retry.
+    pub(crate) fn prepare_system_ui_deferrable(
+        &mut self,
+        backend: &mut dyn Backend,
+        label: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        self.prepare_system_ui_inner(backend, label, true)
+    }
+
+    /// `Ok(false)` means the pointer was not available; the keyboard grab and
+    /// any temporary compositor have already been handed back.
+    fn prepare_system_ui_inner(
+        &mut self,
+        backend: &mut dyn Backend,
+        label: &str,
+        grab_pointer: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if !backend.has_compositor() {
             match backend.set_compositor_enabled(true) {
                 Ok(true) if backend.has_compositor() => {
@@ -908,25 +965,27 @@ impl Jwm {
         }
 
         let Some(root) = backend.root_window() else {
-            return Ok(());
+            return Ok(true);
         };
         if let Err(error) = backend.key_ops().grab_keyboard(root) {
             self.release_temporary_system_ui_compositor(backend, label);
             return Err(error.into());
         }
         if !grab_pointer {
-            return Ok(());
+            return Ok(true);
         }
 
         match backend.input_ops().grab_pointer(
             (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
             None,
         ) {
-            Ok(true) => Ok(()),
+            Ok(true) => Ok(true),
+            // Hand the keyboard straight back: a caller that parks and retries
+            // must not sit on it while it waits.
             Ok(false) => {
                 let _ = backend.key_ops().ungrab_keyboard();
                 self.release_temporary_system_ui_compositor(backend, label);
-                Err(format!("could not grab pointer for {label}").into())
+                Ok(false)
             }
             Err(error) => {
                 let _ = backend.key_ops().ungrab_keyboard();
