@@ -125,7 +125,10 @@ fn toplevel_label(t: &ToplevelInfo) -> String {
     format!("[Window] {app} — {title}\u{0000}{}", t.identifier)
 }
 
-fn run_external_picker_outputs(available: &[OutputInfo], multiple: bool) -> PickerOutcome<OutputInfo> {
+fn run_external_picker_outputs(
+    available: &[OutputInfo],
+    multiple: bool,
+) -> PickerOutcome<OutputInfo> {
     if available.is_empty() {
         return PickerOutcome::NoPicker;
     }
@@ -137,12 +140,7 @@ fn run_external_picker_outputs(available: &[OutputInfo], multiple: bool) -> Pick
     };
     let picked: Vec<OutputInfo> = chosen
         .into_iter()
-        .filter_map(|c| {
-            available
-                .iter()
-                .find(|o| output_label(o) == c)
-                .cloned()
-        })
+        .filter_map(|c| available.iter().find(|o| output_label(o) == c).cloned())
         .collect();
     if picked.is_empty() {
         PickerOutcome::Cancelled
@@ -280,7 +278,11 @@ fn rofi_cmd(multiple: bool) -> (String, Vec<String>) {
 }
 
 fn wofi_cmd(multiple: bool) -> (String, Vec<String>) {
-    let args = vec!["--dmenu".to_string(), "--prompt".into(), "Select source".into()];
+    let args = vec![
+        "--dmenu".to_string(),
+        "--prompt".into(),
+        "Select source".into(),
+    ];
     if multiple {
         // wofi has no native multi-select; document the limitation.
         log::warn!("picker: wofi does not support multi-select; first match wins");
@@ -333,7 +335,9 @@ mod tests {
     }
 
     fn set_env(key: &str, val: &str) {
-        unsafe { std::env::set_var(key, val); }
+        unsafe {
+            std::env::set_var(key, val);
+        }
     }
 
     #[test]

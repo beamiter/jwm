@@ -111,11 +111,7 @@ pub enum Source {
 
 /// Spawn a PipeWire stream worker. Returns once the worker has reported its
 /// assigned PipeWire node_id (or fails after a 5s startup deadline).
-pub fn spawn(
-    spec: StreamSpec,
-    node_name: String,
-    source: Source,
-) -> Result<StreamHandle, String> {
+pub fn spawn(spec: StreamSpec, node_name: String, source: Source) -> Result<StreamHandle, String> {
     let (node_tx, node_rx) = mpsc::sync_channel::<Result<u32, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
 
@@ -149,7 +145,8 @@ fn run(
     shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<(), String> {
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| format!("MainLoop: {e}"))?;
-    let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("Context: {e}"))?;
+    let context =
+        pw::context::ContextRc::new(&mainloop, None).map_err(|e| format!("Context: {e}"))?;
     let core = context
         .connect_rc(None)
         .map_err(|e| format!("connect core: {e}"))?;
@@ -163,8 +160,8 @@ fn run(
         *pw::keys::NODE_DESCRIPTION => "jwm screen capture",
     };
 
-    let stream = pw::stream::StreamRc::new(core, &node_name, props)
-        .map_err(|e| format!("Stream: {e}"))?;
+    let stream =
+        pw::stream::StreamRc::new(core, &node_name, props).map_err(|e| format!("Stream: {e}"))?;
 
     // For dmabuf transport, the PW side needs an `fd -> slot_idx` map populated
     // in add_buffer so on_process can look up which slot to fill. Wrapping in
@@ -211,7 +208,9 @@ fn run(
             let bridge = bridge.clone();
             move |_stream, _ud, pw_buffer| unsafe {
                 // Only relevant for dmabuf transport.
-                let Some(bridge) = bridge.as_ref() else { return };
+                let Some(bridge) = bridge.as_ref() else {
+                    return;
+                };
                 if pw_buffer.is_null() {
                     return;
                 }
@@ -221,8 +220,8 @@ fn run(
                     warn!("dmabuf add_buffer: pw_buffer with no data slots");
                     return;
                 }
-                let slot_idx = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    % bridge.fds.len();
+                let slot_idx =
+                    next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % bridge.fds.len();
                 let fd = bridge.fds[slot_idx].as_raw_fd();
                 let data = (*spa_buf).datas;
                 (*data).type_ = libspa_sys::SPA_DATA_DmaBuf;
@@ -265,9 +264,13 @@ fn run(
             let bridge = bridge.clone();
             let fd_to_slot = fd_to_slot.clone();
             move |stream, _ud| {
-                let Some(mut buffer) = stream.dequeue_buffer() else { return };
+                let Some(mut buffer) = stream.dequeue_buffer() else {
+                    return;
+                };
                 let datas = buffer.datas_mut();
-                let Some(data) = datas.first_mut() else { return };
+                let Some(data) = datas.first_mut() else {
+                    return;
+                };
 
                 if let Some(bridge) = bridge.as_ref() {
                     // dmabuf path — look up which slot this pw_buffer's fd
@@ -304,7 +307,9 @@ fn run(
                     // != current) — discarded rather than misattributed to
                     // request N+1. This is the only way to make timeout safe
                     // when the worker keeps running after the deadline.
-                    let req_seq = bridge.next_req_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let req_seq = bridge
+                        .next_req_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let _ = bridge.fill_req_tx.send((req_seq, slot_idx));
                     let deadline = std::time::Instant::now() + Duration::from_millis(100);
                     let filled = {
@@ -317,7 +322,9 @@ fn run(
                             match rx.recv_timeout(deadline - now) {
                                 Ok(seq) if seq == req_seq => break true,
                                 Ok(stale) => {
-                                    log::trace!("dmabuf: discarding stale done seq={stale} (want {req_seq})");
+                                    log::trace!(
+                                        "dmabuf: discarding stale done seq={stale} (want {req_seq})"
+                                    );
                                     continue;
                                 }
                                 Err(_) => break false,
@@ -484,10 +491,19 @@ fn build_connect_params(spec: &StreamSpec, source: &Source) -> Result<Vec<OwnedP
             type_: SpaTypes::ObjectParamBuffers.as_raw(),
             id: spa::param::ParamType::Buffers.as_raw(),
             properties: vec![
-                Property::new(libspa_sys::SPA_PARAM_BUFFERS_buffers, Value::Int(b.fds.len() as i32)),
+                Property::new(
+                    libspa_sys::SPA_PARAM_BUFFERS_buffers,
+                    Value::Int(b.fds.len() as i32),
+                ),
                 Property::new(libspa_sys::SPA_PARAM_BUFFERS_blocks, Value::Int(1)),
-                Property::new(libspa_sys::SPA_PARAM_BUFFERS_size, Value::Int(b.size as i32)),
-                Property::new(libspa_sys::SPA_PARAM_BUFFERS_stride, Value::Int(b.stride as i32)),
+                Property::new(
+                    libspa_sys::SPA_PARAM_BUFFERS_size,
+                    Value::Int(b.size as i32),
+                ),
+                Property::new(
+                    libspa_sys::SPA_PARAM_BUFFERS_stride,
+                    Value::Int(b.stride as i32),
+                ),
                 Property::new(
                     libspa_sys::SPA_PARAM_BUFFERS_dataType,
                     Value::Int(1 << libspa_sys::SPA_DATA_DmaBuf),

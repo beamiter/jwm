@@ -59,7 +59,9 @@ impl Default for Session {
 }
 
 impl Runtime {
-    pub async fn start(wayland: SharedSnapshot) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn start(
+        wayland: SharedSnapshot,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Self {
             inner: Arc::new(Inner {
                 sessions: Mutex::new(HashMap::new()),

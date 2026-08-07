@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use enumflags2::{BitFlags, bitflags};
 use log::{info, warn};
 use zbus::object_server::{ObjectServer, SignalEmitter};
-use zbus::{Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValue, zvariant::Value};
+use zbus::{
+    Connection, interface, zvariant::OwnedObjectPath, zvariant::OwnedValue, zvariant::Value,
+};
 
 use crate::capture::{self, CaptureHandle, CaptureTransport};
 use crate::picker::{SourceSelection, pick_outputs, pick_windows};
@@ -121,7 +123,10 @@ impl ScreenCast {
         _app_id: String,
         options: HashMap<String, OwnedValue>,
     ) -> (u32, HashMap<String, OwnedValue>) {
-        info!("SelectSources {session_handle} options={:?}", options.keys().collect::<Vec<_>>());
+        info!(
+            "SelectSources {session_handle} options={:?}",
+            options.keys().collect::<Vec<_>>()
+        );
 
         let parsed = parse_select_sources_opts(&options);
         let types_mask = parsed.types_mask;
@@ -144,8 +149,16 @@ impl ScreenCast {
         if let Some(tok) = restore_token_in.as_deref() {
             if let Some((sel, _prev_mode)) = restore::resolve(tok, &outputs, &toplevels) {
                 let filtered = SourceSelection {
-                    outputs: if want_monitor { sel.outputs } else { Vec::new() },
-                    toplevels: if want_window { sel.toplevels } else { Vec::new() },
+                    outputs: if want_monitor {
+                        sel.outputs
+                    } else {
+                        Vec::new()
+                    },
+                    toplevels: if want_window {
+                        sel.toplevels
+                    } else {
+                        Vec::new()
+                    },
                 };
                 if !filtered.outputs.is_empty() || !filtered.toplevels.is_empty() {
                     info!("SelectSources honoring restore_token `{tok}`");
@@ -172,7 +185,8 @@ impl ScreenCast {
             // If the user cancelled either picker, treat the whole
             // SelectSources as cancelled — silently substituting a default
             // would defeat the consent dialog and share the screen anyway.
-            if matches!(outs, PickerOutcome::Cancelled) || matches!(tops, PickerOutcome::Cancelled) {
+            if matches!(outs, PickerOutcome::Cancelled) || matches!(tops, PickerOutcome::Cancelled)
+            {
                 info!("SelectSources cancelled by user");
                 return (1, HashMap::new());
             }
@@ -244,7 +258,10 @@ impl ScreenCast {
             let capture = match capture::spawn_output_capture(o.name.clone(), paint_cursors) {
                 Ok(c) => c,
                 Err(e) => {
-                    warn!("Start: failed to spawn capture for output `{}`: {e}", o.name);
+                    warn!(
+                        "Start: failed to spawn capture for output `{}`: {e}",
+                        o.name
+                    );
                     continue;
                 }
             };
@@ -280,7 +297,8 @@ impl ScreenCast {
             }
         }
         for (idx, t) in selection.toplevels.iter().enumerate() {
-            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors) {
+            let capture = match capture::spawn_toplevel_capture(t.identifier.clone(), paint_cursors)
+            {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(
@@ -340,9 +358,7 @@ impl ScreenCast {
             return (2, HashMap::new());
         }
         if streams_meta.is_empty() {
-            warn!(
-                "Start {session_handle}: all {total_picked} captures failed; returning error"
-            );
+            warn!("Start {session_handle}: all {total_picked} captures failed; returning error");
             return (2, HashMap::new());
         }
 
@@ -484,7 +500,10 @@ mod tests {
         assert!(!p.multiple);
         assert_eq!(p.persist_mode, 0);
         assert_eq!(p.cursor_mode, CursorMode::Embedded as u32);
-        assert!(p.paint_cursors, "Embedded default means cursors are composited");
+        assert!(
+            p.paint_cursors,
+            "Embedded default means cursors are composited"
+        );
         assert!(p.restore_token.is_none());
     }
 
@@ -513,7 +532,10 @@ mod tests {
         let mixed = (CursorMode::Embedded as u32) | (CursorMode::Metadata as u32);
         opts.insert("cursor_mode".into(), ov_u32(mixed));
         let p = parse_select_sources_opts(&opts);
-        assert!(p.paint_cursors, "Embedded bit set anywhere → composite cursors");
+        assert!(
+            p.paint_cursors,
+            "Embedded bit set anywhere → composite cursors"
+        );
     }
 
     #[test]

@@ -1371,9 +1371,7 @@ impl Jwm {
                     .state
                     .monitors
                     .get(sel_mon_key)
-                    .map(|monitor| {
-                        *monitor.lt == crate::core::layout::LayoutEnum::SCROLLING
-                    })
+                    .map(|monitor| *monitor.lt == crate::core::layout::LayoutEnum::SCROLLING)
                     .unwrap_or(false);
                 if is_scrolling {
                     self.scrolling_state_for_monitor(sel_mon_key)

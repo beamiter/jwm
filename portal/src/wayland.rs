@@ -128,9 +128,12 @@ fn run_event_loop(
     let mut outputs = Vec::new();
     for global in globals.contents().clone_list() {
         if global.interface == wl_output::WlOutput::interface().name {
-            let wl_out = globals
-                .registry()
-                .bind::<wl_output::WlOutput, _, Client>(global.name, global.version.min(4), &qh, ());
+            let wl_out = globals.registry().bind::<wl_output::WlOutput, _, Client>(
+                global.name,
+                global.version.min(4),
+                &qh,
+                (),
+            );
             outputs.push((global.name, wl_out, OutputInfo::default()));
         }
     }
@@ -180,14 +183,14 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Client {
         // we'd need a fuller redo — the portal is cheap to restart, so for
         // now we only track the dynamic output set.
         match event {
-            wl_registry::Event::Global { name, interface, version } => {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => {
                 if interface == wl_output::WlOutput::interface().name {
-                    let wl_out = proxy.bind::<wl_output::WlOutput, _, Client>(
-                        name,
-                        version.min(4),
-                        qh,
-                        (),
-                    );
+                    let wl_out =
+                        proxy.bind::<wl_output::WlOutput, _, Client>(name, version.min(4), qh, ());
                     state.outputs.push((name, wl_out, OutputInfo::default()));
                     info!("jwm-portal: wl_output hot-plug add registry_name={name}");
                 }
@@ -229,7 +232,12 @@ impl Dispatch<wl_output::WlOutput, ()> for Client {
         match event {
             wl_output::Event::Name { name } => entry.2.name = name,
             wl_output::Event::Description { description } => entry.2.description = description,
-            wl_output::Event::Mode { width, height, refresh, .. } => {
+            wl_output::Event::Mode {
+                width,
+                height,
+                refresh,
+                ..
+            } => {
                 entry.2.width = width;
                 entry.2.height = height;
                 entry.2.refresh_mhz = refresh;

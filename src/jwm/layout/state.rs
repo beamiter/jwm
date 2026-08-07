@@ -272,10 +272,7 @@ impl Jwm {
         Ok(())
     }
 
-    fn pertag_current_tag(
-        &self,
-        mon_key: MonitorKey,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+    fn pertag_current_tag(&self, mon_key: MonitorKey) -> Result<usize, Box<dyn std::error::Error>> {
         self.state
             .monitors
             .get(mon_key)

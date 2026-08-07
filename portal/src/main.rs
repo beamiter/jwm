@@ -8,15 +8,15 @@
 
 use log::info;
 
+mod capture;
 mod dbus;
+mod dmabuf;
+mod ipc;
+mod picker;
+mod pipewire_stream;
+mod restore;
 mod session;
 mod wayland;
-mod capture;
-mod dmabuf;
-mod pipewire_stream;
-mod picker;
-mod restore;
-mod ipc;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

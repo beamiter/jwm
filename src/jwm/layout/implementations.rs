@@ -107,7 +107,12 @@ impl Jwm {
     }
 
     pub(crate) fn fibonacci(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
-        self.tiling_layout_wrapper(backend, mon_key, "fibonacci", core_layout::calculate_fibonacci);
+        self.tiling_layout_wrapper(
+            backend,
+            mon_key,
+            "fibonacci",
+            core_layout::calculate_fibonacci,
+        );
     }
 
     pub(crate) fn centered_master(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
@@ -338,8 +343,7 @@ impl Jwm {
 
     pub(crate) fn monocle(&mut self, backend: &mut dyn Backend, mon_key: MonitorKey) {
         info!("[monocle] via pure layout engine");
-        let (wx, wy, ww, wh, _, _, _monitor_num, _client_y_offset) =
-            self.get_monitor_info(mon_key);
+        let (wx, wy, ww, wh, _, _, _monitor_num, _client_y_offset) = self.get_monitor_info(mon_key);
 
         // The layout symbol counts every visible client, floating included.
         let visible_count = self

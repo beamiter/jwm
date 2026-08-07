@@ -49,8 +49,7 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1,
-    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    zwp_linux_buffer_params_v1::ZwpLinuxBufferParamsV1, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
 };
 
 use crate::dmabuf::{self, DmabufBuffer, GbmContext};
@@ -156,10 +155,7 @@ pub fn spawn_toplevel_capture(
     spawn_capture(CaptureTarget::Toplevel { identifier }, paint_cursors)
 }
 
-fn spawn_capture(
-    target: CaptureTarget,
-    paint_cursors: bool,
-) -> Result<CaptureHandle, String> {
+fn spawn_capture(target: CaptureTarget, paint_cursors: bool) -> Result<CaptureHandle, String> {
     let (init_tx, init_rx) = mpsc::sync_channel::<Result<InitResult, String>>(1);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
     let init_tx_for_thread = init_tx.clone();
@@ -554,10 +550,16 @@ fn run_capture(
         .map_err(|e| format!("mmap: {e}"))?
     };
 
-    let pool: wl_shm_pool::WlShmPool =
-        shm.create_pool(memfd.as_fd(), buffer_bytes as i32, &qh, ());
-    let wl_buf: wl_buffer::WlBuffer =
-        pool.create_buffer(0, width as i32, height as i32, stride as i32, format, &qh, ());
+    let pool: wl_shm_pool::WlShmPool = shm.create_pool(memfd.as_fd(), buffer_bytes as i32, &qh, ());
+    let wl_buf: wl_buffer::WlBuffer = pool.create_buffer(
+        0,
+        width as i32,
+        height as i32,
+        stride as i32,
+        format,
+        &qh,
+        (),
+    );
 
     let frame = new_frame_slot();
     {
@@ -835,9 +837,7 @@ impl Dispatch<ExtForeignToplevelListV1, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } = event {
-            state
-                .toplevels
-                .push((toplevel, ToplevelProbe::default()));
+            state.toplevels.push((toplevel, ToplevelProbe::default()));
         }
     }
 

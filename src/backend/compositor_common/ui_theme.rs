@@ -678,7 +678,10 @@ mod tests {
             UiTheme::Paper,
         ] {
             let flat = theme.palette();
-            assert!(flat.glass.is_none(), "{theme:?} must not ask for a backdrop");
+            assert!(
+                flat.glass.is_none(),
+                "{theme:?} must not ask for a backdrop"
+            );
             assert!(
                 flat.card[3] > 0.9,
                 "{theme:?}: a flat card at {} would show through",

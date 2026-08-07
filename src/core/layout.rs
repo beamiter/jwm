@@ -819,7 +819,11 @@ pub fn calculate_grid<K: Copy>(
         // 行尾 / 底行吸收整除余数，让网格与工作区边缘齐平
         let x_off = col * (cell_w + gap);
         let y_off = row * (cell_h + gap);
-        let w = if col == row_cols - 1 { ww - x_off } else { cell_w };
+        let w = if col == row_cols - 1 {
+            ww - x_off
+        } else {
+            cell_w
+        };
         let h = if row == rows - 1 { wh - y_off } else { cell_h };
 
         results.push(LayoutResult {

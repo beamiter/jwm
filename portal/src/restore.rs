@@ -50,7 +50,10 @@ fn load() -> Option<Store> {
     let bytes = std::fs::read(&path).ok()?;
     match serde_json::from_slice::<Store>(&bytes) {
         Ok(s) => {
-            info!("restore: loaded {} session(s) from {path:?}", s.sessions.len());
+            info!(
+                "restore: loaded {} session(s) from {path:?}",
+                s.sessions.len()
+            );
             Some(s)
         }
         Err(e) => {
@@ -107,10 +110,7 @@ pub fn resolve_in(
     if outputs.is_empty() && toplevels.is_empty() {
         return None;
     }
-    Some((
-        SourceSelection { outputs, toplevels },
-        entry.persist_mode,
-    ))
+    Some((SourceSelection { outputs, toplevels }, entry.persist_mode))
 }
 
 /// Look up a token; resolve against the *current* available outputs / toplevels.
@@ -137,7 +137,11 @@ pub fn save_new(selection: &SourceSelection, persist_mode: u32) -> String {
     let token = new_token();
     let entry = RestoredSelection {
         outputs: selection.outputs.iter().map(|o| o.name.clone()).collect(),
-        toplevels: selection.toplevels.iter().map(|t| t.identifier.clone()).collect(),
+        toplevels: selection
+            .toplevels
+            .iter()
+            .map(|t| t.identifier.clone())
+            .collect(),
         persist_mode,
     };
     let mut store = STORE.lock().expect("restore store mutex");
@@ -152,7 +156,11 @@ pub fn save_new(selection: &SourceSelection, persist_mode: u32) -> String {
 pub fn touch(token: &str, selection: &SourceSelection, persist_mode: u32) {
     let entry = RestoredSelection {
         outputs: selection.outputs.iter().map(|o| o.name.clone()).collect(),
-        toplevels: selection.toplevels.iter().map(|t| t.identifier.clone()).collect(),
+        toplevels: selection
+            .toplevels
+            .iter()
+            .map(|t| t.identifier.clone())
+            .collect(),
         persist_mode,
     };
     let mut store = STORE.lock().expect("restore store mutex");
@@ -208,10 +216,17 @@ mod tests {
         let outs = vec![out("DP-1"), out("HDMI-A-1"), out("eDP-1")];
         let tops = vec![top("t-firefox"), top("t-terminal")];
         let (sel, mode) = resolve_in(&e, &outs, &tops).expect("resolves");
-        assert_eq!(sel.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
-                   vec!["DP-1", "HDMI-A-1"]);
-        assert_eq!(sel.toplevels.iter().map(|t| &t.identifier).collect::<Vec<_>>(),
-                   vec!["t-firefox"]);
+        assert_eq!(
+            sel.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
+            vec!["DP-1", "HDMI-A-1"]
+        );
+        assert_eq!(
+            sel.toplevels
+                .iter()
+                .map(|t| &t.identifier)
+                .collect::<Vec<_>>(),
+            vec!["t-firefox"]
+        );
         assert_eq!(mode, 2);
     }
 
