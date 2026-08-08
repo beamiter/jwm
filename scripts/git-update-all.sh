@@ -134,11 +134,20 @@ fi
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/git-update-all.XXXXXX")"
 trap 'rm -rf "$WORKDIR"' EXIT
 
+# 一个目录算不算仓库，以 git 自己的判断为准：光看 .git 存不存在会被空的 .git
+# 目录（残留、误建）骗过去，一路走到 update_one 里才报"不是有效仓库"，还占着
+# 一格计数。先要求 .git 存在，是为了挡住"父目录是仓库"导致的向上发现。
+is_git_repo() {
+    [ -e "$1/.git" ] || return 1
+    git -C "$1" rev-parse --git-dir >/dev/null 2>&1
+}
+
 # 收集仓库：ROOT 本身若是仓库也算上，外加一层子目录
 repos=()
-[ -e "$ROOT/.git" ] && repos+=("$ROOT")
+# ROOT 存绝对路径：默认的 "." 会让汇总里的仓库名也变成 "."
+is_git_repo "$ROOT" && repos+=("$(cd "$ROOT" && pwd)")
 for d in "$ROOT"/*/; do
-    [ -e "${d%/}/.git" ] && repos+=("${d%/}")
+    is_git_repo "${d%/}" && repos+=("${d%/}")
 done
 
 if [ ${#repos[@]} -eq 0 ]; then
