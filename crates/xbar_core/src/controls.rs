@@ -266,6 +266,7 @@ impl PresentationProjector {
                             primary: Some(UserAction::RestoreWindow {
                                 window: window.token,
                                 wm_session_id: view.wm_session_id,
+                                minimized_generation: view.wm_sequence.unwrap_or_default(),
                                 geometry: DockItemGeometry::default(),
                             }),
                             ..InputBindings::default()
@@ -797,6 +798,7 @@ mod tests {
             Some(UserAction::RestoreWindow {
                 window: WindowToken(11),
                 wm_session_id: 11,
+                minimized_generation: 7,
                 geometry: DockItemGeometry::default(),
             })
         );

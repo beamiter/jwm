@@ -166,3 +166,47 @@ fn tauri_install_path_declares_and_checks_its_linux_prerequisites() {
         "the documented Tauri path must enable its optional system dependencies"
     );
 }
+
+#[test]
+fn every_tauri_web_preview_retries_fresh_enter_before_renewing() {
+    let sources = [
+        "bars/tauri_react_bar/src/App.tsx",
+        "bars/tauri_solid_bar/src/App.tsx",
+        "bars/tauri_svelte_bar/src/App.svelte",
+        "bars/tauri_vue_bar/src/App.vue",
+        "bars/tauri_leptos_bar/src/main.rs",
+        "bars/tauri_yew_bar/src/main.rs",
+    ];
+    for source in sources {
+        let text = fs::read_to_string(repository_root().join(source)).unwrap();
+        for contract in [
+            "PREVIEW_ENTER_RETRY_MS",
+            "PREVIEW_RENEWAL_MS",
+            "Fresh ENTER remains fresh until the invoke is acknowledged.",
+            "Compensate a delivered ENTER that outlived its binding.",
+        ] {
+            assert!(
+                text.contains(contract),
+                "{source} must preserve preview delivery contract `{contract}`"
+            );
+        }
+        if source.ends_with(".rs") {
+            assert!(
+                text.contains("preview_enter_decision")
+                    && text.contains("PreviewEnterDecision::RetryFreshEnter")
+                    && text.contains("PreviewEnterDecision::StartRenewal")
+                    && text.contains("preview_leave_unless_reentered")
+                    && text.contains("preview_owner_retirement_requires_leave"),
+                "{source} must test the fresh-ENTER-to-renewal state transition"
+            );
+        } else {
+            assert!(
+                text.contains("renewal: false")
+                    && text.contains("renewal: true")
+                    && text.contains("sendPreviewLeaveUnlessReentered")
+                    && text.contains("sendAutomaticPreviewLeave"),
+                "{source} must keep fresh ENTER and renewal requests distinct"
+            );
+        }
+    }
+}

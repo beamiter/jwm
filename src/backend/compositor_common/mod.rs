@@ -12,6 +12,10 @@ pub(crate) mod genie;
 pub mod layout_strip;
 pub mod math;
 pub mod media;
+// Phase-one foundation: the cache is intentionally not connected to backend
+// behaviour until both X11 and Wayland can honour its pinned-iconic contract.
+#[allow(dead_code)]
+pub(crate) mod minimized_thumbnail;
 pub(crate) mod osd;
 pub mod page_curl;
 pub mod rules;

@@ -1,9 +1,10 @@
 [profiles]
 smoke = ["layout-tile", "layout-grid", "layout-scrolling"]
 layouts = ["layout-tile", "layout-float", "layout-monocle", "layout-fibonacci", "layout-centeredmaster", "layout-bstack", "layout-grid", "layout-deck", "layout-threecol", "layout-tatami", "layout-fullscreen", "layout-scrolling", "layout-vstack"]
-window-management = ["wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip"]
+window-management = ["wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip", "wm-minimize-restore"]
+minimize = ["wm-minimize-restore"]
 tags = ["tags-move-window"]
-stage2 = ["layout-tile", "layout-float", "layout-monocle", "layout-fibonacci", "layout-centeredmaster", "layout-bstack", "layout-grid", "layout-deck", "layout-threecol", "layout-tatami", "layout-fullscreen", "layout-scrolling", "layout-vstack", "wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip", "tags-move-window"]
+stage2 = ["layout-tile", "layout-float", "layout-monocle", "layout-fibonacci", "layout-centeredmaster", "layout-bstack", "layout-grid", "layout-deck", "layout-threecol", "layout-tatami", "layout-fullscreen", "layout-scrolling", "layout-vstack", "wm-focus-order", "wm-factors", "wm-floating", "wm-sticky", "wm-pip", "wm-minimize-restore", "tags-move-window"]
 compositor-basic = ["effect-rounded", "effect-shadow", "effect-blur", "effect-fade"]
 compositor-pointer = ["effect-wobbly", "effect-motion-trail"]
 compositor-interactive = ["effect-overview", "effect-magnifier", "effect-annotation"]
@@ -257,6 +258,21 @@ assertions = ["focused_pip"]
 actions = [
   { command = "focus_demo", args = { value = 1 }, hold = 0.6 },
   { command = "togglepip", args = {}, hold = 1.2 },
+]
+
+[[scene]]
+id = "wm-minimize-restore"
+title = "macOS 风格最小化与恢复"
+layout = "tile"
+windows = 3
+duration = 5.0
+status = "ready"
+manual_review = true
+narration = "应用通过标准窗口管理协议最小化到 Dock，并恢复同一个仍由 JWM 管理的窗口。"
+assertions = ["minimize_restore_round_trip"]
+actions = [
+  { command = "minimize_demo", args = {}, hold = 1.4 },
+  { command = "restore_demo", args = {}, hold = 1.4 },
 ]
 
 [[scene]]

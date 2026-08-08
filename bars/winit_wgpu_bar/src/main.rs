@@ -3,13 +3,13 @@ use log::warn;
 use pango::FontDescription;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use winit::window::Window;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{WindowAttributes, WindowId},
 };
 
@@ -447,7 +447,23 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {}
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self
+            .bar
+            .next_dock_deadline(now)
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let update = self.bar.poll_transport();
+            self.handle_runtime_update(update);
+            self.sync_transport_wake();
+        }
+        event_loop.set_control_flow(
+            self.bar
+                .next_dock_deadline(Instant::now())
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
+    }
 }
 
 /// A monitor size is only usable when the platform really knows one. An X

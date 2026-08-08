@@ -30,8 +30,11 @@ python3 video-demo/runner/run_demo.py --backend x11rb --profile smoke
 # All 13 JWM layouts
 python3 video-demo/runner/run_demo.py --backend x11rb --profile layouts
 
-# Focus/order, mfact/cfact/nmaster, Floating, Sticky and PiP
+# Focus/order, mfact/cfact/nmaster, Floating, Sticky, PiP and minimize/restore
 python3 video-demo/runner/run_demo.py --backend x11rb --profile window-management
+
+# Focused regression for the application-driven minimize/restore contract
+python3 video-demo/runner/run_demo.py --backend x11rb --profile minimize
 
 # Safe window migration to an automatically selected empty tag
 python3 video-demo/runner/run_demo.py --backend x11rb --profile tags
@@ -39,6 +42,17 @@ python3 video-demo/runner/run_demo.py --backend x11rb --profile tags
 # Complete phase-2 recording set
 python3 video-demo/runner/run_demo.py --backend x11rb --profile stage2
 ```
+
+The `wm-minimize-restore` scene talks to the demo client's Unix control socket.
+`minimize` emits the ICCCM `WM_CHANGE_STATE/IconicState` request and `restore`
+emits the EWMH `_NET_ACTIVE_WINDOW` request; the runner never substitutes a raw
+X11 unmap. State polling, rather than a fixed delay, verifies that the same
+window ID remains in JWM's `get_windows` result while fully offscreen and
+unfocused, then intersects a monitor and regains focus after restore. The short
+action holds only make both animation endpoints visible in the recorded clip.
+The structural assertion is automated; Genie/Dock appearance remains marked
+`manual_review`. The normal last-tag isolation and session guard apply to this
+profile as well.
 
 Compositor scenes use reversible runtime configuration and real XTest pointer
 input. They are automated but remain marked `manual_review` because visual

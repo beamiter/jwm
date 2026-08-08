@@ -75,6 +75,28 @@ fn tagged_client_count(state: &WMState, monitor: MonitorKey, tag_mask: u32) -> u
     })
 }
 
+fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> WindowInfo {
+    WindowInfo {
+        id: client.win.raw(),
+        name: client.name.clone(),
+        class: client.class.clone(),
+        instance: client.instance.clone(),
+        tags: client.state.tags,
+        monitor,
+        x: client.geometry.x,
+        y: client.geometry.y,
+        w: client.geometry.w,
+        h: client.geometry.h,
+        is_floating: client.state.is_floating,
+        is_fullscreen: client.state.is_fullscreen,
+        is_urgent: client.state.is_urgent,
+        is_sticky: client.state.is_sticky,
+        is_pip: client.state.is_pip,
+        is_minimized: client.state.is_hidden,
+        is_focused,
+    }
+}
+
 fn recording_file_is_valid(path: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
         && std::process::Command::new("ffprobe")
@@ -2227,24 +2249,11 @@ impl Jwm {
 
     fn window_info(&self, client_key: ClientKey, is_focused: bool) -> Option<WindowInfo> {
         let client = self.state.clients.get(client_key)?;
-        Some(WindowInfo {
-            id: client.win.raw(),
-            name: client.name.clone(),
-            class: client.class.clone(),
-            instance: client.instance.clone(),
-            tags: client.state.tags,
-            monitor: resolved_client_monitor_num(&self.state.monitors, client),
-            x: client.geometry.x,
-            y: client.geometry.y,
-            w: client.geometry.w,
-            h: client.geometry.h,
-            is_floating: client.state.is_floating,
-            is_fullscreen: client.state.is_fullscreen,
-            is_urgent: client.state.is_urgent,
-            is_sticky: client.state.is_sticky,
-            is_pip: client.state.is_pip,
+        Some(client_window_info(
+            client,
+            resolved_client_monitor_num(&self.state.monitors, client),
             is_focused,
-        })
+        ))
     }
 
     pub(crate) fn query_windows(&self) -> Vec<WindowInfo> {
@@ -2638,11 +2647,11 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
-        optional_protocol_enabled_from_flags, output_color_policy_json, parse_benchmark_request,
-        parse_command_batch_entries, parse_config_batch_changes, parse_optional_u32_ipc_arg,
-        parse_required_i32_ipc_arg, render_decisions_json, resolved_client_monitor_num,
-        runtime_health, tagged_client_count, workspace_layout_state,
+        client_window_info, color_managed_surface_json, color_session_policy_json,
+        color_surface_summary_json, optional_protocol_enabled_from_flags, output_color_policy_json,
+        parse_benchmark_request, parse_command_batch_entries, parse_config_batch_changes,
+        parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg, render_decisions_json,
+        resolved_client_monitor_num, runtime_health, tagged_client_count, workspace_layout_state,
     };
     use crate::application::BenchmarkRequest;
     use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
@@ -2724,6 +2733,27 @@ mod tests {
         assert_eq!(tagged_client_count(&state, monitor_key, 0b0010), 1);
         assert_eq!(tagged_client_count(&state, monitor_key, 0b0100), 1);
         assert_eq!(tagged_client_count(&state, monitor_key, 0b1000), 0);
+    }
+
+    #[test]
+    fn window_query_projection_distinguishes_minimized_from_focus() {
+        let mut client = WMClient::new(WindowId::from_raw(0x2a));
+        client.state.is_hidden = true;
+        client.geometry.x = -2560;
+        client.geometry.y = 40;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+
+        let info = client_window_info(&client, 7, false);
+        assert_eq!(info.id, 0x2a);
+        assert_eq!(info.monitor, 7);
+        assert!(info.is_minimized);
+        assert!(!info.is_focused);
+
+        client.state.is_hidden = false;
+        let restored = client_window_info(&client, 7, true);
+        assert!(!restored.is_minimized);
+        assert!(restored.is_focused);
     }
 
     #[test]

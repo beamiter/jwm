@@ -138,9 +138,7 @@ impl Jwm {
 
                 if let Some(reason) = remove_reason {
                     info!("Bar for monitor {} failed: {}", mon_id, reason);
-                    self.secondary_bars.remove(&mon_id);
-                    self.clear_minimized_dock_for_monitor(backend, mon_id);
-                    self.note_secondary_bar_failure(mon_id, now, &reason);
+                    self.handle_secondary_bar_failure(backend, mon_id, now, &reason);
                     continue;
                 }
 
@@ -168,14 +166,88 @@ impl Jwm {
             .filter(|monitor| !existing_monitors.contains(monitor))
             .collect();
         for monitor in removed_monitors {
-            self.clear_minimized_dock_for_monitor(backend, monitor);
+            let _ = self.retire_secondary_bar(backend, monitor);
         }
-        self.secondary_bars
-            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
         self.secondary_bar_failures
             .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
         self.secondary_bar_retry_after
             .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
+    }
+
+    /// Apply the common cleanup/backoff policy after a managed bar fails.
+    /// Safe to call after the process has already been removed by SIGCHLD.
+    pub(super) fn handle_secondary_bar_failure(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor_id: i32,
+        now: Instant,
+        reason: &str,
+    ) {
+        self.secondary_bars.remove(&monitor_id);
+        self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        self.note_secondary_bar_failure(monitor_id, now, reason);
+    }
+
+    /// Permanently retire the bar for an output that no longer exists.
+    /// Unlike a crash, this is not retried and must also remove its managed
+    /// Dock client before monitor migration can attach that bar to another
+    /// output. Returns the retired client key so monitor ownership cleanup can
+    /// explicitly keep it out of the reassignment set even if unmanage reports
+    /// a late backend error.
+    pub(super) fn retire_secondary_bar(
+        &mut self,
+        backend: &mut dyn Backend,
+        monitor_id: i32,
+    ) -> Option<crate::core::models::ClientKey> {
+        self.clear_minimized_dock_for_monitor(backend, monitor_id);
+        self.pending_bar_updates.remove(&monitor_id);
+        self.minimized_projection_epochs.remove(&monitor_id);
+        self.reconciled_minimized_target_generations
+            .remove(&monitor_id);
+        self.secondary_bar_failures.remove(&monitor_id);
+        self.secondary_bar_retry_after.remove(&monitor_id);
+
+        let Some(mut bar) = self.secondary_bars.remove(&monitor_id) else {
+            return None;
+        };
+        let retired_client = bar.client_key;
+
+        if let Some(client_key) = bar.client_key
+            && self.state.clients.contains_key(client_key)
+            && let Err(error) = self.unmanage(backend, Some(client_key), true)
+        {
+            warn!(
+                "Could not unmanage retired bar client on monitor {}: {}",
+                monitor_id, error
+            );
+        }
+
+        // Consult the owning Child handle before signalling. A previously
+        // reaped PID may already belong to an unrelated process.
+        match bar.child.try_wait() {
+            Ok(None) => {
+                if let Err(error) = bar.child.kill() {
+                    warn!(
+                        "Could not terminate retired bar on monitor {}: {}",
+                        monitor_id, error
+                    );
+                }
+            }
+            Ok(Some(status)) => {
+                info!(
+                    "Retired bar on monitor {} had already exited: {}",
+                    monitor_id, status
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "Retired bar on monitor {} has unknown status ({}); not signalling PID",
+                    monitor_id, error
+                );
+            }
+        }
+
+        retired_client
     }
 
     pub(super) fn note_secondary_bar_failure(

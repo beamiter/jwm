@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RING_BUFFER_MAGIC: u64 = 0x52494E47_42554646;
-const RING_BUFFER_VERSION: u64 = 12;
+const RING_BUFFER_VERSION: u64 = 13;
 const LAYOUT_MARKER: u32 = 0x5352_4234; // "SRB4"
 
 /// mmap 对基址的对齐保证（Linux 基础页大小）。payload 对齐超过它时

@@ -2,7 +2,15 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from runner.run_demo import layout_name, occupied_user_tags, resolve_args, uses_symbol
+from runner.run_demo import (
+    layout_name,
+    occupied_user_tags,
+    resolve_args,
+    uses_symbol,
+    validate_scene,
+    window_fully_left_of_desktop,
+    window_intersects_monitor,
+)
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -64,6 +72,35 @@ class StageTwoManifestTests(unittest.TestCase):
             self.assertEqual(scene["status"], "ready")
             self.assertTrue(scene["manual_review"])
             self.assertIn("effect_changed", scene["assertions"])
+
+    def test_minimize_profile_uses_a_balanced_demo_client_round_trip(self):
+        self.assertEqual(self.data["profiles"]["minimize"], ["wm-minimize-restore"])
+        scene = self.scenes["wm-minimize-restore"]
+        self.assertEqual(
+            [action["command"] for action in scene["actions"]],
+            ["minimize_demo", "restore_demo"],
+        )
+        self.assertIn("minimize_restore_round_trip", scene["assertions"])
+        self.assertTrue(scene["manual_review"])
+        validate_scene(scene)
+
+    def test_minimize_scene_validation_rejects_unbalanced_controls(self):
+        with self.assertRaisesRegex(RuntimeError, "restores without"):
+            validate_scene({"id": "bad", "actions": [{"command": "restore_demo"}]})
+        with self.assertRaisesRegex(RuntimeError, "leaves a demo window minimized"):
+            validate_scene({"id": "bad", "actions": [{"command": "minimize_demo"}]})
+
+    def test_minimized_geometry_probe_handles_negative_monitor_origins(self):
+        monitors = [
+            {"x": -1920, "y": 0, "w": 1920, "h": 1080},
+            {"x": 0, "y": 0, "w": 2560, "h": 1440},
+        ]
+        hidden = {"x": -2720, "y": 100, "w": 800, "h": 600}
+        restored = {"x": -1600, "y": 100, "w": 800, "h": 600}
+        self.assertTrue(window_fully_left_of_desktop(hidden, monitors))
+        self.assertFalse(window_intersects_monitor(hidden, monitors))
+        self.assertFalse(window_fully_left_of_desktop(restored, monitors))
+        self.assertTrue(window_intersects_monitor(restored, monitors))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ mod frame_rate;
 mod gpu_fence_sync;
 #[cfg(test)]
 mod headless_render;
+mod minimized_thumbnail;
 mod overview;
 #[allow(dead_code, unreachable_pub)]
 mod pbo_uploader;
@@ -70,9 +71,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::api::CompositorRect;
+use crate::backend::compositor_common::capture::flip_rgba_vertical;
 use crate::backend::compositor_common::effects::MotionTrail;
 use crate::backend::compositor_common::genie::{GenieDirection, PreviewDirection};
 use crate::backend::compositor_common::math;
+use crate::backend::compositor_common::minimized_thumbnail::snapshot_shader_opacity;
 use crate::backend::compositor_common::rules::{CornerRadiusRule, OpacityRule, ScaleRule};
 use crate::backend::compositor_common::wallpaper::{WallpaperImageData, WallpaperMode};
 
@@ -116,8 +119,16 @@ pub(crate) unsafe fn create_program(
     fs_src: &str,
 ) -> Result<u32, String> {
     unsafe {
-        let vs = gl.CreateShader(ffi::VERTEX_SHADER);
+        // Validate both sources before creating either shader.  Otherwise a
+        // CString conversion failure after CreateShader would strand the raw
+        // shader name in the still-live KMS context.
         let vs_cstr = CString::new(vs_src).map_err(|e| format!("VS CString: {}", e))?;
+        let fs_cstr = CString::new(fs_src).map_err(|e| format!("FS CString: {}", e))?;
+
+        let vs = gl.CreateShader(ffi::VERTEX_SHADER);
+        if vs == 0 {
+            return Err("glCreateShader returned 0 for vertex shader".into());
+        }
         let vs_ptr = vs_cstr.as_ptr();
         gl.ShaderSource(vs, 1, &vs_ptr, std::ptr::null());
         gl.CompileShader(vs);
@@ -137,7 +148,10 @@ pub(crate) unsafe fn create_program(
         }
 
         let fs = gl.CreateShader(ffi::FRAGMENT_SHADER);
-        let fs_cstr = CString::new(fs_src).map_err(|e| format!("FS CString: {}", e))?;
+        if fs == 0 {
+            gl.DeleteShader(vs);
+            return Err("glCreateShader returned 0 for fragment shader".into());
+        }
         let fs_ptr = fs_cstr.as_ptr();
         gl.ShaderSource(fs, 1, &fs_ptr, std::ptr::null());
         gl.CompileShader(fs);
@@ -157,6 +171,11 @@ pub(crate) unsafe fn create_program(
         }
 
         let program = gl.CreateProgram();
+        if program == 0 {
+            gl.DeleteShader(vs);
+            gl.DeleteShader(fs);
+            return Err("glCreateProgram returned 0".into());
+        }
         gl.AttachShader(program, vs);
         gl.AttachShader(program, fs);
         gl.LinkProgram(program);
@@ -532,6 +551,62 @@ pub(crate) struct WindowState {
     pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
 }
 
+/// Resource-free compositor metadata retained while a minimized surface has
+/// no live or Dock-owned texture. Keeping it separate from `WindowState`
+/// prevents hidden clients from participating in render/direct-scanout scans
+/// while preserving the semantics needed by a later static import or restore.
+#[derive(Clone)]
+struct WindowVisualMetadata {
+    opacity_override: Option<f32>,
+    corner_radius_override: Option<f32>,
+    frame_extents: [u32; 4],
+    is_shaped: bool,
+    is_fullscreen: bool,
+    is_urgent: bool,
+    is_pip: bool,
+    is_frosted: bool,
+    frosted_strength: f32,
+    class_name: String,
+    scale: f32,
+    audio_sync_target: Option<f32>,
+}
+
+impl From<&WindowState> for WindowVisualMetadata {
+    fn from(window: &WindowState) -> Self {
+        Self {
+            opacity_override: window.opacity_override,
+            corner_radius_override: window.corner_radius_override,
+            frame_extents: window.frame_extents,
+            is_shaped: window.is_shaped,
+            is_fullscreen: window.is_fullscreen,
+            is_urgent: window.is_urgent,
+            is_pip: window.is_pip,
+            is_frosted: window.is_frosted,
+            frosted_strength: window.frosted_strength,
+            class_name: window.class_name.clone(),
+            scale: window.scale,
+            audio_sync_target: window.audio_sync_target,
+        }
+    }
+}
+
+impl WindowVisualMetadata {
+    fn apply_to(&self, window: &mut WindowState) {
+        window.opacity_override = self.opacity_override;
+        window.corner_radius_override = self.corner_radius_override;
+        window.frame_extents = self.frame_extents;
+        window.is_shaped = self.is_shaped;
+        window.is_fullscreen = self.is_fullscreen;
+        window.is_urgent = self.is_urgent;
+        window.is_pip = self.is_pip;
+        window.is_frosted = self.is_frosted;
+        window.frosted_strength = self.frosted_strength;
+        window.class_name.clone_from(&self.class_name);
+        window.scale = self.scale;
+        window.audio_sync_target = self.audio_sync_target;
+    }
+}
+
 /// Urgency updates may arrive while a surface is being managed but before its
 /// compositor state/texture exists. Keep only positive pending updates: a
 /// later clear cancels the pending value, and first creation consumes it.
@@ -596,6 +671,8 @@ pub(crate) struct MinimizedVisual {
     pub color_transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
     pub target: Option<CompositorRect>,
     pub cached_at: Instant,
+    /// Conservative allocation estimate derived from the retained texture's
+    /// physical buffer dimensions, not the animation's logical geometry.
     pub estimated_bytes: u64,
 }
 
@@ -610,6 +687,10 @@ pub(crate) struct DockPreview {
     pub direction: PreviewDirection,
     pub opacity: f32,
     pub scale: f32,
+    /// The Dock request remains authoritative while a hidden surface is being
+    /// imported after cache eviction. Its animation and lease start only once
+    /// a real texture is available.
+    pub awaiting_source: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +738,16 @@ pub(crate) struct Particle {
 pub(crate) struct ParticleSystem {
     pub particles: Vec<Particle>,
     pub age: f32,
+}
+
+/// The compositor creates the output texture as a raw GLES name, but KMS may
+/// subsequently transfer that name into a Smithay `GlesTexture::from_raw`
+/// owner. Runtime teardown must honor whichever owner actually exists; a raw
+/// `glDeleteTextures` after that transfer would race Smithay's deferred delete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompositorOutputTextureOwnership {
+    RawCompositor,
+    SmithayRenderer,
 }
 
 // ---------------------------------------------------------------------------
@@ -757,6 +848,9 @@ pub(crate) struct WaylandCompositor {
     transition_texture: u32,
     particle_vao: u32,
     particle_vbo: u32,
+    /// Guards the explicit context-current teardown used by runtime toggles.
+    /// `Drop` remains context-agnostic for KMS/EGL destruction paths.
+    gpu_resources_released: bool,
 
     // Dimensions
     screen_w: u32,
@@ -764,6 +858,7 @@ pub(crate) struct WaylandCompositor {
 
     // Per-window state
     windows: HashMap<u64, WindowState>,
+    minimized_window_metadata: HashMap<u64, WindowVisualMetadata>,
     pending_window_urgency: PendingWindowUrgency,
 
     // Set true while any WindowState carries a non-None color_transform.
@@ -904,6 +999,11 @@ pub(crate) struct WaylandCompositor {
     genie_targets: HashMap<u64, CompositorRect>,
     minimized_windows: HashSet<u64>,
     minimized_visuals: HashMap<u64, MinimizedVisual>,
+    minimized_thumbnails: minimized_thumbnail::MinimizedThumbnailState,
+    // Minimize intent can precede both compositor creation and the client's
+    // first imported buffer. These ids need one hidden-surface texture import
+    // before they can converge into minimized_visuals.
+    pending_minimized_visuals: HashSet<u64>,
     pending_genie_restores: HashSet<u64>,
     dock_preview: Option<DockPreview>,
 
@@ -1188,6 +1288,14 @@ unsafe fn create_fbo_texture_fmt(
     unsafe {
         let mut tex = 0u32;
         gl.GenTextures(1, &mut tex);
+        if tex == 0 {
+            let error = gl.GetError();
+            return Err(if error == ffi::NO_ERROR {
+                ffi::OUT_OF_MEMORY
+            } else {
+                error
+            });
+        }
         gl.BindTexture(ffi::TEXTURE_2D, tex);
         let pixel_type = if internal_format == GL_RGB10_A2 {
             GL_UNSIGNED_INT_2_10_10_10_REV
@@ -1222,6 +1330,16 @@ unsafe fn create_fbo_texture_fmt(
 
         let mut fbo = 0u32;
         gl.GenFramebuffers(1, &mut fbo);
+        if fbo == 0 {
+            let error = gl.GetError();
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+            gl.DeleteTextures(1, &tex);
+            return Err(if error == ffi::NO_ERROR {
+                ffi::OUT_OF_MEMORY
+            } else {
+                error
+            });
+        }
         gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
         gl.FramebufferTexture2D(
             ffi::FRAMEBUFFER,
@@ -1250,6 +1368,209 @@ unsafe fn create_fbo_texture_fmt(
     }
 }
 
+/// Test-only observations and failure points are carried through this private
+/// value rather than global state, so headless constructor tests remain safe
+/// when Rust's test harness runs them in parallel.
+#[derive(Default)]
+struct CompositorConstructionProbe {
+    fail_before_program_count: Option<usize>,
+    fail_before_framebuffer_count: Option<usize>,
+    fail_before_commit: bool,
+    programs: Vec<u32>,
+    vertex_arrays: Vec<u32>,
+    buffers: Vec<u32>,
+    framebuffers: Vec<u32>,
+    textures: Vec<u32>,
+}
+
+/// Owns every raw GLES name created before `WaylandCompositor` itself exists.
+///
+/// The output texture is still a compositor-owned raw name at this stage;
+/// KMS cannot wrap it in a Smithay `GlesTexture` until `new` returns and the
+/// compositor is installed.  Consequently every constructor failure can and
+/// must delete it directly here.
+struct CompositorConstructionGuard<'gl, 'probe> {
+    gl: &'gl ffi::Gles2,
+    probe: Option<&'probe mut CompositorConstructionProbe>,
+    programs: Vec<u32>,
+    vertex_arrays: Vec<u32>,
+    buffers: Vec<u32>,
+    framebuffers: Vec<u32>,
+    textures: Vec<u32>,
+    committed: bool,
+}
+
+impl<'gl, 'probe> CompositorConstructionGuard<'gl, 'probe> {
+    fn new(gl: &'gl ffi::Gles2, probe: Option<&'probe mut CompositorConstructionProbe>) -> Self {
+        Self {
+            gl,
+            probe,
+            programs: Vec::with_capacity(24),
+            vertex_arrays: Vec::with_capacity(2),
+            buffers: Vec::with_capacity(2),
+            framebuffers: Vec::with_capacity(11),
+            textures: Vec::with_capacity(11),
+            committed: false,
+        }
+    }
+
+    unsafe fn compile_program(&mut self, vs_src: &str, fs_src: &str) -> Result<u32, String> {
+        if self
+            .probe
+            .as_ref()
+            .and_then(|probe| probe.fail_before_program_count)
+            == Some(self.programs.len())
+        {
+            return Err(format!(
+                "injected compositor construction failure before program {}",
+                self.programs.len()
+            ));
+        }
+        let program = unsafe { create_program(self.gl, vs_src, fs_src)? };
+        self.track_program(program);
+        Ok(program)
+    }
+
+    fn track_program(&mut self, program: u32) {
+        if program == 0 {
+            return;
+        }
+        self.programs.push(program);
+        if let Some(probe) = &mut self.probe {
+            probe.programs.push(program);
+        }
+    }
+
+    fn track_vertex_array(&mut self, vertex_array: u32) {
+        if vertex_array == 0 {
+            return;
+        }
+        self.vertex_arrays.push(vertex_array);
+        if let Some(probe) = &mut self.probe {
+            probe.vertex_arrays.push(vertex_array);
+        }
+    }
+
+    unsafe fn create_vertex_array(&mut self, label: &str) -> Result<u32, String> {
+        let mut vertex_array = 0;
+        unsafe { self.gl.GenVertexArrays(1, &mut vertex_array) };
+        if vertex_array == 0 {
+            return Err(format!("glGenVertexArrays returned 0 for {label}"));
+        }
+        self.track_vertex_array(vertex_array);
+        Ok(vertex_array)
+    }
+
+    fn track_buffer(&mut self, buffer: u32) {
+        if buffer == 0 {
+            return;
+        }
+        self.buffers.push(buffer);
+        if let Some(probe) = &mut self.probe {
+            probe.buffers.push(buffer);
+        }
+    }
+
+    unsafe fn create_buffer(&mut self, label: &str) -> Result<u32, String> {
+        let mut buffer = 0;
+        unsafe { self.gl.GenBuffers(1, &mut buffer) };
+        if buffer == 0 {
+            return Err(format!("glGenBuffers returned 0 for {label}"));
+        }
+        self.track_buffer(buffer);
+        Ok(buffer)
+    }
+
+    unsafe fn create_fbo_texture(
+        &mut self,
+        w: u32,
+        h: u32,
+        internal_format: u32,
+    ) -> Result<(u32, u32), u32> {
+        if self
+            .probe
+            .as_ref()
+            .and_then(|probe| probe.fail_before_framebuffer_count)
+            == Some(self.framebuffers.len())
+        {
+            return Err(ffi::FRAMEBUFFER_UNSUPPORTED);
+        }
+        let (framebuffer, texture) =
+            unsafe { create_fbo_texture_fmt(self.gl, w, h, internal_format)? };
+        if framebuffer != 0 {
+            self.framebuffers.push(framebuffer);
+            if let Some(probe) = &mut self.probe {
+                probe.framebuffers.push(framebuffer);
+            }
+        }
+        if texture != 0 {
+            self.textures.push(texture);
+            if let Some(probe) = &mut self.probe {
+                probe.textures.push(texture);
+            }
+        }
+        Ok((framebuffer, texture))
+    }
+
+    unsafe fn create_required_fbo_texture(
+        &mut self,
+        w: u32,
+        h: u32,
+        internal_format: u32,
+        label: &str,
+    ) -> Result<(u32, u32), String> {
+        unsafe { self.create_fbo_texture(w, h, internal_format) }.map_err(|status| {
+            format!("failed to create required {label} framebuffer ({w}x{h}, status=0x{status:x})")
+        })
+    }
+
+    fn should_fail_before_commit(&self) -> bool {
+        self.probe
+            .as_ref()
+            .is_some_and(|probe| probe.fail_before_commit)
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for CompositorConstructionGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        unsafe {
+            // Clear every binding which could otherwise keep a deleted name
+            // live or make the caller inherit constructor-only state.
+            self.gl.UseProgram(0);
+            self.gl.BindVertexArray(0);
+            self.gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            self.gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
+            self.gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
+            self.gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            self.gl.ActiveTexture(ffi::TEXTURE0);
+            self.gl.BindTexture(ffi::TEXTURE_2D, 0);
+
+            for framebuffer in self.framebuffers.iter_mut().rev() {
+                delete_framebuffer_name(self.gl, framebuffer);
+            }
+            for texture in self.textures.iter_mut().rev() {
+                delete_texture_name(self.gl, texture);
+            }
+            for buffer in self.buffers.iter_mut().rev() {
+                delete_buffer_name(self.gl, buffer);
+            }
+            for vertex_array in self.vertex_arrays.iter_mut().rev() {
+                delete_vertex_array_name(self.gl, vertex_array);
+            }
+            for program in self.programs.iter_mut().rev() {
+                delete_program_name(self.gl, program);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------
@@ -1261,85 +1582,79 @@ impl WaylandCompositor {
         screen_h: u32,
         hdr_10bit: bool,
     ) -> Result<Self, String> {
+        unsafe { Self::new_inner(gl, screen_w, screen_h, hdr_10bit, None) }
+    }
+
+    unsafe fn new_inner(
+        gl: &ffi::Gles2,
+        screen_w: u32,
+        screen_h: u32,
+        hdr_10bit: bool,
+        construction_probe: Option<&mut CompositorConstructionProbe>,
+    ) -> Result<Self, String> {
         unsafe {
-            let program = create_program(gl, shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-            let shadow_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
-            let blur_down_program =
-                create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
-            let blur_up_program =
-                create_program(gl, shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
-            let border_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
-            let gradient_border_program = create_program(
-                gl,
+            let mut construction = CompositorConstructionGuard::new(gl, construction_probe);
+            let program =
+                construction.compile_program(shaders::VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let thumbnail_program = construction.compile_program(
+                minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_VERTEX_SHADER,
+                crate::backend::compositor_common::minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_FRAGMENT_SHADER,
+            )?;
+            let minimized_thumbnails =
+                minimized_thumbnail::MinimizedThumbnailState::from_program(gl, thumbnail_program);
+            let shadow_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::SHADOW_FRAGMENT_SHADER)?;
+            let blur_down_program = construction
+                .compile_program(shaders::BLUR_DOWN_VERTEX, shaders::BLUR_DOWN_FRAGMENT)?;
+            let blur_up_program = construction
+                .compile_program(shaders::BLUR_DOWN_VERTEX, shaders::BLUR_UP_FRAGMENT)?;
+            let border_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::BORDER_FRAGMENT_SHADER)?;
+            let gradient_border_program = construction.compile_program(
                 shaders::VERTEX_SHADER,
                 shaders::GRADIENT_BORDER_FRAGMENT_SHADER,
             )?;
-            let postprocess_program = create_program(
-                gl,
+            let postprocess_program = construction.compile_program(
                 shaders::VERTEX_SHADER,
                 shaders::MAGNIFIER_POSTPROCESS_FRAGMENT_SHADER,
             )?;
-            let scene_linear_encode_program = create_program(
-                gl,
+            let scene_linear_encode_program = construction.compile_program(
                 shaders::BLUR_DOWN_VERTEX,
                 shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
             )?;
-            let scene_linear_decode_program = create_program(
-                gl,
+            let scene_linear_decode_program = construction.compile_program(
                 shaders::BLUR_DOWN_VERTEX,
                 shaders::SCENE_LINEAR_DECODE_FRAGMENT,
             )?;
-            let transition_program = create_program(
-                gl,
-                shaders::VERTEX_SHADER,
-                shaders::TRANSITION_FRAGMENT_SHADER,
-            )?;
-            let cube_program = create_program(
-                gl,
-                shaders::CUBE_VERTEX_SHADER,
-                shaders::CUBE_FRAGMENT_SHADER,
-            )?;
-            let portal_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::PORTAL_FRAGMENT_SHADER)?;
-            let edge_glow_program = create_program(
-                gl,
-                shaders::VERTEX_SHADER,
-                shaders::EDGE_GLOW_FRAGMENT_SHADER,
-            )?;
-            let tilt_program = create_program(
-                gl,
-                shaders::TILT_VERTEX_SHADER,
-                shaders::TILT_FRAGMENT_SHADER,
-            )?;
-            let wobbly_program =
-                create_program(gl, shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-            let genie_program =
-                create_program(gl, shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
-            let particle_program = create_program(
-                gl,
+            let transition_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::TRANSITION_FRAGMENT_SHADER)?;
+            let cube_program = construction
+                .compile_program(shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?;
+            let portal_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::PORTAL_FRAGMENT_SHADER)?;
+            let edge_glow_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::EDGE_GLOW_FRAGMENT_SHADER)?;
+            let tilt_program = construction
+                .compile_program(shaders::TILT_VERTEX_SHADER, shaders::TILT_FRAGMENT_SHADER)?;
+            let wobbly_program = construction
+                .compile_program(shaders::WOBBLY_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let genie_program = construction
+                .compile_program(shaders::GENIE_VERTEX_SHADER, shaders::FRAGMENT_SHADER)?;
+            let particle_program = construction.compile_program(
                 shaders::PARTICLE_VERTEX_SHADER,
                 shaders::PARTICLE_FRAGMENT_SHADER,
             )?;
-            let overview_bg_program = create_program(
-                gl,
-                shaders::VERTEX_SHADER,
-                shaders::OVERVIEW_BG_FRAGMENT_SHADER,
-            )?;
+            let overview_bg_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)?;
             // Compiled unconditionally so switching `appearance.ui_theme` at
             // runtime never has to touch the GL context.
-            let glass_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::GLASS_FRAGMENT_SHADER)?;
-            let hud_program =
-                create_program(gl, shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
-            let sysui_text_program = create_program(
-                gl,
-                shaders::VERTEX_SHADER,
-                shaders::HUD_TEXT_FRAGMENT_SHADER,
-            )?;
-            let temporal_blur_mix_program = create_program(
-                gl,
+            let glass_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::GLASS_FRAGMENT_SHADER)?;
+            let hud_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::HUD_FRAGMENT_SHADER)?;
+            let sysui_text_program = construction
+                .compile_program(shaders::VERTEX_SHADER, shaders::HUD_TEXT_FRAGMENT_SHADER)?;
+            let temporal_blur_mix_program = construction.compile_program(
                 shaders::TEMPORAL_BLUR_MIX_VERTEX,
                 shaders::TEMPORAL_BLUR_MIX_FRAGMENT,
             )?;
@@ -1350,11 +1665,8 @@ impl WaylandCompositor {
                 previous: get_uniform_loc(gl, temporal_blur_mix_program, "u_previous_blur"),
                 mix: get_uniform_loc(gl, temporal_blur_mix_program, "u_temporal_mix"),
             };
-            let line_program = create_program(
-                gl,
-                shaders::LINE_VERTEX_SHADER,
-                shaders::LINE_FRAGMENT_SHADER,
-            )?;
+            let line_program = construction
+                .compile_program(shaders::LINE_VERTEX_SHADER, shaders::LINE_FRAGMENT_SHADER)?;
             let line_uniform_projection = get_uniform_loc(gl, line_program, "u_projection");
             let line_uniform_color = get_uniform_loc(gl, line_program, "u_color");
 
@@ -1577,16 +1889,14 @@ impl WaylandCompositor {
             // Keep attribute 0 backed by a tiny static buffer. Several quad
             // shaders consume this directly, and some GLES drivers validate
             // VAO/VBO/pointer state aggressively even for shaders that do not.
-            let mut quad_vao = 0u32;
-            let mut quad_vbo = 0u32;
+            let quad_vao = construction.create_vertex_array("quad VAO")?;
+            let quad_vbo = construction.create_buffer("quad VBO")?;
             let quad_vertices: [f32; 8] = [
                 0.0, 0.0, //
                 1.0, 0.0, //
                 0.0, 1.0, //
                 1.0, 1.0,
             ];
-            gl.GenVertexArrays(1, &mut quad_vao);
-            gl.GenBuffers(1, &mut quad_vbo);
             gl.BindVertexArray(quad_vao);
             gl.BindBuffer(ffi::ARRAY_BUFFER, quad_vbo);
             gl.BufferData(
@@ -1601,11 +1911,13 @@ impl WaylandCompositor {
             gl.BindVertexArray(0);
 
             // ----- Create output FBO + texture -----
-            let (output_fbo, output_texture) = if hdr_10bit {
-                create_fbo_texture_10bit(gl, screen_w, screen_h)
-            } else {
-                create_fbo_texture(gl, screen_w, screen_h)
-            };
+            let output_internal_format = if hdr_10bit { GL_RGB10_A2 } else { ffi::RGBA8 };
+            let (output_fbo, output_texture) = construction.create_required_fbo_texture(
+                screen_w,
+                screen_h,
+                output_internal_format,
+                "output",
+            )?;
 
             // ----- SOTA #2 Phase 2.1: optional FP16 linear-scene FBO -----
             // Allocated only when behavior.scene_linear_compositing is on.
@@ -1616,7 +1928,7 @@ impl WaylandCompositor {
                 .behavior()
                 .scene_linear_compositing;
             let (linear_fbo, linear_texture) = if scene_linear_enabled {
-                match create_fbo_texture_fp16(gl, screen_w, screen_h) {
+                match construction.create_fbo_texture(screen_w, screen_h, GL_RGBA16F) {
                     Ok(resources) => resources,
                     Err(status) => {
                         log::warn!(
@@ -1633,16 +1945,13 @@ impl WaylandCompositor {
             // When the output is 10-bit, keep the whole offscreen chain (scene
             // capture, blur, postprocess, transition) at 10-bit too — an 8-bit
             // intermediate would reintroduce banding before the final 10-bit blit.
-            let mk_fbo = |w: u32, h: u32| {
-                if hdr_10bit {
-                    create_fbo_texture_10bit(gl, w, h)
-                } else {
-                    create_fbo_texture(gl, w, h)
-                }
-            };
-
             // ----- Create scene FBO + texture -----
-            let (scene_fbo, scene_texture) = mk_fbo(screen_w, screen_h);
+            let (scene_fbo, scene_texture) = construction.create_required_fbo_texture(
+                screen_w,
+                screen_h,
+                output_internal_format,
+                "scene",
+            )?;
 
             // ----- Create blur FBO chain (6 levels, each half the previous) -----
             let mut blur_fbos = Vec::with_capacity(6);
@@ -1655,7 +1964,12 @@ impl WaylandCompositor {
                 if bh < 1 {
                     bh = 1;
                 }
-                let (fbo, texture) = mk_fbo(bw, bh);
+                let (fbo, texture) = construction.create_required_fbo_texture(
+                    bw,
+                    bh,
+                    output_internal_format,
+                    "blur",
+                )?;
                 blur_fbos.push(BlurFboLevel {
                     fbo,
                     texture,
@@ -1667,16 +1981,24 @@ impl WaylandCompositor {
             }
 
             // ----- Create postprocess FBO + texture -----
-            let (postprocess_fbo, postprocess_texture) = mk_fbo(screen_w, screen_h);
+            let (postprocess_fbo, postprocess_texture) = construction.create_required_fbo_texture(
+                screen_w,
+                screen_h,
+                output_internal_format,
+                "postprocess",
+            )?;
 
             // ----- Create transition FBO + texture -----
-            let (transition_fbo, transition_texture) = mk_fbo(screen_w, screen_h);
+            let (transition_fbo, transition_texture) = construction.create_required_fbo_texture(
+                screen_w,
+                screen_h,
+                output_internal_format,
+                "transition",
+            )?;
 
             // ----- Create particle VAO + VBO -----
-            let mut particle_vao = 0u32;
-            gl.GenVertexArrays(1, &mut particle_vao);
-            let mut particle_vbo = 0u32;
-            gl.GenBuffers(1, &mut particle_vbo);
+            let particle_vao = construction.create_vertex_array("particle VAO")?;
+            let particle_vbo = construction.create_buffer("particle VBO")?;
 
             // ----- Unbind -----
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
@@ -1684,7 +2006,7 @@ impl WaylandCompositor {
 
             let now = Instant::now();
 
-            Ok(Self {
+            let compositor = Self {
                 // Shader programs
                 program,
                 shadow_program,
@@ -1733,7 +2055,7 @@ impl WaylandCompositor {
                 quad_vbo,
                 output_fbo,
                 output_texture,
-                output_internal_format: if hdr_10bit { GL_RGB10_A2 } else { ffi::RGBA8 },
+                output_internal_format,
                 output_texture_generation: next_output_texture_generation(),
                 // Treat a failed FP16 allocation as disabled. In particular,
                 // never advertise the scene-linear path to damage/KMS-offload
@@ -1751,6 +2073,7 @@ impl WaylandCompositor {
                 transition_texture,
                 particle_vao,
                 particle_vbo,
+                gpu_resources_released: false,
 
                 // Dimensions
                 screen_w,
@@ -1758,6 +2081,7 @@ impl WaylandCompositor {
 
                 // Per-window state
                 windows: HashMap::new(),
+                minimized_window_metadata: HashMap::new(),
                 pending_window_urgency: PendingWindowUrgency::default(),
                 any_color_transform_active: false,
 
@@ -1883,6 +2207,8 @@ impl WaylandCompositor {
                 genie_targets: HashMap::new(),
                 minimized_windows: HashSet::new(),
                 minimized_visuals: HashMap::new(),
+                minimized_thumbnails,
+                pending_minimized_visuals: HashSet::new(),
                 pending_genie_restores: HashSet::new(),
                 dock_preview: None,
 
@@ -2086,24 +2412,814 @@ impl WaylandCompositor {
                 // Render stats & texture pool
                 render_stats: render_stats::RenderStats::new(),
                 texture_pool: texture_pool::TexturePool::new(),
-            })
+            };
+
+            if construction.should_fail_before_commit() {
+                return Err("injected compositor construction failure before commit".into());
+            }
+            construction.commit();
+            Ok(compositor)
         }
     }
 }
 
+unsafe fn delete_program_name(gl: &ffi::Gles2, name: &mut u32) {
+    let name = std::mem::take(name);
+    if name != 0 {
+        unsafe { gl.DeleteProgram(name) };
+    }
+}
+
+unsafe fn delete_texture_name(gl: &ffi::Gles2, name: &mut u32) {
+    let name = std::mem::take(name);
+    if name != 0 {
+        unsafe { gl.DeleteTextures(1, &name) };
+    }
+}
+
+unsafe fn delete_framebuffer_name(gl: &ffi::Gles2, name: &mut u32) {
+    let name = std::mem::take(name);
+    if name != 0 {
+        unsafe { gl.DeleteFramebuffers(1, &name) };
+    }
+}
+
+unsafe fn delete_buffer_name(gl: &ffi::Gles2, name: &mut u32) {
+    let name = std::mem::take(name);
+    if name != 0 {
+        unsafe { gl.DeleteBuffers(1, &name) };
+    }
+}
+
+unsafe fn delete_vertex_array_name(gl: &ffi::Gles2, name: &mut u32) {
+    let name = std::mem::take(name);
+    if name != 0 {
+        unsafe { gl.DeleteVertexArrays(1, &name) };
+    }
+}
+
+impl WaylandCompositor {
+    /// Release every raw GLES object owned by this compositor while the KMS
+    /// renderer's EGL context is current.
+    ///
+    /// Smithay `GlesTexture` values in WindowState/Genie/retained visuals are
+    /// deliberately excluded: their strong owners are dropped normally and
+    /// enqueue renderer-managed cleanup. The output texture is the one mixed
+    /// ownership exception and follows the explicit ownership argument.
+    ///
+    /// Returns `true` only for the first release. Every scalar handle is set to
+    /// zero and every container is drained, while the guard makes a repeated
+    /// call a strict no-op.
+    pub(crate) unsafe fn release_gpu_resources(
+        &mut self,
+        gl: &ffi::Gles2,
+        output_texture_ownership: CompositorOutputTextureOwnership,
+    ) -> bool {
+        if std::mem::replace(&mut self.gpu_resources_released, true) {
+            return false;
+        }
+
+        unsafe {
+            // Jobs and synchronization objects may still reference the main
+            // render targets. Retire them before deleting any target storage.
+            self.recording.stop(gl);
+            self.screenshot_readback.clear(gl);
+            self.gpu_fence_sync_mgr.clear(gl);
+            self.pbo_uploader.clear(gl);
+
+            // Do not leave Smithay's renderer with bindings to names which are
+            // about to be deleted from under it.
+            gl.UseProgram(0);
+            gl.BindVertexArray(0);
+            gl.BindBuffer(ffi::ARRAY_BUFFER, 0);
+            gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
+            gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+
+            // `glass_backdrop` aliases blur_fbos[0].texture; it is never an
+            // independent owner.
+            self.glass_backdrop = None;
+
+            self.clear_overview_textures(gl);
+            for row in self.tab_title_textures.drain(..) {
+                for (texture, _, _) in row.into_iter().flatten() {
+                    if texture != 0 {
+                        gl.DeleteTextures(1, &texture);
+                    }
+                }
+            }
+            for (texture, _, _) in self.annotation_label_textures.drain(..).flatten() {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            for (texture, _, _) in self.screenshot_toolbar_icons.drain(..).flatten() {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            for slot in self
+                .hud_textures
+                .iter_mut()
+                .chain(self.sysui_textures.iter_mut())
+            {
+                if let Some((texture, _, _)) = slot.take()
+                    && texture != 0
+                {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            for (_, slots) in self.toast_textures.drain() {
+                for (texture, _, _) in slots.into_iter().flatten() {
+                    if texture != 0 {
+                        gl.DeleteTextures(1, &texture);
+                    }
+                }
+            }
+            if let Some((_, texture, _, _)) = self.osd_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+
+            if let Some(texture) = self.wallpaper_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+            if let Some(texture) = self.old_wallpaper_texture.take()
+                && texture != 0
+            {
+                gl.DeleteTextures(1, &texture);
+            }
+            for wallpaper in &mut self.monitor_wallpapers {
+                if let Some(texture) = wallpaper.texture.take()
+                    && texture != 0
+                {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            for texture in self.retired_wallpaper_textures.drain(..) {
+                if texture != 0 {
+                    gl.DeleteTextures(1, &texture);
+                }
+            }
+            self.texture_pool.clear(gl);
+
+            if let Some((mut framebuffer, mut texture)) = self.prev_blur_fbo.take() {
+                delete_framebuffer_name(gl, &mut framebuffer);
+                delete_texture_name(gl, &mut texture);
+            }
+            if let Some((mut framebuffer, mut texture)) = self.temporal_mix_fbo.take() {
+                delete_framebuffer_name(gl, &mut framebuffer);
+                delete_texture_name(gl, &mut texture);
+            }
+            delete_framebuffer_name(gl, &mut self.blur_blit_src_fbo);
+
+            for mut level in self.blur_fbos.drain(..) {
+                delete_framebuffer_name(gl, &mut level.fbo);
+                delete_texture_name(gl, &mut level.texture);
+            }
+            delete_framebuffer_name(gl, &mut self.output_fbo);
+            delete_framebuffer_name(gl, &mut self.linear_fbo);
+            delete_framebuffer_name(gl, &mut self.scene_fbo);
+            delete_framebuffer_name(gl, &mut self.postprocess_fbo);
+            delete_framebuffer_name(gl, &mut self.transition_fbo);
+
+            match output_texture_ownership {
+                CompositorOutputTextureOwnership::RawCompositor => {
+                    delete_texture_name(gl, &mut self.output_texture);
+                }
+                CompositorOutputTextureOwnership::SmithayRenderer => {
+                    // KMS drops the exact generation's GlesTexture wrapper
+                    // after this method returns. Clearing the raw alias here
+                    // prevents any accidental second delete.
+                    self.output_texture = 0;
+                }
+            }
+            delete_texture_name(gl, &mut self.linear_texture);
+            delete_texture_name(gl, &mut self.scene_texture);
+            delete_texture_name(gl, &mut self.postprocess_texture);
+            delete_texture_name(gl, &mut self.transition_texture);
+
+            delete_buffer_name(gl, &mut self.particle_vbo);
+            delete_buffer_name(gl, &mut self.quad_vbo);
+            delete_vertex_array_name(gl, &mut self.particle_vao);
+            delete_vertex_array_name(gl, &mut self.quad_vao);
+
+            // Thumbnail owns an independent raw texture tier and one program.
+            self.minimized_thumbnails.release_gpu_resources(gl);
+
+            for program in [
+                &mut self.program,
+                &mut self.shadow_program,
+                &mut self.blur_down_program,
+                &mut self.blur_up_program,
+                &mut self.border_program,
+                &mut self.gradient_border_program,
+                &mut self.postprocess_program,
+                &mut self.scene_linear_encode_program,
+                &mut self.scene_linear_decode_program,
+                &mut self.transition_program,
+                &mut self.cube_program,
+                &mut self.portal_program,
+                &mut self.edge_glow_program,
+                &mut self.tilt_program,
+                &mut self.wobbly_program,
+                &mut self.genie_program,
+                &mut self.particle_program,
+                &mut self.overview_bg_program,
+                &mut self.glass_program,
+                &mut self.hud_program,
+                &mut self.sysui_text_program,
+                &mut self.temporal_blur_mix_program,
+                &mut self.line_program,
+            ] {
+                delete_program_name(gl, program);
+            }
+        }
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Drop - GL resources are released when the EGL context is destroyed.
-// We cannot call GL functions in Drop because we don't have access to the
-// current EGL/GL context at destruction time. The GPU driver reclaims all
-// resources when the EGL context is destroyed, so this is safe.
+// Drop - runtime toggles call release_gpu_resources from KMS::with_renderer.
+// KMS/context destruction may still drop this value with no current context,
+// in which case the context itself reclaims any remaining raw objects.
 // ---------------------------------------------------------------------------
 
 impl Drop for WaylandCompositor {
     fn drop(&mut self) {
-        // Intentionally empty: GL resources (programs, textures, FBOs, VAOs, VBOs)
-        // are owned by the EGL context and will be cleaned up when that context
-        // is destroyed. Calling GL functions here would require a current context
-        // which we cannot guarantee.
+        // Intentionally empty: calling GL from Drop would be invalid on the KMS
+        // teardown path. Runtime disable performs the explicit current-context
+        // release before dropping this value.
+    }
+}
+
+#[cfg(test)]
+mod gpu_release_contract_tests {
+    use std::collections::BTreeSet;
+
+    // Persistent raw-GLES ownership manifest. Smithay GlesTexture fields are
+    // intentionally absent; `glass_backdrop` is present only so the teardown
+    // contract locks in its alias-only treatment.
+    const RAW_GPU_OWNER_FIELDS: &[&str] = &[
+        "program",
+        "shadow_program",
+        "blur_down_program",
+        "blur_up_program",
+        "border_program",
+        "gradient_border_program",
+        "postprocess_program",
+        "scene_linear_encode_program",
+        "scene_linear_decode_program",
+        "transition_program",
+        "cube_program",
+        "portal_program",
+        "edge_glow_program",
+        "tilt_program",
+        "wobbly_program",
+        "genie_program",
+        "particle_program",
+        "overview_bg_program",
+        "glass_program",
+        "hud_program",
+        "sysui_text_program",
+        "temporal_blur_mix_program",
+        "line_program",
+        "quad_vao",
+        "quad_vbo",
+        "particle_vao",
+        "particle_vbo",
+        "output_fbo",
+        "output_texture",
+        "linear_fbo",
+        "linear_texture",
+        "scene_fbo",
+        "scene_texture",
+        "blur_fbos",
+        "postprocess_fbo",
+        "postprocess_texture",
+        "transition_fbo",
+        "transition_texture",
+        "prev_blur_fbo",
+        "temporal_mix_fbo",
+        "blur_blit_src_fbo",
+        "glass_backdrop",
+        "overview_title_textures",
+        "tab_title_textures",
+        "annotation_label_textures",
+        "screenshot_toolbar_icons",
+        "hud_textures",
+        "sysui_textures",
+        "toast_textures",
+        "osd_texture",
+        "wallpaper_texture",
+        "old_wallpaper_texture",
+        "monitor_wallpapers",
+        "retired_wallpaper_textures",
+        "recording",
+        "screenshot_readback",
+        "gpu_fence_sync_mgr",
+        "pbo_uploader",
+        "texture_pool",
+        "minimized_thumbnails",
+    ];
+
+    fn braced_item_after<'a>(source: &'a str, needle: &str) -> &'a str {
+        let start = source.find(needle).expect("source item missing");
+        let open = start
+            + source[start..]
+                .find('{')
+                .expect("source item has no opening brace");
+        let mut depth = 0usize;
+        for (offset, byte) in source[open..].bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[start..open + offset + 1];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("source item has no closing brace");
+    }
+
+    #[test]
+    fn raw_gpu_owner_manifest_is_unique_and_fully_referenced_by_teardown() {
+        let unique = RAW_GPU_OWNER_FIELDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), RAW_GPU_OWNER_FIELDS.len());
+
+        let source = include_str!("mod.rs");
+        let release = braced_item_after(source, "pub(crate) unsafe fn release_gpu_resources(");
+        let compact_release = release
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        for field in RAW_GPU_OWNER_FIELDS {
+            let release_reference = match *field {
+                "overview_title_textures" => "self.clear_overview_textures(gl)".to_string(),
+                _ => format!("self.{field}"),
+            };
+            assert!(
+                compact_release.contains(&release_reference),
+                "raw GPU owner `{field}` is absent from release_gpu_resources"
+            );
+        }
+        assert!(compact_release.contains("self.glass_backdrop=None"));
+        assert!(!compact_release.contains("delete_texture_name(gl,&mutself.glass_backdrop"));
+    }
+
+    #[test]
+    fn every_scalar_gl_name_in_the_compositor_struct_is_manifested() {
+        let source = include_str!("mod.rs");
+        let compositor = braced_item_after(source, "pub(crate) struct WaylandCompositor");
+        let manifested = RAW_GPU_OWNER_FIELDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for line in compositor.lines() {
+            let line = line.trim();
+            let Some((field, ty)) = line.split_once(':') else {
+                continue;
+            };
+            let field = field.trim();
+            let ty = ty.trim().trim_end_matches(',');
+            let looks_like_owned_gl_name = ty == "u32"
+                && (field.ends_with("_program")
+                    || field.ends_with("_vao")
+                    || field.ends_with("_vbo")
+                    || field.ends_with("_fbo")
+                    || field.ends_with("_texture")
+                    || field == "program");
+            if looks_like_owned_gl_name {
+                assert!(
+                    manifested.contains(field),
+                    "new scalar raw GL field `{field}` needs an explicit teardown decision"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn constructor_routes_every_raw_allocation_through_the_rollback_guard() {
+        let source = include_str!("mod.rs");
+        let constructor = braced_item_after(source, "unsafe fn new_inner(");
+        let compact = constructor
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+
+        assert_eq!(
+            compact.matches("construction.compile_program(").count(),
+            24,
+            "all 23 compositor programs plus thumbnail must be guard-owned"
+        );
+        assert!(compact.contains("MinimizedThumbnailState::from_program(gl,thumbnail_program)"));
+        assert_eq!(
+            compact.matches("construction.create_vertex_array(").count(),
+            2
+        );
+        assert_eq!(compact.matches("construction.create_buffer(").count(), 2);
+        assert_eq!(
+            compact
+                .matches("construction.create_required_fbo_texture(")
+                .count(),
+            5,
+            "output, scene, blur-loop, postprocess and transition allocations must be guarded"
+        );
+        assert!(compact.contains("construction.create_fbo_texture(screen_w,screen_h,GL_RGBA16F)"));
+
+        for bypass in [
+            "create_program(gl,",
+            "create_fbo_texture(gl,",
+            "create_fbo_texture_10bit(gl,",
+            "gl.GenVertexArrays(",
+            "gl.GenBuffers(",
+        ] {
+            assert!(
+                !compact.contains(bypass),
+                "constructor bypasses rollback guard through `{bypass}`"
+            );
+        }
+
+        let aggregate = compact
+            .find("letcompositor=Self{")
+            .expect("constructor aggregate missing");
+        let injected_failure = compact
+            .find("construction.should_fail_before_commit()")
+            .expect("pre-commit failure hook missing");
+        let commit = compact
+            .find("construction.commit()")
+            .expect("construction ownership commit missing");
+        let success = compact
+            .rfind("Ok(compositor)")
+            .expect("success return missing");
+        assert!(aggregate < injected_failure && injected_failure < commit && commit < success);
+    }
+}
+
+/// Raw-GLES equivalent of the X11 thumbnail state guard. The udev compositor
+/// can call thumbnail capture between render passes, so resetting to a guessed
+/// output FBO/program is not sufficient: callers may be in any nested pass.
+struct ThumbnailGlesState<'a> {
+    gl: &'a ffi::Gles2,
+    draw_framebuffer: i32,
+    read_framebuffer: i32,
+    viewport: [i32; 4],
+    program: i32,
+    vertex_array: i32,
+    active_texture: i32,
+    active_texture_binding: i32,
+    texture0_binding: i32,
+    pixel_pack_buffer: i32,
+    pixel_unpack_buffer: i32,
+    pack_alignment: i32,
+    unpack_alignment: i32,
+    blend_enabled: bool,
+    scissor_enabled: bool,
+    depth_test_enabled: bool,
+    stencil_test_enabled: bool,
+    cull_face_enabled: bool,
+    color_mask: [u8; 4],
+    clear_color: [f32; 4],
+}
+
+impl<'a> ThumbnailGlesState<'a> {
+    unsafe fn begin(gl: &'a ffi::Gles2) -> Self {
+        unsafe {
+            let mut draw_framebuffer = 0;
+            let mut read_framebuffer = 0;
+            let mut viewport = [0; 4];
+            let mut program = 0;
+            let mut vertex_array = 0;
+            let mut active_texture = 0;
+            let mut active_texture_binding = 0;
+            let mut texture0_binding = 0;
+            let mut pixel_pack_buffer = 0;
+            let mut pixel_unpack_buffer = 0;
+            let mut pack_alignment = 0;
+            let mut unpack_alignment = 0;
+            let mut color_mask = [ffi::FALSE; 4];
+            let mut clear_color = [0.0; 4];
+
+            gl.GetIntegerv(ffi::DRAW_FRAMEBUFFER_BINDING, &mut draw_framebuffer);
+            gl.GetIntegerv(ffi::READ_FRAMEBUFFER_BINDING, &mut read_framebuffer);
+            gl.GetIntegerv(ffi::VIEWPORT, viewport.as_mut_ptr());
+            gl.GetIntegerv(ffi::CURRENT_PROGRAM, &mut program);
+            gl.GetIntegerv(ffi::VERTEX_ARRAY_BINDING, &mut vertex_array);
+            gl.GetIntegerv(ffi::ACTIVE_TEXTURE, &mut active_texture);
+            gl.GetIntegerv(ffi::TEXTURE_BINDING_2D, &mut active_texture_binding);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.GetIntegerv(ffi::TEXTURE_BINDING_2D, &mut texture0_binding);
+            gl.GetIntegerv(ffi::PIXEL_PACK_BUFFER_BINDING, &mut pixel_pack_buffer);
+            gl.GetIntegerv(ffi::PIXEL_UNPACK_BUFFER_BINDING, &mut pixel_unpack_buffer);
+            gl.GetIntegerv(ffi::PACK_ALIGNMENT, &mut pack_alignment);
+            gl.GetIntegerv(ffi::UNPACK_ALIGNMENT, &mut unpack_alignment);
+            gl.GetBooleanv(ffi::COLOR_WRITEMASK, color_mask.as_mut_ptr());
+            gl.GetFloatv(ffi::COLOR_CLEAR_VALUE, clear_color.as_mut_ptr());
+            let blend_enabled = gl.IsEnabled(ffi::BLEND) != ffi::FALSE;
+            let scissor_enabled = gl.IsEnabled(ffi::SCISSOR_TEST) != ffi::FALSE;
+            let depth_test_enabled = gl.IsEnabled(ffi::DEPTH_TEST) != ffi::FALSE;
+            let stencil_test_enabled = gl.IsEnabled(ffi::STENCIL_TEST) != ffi::FALSE;
+            let cull_face_enabled = gl.IsEnabled(ffi::CULL_FACE) != ffi::FALSE;
+
+            gl.Disable(ffi::BLEND);
+            gl.Disable(ffi::SCISSOR_TEST);
+            gl.Disable(ffi::DEPTH_TEST);
+            gl.Disable(ffi::STENCIL_TEST);
+            gl.Disable(ffi::CULL_FACE);
+            gl.ColorMask(ffi::TRUE, ffi::TRUE, ffi::TRUE, ffi::TRUE);
+            gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
+            gl.BindBuffer(ffi::PIXEL_UNPACK_BUFFER, 0);
+            gl.PixelStorei(ffi::PACK_ALIGNMENT, 1);
+            gl.PixelStorei(ffi::UNPACK_ALIGNMENT, 1);
+
+            Self {
+                gl,
+                draw_framebuffer,
+                read_framebuffer,
+                viewport,
+                program,
+                vertex_array,
+                active_texture,
+                active_texture_binding,
+                texture0_binding,
+                pixel_pack_buffer,
+                pixel_unpack_buffer,
+                pack_alignment,
+                unpack_alignment,
+                blend_enabled,
+                scissor_enabled,
+                depth_test_enabled,
+                stencil_test_enabled,
+                cull_face_enabled,
+                color_mask,
+                clear_color,
+            }
+        }
+    }
+}
+
+impl Drop for ThumbnailGlesState<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl
+                .BindFramebuffer(ffi::DRAW_FRAMEBUFFER, self.draw_framebuffer.max(0) as u32);
+            self.gl
+                .BindFramebuffer(ffi::READ_FRAMEBUFFER, self.read_framebuffer.max(0) as u32);
+            self.gl.Viewport(
+                self.viewport[0],
+                self.viewport[1],
+                self.viewport[2],
+                self.viewport[3],
+            );
+            self.gl.UseProgram(self.program.max(0) as u32);
+            self.gl.BindVertexArray(self.vertex_array.max(0) as u32);
+
+            self.gl.ActiveTexture(ffi::TEXTURE0);
+            self.gl
+                .BindTexture(ffi::TEXTURE_2D, self.texture0_binding.max(0) as u32);
+            if self.active_texture != ffi::TEXTURE0 as i32 {
+                self.gl.ActiveTexture(self.active_texture.max(0) as u32);
+                self.gl
+                    .BindTexture(ffi::TEXTURE_2D, self.active_texture_binding.max(0) as u32);
+            }
+            self.gl.ActiveTexture(self.active_texture.max(0) as u32);
+
+            self.gl
+                .BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pixel_pack_buffer.max(0) as u32);
+            self.gl.BindBuffer(
+                ffi::PIXEL_UNPACK_BUFFER,
+                self.pixel_unpack_buffer.max(0) as u32,
+            );
+            self.gl
+                .PixelStorei(ffi::PACK_ALIGNMENT, self.pack_alignment);
+            self.gl
+                .PixelStorei(ffi::UNPACK_ALIGNMENT, self.unpack_alignment);
+            self.gl.ColorMask(
+                self.color_mask[0],
+                self.color_mask[1],
+                self.color_mask[2],
+                self.color_mask[3],
+            );
+            self.gl.ClearColor(
+                self.clear_color[0],
+                self.clear_color[1],
+                self.clear_color[2],
+                self.clear_color[3],
+            );
+            if self.blend_enabled {
+                self.gl.Enable(ffi::BLEND);
+            } else {
+                self.gl.Disable(ffi::BLEND);
+            }
+            if self.scissor_enabled {
+                self.gl.Enable(ffi::SCISSOR_TEST);
+            } else {
+                self.gl.Disable(ffi::SCISSOR_TEST);
+            }
+            if self.depth_test_enabled {
+                self.gl.Enable(ffi::DEPTH_TEST);
+            } else {
+                self.gl.Disable(ffi::DEPTH_TEST);
+            }
+            if self.stencil_test_enabled {
+                self.gl.Enable(ffi::STENCIL_TEST);
+            } else {
+                self.gl.Disable(ffi::STENCIL_TEST);
+            }
+            if self.cull_face_enabled {
+                self.gl.Enable(ffi::CULL_FACE);
+            } else {
+                self.gl.Disable(ffi::CULL_FACE);
+            }
+        }
+    }
+}
+
+unsafe fn read_gles_uniform_f32<const N: usize>(
+    gl: &ffi::Gles2,
+    program: u32,
+    location: i32,
+) -> Option<[f32; N]> {
+    if location < 0 {
+        return None;
+    }
+    let mut value = [0.0; N];
+    unsafe { gl.GetUniformfv(program, location, value.as_mut_ptr()) };
+    Some(value)
+}
+
+unsafe fn read_gles_uniform_i32(gl: &ffi::Gles2, program: u32, location: i32) -> Option<i32> {
+    if location < 0 {
+        return None;
+    }
+    let mut value = 0;
+    unsafe { gl.GetUniformiv(program, location, &mut value) };
+    Some(value)
+}
+
+struct ThumbnailGlesUniformState<'a> {
+    gl: &'a ffi::Gles2,
+    program: u32,
+    uniforms: &'a WindowUniforms,
+    projection: Option<[f32; 16]>,
+    rect: Option<[f32; 4]>,
+    texture: Option<i32>,
+    opacity: Option<f32>,
+    radius: Option<f32>,
+    size: Option<[f32; 2]>,
+    dim: Option<f32>,
+    desat: Option<f32>,
+    uv_rect: Option<[f32; 4]>,
+    ripple_progress: Option<f32>,
+    ripple_amplitude: Option<f32>,
+    color_managed: Option<i32>,
+    color_matrix: Option<[f32; 9]>,
+    decode_tf: Option<i32>,
+    decode_gamma: Option<f32>,
+    encode_tf: Option<i32>,
+    encode_gamma: Option<f32>,
+    scene_linear: Option<i32>,
+}
+
+impl<'a> ThumbnailGlesUniformState<'a> {
+    unsafe fn capture(gl: &'a ffi::Gles2, program: u32, uniforms: &'a WindowUniforms) -> Self {
+        unsafe {
+            Self {
+                gl,
+                program,
+                uniforms,
+                projection: read_gles_uniform_f32(gl, program, uniforms.projection),
+                rect: read_gles_uniform_f32(gl, program, uniforms.rect),
+                texture: read_gles_uniform_i32(gl, program, uniforms.texture),
+                opacity: read_gles_uniform_f32::<1>(gl, program, uniforms.opacity)
+                    .map(|value| value[0]),
+                radius: read_gles_uniform_f32::<1>(gl, program, uniforms.radius)
+                    .map(|value| value[0]),
+                size: read_gles_uniform_f32(gl, program, uniforms.size),
+                dim: read_gles_uniform_f32::<1>(gl, program, uniforms.dim).map(|value| value[0]),
+                desat: read_gles_uniform_f32::<1>(gl, program, uniforms.desat)
+                    .map(|value| value[0]),
+                uv_rect: read_gles_uniform_f32(gl, program, uniforms.uv_rect),
+                ripple_progress: read_gles_uniform_f32::<1>(gl, program, uniforms.ripple_progress)
+                    .map(|value| value[0]),
+                ripple_amplitude: read_gles_uniform_f32::<1>(
+                    gl,
+                    program,
+                    uniforms.ripple_amplitude,
+                )
+                .map(|value| value[0]),
+                color_managed: read_gles_uniform_i32(gl, program, uniforms.color_managed),
+                color_matrix: read_gles_uniform_f32(gl, program, uniforms.color_matrix),
+                decode_tf: read_gles_uniform_i32(gl, program, uniforms.decode_tf),
+                decode_gamma: read_gles_uniform_f32::<1>(gl, program, uniforms.decode_gamma)
+                    .map(|value| value[0]),
+                encode_tf: read_gles_uniform_i32(gl, program, uniforms.encode_tf),
+                encode_gamma: read_gles_uniform_f32::<1>(gl, program, uniforms.encode_gamma)
+                    .map(|value| value[0]),
+                scene_linear: read_gles_uniform_i32(gl, program, uniforms.scene_linear),
+            }
+        }
+    }
+}
+
+impl Drop for ThumbnailGlesUniformState<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            self.gl.UseProgram(self.program);
+            if let Some(value) = self.projection {
+                self.gl
+                    .UniformMatrix4fv(self.uniforms.projection, 1, ffi::FALSE, value.as_ptr());
+            }
+            if let Some(value) = self.rect {
+                self.gl
+                    .Uniform4f(self.uniforms.rect, value[0], value[1], value[2], value[3]);
+            }
+            if let Some(value) = self.texture {
+                self.gl.Uniform1i(self.uniforms.texture, value);
+            }
+            if let Some(value) = self.opacity {
+                self.gl.Uniform1f(self.uniforms.opacity, value);
+            }
+            if let Some(value) = self.radius {
+                self.gl.Uniform1f(self.uniforms.radius, value);
+            }
+            if let Some(value) = self.size {
+                self.gl.Uniform2f(self.uniforms.size, value[0], value[1]);
+            }
+            if let Some(value) = self.dim {
+                self.gl.Uniform1f(self.uniforms.dim, value);
+            }
+            if let Some(value) = self.desat {
+                self.gl.Uniform1f(self.uniforms.desat, value);
+            }
+            if let Some(value) = self.uv_rect {
+                self.gl.Uniform4f(
+                    self.uniforms.uv_rect,
+                    value[0],
+                    value[1],
+                    value[2],
+                    value[3],
+                );
+            }
+            if let Some(value) = self.ripple_progress {
+                self.gl.Uniform1f(self.uniforms.ripple_progress, value);
+            }
+            if let Some(value) = self.ripple_amplitude {
+                self.gl.Uniform1f(self.uniforms.ripple_amplitude, value);
+            }
+            if let Some(value) = self.color_managed {
+                self.gl.Uniform1i(self.uniforms.color_managed, value);
+            }
+            if let Some(value) = self.color_matrix {
+                self.gl
+                    .UniformMatrix3fv(self.uniforms.color_matrix, 1, ffi::FALSE, value.as_ptr());
+            }
+            if let Some(value) = self.decode_tf {
+                self.gl.Uniform1i(self.uniforms.decode_tf, value);
+            }
+            if let Some(value) = self.decode_gamma {
+                self.gl.Uniform1f(self.uniforms.decode_gamma, value);
+            }
+            if let Some(value) = self.encode_tf {
+                self.gl.Uniform1i(self.uniforms.encode_tf, value);
+            }
+            if let Some(value) = self.encode_gamma {
+                self.gl.Uniform1f(self.uniforms.encode_gamma, value);
+            }
+            if let Some(value) = self.scene_linear {
+                self.gl.Uniform1i(self.uniforms.scene_linear, value);
+            }
+        }
+    }
+}
+
+struct ThumbnailGlesResources<'a> {
+    gl: &'a ffi::Gles2,
+    texture: u32,
+    framebuffer: u32,
+}
+
+impl Drop for ThumbnailGlesResources<'_> {
+    fn drop(&mut self) {
+        unsafe {
+            if self.framebuffer != 0 {
+                self.gl.DeleteFramebuffers(1, &self.framebuffer);
+            }
+            if self.texture != 0 {
+                self.gl.DeleteTextures(1, &self.texture);
+            }
+        }
     }
 }
 
@@ -2116,11 +3232,12 @@ impl WaylandCompositor {
     pub(crate) fn needs_render(&self) -> bool {
         self.needs_render
             || self.dock_preview.as_ref().is_some_and(|preview| {
-                crate::backend::compositor_common::genie::preview_lease_timeout(
-                    preview.direction,
-                    Instant::now(),
-                    preview.lease_deadline,
-                ) == Some(std::time::Duration::ZERO)
+                !preview.awaiting_source
+                    && crate::backend::compositor_common::genie::preview_lease_timeout(
+                        preview.direction,
+                        Instant::now(),
+                        preview.lease_deadline,
+                    ) == Some(std::time::Duration::ZERO)
             })
     }
 
@@ -2129,6 +3246,9 @@ impl WaylandCompositor {
     /// only needed so a crashed bar or lost LEAVE cannot strand a preview.
     pub(crate) fn next_wakeup(&self) -> Option<std::time::Duration> {
         let preview = self.dock_preview.as_ref()?;
+        if preview.awaiting_source {
+            return None;
+        }
         crate::backend::compositor_common::genie::preview_lease_timeout(
             preview.direction,
             Instant::now(),
@@ -2259,9 +3379,18 @@ impl WaylandCompositor {
         };
 
         unsafe {
-            let mut tmp_tex = 0u32;
-            gl.GenTextures(1, &mut tmp_tex);
-            gl.BindTexture(ffi::TEXTURE_2D, tmp_tex);
+            let _state = ThumbnailGlesState::begin(gl);
+            let mut resources = ThumbnailGlesResources {
+                gl,
+                texture: 0,
+                framebuffer: 0,
+            };
+            gl.GenTextures(1, &mut resources.texture);
+            if resources.texture == 0 {
+                log::warn!("wayland compositor: thumbnail texture allocation failed");
+                return None;
+            }
+            gl.BindTexture(ffi::TEXTURE_2D, resources.texture);
             gl.TexImage2D(
                 ffi::TEXTURE_2D,
                 0,
@@ -2276,21 +3405,30 @@ impl WaylandCompositor {
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
             gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
 
-            let mut tmp_fbo = 0u32;
-            gl.GenFramebuffers(1, &mut tmp_fbo);
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, tmp_fbo);
+            gl.GenFramebuffers(1, &mut resources.framebuffer);
+            if resources.framebuffer == 0 {
+                log::warn!("wayland compositor: thumbnail framebuffer allocation failed");
+                return None;
+            }
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, resources.framebuffer);
             gl.FramebufferTexture2D(
                 ffi::FRAMEBUFFER,
                 ffi::COLOR_ATTACHMENT0,
                 ffi::TEXTURE_2D,
-                tmp_tex,
+                resources.texture,
                 0,
             );
+            if gl.CheckFramebufferStatus(ffi::FRAMEBUFFER) != ffi::FRAMEBUFFER_COMPLETE {
+                log::warn!("wayland compositor: thumbnail framebuffer is incomplete");
+                return None;
+            }
 
             gl.Viewport(0, 0, tw as i32, th as i32);
             gl.ClearColor(0.0, 0.0, 0.0, 0.0);
             gl.Clear(ffi::COLOR_BUFFER_BIT);
 
+            let _uniform_state =
+                ThumbnailGlesUniformState::capture(gl, self.program, &self.win_uniforms);
             gl.UseProgram(self.program);
             let projection = ortho(0.0, tw as f32, th as f32, 0.0);
             gl.UniformMatrix4fv(
@@ -2300,11 +3438,29 @@ impl WaylandCompositor {
                 projection.as_ptr(),
             );
             gl.Uniform1i(self.win_uniforms.texture, 0);
-            gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+            gl.Uniform1f(
+                self.win_uniforms.opacity,
+                snapshot_shader_opacity(ws.has_alpha),
+            );
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.radius, 0.0);
             gl.Uniform2f(self.win_uniforms.size, tw as f32, th as f32);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            gl.UniformMatrix3fv(
+                self.win_uniforms.color_matrix,
+                1,
+                ffi::FALSE,
+                identity.as_ptr(),
+            );
+            gl.Uniform1i(self.win_uniforms.decode_tf, 0);
+            gl.Uniform1f(self.win_uniforms.decode_gamma, 1.0);
+            gl.Uniform1i(self.win_uniforms.encode_tf, 0);
+            gl.Uniform1f(self.win_uniforms.encode_gamma, 1.0);
+            gl.Uniform1i(self.win_uniforms.scene_linear, 0);
 
             let [cu, cv, cuw, cuh] = ws.content_uv;
             if ws.y_inverted {
@@ -2331,22 +3487,7 @@ impl WaylandCompositor {
                 ffi::UNSIGNED_BYTE,
                 pixels.as_mut_ptr() as *mut _,
             );
-
-            // Flip vertically (OpenGL reads bottom-up)
-            let row_bytes = (tw * 4) as usize;
-            for row in 0..(th as usize / 2) {
-                let top = row * row_bytes;
-                let bot = ((th as usize) - 1 - row) * row_bytes;
-                for i in 0..row_bytes {
-                    pixels.swap(top + i, bot + i);
-                }
-            }
-
-            // Restore state
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
-            gl.DeleteFramebuffers(1, &tmp_fbo);
-            gl.DeleteTextures(1, &tmp_tex);
-            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            flip_rgba_vertical(&mut pixels, tw, th);
 
             Some((pixels, tw, th))
         }

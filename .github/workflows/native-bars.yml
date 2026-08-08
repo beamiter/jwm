@@ -1,32 +1,26 @@
-name: Native bar validation
+name: Native and web bar validation
 
 on:
   push:
     branches:
       - master
     paths:
-      - bars/tao_pixels_bar/**
-      - bars/tao_softbuffer_bar/**
-      - bars/tao_wgpu_bar/**
-      - bars/winit_pixels_bar/**
-      - bars/winit_softbuffer_bar/**
-      - bars/winit_wgpu_bar/**
+      - bars/**
       - crates/shared_structures/**
       - crates/xbar_core/**
+      - Cargo.toml
+      - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/native-bars.yml
   pull_request:
     branches:
       - master
     paths:
-      - bars/tao_pixels_bar/**
-      - bars/tao_softbuffer_bar/**
-      - bars/tao_wgpu_bar/**
-      - bars/winit_pixels_bar/**
-      - bars/winit_softbuffer_bar/**
-      - bars/winit_wgpu_bar/**
+      - bars/**
       - crates/shared_structures/**
       - crates/xbar_core/**
+      - Cargo.toml
+      - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/native-bars.yml
   workflow_dispatch:
@@ -44,15 +38,69 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  check:
-    name: Format, check, and test six native presenters
+  protocol-core:
+    name: Shared protocol and bar core
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     steps:
       - name: Check out source
         uses: actions/checkout@v7
 
-      - name: Install native bar build dependencies
+      - name: Install xbar_core build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libasound2-dev \
+            libdbus-1-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libudev-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-bars-protocol-core
+
+      # The root workspace formatter reaches both crates, but spelling them
+      # out keeps this path-filtered workflow's contract self-contained.
+      - name: Check protocol and core formatting
+        run: |
+          cargo fmt --manifest-path crates/shared_structures/Cargo.toml -- --check
+          cargo fmt --manifest-path crates/xbar_core/Cargo.toml -- --check
+
+      - name: Test the shared wire protocol
+        run: cargo test --locked -p shared_structures --all-targets
+
+      - name: Test every xbar_core adapter feature
+        run: cargo test --locked -p xbar_core --all-features --all-targets
+
+  native-presenters:
+    name: Native presenters (${{ matrix.family }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: tao
+            bars: tao_pixels_bar tao_softbuffer_bar tao_wgpu_bar
+          - family: winit
+            bars: winit_pixels_bar winit_softbuffer_bar winit_wgpu_bar
+          - family: x11-xcb
+            bars: x11rb_bar x11rb_wgpu_bar xcb_bar xcb_wgpu_bar
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install native presenter dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -64,6 +112,8 @@ jobs:
             libgtk-3-dev \
             libcairo2-dev \
             libpango1.0-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
             libudev-dev \
             libwayland-dev \
             libxkbcommon-dev \
@@ -86,14 +136,13 @@ jobs:
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: native-bars
+          shared-key: native-bars-presenters-${{ matrix.family }}
 
       - name: Check formatting
         shell: bash
         run: |
           set -euo pipefail
-          bars=(tao_pixels_bar tao_softbuffer_bar tao_wgpu_bar winit_pixels_bar winit_softbuffer_bar winit_wgpu_bar)
-          for bar in "${bars[@]}"; do
+          for bar in ${{ matrix.bars }}; do
             cargo fmt --manifest-path "bars/$bar/Cargo.toml" -- --check
           done
 
@@ -101,18 +150,343 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # These isolated presenters intentionally ignore Cargo.lock, so a
-          # clean checkout must resolve an ephemeral lock before compiling.
-          bars=(tao_pixels_bar tao_softbuffer_bar tao_wgpu_bar winit_pixels_bar winit_softbuffer_bar winit_wgpu_bar)
-          for bar in "${bars[@]}"; do
+          for bar in ${{ matrix.bars }}; do
             cargo check --manifest-path "bars/$bar/Cargo.toml" --all-targets
           done
 
-      - name: Run tests
+      - name: Run presenter tests
         shell: bash
         run: |
           set -euo pipefail
-          bars=(tao_pixels_bar tao_softbuffer_bar tao_wgpu_bar winit_pixels_bar winit_softbuffer_bar winit_wgpu_bar)
-          for bar in "${bars[@]}"; do
+          for bar in ${{ matrix.bars }}; do
             cargo test --manifest-path "bars/$bar/Cargo.toml" --all-targets
           done
+
+  desktop-toolkits:
+    name: Desktop toolkit (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: dioxus
+            manifest: bars/dioxus_bar/Cargo.toml
+            extra-packages: libwebkit2gtk-4.1-dev libxdo-dev
+            full_format: true
+          - name: egui
+            manifest: bars/egui_bar/Cargo.toml
+            extra-packages: libgtk-3-dev
+            full_format: false
+          - name: gpui-component
+            manifest: bars/gpui_component_bar/Cargo.toml
+            extra-packages: libgtk-3-dev
+            full_format: true
+          - name: gtk4
+            manifest: bars/gtk_bar/Cargo.toml
+            extra-packages: libgtk-4-dev
+            full_format: true
+          - name: relm4
+            manifest: bars/relm_bar/Cargo.toml
+            extra-packages: libgtk-4-dev libadwaita-1-dev
+            full_format: true
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install desktop toolkit dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            cmake \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libvulkan-dev \
+            ${{ matrix.extra-packages }}
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-bars-toolkit-${{ matrix.name }}
+
+      - name: Check crate formatting
+        if: ${{ matrix.full_format }}
+        run: cargo fmt --manifest-path "${{ matrix.manifest }}" -- --check
+
+      # egui_bar has pre-existing rustfmt drift in unrelated font/platform/
+      # scene files. Keep this change's protocol consumer gated without
+      # pretending the whole crate currently passes formatting.
+      - name: Check egui protocol adapter formatting
+        if: ${{ !matrix.full_format }}
+        run: rustfmt --edition 2024 --check bars/egui_bar/src/app.rs
+
+      - name: Check all targets
+        run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
+
+  git-toolkits:
+    name: Moving git toolkit (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: iced
+            manifest: bars/iced_bar/Cargo.toml
+          - name: xilem
+            manifest: bars/xilem_bar/Cargo.toml
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install GPU toolkit dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            cmake \
+            clang \
+            libclang-dev \
+            libasound2-dev \
+            libdbus-1-dev \
+            libglib2.0-dev \
+            libcairo2-dev \
+            libpango1.0-dev \
+            libfontconfig1-dev \
+            libfreetype-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libvulkan-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-bars-git-toolkit-${{ matrix.name }}
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path "${{ matrix.manifest }}" -- --check
+
+      # These manifests intentionally track upstream branches and have no
+      # committed lockfile. Unlike gpui_bar, both graphs are practical to
+      # resolve in CI, so compile them honestly at the selected branch head.
+      - name: Check all targets at the selected upstream branch
+        run: cargo check --manifest-path "${{ matrix.manifest }}" --all-targets
+
+  tauri-wasm-ui:
+    name: Tauri Rust/WASM UI (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: leptos
+            manifest: bars/tauri_leptos_bar/Cargo.toml
+          - name: yew
+            manifest: bars/tauri_yew_bar/Cargo.toml
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust and the WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-bars-tauri-wasm-${{ matrix.name }}
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path "${{ matrix.manifest }}" -- --check
+
+      - name: Check the WASM frontend
+        run: >
+          cargo check --manifest-path "${{ matrix.manifest }}"
+          --target wasm32-unknown-unknown --all-targets
+
+  tauri-host-contracts:
+    name: Six Tauri Rust hosts (format + static contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # Five generated Tauri templates have pre-existing two-space formatting
+      # in build.rs/lib.rs. The repository-owned xbar bridge entry points are
+      # all rustfmt-clean, so gate that precise surface until the baseline is
+      # normalized separately.
+      - name: Check host bridge formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          hosts=(leptos react solid svelte vue yew)
+          for host in "${hosts[@]}"; do
+            rustfmt --edition 2024 --check "bars/tauri_${host}_bar/src-tauri/src/main.rs"
+          done
+
+      # Do not label this as compilation. The six unpinned standalone host
+      # graphs currently resolve image -> zune-jpeg 0.5.15, whose no-log macro
+      # regression fails before repository-owned code is checked. Keep their
+      # bridge wiring covered without mutating upstream dependencies in CI.
+      - name: Assert host bridge wiring (not a compile)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+
+          hosts = ("leptos", "react", "solid", "svelte", "vue", "yew")
+          expected_paths = {
+              "xbar_core": "../../../crates/xbar_core",
+              "xbar_tauri": "../../../crates/xbar_core/crates/xbar_tauri",
+          }
+          failed = []
+          for host in hosts:
+              root = Path(f"bars/tauri_{host}_bar/src-tauri")
+              manifest_path = root / "Cargo.toml"
+              manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+              dependencies = manifest.get("dependencies", {})
+              for dependency, expected_path in expected_paths.items():
+                  specification = dependencies.get(dependency)
+                  actual_path = (
+                      specification.get("path")
+                      if isinstance(specification, dict)
+                      else None
+                  )
+                  if actual_path != expected_path:
+                      failed.append(
+                          f"{manifest_path}: {dependency}.path is {actual_path!r}, "
+                          f"expected {expected_path!r}"
+                      )
+
+              main_path = root / "src/main.rs"
+              main = main_path.read_text(encoding="utf-8")
+              for symbol in (
+                  "xbar_tauri::configure",
+                  "xbar_tauri::BridgeConfig::new",
+              ):
+                  if symbol not in main:
+                      failed.append(f"{main_path}: missing {symbol}")
+
+          if failed:
+              raise SystemExit("broken Tauri host bridge contracts:\n" + "\n".join(failed))
+          print("Tauri host bridge contracts present in " + ", ".join(hosts))
+          PY
+
+      - name: Record why host compilation is excluded
+        run: |
+          echo '### Tauri host validation boundary' >> "$GITHUB_STEP_SUMMARY"
+          echo '- All six Rust host bridge entry points are format-checked and their local `xbar_core`/`xbar_tauri` wiring is asserted.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- This job does **not** claim compilation: the unlocked cold graph currently selects `image -> zune-jpeg 0.5.15`, whose no-log macro regression fails before repository code.' >> "$GITHUB_STEP_SUMMARY"
+
+  static-source-contracts:
+    name: Static contracts for intentionally uncompiled frontends
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install Rustfmt
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # gpui_bar follows an unpinned `main` branch and has no Cargo.lock. A
+      # mandatory network build would be non-reproducible; formatting and the
+      # binding assertion below still cover repository-owned source.
+      - name: Check gpui_bar formatting without resolving git dependencies
+        run: cargo fmt --manifest-path bars/gpui_bar/Cargo.toml -- --check
+
+      - name: Assert generation-aware source contracts (not a frontend build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          sources = {
+              "gpui": Path("bars/gpui_bar/src/main.rs"),
+              "react": Path("bars/tauri_react_bar/src/App.tsx"),
+              "solid": Path("bars/tauri_solid_bar/src/App.tsx"),
+              "svelte": Path("bars/tauri_svelte_bar/src/App.svelte"),
+              "vue": Path("bars/tauri_vue_bar/src/App.vue"),
+          }
+          required = ("wm_session_id", "minimized_generation")
+          failed = []
+          for name, path in sources.items():
+              text = path.read_text(encoding="utf-8")
+              missing = [field for field in required if field not in text]
+              if name != "gpui" and "wm_sequence" not in text:
+                  missing.append("wm_sequence")
+              if name == "gpui" and "DockItemBinding" not in text:
+                  missing.append("DockItemBinding")
+              if missing:
+                  failed.append(f"{name} ({path}): {', '.join(missing)}")
+          if failed:
+              raise SystemExit("missing generation-aware source contracts:\n" + "\n".join(failed))
+          print("static generation-aware source contracts present in " + ", ".join(sources))
+          PY
+
+      - name: Record intentional build exclusions
+        run: |
+          echo '### Intentional exclusions' >> "$GITHUB_STEP_SUMMARY"
+          echo '- `gpui_bar`: formatting + static binding assertion only; its git `main` dependencies are unpinned and it has no lockfile.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- React/Solid/Svelte/Vue UI: static protocol assertions only; no Node package install or frontend build is claimed.' >> "$GITHUB_STEP_SUMMARY"
+          echo '- The six Tauri Rust hosts are format-checked and statically wired by `tauri-host-contracts`; that job explicitly documents why it does not claim compilation.' >> "$GITHUB_STEP_SUMMARY"

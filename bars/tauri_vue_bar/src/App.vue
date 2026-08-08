@@ -60,17 +60,17 @@
       >
         <span class="minimized-divider" aria-hidden="true"></span>
         <button
-          v-for="item in monitorSnapshot.minimized_windows"
-          :key="item.token"
+          v-for="item in minimizedDockItems"
+          :key="`${item.wm_session_id}:${item.minimized_generation}:${item.token}`"
           class="minimized-item"
           :class="{ 'is-urgent': (item.flags & 2) !== 0 }"
           :data-window-id="item.token"
           :disabled="!wmAvailable"
           :title="`${item.title.trim() || item.app_id.trim() || 'Minimized window'} — click to restore`"
           :aria-label="`Restore ${item.title.trim() || item.app_id.trim() || 'Minimized window'}`"
-          @click="onRestoreWindow(item.token, monitorSnapshot.wm_session_id, $event)"
-          @mouseenter="(item.flags & 1) !== 0 && beginPreviewWindow(item.token, monitorSnapshot.wm_session_id, $event)"
-          @mouseleave="(item.flags & 1) !== 0 && endPreviewWindow(item.token, monitorSnapshot.wm_session_id, $event)"
+          @click="onRestoreWindow(item.token, item.wm_session_id, item.minimized_generation, $event)"
+          @mouseenter="(item.flags & 1) !== 0 && beginPreviewWindow(item.token, item.wm_session_id, item.minimized_generation, $event)"
+          @mouseleave="(item.flags & 1) !== 0 && endPreviewWindow(item.token, item.wm_session_id, item.minimized_generation, $event)"
         >
           <span class="minimized-thumbnail" aria-hidden="true">
             <span class="minimized-traffic-lights"></span>
@@ -238,6 +238,11 @@ interface MinimizedWindow {
   flags: number;
 }
 
+interface BoundMinimizedWindow extends MinimizedWindow {
+  wm_session_id: number;
+  minimized_generation: number;
+}
+
 interface DockGeometry {
   x: number;
   y: number;
@@ -247,6 +252,7 @@ interface DockGeometry {
 
 interface BarSnapshot {
   wm_available: boolean;
+  wm_sequence: number | null;
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
@@ -291,19 +297,23 @@ type ActionRequest =
   | {
       action: 'restore_window';
       wm_session_id: number;
+      minimized_generation: number;
       window_id: number;
       geometry?: DockGeometry;
     }
   | {
       action: 'preview_window';
       wm_session_id: number;
+      minimized_generation: number;
       window_id: number;
       visible: boolean;
+      renewal: boolean;
       geometry?: DockGeometry;
     }
   | {
       action: 'set_dock_geometry';
       wm_session_id: number;
+      minimized_generation: number;
       window_id?: number | null;
       geometry?: DockGeometry;
     }
@@ -314,6 +324,7 @@ const dispatchAction = (request: ActionRequest): Promise<void> =>
 
 let snapshotBarOrigin: Pick<DockGeometry, 'x' | 'y'> | null = null;
 let currentWmSessionId = 0;
+let currentMinimizedGeneration = 0;
 let currentWmAvailable = false;
 
 // --- Nerd Font 图标 ---
@@ -440,13 +451,18 @@ async function geometryForElement(element: HTMLElement): Promise<DockGeometry | 
   return metrics ? physicalGeometry(element, metrics) : undefined;
 }
 
-async function publishDockGeometry(dock: HTMLElement, wmSessionId: number) {
+async function publishDockGeometry(
+  dock: HTMLElement,
+  wmSessionId: number,
+  minimizedGeneration: number,
+) {
   const metrics = await windowMetrics();
   if (!dock.isConnected) return;
   if (!metrics) throw new Error('Dock window metrics are temporarily unavailable');
   await dispatchAction({
     action: 'set_dock_geometry',
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: null,
     geometry: physicalGeometry(dock, metrics),
   });
@@ -456,6 +472,7 @@ async function publishDockGeometry(dock: HTMLElement, wmSessionId: number) {
     await dispatchAction({
       action: 'set_dock_geometry',
       wm_session_id: wmSessionId,
+      minimized_generation: minimizedGeneration,
       window_id: windowId,
       geometry: restingItemGeometry(item, dock, metrics),
     });
@@ -477,7 +494,27 @@ let dockRetryTimer: number | undefined;
 let dockPublishGeneration = 0;
 let dockPublishInFlight = false;
 let dockRepublishRequested = false;
-const previewRenewals = new Map<number, number>();
+const PREVIEW_ENTER_RETRY_MS = 100;
+const PREVIEW_RENEWAL_MS = 2_000;
+// Fresh ENTER remains fresh until the invoke is acknowledged.
+const PREVIEW_ENTER_REQUEST = { visible: true, renewal: false } as const;
+const PREVIEW_RENEWAL_REQUEST = { visible: true, renewal: true } as const;
+
+interface PreviewDelivery {
+  windowId: number;
+  wmSessionId: number;
+  minimizedGeneration: number;
+  element: HTMLElement;
+  retryTimer?: number;
+  renewalTimer?: number;
+}
+
+const previewDeliveries = new Map<string, PreviewDelivery>();
+const previewBindingKey = (
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+): string => `${wmSessionId}:${minimizedGeneration}:${windowId}`;
 
 function cancelDockGeometryRetry() {
   dockPublishGeneration += 1;
@@ -487,12 +524,17 @@ function cancelDockGeometryRetry() {
   dockRepublishRequested = false;
 }
 
-function requestDockGeometryPublish(dock: HTMLElement, wmSessionId: number) {
+function requestDockGeometryPublish(
+  dock: HTMLElement,
+  wmSessionId: number,
+  minimizedGeneration: number,
+) {
   if (
     !dock.isConnected ||
     !currentWmAvailable ||
     wmSessionId === 0 ||
-    wmSessionId !== currentWmSessionId
+    wmSessionId !== currentWmSessionId ||
+    minimizedGeneration !== currentMinimizedGeneration
   ) return;
   const generation = dockPublishGeneration;
   if (dockRetryTimer !== undefined) {
@@ -504,13 +546,13 @@ function requestDockGeometryPublish(dock: HTMLElement, wmSessionId: number) {
     return;
   }
   dockPublishInFlight = true;
-  publishDockGeometry(dock, wmSessionId)
+  publishDockGeometry(dock, wmSessionId, minimizedGeneration)
     .then(() => {
       if (generation !== dockPublishGeneration) return;
       dockPublishInFlight = false;
       if (dockRepublishRequested) {
         dockRepublishRequested = false;
-        requestDockGeometryPublish(dock, wmSessionId);
+        requestDockGeometryPublish(dock, wmSessionId, minimizedGeneration);
       }
     })
     .catch((error) => {
@@ -523,11 +565,12 @@ function requestDockGeometryPublish(dock: HTMLElement, wmSessionId: number) {
         dock.isConnected &&
         currentWmAvailable &&
         wmSessionId !== 0 &&
-        wmSessionId === currentWmSessionId
+        wmSessionId === currentWmSessionId &&
+        minimizedGeneration === currentMinimizedGeneration
       ) {
         dockRetryTimer = window.setTimeout(() => {
           dockRetryTimer = undefined;
-          requestDockGeometryPublish(dock, wmSessionId);
+          requestDockGeometryPublish(dock, wmSessionId, minimizedGeneration);
         }, 100);
       }
     });
@@ -540,17 +583,18 @@ function scheduleDockGeometry(current: BarSnapshot) {
     dockGeometrySignature = '';
     return;
   }
-  const signature = `${current.wm_session_id}|${current.geometry?.x},${current.geometry?.y},${current.geometry?.width},${current.geometry?.height}|${current.minimized_windows.map((item) => item.token).join(',')}|${current.minimized_overflow}`;
+  const minimizedGeneration = current.wm_sequence ?? 0;
+  const signature = `${current.wm_session_id}|${minimizedGeneration}|${current.geometry?.x},${current.geometry?.y},${current.geometry?.width},${current.geometry?.height}|${current.minimized_windows.map((item) => item.token).join(',')}|${current.minimized_overflow}`;
   if (signature === dockGeometrySignature) return;
   dockGeometrySignature = signature;
   window.requestAnimationFrame(() => {
     const dock = document.querySelector<HTMLElement>('.minimized-dock');
     if (!dock) return;
-    requestDockGeometryPublish(dock, current.wm_session_id);
+    requestDockGeometryPublish(dock, current.wm_session_id, minimizedGeneration);
     dockResizeObserver?.disconnect();
     if (typeof ResizeObserver !== 'undefined') {
       dockResizeObserver = new ResizeObserver(() =>
-        requestDockGeometryPublish(dock, current.wm_session_id),
+        requestDockGeometryPublish(dock, current.wm_session_id, minimizedGeneration),
       );
       dockResizeObserver.observe(dock);
     }
@@ -560,7 +604,11 @@ function scheduleDockGeometry(current: BarSnapshot) {
 function handleDockResize() {
   const dock = document.querySelector<HTMLElement>('.minimized-dock');
   if (dock && snapshot.value) {
-    requestDockGeometryPublish(dock, snapshot.value.wm_session_id);
+    requestDockGeometryPublish(
+      dock,
+      snapshot.value.wm_session_id,
+      snapshot.value.wm_sequence ?? 0,
+    );
   }
 }
 
@@ -575,13 +623,15 @@ onMounted(() => {
       snapshotBarOrigin = event.payload.snapshot.geometry;
       if (
         currentWmSessionId !== event.payload.snapshot.wm_session_id ||
+        currentMinimizedGeneration !== (event.payload.snapshot.wm_sequence ?? 0) ||
         currentWmAvailable !== event.payload.snapshot.wm_available
       ) {
         cancelDockGeometryRetry();
-        previewRenewals.forEach((renewal) => window.clearInterval(renewal));
-        previewRenewals.clear();
+        stopAllPreviewDeliveries();
       }
+      stopInvalidPreviewDeliveries(event.payload.snapshot);
       currentWmSessionId = event.payload.snapshot.wm_session_id;
+      currentMinimizedGeneration = event.payload.snapshot.wm_sequence ?? 0;
       currentWmAvailable = event.payload.snapshot.wm_available;
       snapshot.value = event.payload.snapshot;
       scheduleDockGeometry(event.payload.snapshot);
@@ -609,12 +659,21 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', handleDockResize);
   dockResizeObserver?.disconnect();
   cancelDockGeometryRetry();
-  previewRenewals.forEach((renewal) => window.clearInterval(renewal));
-  previewRenewals.clear();
+  stopAllPreviewDeliveries();
 });
 
 // --- 计算属性 ---
 const monitorSnapshot = computed(() => snapshot.value);
+const minimizedDockItems = computed<BoundMinimizedWindow[]>(() => {
+  const current = snapshot.value;
+  if (!current) return [];
+  const minimizedGeneration = current.wm_sequence ?? 0;
+  return current.minimized_windows.map((item) => ({
+    ...item,
+    wm_session_id: current.wm_session_id,
+    minimized_generation: minimizedGeneration,
+  }));
+});
 const wmAvailable = computed(() => snapshot.value?.wm_available ?? false);
 const systemSnapshot = computed(() => snapshot.value?.system_details ?? null);
 const audioSnapshot = computed(() => snapshot.value?.audio_device ?? null);
@@ -744,12 +803,18 @@ function onOpenShell(route: ShellRoute) {
   dispatchAction({ action: 'open_shell_hub', route }).catch(console.error);
 }
 
-async function onRestoreWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
+async function onRestoreWindow(
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+  event: MouseEvent,
+) {
   if (!(event.currentTarget instanceof HTMLElement)) return;
   const geometry = await geometryForElement(event.currentTarget);
   await dispatchAction({
     action: 'restore_window',
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: windowId,
     geometry,
   });
@@ -758,7 +823,9 @@ async function onRestoreWindow(windowId: number, wmSessionId: number, event: Mou
 async function sendPreviewWindow(
   windowId: number,
   wmSessionId: number,
+  minimizedGeneration: number,
   visible: boolean,
+  renewal: boolean,
   element: HTMLElement,
 ) {
   const geometry = await geometryForElement(element);
@@ -766,38 +833,184 @@ async function sendPreviewWindow(
   await dispatchAction({
     action: 'preview_window',
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: windowId,
     visible,
+    renewal,
     geometry,
   });
 }
 
-function stopPreviewRenewal(windowId: number) {
-  const renewal = previewRenewals.get(windowId);
-  if (renewal !== undefined) window.clearInterval(renewal);
-  previewRenewals.delete(windowId);
+function stopPreviewDelivery(bindingKey: string, expected?: PreviewDelivery) {
+  const delivery = previewDeliveries.get(bindingKey);
+  if (!delivery || (expected !== undefined && delivery !== expected)) return;
+  previewDeliveries.delete(bindingKey);
+  if (delivery.retryTimer !== undefined) window.clearTimeout(delivery.retryTimer);
+  if (delivery.renewalTimer !== undefined) window.clearInterval(delivery.renewalTimer);
 }
 
-function beginPreviewWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
-  if (!(event.currentTarget instanceof HTMLElement)) return;
-  const element = event.currentTarget;
-  stopPreviewRenewal(windowId);
-  sendPreviewWindow(windowId, wmSessionId, true, element).catch(console.error);
-  const renewal = window.setInterval(() => {
-    if (!element.isConnected || !element.matches(':hover')) {
-      stopPreviewRenewal(windowId);
-      sendPreviewWindow(windowId, wmSessionId, false, element).catch(console.error);
+function stopAllPreviewDeliveries() {
+  for (const [bindingKey, delivery] of Array.from(previewDeliveries)) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+  }
+}
+
+function stopInvalidPreviewDeliveries(current: BarSnapshot) {
+  const currentTokens = new Set(current.minimized_windows.map((item) => item.token));
+  const minimizedGeneration = current.wm_sequence ?? 0;
+  for (const [bindingKey, delivery] of Array.from(previewDeliveries)) {
+    if (
+      delivery.wmSessionId !== current.wm_session_id ||
+      delivery.minimizedGeneration !== minimizedGeneration ||
+      !currentTokens.has(delivery.windowId)
+    ) {
+      sendAutomaticPreviewLeave(bindingKey, delivery);
+    }
+  }
+}
+
+function previewDeliveryIsActive(bindingKey: string, delivery: PreviewDelivery) {
+  return (
+    previewDeliveries.get(bindingKey) === delivery &&
+    delivery.element.isConnected &&
+    delivery.element.matches(':hover')
+  );
+}
+
+async function sendPreviewLeaveUnlessReentered(
+  bindingKey: string,
+  delivery: PreviewDelivery,
+) {
+  const geometry = await geometryForElement(delivery.element);
+  const current = previewDeliveries.get(bindingKey);
+  if (current !== undefined && current !== delivery) return;
+  await dispatchAction({
+    action: 'preview_window',
+    wm_session_id: delivery.wmSessionId,
+    minimized_generation: delivery.minimizedGeneration,
+    window_id: delivery.windowId,
+    visible: false,
+    renewal: false,
+    geometry,
+  });
+}
+
+function sendAutomaticPreviewLeave(bindingKey: string, delivery: PreviewDelivery) {
+  if (previewDeliveries.get(bindingKey) !== delivery) return;
+  stopPreviewDelivery(bindingKey, delivery);
+  sendPreviewLeaveUnlessReentered(bindingKey, delivery).catch(console.error);
+}
+
+function compensateDeliveredPreviewEnter(bindingKey: string, delivery: PreviewDelivery) {
+  const current = previewDeliveries.get(bindingKey);
+  if (current !== undefined && current !== delivery) return;
+  if (current === delivery) stopPreviewDelivery(bindingKey, delivery);
+  // Compensate a delivered ENTER that outlived its binding.
+  sendPreviewLeaveUnlessReentered(bindingKey, delivery).catch(console.error);
+}
+
+function schedulePreviewEnterRetry(
+  bindingKey: string,
+  delivery: PreviewDelivery,
+  error: unknown,
+) {
+  if (previewDeliveries.get(bindingKey) !== delivery) return;
+  console.error('Failed to enter minimized preview; retrying:', error);
+  if (!previewDeliveryIsActive(bindingKey, delivery)) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+    return;
+  }
+  if (delivery.renewalTimer !== undefined) {
+    window.clearInterval(delivery.renewalTimer);
+    delivery.renewalTimer = undefined;
+  }
+  if (delivery.retryTimer !== undefined) return;
+  delivery.retryTimer = window.setTimeout(() => {
+    delivery.retryTimer = undefined;
+    deliverPreviewEnter(bindingKey, delivery);
+  }, PREVIEW_ENTER_RETRY_MS);
+}
+
+function startPreviewRenewal(bindingKey: string, delivery: PreviewDelivery) {
+  if (!previewDeliveryIsActive(bindingKey, delivery) || delivery.renewalTimer !== undefined) return;
+  delivery.renewalTimer = window.setInterval(() => {
+    if (!previewDeliveryIsActive(bindingKey, delivery)) {
+      sendAutomaticPreviewLeave(bindingKey, delivery);
       return;
     }
-    sendPreviewWindow(windowId, wmSessionId, true, element).catch(console.error);
-  }, 2_000);
-  previewRenewals.set(windowId, renewal);
+    sendPreviewWindow(
+      delivery.windowId,
+      delivery.wmSessionId,
+      delivery.minimizedGeneration,
+      PREVIEW_RENEWAL_REQUEST.visible,
+      PREVIEW_RENEWAL_REQUEST.renewal,
+      delivery.element,
+    ).catch((error) => schedulePreviewEnterRetry(bindingKey, delivery, error));
+  }, PREVIEW_RENEWAL_MS);
 }
 
-function endPreviewWindow(windowId: number, wmSessionId: number, event: MouseEvent) {
+function deliverPreviewEnter(bindingKey: string, delivery: PreviewDelivery) {
+  if (!previewDeliveryIsActive(bindingKey, delivery)) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+    return;
+  }
+  sendPreviewWindow(
+    delivery.windowId,
+    delivery.wmSessionId,
+    delivery.minimizedGeneration,
+    PREVIEW_ENTER_REQUEST.visible,
+    PREVIEW_ENTER_REQUEST.renewal,
+    delivery.element,
+  )
+    .then(() => {
+      if (previewDeliveryIsActive(bindingKey, delivery)) {
+        startPreviewRenewal(bindingKey, delivery);
+      } else {
+        compensateDeliveredPreviewEnter(bindingKey, delivery);
+      }
+    })
+    .catch((error) => schedulePreviewEnterRetry(bindingKey, delivery, error));
+}
+
+function beginPreviewWindow(
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+  event: MouseEvent,
+) {
   if (!(event.currentTarget instanceof HTMLElement)) return;
-  stopPreviewRenewal(windowId);
-  sendPreviewWindow(windowId, wmSessionId, false, event.currentTarget).catch(console.error);
+  const element = event.currentTarget;
+  const bindingKey = previewBindingKey(windowId, wmSessionId, minimizedGeneration);
+  stopPreviewDelivery(bindingKey);
+  const delivery: PreviewDelivery = {
+    windowId,
+    wmSessionId,
+    minimizedGeneration,
+    element,
+  };
+  previewDeliveries.set(bindingKey, delivery);
+  deliverPreviewEnter(bindingKey, delivery);
+}
+
+function endPreviewWindow(
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+  event: MouseEvent,
+) {
+  if (!(event.currentTarget instanceof HTMLElement)) return;
+  const bindingKey = previewBindingKey(windowId, wmSessionId, minimizedGeneration);
+  const delivery = previewDeliveries.get(bindingKey);
+  if (delivery) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+  } else {
+    sendPreviewLeaveUnlessReentered(bindingKey, {
+      windowId,
+      wmSessionId,
+      minimizedGeneration,
+      element: event.currentTarget,
+    }).catch(console.error);
+  }
 }
 
 async function onScreenshot() {

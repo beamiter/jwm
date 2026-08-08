@@ -13,6 +13,10 @@ use crate::presentation::{NodeId, PresentationConfig, Rect, Scene};
 
 /// A visible preview is renewed before the compositor's lease can expire.
 pub const DOCK_PREVIEW_LEASE_INTERVAL: Duration = Duration::from_secs(2);
+/// A moving/magnified Dock card may refresh its preview anchor at most this
+/// often.  This keeps the compositor preview visually attached to the card
+/// without turning every pointer-motion frame into an IPC write.
+pub const DOCK_PREVIEW_ANCHOR_INTERVAL: Duration = Duration::from_millis(50);
 /// Backpressure retry throttle used between native input/service turns.
 pub const DOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -28,6 +32,8 @@ pub struct DockGeometryReport {
 pub struct DockReporterInput<'a> {
     pub wm_available: bool,
     pub wm_session_id: u64,
+    /// Exact minimized projection generation used to build this scene.
+    pub minimized_generation: u64,
     /// Increment whenever the adapter replaces or reconnects its WM channel.
     pub transport_generation: u64,
     pub monitor_geometry: Option<MonitorGeometry>,
@@ -43,6 +49,7 @@ pub struct DockReporterInput<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct DockReporter {
     state_key: Option<(u64, u64)>,
+    minimized_generation: u64,
     desired_preview: Option<WindowToken>,
     acknowledged_preview: Option<WindowToken>,
     preview_last_sent: Option<Instant>,
@@ -52,6 +59,12 @@ pub struct DockReporter {
     desired_geometry: Vec<DockGeometryReport>,
     interactive_geometry: Vec<DockGeometryReport>,
     acknowledged_geometry: Vec<DockGeometryReport>,
+    /// Item targets acknowledged in an older projection but absent from the
+    /// current one. They remain pending until a zero geometry carrying the
+    /// current generation is delivered. Keeping this separate from current
+    /// acknowledgements also forces surviving/reused tokens to republish
+    /// their geometry for the new incarnation.
+    pending_geometry_withdrawals: Vec<WindowToken>,
     retry_not_before: Option<Instant>,
 }
 
@@ -60,6 +73,7 @@ impl DockReporter {
     pub const fn new() -> Self {
         Self {
             state_key: None,
+            minimized_generation: 0,
             desired_preview: None,
             acknowledged_preview: None,
             preview_last_sent: None,
@@ -69,6 +83,7 @@ impl DockReporter {
             desired_geometry: Vec::new(),
             interactive_geometry: Vec::new(),
             acknowledged_geometry: Vec::new(),
+            pending_geometry_withdrawals: Vec::new(),
             retry_not_before: None,
         }
     }
@@ -78,6 +93,7 @@ impl DockReporter {
         self.synchronize_lifetime(
             input.wm_available,
             input.wm_session_id,
+            input.minimized_generation,
             input.transport_generation,
             input.minimized_windows,
         );
@@ -115,6 +131,7 @@ impl DockReporter {
         &mut self,
         wm_available: bool,
         wm_session_id: u64,
+        minimized_generation: u64,
         transport_generation: u64,
         minimized_windows: &[MinimizedWindow],
         hovered: Option<NodeId>,
@@ -122,16 +139,19 @@ impl DockReporter {
         let session_changed = self
             .state_key
             .is_some_and(|(session, _)| session != wm_session_id);
+        let projection_changed = self.state_key.is_some()
+            && (session_changed || self.minimized_generation != minimized_generation);
         self.synchronize_lifetime(
             wm_available,
             wm_session_id,
+            minimized_generation,
             transport_generation,
             minimized_windows,
         );
         // The hovered id belongs to the last rendered scene. A restarted WM
         // may immediately reuse that numeric token for a different window,
         // so only a fresh `synchronize` pass may bind it in the new session.
-        if !session_changed && self.state_key.is_some() {
+        if !projection_changed && self.state_key.is_some() {
             self.set_hover(hovered, minimized_windows);
         }
     }
@@ -140,6 +160,7 @@ impl DockReporter {
         &mut self,
         wm_available: bool,
         wm_session_id: u64,
+        minimized_generation: u64,
         transport_generation: u64,
         minimized_windows: &[MinimizedWindow],
     ) {
@@ -149,26 +170,72 @@ impl DockReporter {
         }
 
         let next = (wm_session_id, transport_generation);
+        let same_connection = self.state_key == Some(next);
+        let same_session = self
+            .state_key
+            .is_some_and(|(session, _)| session == wm_session_id);
         let session_changed = self
             .state_key
             .is_some_and(|(session, _)| session != wm_session_id);
-        if self.state_key != Some(next) {
+        let projection_changed = self.state_key.is_some()
+            && (session_changed || self.minimized_generation != minimized_generation);
+        let contains = |token| minimized_windows.iter().any(|window| window.token == token);
+
+        if same_session {
+            // A projection can stop carrying an item while its compositor
+            // target is still live (for example when a newly eligible 17th
+            // window pushes the oldest item out of the bounded snapshot).
+            // Remember that old acknowledgement before current-model pruning.
+            for token in self
+                .acknowledged_geometry
+                .iter()
+                .filter_map(|report| report.window)
+                .filter(|token| !contains(*token))
+            {
+                if !self.pending_geometry_withdrawals.contains(&token) {
+                    self.pending_geometry_withdrawals.push(token);
+                }
+            }
+            // If the same numeric token is present in the new projection, it
+            // denotes a surviving or reused current incarnation. Never let a
+            // withdrawal remembered for an intermediate projection clear it.
+            self.pending_geometry_withdrawals
+                .retain(|token| !contains(*token));
+        }
+
+        if !same_connection {
             self.state_key = Some(next);
             self.acknowledged_preview = None;
             self.preview_last_sent = None;
             self.acknowledged_preview_anchor = DockItemGeometry::default();
             self.acknowledged_geometry.clear();
+            // A replacement channel does not reset compositor state in the
+            // same WM process. Keep current-epoch withdrawals so QueueFull or
+            // reconnect cannot strand an old target; a new WM session cannot
+            // safely inherit them because window tokens may be reused.
+            if !same_session {
+                self.pending_geometry_withdrawals.clear();
+            }
+            self.retry_not_before = None;
+        } else if projection_changed {
+            self.acknowledged_preview = None;
+            self.preview_last_sent = None;
+            self.acknowledged_preview_anchor = DockItemGeometry::default();
+            // Old acknowledgements cannot suppress reports in the new
+            // generation. Removed items were copied to the withdrawal queue
+            // above; current/reused tokens must send a fresh non-empty target.
+            self.acknowledged_geometry.clear();
             self.retry_not_before = None;
         }
-        if session_changed {
+        if projection_changed {
             self.desired_preview = None;
             self.preview_anchor = DockItemGeometry::default();
             self.preview_waiting_for_scene = false;
             self.desired_geometry.clear();
             self.interactive_geometry.clear();
         }
+        self.minimized_generation = minimized_generation;
 
-        let contains = |token| minimized_windows.iter().any(|window| window.token == token);
         if self.desired_preview.is_some_and(|token| !contains(token)) {
             self.desired_preview = None;
             self.preview_anchor = DockItemGeometry::default();
@@ -211,10 +278,10 @@ impl DockReporter {
                 .iter()
                 .any(|report| report.window == Some(*token))
         });
+        self.preview_anchor =
+            next.map_or_else(DockItemGeometry::default, |token| self.geometry_for(token));
         if next != self.desired_preview || self.preview_waiting_for_scene {
             self.desired_preview = next;
-            self.preview_anchor =
-                next.map_or_else(DockItemGeometry::default, |token| self.geometry_for(token));
             self.preview_waiting_for_scene = false;
         }
     }
@@ -244,8 +311,13 @@ impl DockReporter {
             UserAction::SetDockGeometry {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
-            } if wm_session_id == session => {
+            } if wm_session_id == session && minimized_generation == self.minimized_generation => {
+                if let Some(window) = window {
+                    self.pending_geometry_withdrawals
+                        .retain(|pending| *pending != window);
+                }
                 self.acknowledged_geometry
                     .retain(|report| report.window != window);
                 if !geometry.is_empty() {
@@ -257,9 +329,11 @@ impl DockReporter {
             UserAction::PreviewWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 visible,
+                renewal: _,
                 geometry,
-            } if wm_session_id == session => {
+            } if wm_session_id == session && minimized_generation == self.minimized_generation => {
                 if visible {
                     self.acknowledged_preview = Some(window);
                     self.acknowledged_preview_anchor = geometry;
@@ -295,9 +369,20 @@ impl DockReporter {
             );
         }
         if self.desired_preview.is_some() && self.desired_preview == self.acknowledged_preview {
-            return self
-                .preview_last_sent
-                .and_then(|sent| sent.checked_add(DOCK_PREVIEW_LEASE_INTERVAL).or(Some(sent)));
+            return self.preview_last_sent.map(|sent| {
+                let lease = sent
+                    .checked_add(DOCK_PREVIEW_LEASE_INTERVAL)
+                    .unwrap_or(sent);
+                if !self.preview_anchor.is_empty()
+                    && self.preview_anchor != self.acknowledged_preview_anchor
+                {
+                    sent.checked_add(DOCK_PREVIEW_ANCHOR_INTERVAL)
+                        .unwrap_or(sent)
+                        .min(lease)
+                } else {
+                    lease
+                }
+            });
         }
         None
     }
@@ -322,6 +407,11 @@ impl DockReporter {
     #[must_use]
     pub const fn state_key(&self) -> Option<(u64, u64)> {
         self.state_key
+    }
+
+    #[must_use]
+    pub const fn minimized_generation(&self) -> u64 {
+        self.minimized_generation
     }
 
     #[must_use]
@@ -361,6 +451,14 @@ impl DockReporter {
         };
         let mut actions = Vec::new();
 
+        for &window in &self.pending_geometry_withdrawals {
+            actions.push(UserAction::SetDockGeometry {
+                window: Some(window),
+                wm_session_id,
+                minimized_generation: self.minimized_generation,
+                geometry: DockItemGeometry::default(),
+            });
+        }
         for report in self.acknowledged_geometry.iter().filter(|report| {
             !self
                 .desired_geometry
@@ -370,6 +468,7 @@ impl DockReporter {
             actions.push(UserAction::SetDockGeometry {
                 window: report.window,
                 wm_session_id,
+                minimized_generation: self.minimized_generation,
                 geometry: DockItemGeometry::default(),
             });
         }
@@ -381,6 +480,7 @@ impl DockReporter {
             actions.push(UserAction::SetDockGeometry {
                 window: report.window,
                 wm_session_id,
+                minimized_generation: self.minimized_generation,
                 geometry: report.geometry,
             });
         }
@@ -391,24 +491,37 @@ impl DockReporter {
             actions.push(UserAction::PreviewWindow {
                 window: current,
                 wm_session_id,
+                minimized_generation: self.minimized_generation,
                 visible: false,
+                renewal: false,
                 geometry: self.acknowledged_preview_anchor,
             });
         }
-        let renew = self.desired_preview == self.acknowledged_preview
+        let same_preview = self.desired_preview == self.acknowledged_preview
             && self.desired_preview.is_some()
+            && !self.preview_anchor.is_empty();
+        let renew = same_preview
             && self.preview_last_sent.is_none_or(|sent| {
                 now.saturating_duration_since(sent) >= DOCK_PREVIEW_LEASE_INTERVAL
+            });
+        let anchor_refresh = same_preview
+            && self.preview_anchor != self.acknowledged_preview_anchor
+            && self.preview_last_sent.is_none_or(|sent| {
+                now.saturating_duration_since(sent) >= DOCK_PREVIEW_ANCHOR_INTERVAL
             });
         if let Some(desired) = self.desired_preview
             && !self.preview_waiting_for_scene
             && !self.preview_anchor.is_empty()
-            && (self.acknowledged_preview != Some(desired) || renew)
+            && (self.acknowledged_preview != Some(desired) || renew || anchor_refresh)
         {
             actions.push(UserAction::PreviewWindow {
                 window: desired,
                 wm_session_id,
+                minimized_generation: self.minimized_generation,
                 visible: true,
+                // Both the lease heartbeat and a throttled anchor refresh
+                // extend the same compositor-side ownership lease.
+                renewal: self.acknowledged_preview == Some(desired),
                 geometry: self.preview_anchor,
             });
         }
@@ -614,6 +727,7 @@ mod tests {
         reporter.synchronize(DockReporterInput {
             wm_available: true,
             wm_session_id: 91,
+            minimized_generation: 7,
             transport_generation: 3,
             monitor_geometry: Some(monitor),
             minimized_windows: &windows,
@@ -645,6 +759,7 @@ mod tests {
         assert!(actions.iter().any(|action| matches!(
             action,
             UserAction::PreviewWindow {
+                renewal: false,
                 geometry: DockItemGeometry {
                     width: 84,
                     height: 56,
@@ -660,19 +775,217 @@ mod tests {
             reporter.next_retry_deadline(start),
             start.checked_add(DOCK_PREVIEW_LEASE_INTERVAL)
         );
-        assert!(
-            reporter
-                .pending_actions(start + DOCK_PREVIEW_LEASE_INTERVAL)
-                .iter()
-                .any(|action| matches!(
+        let moved_scene = dock_scene(Some(Rect::new(120.0, 4.0, 45.0, 30.0)));
+        reporter.synchronize(DockReporterInput {
+            wm_available: true,
+            wm_session_id: 91,
+            minimized_generation: 7,
+            transport_generation: 3,
+            monitor_geometry: Some(monitor),
+            minimized_windows: &windows,
+            scene: &moved_scene,
+            presentation: &config,
+            hovered: Some(NodeId::MinimizedWindow(WindowToken(41))),
+            scale_factor: 2.0,
+        });
+        assert_eq!(
+            reporter.geometry_for(WindowToken(41)),
+            DockItemGeometry::new(540, 408, 90, 60)
+        );
+        assert_eq!(
+            reporter.pending_actions(start + Duration::from_millis(1)),
+            Vec::new(),
+            "same-token motion must not emit a per-frame preview command"
+        );
+        assert_eq!(
+            reporter.next_retry_deadline(start + Duration::from_millis(1)),
+            start.checked_add(DOCK_PREVIEW_ANCHOR_INTERVAL)
+        );
+        let anchor_refresh = reporter
+            .pending_actions(start + DOCK_PREVIEW_ANCHOR_INTERVAL)
+            .into_iter()
+            .find(|action| {
+                matches!(
                     action,
                     UserAction::PreviewWindow {
                         window: WindowToken(41),
                         visible: true,
                         ..
                     }
+                )
+            })
+            .expect("throttled preview anchor refresh");
+        assert!(matches!(
+            anchor_refresh,
+            UserAction::PreviewWindow {
+                renewal: true,
+                geometry: DockItemGeometry {
+                    x: 540,
+                    y: 408,
+                    width: 90,
+                    height: 60,
+                },
+                ..
+            }
+        ));
+        assert!(reporter.acknowledge(anchor_refresh, start + DOCK_PREVIEW_ANCHOR_INTERVAL));
+        assert_eq!(
+            reporter.next_retry_deadline(start + DOCK_PREVIEW_ANCHOR_INTERVAL),
+            start
+                .checked_add(DOCK_PREVIEW_ANCHOR_INTERVAL)
+                .and_then(|sent| sent.checked_add(DOCK_PREVIEW_LEASE_INTERVAL))
+        );
+    }
+
+    #[test]
+    fn generation_bump_withdraws_a_removed_acknowledged_target_with_the_new_epoch() {
+        let scene = dock_scene(Some(Rect::new(112.0, 10.0, 27.0, 18.0)));
+        let empty_scene = dock_scene(None);
+        let config = PresentationConfig::default();
+        let windows = [minimized(41)];
+        let monitor = MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: 1600,
+            height: 900,
+        };
+        let now = Instant::now();
+        let mut reporter = DockReporter::new();
+        reporter.synchronize(DockReporterInput {
+            wm_available: true,
+            wm_session_id: 91,
+            minimized_generation: 7,
+            transport_generation: 3,
+            monitor_geometry: Some(monitor),
+            minimized_windows: &windows,
+            scene: &scene,
+            presentation: &config,
+            hovered: None,
+            scale_factor: 1.0,
+        });
+        for action in reporter.pending_actions(now) {
+            assert!(reporter.acknowledge(action, now));
+        }
+
+        reporter.synchronize(DockReporterInput {
+            wm_available: true,
+            wm_session_id: 91,
+            minimized_generation: 8,
+            transport_generation: 3,
+            monitor_geometry: Some(monitor),
+            minimized_windows: &[],
+            scene: &empty_scene,
+            presentation: &config,
+            hovered: None,
+            scale_factor: 1.0,
+        });
+        let withdrawal = reporter
+            .pending_actions(now)
+            .into_iter()
+            .find(|action| {
+                matches!(
+                    action,
+                    UserAction::SetDockGeometry {
+                        window: Some(WindowToken(41)),
+                        minimized_generation: 8,
+                        geometry,
+                        ..
+                    } if geometry.is_empty()
+                )
+            })
+            .expect("old target withdrawal in the current projection");
+
+        let mut reconnected = reporter.clone();
+        reconnected.synchronize_model(true, 91, 8, 4, &[], None);
+        assert!(
+            reconnected
+                .pending_actions(now)
+                .iter()
+                .any(|action| matches!(
+                    action,
+                    UserAction::SetDockGeometry {
+                        window: Some(WindowToken(41)),
+                        minimized_generation: 8,
+                        geometry,
+                        ..
+                    } if geometry.is_empty()
                 ))
         );
+
+        let mut restarted = reporter.clone();
+        restarted.synchronize_model(true, 92, 9, 3, &[], None);
+        assert!(restarted.pending_geometry_withdrawals.is_empty());
+        assert!(restarted.pending_actions(now).is_empty());
+
+        assert!(reporter.acknowledge(withdrawal, now));
+        assert!(!reporter.pending_actions(now).iter().any(|action| matches!(
+            action,
+            UserAction::SetDockGeometry {
+                window: Some(WindowToken(41)),
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn generation_bump_never_withdraws_a_token_present_in_the_new_projection() {
+        let scene = dock_scene(Some(Rect::new(112.0, 10.0, 27.0, 18.0)));
+        let config = PresentationConfig::default();
+        let windows = [minimized(41)];
+        let monitor = MonitorGeometry {
+            x: 0,
+            y: 0,
+            width: 1600,
+            height: 900,
+        };
+        let now = Instant::now();
+        let mut reporter = DockReporter::new();
+        reporter.synchronize(DockReporterInput {
+            wm_available: true,
+            wm_session_id: 91,
+            minimized_generation: 7,
+            transport_generation: 3,
+            monitor_geometry: Some(monitor),
+            minimized_windows: &windows,
+            scene: &scene,
+            presentation: &config,
+            hovered: None,
+            scale_factor: 1.0,
+        });
+        for action in reporter.pending_actions(now) {
+            assert!(reporter.acknowledge(action, now));
+        }
+
+        reporter.synchronize(DockReporterInput {
+            wm_available: true,
+            wm_session_id: 91,
+            minimized_generation: 8,
+            transport_generation: 3,
+            monitor_geometry: Some(monitor),
+            minimized_windows: &windows,
+            scene: &scene,
+            presentation: &config,
+            hovered: None,
+            scale_factor: 1.0,
+        });
+        let actions = reporter.pending_actions(now);
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            UserAction::SetDockGeometry {
+                window: Some(WindowToken(41)),
+                geometry,
+                ..
+            } if geometry.is_empty()
+        )));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            UserAction::SetDockGeometry {
+                window: Some(WindowToken(41)),
+                minimized_generation: 8,
+                geometry,
+                ..
+            } if !geometry.is_empty()
+        )));
     }
 
     #[test]
@@ -692,6 +1005,7 @@ mod tests {
         reporter.synchronize(DockReporterInput {
             wm_available: true,
             wm_session_id: 91,
+            minimized_generation: 7,
             transport_generation: 3,
             monitor_geometry: Some(monitor),
             minimized_windows: &windows,
@@ -704,7 +1018,7 @@ mod tests {
             assert!(reporter.acknowledge(action, start));
         }
 
-        reporter.synchronize_model(true, 91, 4, &windows, None);
+        reporter.synchronize_model(true, 91, 7, 4, &windows, None);
         assert_eq!(reporter.desired_geometry().len(), 2);
         assert_eq!(reporter.interactive_geometry().len(), 1);
         let reconnected = reporter.pending_actions(start);
@@ -720,6 +1034,7 @@ mod tests {
         reporter.synchronize(DockReporterInput {
             wm_available: true,
             wm_session_id: 91,
+            minimized_generation: 7,
             transport_generation: 4,
             monitor_geometry: Some(monitor),
             minimized_windows: &windows,
@@ -744,6 +1059,7 @@ mod tests {
         reporter.synchronize_model(
             true,
             92,
+            8,
             5,
             &windows,
             Some(NodeId::MinimizedWindow(WindowToken(41))),
@@ -760,6 +1076,7 @@ mod tests {
         reporter.synchronize(DockReporterInput {
             wm_available: true,
             wm_session_id: 92,
+            minimized_generation: 8,
             transport_generation: 5,
             monitor_geometry: Some(monitor),
             minimized_windows: &windows,
@@ -781,7 +1098,7 @@ mod tests {
             2
         );
 
-        reporter.synchronize_model(false, 92, 5, &windows, None);
+        reporter.synchronize_model(false, 92, 8, 5, &windows, None);
         assert!(reporter.state_key().is_none());
         assert!(reporter.desired_geometry().is_empty());
         assert!(reporter.acknowledged_geometry().is_empty());

@@ -113,7 +113,7 @@ unsafe impl WireSafe for WireMessage {}
 
 /// 共享内存中的稳定命令表示。
 ///
-/// 字段顺序与显式整数类型使整个 56-byte payload 不含 padding。
+/// 字段顺序与显式整数类型使整个 64-byte payload 不含 padding。
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WireCommand {
@@ -123,6 +123,7 @@ pub(crate) struct WireCommand {
     flags: u32,
     window_id: u64,
     wm_session_id: u64,
+    minimized_generation: u64,
     anchor_x: i32,
     anchor_y: i32,
     anchor_w: u32,
@@ -130,7 +131,7 @@ pub(crate) struct WireCommand {
     timestamp: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<WireCommand>() == 56);
+const _: () = assert!(std::mem::size_of::<WireCommand>() == 64);
 
 // SAFETY: repr(C)；上方 const 断言证明无 padding；全部字段为整数，
 // 任意位模式有效；无内部可变性。
@@ -145,6 +146,7 @@ impl From<SharedCommand> for WireCommand {
             flags: command.flags,
             window_id: command.window_id,
             wm_session_id: command.wm_session_id,
+            minimized_generation: command.minimized_generation,
             anchor_x: command.anchor_x,
             anchor_y: command.anchor_y,
             anchor_w: command.anchor_w,
@@ -163,6 +165,7 @@ impl From<WireCommand> for SharedCommand {
             flags: command.flags,
             window_id: command.window_id,
             wm_session_id: command.wm_session_id,
+            minimized_generation: command.minimized_generation,
             anchor_x: command.anchor_x,
             anchor_y: command.anchor_y,
             anchor_w: command.anchor_w,
@@ -659,21 +662,22 @@ mod tests {
     }
 
     #[test]
-    fn v12_wire_layout_is_exact_and_padding_free() {
+    fn v13_wire_layout_is_exact_and_padding_free() {
         assert_eq!(std::mem::size_of::<WireMinimizedWindowInfo>(), 176);
         assert_eq!(std::mem::size_of::<WireMessage>(), 3040);
-        assert_eq!(std::mem::size_of::<WireCommand>(), 56);
+        assert_eq!(std::mem::size_of::<WireCommand>(), 64);
         assert_eq!(std::mem::offset_of!(WireCommand, cmd_type), 0);
         assert_eq!(std::mem::offset_of!(WireCommand, parameter), 4);
         assert_eq!(std::mem::offset_of!(WireCommand, monitor_id), 8);
         assert_eq!(std::mem::offset_of!(WireCommand, flags), 12);
         assert_eq!(std::mem::offset_of!(WireCommand, window_id), 16);
         assert_eq!(std::mem::offset_of!(WireCommand, wm_session_id), 24);
-        assert_eq!(std::mem::offset_of!(WireCommand, anchor_x), 32);
-        assert_eq!(std::mem::offset_of!(WireCommand, anchor_y), 36);
-        assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 40);
-        assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 44);
-        assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 48);
+        assert_eq!(std::mem::offset_of!(WireCommand, minimized_generation), 32);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_x), 40);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_y), 44);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 48);
+        assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 52);
+        assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 56);
     }
 
     // ── 创建 / 打开 ──────────────────────────────────────────────────────────
@@ -1031,13 +1035,14 @@ mod tests {
     }
 
     #[test]
-    fn minimized_command_roundtrip_preserves_every_v12_field() {
+    fn minimized_command_roundtrip_preserves_every_v13_field() {
         let path = mk_path("minimized_cmd_roundtrip");
         let buf = SharedRingBuffer::create_aux(&path, Some(16), Some(0)).unwrap();
         let anchor = MinimizedWindowAnchor::new(-101, 202, 303, 404);
         let mut command = SharedCommand::preview_minimized(
             0xfedc_ba98_7654_3210,
             0x0123_4567_89ab_cdef,
+            0x8877_6655_4433_2211,
             -7,
             0xa5a5_5a5a,
             anchor,
@@ -1060,6 +1065,7 @@ mod tests {
             flags: 0x5566_7788,
             window_id: 0x0123_4567_89ab_cdef,
             wm_session_id: 0xfedc_ba98_7654_3210,
+            minimized_generation: 0x1020_3040_5060_7080,
             anchor_x: -1,
             anchor_y: -2,
             anchor_w: 3,

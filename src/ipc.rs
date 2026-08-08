@@ -379,6 +379,9 @@ pub struct WindowInfo {
     pub is_urgent: bool,
     pub is_sticky: bool,
     pub is_pip: bool,
+    /// True only for JWM's semantic minimized state. Windows parked off-screen
+    /// because their tag is not selected are not minimized.
+    pub is_minimized: bool,
     pub is_focused: bool,
 }
 
@@ -760,6 +763,33 @@ mod tests {
         let json = r#"{"query": "get_windows"}"#;
         let msg: IpcMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, IpcMessage::Query(IpcQuery { query, .. }) if query == "get_windows"));
+    }
+
+    #[test]
+    fn window_info_serializes_the_explicit_minimized_state() {
+        let value = serde_json::to_value(WindowInfo {
+            id: 42,
+            name: "terminal".to_string(),
+            class: "xterm".to_string(),
+            instance: "xterm".to_string(),
+            tags: 1,
+            monitor: 0,
+            x: -2560,
+            y: 20,
+            w: 640,
+            h: 480,
+            is_floating: false,
+            is_fullscreen: false,
+            is_urgent: false,
+            is_sticky: false,
+            is_pip: false,
+            is_minimized: true,
+            is_focused: false,
+        })
+        .expect("serialize WindowInfo");
+
+        assert_eq!(value["is_minimized"], true);
+        assert!(value.get("is_hidden").is_none());
     }
 
     #[test]

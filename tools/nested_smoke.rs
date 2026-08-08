@@ -313,6 +313,10 @@ pub enum ScenarioStage {
     MapClient,
     /// Send one IPC command (name, JSON args).
     Command(&'static str, &'static str),
+    /// Select the stable focused window from `get_windows`, minimize it, then
+    /// restore that exact window through `focus_window(id)`. Both halves are
+    /// independently converged and snapshotted.
+    MinimizeRestoreFocus,
 }
 
 /// The fixed stage sequence driven by `policy_scenario`. It walks the
@@ -325,6 +329,9 @@ pub const SCENARIO_STAGES: &[ScenarioStage] = &[
     ScenarioStage::MapClient,
     // Deterministic layout baseline, then master-area math.
     ScenarioStage::Command("setlayout", r#"{"layout":"tile"}"#),
+    // Exercise the same minimize -> taskbar/launcher restore path used by the
+    // native bars. The target id is selected dynamically per transport.
+    ScenarioStage::MinimizeRestoreFocus,
     ScenarioStage::Command("setmfact", r#"{"value":0.05}"#),
     ScenarioStage::Command("incnmaster", r#"{"value":1}"#),
     ScenarioStage::Command("incnmaster", r#"{"value":-1}"#),
@@ -341,6 +348,24 @@ pub const SCENARIO_STAGES: &[ScenarioStage] = &[
     ScenarioStage::Command("view", r#"{"tag":1}"#),
     ScenarioStage::Command("togglefloating", "null"),
 ];
+
+impl ScenarioStage {
+    #[must_use]
+    pub const fn snapshot_count(self) -> usize {
+        match self {
+            Self::MinimizeRestoreFocus => 2,
+            Self::MapClient | Self::Command(_, _) => 1,
+        }
+    }
+}
+
+#[must_use]
+pub fn scenario_snapshot_count() -> usize {
+    SCENARIO_STAGES
+        .iter()
+        .map(|stage| stage.snapshot_count())
+        .sum()
+}
 
 /// Reduce `get_windows` + `get_workspaces` payloads to the transport-neutral
 /// observable state the differential comparison is defined over.
@@ -366,6 +391,7 @@ pub fn normalize_observable_state(
                         "tags": window["tags"],
                         "floating": window["is_floating"],
                         "fullscreen": window["is_fullscreen"],
+                        "minimized": window["is_minimized"],
                         "focused": window["is_focused"],
                         "monitor": window["monitor"],
                         "x": window["x"],
@@ -415,6 +441,149 @@ pub fn normalize_observable_state(
         "windows": normalized_windows,
         "workspaces": normalized_workspaces,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowGeometry {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MinimizeTarget {
+    id: u64,
+    geometry: WindowGeometry,
+}
+
+fn value_i32(value: &serde_json::Value) -> Option<i32> {
+    i32::try_from(value.as_i64()?).ok()
+}
+
+fn window_geometry(window: &serde_json::Value) -> Option<WindowGeometry> {
+    Some(WindowGeometry {
+        x: value_i32(&window["x"])?,
+        y: value_i32(&window["y"])?,
+        w: value_i32(&window["w"])?,
+        h: value_i32(&window["h"])?,
+    })
+}
+
+fn monitor_geometries(monitors: &serde_json::Value) -> Vec<WindowGeometry> {
+    monitors
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(window_geometry)
+        .filter(|geometry| geometry.w > 0 && geometry.h > 0)
+        .collect()
+}
+
+fn geometry_intersects_monitor(geometry: WindowGeometry, monitors: &serde_json::Value) -> bool {
+    if geometry.w <= 0 || geometry.h <= 0 {
+        return false;
+    }
+    let x = i64::from(geometry.x);
+    let y = i64::from(geometry.y);
+    let right = x + i64::from(geometry.w);
+    let bottom = y + i64::from(geometry.h);
+    monitor_geometries(monitors).into_iter().any(|monitor| {
+        let monitor_x = i64::from(monitor.x);
+        let monitor_y = i64::from(monitor.y);
+        let monitor_right = monitor_x + i64::from(monitor.w);
+        let monitor_bottom = monitor_y + i64::from(monitor.h);
+        x < monitor_right && right > monitor_x && y < monitor_bottom && bottom > monitor_y
+    })
+}
+
+fn geometry_is_parked_left(geometry: WindowGeometry, monitors: &serde_json::Value) -> bool {
+    if geometry.w <= 0 || geometry.h <= 0 {
+        return false;
+    }
+    let Some(desktop_left) = monitor_geometries(monitors)
+        .into_iter()
+        .map(|monitor| monitor.x)
+        .min()
+    else {
+        return false;
+    };
+    i64::from(geometry.x) + i64::from(geometry.w) <= i64::from(desktop_left)
+}
+
+fn window_by_id(windows: &serde_json::Value, id: u64) -> Option<&serde_json::Value> {
+    windows
+        .as_array()?
+        .iter()
+        .find(|window| window["id"].as_u64() == Some(id))
+}
+
+/// Select the one semantically visible focused window. The transport-local id
+/// is retained only for the subsequent command; it is still excluded from the
+/// differential snapshots.
+fn select_minimize_target(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+) -> Result<MinimizeTarget, String> {
+    let entries = windows
+        .as_array()
+        .ok_or("get_windows returned a non-array payload")?;
+    let mut candidates = entries.iter().filter(|window| {
+        window["is_focused"].as_bool() == Some(true)
+            && window["is_minimized"].as_bool() == Some(false)
+    });
+    let window = candidates
+        .next()
+        .ok_or("get_windows has no focused, non-minimized target")?;
+    if candidates.next().is_some() {
+        return Err("get_windows has multiple focused, non-minimized targets".to_string());
+    }
+    let id = window["id"]
+        .as_u64()
+        .ok_or("focused window has no u64 id")?;
+    let geometry = window_geometry(window).ok_or("focused window has invalid geometry")?;
+    if !geometry_intersects_monitor(geometry, monitors) {
+        return Err(format!(
+            "focused window {id} does not intersect a live monitor before minimize"
+        ));
+    }
+    Ok(MinimizeTarget { id, geometry })
+}
+
+fn minimized_target_converged(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+    target: MinimizeTarget,
+) -> bool {
+    let Some(window) = window_by_id(windows, target.id) else {
+        return false;
+    };
+    let Some(geometry) = window_geometry(window) else {
+        return false;
+    };
+    window["is_minimized"].as_bool() == Some(true)
+        && window["is_focused"].as_bool() == Some(false)
+        && geometry.y == target.geometry.y
+        && geometry.w == target.geometry.w
+        && geometry.h == target.geometry.h
+        && geometry_is_parked_left(geometry, monitors)
+}
+
+fn restored_target_converged(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+    target: MinimizeTarget,
+) -> bool {
+    let Some(window) = window_by_id(windows, target.id) else {
+        return false;
+    };
+    let Some(geometry) = window_geometry(window) else {
+        return false;
+    };
+    window["is_minimized"].as_bool() == Some(false)
+        && window["is_focused"].as_bool() == Some(true)
+        && geometry == target.geometry
+        && geometry_intersects_monitor(geometry, monitors)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -655,6 +824,7 @@ pub struct NestedSmokeOptions {
 
 const POLL_INTERVAL: Duration = Duration::from_millis(150);
 const IPC_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const SCENARIO_CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Preserved log lines quoted into a failure detail; keeps the report bounded.
 const LOG_TAIL_LINES: usize = 5;
 
@@ -1563,16 +1733,16 @@ fn drive_scenario(
     clients: &mut Vec<Child>,
     context: &RunContext,
 ) -> Result<(Vec<serde_json::Value>, usize), String> {
-    let mut snapshots = Vec::with_capacity(SCENARIO_STAGES.len());
+    let mut snapshots = Vec::with_capacity(scenario_snapshot_count());
     let mut mapped = 0usize;
-    for stage in SCENARIO_STAGES {
+    for (stage_index, stage) in SCENARIO_STAGES.iter().copied().enumerate() {
         match stage {
             ScenarioStage::MapClient => {
                 let child = spawn_nested_client(context.kind, argv, context)?;
                 clients.push(child);
                 mapped += 1;
                 let expected = baseline + mapped;
-                match poll_until(deadline, || {
+                match poll_until(convergence_deadline(deadline), || {
                     window_count(socket).map(|count| count >= expected)
                 }) {
                     Ok(true) => {}
@@ -1584,6 +1754,11 @@ fn drive_scenario(
                     }
                     Err(error) => return Err(error),
                 }
+                snapshots.push(settled_snapshot(
+                    socket,
+                    convergence_deadline(deadline),
+                    &format!("stage {stage_index} map client #{mapped}"),
+                )?);
             }
             ScenarioStage::Command(command, args) => {
                 let args: serde_json::Value = serde_json::from_str(args)
@@ -1591,35 +1766,135 @@ fn drive_scenario(
                 let request = serde_json::json!({ "command": command, "args": args });
                 let response = ipc_roundtrip(socket, &request)?;
                 expect_success(command, response)?;
+                snapshots.push(settled_snapshot(
+                    socket,
+                    convergence_deadline(deadline),
+                    &format!("stage {stage_index} command {command}"),
+                )?);
+            }
+            ScenarioStage::MinimizeRestoreFocus => {
+                let target =
+                    wait_for_stable_minimize_target(socket, convergence_deadline(deadline))?;
+
+                ipc_command(socket, "minimize")?;
+                snapshots.push(settled_snapshot_where(
+                    socket,
+                    convergence_deadline(deadline),
+                    &format!("stage {stage_index} minimize window {}", target.id),
+                    |state| minimized_target_converged(&state.windows, &state.monitors, target),
+                )?);
+
+                let request = serde_json::json!({
+                    "command": "focus_window",
+                    "args": {"id": target.id},
+                });
+                let response = ipc_roundtrip(socket, &request)?;
+                expect_success("focus_window", response)?;
+                snapshots.push(settled_snapshot_where(
+                    socket,
+                    convergence_deadline(deadline),
+                    &format!("stage {stage_index} restore/focus window {}", target.id),
+                    |state| restored_target_converged(&state.windows, &state.monitors, target),
+                )?);
             }
         }
-        snapshots.push(settled_snapshot(socket, deadline)?);
     }
     Ok((snapshots, mapped))
 }
 
-/// Normalized snapshot that is stable across two consecutive reads, so
-/// asynchronous follow-ups (property updates, arrange) cannot race the
-/// comparison. Falls back to the last read at the deadline.
-fn settled_snapshot(socket: &Path, deadline: Instant) -> Result<serde_json::Value, String> {
-    let mut previous = read_normalized_state(socket)?;
-    loop {
-        std::thread::sleep(POLL_INTERVAL);
-        let current = read_normalized_state(socket)?;
-        if current == previous || Instant::now() >= deadline {
-            return Ok(current);
-        }
-        previous = current;
+struct ScenarioObservation {
+    windows: serde_json::Value,
+    workspaces: serde_json::Value,
+    monitors: serde_json::Value,
+}
+
+impl ScenarioObservation {
+    fn normalized(&self) -> serde_json::Value {
+        normalize_observable_state(&self.windows, &self.workspaces)
     }
 }
 
-fn read_normalized_state(socket: &Path) -> Result<serde_json::Value, String> {
+fn convergence_deadline(overall_deadline: Instant) -> Instant {
+    std::cmp::min(
+        overall_deadline,
+        Instant::now() + SCENARIO_CONVERGENCE_TIMEOUT,
+    )
+}
+
+fn wait_for_stable_minimize_target(
+    socket: &Path,
+    deadline: Instant,
+) -> Result<MinimizeTarget, String> {
+    let mut previous = None;
+    loop {
+        let state = read_scenario_observation(socket)?;
+        let rejection = match select_minimize_target(&state.windows, &state.monitors) {
+            Ok(target) if previous == Some(target) => return Ok(target),
+            Ok(target) => {
+                previous = Some(target);
+                format!("window {} was observed only once", target.id)
+            }
+            Err(error) => {
+                previous = None;
+                error
+            }
+        };
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "minimize target did not stabilize before the phase deadline: {rejection}"
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// Require both a phase-specific semantic/physical predicate and two
+/// consecutive identical normalized reads. A deadline is an error rather
+/// than permission to compare an unsettled last sample.
+fn settled_snapshot_where(
+    socket: &Path,
+    deadline: Instant,
+    phase: &str,
+    mut converged: impl FnMut(&ScenarioObservation) -> bool,
+) -> Result<serde_json::Value, String> {
+    let mut previous = None;
+    loop {
+        let state = read_scenario_observation(socket)?;
+        let current = state.normalized();
+        if converged(&state) {
+            if previous.as_ref() == Some(&current) {
+                return Ok(current);
+            }
+            previous = Some(current);
+        } else {
+            previous = None;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "{phase} did not reach two consecutive converged observations"
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn settled_snapshot(
+    socket: &Path,
+    deadline: Instant,
+    phase: &str,
+) -> Result<serde_json::Value, String> {
+    settled_snapshot_where(socket, deadline, phase, |_| true)
+}
+
+fn read_scenario_observation(socket: &Path) -> Result<ScenarioObservation, String> {
     let windows = ipc_query(socket, "get_windows")?;
     let workspaces = ipc_query(socket, "get_workspaces")?;
-    Ok(normalize_observable_state(
-        &windows["data"],
-        &workspaces["data"],
-    ))
+    let monitors = ipc_query(socket, "get_monitors")?;
+    Ok(ScenarioObservation {
+        windows: windows["data"].clone(),
+        workspaces: workspaces["data"].clone(),
+        monitors: monitors["data"].clone(),
+    })
 }
 
 fn run_shutdown_step(spec: &StepSpec, context: &mut RunContext) -> StepReport {
@@ -1990,7 +2265,10 @@ mod tests {
     }
 
     #[test]
-    fn report_serializes_with_the_frozen_version_1_field_names() {
+    fn report_serializes_with_the_version_1_envelope_field_names() {
+        // V1 freezes this report envelope. Scenario snapshots intentionally
+        // evolve additively within V1, so their fields/count are covered by
+        // scenario-specific tests rather than frozen here.
         let report = MatrixReport {
             schema_version: NESTED_SMOKE_SCHEMA_VERSION,
             generated_unix_ms: 42,
@@ -2085,9 +2363,11 @@ mod tests {
         let windows = serde_json::json!([
             {"id": 99, "name": "async title", "class": "xterm", "instance": "xterm",
              "tags": 1, "is_floating": false, "is_fullscreen": false, "is_focused": true,
+             "is_minimized": false,
              "monitor": 0, "x": 640, "y": 52, "w": 636, "h": 745},
             {"id": 3, "name": "other", "class": "xclock", "instance": "xclock",
              "tags": 1, "is_floating": true, "is_fullscreen": false, "is_focused": false,
+             "is_minimized": true,
              "monitor": 0, "x": 0, "y": 52, "w": 640, "h": 745},
         ]);
         let workspaces = serde_json::json!([
@@ -2102,6 +2382,8 @@ mod tests {
         assert_eq!(normalized["windows"][1]["class"], "xterm");
         assert!(normalized["windows"][0].get("id").is_none());
         assert!(normalized["windows"][0].get("name").is_none());
+        assert_eq!(normalized["windows"][0]["minimized"], true);
+        assert_eq!(normalized["windows"][1]["minimized"], false);
         // Workspaces sorted by (monitor, tag_index).
         assert_eq!(normalized["workspaces"][0]["tag_index"], 0);
         assert_eq!(normalized["workspaces"][0]["num_clients"], 2);
@@ -2198,6 +2480,7 @@ mod tests {
     #[test]
     fn scenario_stages_parse_and_target_registered_ipc_commands() {
         let mut map_clients = 0usize;
+        let mut minimize_restore_loops = 0usize;
         for stage in SCENARIO_STAGES {
             match stage {
                 ScenarioStage::MapClient => map_clients += 1,
@@ -2212,12 +2495,112 @@ mod tests {
                         "{command} is not a registered IPC command"
                     );
                 }
+                ScenarioStage::MinimizeRestoreFocus => {
+                    minimize_restore_loops += 1;
+                    assert!(jwm::ipc::is_known_command("minimize"));
+                    assert!(jwm::ipc::is_known_command("focus_window"));
+                }
             }
         }
         // Snapshot 0 needs a mapped window, and the master/stack math the
         // differential exists for needs at least two clients.
         assert!(matches!(SCENARIO_STAGES[0], ScenarioStage::MapClient));
         assert!(map_clients >= 2);
+        assert_eq!(minimize_restore_loops, 1);
+        assert_eq!(scenario_snapshot_count(), SCENARIO_STAGES.len() + 1);
+    }
+
+    #[test]
+    fn minimize_target_selection_requires_explicit_semantics_and_visible_geometry() {
+        let monitors = serde_json::json!([
+            {"x": -1920, "y": 0, "w": 1920, "h": 1080},
+            {"x": 0, "y": 0, "w": 1920, "h": 1080},
+        ]);
+        let windows = serde_json::json!([
+            {"id": 10, "is_focused": false, "is_minimized": false,
+             "x": 0, "y": 0, "w": 960, "h": 1080},
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": -1800, "y": 40, "w": 900, "h": 900},
+        ]);
+
+        assert_eq!(
+            select_minimize_target(&windows, &monitors).unwrap(),
+            MinimizeTarget {
+                id: 20,
+                geometry: WindowGeometry {
+                    x: -1800,
+                    y: 40,
+                    w: 900,
+                    h: 900,
+                },
+            }
+        );
+
+        let missing_semantics = serde_json::json!([
+            {"id": 20, "is_focused": true, "x": 0, "y": 0, "w": 900, "h": 900},
+        ]);
+        assert!(select_minimize_target(&missing_semantics, &monitors).is_err());
+    }
+
+    #[test]
+    fn minimize_restore_convergence_checks_semantics_geometry_and_focus_independently() {
+        let monitors = serde_json::json!([
+            {"x": -1920, "y": 0, "w": 1920, "h": 1080},
+            {"x": 0, "y": 0, "w": 1920, "h": 1080},
+        ]);
+        let target = MinimizeTarget {
+            id: 20,
+            geometry: WindowGeometry {
+                x: -1800,
+                y: 40,
+                w: 900,
+                h: 900,
+            },
+        };
+
+        let minimized = serde_json::json!([
+            {"id": 20, "is_focused": false, "is_minimized": true,
+             "x": -4000, "y": 40, "w": 900, "h": 900},
+            {"id": 10, "is_focused": true, "is_minimized": false,
+             "x": -1920, "y": 0, "w": 1920, "h": 1080},
+        ]);
+        assert!(minimized_target_converged(&minimized, &monitors, target));
+
+        let merely_offscreen = serde_json::json!([
+            {"id": 20, "is_focused": false, "is_minimized": false,
+             "x": -4000, "y": 40, "w": 900, "h": 900},
+        ]);
+        assert!(!minimized_target_converged(
+            &merely_offscreen,
+            &monitors,
+            target
+        ));
+
+        let semantic_only = serde_json::json!([
+            {"id": 20, "is_focused": false, "is_minimized": true,
+             "x": -1800, "y": 40, "w": 900, "h": 900},
+        ]);
+        assert!(!minimized_target_converged(
+            &semantic_only,
+            &monitors,
+            target
+        ));
+
+        let restored = serde_json::json!([
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": -1800, "y": 40, "w": 900, "h": 900},
+        ]);
+        assert!(restored_target_converged(&restored, &monitors, target));
+
+        let wrong_geometry = serde_json::json!([
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": -1700, "y": 40, "w": 900, "h": 900},
+        ]);
+        assert!(!restored_target_converged(
+            &wrong_geometry,
+            &monitors,
+            target
+        ));
     }
 
     #[test]

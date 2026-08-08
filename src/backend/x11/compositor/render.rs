@@ -11,6 +11,7 @@ use crate::backend::compositor_common::dynamic_island::IslandDock;
 use crate::backend::compositor_common::genie::{
     GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect,
 };
+use crate::backend::compositor_common::minimized_thumbnail::{ThumbnailPurpose, ThumbnailSource};
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{
     WindowGlowSettings, WindowGlowStyle, WindowGlowTarget,
@@ -28,6 +29,15 @@ use std::sync::mpsc;
 
 type GlScissor = (i32, i32, i32, i32);
 
+#[derive(Clone, Copy)]
+struct MinimizedRenderSource {
+    texture: glow::Texture,
+    has_alpha: bool,
+    width: f32,
+    height: f32,
+    uv_rect: [f32; 4],
+}
+
 fn transformed_overlays_require_full_redraw(
     overview_active: bool,
     overview_closing: bool,
@@ -40,8 +50,27 @@ fn transformed_overlays_require_full_redraw(
 fn minimized_dock_requires_composition(
     has_targeted_cached_visual: bool,
     has_preview: bool,
+    iconic_recapture_pending: bool,
 ) -> bool {
-    has_targeted_cached_visual || has_preview
+    has_targeted_cached_visual || has_preview || iconic_recapture_pending
+}
+
+/// Resolve and consume each transient render source before resolving the next
+/// one. Minimized thumbnail sources contain bare GL object names: resolving a
+/// later CPU-only item may upload it and evict an older GPU-LRU entry, so a
+/// batch of resolved sources cannot safely outlive another resolution step.
+fn resolve_and_draw_each<State, Item, Source>(
+    state: &mut State,
+    items: impl IntoIterator<Item = Item>,
+    mut resolve: impl FnMut(&mut State, Item) -> Option<Source>,
+    mut draw: impl FnMut(&mut State, Source),
+) {
+    for item in items {
+        let Some(source) = resolve(state, item) else {
+            continue;
+        };
+        draw(state, source);
+    }
 }
 
 /// Whether a composited window participates in the smart-border rule (a lone
@@ -286,6 +315,14 @@ fn window_prefers_direct_presentation(is_fullscreen: bool, bypass_compositor: u8
         2 => false,
         _ => is_fullscreen,
     }
+}
+
+/// A single XComposite redirect owner cannot be replaced by assigning a new
+/// marker. Restore the previous client before considering direct presentation
+/// for a different focused window; otherwise the old window remains physically
+/// unredirected with no state left from which to recover it.
+fn direct_presentation_owner_changed(previous: u32, focused: Option<u32>) -> bool {
+    Some(previous) != focused
 }
 
 fn edge_effects_require_composition(
@@ -2467,11 +2504,28 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.zoom_to_fit_window.is_some()
             || !self.particle_systems.is_empty()
             || !self.genie_active.is_empty()
+            // An explicit Dock request may promote a durable CPU thumbnail
+            // once.  This is a one-frame render demand, not a persistent
+            // drawable-source claim: the marker is consumed even on failure.
+            || self.genie_targets.keys().any(|x11_win| {
+                self.minimized_windows.contains(x11_win)
+                    && self.minimized_gpu_upload_pending(*x11_win)
+            })
+            || self.dock_preview.is_some_and(|preview| {
+                self.minimized_gpu_upload_pending(preview.x11_win)
+            })
             || minimized_dock_requires_composition(
-                self.minimized_visuals
-                    .values()
-                    .any(|visual| visual.target.is_some()),
-                self.dock_preview.is_some(),
+                self.genie_targets.keys().any(|x11_win| {
+                    self.minimized_windows.contains(x11_win)
+                        && self.minimized_preview_drawable_source_available(*x11_win)
+                }),
+                self.dock_preview.is_some_and(|preview| {
+                    !preview.awaiting_source
+                        && self.minimized_preview_drawable_source_available(preview.x11_win)
+                }),
+                // A due retained-source CPU recapture needs exactly one frame
+                // past fullscreen-unredirect and the make-current barrier.
+                self.iconic_snapshot_recapture_pending(),
             )
             || !self.ripple_active.is_empty()
             || self.tickless_focus_or_wallpaper_animation_active()
@@ -2545,7 +2599,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// the state and tell the caller to continue bypassing this frame. Drawing
     /// into the overlay while the server still owns the client would otherwise
     /// produce a blank/frozen frame and lose the only handle needed to retry.
-    fn restore_unredirected_window(&mut self, window: u32, reason: &str) -> bool {
+    pub(super) fn restore_unredirected_window(&mut self, window: u32, reason: &str) -> bool {
         let confirm_pixmap_on_damage = self.graphics.is_gles();
         let result = self
             .conn
@@ -2603,6 +2657,20 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
             return false;
+        }
+        // Focus can move directly from one output-covering client to another,
+        // and minimizing a directly-presented fullscreen client removes it
+        // from the drawable scene before its replacement capture is ready.
+        // In both cases restore the old owner first. The prior implementation
+        // could overwrite `unredirected_window` with the new candidate and
+        // permanently lose the only retry handle for the old client.
+        if let Some(previous) = self.unredirected_window
+            && direct_presentation_owner_changed(previous, focused)
+        {
+            self.unredirected_window = None;
+            if !self.restore_unredirected_window(previous, "direct-presentation owner changed") {
+                return true;
+            }
         }
         // Only unredirect if the top, focused window is an opaque fullscreen
         // client or explicitly carries `_NET_WM_BYPASS_COMPOSITOR = 1`.
@@ -2712,41 +2780,89 @@ impl<C: CompositorConnection> Compositor<C> {
         hasher.finish()
     }
 
-    fn render_dock_preview(&self, projection: &[f32; 16]) {
+    fn minimized_render_source(
+        &mut self,
+        x11_win: u32,
+        purpose: ThumbnailPurpose,
+    ) -> Option<MinimizedRenderSource> {
+        // A CPU hit is promoted lazily after an independent GPU LRU eviction.
+        // Restore never enters this helper, and its policy rejects both tiers
+        // even if a future call site accidentally tries to use it.
+        if purpose != ThumbnailPurpose::RestoreAnimation
+            && self.consume_minimized_gpu_upload(x11_win)
+            && self.ensure_minimized_gpu_snapshot(x11_win)
+        {
+            self.resume_minimized_preview_after_capture(x11_win);
+        }
+        let retained_visual = self.minimized_visuals.get(&x11_win);
+        let retained_animation = self
+            .genie_active
+            .iter()
+            .find(|animation| animation.x11_win == x11_win);
+        let source = select_minimized_thumbnail_source(
+            purpose,
+            MinimizedThumbnailAvailability {
+                live: self.windows.contains_key(&x11_win),
+                retained: retained_visual.is_some() || retained_animation.is_some(),
+                gpu: self.current_minimized_gpu_snapshot_available(x11_win),
+                cpu: self.current_minimized_cpu_snapshot_available(x11_win),
+            },
+        )?;
+        match source {
+            ThumbnailSource::GpuSnapshot => {
+                let snapshot = self.minimized_gpu_snapshots.get(&x11_win)?;
+                Some(MinimizedRenderSource {
+                    texture: snapshot.texture,
+                    has_alpha: snapshot.has_alpha,
+                    width: snapshot.width as f32,
+                    height: snapshot.height as f32,
+                    uv_rect: snapshot.uv_rect(),
+                })
+            }
+            ThumbnailSource::RetainedVisual => retained_visual
+                .map(|visual| MinimizedRenderSource {
+                    texture: visual.gl_texture,
+                    has_alpha: visual.has_rgba,
+                    width: visual.w,
+                    height: visual.h,
+                    uv_rect: [0.0, 0.0, 1.0, 1.0],
+                })
+                .or_else(|| {
+                    retained_animation.map(|animation| MinimizedRenderSource {
+                        texture: animation.gl_texture,
+                        has_alpha: animation.has_rgba,
+                        width: animation.w,
+                        height: animation.h,
+                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                    })
+                }),
+            ThumbnailSource::LiveMappedTexture => {
+                self.windows
+                    .get(&x11_win)
+                    .map(|window| MinimizedRenderSource {
+                        texture: window.gl_texture,
+                        has_alpha: window.has_rgba,
+                        width: window.w as f32,
+                        height: window.h as f32,
+                        uv_rect: [0.0, 0.0, 1.0, 1.0],
+                    })
+            }
+            // A failed upload cannot be drawn directly by OpenGL. Keep the CPU
+            // entry for a later retry and let the bar's icon remain visible.
+            ThumbnailSource::CpuSnapshot | ThumbnailSource::Placeholder => None,
+        }
+    }
+
+    fn render_dock_preview(&mut self, projection: &[f32; 16]) {
         let Some(preview) = self.dock_preview else {
             return;
         };
         if preview.opacity <= 0.001 {
             return;
         }
-        let source = self
-            .minimized_visuals
-            .get(&preview.x11_win)
-            .map(|visual| (visual.gl_texture, visual.has_rgba, visual.w, visual.h))
-            .or_else(|| {
-                self.genie_active
-                    .iter()
-                    .find(|animation| animation.x11_win == preview.x11_win)
-                    .map(|animation| {
-                        (
-                            animation.gl_texture,
-                            animation.has_rgba,
-                            animation.w,
-                            animation.h,
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.windows.get(&preview.x11_win).map(|window| {
-                    (
-                        window.gl_texture,
-                        window.has_rgba,
-                        window.w as f32,
-                        window.h as f32,
-                    )
-                })
-            });
-        let Some((texture, has_rgba, source_w, source_h)) = source else {
+        let Some(source) =
+            self.minimized_render_source(preview.x11_win, ThumbnailPurpose::HoverPreview)
+        else {
             return;
         };
         let output_bounds = output_bounds_for_anchor(
@@ -2763,8 +2879,8 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         let Some(rect) = preview_rect(
             preview.anchor,
-            source_w,
-            source_h,
+            source.width,
+            source.height,
             output_bounds,
             preview.scale,
         ) else {
@@ -2822,7 +2938,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
             self.gl.uniform_1_f32(
                 self.win_uniforms.opacity.as_ref(),
-                if has_rgba {
+                if source.has_alpha {
                     -preview.opacity
                 } else {
                     preview.opacity
@@ -2832,14 +2948,19 @@ impl<C: CompositorConnection> Compositor<C> {
                 .uniform_1_f32(self.win_uniforms.radius.as_ref(), 14.0);
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
             self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
-            self.gl
-                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl.uniform_4_f32(
+                self.win_uniforms.uv_rect.as_ref(),
+                source.uv_rect[0],
+                source.uv_rect[1],
+                source.uv_rect[2],
+                source.uv_rect[3],
+            );
             self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), 0.0);
             self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(source.texture));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.bind_vertex_array(None);
@@ -2847,12 +2968,23 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
-    fn render_minimized_dock_items(&self, projection: &[f32; 16]) {
-        if !self
-            .minimized_visuals
-            .values()
-            .any(|visual| visual.target.is_some())
-        {
+    fn render_minimized_dock_items(&mut self, projection: &[f32; 16]) {
+        let preview = self
+            .dock_preview
+            .map(|preview| (u64::from(preview.x11_win), preview.anchor, preview.opacity));
+        let targets: Vec<_> = self
+            .genie_targets
+            .iter()
+            .filter(|(x11_win, _)| {
+                self.minimized_windows.contains(x11_win)
+                    && !self
+                        .genie_active
+                        .iter()
+                        .any(|animation| animation.x11_win == **x11_win)
+            })
+            .map(|(&x11_win, &target)| (x11_win, target))
+            .collect();
+        if targets.is_empty() {
             return;
         }
         unsafe {
@@ -2866,48 +2998,64 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
             self.gl.uniform_1_f32(self.win_uniforms.desat.as_ref(), 0.0);
             self.gl
-                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
-            self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_progress.as_ref(), 0.0);
             self.gl
                 .uniform_1_f32(self.win_uniforms.ripple_amplitude.as_ref(), 0.0);
             self.gl.bind_vertex_array(Some(self.quad_vao));
             self.gl.active_texture(glow::TEXTURE0);
 
-            let preview = self
-                .dock_preview
-                .map(|preview| (u64::from(preview.x11_win), preview.anchor, preview.opacity));
-            for (&x11_win, visual) in &self.minimized_visuals {
-                let Some(stable_target) = visual.target else {
-                    continue;
-                };
-                let Some(target) =
-                    dock_item_preview_target(u64::from(x11_win), stable_target, preview)
-                else {
-                    continue;
-                };
-                if visual.w <= 0.0 || visual.h <= 0.0 {
-                    continue;
-                }
-                let fit = (target.width / visual.w).min(target.height / visual.h);
-                let width = (visual.w * fit).max(1.0);
-                let height = (visual.h * fit).max(1.0);
-                let x = target.x + (target.width - width) * 0.5;
-                let y = target.y + (target.height - height) * 0.5;
-                self.gl
-                    .uniform_4_f32(self.win_uniforms.rect.as_ref(), x, y, width, height);
-                self.gl
-                    .uniform_2_f32(self.win_uniforms.size.as_ref(), width, height);
-                self.gl.uniform_1_f32(
-                    self.win_uniforms.opacity.as_ref(),
-                    if visual.has_rgba { -1.0 } else { 1.0 },
-                );
-                self.gl
-                    .uniform_1_f32(self.win_uniforms.radius.as_ref(), 5.0_f32.min(height * 0.5));
-                self.gl
-                    .bind_texture(glow::TEXTURE_2D, Some(visual.gl_texture));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            }
+            resolve_and_draw_each(
+                self,
+                targets,
+                |compositor, (x11_win, stable_target)| {
+                    let target =
+                        dock_item_preview_target(u64::from(x11_win), stable_target, preview)?;
+                    let source = compositor
+                        .minimized_render_source(x11_win, ThumbnailPurpose::StaticDockCard)?;
+                    (source.width > 0.0 && source.height > 0.0).then_some((source, target))
+                },
+                |compositor, (source, target)| {
+                    // Draw before resolving the next item. That next resolve
+                    // may perform a lazy CPU upload and delete this texture as
+                    // the independent minimized-GPU cache's LRU victim.
+                    let fit = (target.width / source.width).min(target.height / source.height);
+                    let width = (source.width * fit).max(1.0);
+                    let height = (source.height * fit).max(1.0);
+                    let x = target.x + (target.width - width) * 0.5;
+                    let y = target.y + (target.height - height) * 0.5;
+                    compositor.gl.uniform_4_f32(
+                        compositor.win_uniforms.rect.as_ref(),
+                        x,
+                        y,
+                        width,
+                        height,
+                    );
+                    compositor.gl.uniform_2_f32(
+                        compositor.win_uniforms.size.as_ref(),
+                        width,
+                        height,
+                    );
+                    compositor.gl.uniform_1_f32(
+                        compositor.win_uniforms.opacity.as_ref(),
+                        if source.has_alpha { -1.0 } else { 1.0 },
+                    );
+                    compositor.gl.uniform_1_f32(
+                        compositor.win_uniforms.radius.as_ref(),
+                        5.0_f32.min(height * 0.5),
+                    );
+                    compositor.gl.uniform_4_f32(
+                        compositor.win_uniforms.uv_rect.as_ref(),
+                        source.uv_rect[0],
+                        source.uv_rect[1],
+                        source.uv_rect[2],
+                        source.uv_rect[3],
+                    );
+                    compositor
+                        .gl
+                        .bind_texture(glow::TEXTURE_2D, Some(source.texture));
+                    compositor.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                },
+            );
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);
@@ -3450,6 +3598,16 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             self.context_current = true;
         }
+
+        // True-Iconic admission is serviced by the backend after render_frame
+        // returns. Rebuild any missing CPU owner only here, after a successful
+        // make-current; WM-facing ensure/admission paths merely arm the gate.
+        self.service_iconic_snapshot_recaptures_current_context();
+
+        // Explicit Dock demand gets one CPU-to-GPU promotion attempt per arm.
+        // Service it before preview/card early returns so failure always
+        // consumes the gate and subsequent unrelated frames may unredirect.
+        self.service_minimized_gpu_uploads();
 
         // Recreate pixmaps for windows that were resized (batched, single XSync)
         let pixmaps_native_synced = self.refresh_pixmaps();
@@ -6104,13 +6262,52 @@ impl<C: CompositorConnection> Compositor<C> {
 mod tests {
     use super::{
         DirtyRect, PresentedSceneCopyPlan, PresentedSceneStatus, TransitionCapturePlan,
-        blur_sampling_margin, counts_for_smart_borders, dirty_below_affects_backdrop,
-        dirty_below_requires_full_blur_redraw, edge_effects_require_composition,
-        focus_highlight_style, intersect_gl_scissors, is_opaque_occluder,
-        minimized_dock_requires_composition, presented_scene_copy_plan, rect_covers_output,
-        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
-        window_prefers_direct_presentation,
+        blur_sampling_margin, counts_for_smart_borders, direct_presentation_owner_changed,
+        dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
+        edge_effects_require_composition, focus_highlight_style, intersect_gl_scissors,
+        is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
+        rect_covers_output, resolve_and_draw_each, transformed_overlays_require_full_redraw,
+        transition_capture_plan, wallpaper_blend_plan, window_prefers_direct_presentation,
     };
+
+    #[test]
+    fn dock_sources_are_drawn_before_a_later_resolution_can_evict_them() {
+        #[derive(Default)]
+        struct GpuLruModel {
+            resident: std::collections::HashSet<u8>,
+            trace: Vec<(&'static str, u8)>,
+        }
+
+        let mut model = GpuLruModel::default();
+        resolve_and_draw_each(
+            &mut model,
+            [1_u8, 2],
+            |model, item| {
+                model.trace.push(("resolve", item));
+                let texture = item * 10;
+                if item == 2 {
+                    // The second lazy upload needs room and evicts the first
+                    // item's raw texture. Interleaving must already have drawn
+                    // the first handle before this mutation can occur.
+                    model.resident.remove(&10);
+                }
+                model.resident.insert(texture);
+                Some(texture)
+            },
+            |model, texture| {
+                assert!(
+                    model.resident.contains(&texture),
+                    "a later resolve evicted a bare texture before its draw"
+                );
+                model.trace.push(("draw", texture / 10));
+            },
+        );
+
+        assert_eq!(
+            model.trace,
+            [("resolve", 1), ("draw", 1), ("resolve", 2), ("draw", 2),]
+        );
+    }
 
     #[test]
     fn ime_popups_do_not_count_toward_smart_borders() {
@@ -6124,9 +6321,17 @@ mod tests {
 
     #[test]
     fn hidden_bar_geometry_does_not_keep_x11_cache_composited() {
-        assert!(minimized_dock_requires_composition(true, false));
-        assert!(minimized_dock_requires_composition(false, true));
-        assert!(!minimized_dock_requires_composition(false, false));
+        assert!(minimized_dock_requires_composition(true, false, false));
+        assert!(minimized_dock_requires_composition(false, true, false));
+        assert!(!minimized_dock_requires_composition(false, false, false));
+    }
+
+    #[test]
+    fn pending_iconic_recapture_blocks_fullscreen_early_return() {
+        assert!(
+            minimized_dock_requires_composition(false, false, true),
+            "a due retained recapture must reach the make-current barrier even without Dock drawing"
+        );
     }
 
     #[test]
@@ -6251,6 +6456,13 @@ mod tests {
         // Reserved values are neutral.
         assert!(window_prefers_direct_presentation(true, 9));
         assert!(!window_prefers_direct_presentation(false, 9));
+    }
+
+    #[test]
+    fn focus_change_restores_the_previous_direct_presentation_owner_first() {
+        assert!(!direct_presentation_owner_changed(7, Some(7)));
+        assert!(direct_presentation_owner_changed(7, Some(8)));
+        assert!(direct_presentation_owner_changed(7, None));
     }
 
     #[test]

@@ -44,6 +44,22 @@ impl Jwm {
 
                     let mon_key = self.state.clients.get(client_key).and_then(|c| c.mon);
                     self.arrange(backend, mon_key);
+                    if self
+                        .state
+                        .clients
+                        .get(client_key)
+                        .is_some_and(|client| client.state.is_hidden)
+                        && let Err(error) =
+                            self.persist_minimized_restore_state(backend, client_key)
+                    {
+                        // The floating transition is already authoritative in
+                        // memory. Keep it and make a later seamless-restart
+                        // refresh retry the private property rather than
+                        // restoring this dialog as tiled from stale V1 data.
+                        log::warn!(
+                            "could not refresh minimized restore state after transient change for {win:?}: {error}"
+                        );
+                    }
                 }
             }
         }
@@ -181,7 +197,28 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let was_dock_eligible = self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(super::statusbar::StatusBarBuilder::is_minimized_dock_eligible);
         self.updatewindowtype(backend, client_key);
+        self.reconcile_minimized_dock_eligibility(backend, client_key, was_dock_eligible);
+
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.is_hidden)
+            && let Err(error) = self.persist_minimized_restore_state(backend, client_key)
+        {
+            // Window type can change floating/tags without changing Dock
+            // eligibility. Persist those semantic fields even when the
+            // eligibility reconciler correctly has no visual work to do.
+            log::warn!(
+                "could not refresh minimized restore state after window type change: {error}"
+            );
+        }
 
         if let Some(client) = self.state.clients.get(client_key) {
             debug!("Window type updated for window {:?}", client.win);

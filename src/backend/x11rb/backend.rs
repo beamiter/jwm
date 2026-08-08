@@ -30,10 +30,13 @@ use calloop::{
 use crate::backend::api::{
     Backend, Capabilities, ColorAllocator, CompositorBenchmark, CursorProvider, DisplayControl,
     EwmhFacade, InputOps, KeyOps, OutputOps, PropertyOps, RenderScheduler, VrrCapabilities,
-    WindowOps,
+    WindowHandoffIdentity, WindowOps,
 };
 use crate::backend::x11::compositor_common::X11ConnectionOps;
+use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
+use crate::backend::x11::wm::iconify::IconifyCoordinator;
+use crate::backend::x11::wm::managed_unmap::{ManagedUnmapTracker, SharedManagedUnmaps};
 use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
 
 use self::{
@@ -58,6 +61,8 @@ pub struct X11rbBackend {
     root_x11: u32,
     ids: X11IdRegistry,
     atoms: Atoms,
+    managed_unmaps: SharedManagedUnmaps,
+    iconify: IconifyCoordinator,
 
     caps: Capabilities,
 
@@ -76,6 +81,7 @@ pub struct X11rbBackend {
     interaction: Option<X11Interaction>,
 
     compositor: Option<super::compositor::Compositor<RustConnection>>,
+    compositor_desired: X11CompositorDesiredState,
     compositor_loop_signal: Option<calloop::LoopSignal>,
 
     systray: Option<super::systray::SystemTray<RustConnection>>,
@@ -153,6 +159,74 @@ impl X11rbBackend {
         }
     }
 
+    fn replay_compositor_desired_state(
+        &mut self,
+        compositor: &mut super::compositor::Compositor<RustConnection>,
+    ) {
+        let ids = &self.ids;
+        let plan = self
+            .compositor_desired
+            .replay_plan(|window| ids.x11(window).ok());
+        plan.apply(compositor);
+    }
+
+    fn register_existing_windows_with_compositor(
+        &self,
+        compositor: &mut super::compositor::Compositor<RustConnection>,
+    ) {
+        // Use batched geometry requests for all windows (one X11 round trip).
+        let overlay = compositor.overlay_window();
+        let windows: Vec<_> = self
+            .ids
+            .all_x11_windows()
+            .into_iter()
+            .filter(|(x11w, _)| *x11w != self.root_x11 && *x11w != overlay)
+            .collect();
+        if windows.is_empty() {
+            return;
+        }
+
+        use crate::backend::x11rb::batch::BatchedGeometryRequest;
+        let mut batch = BatchedGeometryRequest::new(&*self.conn);
+        for &(x11w, _) in &windows {
+            batch.queue_geometry(x11w);
+        }
+
+        match batch.flush_and_collect() {
+            Ok(geometries) => {
+                for (x11w, win) in windows {
+                    if let Some((x, y, w, h)) = geometries.get(&x11w) {
+                        compositor.add_window(x11w, *x as i32, *y as i32, *w as u32, *h as u32);
+                        self.apply_compositor_window_metadata(compositor, x11w, win);
+                    }
+                }
+                log::info!(
+                    "Compositor enabled at runtime (batched {} windows)",
+                    geometries.len()
+                );
+                return;
+            }
+            Err(error) => {
+                log::warn!(
+                    "Batched geometry request failed: {error:?}, falling back to individual queries"
+                );
+            }
+        }
+
+        let mut registered = 0usize;
+        for (x11w, window) in self.ids.all_x11_windows() {
+            if x11w == self.root_x11 || x11w == overlay {
+                continue;
+            }
+            if let Ok(geometry) = self.window_ops.get_geometry(window) {
+                compositor.add_window(x11w, geometry.x, geometry.y, geometry.w, geometry.h);
+                self.apply_compositor_window_metadata(compositor, x11w, window);
+                registered += 1;
+            }
+        }
+        log::info!("Compositor enabled at runtime ({registered} individually queried windows)");
+    }
+
     fn systray_handle_event(&mut self, ev: &BackendEvent) -> bool {
         let systray = match self.systray.as_mut() {
             Some(s) => s,
@@ -178,8 +252,8 @@ impl X11rbBackend {
                 }
                 false
             }
-            BackendEvent::WindowUnmapped(win) => {
-                let x11w = self.ids.x11(*win).unwrap_or(0);
+            BackendEvent::WindowUnmapped { window, .. } => {
+                let x11w = self.ids.x11(*window).unwrap_or(0);
                 if systray.is_tray_icon(x11w) {
                     systray.handle_unmap(x11w);
                     return true;
@@ -205,6 +279,19 @@ impl X11rbBackend {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Retire the transport mapping only after every consumer has observed a
+    /// `DestroyNotify`.  The compositor needs the raw X11 id while translating
+    /// `WindowDestroyed`, and the systray/JWM paths need the same stable
+    /// `WindowId` during their callbacks.
+    fn cleanup_destroyed_window(&mut self, win: Option<WindowId>) {
+        let Some(win) = win else {
+            return;
+        };
+        if let Ok(x11) = self.ids.x11(win) {
+            self.ids.remove_x11(x11);
         }
     }
 
@@ -236,6 +323,7 @@ impl X11rbBackend {
 
         let numlock_mask = Arc::new(Mutex::new(0u16));
         let atoms = Atoms::new(conn.as_ref())?.reply()?;
+        let managed_unmaps = Arc::new(Mutex::new(ManagedUnmapTracker::default()));
 
         let window_ops: Box<dyn WindowOps> = Box::new(X11WindowOps::new(
             conn.clone(),
@@ -243,6 +331,7 @@ impl X11rbBackend {
             numlock_mask.clone(),
             screen.root,
             ids.clone(),
+            managed_unmaps.clone(),
         ));
 
         let x11_input_ops = X11InputOps::new(conn.clone(), screen.root, ids.clone());
@@ -339,6 +428,7 @@ impl X11rbBackend {
             screen.root,
             overlay_x11,
             ids.clone(),
+            managed_unmaps.clone(),
         );
 
         let mut backend = Self {
@@ -349,6 +439,8 @@ impl X11rbBackend {
             root_x11,
             ids,
             atoms,
+            managed_unmaps,
+            iconify: IconifyCoordinator::default(),
             caps,
             window_ops,
             input_ops,
@@ -361,6 +453,7 @@ impl X11rbBackend {
             _init_event_source: Some(event_source),
             interaction: None,
             compositor,
+            compositor_desired: X11CompositorDesiredState::default(),
             compositor_loop_signal: None,
             systray: None,
             clipboard: None,
@@ -406,6 +499,15 @@ impl X11rbBackend {
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
+        self.observe_iconify_event(event);
+        if let BackendEvent::WindowUnmapped {
+            window,
+            from_configure: false,
+        }
+        | BackendEvent::WindowDestroyed(window) = event
+        {
+            self.compositor_desired.retire_window(*window);
+        }
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -727,6 +829,16 @@ impl Backend for X11rbBackend {
         Some(self.root)
     }
 
+    fn window_handoff_identity(&self, window: WindowId) -> Option<WindowHandoffIdentity> {
+        self.ids.x11(window).ok().map(WindowHandoffIdentity::X11)
+    }
+
+    fn resolve_window_handoff_identity(&self, identity: WindowHandoffIdentity) -> Option<WindowId> {
+        match identity {
+            WindowHandoffIdentity::X11(x11) => self.ids.existing_window(x11),
+        }
+    }
+
     fn check_existing_wm(&self) -> Result<(), BackendError> {
         let mask_bits = EventMaskBits::SUBSTRUCTURE_REDIRECT.bits();
         self.window_ops
@@ -757,65 +869,11 @@ impl Backend for X11rbBackend {
                     if let Some(signal) = self.compositor_loop_signal.clone() {
                         compositor.set_waterlily_loop_signal(signal);
                     }
-                    // Phase 1.3: Use batched geometry requests for all windows (single round-trip!)
-                    let overlay = compositor.overlay_window();
-                    let all_windows = self.ids.all_x11_windows();
-                    let windows: Vec<_> = all_windows
-                        .into_iter()
-                        .filter(|(x11w, _)| *x11w != self.root_x11 && *x11w != overlay)
-                        .collect();
-
-                    if !windows.is_empty() {
-                        use crate::backend::x11rb::batch::BatchedGeometryRequest;
-                        let mut batch = BatchedGeometryRequest::new(&*self.conn);
-
-                        for &(x11w, _) in &windows {
-                            batch.queue_geometry(x11w);
-                        }
-
-                        match batch.flush_and_collect() {
-                            Ok(geometries) => {
-                                for (x11w, win) in windows {
-                                    if let Some((x, y, w, h)) = geometries.get(&x11w) {
-                                        compositor.add_window(
-                                            x11w, *x as i32, *y as i32, *w as u32, *h as u32,
-                                        );
-                                        self.apply_compositor_window_metadata(
-                                            &mut compositor,
-                                            x11w,
-                                            win,
-                                        );
-                                    }
-                                }
-                                log::info!(
-                                    "Compositor enabled at runtime (batched {} windows)",
-                                    geometries.len()
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Batched geometry request failed: {:?}, falling back to individual queries",
-                                    e
-                                );
-                                // Fallback to individual queries
-                                for (x11w, wid) in self.ids.all_x11_windows() {
-                                    if x11w == self.root_x11 || x11w == overlay {
-                                        continue;
-                                    }
-                                    if let Ok(geom) = self.window_ops.get_geometry(wid) {
-                                        compositor.add_window(x11w, geom.x, geom.y, geom.w, geom.h);
-                                        self.apply_compositor_window_metadata(
-                                            &mut compositor,
-                                            x11w,
-                                            wid,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    self.replay_compositor_desired_state(&mut compositor);
+                    self.register_existing_windows_with_compositor(&mut compositor);
 
                     self.compositor = Some(compositor);
+                    self.service_pending_iconify_admissions();
                     Ok(true)
                 }
                 Err(e) => {
@@ -826,6 +884,7 @@ impl Backend for X11rbBackend {
                 }
             }
         } else {
+            self.prepare_iconify_compositor_disable()?;
             log::info!("Compositor disabled at runtime");
             self.compositor.take(); // Drop triggers cleanup
             Ok(true)
@@ -874,6 +933,7 @@ impl Backend for X11rbBackend {
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
         // Return the buffer to its home for reuse next frame.
         self.scratch_x11_scene = x11_scene;
+        self.service_pending_iconify_admissions();
         Ok(rendered)
     }
 
@@ -1256,21 +1316,28 @@ impl Backend for X11rbBackend {
                 self.screen.root,
                 self.compositor.as_ref().map(|c| c.overlay_window()),
                 self.ids.clone(),
+                self.managed_unmaps.clone(),
             )
         };
 
         handle
             .insert_source(x11_source, |event, _, data| {
+                let destroyed_window = match &event {
+                    BackendEvent::WindowDestroyed(win) => Some(*win),
+                    _ => None,
+                };
                 // Compositor hooks: track window lifecycle and damage
                 data.backend.compositor_handle_event(&event);
                 // Systray intercept: handle tray-related events internally
                 if data.backend.systray_handle_event(&event) {
+                    data.backend.cleanup_destroyed_window(destroyed_window);
                     return;
                 }
                 let event = data.backend.enrich_event_with_output(event);
                 if let Err(e) = data.handler.handle_event(data.backend, event) {
                     log::error!("Error handling X11 event: {:?}", e);
                 }
+                data.backend.cleanup_destroyed_window(destroyed_window);
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert X11 source: {}", e)))?;
 
@@ -1487,6 +1554,12 @@ mod ids {
                 .ok_or(BackendError::NotFound("WindowId not mapped to X11 window"))
         }
 
+        /// Resolve only a native XID that this backend instance has already
+        /// discovered. Handoff payloads must never allocate registry entries.
+        pub(super) fn existing_window(&self, x11: u32) -> Option<WindowId> {
+            self.x11_to_wid.read_safe().get(&x11).copied()
+        }
+
         pub(super) fn remove_x11(&self, x11: u32) {
             if let Some(id) = self.x11_to_wid.write_safe().remove(&x11) {
                 self.wid_to_x11.write_safe().remove(&id);
@@ -1500,6 +1573,37 @@ mod ids {
                 .iter()
                 .map(|(&x, &w)| (x, w))
                 .collect()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn native_lookup_survives_reordered_interning_without_allocating_unknown_xids() {
+            let root = 0x100;
+            let target = 0x200;
+            let other = 0x300;
+
+            let old = X11IdRegistry::new(1);
+            old.intern(root);
+            let old_target = old.intern(target);
+            old.intern(other);
+
+            let fresh = X11IdRegistry::new(1);
+            fresh.intern(root);
+            fresh.intern(other);
+            let fresh_target = fresh.intern(target);
+
+            assert_ne!(old_target, fresh_target);
+            assert_eq!(fresh.existing_window(target), Some(fresh_target));
+            assert_eq!(fresh.existing_window(0x400), None);
+            assert_eq!(
+                fresh.intern(0x500).raw(),
+                4,
+                "lookup must not consume an id"
+            );
         }
     }
 }
@@ -2306,12 +2410,14 @@ mod event_source {
     use crate::backend::api::{BackendEvent, NetWmAction, NetWmState, PropertyKind};
     use crate::backend::api::{HitTarget, NotifyMode};
     use crate::backend::error::BackendError;
+    use crate::backend::x11::wm::managed_unmap::{ManagedUnmapDisposition, SharedManagedUnmaps};
     use crate::backend::x11::wm::{
         ClientMessageAtoms, ClientMessageKind, PropertyKindAtoms, classify_client_message,
         expand_net_wm_state_requests, net_wm_state_from_atom, property_kind_from_atom,
         stack_mode_from_index, window_changes_from_configure_request_parts,
     };
     use crate::backend::x11rb::Atoms;
+    use crate::sync_ext::MutexExt;
 
     use calloop::{EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory};
 
@@ -2321,6 +2427,7 @@ mod event_source {
         root_x11: u32,
         overlay_x11: Option<u32>,
         ids: X11IdRegistry,
+        managed_unmaps: SharedManagedUnmaps,
         // Events produced beyond the single one returned by map_event (e.g. a
         // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
         pending: VecDeque<BackendEvent>,
@@ -2333,6 +2440,7 @@ mod event_source {
             root_x11: u32,
             overlay_x11: Option<u32>,
             ids: X11IdRegistry,
+            managed_unmaps: SharedManagedUnmaps,
         ) -> Self {
             Self {
                 conn,
@@ -2340,6 +2448,7 @@ mod event_source {
                 root_x11,
                 overlay_x11,
                 ids,
+                managed_unmaps,
                 pending: VecDeque::new(),
             }
         }
@@ -2462,13 +2571,33 @@ mod event_source {
                     Some(BackendEvent::WindowCreated(self.ids.intern(e.window)))
                 }
                 XEvent::MapNotify(e) => Some(BackendEvent::WindowMapped(self.ids.intern(e.window))),
-                XEvent::UnmapNotify(e) => {
-                    Some(BackendEvent::WindowUnmapped(self.ids.intern(e.window)))
-                }
+                XEvent::UnmapNotify(e) => match self.managed_unmaps.lock_safe().classify(
+                    self.root_x11,
+                    e.window,
+                    e.event,
+                    e.sequence,
+                    e.response_type & 0x80 != 0,
+                    e.from_configure,
+                ) {
+                    ManagedUnmapDisposition::ManagerOwned(reason) => {
+                        Some(BackendEvent::WindowManagerUnmapped {
+                            window: self.ids.intern(e.window),
+                            reason,
+                        })
+                    }
+                    ManagedUnmapDisposition::ManagerDuplicate => None,
+                    ManagedUnmapDisposition::External => Some(BackendEvent::WindowUnmapped {
+                        window: self.ids.intern(e.window),
+                        from_configure: e.from_configure,
+                    }),
+                },
                 XEvent::DestroyNotify(e) => {
-                    let id = self.ids.intern(e.window);
-                    self.ids.remove_x11(e.window);
-                    Some(BackendEvent::WindowDestroyed(id))
+                    self.managed_unmaps.lock_safe().clear(e.window);
+                    // Keep the registry entry alive until the compositor,
+                    // systray and JWM have all consumed this event.  In
+                    // particular, compositor_event_ops resolves WindowId back
+                    // to the raw X11 window while producing RemoveWindow.
+                    Some(BackendEvent::WindowDestroyed(self.ids.intern(e.window)))
                 }
                 XEvent::ConfigureNotify(e) => Some(BackendEvent::WindowConfigured {
                     window: self.ids.intern(e.window),
@@ -3897,17 +4026,22 @@ mod output_ops {
 mod property_ops {
     use super::ids::X11IdRegistry;
     use crate::backend::api::{
-        AllowedAction, IconData, MotifWmHints, NetWmState, NormalHints,
+        AllowedAction, IconData, MinimizedRestoreState, MotifWmHints, NetWmState, NormalHints,
         PropertyOps as PropertyOpsTrait, StrutPartial, WindowType, WmHints,
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::error::BackendError;
     use crate::backend::x11::wm::{
         AllowedActionAtoms, NetWmStateAtoms, WindowTypeAtoms, atom_for_allowed_action,
-        atom_for_net_wm_state, decode_text_property, net_wm_ping_message,
-        net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data, parse_motif_hints,
-        parse_normal_hints, parse_opaque_region, parse_strut, parse_strut_partial, parse_wm_class,
-        parse_wm_hints, protocol_supported, window_type_from_atom,
+        atom_for_net_wm_state, decode_text_property,
+        minimized_restore::{
+            MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1,
+            encode_minimized_restore_v1,
+        },
+        net_wm_ping_message, net_wm_sync_request_message, parse_gtk_frame_extents, parse_icon_data,
+        parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut,
+        parse_strut_partial, parse_wm_class, parse_wm_hints, protocol_supported,
+        window_type_from_atom,
     };
     use crate::backend::x11rb::Atoms;
     use std::sync::Arc;
@@ -3986,13 +4120,15 @@ mod property_ops {
 
         fn set_net_wm_state_atoms(&self, win: WindowId, atoms: &[u32]) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
-            self.conn.change_property32(
-                PropMode::REPLACE,
-                w,
-                self.atoms._NET_WM_STATE,
-                AtomEnum::ATOM,
-                atoms,
-            )?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    w,
+                    self.atoms._NET_WM_STATE,
+                    AtomEnum::ATOM,
+                    atoms,
+                )?
+                .check()?;
             Ok(())
         }
 
@@ -4365,13 +4501,68 @@ mod property_ops {
         fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             let data: [u32; 2] = [state as u32, 0];
-            self.conn.change_property32(
-                PropMode::REPLACE,
-                w,
-                self.atoms.WM_STATE,
-                self.atoms.WM_STATE,
-                &data,
-            )?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    w,
+                    self.atoms.WM_STATE,
+                    self.atoms.WM_STATE,
+                    &data,
+                )?
+                .check()?;
+            Ok(())
+        }
+
+        fn get_minimized_restore_state(
+            &self,
+            win: WindowId,
+        ) -> Result<Option<MinimizedRestoreState>, BackendError> {
+            let w = self.ids.x11(win)?;
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    w,
+                    self.atoms._JWM_MINIMIZED_RESTORE_V1,
+                    AtomEnum::CARDINAL,
+                    0,
+                    MINIMIZED_RESTORE_V1_LONG_LENGTH,
+                )?
+                .reply()?;
+            let words: Vec<u32> = reply.value32().into_iter().flatten().collect();
+            Ok(decode_minimized_restore_v1(
+                reply.type_,
+                u32::from(AtomEnum::CARDINAL),
+                reply.format,
+                reply.bytes_after,
+                &words,
+            ))
+        }
+
+        fn set_minimized_restore_state(
+            &self,
+            win: WindowId,
+            state: MinimizedRestoreState,
+        ) -> Result<(), BackendError> {
+            let words = encode_minimized_restore_v1(state).ok_or_else(|| {
+                BackendError::Message("invalid minimized restore state".to_string())
+            })?;
+            self.conn
+                .change_property32(
+                    PropMode::REPLACE,
+                    self.ids.x11(win)?,
+                    self.atoms._JWM_MINIMIZED_RESTORE_V1,
+                    AtomEnum::CARDINAL,
+                    &words,
+                )?
+                .check()?;
+            Ok(())
+        }
+
+        fn clear_minimized_restore_state(&self, win: WindowId) -> Result<(), BackendError> {
+            self.conn
+                .delete_property(self.ids.x11(win)?, self.atoms._JWM_MINIMIZED_RESTORE_V1)?
+                .check()?;
             Ok(())
         }
 
@@ -4403,6 +4594,15 @@ mod property_ops {
             } else {
                 self.remove_net_wm_state_atom(win, atom)
             }
+        }
+
+        fn has_net_wm_state_flag(
+            &self,
+            win: WindowId,
+            state: NetWmState,
+        ) -> Result<bool, BackendError> {
+            let atom = self.net_wm_state_to_atom(state);
+            Ok(self.get_net_wm_state_atoms(win)?.contains(&atom))
         }
 
         fn set_frame_extents(
@@ -4651,10 +4851,13 @@ mod property_ops {
 mod window_ops {
     use super::adapter::{event_mask_from_generic, mods_to_x11};
     use super::ids::X11IdRegistry;
-    use crate::backend::api::{CloseResult, Geometry, WindowAttributes, WindowOps};
+    use crate::backend::api::{
+        CloseResult, Geometry, ManagedUnmapReason, WindowAttributes, WindowOps,
+    };
     use crate::backend::api::{StackMode, WindowChanges};
     use crate::backend::common_define::{Mods, Pixel, WindowId};
     use crate::backend::error::BackendError;
+    use crate::backend::x11::wm::managed_unmap::SharedManagedUnmaps;
     use crate::backend::x11::wm::{
         lock_modifier_combinations, protocol_supported, restack_window_changes,
         wm_delete_window_message, wm_take_focus_message,
@@ -4677,6 +4880,7 @@ mod window_ops {
         root_x11: u32,
         ids: X11IdRegistry,
         batcher: X11RequestBatcher,
+        managed_unmaps: SharedManagedUnmaps,
     }
 
     impl<C: Connection> X11WindowOps<C> {
@@ -4696,6 +4900,7 @@ mod window_ops {
             numlock_mask: Arc<Mutex<u16>>,
             root_x11: u32,
             ids: X11IdRegistry,
+            managed_unmaps: SharedManagedUnmaps,
         ) -> Self {
             Self {
                 conn,
@@ -4704,6 +4909,7 @@ mod window_ops {
                 root_x11,
                 ids,
                 batcher: X11RequestBatcher::new(),
+                managed_unmaps,
             }
         }
 
@@ -4854,10 +5060,7 @@ mod window_ops {
         }
 
         fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
-            let tree = self
-                .conn
-                .query_tree(self.conn.setup().roots[0].root)?
-                .reply()?;
+            let tree = self.conn.query_tree(self.root_x11)?.reply()?;
             Ok(tree.children.iter().map(|&w| self.ids.intern(w)).collect())
         }
 
@@ -4928,7 +5131,7 @@ mod window_ops {
 
         fn map_window(&self, win: WindowId) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
-            self.conn.map_window(w)?;
+            self.conn.map_window(w)?.check()?;
             Ok(())
         }
 
@@ -4984,6 +5187,25 @@ mod window_ops {
         fn unmap_window(&self, win: WindowId) -> Result<(), BackendError> {
             let w = self.ids.x11(win)?;
             self.conn.unmap_window(w)?;
+            Ok(())
+        }
+
+        fn unmap_managed_window(
+            &self,
+            win: WindowId,
+            reason: ManagedUnmapReason,
+        ) -> Result<(), BackendError> {
+            let w = self.ids.x11(win)?;
+            let mut managed_unmaps = self.managed_unmaps.lock_safe();
+            managed_unmaps
+                .ensure_capacity(w)
+                .map_err(|error| BackendError::Other(Box::new(error)))?;
+            let cookie = self.conn.unmap_window(w)?;
+            let sequence = cookie.sequence_number();
+            cookie.check()?;
+            managed_unmaps
+                .record(w, sequence, reason)
+                .expect("managed-unmap capacity changed while holding its lock");
             Ok(())
         }
 

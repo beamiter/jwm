@@ -6,7 +6,7 @@
 //! change made to them.
 
 use std::cell::RefCell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use egui::{Color32, FontFamily, Pos2};
@@ -19,7 +19,7 @@ use xbar_core::presentation::{
 use xbar_core::{
     BarEffect, BarPlacement, BarRuntime, DockReporter, DockReporterInput, DockWindowSpec,
     ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate,
-    TransportRecoveryConfig, UserAction,
+    TransportRecoveryConfig, UserAction, dock_wake_delay,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -57,6 +57,9 @@ pub struct EguiBarApp {
     active_monitor_geometry: Option<MonitorGeometry>,
     last_pixels_per_point: f32,
     dock_reporter: DockReporter,
+    /// Projection that owns `interaction`'s pressed/hovered node ids. NodeId
+    /// intentionally stays token-sized, so the generation lives beside it.
+    dock_interaction_projection: Option<(u64, u64)>,
 }
 
 impl EguiBarApp {
@@ -133,7 +136,22 @@ impl EguiBarApp {
             active_monitor_geometry: None,
             last_pixels_per_point: cc.egui_ctx.pixels_per_point(),
             dock_reporter: DockReporter::new(),
+            dock_interaction_projection: None,
         })
+    }
+
+    fn synchronize_interaction_projection(&mut self) {
+        let view = self.runtime.view();
+        let next = view
+            .wm_available
+            .then_some((view.wm_session_id, view.wm_sequence.unwrap_or_default()));
+        if self.dock_interaction_projection != next {
+            // A press in generation N must not release against the same token
+            // in generation N+1 and pick up the new scene's action.
+            self.interaction.clear_hover();
+            self.pressed_pointer_button = None;
+            self.dock_interaction_projection = next;
+        }
     }
 
     /// Build a complete scene with text measured by the font stack that will
@@ -245,10 +263,12 @@ impl EguiBarApp {
             UserAction::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } if geometry.is_empty() => UserAction::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry: self.dock_reporter.geometry_for(window),
             },
             action => action,
@@ -262,6 +282,7 @@ impl EguiBarApp {
         self.dock_reporter.synchronize(DockReporterInput {
             wm_available: view.wm_available,
             wm_session_id: view.wm_session_id,
+            minimized_generation: view.wm_sequence.unwrap_or_default(),
             transport_generation: self.runtime.transport_generation(),
             monitor_geometry: view.geometry,
             minimized_windows: view.minimized_windows,
@@ -366,6 +387,7 @@ impl eframe::App for EguiBarApp {
 
         let update = self.schedule.service(&mut self.runtime);
         self.apply_runtime_update(&ctx, update);
+        self.synchronize_interaction_projection();
 
         let viewport = ctx.viewport_rect();
         let size = Size::new(viewport.width(), viewport.height());
@@ -388,7 +410,14 @@ impl eframe::App for EguiBarApp {
         let painter = ctx.layer_painter(egui::LayerId::background());
         crate::scene::paint(&painter, viewport.min, &self.scene, &self.style);
 
-        ctx.request_repaint_after(HEARTBEAT);
+        let now = Instant::now();
+        let runtime_wait = self
+            .schedule
+            .next_service_deadline(&self.runtime, now)
+            .saturating_duration_since(now);
+        let fallback = HEARTBEAT.min(runtime_wait);
+        let wait = dock_wake_delay(now, fallback, self.dock_reporter.next_retry_deadline(now));
+        ctx.request_repaint_after(wait);
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

@@ -11,6 +11,7 @@ use crate::backend::compositor_common::effects::MotionTrailParams;
 use crate::backend::compositor_common::genie::{
     dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect,
 };
+use crate::backend::compositor_common::minimized_thumbnail::ThumbnailPurpose;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
@@ -595,16 +596,29 @@ impl WaylandCompositor {
     }
 
     fn render_minimized_dock_items(
-        &self,
+        &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         scene_linear_output: bool,
     ) {
-        if !self
-            .minimized_visuals
-            .values()
-            .any(|visual| visual.target.is_some())
-        {
+        let preview = self
+            .dock_preview
+            .as_ref()
+            .map(|preview| (preview.window_id, preview.anchor, preview.opacity));
+        let targets = self
+            .genie_targets
+            .iter()
+            .filter(|(window_id, _)| {
+                self.minimized_windows.contains(window_id)
+                    && !self
+                        .genie_active
+                        .iter()
+                        .any(|animation| animation.window_id == **window_id)
+                    && self.minimized_static_source_available(**window_id)
+            })
+            .map(|(&window_id, &target)| (window_id, target))
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
             return;
         }
         unsafe {
@@ -623,43 +637,49 @@ impl WaylandCompositor {
             gl.BindVertexArray(self.quad_vao);
             gl.ActiveTexture(ffi::TEXTURE0);
 
-            let preview = self
-                .dock_preview
-                .as_ref()
-                .map(|preview| (preview.window_id, preview.anchor, preview.opacity));
-            for (&window_id, visual) in &self.minimized_visuals {
-                let Some(stable_target) = visual.target else {
-                    continue;
-                };
+            for (window_id, stable_target) in targets {
                 let Some(target) = dock_item_preview_target(window_id, stable_target, preview)
                 else {
                     continue;
                 };
-                if visual.w <= 0.0 || visual.h <= 0.0 {
+                // Resolve and draw one item before resolving the next. A lazy
+                // CPU upload may evict another raw GPU snapshot; retaining a
+                // batch of bare GLuints across that eviction would make an
+                // earlier item stale before its draw call.
+                let Some(source) =
+                    self.minimized_render_source(gl, window_id, ThumbnailPurpose::StaticDockCard)
+                else {
+                    continue;
+                };
+                if source.width <= 0.0 || source.height <= 0.0 {
                     continue;
                 }
-                let fit = (target.width / visual.w).min(target.height / visual.h);
-                let width = (visual.w * fit).max(1.0);
-                let height = (visual.h * fit).max(1.0);
+                let fit = (target.width / source.width).min(target.height / source.height);
+                let width = (source.width * fit).max(1.0);
+                let height = (source.height * fit).max(1.0);
                 let x = target.x + (target.width - width) * 0.5;
                 let y = target.y + (target.height - height) * 0.5;
-                let [uv_x, uv_y, uv_w, uv_h] =
-                    oriented_content_uv(visual.content_uv, visual.y_inverted);
                 self.set_rect_uniform(gl, self.win_uniforms.rect, x, y, width, height);
                 gl.Uniform2f(self.win_uniforms.size, width, height);
                 gl.Uniform1f(
                     self.win_uniforms.opacity,
-                    if visual.has_alpha { -1.0 } else { 1.0 },
+                    if source.has_alpha { -1.0 } else { 1.0 },
                 );
                 gl.Uniform1f(self.win_uniforms.radius, 5.0_f32.min(height * 0.5));
-                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                gl.Uniform4f(
+                    self.win_uniforms.uv_rect,
+                    source.uv_rect[0],
+                    source.uv_rect[1],
+                    source.uv_rect[2],
+                    source.uv_rect[3],
+                );
                 let color_plan = retained_color_plan(
                     RetainedTexturePass::StaticDockItem,
-                    visual.color_transform,
+                    source.color_transform,
                     scene_linear_output,
                 );
                 self.upload_retained_color_plan(gl, color_plan);
-                self.bind_window_texture(gl, visual.texture_owner.tex_id());
+                self.bind_window_texture(gl, source.texture);
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 self.reset_retained_color_plan(gl, color_plan);
             }
@@ -670,64 +690,19 @@ impl WaylandCompositor {
     }
 
     fn render_dock_preview(
-        &self,
+        &mut self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         scene_linear_output: bool,
     ) {
-        let Some(preview) = self.dock_preview.as_ref() else {
+        let Some(preview) = self.dock_preview.clone() else {
             return;
         };
         if preview.opacity <= 0.001 {
             return;
         }
-        let source = self
-            .minimized_visuals
-            .get(&preview.window_id)
-            .map(|visual| {
-                (
-                    visual.texture_owner.tex_id(),
-                    visual.has_alpha,
-                    visual.y_inverted,
-                    visual.content_uv,
-                    visual.w,
-                    visual.h,
-                    visual.color_transform,
-                )
-            })
-            .or_else(|| {
-                self.genie_active
-                    .iter()
-                    .find(|animation| animation.window_id == preview.window_id)
-                    .map(|animation| {
-                        (
-                            animation.texture_owner.tex_id(),
-                            animation.has_alpha,
-                            animation.y_inverted,
-                            animation.content_uv,
-                            animation.w,
-                            animation.h,
-                            animation.color_transform,
-                        )
-                    })
-            })
-            .or_else(|| {
-                self.windows.get(&preview.window_id).and_then(|window| {
-                    window.texture_owner.as_ref().map(|texture| {
-                        (
-                            texture.tex_id(),
-                            window.has_alpha,
-                            window.y_inverted,
-                            window.content_uv,
-                            window.width as f32,
-                            window.height as f32,
-                            window.color_transform,
-                        )
-                    })
-                })
-            });
-        let Some((texture, has_alpha, y_inverted, content_uv, source_w, source_h, color_transform)) =
-            source
+        let Some(source) =
+            self.minimized_render_source(gl, preview.window_id, ThumbnailPurpose::HoverPreview)
         else {
             return;
         };
@@ -745,15 +720,13 @@ impl WaylandCompositor {
         );
         let Some(rect) = preview_rect(
             preview.anchor,
-            source_w,
-            source_h,
+            source.width,
+            source.height,
             output_bounds,
             preview.scale,
         ) else {
             return;
         };
-        let [uv_x, uv_y, uv_w, uv_h] = oriented_content_uv(content_uv, y_inverted);
-
         unsafe {
             let spread = 16.0;
             gl.UseProgram(self.shadow_program);
@@ -784,7 +757,7 @@ impl WaylandCompositor {
             gl.Uniform1i(self.win_uniforms.texture, 0);
             let color_plan = retained_color_plan(
                 RetainedTexturePass::DockPreview,
-                color_transform,
+                source.color_transform,
                 scene_linear_output,
             );
             self.upload_retained_color_plan(gl, color_plan);
@@ -799,7 +772,7 @@ impl WaylandCompositor {
             gl.Uniform2f(self.win_uniforms.size, rect.width, rect.height);
             gl.Uniform1f(
                 self.win_uniforms.opacity,
-                if has_alpha {
+                if source.has_alpha {
                     -preview.opacity
                 } else {
                     preview.opacity
@@ -808,11 +781,17 @@ impl WaylandCompositor {
             gl.Uniform1f(self.win_uniforms.radius, 14.0);
             gl.Uniform1f(self.win_uniforms.dim, 1.0);
             gl.Uniform1f(self.win_uniforms.desat, 0.0);
-            gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+            gl.Uniform4f(
+                self.win_uniforms.uv_rect,
+                source.uv_rect[0],
+                source.uv_rect[1],
+                source.uv_rect[2],
+                source.uv_rect[3],
+            );
             gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
             gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
             gl.ActiveTexture(ffi::TEXTURE0);
-            self.bind_window_texture(gl, texture);
+            self.bind_window_texture(gl, source.texture);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
             self.reset_retained_color_plan(gl, color_plan);
             gl.BindVertexArray(0);
@@ -1069,6 +1048,12 @@ impl WaylandCompositor {
         shader_encode_tf: i32,
         shader_encode_gamma: f32,
     ) -> bool {
+        // Hidden imports arrive as ordinary WindowState owners. Capture the
+        // bounded tier before full-retained admission can evict an older
+        // source, then run once more for any fallback armed while settling.
+        self.capture_pending_minimized_snapshots(gl);
+        self.settle_pending_minimized_visuals();
+        self.capture_pending_minimized_snapshots(gl);
         self.start_pending_genie_restores(scene);
         // Last frame's frosted-glass backdrop describes a framebuffer that is
         // about to be overwritten; the first panel that needs one recaptures.

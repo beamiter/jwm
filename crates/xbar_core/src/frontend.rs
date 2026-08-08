@@ -500,12 +500,18 @@ pub enum ActionRequest {
         window_id: u64,
         wm_session_id: u64,
         #[serde(default)]
+        minimized_generation: u64,
+        #[serde(default)]
         geometry: DockItemGeometry,
     },
     PreviewWindow {
         window_id: u64,
         wm_session_id: u64,
+        #[serde(default)]
+        minimized_generation: u64,
         visible: bool,
+        #[serde(default)]
+        renewal: bool,
         #[serde(default)]
         geometry: DockItemGeometry,
     },
@@ -513,6 +519,8 @@ pub enum ActionRequest {
         #[serde(default)]
         window_id: Option<u64>,
         wm_session_id: u64,
+        #[serde(default)]
+        minimized_generation: u64,
         #[serde(default)]
         geometry: DockItemGeometry,
     },
@@ -610,30 +618,38 @@ impl TryFrom<ActionRequest> for UserAction {
             ActionRequest::RestoreWindow {
                 window_id,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } => Self::RestoreWindow {
                 window: WindowToken(window_id),
                 wm_session_id,
+                minimized_generation,
                 geometry,
             },
             ActionRequest::PreviewWindow {
                 window_id,
                 wm_session_id,
+                minimized_generation,
                 visible,
+                renewal,
                 geometry,
             } => Self::PreviewWindow {
                 window: WindowToken(window_id),
                 wm_session_id,
+                minimized_generation,
                 visible,
+                renewal,
                 geometry,
             },
             ActionRequest::SetDockGeometry {
                 window_id,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } => Self::SetDockGeometry {
                 window: window_id.map(WindowToken),
                 wm_session_id,
+                minimized_generation,
                 geometry,
             },
             ActionRequest::OpenShellHub { route } => Self::OpenShellHub(route),
@@ -713,28 +729,35 @@ mod tests {
             ActionRequest::RestoreWindow {
                 window_id: 0x1234_5678_9abc_def0,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry: DockItemGeometry::new(-20, 40, 54, 36),
             },
             ActionRequest::PreviewWindow {
                 window_id: 77,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 visible: true,
+                renewal: false,
                 geometry: DockItemGeometry::new(100, 200, 27, 18),
             },
             ActionRequest::PreviewWindow {
                 window_id: 77,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 visible: false,
+                renewal: false,
                 geometry: DockItemGeometry::default(),
             },
             ActionRequest::SetDockGeometry {
                 window_id: None,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry: DockItemGeometry::new(1, 2, 80, 38),
             },
             ActionRequest::SetDockGeometry {
                 window_id: Some(77),
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry: DockItemGeometry::new(10, 20, 27, 18),
             },
         ]);
@@ -828,6 +851,7 @@ mod tests {
             UserAction::RestoreWindow {
                 window: WindowToken(9),
                 wm_session_id: 91,
+                minimized_generation: 0,
                 geometry: DockItemGeometry::default(),
             }
         );
@@ -840,7 +864,9 @@ mod tests {
             UserAction::PreviewWindow {
                 window: WindowToken(9),
                 wm_session_id: 91,
+                minimized_generation: 0,
                 visible: true,
+                renewal: false,
                 geometry: DockItemGeometry::default(),
             }
         );
@@ -851,6 +877,7 @@ mod tests {
             UserAction::SetDockGeometry {
                 window: None,
                 wm_session_id: 91,
+                minimized_generation: 0,
                 geometry: DockItemGeometry::default(),
             }
         );
@@ -1175,11 +1202,13 @@ mod tests {
                 ActionRequest::RestoreWindow {
                     window_id: 17,
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(1, 2, 27, 18),
                 },
                 UserAction::RestoreWindow {
                     window: WindowToken(17),
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(1, 2, 27, 18),
                 },
             ),
@@ -1187,13 +1216,17 @@ mod tests {
                 ActionRequest::PreviewWindow {
                     window_id: 17,
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     visible: false,
+                    renewal: true,
                     geometry: DockItemGeometry::new(3, 4, 54, 36),
                 },
                 UserAction::PreviewWindow {
                     window: WindowToken(17),
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     visible: false,
+                    renewal: true,
                     geometry: DockItemGeometry::new(3, 4, 54, 36),
                 },
             ),
@@ -1201,11 +1234,13 @@ mod tests {
                 ActionRequest::SetDockGeometry {
                     window_id: Some(17),
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(5, 6, 27, 18),
                 },
                 UserAction::SetDockGeometry {
                     window: Some(WindowToken(17)),
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(5, 6, 27, 18),
                 },
             ),
@@ -1213,11 +1248,13 @@ mod tests {
                 ActionRequest::SetDockGeometry {
                     window_id: None,
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(7, 8, 60, 38),
                 },
                 UserAction::SetDockGeometry {
                     window: None,
                     wm_session_id: 91,
+                    minimized_generation: 73,
                     geometry: DockItemGeometry::new(7, 8, 60, 38),
                 },
             ),
@@ -1280,6 +1317,7 @@ mod tests {
         let update = ActionRequest::RestoreWindow {
             window_id: 17,
             wm_session_id: 91,
+            minimized_generation: 0,
             geometry: DockItemGeometry::new(1, 2, 27, 18),
         }
         .dispatch(&mut runtime)

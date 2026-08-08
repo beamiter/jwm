@@ -2040,6 +2040,28 @@ impl Jwm {
         mask_bits: u16,
         req: WindowChanges,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // A managed fullscreen rectangle and its pre-fullscreen `old_*`
+        // return slot are WM-owned.  Fullscreen temporarily forces the client
+        // into the floating group, so letting the ordinary floating branch
+        // below consume a ConfigureRequest would both move/resize the live
+        // fullscreen window and overwrite that return slot.  This is even
+        // more dangerous while minimized: the live x is JWM's off-screen
+        // parking coordinate, which could then become the fullscreen exit
+        // target.
+        //
+        // ICCCM requires a WM that rejects requested geometry to report the
+        // authoritative geometry back to the client.  `configure_client`
+        // performs that response for both X11 transports.  Do it before the
+        // border request or any current/old geometry field can be mutated.
+        if self
+            .state
+            .clients
+            .get(client_key)
+            .is_some_and(|client| client.state.is_fullscreen)
+        {
+            return self.configure_client(backend, client_key);
+        }
+
         let is_popup = self.is_popup_like(backend, client_key);
         let mask = ConfigWindowBits::from_bits_truncate(mask_bits);
 
@@ -2356,6 +2378,305 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{parse_direct_launcher_command, split_launcher_command_line};
+    use crate::Jwm;
+    use crate::backend::api::{
+        Backend, BackendDiagnostics, Capabilities, CloseResult, ColorAllocator,
+        CompositorAnnotation, CompositorBenchmark, CompositorControl, CompositorMedia,
+        CompositorWindowEffects, CompositorWorkspaceEffects, DisplayControl, EventHandler,
+        Geometry, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
+    };
+    use crate::backend::common_define::{ConfigWindowBits, Pixel, WindowId};
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps,
+    };
+    use crate::core::models::WMClient;
+    use crate::core::types::Rect;
+    use std::any::Any;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ConfigureReply {
+        window: WindowId,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        border: u32,
+    }
+
+    #[derive(Default)]
+    struct ConfigureReplyWindowOps {
+        replies: Mutex<Vec<ConfigureReply>>,
+    }
+
+    impl WindowOps for ConfigureReplyWindowOps {
+        fn set_position(&self, _win: WindowId, _x: i32, _y: i32) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn configure(
+            &self,
+            window: WindowId,
+            x: i32,
+            y: i32,
+            width: u32,
+            height: u32,
+            border: u32,
+        ) -> Result<(), BackendError> {
+            self.replies
+                .lock()
+                .expect("configure reply lock")
+                .push(ConfigureReply {
+                    window,
+                    x,
+                    y,
+                    width,
+                    height,
+                    border,
+                });
+            Ok(())
+        }
+
+        fn set_decoration_style(
+            &self,
+            _win: WindowId,
+            _border_width: u32,
+            _border_color: Pixel,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn raise_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn map_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn unmap_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn close_window(&self, _win: WindowId) -> Result<CloseResult, BackendError> {
+            Ok(CloseResult::Graceful)
+        }
+
+        fn set_input_focus(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_input_focus_root(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn get_window_attributes(&self, _win: WindowId) -> Result<WindowAttributes, BackendError> {
+            Ok(WindowAttributes {
+                override_redirect: false,
+                map_state_viewable: true,
+            })
+        }
+
+        fn get_geometry(&self, _win: WindowId) -> Result<Geometry, BackendError> {
+            Ok(Geometry::default())
+        }
+
+        fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        fn flush(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn kill_client(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn apply_window_changes(
+            &self,
+            _win: WindowId,
+            _changes: WindowChanges,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    struct ConfigureReplyBackend {
+        window_ops: ConfigureReplyWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+    }
+
+    impl ConfigureReplyBackend {
+        fn new() -> Self {
+            Self {
+                window_ops: ConfigureReplyWindowOps::default(),
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+            }
+        }
+    }
+
+    impl CompositorBenchmark for ConfigureReplyBackend {}
+    impl BackendDiagnostics for ConfigureReplyBackend {}
+    impl CompositorControl for ConfigureReplyBackend {}
+    impl CompositorMedia for ConfigureReplyBackend {}
+    impl CompositorWorkspaceEffects for ConfigureReplyBackend {}
+    impl CompositorWindowEffects for ConfigureReplyBackend {}
+    impl CompositorAnnotation for ConfigureReplyBackend {}
+    impl DisplayControl for ConfigureReplyBackend {}
+    impl RenderScheduler for ConfigureReplyBackend {}
+
+    impl Backend for ConfigureReplyBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::default()
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(0))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn crate::backend::api::InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn crate::backend::api::PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn crate::backend::api::OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn crate::backend::api::KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn crate::backend::api::KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn crate::backend::api::CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn run(&mut self, _handler: &mut dyn EventHandler) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn assert_fullscreen_configure_request_is_rejected(hidden: bool) {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let fullscreen = Rect::new(0, 0, 1920, 1080);
+        let parked = Rect::new(-4096, fullscreen.y, fullscreen.w, fullscreen.h);
+        let current = if hidden { parked } else { fullscreen };
+        let pre_fullscreen = Rect::new(240, 130, 960, 700);
+        let window = WindowId::from_raw(if hidden { 0x7f02 } else { 0x7f01 });
+
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = true;
+        client.state.is_fullscreen = true;
+        client.state.is_hidden = hidden;
+        client.geometry.x = current.x;
+        client.geometry.y = current.y;
+        client.geometry.w = current.w;
+        client.geometry.h = current.h;
+        client.geometry.old_x = pre_fullscreen.x;
+        client.geometry.old_y = pre_fullscreen.y;
+        client.geometry.old_w = pre_fullscreen.w;
+        client.geometry.old_h = pre_fullscreen.h;
+        client.geometry.border_w = 0;
+        client.geometry.old_border_w = 7;
+        if hidden {
+            client.geometry.hidden_x = Some(parked.x);
+            client.geometry.hidden_restore_rect = Some(fullscreen);
+        }
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+        let before = jwm.state.clients[client_key].geometry.clone();
+
+        let mask = (ConfigWindowBits::X
+            | ConfigWindowBits::Y
+            | ConfigWindowBits::WIDTH
+            | ConfigWindowBits::HEIGHT
+            | ConfigWindowBits::BORDER_WIDTH)
+            .bits();
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            mask,
+            WindowChanges {
+                x: Some(333),
+                y: Some(222),
+                width: Some(640),
+                height: Some(480),
+                border_width: Some(19),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let after = &jwm.state.clients[client_key];
+        assert_eq!(after.geometry, before);
+        assert!(after.state.is_fullscreen);
+        assert_eq!(
+            backend
+                .window_ops
+                .replies
+                .lock()
+                .expect("configure reply lock")
+                .as_slice(),
+            &[ConfigureReply {
+                window,
+                x: current.x,
+                y: current.y,
+                width: current.w as u32,
+                height: current.h as u32,
+                border: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn fullscreen_rejects_complete_client_configure_without_losing_return_slot() {
+        assert_fullscreen_configure_request_is_rejected(false);
+    }
+
+    #[test]
+    fn hidden_fullscreen_rejects_configure_without_losing_parked_geometry() {
+        assert_fullscreen_configure_request_is_rejected(true);
+    }
 
     #[test]
     fn launcher_composite_command_preserves_quoted_arguments() {

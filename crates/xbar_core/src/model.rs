@@ -341,8 +341,8 @@ pub struct TagState {
 /// Transport-neutral snapshot received from a window manager.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WmSnapshot {
-    /// Optional opaque transport metadata. Correctness never relies on it:
-    /// transports may reuse timestamps or sequence values.
+    /// Per-monitor minimized-projection epoch when the transport provides it.
+    /// Non-Dock fields are still reduced by value even when this stays equal.
     pub sequence: Option<u64>,
     /// Random identity of the producing WM lifetime. Zero is the legacy
     /// fallback used by snapshots serialized before the Dock protocol.
@@ -778,6 +778,7 @@ pub enum ModelError {
     InvalidPercentageStep { field: &'static str, value: u8 },
     TagOutOfRange { index: usize, tag_count: usize },
     StaleWmSession { requested: u64, current: u64 },
+    StaleMinimizedGeneration { requested: u64, current: u64 },
     WindowNotMinimized(WindowToken),
 }
 
@@ -800,6 +801,10 @@ impl fmt::Display for ModelError {
             Self::StaleWmSession { requested, current } => write!(
                 f,
                 "window-manager session {requested} is stale; current session is {current}"
+            ),
+            Self::StaleMinimizedGeneration { requested, current } => write!(
+                f,
+                "minimized projection generation {requested} is stale; current generation is {current}"
             ),
             Self::WindowNotMinimized(window) => {
                 write!(f, "window {} is not in the minimized shelf", window.get())
@@ -997,19 +1002,25 @@ pub enum UserAction {
     RestoreWindow {
         window: WindowToken,
         wm_session_id: u64,
+        minimized_generation: u64,
         geometry: DockItemGeometry,
     },
     /// Enter or leave the compositor-owned preview for one minimized window.
     PreviewWindow {
         window: WindowToken,
         wm_session_id: u64,
+        minimized_generation: u64,
         visible: bool,
+        /// True only for a periodic lease refresh of an already-owned preview.
+        #[serde(default)]
+        renewal: bool,
         geometry: DockItemGeometry,
     },
     /// Publish the shelf (`window == None`) or one item animation target.
     SetDockGeometry {
         window: Option<WindowToken>,
         wm_session_id: u64,
+        minimized_generation: u64,
         geometry: DockItemGeometry,
     },
     /// Ask the window manager to open its own shell surface at `route`.
@@ -1039,19 +1050,25 @@ pub enum WmCommand {
     RestoreWindow {
         window: WindowToken,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor: MonitorId,
         geometry: DockItemGeometry,
     },
     PreviewWindow {
         window: WindowToken,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor: MonitorId,
         visible: bool,
+        /// True only for a periodic lease refresh of an already-owned preview.
+        #[serde(default)]
+        renewal: bool,
         geometry: DockItemGeometry,
     },
     SetDockGeometry {
         window: Option<WindowToken>,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor: MonitorId,
         geometry: DockItemGeometry,
     },
@@ -1096,7 +1113,7 @@ impl ModelUpdate {
 pub struct BarView<'a> {
     /// Whether at least one window-manager snapshot has been reduced.
     pub wm_available: bool,
-    /// Last opaque transport sequence, retained only as metadata.
+    /// Minimized-projection epoch captured by Dock interactions.
     pub wm_sequence: Option<u64>,
     pub wm_session_id: u64,
     pub tags: &'a [TagState],
@@ -1128,6 +1145,7 @@ pub struct BarView<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BarSnapshot {
     pub wm_available: bool,
+    /// Minimized-projection epoch captured by Dock interactions.
     pub wm_sequence: Option<u64>,
     #[serde(default)]
     pub wm_session_id: u64,
@@ -1627,15 +1645,18 @@ impl BarModel {
             UserAction::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } => {
                 self.ensure_wm_session(wm_session_id)?;
+                self.ensure_minimized_generation(minimized_generation)?;
                 let monitor = self.minimized_window(window)?.monitor;
                 update
                     .effects
                     .push(BarEffect::WindowManager(WmCommand::RestoreWindow {
                         window,
                         wm_session_id,
+                        minimized_generation,
                         monitor,
                         geometry,
                     }));
@@ -1643,27 +1664,34 @@ impl BarModel {
             UserAction::PreviewWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 visible,
+                renewal,
                 geometry,
             } => {
                 self.ensure_wm_session(wm_session_id)?;
+                self.ensure_minimized_generation(minimized_generation)?;
                 let monitor = self.minimized_window(window)?.monitor;
                 update
                     .effects
                     .push(BarEffect::WindowManager(WmCommand::PreviewWindow {
                         window,
                         wm_session_id,
+                        minimized_generation,
                         monitor,
                         visible,
+                        renewal,
                         geometry,
                     }));
             }
             UserAction::SetDockGeometry {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } => {
                 self.ensure_wm_session(wm_session_id)?;
+                self.ensure_minimized_generation(minimized_generation)?;
                 let monitor = match window {
                     Some(window) => match self.minimized_window(window) {
                         Ok(window) => window.monitor,
@@ -1679,6 +1707,7 @@ impl BarModel {
                     .push(BarEffect::WindowManager(WmCommand::SetDockGeometry {
                         window,
                         wm_session_id,
+                        minimized_generation,
                         monitor,
                         geometry,
                     }));
@@ -1724,6 +1753,15 @@ impl BarModel {
                 requested,
                 current: self.wm_session_id,
             })
+        }
+    }
+
+    fn ensure_minimized_generation(&self, requested: u64) -> Result<(), ModelError> {
+        let current = self.wm_sequence.unwrap_or_default();
+        if requested == current {
+            Ok(())
+        } else {
+            Err(ModelError::StaleMinimizedGeneration { requested, current })
         }
     }
 
@@ -2054,6 +2092,7 @@ mod tests {
         let token = WindowToken(0x1234);
         model
             .update(BarEvent::WindowManager(WmSnapshot {
+                sequence: Some(73),
                 wm_session_id: 91,
                 monitor: MonitorId(2),
                 minimized_windows: vec![MinimizedWindow {
@@ -2072,6 +2111,7 @@ mod tests {
             .update(BarEvent::User(UserAction::RestoreWindow {
                 window: token,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry,
             }))
             .unwrap();
@@ -2080,6 +2120,7 @@ mod tests {
             vec![BarEffect::WindowManager(WmCommand::RestoreWindow {
                 window: token,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 monitor: MonitorId(7),
                 geometry,
             })]
@@ -2089,7 +2130,9 @@ mod tests {
             .update(BarEvent::User(UserAction::PreviewWindow {
                 window: token,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 visible: true,
+                renewal: false,
                 geometry,
             }))
             .unwrap();
@@ -2098,8 +2141,10 @@ mod tests {
             vec![BarEffect::WindowManager(WmCommand::PreviewWindow {
                 window: token,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 monitor: MonitorId(7),
                 visible: true,
+                renewal: false,
                 geometry,
             })]
         );
@@ -2108,6 +2153,7 @@ mod tests {
             .update(BarEvent::User(UserAction::SetDockGeometry {
                 window: Some(token),
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry,
             }))
             .unwrap();
@@ -2116,6 +2162,7 @@ mod tests {
             vec![BarEffect::WindowManager(WmCommand::SetDockGeometry {
                 window: Some(token),
                 wm_session_id: 91,
+                minimized_generation: 73,
                 monitor: MonitorId(7),
                 geometry,
             })]
@@ -2125,6 +2172,7 @@ mod tests {
             .update(BarEvent::User(UserAction::SetDockGeometry {
                 window: None,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry,
             }))
             .unwrap();
@@ -2133,6 +2181,7 @@ mod tests {
             vec![BarEffect::WindowManager(WmCommand::SetDockGeometry {
                 window: None,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 monitor: MonitorId(2),
                 geometry,
             })]
@@ -2143,6 +2192,7 @@ mod tests {
             model.update(BarEvent::User(UserAction::RestoreWindow {
                 window: stale,
                 wm_session_id: 91,
+                minimized_generation: 73,
                 geometry,
             })),
             Err(ModelError::WindowNotMinimized(stale))
@@ -2152,11 +2202,25 @@ mod tests {
             model.update(BarEvent::User(UserAction::RestoreWindow {
                 window: token,
                 wm_session_id: 90,
+                minimized_generation: 73,
                 geometry,
             })),
             Err(ModelError::StaleWmSession {
                 requested: 90,
                 current: 91,
+            })
+        );
+
+        assert_eq!(
+            model.update(BarEvent::User(UserAction::RestoreWindow {
+                window: token,
+                wm_session_id: 91,
+                minimized_generation: 72,
+                geometry,
+            })),
+            Err(ModelError::StaleMinimizedGeneration {
+                requested: 72,
+                current: 73,
             })
         );
     }
@@ -2190,6 +2254,7 @@ mod tests {
             .update(BarEvent::User(UserAction::SetDockGeometry {
                 window: Some(token),
                 wm_session_id: 91,
+                minimized_generation: 0,
                 geometry: empty_geometry,
             }))
             .unwrap();
@@ -2198,6 +2263,7 @@ mod tests {
             vec![BarEffect::WindowManager(WmCommand::SetDockGeometry {
                 window: Some(token),
                 wm_session_id: 91,
+                minimized_generation: 0,
                 monitor: MonitorId(2),
                 geometry: empty_geometry,
             })]
@@ -2208,6 +2274,7 @@ mod tests {
             model.update(BarEvent::User(UserAction::SetDockGeometry {
                 window: Some(token),
                 wm_session_id: 91,
+                minimized_generation: 0,
                 geometry: nonempty_geometry,
             })),
             Err(ModelError::WindowNotMinimized(token))

@@ -9,10 +9,38 @@ use std::rc::Rc;
 use std::time::Instant;
 use xbar_core::shared_structures::SharedRingBuffer;
 
-pub const WITHDRAWN_STATE: u8 = 0;
+pub const WITHDRAWN_STATE: u8 = crate::backend::api::ICCCM_WITHDRAWN_STATE;
 pub const STEXT_MAX_LEN: usize = 512;
-pub const NORMAL_STATE: u8 = 1;
-pub const ICONIC_STATE: u8 = 2;
+pub const NORMAL_STATE: u8 = crate::backend::api::ICCCM_NORMAL_STATE;
+/// ICCCM `WM_STATE` value for an iconified (minimized) client.
+pub const ICONIC_STATE: u8 = crate::backend::api::ICCCM_ICONIC_STATE;
+
+/// Keep the ICCCM state written by JWM in lockstep with its internal hidden
+/// bit. Wayland property backends intentionally accept the same values as a
+/// no-op, so callers do not need a backend-family branch.
+#[must_use]
+pub const fn wm_state_for_minimized(minimized: bool) -> u8 {
+    if minimized {
+        ICONIC_STATE
+    } else {
+        NORMAL_STATE
+    }
+}
+
+/// Interpret only ICCCM IconicState as minimized. Withdrawn and the reserved
+/// value `2` are deliberately not treated as restorable Dock entries.
+#[must_use]
+pub const fn wm_state_is_minimized(state: i64) -> bool {
+    state == ICONIC_STATE as i64
+}
+
+/// Adopt minimized state written by both current and older JWM versions.
+/// Older releases only persisted `_NET_WM_STATE_HIDDEN`; current releases
+/// normalize either signal back to both EWMH and ICCCM during management.
+#[must_use]
+pub const fn wm_state_or_ewmh_is_minimized(state: i64, ewmh_hidden: bool) -> bool {
+    wm_state_is_minimized(state) || ewmh_hidden
+}
 
 pub type WMFuncType = fn(
     &mut crate::jwm::Jwm,
@@ -21,6 +49,32 @@ pub type WMFuncType = fn(
 ) -> Result<(), Box<dyn std::error::Error>>;
 
 pub type MonitorIndex = i32;
+
+#[cfg(test)]
+mod wm_state_tests {
+    use super::*;
+
+    #[test]
+    fn minimized_state_mapping_matches_icccm() {
+        assert_eq!(WITHDRAWN_STATE, 0);
+        assert_eq!(wm_state_for_minimized(false), NORMAL_STATE);
+        assert_eq!(wm_state_for_minimized(true), ICONIC_STATE);
+        assert!(!wm_state_is_minimized(-1));
+        assert!(!wm_state_is_minimized(i64::from(WITHDRAWN_STATE)));
+        assert!(!wm_state_is_minimized(i64::from(NORMAL_STATE)));
+        assert!(!wm_state_is_minimized(2));
+        assert!(wm_state_is_minimized(i64::from(ICONIC_STATE)));
+        assert!(!wm_state_or_ewmh_is_minimized(
+            i64::from(NORMAL_STATE),
+            false
+        ));
+        assert!(wm_state_or_ewmh_is_minimized(i64::from(NORMAL_STATE), true));
+        assert!(wm_state_or_ewmh_is_minimized(
+            i64::from(ICONIC_STATE),
+            false
+        ));
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct WMWindowGeom {

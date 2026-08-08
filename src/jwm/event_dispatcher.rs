@@ -12,9 +12,11 @@ use crate::backend::error::BackendError;
 use crate::config::{BackendFamily, CONFIG, ClientMoveResize, get_backend_family};
 use crate::core::animation::AnimationKind;
 use crate::core::controller::WMController;
+use crate::core::models::ClientKey;
 use crate::jwm::Jwm;
 use crate::jwm::features::CaptureTarget;
 use crate::jwm::mouse_handler::DragMode;
+use crate::jwm::statusbar::StatusBarBuilder;
 use crate::jwm::types::WMArgEnum;
 use log::{debug, error, info};
 use std::sync::atomic::Ordering;
@@ -29,6 +31,30 @@ fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
         NetWmAction::Remove => false,
         NetWmAction::Toggle => !currently_hidden,
     }
+}
+
+/// Apply a taskbar/pager request without letting a de-minimized client remain
+/// parked on an inactive tag. A repeated "not minimized" request for an
+/// already-visible client is deliberately only a protocol repair; it must not
+/// steal focus.
+fn apply_external_minimized_request(
+    wm: &mut Jwm,
+    backend: &mut dyn Backend,
+    client_key: ClientKey,
+    win: WindowId,
+    minimized: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let was_hidden = wm
+        .state
+        .clients
+        .get(client_key)
+        .is_some_and(|client| client.state.is_hidden);
+    if !minimized && was_hidden {
+        let _revealed = wm.reveal_and_focus(backend, win)?;
+    } else {
+        let _changed = wm.set_client_minimized(backend, client_key, minimized)?;
+    }
+    Ok(())
 }
 
 fn requested_attention_state(action: NetWmAction, currently_requested: bool) -> bool {
@@ -148,9 +174,15 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_child_process_exited(&mut self, _backend: &mut dyn Backend) {
+    fn on_child_process_exited(&mut self, backend: &mut dyn Backend) {
         debug!("Received SIGCHLD, reaping zombies...");
-        self.reap_zombies();
+        let now = std::time::Instant::now();
+        for (monitor_id, reason) in self.reap_zombies() {
+            // `reap_zombies` must consume the process through its owning Child
+            // handle, but SIGCHLD still needs the same visual cleanup and
+            // bounded restart policy as the periodic bar supervisor.
+            self.handle_secondary_bar_failure(backend, monitor_id, now, &reason);
+        }
     }
 
     // === 窗口生命周期 ===
@@ -894,25 +926,11 @@ impl WMController for Jwm {
 
     fn on_client_message(&mut self, backend: &mut dyn Backend, win: WindowId) {
         // 对应 _NET_ACTIVE_WINDOW: activate (focus + raise) the requested window.
-        if let Some(ck) = self.wintoclient(win) {
-            if !self.is_client_selected(ck) {
-                // Clear urgent flag if it was set
-                if self
-                    .state
-                    .clients
-                    .get(ck)
-                    .map(|c| c.state.is_urgent)
-                    .unwrap_or(false)
-                {
-                    let _ = self.seturgent(backend, ck, false);
-                }
-                if let Err(e) = self.focus(backend, Some(ck)) {
-                    error!("Error focusing client on _NET_ACTIVE_WINDOW: {:?}", e);
-                }
-                if let Err(e) = self.restack(backend, self.state.sel_mon) {
-                    error!("Error restacking on _NET_ACTIVE_WINDOW: {:?}", e);
-                }
-            }
+        // `focus` deliberately falls back to another client when its target is
+        // hidden, on another tag, or on another monitor.  Activation means the
+        // opposite: reveal this exact window, then focus and raise it.
+        if let Err(error) = self.reveal_and_focus(backend, win) {
+            error!("Error activating client on _NET_ACTIVE_WINDOW: {error:?}");
         }
     }
 
@@ -1027,16 +1045,15 @@ impl WMController for Jwm {
                     }
                 }
                 NetWmState::SkipTaskbar => {
-                    let mut hide_minimized_dock_item = false;
+                    let mut was_dock_eligible = None;
                     let monitor = if let Some(c) = self.state.clients.get_mut(ck) {
+                        was_dock_eligible = Some(StatusBarBuilder::is_minimized_dock_eligible(c));
                         let on = match action {
                             NetWmAction::Add => true,
                             NetWmAction::Remove => false,
                             NetWmAction::Toggle => !c.state.skip_taskbar,
                         };
                         c.state.skip_taskbar = on;
-                        hide_minimized_dock_item =
-                            skip_taskbar_withdraws_minimized(on, c.state.is_hidden);
                         let _ = backend.property_ops().set_net_wm_state_flag(
                             win,
                             NetWmState::SkipTaskbar,
@@ -1049,16 +1066,8 @@ impl WMController for Jwm {
                     let monitor_num = monitor
                         .and_then(|key| self.state.monitors.get(key))
                         .map(|monitor| monitor.num);
-                    if hide_minimized_dock_item {
-                        if let Some(monitor_num) = monitor_num {
-                            self.clear_minimized_preview_for(backend, monitor_num, Some(win));
-                        }
-                        // Once SKIP_TASKBAR removes a still-minimized client
-                        // from the authoritative Dock model, no bar can name
-                        // it in a normal non-zero geometry command. Withdraw
-                        // the compositor target at the state transition so a
-                        // stale thumbnail cannot survive or block scanout.
-                        backend.compositor_set_window_dock_geometry(win, None);
+                    if let Some(was_dock_eligible) = was_dock_eligible {
+                        self.reconcile_minimized_dock_eligibility(backend, ck, was_dock_eligible);
                     }
                     self.mark_bar_update_needed_if_visible(monitor_num);
                 }
@@ -1085,7 +1094,10 @@ impl WMController for Jwm {
                         .map(|client| client.state.is_hidden)
                         .unwrap_or(false);
                     let on = requested_hidden_state(action, was_hidden);
-                    self.set_client_minimized(backend, ck, on);
+                    if let Err(error) = apply_external_minimized_request(self, backend, ck, win, on)
+                    {
+                        error!("Could not apply minimized state for {win:?}: {error}");
+                    }
                 }
                 NetWmState::MaximizedVert | NetWmState::MaximizedHorz => {
                     if let Some(c) = self.state.clients.get_mut(ck) {
@@ -1221,14 +1233,6 @@ impl Jwm {
     }
 }
 
-/// A visible window has no retained Dock target, while removing
-/// `SKIP_TASKBAR` makes a hidden window eligible for publication again.  Only
-/// the transition that excludes an already-minimized window needs an eager
-/// compositor withdrawal.
-fn skip_taskbar_withdraws_minimized(skip_taskbar: bool, minimized: bool) -> bool {
-    skip_taskbar && minimized
-}
-
 #[cfg(test)]
 // Kept next to the event-handler implementation it protects; this file also
 // contains later inherent helpers used by unrelated event families.
@@ -1238,37 +1242,280 @@ mod tests {
     use crate::config::CONFIG;
 
     use crate::backend::api::{
-        BackendDiagnostics, Capabilities, ColorAllocator, CompositorAnnotation,
-        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
-        CompositorWorkspaceEffects, CursorProvider, DisplayControl, InputOps, KeyOps, OutputOps,
-        PropertyOps, RenderScheduler, WindowOps,
+        BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
+        CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
+        Geometry, InputOps, KeyOps, ManagedUnmapReason, NetWmState, NormalHints, OutputInfo,
+        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
+        WindowType, WmHints,
     };
+    use crate::backend::common_define::Pixel;
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
-        DummyPropertyOps, DummyWindowOps,
     };
     use crate::core::animation::AnimationManager;
+    use crate::core::models::ClientKey;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
     use crate::jwm::types::WMArgEnum;
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
-    use std::sync::atomic::AtomicBool;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
     use xbar_core::shared_structures::SharedMessage;
 
-    #[test]
-    fn skip_taskbar_only_withdraws_an_already_minimized_dock_item() {
-        assert!(skip_taskbar_withdraws_minimized(true, true));
-        assert!(!skip_taskbar_withdraws_minimized(true, false));
-        assert!(!skip_taskbar_withdraws_minimized(false, true));
-        assert!(!skip_taskbar_withdraws_minimized(false, false));
+    struct MapRestorePropertyOps {
+        ewmh_hidden: AtomicBool,
+        wm_state: AtomicI64,
+    }
+
+    impl MapRestorePropertyOps {
+        fn new() -> Self {
+            Self {
+                ewmh_hidden: AtomicBool::new(false),
+                wm_state: AtomicI64::new(i64::from(crate::jwm::types::NORMAL_STATE)),
+            }
+        }
+    }
+
+    impl PropertyOps for MapRestorePropertyOps {
+        fn get_title(&self, _win: WindowId) -> String {
+            "Test Window".into()
+        }
+
+        fn get_class(&self, _win: WindowId) -> (String, String) {
+            ("test".into(), "Test".into())
+        }
+
+        fn get_window_types(&self, _win: WindowId) -> Vec<WindowType> {
+            vec![WindowType::Normal]
+        }
+
+        fn is_fullscreen(&self, _win: WindowId) -> bool {
+            false
+        }
+
+        fn set_fullscreen_state(&self, _win: WindowId, _on: bool) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn transient_for(&self, _win: WindowId) -> Option<WindowId> {
+            None
+        }
+
+        fn get_wm_hints(&self, _win: WindowId) -> Option<WmHints> {
+            None
+        }
+
+        fn set_urgent_hint(&self, _win: WindowId, _urgent: bool) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn fetch_normal_hints(&self, _win: WindowId) -> Result<Option<NormalHints>, BackendError> {
+            Ok(None)
+        }
+
+        fn set_window_strut_top(
+            &self,
+            _win: WindowId,
+            _top: u32,
+            _start_x: u32,
+            _end_x: u32,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_window_type_dock(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn clear_window_strut(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn get_wm_state(&self, _win: WindowId) -> Result<i64, BackendError> {
+            Ok(self.wm_state.load(AtomicOrdering::Relaxed))
+        }
+
+        fn set_wm_state(&self, _win: WindowId, state: i64) -> Result<(), BackendError> {
+            self.wm_state.store(state, AtomicOrdering::Relaxed);
+            Ok(())
+        }
+
+        fn set_client_info_props(
+            &self,
+            _win: WindowId,
+            _tags: u32,
+            _monitor_num: u32,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_net_wm_state_flag(
+            &self,
+            _win: WindowId,
+            state: NetWmState,
+            on: bool,
+        ) -> Result<(), BackendError> {
+            if state == NetWmState::Hidden {
+                self.ewmh_hidden.store(on, AtomicOrdering::Relaxed);
+            }
+            Ok(())
+        }
+
+        fn has_net_wm_state_flag(
+            &self,
+            _win: WindowId,
+            state: NetWmState,
+        ) -> Result<bool, BackendError> {
+            Ok(state == NetWmState::Hidden && self.ewmh_hidden.load(AtomicOrdering::Relaxed))
+        }
+    }
+
+    struct MapRestoreWindowOps {
+        geometry: Mutex<Geometry>,
+        fail_position: AtomicBool,
+        fail_configure: AtomicBool,
+        compositor_disable_trace: Mutex<Vec<&'static str>>,
+    }
+
+    impl MapRestoreWindowOps {
+        fn new() -> Self {
+            Self {
+                geometry: Mutex::new(Geometry {
+                    x: 120,
+                    y: 80,
+                    w: 640,
+                    h: 480,
+                    border: 0,
+                }),
+                fail_position: AtomicBool::new(false),
+                fail_configure: AtomicBool::new(false),
+                compositor_disable_trace: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl WindowOps for MapRestoreWindowOps {
+        fn set_position(&self, _win: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
+            if self.fail_position.swap(false, AtomicOrdering::Relaxed) {
+                return Err(BackendError::Message(
+                    "injected set-position failure".into(),
+                ));
+            }
+            let mut geometry = self.geometry.lock().expect("map restore geometry lock");
+            geometry.x = x;
+            geometry.y = y;
+            Ok(())
+        }
+
+        fn configure(
+            &self,
+            _win: WindowId,
+            x: i32,
+            y: i32,
+            w: u32,
+            h: u32,
+            border: u32,
+        ) -> Result<(), BackendError> {
+            self.compositor_disable_trace
+                .lock()
+                .expect("compositor disable trace lock")
+                .push("park");
+            if self.fail_configure.load(AtomicOrdering::Relaxed) {
+                return Err(BackendError::Message("injected parking failure".into()));
+            }
+            *self.geometry.lock().expect("map restore geometry lock") =
+                Geometry { x, y, w, h, border };
+            Ok(())
+        }
+
+        fn set_decoration_style(
+            &self,
+            _win: WindowId,
+            _border_width: u32,
+            _border_color: Pixel,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn raise_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn map_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn unmap_window(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn close_window(&self, _win: WindowId) -> Result<CloseResult, BackendError> {
+            Ok(CloseResult::Graceful)
+        }
+
+        fn set_input_focus(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_input_focus_root(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn get_window_attributes(&self, _win: WindowId) -> Result<WindowAttributes, BackendError> {
+            Ok(WindowAttributes {
+                override_redirect: false,
+                map_state_viewable: true,
+            })
+        }
+
+        fn get_geometry(&self, _win: WindowId) -> Result<Geometry, BackendError> {
+            Ok(*self.geometry.lock().expect("map restore geometry lock"))
+        }
+
+        fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        fn flush(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn kill_client(&self, _win: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn apply_window_changes(
+            &self,
+            _win: WindowId,
+            changes: WindowChanges,
+        ) -> Result<(), BackendError> {
+            let mut geometry = self.geometry.lock().expect("map restore geometry lock");
+            if let Some(x) = changes.x {
+                geometry.x = x;
+            }
+            if let Some(y) = changes.y {
+                geometry.y = y;
+            }
+            if let Some(width) = changes.width {
+                geometry.w = width;
+            }
+            if let Some(height) = changes.height {
+                geometry.h = height;
+            }
+            if let Some(border_width) = changes.border_width {
+                geometry.border = border_width;
+            }
+            Ok(())
+        }
     }
 
     struct RenderSpyBackend {
-        window_ops: DummyWindowOps,
+        window_ops: MapRestoreWindowOps,
         input_ops: DummyInputOps,
-        property_ops: DummyPropertyOps,
+        property_ops: MapRestorePropertyOps,
         output_ops: DummyOutputOps,
         key_ops: DummyKeyOps,
         cursor_provider: DummyCursorProvider,
@@ -1278,14 +1525,20 @@ mod tests {
         compositor_supported: bool,
         compositor_transitions: Vec<bool>,
         compositor_urgency: Vec<(WindowId, bool)>,
+        compositor_minimized_updates: Vec<(WindowId, bool)>,
+        compositor_static_ensures: Vec<WindowId>,
+        compositor_forgotten_visuals: Vec<WindowId>,
+        dock_geometry_updates: Vec<(WindowId, Option<CompositorRect>)>,
+        dock_preview_updates: Vec<(Option<WindowId>, Option<CompositorRect>)>,
+        x11_client_list: bool,
     }
 
     impl RenderSpyBackend {
         fn new() -> Self {
             Self {
-                window_ops: DummyWindowOps,
+                window_ops: MapRestoreWindowOps::new(),
                 input_ops: DummyInputOps,
-                property_ops: DummyPropertyOps,
+                property_ops: MapRestorePropertyOps::new(),
                 output_ops: DummyOutputOps,
                 key_ops: DummyKeyOps,
                 cursor_provider: DummyCursorProvider,
@@ -1295,6 +1548,12 @@ mod tests {
                 compositor_supported: true,
                 compositor_transitions: Vec::new(),
                 compositor_urgency: Vec::new(),
+                compositor_minimized_updates: Vec::new(),
+                compositor_static_ensures: Vec::new(),
+                compositor_forgotten_visuals: Vec::new(),
+                dock_geometry_updates: Vec::new(),
+                dock_preview_updates: Vec::new(),
+                x11_client_list: false,
             }
         }
     }
@@ -1307,6 +1566,34 @@ mod tests {
     impl CompositorWindowEffects for RenderSpyBackend {
         fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
             self.compositor_urgency.push((window, urgent));
+        }
+
+        fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
+            self.compositor_minimized_updates.push((window, minimized));
+        }
+
+        fn compositor_ensure_minimized_window_visual(&mut self, window: WindowId) {
+            self.compositor_static_ensures.push(window);
+        }
+
+        fn compositor_forget_minimized_window_visual(&mut self, window: WindowId) {
+            self.compositor_forgotten_visuals.push(window);
+        }
+
+        fn compositor_set_window_dock_geometry(
+            &mut self,
+            window: WindowId,
+            target: Option<CompositorRect>,
+        ) {
+            self.dock_geometry_updates.push((window, target));
+        }
+
+        fn compositor_set_minimized_window_preview(
+            &mut self,
+            window: Option<WindowId>,
+            anchor: Option<CompositorRect>,
+        ) {
+            self.dock_preview_updates.push((window, anchor));
         }
     }
     impl CompositorAnnotation for RenderSpyBackend {}
@@ -1324,7 +1611,10 @@ mod tests {
 
     impl Backend for RenderSpyBackend {
         fn capabilities(&self) -> Capabilities {
-            Capabilities::default()
+            Capabilities {
+                supports_client_list: self.x11_client_list,
+                ..Capabilities::default()
+            }
         }
 
         fn root_window(&self) -> Option<WindowId> {
@@ -1385,6 +1675,13 @@ mod tests {
         }
 
         fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
+            if !enabled {
+                self.window_ops
+                    .compositor_disable_trace
+                    .lock()
+                    .expect("compositor disable trace lock")
+                    .push("disable");
+            }
             self.compositor_transitions.push(enabled);
             if !self.compositor_supported || self.compositor_enabled == enabled {
                 return Ok(false);
@@ -1411,14 +1708,19 @@ mod tests {
             secondary_bar_retry_after: HashMap::new(),
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),
+            minimized_projection_epochs: HashMap::new(),
+            reconciled_minimized_target_generations: HashMap::new(),
             minimized_dock_shelves: HashMap::new(),
             active_minimized_preview: None,
+            active_minimized_preview_generation: None,
             suppress_mouse_focus_until: None,
             suppress_layout_animation: false,
             last_stacking: SecondaryMap::new(),
             scratchpads: HashMap::new(),
-            scratchpad_pending_name: None,
+            scratchpad_pending: crate::jwm::scratchpad_pending::ScratchpadPendingRegistry::default(
+            ),
             animations: AnimationManager::new(),
+            hidden_client_park_retries: crate::jwm::monitor::HiddenClientParkRetries::default(),
             key_bindings: Vec::new(),
             chord_compiled: None,
             chord_armed_until: None,
@@ -1568,6 +1870,170 @@ mod tests {
         assert_eq!(backend.compositor_transitions, [false]);
     }
 
+    #[test]
+    fn compositor_disable_parks_hidden_clients_before_backend_teardown() {
+        let (mut jwm, _target, _target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(!backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [false]);
+        assert_eq!(
+            *backend
+                .window_ops
+                .compositor_disable_trace
+                .lock()
+                .expect("compositor disable trace lock"),
+            ["park", "disable"]
+        );
+    }
+
+    #[test]
+    fn failed_hidden_client_parking_prevents_backend_compositor_disable() {
+        let (mut jwm, _target, _target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        backend
+            .window_ops
+            .fail_configure
+            .store(true, AtomicOrdering::Relaxed);
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(backend.compositor_enabled);
+        assert!(backend.compositor_transitions.is_empty());
+        assert_eq!(
+            *backend
+                .window_ops
+                .compositor_disable_trace
+                .lock()
+                .expect("compositor disable trace lock"),
+            ["park"]
+        );
+    }
+
+    #[test]
+    fn far_left_topology_repark_retries_without_busy_loop_and_converges() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let original_order = jwm.state.clients[target].state.minimized_order;
+        let original_restore = jwm.state.clients[target].geometry.hidden_restore_rect;
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        // Settle the independent config-poll deadline so the assertions below
+        // isolate the hidden-park scheduler's wakeup behavior.
+        jwm.poll_config_reload(&mut backend, std::time::Instant::now());
+        backend
+            .window_ops
+            .fail_position
+            .store(true, AtomicOrdering::Relaxed);
+
+        jwm.add_monitor(output_info(99, -4000));
+        jwm.repark_all_hidden_clients(&mut backend);
+
+        assert!(jwm.has_hidden_client_park_retry(target));
+        jwm.defer_hidden_client_park_retry_for_test(target, std::time::Duration::from_secs(1));
+        assert_eq!(
+            backend
+                .window_ops
+                .geometry
+                .lock()
+                .expect("map restore geometry lock")
+                .x,
+            120,
+            "the injected first failure must leave the server geometry stale"
+        );
+        assert!(
+            !<Jwm as EventHandler>::needs_tick(&jwm),
+            "a future retry deadline must not force a 1ms X11 poll loop"
+        );
+        assert!(
+            <Jwm as EventHandler>::next_wakeup(&jwm).is_some_and(|delay| !delay.is_zero()),
+            "the event loop must receive the future retry deadline"
+        );
+
+        backend
+            .window_ops
+            .fail_configure
+            .store(true, AtomicOrdering::Relaxed);
+        jwm.force_hidden_client_park_retry_due(target);
+        assert!(<Jwm as EventHandler>::needs_tick(&jwm));
+        assert_eq!(
+            <Jwm as EventHandler>::next_wakeup(&jwm),
+            Some(std::time::Duration::ZERO)
+        );
+        jwm.tick_hidden_client_park_retries(&mut backend, std::time::Instant::now());
+
+        assert!(jwm.has_hidden_client_park_retry(target));
+        assert!(
+            !<Jwm as EventHandler>::needs_tick(&jwm),
+            "a failed due attempt must back off instead of remaining due"
+        );
+        assert!(<Jwm as EventHandler>::next_wakeup(&jwm).is_some_and(|delay| !delay.is_zero()));
+
+        backend
+            .window_ops
+            .fail_configure
+            .store(false, AtomicOrdering::Relaxed);
+        jwm.force_hidden_client_park_retry_due(target);
+        jwm.tick_hidden_client_park_retries(&mut backend, std::time::Instant::now());
+
+        assert!(!jwm.has_hidden_client_park_retry(target));
+        let geometry = *backend
+            .window_ops
+            .geometry
+            .lock()
+            .expect("map restore geometry lock");
+        assert!(
+            geometry
+                .x
+                .saturating_add(i32::try_from(geometry.w).unwrap_or(i32::MAX))
+                <= jwm.desktop_left_edge(),
+            "the successful retry must read back a fully parked current-topology geometry"
+        );
+        let client = &jwm.state.clients[target];
+        assert!(client.state.is_hidden);
+        assert_eq!(client.state.minimized_order, original_order);
+        assert_eq!(client.geometry.hidden_restore_rect, original_restore);
+        assert!(backend.compositor_minimized_updates.is_empty());
+        assert_eq!(target_window, client.win);
+    }
+
+    #[test]
+    fn failed_temporary_compositor_release_keeps_the_lease_retryable() {
+        let (mut jwm, _target, _target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        backend
+            .window_ops
+            .fail_configure
+            .store(true, AtomicOrdering::Relaxed);
+        jwm.features.system_ui_temporary_compositor = true;
+
+        jwm.close_system_ui(&mut backend);
+
+        assert!(backend.compositor_enabled);
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert!(backend.compositor_transitions.is_empty());
+    }
+
+    #[test]
+    fn refused_temporary_compositor_release_does_not_drop_the_lease_flag() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_supported = false;
+        jwm.features.system_ui_temporary_compositor = true;
+
+        jwm.close_system_ui(&mut backend);
+
+        assert!(backend.compositor_enabled);
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [false]);
+    }
+
     /// A window manager with one empty monitor on a 1920x1080 screen, which is
     /// the least the layout picker needs to have something to switch.
     fn jwm_with_monitor() -> Jwm {
@@ -1582,6 +2048,550 @@ mod tests {
         jwm.s_w = 1920;
         jwm.s_h = 1080;
         jwm
+    }
+
+    fn output_info(id: u64, x: i32) -> OutputInfo {
+        OutputInfo {
+            id: OutputId(id),
+            name: format!("test-{id}"),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+            identity: crate::backend::api::OutputIdentity::connector_only(format!("test-{id}")),
+        }
+    }
+
+    fn jwm_with_hidden_activation_target() -> (Jwm, ClientKey, WindowId) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let monitor_key = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(monitor_key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+
+        let current_window = WindowId::from_raw(0x101);
+        let mut current = WMClient::new(current_window);
+        current.mon = Some(monitor_key);
+        current.state.tags = 0b01;
+        current.geometry.x = 40;
+        current.geometry.y = 80;
+        current.geometry.w = 800;
+        current.geometry.h = 600;
+        let current_key = jwm.insert_client(current);
+        jwm.attach_to_monitor(current_key, monitor_key);
+
+        let target_window = WindowId::from_raw(0x202);
+        let mut target = WMClient::new(target_window);
+        target.mon = Some(monitor_key);
+        target.state.tags = 0b10;
+        target.state.is_hidden = true;
+        target.state.minimized_order = 7;
+        target.geometry.x = -1600;
+        target.geometry.old_x = 120;
+        target.geometry.y = 100;
+        target.geometry.old_y = 100;
+        target.geometry.w = 800;
+        target.geometry.h = 600;
+        let target_key = jwm.insert_client(target);
+        jwm.attach_to_monitor(target_key, monitor_key);
+
+        if let Some(monitor) = jwm.state.monitors.get_mut(monitor_key) {
+            monitor.set_selected_client_for_current_tag(Some(current_key));
+        }
+
+        (jwm, target_key, target_window)
+    }
+
+    fn assert_activation_revealed_target(jwm: &Jwm, target: ClientKey) {
+        let client = &jwm.state.clients[target];
+        assert!(!client.state.is_hidden);
+        assert_eq!(client.state.minimized_order, 0);
+        assert_eq!(jwm.state.sel_mon, client.mon);
+        let monitor = jwm.state.monitors.get(client.mon.unwrap()).unwrap();
+        assert_eq!(monitor.get_active_tags(), 0b10);
+        assert_eq!(monitor.sel, Some(target));
+    }
+
+    fn jwm_with_cross_monitor_hidden_map_target() -> (Jwm, ClientKey, WindowId, ClientKey) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+
+        let mut source_monitor = jwm.createmon(true);
+        source_monitor.num = 0;
+        source_monitor.geometry.m_x = 0;
+        source_monitor.geometry.m_w = 1280;
+        source_monitor.geometry.m_h = 720;
+        source_monitor.geometry.w_x = 0;
+        source_monitor.geometry.w_w = 1280;
+        source_monitor.geometry.w_h = 720;
+        let source_monitor = jwm.insert_monitor(source_monitor);
+
+        let mut target_monitor = jwm.createmon(true);
+        target_monitor.num = 1;
+        target_monitor.geometry.m_x = 1280;
+        target_monitor.geometry.m_w = 1920;
+        target_monitor.geometry.m_h = 1080;
+        target_monitor.geometry.w_x = 1280;
+        target_monitor.geometry.w_w = 1920;
+        target_monitor.geometry.w_h = 1080;
+        let target_monitor = jwm.insert_monitor(target_monitor);
+
+        jwm.state.sel_mon = Some(source_monitor);
+        jwm.s_w = 3200;
+        jwm.s_h = 1080;
+
+        let source_window = WindowId::from_raw(0x301);
+        let mut source = WMClient::new(source_window);
+        source.mon = Some(source_monitor);
+        source.state.tags = 0b01;
+        source.geometry.x = 80;
+        source.geometry.y = 80;
+        source.geometry.w = 900;
+        source.geometry.h = 560;
+        let source_client = jwm.insert_client(source);
+        jwm.attach_to_monitor(source_client, source_monitor);
+        jwm.state.monitors[source_monitor].set_selected_client_for_current_tag(Some(source_client));
+
+        let target_window = WindowId::from_raw(0x302);
+        let mut target = WMClient::new(target_window);
+        target.mon = Some(target_monitor);
+        target.state.tags = 0b10;
+        target.state.is_hidden = true;
+        target.state.minimized_order = 11;
+        target.geometry.x = -1000;
+        target.geometry.hidden_x = Some(-1000);
+        target.geometry.old_x = 1440;
+        target.geometry.y = 120;
+        target.geometry.old_y = 120;
+        target.geometry.w = 1000;
+        target.geometry.h = 700;
+        let target_client = jwm.insert_client(target);
+        jwm.attach_to_monitor(target_client, target_monitor);
+
+        (jwm, target_client, target_window, source_client)
+    }
+
+    #[test]
+    fn net_active_window_reveals_a_minimized_window_on_another_tag() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ActiveWindowMessage {
+                window: target_window,
+            },
+        )
+        .unwrap();
+
+        assert_activation_revealed_target(&jwm, target);
+    }
+
+    #[test]
+    fn manager_owned_unmaps_keep_the_client_managed_for_every_reason() {
+        for reason in [
+            ManagedUnmapReason::SwallowDiscard,
+            ManagedUnmapReason::IconifyRetain { generation: 17 },
+        ] {
+            let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+            let mut backend = RenderSpyBackend::new();
+
+            jwm.handle_event(
+                &mut backend,
+                BackendEvent::WindowManagerUnmapped {
+                    window: target_window,
+                    reason,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(jwm.wintoclient(target_window), Some(target));
+        }
+    }
+
+    #[test]
+    fn configure_unmap_reconverges_a_hidden_client_to_iconic_state() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::NORMAL_STATE),
+            AtomicOrdering::Relaxed,
+        );
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WindowUnmapped {
+                window: target_window,
+                from_configure: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(jwm.wintoclient(target_window), Some(target));
+        assert_eq!(
+            backend.property_ops.wm_state.load(AtomicOrdering::Relaxed),
+            i64::from(crate::jwm::types::ICONIC_STATE)
+        );
+    }
+
+    #[test]
+    fn mapped_hidden_ineligible_client_retires_the_late_live_visual() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        jwm.state.clients[target].state.skip_taskbar = true;
+
+        jwm.handle_event(&mut backend, BackendEvent::WindowMapped(target_window))
+            .unwrap();
+
+        assert!(jwm.state.clients[target].state.is_hidden);
+        assert_eq!(backend.compositor_forgotten_visuals, vec![target_window]);
+        assert!(backend.compositor_minimized_updates.is_empty());
+    }
+
+    #[test]
+    fn external_unmap_still_withdraws_and_unmanages_the_client() {
+        let (mut jwm, _target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::WindowUnmapped {
+                window: target_window,
+                from_configure: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(jwm.wintoclient(target_window), None);
+    }
+
+    #[test]
+    fn foreign_toplevel_activate_reveals_a_minimized_window_on_another_tag() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ForeignToplevelActivate(target_window),
+        )
+        .unwrap();
+
+        assert_activation_revealed_target(&jwm, target);
+    }
+
+    #[test]
+    fn foreign_toplevel_unminimize_reveals_a_minimized_window_on_another_tag() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        jwm.schedule_hidden_client_park_retry(target, std::time::Instant::now());
+        assert!(jwm.has_hidden_client_park_retry(target));
+        backend
+            .property_ops
+            .ewmh_hidden
+            .store(true, AtomicOrdering::Relaxed);
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::ICONIC_STATE),
+            AtomicOrdering::Relaxed,
+        );
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ForeignToplevelSetMinimized(target_window, false),
+        )
+        .unwrap();
+
+        assert_activation_revealed_target(&jwm, target);
+        assert!(!jwm.has_hidden_client_park_retry(target));
+        assert_eq!(
+            backend.property_ops.wm_state.load(AtomicOrdering::Relaxed),
+            i64::from(crate::jwm::types::NORMAL_STATE)
+        );
+        assert!(
+            !backend
+                .property_ops
+                .ewmh_hidden
+                .load(AtomicOrdering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn ewmh_hidden_remove_reveals_a_minimized_window_on_another_tag() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend
+            .property_ops
+            .ewmh_hidden
+            .store(true, AtomicOrdering::Relaxed);
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::ICONIC_STATE),
+            AtomicOrdering::Relaxed,
+        );
+
+        jwm.on_window_state_request(
+            &mut backend,
+            target_window,
+            NetWmAction::Remove,
+            NetWmState::Hidden,
+        );
+
+        assert_activation_revealed_target(&jwm, target);
+        assert_eq!(
+            backend.property_ops.wm_state.load(AtomicOrdering::Relaxed),
+            i64::from(crate::jwm::types::NORMAL_STATE)
+        );
+        assert!(
+            !backend
+                .property_ops
+                .ewmh_hidden
+                .load(AtomicOrdering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn repeated_external_unminimize_does_not_activate_an_off_tag_visible_client() {
+        let (mut jwm, target, target_window) = jwm_with_hidden_activation_target();
+        let monitor = jwm.state.clients[target].mon.unwrap();
+        let current = jwm.state.monitors[monitor].sel.expect("current selection");
+        jwm.state.clients[target].state.is_hidden = false;
+        jwm.state.clients[target].state.minimized_order = 0;
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.handle_event(
+            &mut backend,
+            BackendEvent::ForeignToplevelSetMinimized(target_window, false),
+        )
+        .unwrap();
+
+        assert_eq!(jwm.state.monitors[monitor].get_active_tags(), 0b01);
+        assert_eq!(jwm.state.monitors[monitor].sel, Some(current));
+        assert_eq!(jwm.get_selected_client_key(), Some(current));
+    }
+
+    #[test]
+    fn x11_map_request_deiconifies_a_managed_window_across_monitor_and_tag() {
+        let (mut jwm, target, target_window, _) = jwm_with_cross_monitor_hidden_map_target();
+        let target_monitor = jwm.state.clients[target].mon.unwrap();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        backend
+            .property_ops
+            .ewmh_hidden
+            .store(true, AtomicOrdering::Relaxed);
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::ICONIC_STATE),
+            AtomicOrdering::Relaxed,
+        );
+
+        // Both X11 transports bridge any MapRequest they receive to
+        // WindowCreated. This is a dispatcher regression, not an end-to-end
+        // XMapWindow test: an off-screen minimized client remains mapped, so
+        // an ordinary XMapWindow normally emits no request. A duplicate queued
+        // or synthetic request must still avoid replaying reverse Genie.
+        for _ in 0..2 {
+            jwm.handle_event(&mut backend, BackendEvent::WindowCreated(target_window))
+                .unwrap();
+        }
+
+        assert_activation_revealed_target(&jwm, target);
+        assert_eq!(jwm.state.sel_mon, Some(target_monitor));
+        assert_eq!(
+            backend.property_ops.wm_state.load(AtomicOrdering::Relaxed),
+            i64::from(crate::jwm::types::NORMAL_STATE)
+        );
+        assert!(
+            !backend
+                .property_ops
+                .ewmh_hidden
+                .load(AtomicOrdering::Relaxed)
+        );
+        assert_eq!(
+            backend.compositor_minimized_updates,
+            vec![(target_window, false)]
+        );
+    }
+
+    #[test]
+    fn native_window_created_duplicate_does_not_deiconify_a_dock_item() {
+        let (mut jwm, target, target_window, source) = jwm_with_cross_monitor_hidden_map_target();
+        let source_monitor = jwm.state.clients[source].mon;
+        let mut backend = RenderSpyBackend::new();
+        backend
+            .property_ops
+            .ewmh_hidden
+            .store(true, AtomicOrdering::Relaxed);
+        backend.property_ops.wm_state.store(
+            i64::from(crate::jwm::types::ICONIC_STATE),
+            AtomicOrdering::Relaxed,
+        );
+
+        // Native Wayland uses WindowCreated for a lifecycle notification, not
+        // an ICCCM map request, and does not advertise `_NET_CLIENT_LIST`.
+        jwm.handle_event(&mut backend, BackendEvent::WindowCreated(target_window))
+            .unwrap();
+
+        assert!(jwm.state.clients[target].state.is_hidden);
+        assert_eq!(jwm.state.sel_mon, source_monitor);
+        assert_eq!(jwm.get_selected_client_key(), Some(source));
+        assert_eq!(
+            backend.property_ops.wm_state.load(AtomicOrdering::Relaxed),
+            i64::from(crate::jwm::types::ICONIC_STATE)
+        );
+        assert!(
+            backend
+                .property_ops
+                .ewmh_hidden
+                .load(AtomicOrdering::Relaxed)
+        );
+        assert!(backend.compositor_minimized_updates.is_empty());
+    }
+
+    #[test]
+    fn output_change_withdraws_physical_dock_targets_before_relayout() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 3;
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let monitor_key = jwm.insert_monitor(monitor);
+        let output_id = OutputId(77);
+        jwm.state.output_map.insert(monitor_key, output_id);
+        jwm.state.sel_mon = Some(monitor_key);
+
+        let window = WindowId::from_raw(0x303);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor_key);
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor_key);
+
+        jwm.minimized_dock_shelves
+            .insert(3, CompositorRect::new(1700.0, 4.0, 180.0, 36.0));
+        jwm.active_minimized_preview = Some((3, window));
+
+        let mut backend = RenderSpyBackend::new();
+        jwm.handle_output_changed(
+            &mut backend,
+            OutputInfo {
+                id: output_id,
+                name: "Virtual-1".into(),
+                x: -1280,
+                y: 20,
+                width: 1280,
+                height: 720,
+                scale: 1.5,
+                refresh_rate: 60_000,
+                hdr_capable: false,
+                hdr_metadata: None,
+                identity: crate::backend::api::OutputIdentity::connector_only("Virtual-1"),
+            },
+        )
+        .unwrap();
+
+        assert!(!jwm.minimized_dock_shelves.contains_key(&3));
+        assert_eq!(jwm.active_minimized_preview, None);
+        assert_eq!(backend.dock_preview_updates, vec![(None, None)]);
+        assert_eq!(backend.dock_geometry_updates, vec![(window, None)]);
+        assert!(jwm.pending_bar_updates.contains(&3));
+        let geometry = &jwm.state.monitors[monitor_key].geometry;
+        assert_eq!(
+            (geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h),
+            (-1280, 20, 1280, 720)
+        );
+    }
+
+    #[test]
+    fn failed_bar_cleanup_withdraws_overlays_and_arms_bounded_retry() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 5;
+        let monitor_key = jwm.insert_monitor(monitor);
+
+        let window = WindowId::from_raw(0x505);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor_key);
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor_key);
+        jwm.minimized_dock_shelves
+            .insert(5, CompositorRect::new(10.0, 20.0, 100.0, 30.0));
+        jwm.active_minimized_preview = Some((5, window));
+
+        let mut backend = RenderSpyBackend::new();
+        let now = std::time::Instant::now();
+        jwm.handle_secondary_bar_failure(&mut backend, 5, now, "test crash");
+
+        assert_eq!(backend.dock_preview_updates, vec![(None, None)]);
+        assert_eq!(backend.dock_geometry_updates, vec![(window, None)]);
+        assert!(!jwm.minimized_dock_shelves.contains_key(&5));
+        assert_eq!(jwm.secondary_bar_failures.get(&5), Some(&1));
+        assert_eq!(
+            jwm.secondary_bar_retry_after.get(&5).copied(),
+            now.checked_add(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn non_tail_hotplug_reuses_the_free_monitor_number_without_collision() {
+        let mut jwm = empty_jwm();
+        let mut first = jwm.createmon(true);
+        first.num = 0;
+        let first_key = jwm.insert_monitor(first);
+        let mut second = jwm.createmon(true);
+        second.num = 1;
+        let second_key = jwm.insert_monitor(second);
+        let first_output = OutputId(10);
+        jwm.state.output_map.insert(first_key, first_output);
+        jwm.state.output_map.insert(second_key, OutputId(11));
+        jwm.state.sel_mon = Some(second_key);
+
+        let mut backend = RenderSpyBackend::new();
+        jwm.handle_output_removed(&mut backend, first_output)
+            .unwrap();
+        jwm.add_monitor(OutputInfo {
+            id: OutputId(12),
+            name: "Virtual-3".into(),
+            x: 1920,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            refresh_rate: 60_000,
+            hdr_capable: false,
+            hdr_metadata: None,
+            identity: crate::backend::api::OutputIdentity::connector_only("Virtual-3"),
+        });
+
+        let mut nums: Vec<_> = jwm
+            .state
+            .monitors
+            .values()
+            .map(|monitor| monitor.num)
+            .collect();
+        nums.sort_unstable();
+        assert_eq!(nums, vec![0, 1]);
+        assert_ne!(jwm.get_monitor_by_id(0), jwm.get_monitor_by_id(1));
+        assert!(jwm.get_monitor_by_id(0).is_some());
+        assert!(jwm.get_monitor_by_id(1).is_some());
     }
 
     fn current_layout(jwm: &Jwm) -> crate::core::layout::LayoutEnum {
@@ -1724,6 +2734,105 @@ mod tests {
     }
 
     #[test]
+    fn removing_skip_taskbar_statically_adopts_hidden_window_once() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.monitor_order[0];
+        let monitor_num = jwm.state.monitors[monitor].num;
+        let shelf = CompositorRect::new(30.0, 700.0, 48.0, 48.0);
+        jwm.minimized_dock_shelves.insert(monitor_num, shelf);
+
+        let window = WindowId::from_raw(0x4242);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        client.state.skip_taskbar = true;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            NetWmState::SkipTaskbar,
+        );
+        assert_eq!(backend.dock_geometry_updates, vec![(window, Some(shelf))]);
+        assert_eq!(backend.compositor_static_ensures, vec![window]);
+
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            NetWmState::SkipTaskbar,
+        );
+        assert_eq!(backend.dock_geometry_updates.len(), 1);
+        assert_eq!(backend.compositor_static_ensures.len(), 1);
+    }
+
+    #[test]
+    fn adding_skip_taskbar_forgets_hidden_visual_without_restoring_the_client() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let monitor = jwm.state.monitor_order[0];
+        let monitor_num = jwm.state.monitors[monitor].num;
+        let shelf = CompositorRect::new(30.0, 700.0, 48.0, 48.0);
+        jwm.minimized_dock_shelves.insert(monitor_num, shelf);
+
+        let window = WindowId::from_raw(0x4343);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::SkipTaskbar,
+        );
+        assert!(jwm.state.clients[client_key].state.is_hidden);
+        assert!(jwm.state.clients[client_key].state.skip_taskbar);
+        assert_eq!(backend.compositor_forgotten_visuals, vec![window]);
+        assert!(backend.compositor_minimized_updates.is_empty());
+        assert_eq!(backend.dock_geometry_updates, vec![(window, None)]);
+
+        // The ineligible retirement path is intentionally repeatable: an
+        // earlier checked map/attribute confirmation may have failed after
+        // the property bit committed. Repeating Add safely retries target
+        // withdrawal and visual retirement; removing the bit then follows the
+        // static geometry-before-ensure adoption path.
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Add,
+            NetWmState::SkipTaskbar,
+        );
+        assert_eq!(backend.compositor_forgotten_visuals, vec![window, window]);
+
+        jwm.on_window_state_request(
+            &mut backend,
+            window,
+            NetWmAction::Remove,
+            NetWmState::SkipTaskbar,
+        );
+        assert!(jwm.state.clients[client_key].state.is_hidden);
+        assert!(!jwm.state.clients[client_key].state.skip_taskbar);
+        assert_eq!(
+            backend.dock_geometry_updates,
+            vec![(window, None), (window, None), (window, Some(shelf))]
+        );
+        assert_eq!(backend.compositor_static_ensures, vec![window]);
+        assert!(backend.compositor_minimized_updates.is_empty());
+    }
+
+    #[test]
     fn attention_state_requests_sync_the_client_and_compositor() {
         use crate::core::models::WMClient;
 
@@ -1817,8 +2926,32 @@ impl EventHandler for Jwm {
                     // Clamp them to the monitor workarea here to avoid being covered by the status bar.
                     self.maybe_clamp_override_redirect_notification(backend, win);
                 }
+
+                // A hidden client that is deliberately absent from the Dock
+                // can be remapped by recovery from X11 UnmapGravity.  The
+                // compositor observes MapNotify before this JWM callback and
+                // may therefore have imported a new live pixmap even though
+                // no shelf/preview can address it. Retire that late import
+                // without changing the client's hidden state or playing a
+                // reverse Genie transition.
+                if self.wintoclient(win).is_some_and(|client_key| {
+                    self.state.clients.get(client_key).is_some_and(|client| {
+                        client.state.is_hidden
+                            && !StatusBarBuilder::is_minimized_dock_eligible(client)
+                    })
+                }) {
+                    backend.compositor_forget_minimized_window_visual(win);
+                }
             }
-            BackendEvent::WindowUnmapped(win) => self.on_unmap_notify(backend, win, false),
+            BackendEvent::WindowUnmapped {
+                window,
+                from_configure,
+            } => self.on_unmap_notify(backend, window, from_configure),
+            BackendEvent::WindowManagerUnmapped { .. } => {
+                // The X11 transport has already correlated this with a checked
+                // JWM request. The client remains managed; compositor resource
+                // policy is applied before dispatch by the shared event bridge.
+            }
             BackendEvent::WindowConfigured {
                 window,
                 x,
@@ -1928,7 +3061,9 @@ impl EventHandler for Jwm {
 
             // Foreign toplevel management actions (taskbar → WM)
             BackendEvent::ForeignToplevelActivate(win) => {
-                let _ = self.focusin(backend, win);
+                if let Err(error) = self.reveal_and_focus(backend, win) {
+                    error!("Error activating foreign toplevel {win:?}: {error:?}");
+                }
             }
             BackendEvent::ForeignToplevelClose(win) => {
                 let _ = backend.window_ops().close_window(win);
@@ -1953,7 +3088,13 @@ impl EventHandler for Jwm {
             }
             BackendEvent::ForeignToplevelSetMinimized(win, minimized) => {
                 if let Some(ck) = self.wintoclient(win) {
-                    self.set_client_minimized(backend, ck, minimized);
+                    if let Err(error) =
+                        apply_external_minimized_request(self, backend, ck, win, minimized)
+                    {
+                        error!(
+                            "Could not apply foreign-toplevel minimized state for {win:?}: {error}"
+                        );
+                    }
                 }
             }
             BackendEvent::ForeignToplevelSetFullscreen(win, fullscreen) => {
@@ -1982,6 +3123,8 @@ impl EventHandler for Jwm {
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
         // Ensure all monitor bars are running (sequential creation)
         let now = std::time::Instant::now();
+        self.expire_pending_scratchpads(now);
+        self.tick_hidden_client_park_retries(backend, now);
         self.ensure_secondary_bars_running(backend, now);
 
         self.process_commands_from_status_bar(backend);
@@ -2026,12 +3169,14 @@ impl EventHandler for Jwm {
     }
 
     fn needs_tick(&self) -> bool {
+        let now = std::time::Instant::now();
         self.animations.has_active()
             || self.features.overview.active
             || self.features.expose_active
             || self.features.system_ui.is_layout_picker()
             || self.has_deferred_grab()
-            || self.config_reload_deadline_is_due(std::time::Instant::now())
+            || self.config_reload_deadline_is_due(now)
+            || self.hidden_client_park_retry_deadline_is_due(now)
     }
 
     fn next_wakeup(&self) -> Option<std::time::Duration> {
@@ -2044,6 +3189,9 @@ impl EventHandler for Jwm {
             Some(remaining) => config_reload.min(remaining).min(FRAME_INTERVAL),
             None => config_reload,
         };
+        let base = self
+            .hidden_client_park_retry_next_wakeup(now)
+            .map_or(base, |remaining| base.min(remaining));
         // A request waiting on the pointer has to poll: the button release
         // that frees it goes to the client holding the grab, not here.
         Some(if self.has_deferred_grab() {

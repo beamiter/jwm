@@ -318,6 +318,8 @@ where
     #[allow(dead_code)]
     shader_cache: ShaderCache,
     program: glow::Program,
+    thumbnail_downsample_program: glow::Program,
+    thumbnail_downsample_uniforms: ThumbnailDownsampleUniforms,
     shadow_program: glow::Program,
     blur_down_program: glow::Program,
     blur_up_program: glow::Program,
@@ -774,7 +776,35 @@ where
     genie_active: Vec<GenieAnimation>,
     genie_targets: HashMap<u32, crate::backend::api::CompositorRect>,
     minimized_windows: HashSet<u32>,
+    minimized_window_intents: HashMap<u32, MinimizedWindowIntent>,
+    /// Hidden-pixmap imports armed by adoption/geometry/preview.  This is
+    /// separate from `minimized_window_intents`: the latter describes how a
+    /// future AddWindow is consumed, while this set distinguishes the first
+    /// import from a bounded retry after a synchronous geometry/pixmap failure.
+    /// Successful static settlement removes the marker.
+    pending_static_minimized_captures: HashSet<u32>,
+    /// One-shot CPU-to-GPU thumbnail promotions armed only by an explicit
+    /// Dock demand (geometry, hover, or a newly captured snapshot).  A failed
+    /// upload consumes the marker so unrelated compositor frames cannot turn
+    /// a driver/allocation failure into a permanent retry loop.
+    pending_minimized_gpu_uploads: HashSet<u32>,
     minimized_visuals: HashMap<u32, MinimizedVisual>,
+    minimized_snapshots:
+        crate::backend::compositor_common::minimized_thumbnail::MinimizedSnapshotCache<u32>,
+    minimized_gpu_snapshots: HashMap<u32, MinimizedGpuSnapshot>,
+    minimized_snapshot_generation_clock: u64,
+    minimized_snapshot_generations:
+        HashMap<u32, crate::backend::compositor_common::minimized_thumbnail::SnapshotGeneration>,
+    /// Per-window true-Iconic CPU recapture demand. A retained full-size
+    /// texture is sampled only when this gate observes a new explicit request
+    /// or newly released CPU-cache capacity.
+    iconic_snapshot_recapture_gates:
+        HashMap<u32, crate::backend::compositor_common::minimized_thumbnail::SnapshotRecaptureGate>,
+    minimized_gpu_use_clock: u64,
+    /// Resource-free semantic state detached from minimized WindowTexture
+    /// owners. This survives Dock eligibility withdrawal and is cleared only
+    /// when the client is restored or actually retired.
+    minimized_window_metadata: HashMap<u32, WindowVisualMetadata>,
     dock_preview: Option<DockPreview>,
     dock_position: (f32, f32),
 
@@ -942,6 +972,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         self.clear_overview_snapshots();
         unsafe {
             self.gl.delete_program(self.program);
+            self.gl.delete_program(self.thumbnail_downsample_program);
             self.gl.delete_program(self.shadow_program);
             self.gl.delete_program(self.blur_down_program);
             self.gl.delete_program(self.blur_up_program);
@@ -985,6 +1016,9 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
             self.gl.delete_program(self.overview_cap_program);
             self.gl.delete_program(self.particle_program);
             self.gl.delete_program(self.genie_program);
+            for (_, snapshot) in self.minimized_gpu_snapshots.drain() {
+                self.gl.delete_texture(snapshot.texture);
+            }
             self.gl.delete_buffer(self.particle_vbo);
             self.gl.delete_vertex_array(self.particle_vao);
             self.gl.delete_vertex_array(self.quad_vao);

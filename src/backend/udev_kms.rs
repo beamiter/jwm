@@ -54,6 +54,7 @@ use smithay::wayland::presentation::{PresentationFeedbackCachedState, Refresh};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 
+use crate::backend::api::CompositorRect;
 use crate::backend::common_define::StdCursorKind;
 use crate::backend::error::{BackendErrorContext, ErrorBoundary};
 
@@ -83,6 +84,15 @@ fn renderer_ctx(operation: &'static str) -> BackendErrorContext {
 /// `[wayland-udev/device] operation` context for DRM/KMS device operations.
 fn device_ctx(operation: &'static str) -> BackendErrorContext {
     BackendErrorContext::new("wayland-udev", ErrorBoundary::Device, operation)
+}
+
+const fn compositor_output_texture_identity_matches(
+    texture: u32,
+    generation: u64,
+    candidate_texture: u32,
+    candidate_generation: u64,
+) -> bool {
+    texture == candidate_texture && generation == candidate_generation
 }
 
 struct KmsOutputState {
@@ -186,10 +196,12 @@ pub(super) struct KmsState {
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
     // Strong refs to every compositor output-FBO texture generation we've wrapped.
-    // The GL texture is owned/deleted by the compositor, so smithay's GlesTexture
-    // Drop must never fire on it (double-glDeleteTextures / recycled-id risk).
-    // Holding a ref keeps Drop suppressed until the renderer/context is torn down.
-    compositor_texture_keepalive: Vec<GlesTexture>,
+    // Older generations were explicitly deleted by the compositor's resize path,
+    // so their wrappers must remain alive until context teardown to avoid a delayed
+    // delete of a recycled GL name. Runtime compositor disable retires only the
+    // precisely matching current generation, whose texture ownership is then
+    // released by Smithay exactly once.
+    compositor_texture_keepalive: Vec<(u64, GlesTexture)>,
     background_id: Id,
 
     cursor_theme: CursorTheme,
@@ -611,6 +623,82 @@ impl KmsState {
         F: FnOnce(&mut GlesRenderer) -> R,
     {
         f(&mut self.renderer)
+    }
+
+    /// Whether Smithay currently owns the compositor output texture through a
+    /// `GlesTexture::from_raw` wrapper. The generation is part of the identity:
+    /// drivers may recycle the numeric texture name after a compositor resize.
+    pub(super) fn compositor_output_texture_is_renderer_owned(
+        &self,
+        texture: u32,
+        generation: u64,
+    ) -> bool {
+        self.compositor_texture_cache.as_ref().is_some_and(
+            |(cached_texture, _, _, _, cached_generation, _)| {
+                compositor_output_texture_identity_matches(
+                    texture,
+                    generation,
+                    *cached_texture,
+                    *cached_generation,
+                )
+            },
+        ) && self
+            .compositor_texture_keepalive
+            .iter()
+            .any(|(kept_generation, kept_texture)| {
+                compositor_output_texture_identity_matches(
+                    texture,
+                    generation,
+                    kept_texture.tex_id(),
+                    *kept_generation,
+                )
+            })
+    }
+
+    /// Drop only the current compositor-output wrapper after the compositor
+    /// has released every raw object which references it. Older resize-era
+    /// wrappers deliberately stay pinned: their raw names were already deleted
+    /// and may since have been recycled for unrelated textures.
+    pub(super) fn retire_compositor_output_texture(
+        &mut self,
+        texture: u32,
+        generation: u64,
+    ) -> bool {
+        let cache_matches = self.compositor_texture_cache.as_ref().is_some_and(
+            |(cached_texture, _, _, _, cached_generation, _)| {
+                compositor_output_texture_identity_matches(
+                    texture,
+                    generation,
+                    *cached_texture,
+                    *cached_generation,
+                )
+            },
+        );
+        if cache_matches {
+            self.compositor_texture_cache.take();
+        }
+
+        let before = self.compositor_texture_keepalive.len();
+        self.compositor_texture_keepalive
+            .retain(|(kept_generation, kept_texture)| {
+                !compositor_output_texture_identity_matches(
+                    texture,
+                    generation,
+                    kept_texture.tex_id(),
+                    *kept_generation,
+                )
+            });
+        let retired = cache_matches || self.compositor_texture_keepalive.len() != before;
+        if retired && let Err(error) = self.renderer.cleanup_texture_cache() {
+            // Dropping the wrapper already queued the exact texture name. A
+            // later renderer operation or EGL-context teardown will finish it;
+            // importantly, no stale raw alias remains in the compositor.
+            log::warn!(
+                "{}: deferred compositor output texture cleanup after wrapper retirement: {error}",
+                renderer_ctx("runtime compositor disable")
+            );
+        }
+        retired
     }
 
     pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
@@ -2867,6 +2955,13 @@ impl KmsState {
                 (ox, oy).into(),
                 (out_w, out_h).into(),
             );
+            // `origin` comes from the physical-pixel OutputInfo layout and
+            // `mode_size` is the DRM mode's physical size. These are also the
+            // coordinates used to slice the compositor's global output FBO,
+            // matching the Dock-facing CompositorRect contract. Do not apply
+            // wl_output scale here: that scale belongs to client logical space.
+            let output_rect_global_physical =
+                CompositorRect::new(ox as f32, oy as f32, out_w as f32, out_h as f32);
 
             // DrmOutput::render_frame expects elements in front-to-back order.
             // So: cursor/top-most surfaces first, solid background last.
@@ -3092,7 +3187,7 @@ impl KmsState {
                 .is_some_and(|c| c.recording_requires_composition());
             let compositor_effect_reason = compositor
                 .as_ref()
-                .and_then(|c| c.direct_scanout_block_reason());
+                .and_then(|c| c.direct_scanout_block_reason(output_rect_global_physical));
             let (direct_scanout_eligible, direct_scanout_reason) = if compositor.is_none() {
                 (false, "compositor disabled".to_string())
             } else if recording_requires_composition {
@@ -3256,7 +3351,8 @@ impl KmsState {
                         // and may explicitly recreate/delete the raw GL name;
                         // letting Smithay later drop an older wrapper could
                         // delete a recycled id belonging to a newer texture.
-                        self.compositor_texture_keepalive.push(tex.clone());
+                        self.compositor_texture_keepalive
+                            .push((tex_generation, tex.clone()));
                         self.compositor_texture_cache =
                             Some((tex_id, sw, sh, tex_format, tex_generation, tex.clone()));
                         tex
@@ -3866,4 +3962,16 @@ fn save_rgba_png(
 
     writer.write_image_data(pixels)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod compositor_texture_ownership_tests {
+    use super::compositor_output_texture_identity_matches;
+
+    #[test]
+    fn renderer_wrapper_identity_includes_generation_not_only_recycled_gl_name() {
+        assert!(compositor_output_texture_identity_matches(17, 4, 17, 4));
+        assert!(!compositor_output_texture_identity_matches(17, 4, 17, 3));
+        assert!(!compositor_output_texture_identity_matches(17, 4, 18, 4));
+    }
 }

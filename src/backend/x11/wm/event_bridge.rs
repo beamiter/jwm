@@ -7,7 +7,9 @@
 //! two parallel match statements. The decision is now this pure function
 //! returning operations; `Compositor::apply_event_op` executes them.
 
-use crate::backend::api::{BackendEvent, NetWmAction, NetWmState, PropertyKind};
+use crate::backend::api::{
+    BackendEvent, ManagedUnmapReason, NetWmAction, NetWmState, PropertyKind,
+};
 use crate::backend::common_define::WindowId;
 
 /// One compositor-facing effect of a backend event.
@@ -28,6 +30,10 @@ pub enum CompositorEventOp {
         window: u32,
     },
     RemoveWindow {
+        window: u32,
+    },
+    /// Release a still-managed window without close particles or a fade.
+    DiscardWindowSilently {
         window: u32,
     },
     UpdateGeometry {
@@ -147,9 +153,41 @@ pub fn compositor_event_ops(
                 }
             }
         }
-        BackendEvent::WindowUnmapped(win) | BackendEvent::WindowDestroyed(win) => {
-            if let Some(x11w) = (sources.resolve)(*win) {
+        BackendEvent::WindowUnmapped {
+            window,
+            from_configure: false,
+        }
+        | BackendEvent::WindowDestroyed(window) => {
+            if let Some(x11w) = (sources.resolve)(*window) {
                 ops.push(CompositorEventOp::RemoveWindow { window: x11w });
+            }
+        }
+        BackendEvent::WindowUnmapped {
+            window,
+            from_configure: true,
+        } => {
+            if let Some(x11w) = (sources.resolve)(*window) {
+                // UnmapGravity does not end WM ownership. Release only the
+                // invalid live Composite pixmap; a true-Iconic coordinator
+                // generation and its durable minimized snapshot must survive.
+                ops.push(CompositorEventOp::DiscardWindowSilently { window: x11w });
+            }
+        }
+        BackendEvent::WindowManagerUnmapped { window, reason } => {
+            if let Some(x11w) = (sources.resolve)(*window) {
+                if x11w != root && x11w != overlay {
+                    match reason {
+                        ManagedUnmapReason::SwallowDiscard => {
+                            ops.push(CompositorEventOp::DiscardWindowSilently { window: x11w });
+                        }
+                        // The minimize path transferred the live texture into
+                        // compositor-owned retained state before issuing
+                        // UnmapWindow. Its acknowledgement must therefore not
+                        // look like either a close or swallowing: both the
+                        // visual and the desired replay record remain live.
+                        ManagedUnmapReason::IconifyRetain { .. } => {}
+                    }
+                }
             }
         }
         BackendEvent::WindowConfigured {
@@ -275,7 +313,9 @@ pub fn compositor_event_ops(
 #[cfg(test)]
 mod tests {
     use super::{CompositorEventOp, CompositorEventSources, compositor_event_ops};
-    use crate::backend::api::{BackendEvent, HitTarget, NetWmAction, NetWmState, PropertyKind};
+    use crate::backend::api::{
+        BackendEvent, HitTarget, ManagedUnmapReason, NetWmAction, NetWmState, PropertyKind,
+    };
     use crate::backend::common_define::WindowId;
 
     const ROOT: u32 = 1;
@@ -386,7 +426,10 @@ mod tests {
     fn unmap_and_destroy_both_remove_the_window() {
         let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
         for event in [
-            BackendEvent::WindowUnmapped(win(9)),
+            BackendEvent::WindowUnmapped {
+                window: win(9),
+                from_configure: false,
+            },
             BackendEvent::WindowDestroyed(win(9)),
         ] {
             let ops = compositor_event_ops(&event, ROOT, OVERLAY, &s);
@@ -395,9 +438,60 @@ mod tests {
     }
 
     #[test]
+    fn configure_unmap_discards_only_the_live_window() {
+        let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
+        let ops = compositor_event_ops(
+            &BackendEvent::WindowUnmapped {
+                window: win(9),
+                from_configure: true,
+            },
+            ROOT,
+            OVERLAY,
+            &s,
+        );
+        assert_eq!(
+            ops,
+            vec![CompositorEventOp::DiscardWindowSilently { window: 9 }]
+        );
+    }
+
+    #[test]
+    fn manager_swallow_unmap_discards_without_close_retirement() {
+        let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
+        let event = BackendEvent::WindowManagerUnmapped {
+            window: win(9),
+            reason: ManagedUnmapReason::SwallowDiscard,
+        };
+        assert_eq!(
+            compositor_event_ops(&event, ROOT, OVERLAY, &s),
+            vec![CompositorEventOp::DiscardWindowSilently { window: 9 }]
+        );
+    }
+
+    #[test]
+    fn manager_iconify_unmap_preserves_retained_compositor_state() {
+        let s = sources(&|w| Some(w.raw() as u32), &|_| String::new(), &|_| false);
+        for generation in [1, 17, u64::MAX] {
+            let event = BackendEvent::WindowManagerUnmapped {
+                window: win(9),
+                reason: ManagedUnmapReason::IconifyRetain { generation },
+            };
+            assert_eq!(compositor_event_ops(&event, ROOT, OVERLAY, &s), vec![]);
+        }
+    }
+
+    #[test]
     fn an_unknown_id_plans_nothing() {
         let s = sources(&|_| None, &|_| String::new(), &|_| false);
-        let ops = compositor_event_ops(&BackendEvent::WindowUnmapped(win(9)), ROOT, OVERLAY, &s);
+        let ops = compositor_event_ops(
+            &BackendEvent::WindowUnmapped {
+                window: win(9),
+                from_configure: false,
+            },
+            ROOT,
+            OVERLAY,
+            &s,
+        );
         assert_eq!(ops, vec![]);
     }
 

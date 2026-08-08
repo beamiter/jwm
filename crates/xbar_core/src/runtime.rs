@@ -342,6 +342,7 @@ struct TransportRecoveryState {
 struct PendingRestore {
     window: WindowToken,
     wm_session_id: u64,
+    minimized_generation: u64,
     geometry: DockItemGeometry,
 }
 
@@ -352,11 +353,13 @@ impl PendingRestore {
             WmCommand::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
                 ..
             } => Some(Self {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             }),
             _ => None,
@@ -364,7 +367,9 @@ impl PendingRestore {
     }
 
     fn matches(self, other: Self) -> bool {
-        self.window == other.window && self.wm_session_id == other.wm_session_id
+        self.window == other.window
+            && self.wm_session_id == other.wm_session_id
+            && self.minimized_generation == other.minimized_generation
     }
 }
 
@@ -660,7 +665,12 @@ impl BarRuntime {
             self.bump_transport_generation();
         }
         if self.transport.is_none() {
-            self.clear_pending_restores();
+            self.suspend_pending_restore_retries();
+        } else if self.model.view().wm_available && !self.pending_restores.is_empty() {
+            // A replacement channel can have capacity immediately. Preserve
+            // the semantic intents, but do not carry the retired transport's
+            // QueueFull delay into the new generation.
+            self.pending_restore_retry_at = Some(Instant::now());
         }
         if let Some(recovery) = self.transport_recovery.as_mut() {
             if self.transport.is_some() {
@@ -919,7 +929,7 @@ impl BarRuntime {
             let result = match self.transport.as_ref() {
                 Some(transport) => transport.drain_latest(),
                 None => {
-                    self.clear_pending_restores();
+                    self.suspend_pending_restore_retries();
                     return update;
                 }
             };
@@ -998,7 +1008,10 @@ impl BarRuntime {
 
     #[cfg(feature = "transport-shared")]
     fn drop_transport(&mut self) {
-        self.clear_pending_restores();
+        // The unavailable interval cannot prove that a restore target is
+        // stale. Keep the bounded intents dormant until a replacement
+        // transport supplies an authoritative projection to prune them.
+        self.suspend_pending_restore_retries();
         if self.transport.take().is_some() {
             self.bump_transport_generation();
         }
@@ -1121,8 +1134,7 @@ impl BarRuntime {
     }
 
     #[cfg(feature = "transport-shared")]
-    fn clear_pending_restores(&mut self) {
-        self.pending_restores.clear();
+    fn suspend_pending_restore_retries(&mut self) {
         self.pending_restore_retry_at = None;
     }
 
@@ -1130,11 +1142,12 @@ impl BarRuntime {
     fn prune_pending_restores(&mut self) {
         let view = self.model.view();
         if !view.wm_available {
-            self.clear_pending_restores();
+            self.suspend_pending_restore_retries();
             return;
         }
         self.pending_restores.retain(|pending| {
             pending.wm_session_id == view.wm_session_id
+                && Some(pending.minimized_generation) == view.wm_sequence
                 && view
                     .minimized_windows
                     .iter()
@@ -1148,7 +1161,9 @@ impl BarRuntime {
     #[cfg(feature = "transport-shared")]
     fn retry_pending_restores_at(&mut self, now: Instant) -> RuntimeUpdate {
         self.prune_pending_restores();
-        if self.pending_restores.is_empty()
+        if !self.model.view().wm_available
+            || self.transport.is_none()
+            || self.pending_restores.is_empty()
             || self
                 .pending_restore_retry_at
                 .is_some_and(|deadline| now < deadline)
@@ -1168,6 +1183,7 @@ impl BarRuntime {
             let command = WmCommand::RestoreWindow {
                 window: restore.window,
                 wm_session_id: restore.wm_session_id,
+                minimized_generation: restore.minimized_generation,
                 monitor,
                 geometry: restore.geometry,
             };
@@ -1435,6 +1451,38 @@ mod tests {
     static NEXT_TRANSPORT_PATH: AtomicU64 = AtomicU64::new(0);
 
     #[cfg(feature = "transport-shared")]
+    fn minimized_snapshot(
+        wm_session_id: u64,
+        minimized_generation: u64,
+        tokens: &[u64],
+    ) -> WmSnapshot {
+        WmSnapshot {
+            sequence: Some(minimized_generation),
+            wm_session_id,
+            monitor: MonitorId(4),
+            geometry: Some(MonitorGeometry {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
+            layout_symbol: "[]=".to_owned(),
+            minimized_windows: tokens
+                .iter()
+                .copied()
+                .map(|token| MinimizedWindow {
+                    token: WindowToken(token),
+                    monitor: MonitorId(4),
+                    title: format!("window {token}"),
+                    app_id: "test".to_owned(),
+                    flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+                })
+                .collect(),
+            ..WmSnapshot::default()
+        }
+    }
+
+    #[cfg(feature = "transport-shared")]
     fn critical_restore_runtime(
         wm_session_id: u64,
         tokens: &[u64],
@@ -1453,31 +1501,11 @@ mod tests {
         let transport = SharedTransport::open(&path).unwrap();
         let mut runtime =
             BarRuntime::with_transport(ModelConfig::default(), Some(transport)).unwrap();
-        let minimized_windows = tokens
-            .iter()
-            .copied()
-            .map(|token| MinimizedWindow {
-                token: WindowToken(token),
-                monitor: MonitorId(4),
-                title: format!("window {token}"),
-                app_id: "test".to_owned(),
-                flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
-            })
-            .collect();
-        let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
-            sequence: Some(1),
+        let _ = runtime.apply_event(BarEvent::WindowManager(minimized_snapshot(
             wm_session_id,
-            monitor: MonitorId(4),
-            geometry: Some(MonitorGeometry {
-                x: 0,
-                y: 0,
-                width: 1920,
-                height: 1080,
-            }),
-            layout_symbol: "[]=".to_owned(),
-            minimized_windows,
-            ..WmSnapshot::default()
-        }));
+            1,
+            tokens,
+        )));
         (runtime, owner)
     }
 
@@ -1497,9 +1525,20 @@ mod tests {
 
     #[cfg(feature = "transport-shared")]
     fn restore_action(window: u64, wm_session_id: u64, x: i32) -> UserAction {
+        restore_action_at_generation(window, wm_session_id, 1, x)
+    }
+
+    #[cfg(feature = "transport-shared")]
+    fn restore_action_at_generation(
+        window: u64,
+        wm_session_id: u64,
+        minimized_generation: u64,
+        x: i32,
+    ) -> UserAction {
         UserAction::RestoreWindow {
             window: WindowToken(window),
             wm_session_id,
+            minimized_generation,
             geometry: DockItemGeometry::new(x, 20, 36, 24),
         }
     }
@@ -1621,7 +1660,75 @@ mod tests {
 
     #[cfg(feature = "transport-shared")]
     #[test]
-    fn critical_restore_is_cancelled_when_window_or_session_changes() {
+    fn critical_restore_survives_unavailable_gap_and_retries_after_matching_snapshot() {
+        let (mut runtime, owner) = critical_restore_runtime(92, &[42]);
+        let replacement = runtime.transport().unwrap().clone();
+        fill_command_ring(&runtime, &owner);
+
+        assert!(runtime.dispatch(restore_action(42, 92, 10)).is_empty());
+        assert_eq!(runtime.pending_restores.len(), 1);
+        assert!(runtime.pending_restore_retry_at.is_some());
+
+        drop(runtime.set_transport(None));
+        let _ = runtime.apply_event(BarEvent::WindowManagerUnavailable);
+        assert_eq!(runtime.pending_restores.len(), 1);
+        assert!(
+            runtime.pending_restore_retry_at.is_none(),
+            "offline intent must not keep an overdue service deadline armed"
+        );
+        assert!(runtime.poll_transport_at(Instant::now()).is_empty());
+        assert_eq!(runtime.pending_restores.len(), 1);
+
+        for _ in 0..owner.command_capacity() {
+            assert!(owner.try_receive_command().unwrap().is_some());
+        }
+        runtime.set_transport(Some(replacement));
+        let _ = runtime.apply_event(BarEvent::WindowManager(minimized_snapshot(92, 1, &[42])));
+
+        assert!(runtime.poll_transport_at(Instant::now()).is_empty());
+        let command = owner
+            .try_receive_command()
+            .unwrap()
+            .expect("matching reconnect retries the retained restore");
+        assert_eq!(
+            command.get_command_type(),
+            shared_structures::CommandType::RestoreMinimized
+        );
+        assert_eq!(command.get_window_id(), 42);
+        assert_eq!(command.get_wm_session_id(), 92);
+        assert!(runtime.pending_restores.is_empty());
+        assert!(runtime.poll_transport_at(Instant::now()).is_empty());
+        assert!(owner.try_receive_command().unwrap().is_none());
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn critical_restore_is_pruned_by_first_mismatching_snapshot_after_unavailable_gap() {
+        let (mut runtime, owner) = critical_restore_runtime(93, &[43]);
+        let replacement = runtime.transport().unwrap().clone();
+        fill_command_ring(&runtime, &owner);
+
+        assert!(runtime.dispatch(restore_action(43, 93, 10)).is_empty());
+        drop(runtime.set_transport(None));
+        let _ = runtime.apply_event(BarEvent::WindowManagerUnavailable);
+        assert_eq!(runtime.pending_restores.len(), 1);
+
+        for _ in 0..owner.command_capacity() {
+            assert!(owner.try_receive_command().unwrap().is_some());
+        }
+        runtime.set_transport(Some(replacement));
+        let _ = runtime.apply_event(BarEvent::WindowManager(minimized_snapshot(93, 2, &[43])));
+
+        assert!(runtime.pending_restores.is_empty());
+        assert!(runtime.poll_transport_at(Instant::now()).is_empty());
+        assert!(owner.try_receive_command().unwrap().is_none());
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn critical_restore_is_cancelled_when_window_session_or_generation_changes() {
         let (mut runtime, owner) = critical_restore_runtime(71, &[1, 2]);
         fill_command_ring(&runtime, &owner);
         assert!(runtime.dispatch(restore_action(1, 71, 10)).is_empty());
@@ -1629,7 +1736,7 @@ mod tests {
         assert_eq!(runtime.pending_restores.len(), 2);
 
         let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
-            sequence: Some(2),
+            sequence: Some(1),
             wm_session_id: 71,
             monitor: MonitorId(4),
             minimized_windows: vec![MinimizedWindow {
@@ -1643,6 +1750,31 @@ mod tests {
         }));
         assert_eq!(runtime.pending_restores.len(), 1);
         assert_eq!(runtime.pending_restores[0].window, WindowToken(2));
+
+        let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            sequence: Some(2),
+            wm_session_id: 71,
+            monitor: MonitorId(4),
+            minimized_windows: vec![MinimizedWindow {
+                token: WindowToken(2),
+                monitor: MonitorId(4),
+                title: "rapidly re-minimized".to_owned(),
+                app_id: "test".to_owned(),
+                flags: MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+            }],
+            ..WmSnapshot::default()
+        }));
+        assert!(
+            runtime.pending_restores.is_empty(),
+            "same token in a new generation must not inherit a delayed click"
+        );
+
+        assert!(
+            runtime
+                .dispatch(restore_action_at_generation(2, 71, 2, 30))
+                .is_empty()
+        );
+        assert_eq!(runtime.pending_restores.len(), 1);
 
         let _ = runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
             sequence: Some(3),
@@ -1697,7 +1829,9 @@ mod tests {
         let preview = runtime.dispatch(UserAction::PreviewWindow {
             window: WindowToken(1),
             wm_session_id: 81,
+            minimized_generation: 1,
             visible: true,
+            renewal: false,
             geometry: DockItemGeometry::new(10, 20, 36, 24),
         });
         assert!(matches!(
@@ -1709,6 +1843,7 @@ mod tests {
         let geometry = runtime.dispatch(UserAction::SetDockGeometry {
             window: Some(WindowToken(1)),
             wm_session_id: 81,
+            minimized_generation: 1,
             geometry: DockItemGeometry::new(10, 20, 36, 24),
         });
         assert!(matches!(

@@ -479,6 +479,78 @@ pub struct Geometry {
     pub border: u32,
 }
 
+/// Backend-native identity that remains meaningful across one exec handoff.
+///
+/// [`WindowId`] is deliberately local to one backend instance and may be
+/// allocated in discovery order.  Persisting `WindowId::raw()` across exec can
+/// therefore bind state to a different client when a fresh backend scans the
+/// same windows in another order.  X11's server-owned XID survives reconnecting
+/// the window manager and is the only identity currently supported here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum WindowHandoffIdentity {
+    X11(u32),
+}
+
+/// ICCCM `WM_STATE` values shared by policy and the concrete X11 decoders.
+///
+/// Keeping these at the backend contract boundary prevents the policy layer
+/// from importing an X11 implementation module merely to verify a protocol
+/// number. Non-X11 property implementations accept the values as no-ops.
+pub const ICCCM_WITHDRAWN_STATE: u8 = 0;
+pub const ICCCM_NORMAL_STATE: u8 = 1;
+pub const ICCCM_ICONIC_STATE: u8 = 3;
+
+/// Largest persisted Dock insertion order accepted from an X11 client
+/// property.  The upper half of `u64` remains allocator headroom, preventing
+/// a forged snapshot from driving the process-local counter straight into a
+/// wraparound.
+pub const MAX_MINIMIZED_RESTORE_ORDER: u64 = i64::MAX as u64;
+
+/// A semantic client rectangle persisted while an X11 window is minimized.
+///
+/// Unlike [`Geometry`], this contains no live X11 border value: it describes
+/// JWM's client-area restore target, whose dimensions must be positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinimizedRestoreRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// JWM-owned state needed to adopt a minimized X11 client across an exec
+/// restart without deriving restore coordinates from its off-screen parking
+/// position.
+///
+/// The X11 transport has a versioned wire encoding for this semantic value;
+/// non-X11 backends may leave the corresponding [`PropertyOps`] hooks as
+/// no-ops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinimizedRestoreState {
+    pub tags: u32,
+    pub monitor_num: i32,
+    pub visible_rect: MinimizedRestoreRect,
+    pub is_floating: bool,
+    pub is_drag_floating: bool,
+    pub floating_rect: Option<MinimizedRestoreRect>,
+    pub is_pip: bool,
+    /// Sticky state to reinstate when the active PiP mode exits.
+    /// Meaningful only while `is_pip` is true.
+    pub pip_restore_sticky: bool,
+    /// Floating state to reinstate when leaving the active fullscreen/PiP
+    /// mode. Fullscreen and PiP are mutually exclusive, so this single slot
+    /// always belongs to exactly one active mode.
+    pub old_state: bool,
+    /// Pre-fullscreen geometry, when JWM has a meaningful fullscreen restore
+    /// target. This deliberately does not expose the overloaded live
+    /// `ClientGeometry::old_*` fields as a persistence contract.
+    pub fullscreen_restore_rect: Option<MinimizedRestoreRect>,
+    /// Stable Dock insertion order. A minimized snapshot always carries a
+    /// non-zero value.
+    pub minimized_order: u64,
+}
+
 /// A single output's requested configuration, produced by the
 /// wlr-output-management protocol and applied by the backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -610,6 +682,25 @@ pub struct ProtocolBindStatus {
 
 // --- 事件定义 ---
 
+/// Why JWM deliberately unmapped an X11 client that remains managed.
+///
+/// This is intentionally a reason rather than a boolean: each lifecycle owns
+/// different compositor resources. Future true-Iconic minimization can retain
+/// a named pixmap without being confused with swallowing's silent discard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ManagedUnmapReason {
+    /// A terminal is hidden while its graphical child replaces it. The live
+    /// compositor texture is released immediately, without close effects.
+    SwallowDiscard,
+    /// A minimized X11 client entered true ICCCM IconicState after the
+    /// compositor retained its visual. The compositor and desired-state
+    /// replay continue to own that visual while the client stays managed.
+    /// `generation` fences rapid restore/re-minimize cycles: an acknowledgement
+    /// for an older `UnmapWindow` cannot commit the newer incarnation.
+    IconifyRetain { generation: u64 },
+}
+
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     // === 硬件与输出 ===
@@ -628,7 +719,19 @@ pub enum BackendEvent {
     WindowCreated(WindowId),
     WindowDestroyed(WindowId),
     WindowMapped(WindowId),
-    WindowUnmapped(WindowId),
+    WindowUnmapped {
+        window: WindowId,
+        /// True only for the core X11 `UnmapGravity` transition caused by a
+        /// parent configure. It is not a client withdrawal.
+        from_configure: bool,
+    },
+    /// First normalized `UnmapNotify` for an `UnmapWindow` request issued by
+    /// JWM. The client remains managed; duplicate root/client deliveries are
+    /// consumed inside the X11 transport before this event is produced.
+    WindowManagerUnmapped {
+        window: WindowId,
+        reason: ManagedUnmapReason,
+    },
     WindowConfigured {
         window: WindowId,
         x: i32,
@@ -807,6 +910,17 @@ pub trait WindowOps: Send {
     fn raise_window(&self, win: WindowId) -> Result<(), BackendError>;
     fn map_window(&self, win: WindowId) -> Result<(), BackendError>;
     fn unmap_window(&self, win: WindowId) -> Result<(), BackendError>;
+    /// Unmap a client while retaining WM ownership of it.
+    ///
+    /// X11 implementations correlate the returned request sequence with raw
+    /// `UnmapNotify`; other backends keep the ordinary unmap fallback.
+    fn unmap_managed_window(
+        &self,
+        win: WindowId,
+        _reason: ManagedUnmapReason,
+    ) -> Result<(), BackendError> {
+        self.unmap_window(win)
+    }
     fn close_window(&self, win: WindowId) -> Result<CloseResult, BackendError>;
     fn set_input_focus(&self, win: WindowId) -> Result<(), BackendError>;
     fn set_input_focus_root(&self) -> Result<(), BackendError>;
@@ -950,6 +1064,31 @@ pub trait PropertyOps: Send {
     fn get_wm_state(&self, win: WindowId) -> Result<i64, BackendError>;
     fn set_wm_state(&self, win: WindowId, state: i64) -> Result<(), BackendError>;
 
+    /// Read JWM's private, versioned minimized-client restart snapshot.
+    /// Missing or malformed properties are reported as `Ok(None)` so an
+    /// untrusted client property cannot prevent window adoption.
+    fn get_minimized_restore_state(
+        &self,
+        _win: WindowId,
+    ) -> Result<Option<MinimizedRestoreState>, BackendError> {
+        Ok(None)
+    }
+
+    /// Replace JWM's private minimized-client restart snapshot.
+    fn set_minimized_restore_state(
+        &self,
+        _win: WindowId,
+        _state: MinimizedRestoreState,
+    ) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// Remove JWM's private minimized-client restart snapshot. This operation
+    /// is idempotent when no snapshot exists.
+    fn clear_minimized_restore_state(&self, _win: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+
     fn set_client_info_props(
         &self,
         win: WindowId,
@@ -979,6 +1118,17 @@ pub trait PropertyOps: Send {
         _on: bool,
     ) -> Result<(), BackendError> {
         Ok(())
+    }
+
+    /// Query one EWMH state atom when the backend exposes `_NET_WM_STATE`.
+    /// Non-X11 backends may keep the default because JWM already owns their
+    /// live state; this read is primarily an adoption/migration seam.
+    fn has_net_wm_state_flag(
+        &self,
+        _win: WindowId,
+        _state: NetWmState,
+    ) -> Result<bool, BackendError> {
+        Ok(false)
     }
 
     fn set_frame_extents(
@@ -1486,7 +1636,33 @@ pub trait CompositorWindowEffects: Send {
     fn compositor_notify_window_move_start(&mut self, _window: WindowId) {}
     fn compositor_notify_window_move_delta(&mut self, _window: WindowId, _dx: f32, _dy: f32) {}
     fn compositor_notify_window_move_end(&mut self, _window: WindowId) {}
+    /// Request true X11 ICCCM iconification after the compositor has admitted
+    /// a restart-recoverable retained snapshot. Backends without this
+    /// lifecycle keep the existing semantic minimize behavior.
+    fn compositor_request_window_iconify(&mut self, _window: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
+    /// Cancel a pending or physical true-Iconic transition. X11 maps and then
+    /// confirms a sent/acknowledged client is viewable before dropping
+    /// coordinator ownership; the pinned snapshot remains until live
+    /// compositor import succeeds.
+    fn compositor_cancel_window_iconify(&mut self, _window: WindowId) -> Result<(), BackendError> {
+        Ok(())
+    }
     fn compositor_set_window_minimized(&mut self, _window: WindowId, _minimized: bool) {}
+    /// Forget every compositor-owned resource and replay record for a window
+    /// that remains hidden in JWM but is no longer eligible for the Dock.
+    ///
+    /// This is resource retirement, not a restore request: implementations
+    /// must not play a reverse Genie transition or make the client visible.
+    /// Resource-free window metadata may be retained so a later eligibility
+    /// re-entry preserves PiP/class/rule state.
+    fn compositor_forget_minimized_window_visual(&mut self, _window: WindowId) {}
+    /// Reconcile a window that is already hidden in WM state with the
+    /// compositor's minimized lifecycle without replaying the minimize
+    /// animation. Implementations may defer the static texture import until a
+    /// valid Dock geometry makes the window addressable.
+    fn compositor_ensure_minimized_window_visual(&mut self, _window: WindowId) {}
     /// Set or withdraw one window's Dock slot in global physical pixels.
     fn compositor_set_window_dock_geometry(
         &mut self,
@@ -1641,6 +1817,27 @@ pub trait Backend:
     fn root_window(&self) -> Option<WindowId>;
     fn as_any(&self) -> &dyn Any;
     fn check_existing_wm(&self) -> Result<(), BackendError>;
+
+    /// Export a backend-native identity for a managed window.
+    ///
+    /// The default is deliberately unavailable: a backend-local raw
+    /// [`WindowId`] must never masquerade as a cross-exec identity.
+    fn window_handoff_identity(&self, _window: WindowId) -> Option<WindowHandoffIdentity> {
+        None
+    }
+
+    /// Resolve a handoff identity only if the fresh backend has already
+    /// discovered and interned that native window.
+    ///
+    /// Implementations must not create/intern a mapping from untrusted handoff
+    /// data. The caller performs a second managed-client and PID check after
+    /// this lookup.
+    fn resolve_window_handoff_identity(
+        &self,
+        _identity: WindowHandoffIdentity,
+    ) -> Option<WindowId> {
+        None
+    }
 
     /// Put `text` on the clipboard, returning whether the backend could.
     /// X11 must own the CLIPBOARD selection to do it; Wayland sets its data

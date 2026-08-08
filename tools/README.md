@@ -92,12 +92,21 @@ Wayland 行按 `get_capture_status` 的真实能力决定执行或跳过(嵌套
 根窗口验证像素可读。
 
 **x11rb vs xcb 差分**:两个 X11 传输在各自的 Xephyr 里执行同一段
-固定 15 阶段 IPC 场景,每一步截取一份归一化可观测状态快照(窗口
-class/tags/浮动/几何 + 工作区布局/占用;传输相关 id 与异步标题按
-定义排除)。场景覆盖易分歧的平铺策略面:两窗主区/栈区分割、
+固定 16 阶段 IPC 场景,截取 17 份归一化可观测状态快照(窗口
+class/tags/浮动/minimized/几何/焦点 + 工作区布局/占用;传输相关 id
+与异步标题按定义排除)。新增的动态阶段从 `get_windows` 选择连续两次
+稳定的当前焦点窗口,发送 `minimize`,等待 `is_minimized=true`、失焦和
+窗口完全停靠到桌面左侧同时收敛;随后用该传输自己的 window id 发送
+`focus_window`,走与任务栏相同的 `reveal_and_focus` 路径,直到明确恢复、
+重新聚焦并回到原几何。minimize 与 restore 各自产生一份快照。所有阶段
+都要求连续两份语义/几何/焦点快照一致,超时不会拿瞬时末样本参与差分。
+报告仍为 schema v1:版本 1 冻结顶层 envelope,而 `scenario` 按仓库既有
+策略做向后兼容的 additive evolution;消费者应容忍新增快照字段与阶段,
+不要把旧阶段数写死。
+场景还覆盖易分歧的平铺策略面:两窗主区/栈区分割、
 `setlayout`(tile/monocle)、`setmfact`、`incnmaster` 增减、`zoom`、
 `focusstack`、`movestack`、`togglebar`(工作区变化)、tag 往返、
-`togglefloating`——15 阶段中 14 个产生不同状态。两个映射阶段都启动
+`togglefloating`。两个映射阶段都启动
 *同一个*已解析客户端(xterm):单一可靠客户端映射两次可保证被管理
 窗口集确定;异构 libXt 客户端(xclock/xeyes)启动时创建瞬时窗口会
 把客户端启动时序泄漏进对比。任一快照不一致即整个矩阵失败,并指明

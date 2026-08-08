@@ -20,6 +20,8 @@ pub const MINIMIZED_WINDOW_FLAG_URGENT: u32 = 1 << 1;
 pub const MINIMIZED_LIST_FLAG_OVERFLOW: u32 = 1 << 0;
 /// `SharedCommand::flags`: show (rather than dismiss) a minimized preview.
 pub const PREVIEW_MINIMIZED_FLAG_VISIBLE: u32 = 1 << 0;
+/// `SharedCommand::flags`: refresh an existing preview lease without taking ownership.
+pub const PREVIEW_MINIMIZED_FLAG_RENEWAL: u32 = 1 << 1;
 
 #[inline]
 fn now_millis() -> u64 {
@@ -510,6 +512,8 @@ pub struct SharedCommand {
     pub flags: u32,
     pub window_id: u64,
     pub wm_session_id: u64,
+    /// Minimized projection generation observed by the command producer.
+    pub minimized_generation: u64,
     pub anchor_x: i32,
     pub anchor_y: i32,
     pub anchor_w: u32,
@@ -527,6 +531,7 @@ impl SharedCommand {
             flags: 0,
             window_id: 0,
             wm_session_id: 0,
+            minimized_generation: 0,
             anchor_x: 0,
             anchor_y: 0,
             anchor_w: 0,
@@ -570,12 +575,14 @@ impl SharedCommand {
     pub fn restore_minimized(
         window_id: u64,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor_id: i32,
         anchor: MinimizedWindowAnchor,
     ) -> Self {
         Self {
             window_id,
             wm_session_id,
+            minimized_generation,
             anchor_x: anchor.x,
             anchor_y: anchor.y,
             anchor_w: anchor.width,
@@ -588,6 +595,7 @@ impl SharedCommand {
     pub fn preview_minimized(
         window_id: u64,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor_id: i32,
         flags: u32,
         anchor: MinimizedWindowAnchor,
@@ -596,6 +604,7 @@ impl SharedCommand {
             flags,
             window_id,
             wm_session_id,
+            minimized_generation,
             anchor_x: anchor.x,
             anchor_y: anchor.y,
             anchor_w: anchor.width,
@@ -608,12 +617,14 @@ impl SharedCommand {
     pub fn set_minimized_geometry(
         window_id: u64,
         wm_session_id: u64,
+        minimized_generation: u64,
         monitor_id: i32,
         anchor: MinimizedWindowAnchor,
     ) -> Self {
         Self {
             window_id,
             wm_session_id,
+            minimized_generation,
             anchor_x: anchor.x,
             anchor_y: anchor.y,
             anchor_w: anchor.width,
@@ -652,6 +663,11 @@ impl SharedCommand {
     #[must_use]
     pub const fn get_wm_session_id(&self) -> u64 {
         self.wm_session_id
+    }
+
+    #[must_use]
+    pub const fn get_minimized_generation(&self) -> u64 {
+        self.minimized_generation
     }
 
     /// 命令是 `ShellHub` 时返回它的路由，其它命令返回 `None`。
@@ -1137,7 +1153,7 @@ mod tests {
     #[test]
     fn minimized_command_constructors_preserve_target_session_flags_and_anchor() {
         let anchor = MinimizedWindowAnchor::new(-12, 34, 56, 78);
-        let restore = SharedCommand::restore_minimized(0x1234_5678_9abc_def0, 91, -3, anchor);
+        let restore = SharedCommand::restore_minimized(0x1234_5678_9abc_def0, 91, 73, -3, anchor);
         assert_eq!(
             restore.command_type_checked(),
             Some(CommandType::RestoreMinimized)
@@ -1145,21 +1161,31 @@ mod tests {
         assert_eq!(restore.minimized_window_id(), Some(0x1234_5678_9abc_def0));
         assert_eq!(restore.get_window_id(), 0x1234_5678_9abc_def0);
         assert_eq!(restore.get_wm_session_id(), 91);
+        assert_eq!(restore.get_minimized_generation(), 73);
         assert_eq!(restore.get_monitor_id(), -3);
         assert_eq!(restore.get_flags(), 0);
         assert_eq!(restore.anchor(), anchor);
 
-        let preview =
-            SharedCommand::preview_minimized(44, 91, 2, PREVIEW_MINIMIZED_FLAG_VISIBLE, anchor);
+        let preview = SharedCommand::preview_minimized(
+            44,
+            91,
+            73,
+            2,
+            PREVIEW_MINIMIZED_FLAG_VISIBLE | PREVIEW_MINIMIZED_FLAG_RENEWAL,
+            anchor,
+        );
         assert_eq!(
             preview.command_type_checked(),
             Some(CommandType::PreviewMinimized)
         );
         assert_eq!(preview.minimized_window_id(), Some(44));
-        assert_eq!(preview.get_flags(), PREVIEW_MINIMIZED_FLAG_VISIBLE);
+        assert_eq!(
+            preview.get_flags(),
+            PREVIEW_MINIMIZED_FLAG_VISIBLE | PREVIEW_MINIMIZED_FLAG_RENEWAL
+        );
         assert_eq!(preview.anchor(), anchor);
 
-        let geometry = SharedCommand::set_minimized_geometry(44, 91, 2, anchor);
+        let geometry = SharedCommand::set_minimized_geometry(44, 91, 73, 2, anchor);
         assert_eq!(
             geometry.command_type_checked(),
             Some(CommandType::SetMinimizedGeometry)
@@ -1169,7 +1195,7 @@ mod tests {
         assert_eq!(geometry.get_wm_session_id(), 91);
         assert_eq!(geometry.anchor(), anchor);
 
-        let shelf = SharedCommand::set_minimized_geometry(0, 91, 2, anchor);
+        let shelf = SharedCommand::set_minimized_geometry(0, 91, 73, 2, anchor);
         assert_eq!(shelf.minimized_window_id(), None);
     }
 
@@ -1180,9 +1206,9 @@ mod tests {
         assert!(SharedCommand::set_layout(0, 0).get_timestamp() > 0);
         assert!(SharedCommand::shell_hub(ShellHubRoute::Hub, 0).get_timestamp() > 0);
         let anchor = MinimizedWindowAnchor::default();
-        assert!(SharedCommand::restore_minimized(1, 2, 0, anchor).get_timestamp() > 0);
-        assert!(SharedCommand::preview_minimized(1, 2, 0, 0, anchor).get_timestamp() > 0);
-        assert!(SharedCommand::set_minimized_geometry(0, 2, 0, anchor).get_timestamp() > 0);
+        assert!(SharedCommand::restore_minimized(1, 2, 3, 0, anchor).get_timestamp() > 0);
+        assert!(SharedCommand::preview_minimized(1, 2, 3, 0, 0, anchor).get_timestamp() > 0);
+        assert!(SharedCommand::set_minimized_geometry(0, 2, 3, 0, anchor).get_timestamp() > 0);
         assert!(SharedCommand::new(CommandType::None, 0, 0).get_timestamp() > 0);
     }
 
@@ -1200,7 +1226,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<MinimizedWindowInfo>(), 176);
         assert_eq!(std::mem::size_of::<MinimizedWindowAnchor>(), 16);
         assert_eq!(sz_msg, 3064);
-        assert_eq!(sz_cmd, 56);
+        assert_eq!(sz_cmd, 64);
     }
 
     #[test]
@@ -1217,10 +1243,14 @@ mod tests {
         assert_eq!(std::mem::offset_of!(SharedCommand, flags), 12);
         assert_eq!(std::mem::offset_of!(SharedCommand, window_id), 16);
         assert_eq!(std::mem::offset_of!(SharedCommand, wm_session_id), 24);
-        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_x), 32);
-        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_y), 36);
-        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_w), 40);
-        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_h), 44);
-        assert_eq!(std::mem::offset_of!(SharedCommand, timestamp), 48);
+        assert_eq!(
+            std::mem::offset_of!(SharedCommand, minimized_generation),
+            32
+        );
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_x), 40);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_y), 44);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_w), 48);
+        assert_eq!(std::mem::offset_of!(SharedCommand, anchor_h), 52);
+        assert_eq!(std::mem::offset_of!(SharedCommand, timestamp), 56);
     }
 }

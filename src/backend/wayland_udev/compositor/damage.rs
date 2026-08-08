@@ -94,8 +94,14 @@ impl WaylandCompositor {
     /// This deliberately checks *live state*, rather than merely checking
     /// whether an effect is enabled in the configuration.  A fullscreen
     /// surface may therefore return to direct scanout as soon as its fade,
-    /// deformation, trail, or overlay has fully drained.
-    pub(crate) fn direct_scanout_block_reason(&self) -> Option<&'static str> {
+    /// deformation, trail, or overlay has fully drained. Dock rectangles are
+    /// the one output-local exception: their global physical geometry is
+    /// intersected with `output_rect_global_physical`; effects without an
+    /// output assignment remain conservatively global.
+    pub(crate) fn direct_scanout_block_reason(
+        &self,
+        output_rect_global_physical: CompositorRect,
+    ) -> Option<&'static str> {
         const EPSILON: f32 = 0.0001;
 
         if self.postprocess_active {
@@ -152,11 +158,25 @@ impl WaylandCompositor {
         if !self.genie_active.is_empty() {
             return Some("genie minimize requires composition");
         }
+        // Retained Dock targets and preview anchors already carry global
+        // physical geometry, so unlike the active Genie animation they can be
+        // scoped safely to the output that actually contains their pixels.
         if minimized_dock_requires_composition(
-            self.minimized_visuals
-                .values()
-                .any(|visual| visual.target.is_some()),
-            self.dock_preview.is_some(),
+            self.genie_targets
+                .iter()
+                .filter_map(|(&window_id, &target)| {
+                    (self.minimized_windows.contains(&window_id)
+                        && self.minimized_static_drawable_source_available(window_id))
+                    .then_some(target)
+                }),
+            self.dock_preview
+                .as_ref()
+                .filter(|preview| {
+                    !preview.awaiting_source
+                        && self.minimized_preview_drawable_source_available(preview.window_id)
+                })
+                .map(|preview| preview.anchor),
+            output_rect_global_physical,
         ) {
             return Some("minimized Dock visual requires composition");
         }
@@ -266,13 +286,15 @@ impl WaylandCompositor {
             return true;
         }
         if self.dock_preview.as_ref().is_some_and(|preview| {
-            preview.direction == crate::backend::compositor_common::genie::PreviewDirection::Hide
-                || preview.started.elapsed().as_secs_f32() < 0.22
-                || crate::backend::compositor_common::genie::preview_lease_timeout(
-                    preview.direction,
-                    std::time::Instant::now(),
-                    preview.lease_deadline,
-                ) == Some(std::time::Duration::ZERO)
+            !preview.awaiting_source
+                && (preview.direction
+                    == crate::backend::compositor_common::genie::PreviewDirection::Hide
+                    || preview.started.elapsed().as_secs_f32() < 0.22
+                    || crate::backend::compositor_common::genie::preview_lease_timeout(
+                        preview.direction,
+                        std::time::Instant::now(),
+                        preview.lease_deadline,
+                    ) == Some(std::time::Duration::ZERO))
         }) {
             return true;
         }
@@ -372,19 +394,30 @@ impl WaylandCompositor {
     }
 }
 
+fn compositor_rects_overlap(a: CompositorRect, b: CompositorRect) -> bool {
+    let (Some(a), Some(b)) = (a.normalized(), b.normalized()) else {
+        return false;
+    };
+
+    a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y
+}
+
 fn minimized_dock_requires_composition(
-    has_targeted_cached_visual: bool,
-    has_preview: bool,
+    targeted_cached_visuals: impl Iterator<Item = CompositorRect>,
+    preview_anchor: Option<CompositorRect>,
+    output_rect_global_physical: CompositorRect,
 ) -> bool {
-    has_targeted_cached_visual || has_preview
+    targeted_cached_visuals
+        .chain(preview_anchor)
+        .any(|rect| compositor_rects_overlap(rect, output_rect_global_physical))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        attention_requires_composition, border_requires_composition, expose_animation_pending,
-        inactive_window_styling_requires_composition, minimized_dock_requires_composition,
-        overview_animation_pending, rect_animation_pending,
+        CompositorRect, attention_requires_composition, border_requires_composition,
+        expose_animation_pending, inactive_window_styling_requires_composition,
+        minimized_dock_requires_composition, overview_animation_pending, rect_animation_pending,
     };
 
     #[test]
@@ -403,10 +436,80 @@ mod tests {
     }
 
     #[test]
-    fn hidden_bar_geometry_does_not_keep_cached_visual_composited() {
-        assert!(minimized_dock_requires_composition(true, false));
-        assert!(minimized_dock_requires_composition(false, true));
-        assert!(!minimized_dock_requires_composition(false, false));
+    fn minimized_dock_target_only_blocks_the_output_it_overlaps() {
+        let left = CompositorRect::new(0.0, 0.0, 1920.0, 1080.0);
+        let right = CompositorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+        let target = CompositorRect::new(1810.0, 1010.0, 80.0, 50.0);
+
+        assert!(minimized_dock_requires_composition(
+            [target].into_iter(),
+            None,
+            left,
+        ));
+        assert!(!minimized_dock_requires_composition(
+            [target].into_iter(),
+            None,
+            right,
+        ));
+        assert!(!minimized_dock_requires_composition(
+            std::iter::empty(),
+            None,
+            left,
+        ));
+    }
+
+    #[test]
+    fn dock_preview_anchor_only_blocks_the_output_it_overlaps() {
+        let left = CompositorRect::new(0.0, 0.0, 1920.0, 1080.0);
+        let right = CompositorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+        let anchor = CompositorRect::new(120.0, 1020.0, 48.0, 40.0);
+
+        assert!(minimized_dock_requires_composition(
+            std::iter::empty(),
+            Some(anchor),
+            left,
+        ));
+        assert!(!minimized_dock_requires_composition(
+            std::iter::empty(),
+            Some(anchor),
+            right,
+        ));
+    }
+
+    #[test]
+    fn dock_rect_crossing_an_output_edge_blocks_both_outputs() {
+        let left = CompositorRect::new(0.0, 0.0, 1920.0, 1080.0);
+        let right = CompositorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+        let crossing_target = CompositorRect::new(1900.0, 1000.0, 40.0, 60.0);
+
+        assert!(minimized_dock_requires_composition(
+            [crossing_target].into_iter(),
+            None,
+            left,
+        ));
+        assert!(minimized_dock_requires_composition(
+            [crossing_target].into_iter(),
+            None,
+            right,
+        ));
+    }
+
+    #[test]
+    fn dock_rect_touching_an_output_edge_does_not_overlap_it() {
+        let left = CompositorRect::new(0.0, 0.0, 1920.0, 1080.0);
+        let right = CompositorRect::new(1920.0, 0.0, 2560.0, 1440.0);
+        let left_only = CompositorRect::new(1880.0, 1000.0, 40.0, 60.0);
+
+        assert!(minimized_dock_requires_composition(
+            [left_only].into_iter(),
+            None,
+            left,
+        ));
+        assert!(!minimized_dock_requires_composition(
+            [left_only].into_iter(),
+            None,
+            right,
+        ));
     }
 
     #[test]

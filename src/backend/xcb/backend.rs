@@ -10,10 +10,11 @@ use crate::backend::api::InteractionAction;
 use crate::backend::api::{
     AllowMode, AllowedAction, Backend, BackendEvent, Capabilities, CloseResult, ColorAllocator,
     CompositorBenchmark, CursorProvider, DisplayControl, EventHandler, EwmhFacade, EwmhFeature,
-    Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, MotifWmHints, NetWmAction,
-    NetWmState, NormalHints, NotifyMode, OutputInfo, OutputOps, PropertyKind, PropertyOps,
-    RenderScheduler, ResizeEdge, ScreenInfo, StackMode, StrutPartial, VrrCapabilities,
-    WindowAttributes, WindowChanges, WindowOps, WindowType, WmHints,
+    Geometry, HitTarget, IconData, InputOps, KeyOps, LayerSurfaceInfo, ManagedUnmapReason,
+    MinimizedRestoreState, MotifWmHints, NetWmAction, NetWmState, NormalHints, NotifyMode,
+    OutputInfo, OutputOps, PropertyKind, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo,
+    StackMode, StrutPartial, VrrCapabilities, WindowAttributes, WindowChanges,
+    WindowHandoffIdentity, WindowOps, WindowType, WmHints,
 };
 use crate::backend::common_define::{
     ArgbColor, ColorScheme, CursorHandle, EventMaskBits, KeySym, Mods, OutputId, Pixel, SchemeType,
@@ -21,19 +22,27 @@ use crate::backend::common_define::{
 };
 use crate::backend::error::{BackendContextExt, BackendError};
 use crate::backend::x11::compositor_common::X11ConnectionOps;
+use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
+use crate::backend::x11::wm::iconify::IconifyCoordinator;
+use crate::backend::x11::wm::managed_unmap::{
+    ManagedUnmapDisposition, ManagedUnmapTracker, SharedManagedUnmaps,
+};
 use crate::backend::x11::wm::{
     AllowedActionAtoms, ClientMessageAtoms, ClientMessageKind, DEFAULT_OUTPUT_REFRESH_MHZ,
     EwmhFeatureAtoms, NetWmStateAtoms, PropertyKindAtoms, SUPPORTED_EWMH_FEATURES, WindowTypeAtoms,
     atom_for_allowed_action, atom_for_ewmh_feature, atom_for_net_wm_state, build_output_info,
     classify_client_message, decode_text_property, expand_net_wm_state_requests, fallback_output,
-    lock_modifier_combinations, net_wm_ping_message, net_wm_state_from_atom,
-    net_wm_sync_request_message, output_at, parse_gtk_frame_extents, parse_icon_data,
-    parse_motif_hints, parse_normal_hints, parse_opaque_region, parse_strut, parse_strut_partial,
-    parse_wm_class, parse_wm_hints, primary_refresh, property_kind_from_atom, protocol_supported,
-    restack_window_changes, stack_mode_from_index, stack_mode_to_index,
-    window_changes_from_configure_request_parts, window_type_from_atom, wm_delete_window_message,
-    wm_take_focus_message,
+    lock_modifier_combinations,
+    minimized_restore::{
+        MINIMIZED_RESTORE_V1_LONG_LENGTH, decode_minimized_restore_v1, encode_minimized_restore_v1,
+    },
+    net_wm_ping_message, net_wm_state_from_atom, net_wm_sync_request_message, output_at,
+    parse_gtk_frame_extents, parse_icon_data, parse_motif_hints, parse_normal_hints,
+    parse_opaque_region, parse_strut, parse_strut_partial, parse_wm_class, parse_wm_hints,
+    primary_refresh, property_kind_from_atom, protocol_supported, restack_window_changes,
+    stack_mode_from_index, stack_mode_to_index, window_changes_from_configure_request_parts,
+    window_type_from_atom, wm_delete_window_message, wm_take_focus_message,
 };
 use crate::backend::xcb::batch::{
     BatchedAttributesRequest, BatchedGeometryRequest, XcbRequestBatcher,
@@ -57,7 +66,9 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
-use xcb::{Raw, Xid, XidNew, x};
+use xcb::{Cookie, Raw, Xid, XidNew, x};
+
+use crate::sync_ext::MutexExt;
 
 type XcbResult<T> = Result<T, BackendError>;
 
@@ -67,6 +78,7 @@ struct XcbAtoms {
     wm_delete_window: x::Atom,
     wm_take_focus: x::Atom,
     wm_state: x::Atom,
+    jwm_minimized_restore_v1: x::Atom,
     wm_transient_for: x::Atom,
     wm_class: x::Atom,
     wm_hints: x::Atom,
@@ -171,6 +183,7 @@ impl XcbAtoms {
             wm_delete_window: Self::intern(conn, b"WM_DELETE_WINDOW")?,
             wm_take_focus: Self::intern(conn, b"WM_TAKE_FOCUS")?,
             wm_state: Self::intern(conn, b"WM_STATE")?,
+            jwm_minimized_restore_v1: Self::intern(conn, b"_JWM_MINIMIZED_RESTORE_V1")?,
             wm_transient_for: x::ATOM_WM_TRANSIENT_FOR,
             wm_class: x::ATOM_WM_CLASS,
             wm_hints: x::ATOM_WM_HINTS,
@@ -444,6 +457,12 @@ impl XcbIdRegistry {
         self.intern(x::Window::new(raw))
     }
 
+    /// Resolve only an XID already seen by this backend. Never intern handoff
+    /// input: it is decoded before the managed-client table validates it.
+    fn existing_window(&self, raw: u32) -> Option<WindowId> {
+        self.x_to_wid.read().unwrap().get(&raw).copied()
+    }
+
     fn all_x11_windows(&self) -> Vec<(u32, WindowId)> {
         self.x_to_wid
             .read()
@@ -467,6 +486,8 @@ pub struct XcbBackend {
     ids: XcbIdRegistry,
     atoms: XcbAtoms,
     caps: Capabilities,
+    managed_unmaps: SharedManagedUnmaps,
+    iconify: IconifyCoordinator,
     window_ops: Box<dyn WindowOps>,
     input_ops: Box<dyn InputOps>,
     property_ops: Box<dyn PropertyOps>,
@@ -479,6 +500,7 @@ pub struct XcbBackend {
     interaction: Option<XcbInteraction>,
     shared_compositor_conn: Option<Arc<XcbSharedCompositorConnection>>,
     compositor: Option<XcbSharedCompositor>,
+    compositor_desired: X11CompositorDesiredState,
     compositor_loop_signal: Option<calloop::LoopSignal>,
     systray: Option<XcbSystemTray>,
     clipboard: Option<super::clipboard::Clipboard>,
@@ -973,12 +995,14 @@ impl XcbBackend {
         };
 
         let numlock_mask = Arc::new(RwLock::new(None));
+        let managed_unmaps = Arc::new(Mutex::new(ManagedUnmapTracker::default()));
         let window_ops = Box::new(XcbWindowOps::new(
             conn.clone(),
             ids.clone(),
             atoms,
             root,
             numlock_mask.clone(),
+            managed_unmaps.clone(),
         ));
         let input_ops = Box::new(XcbInputOps::new(conn.clone(), ids.clone(), root));
         let property_ops = Box::new(XcbPropertyOps::new(conn.clone(), ids.clone(), atoms));
@@ -1078,6 +1102,8 @@ impl XcbBackend {
             ids,
             atoms,
             caps,
+            managed_unmaps,
+            iconify: IconifyCoordinator::default(),
             window_ops,
             input_ops,
             property_ops,
@@ -1090,6 +1116,7 @@ impl XcbBackend {
             interaction: None,
             shared_compositor_conn,
             compositor,
+            compositor_desired: X11CompositorDesiredState::default(),
             compositor_loop_signal: None,
             systray: None,
             clipboard: None,
@@ -1171,8 +1198,8 @@ impl XcbBackend {
                 }
                 false
             }
-            BackendEvent::WindowUnmapped(win) => {
-                let x11w = x::Window::new(self.ids.x11(*win).unwrap_or(0));
+            BackendEvent::WindowUnmapped { window, .. } => {
+                let x11w = x::Window::new(self.ids.x11(*window).unwrap_or(0));
                 if systray.is_tray_icon(x11w) {
                     systray.handle_unmap(x11w);
                     return true;
@@ -1286,7 +1313,15 @@ impl XcbBackend {
         crate::backend::edid::parse_edid_hdr_from_bytes(data)
     }
 
-    fn register_existing_windows_with_compositor(&mut self, compositor: &mut XcbSharedCompositor) {
+    fn replay_compositor_desired_state(&mut self, compositor: &mut XcbSharedCompositor) {
+        let ids = &self.ids;
+        let plan = self
+            .compositor_desired
+            .replay_plan(|window| ids.x11(window).ok());
+        plan.apply(compositor);
+    }
+
+    fn register_existing_windows_with_compositor(&self, compositor: &mut XcbSharedCompositor) {
         let overlay = compositor.overlay_window();
         let windows: Vec<_> = self
             .ids
@@ -1389,6 +1424,15 @@ impl XcbBackend {
     }
 
     fn compositor_handle_event(&mut self, event: &BackendEvent) {
+        self.observe_iconify_event(event);
+        if let BackendEvent::WindowUnmapped {
+            window,
+            from_configure: false,
+        }
+        | BackendEvent::WindowDestroyed(window) = event
+        {
+            self.compositor_desired.retire_window(*window);
+        }
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -1437,12 +1481,34 @@ impl XcbBackend {
                 if self.is_compositor_overlay(ev.window()) {
                     return None;
                 }
-                Some(BackendEvent::WindowUnmapped(self.ids.intern(ev.window())))
+                match self.managed_unmaps.lock_safe().classify(
+                    self.root.resource_id(),
+                    ev.window().resource_id(),
+                    ev.event().resource_id(),
+                    ev.sequence(),
+                    ev.response_type() & 0x80 != 0,
+                    ev.from_configure(),
+                ) {
+                    ManagedUnmapDisposition::ManagerOwned(reason) => {
+                        Some(BackendEvent::WindowManagerUnmapped {
+                            window: self.ids.intern(ev.window()),
+                            reason,
+                        })
+                    }
+                    ManagedUnmapDisposition::ManagerDuplicate => None,
+                    ManagedUnmapDisposition::External => Some(BackendEvent::WindowUnmapped {
+                        window: self.ids.intern(ev.window()),
+                        from_configure: ev.from_configure(),
+                    }),
+                }
             }
             xcb::Event::X(x::Event::DestroyNotify(ev)) => {
                 if self.is_compositor_overlay(ev.window()) {
                     return None;
                 }
+                self.managed_unmaps
+                    .lock_safe()
+                    .clear(ev.window().resource_id());
                 Some(BackendEvent::WindowDestroyed(self.ids.intern(ev.window())))
             }
             xcb::Event::X(x::Event::ConfigureRequest(ev)) => {
@@ -1876,6 +1942,16 @@ impl Backend for XcbBackend {
         Some(self.root_id)
     }
 
+    fn window_handoff_identity(&self, window: WindowId) -> Option<WindowHandoffIdentity> {
+        self.ids.x11(window).ok().map(WindowHandoffIdentity::X11)
+    }
+
+    fn resolve_window_handoff_identity(&self, identity: WindowHandoffIdentity) -> Option<WindowId> {
+        match identity {
+            WindowHandoffIdentity::X11(x11) => self.ids.existing_window(x11),
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1895,6 +1971,7 @@ impl Backend for XcbBackend {
         }
 
         if !enabled {
+            self.prepare_iconify_compositor_disable()?;
             log::info!("XCB backend: compositor disabled at runtime");
             self.compositor.take();
             return Ok(true);
@@ -1920,8 +1997,10 @@ impl Backend for XcbBackend {
         if let Some(signal) = self.compositor_loop_signal.clone() {
             compositor.set_waterlily_loop_signal(signal);
         }
+        self.replay_compositor_desired_state(&mut compositor);
         self.register_existing_windows_with_compositor(&mut compositor);
         self.compositor = Some(compositor);
+        self.service_pending_iconify_admissions();
         self.compositor_auto_configure_hdr();
         Ok(true)
     }
@@ -1963,6 +2042,7 @@ impl Backend for XcbBackend {
         let _ = self.conn.flush();
         let rendered = compositor.render_frame(&x11_scene, focused_x11);
         self.scratch_x11_scene = x11_scene;
+        self.service_pending_iconify_admissions();
         Ok(rendered)
     }
 
@@ -2436,6 +2516,7 @@ struct XcbWindowOps {
     root: x::Window,
     batcher: XcbRequestBatcher,
     numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
+    managed_unmaps: SharedManagedUnmaps,
 }
 
 impl XcbWindowOps {
@@ -2445,6 +2526,7 @@ impl XcbWindowOps {
         atoms: XcbAtoms,
         root: x::Window,
         numlock_mask: Arc<RwLock<Option<x::ModMask>>>,
+        managed_unmaps: SharedManagedUnmaps,
     ) -> Self {
         Self {
             conn,
@@ -2453,6 +2535,7 @@ impl XcbWindowOps {
             root,
             batcher: XcbRequestBatcher::new(),
             numlock_mask,
+            managed_unmaps,
         }
     }
 
@@ -2661,6 +2744,21 @@ impl WindowOps for XcbWindowOps {
                 window: self.win(win)?,
             })
             .map_err(xcb_err)
+    }
+
+    fn unmap_managed_window(&self, win: WindowId, reason: ManagedUnmapReason) -> XcbResult<()> {
+        let window = self.win(win)?;
+        let mut managed_unmaps = self.managed_unmaps.lock_safe();
+        managed_unmaps
+            .ensure_capacity(window.resource_id())
+            .map_err(|error| BackendError::Other(Box::new(error)))?;
+        let cookie = self.conn.send_request_checked(&x::UnmapWindow { window });
+        let sequence = cookie.sequence();
+        self.conn.check_request(cookie).map_err(xcb_err)?;
+        managed_unmaps
+            .record(window.resource_id(), sequence, reason)
+            .expect("managed-unmap capacity changed while holding its lock");
+        Ok(())
     }
 
     fn close_window(&self, win: WindowId) -> XcbResult<CloseResult> {
@@ -3313,17 +3411,28 @@ impl PropertyOps for XcbPropertyOps {
 
     fn get_wm_state(&self, win: WindowId) -> XcbResult<i64> {
         let w = self.win(win)?;
-        Ok(get_u32s_with_length(
-            &self.conn,
-            w,
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: w,
+            property: self.atoms.wm_state,
+            r#type: self.atoms.wm_state,
+            long_offset: 0,
+            long_length: MAX_WM_STATE_ITEMS,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let values = if reply.format() == 32 {
+            reply.value::<u32>()
+        } else {
+            &[]
+        };
+        Ok(decode_wm_state_property(
+            reply.r#type(),
             self.atoms.wm_state,
-            self.atoms.wm_state,
-            MAX_WM_STATE_ITEMS,
-        )
-        .first()
-        .copied()
-        .map(|state| state as i64)
-        .unwrap_or(-1))
+            reply.format(),
+            reply.length(),
+            reply.bytes_after(),
+            values,
+        ))
     }
 
     fn set_wm_state(&self, win: WindowId, state: i64) -> XcbResult<()> {
@@ -3334,6 +3443,58 @@ impl PropertyOps for XcbPropertyOps {
             self.atoms.wm_state,
             &[state as u32, 0],
         )
+    }
+
+    fn get_minimized_restore_state(
+        &self,
+        win: WindowId,
+    ) -> XcbResult<Option<MinimizedRestoreState>> {
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: self.win(win)?,
+            property: self.atoms.jwm_minimized_restore_v1,
+            r#type: self.atoms.cardinal,
+            long_offset: 0,
+            long_length: MINIMIZED_RESTORE_V1_LONG_LENGTH,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let words: &[u32] = if reply.format() == 32 {
+            reply.value::<u32>()
+        } else {
+            &[]
+        };
+        Ok(decode_minimized_restore_v1(
+            reply.r#type(),
+            self.atoms.cardinal,
+            reply.format(),
+            reply.bytes_after(),
+            words,
+        ))
+    }
+
+    fn set_minimized_restore_state(
+        &self,
+        win: WindowId,
+        state: MinimizedRestoreState,
+    ) -> XcbResult<()> {
+        let words = encode_minimized_restore_v1(state)
+            .ok_or_else(|| BackendError::Message("invalid minimized restore state".to_string()))?;
+        change_u32s(
+            &self.conn,
+            self.win(win)?,
+            self.atoms.jwm_minimized_restore_v1,
+            self.atoms.cardinal,
+            &words,
+        )
+    }
+
+    fn clear_minimized_restore_state(&self, win: WindowId) -> XcbResult<()> {
+        self.conn
+            .send_and_check_request(&x::DeleteProperty {
+                window: self.win(win)?,
+                property: self.atoms.jwm_minimized_restore_v1,
+            })
+            .map_err(xcb_err)
     }
 
     fn set_client_info_props(&self, win: WindowId, tags: u32, monitor_num: u32) -> XcbResult<()> {
@@ -3403,6 +3564,34 @@ impl PropertyOps for XcbPropertyOps {
             self.atoms.atom,
             &raw,
         )
+    }
+
+    fn has_net_wm_state_flag(&self, win: WindowId, state: NetWmState) -> XcbResult<bool> {
+        let w = self.win(win)?;
+        let atom = self.atoms.atom_for_state(state);
+        let cookie = self.conn.send_request(&x::GetProperty {
+            delete: false,
+            window: w,
+            property: self.atoms.net_wm_state,
+            r#type: self.atoms.atom,
+            long_offset: 0,
+            long_length: MAX_ATOM_LIST_ITEMS,
+        });
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let values = if reply.format() == 32 {
+            reply.value::<u32>()
+        } else {
+            &[]
+        };
+        Ok(decode_net_wm_state_flag(
+            reply.r#type(),
+            self.atoms.atom,
+            reply.format(),
+            reply.length(),
+            reply.bytes_after(),
+            values,
+            atom.resource_id(),
+        ))
     }
 
     fn set_frame_extents(
@@ -4904,6 +5093,69 @@ const MAX_MOTIF_HINTS_ITEMS: u32 = 5;
 const MAX_GTK_FRAME_EXTENTS_ITEMS: u32 = 4;
 const MAX_SINGLE_U32_ITEMS: u32 = 1;
 
+fn complete_u32_property<'a>(
+    actual_type: x::Atom,
+    expected_type: x::Atom,
+    format: u8,
+    reply_length: u32,
+    bytes_after: u32,
+    values: &'a [u32],
+    max_items: u32,
+) -> Option<&'a [u32]> {
+    let value_len = u32::try_from(values.len()).ok()?;
+    (actual_type == expected_type
+        && format == 32
+        && reply_length == value_len
+        && bytes_after == 0
+        && value_len <= max_items)
+        .then_some(values)
+}
+
+fn decode_wm_state_property(
+    actual_type: x::Atom,
+    expected_type: x::Atom,
+    format: u8,
+    reply_length: u32,
+    bytes_after: u32,
+    values: &[u32],
+) -> i64 {
+    complete_u32_property(
+        actual_type,
+        expected_type,
+        format,
+        reply_length,
+        bytes_after,
+        values,
+        MAX_WM_STATE_ITEMS,
+    )
+    .filter(|values| values.len() == MAX_WM_STATE_ITEMS as usize)
+    .and_then(|values| values.first())
+    .copied()
+    .map(i64::from)
+    .unwrap_or(-1)
+}
+
+fn decode_net_wm_state_flag(
+    actual_type: x::Atom,
+    expected_type: x::Atom,
+    format: u8,
+    reply_length: u32,
+    bytes_after: u32,
+    values: &[u32],
+    state_atom: u32,
+) -> bool {
+    complete_u32_property(
+        actual_type,
+        expected_type,
+        format,
+        reply_length,
+        bytes_after,
+        values,
+        MAX_ATOM_LIST_ITEMS,
+    )
+    .is_some_and(|values| values.contains(&state_atom))
+}
+
 fn get_u32s(conn: &xcb::Connection, window: x::Window, property: x::Atom, ty: x::Atom) -> Vec<u32> {
     get_u32s_with_length(conn, window, property, ty, MAX_U32_PROPERTY_ITEMS)
 }
@@ -5046,20 +5298,53 @@ where
 
 #[cfg(test)]
 mod parity_tests {
-    use super::observe_and_coalesce_configure;
+    use super::{
+        XcbIdRegistry, decode_net_wm_state_flag, decode_wm_state_property,
+        observe_and_coalesce_configure,
+    };
     use crate::backend::api::BackendEvent;
     use crate::backend::common_define::WindowId;
     use std::collections::BTreeSet;
+    use xcb::x;
 
     const X11RB_BACKEND_SRC: &str = include_str!("../x11rb/backend.rs");
     const X11RB_MOD_SRC: &str = include_str!("../x11rb/mod.rs");
     const XCB_BACKEND_SRC: &str = include_str!("backend.rs");
     const X11_COMPOSITOR_DELEGATION_SRC: &str = include_str!("../x11/wm/compositor_delegation.rs");
+    const X11_ICONIFY_SRC: &str = include_str!("../x11/wm/iconify.rs");
     const X11_COMPOSITOR_MOD_SRC: &str = include_str!("../x11/compositor/mod.rs");
     const X11_COMPOSITOR_INIT_SRC: &str = include_str!("../x11/compositor/init.rs");
+    const X11_COMPOSITOR_EFFECTS_SRC: &str = include_str!("../x11/compositor/effects.rs");
+    const X11_COMPOSITOR_FEATURES_SRC: &str = include_str!("../x11/compositor/features.rs");
     const X11_COMPOSITOR_RENDER_SRC: &str = include_str!("../x11/compositor/render.rs");
     const X11_COMPOSITOR_TFP_SRC: &str = include_str!("../x11/compositor/tfp.rs");
     const X11_COMPOSITOR_GLX_SRC: &str = include_str!("../x11/compositor/platform/glx.rs");
+
+    #[test]
+    fn native_lookup_survives_reordered_interning_without_allocating_unknown_xids() {
+        let root = 0x100;
+        let target = 0x200;
+        let other = 0x300;
+
+        let old = XcbIdRegistry::new(1);
+        old.intern_raw(root);
+        let old_target = old.intern_raw(target);
+        old.intern_raw(other);
+
+        let fresh = XcbIdRegistry::new(1);
+        fresh.intern_raw(root);
+        fresh.intern_raw(other);
+        let fresh_target = fresh.intern_raw(target);
+
+        assert_ne!(old_target, fresh_target);
+        assert_eq!(fresh.existing_window(target), Some(fresh_target));
+        assert_eq!(fresh.existing_window(0x400), None);
+        assert_eq!(
+            fresh.intern_raw(0x500).raw(),
+            4,
+            "lookup must not consume an id"
+        );
+    }
 
     fn impl_body_after<'a>(src: &'a str, needle: &str) -> &'a str {
         let start = src
@@ -5203,12 +5488,460 @@ mod parity_tests {
             "fn compositor_set_window_minimized",
         );
         assert!(
-            body.contains("compositor.minimize_window(x11_window)")
+            body.contains("self.compositor_desired.set_minimized(window, minimized)")
+                && body.contains("compositor.minimize_window(x11_window)")
                 && body.contains("self.window_ops.get_geometry(window)")
                 && body.contains(".add_window(x11_window")
                 && body.contains("compositor.update_geometry("),
             "the shared minimize bridge must detach explicitly and rebuild the same XID from live geometry"
         );
+
+        for method in [
+            "fn compositor_ensure_minimized_window_visual",
+            "fn compositor_set_window_dock_geometry",
+        ] {
+            let body = impl_body_after(X11_COMPOSITOR_DELEGATION_SRC, method);
+            assert!(
+                body.contains("self.compositor_desired")
+                    && body.contains("self.window_ops.get_geometry(window)")
+                    && body.contains(".add_window(x11_window"),
+                "{method} must retain offline desired state and import a missing X pixmap for static minimized recapture"
+            );
+        }
+
+        let preview_body = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn compositor_set_minimized_window_preview",
+        );
+        assert!(
+            preview_body.contains("let needs_import")
+                && preview_body.contains("self.window_ops.get_geometry(window)")
+                && preview_body.contains(".add_window(x11_window"),
+            "the shared preview bridge must service an evicted minimized visual with one static pixmap import"
+        );
+
+        let forget_body = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn compositor_forget_minimized_window_visual",
+        );
+        assert!(
+            forget_body.contains("self.compositor_desired.retire_window(window)")
+                && forget_body.contains("compositor.forget_minimized_window_visual(x11_window)")
+                && !forget_body.contains("prepare_window_restore")
+                && !forget_body.contains("get_geometry")
+                && !forget_body.contains(".add_window("),
+            "visual forget must retire replay/native resources without entering the restore bridge"
+        );
+    }
+
+    #[test]
+    fn both_x11_runtime_enable_paths_replay_desired_state_before_window_import() {
+        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+            let body = impl_body_after(source, "fn set_compositor_enabled");
+            let replay = body
+                .find("self.replay_compositor_desired_state(&mut compositor)")
+                .unwrap_or_else(|| panic!("{label} runtime enable must replay desired state"));
+            let register = body
+                .find("self.register_existing_windows_with_compositor(&mut compositor)")
+                .unwrap_or_else(|| panic!("{label} runtime enable must import existing windows"));
+            let install = body
+                .find("self.compositor = Some(compositor)")
+                .unwrap_or_else(|| panic!("{label} runtime enable must install the compositor"));
+            let service = body
+                .find("self.service_pending_iconify_admissions();")
+                .unwrap_or_else(|| panic!("{label} runtime enable must service Iconic admission"));
+            assert!(
+                replay < register && register < install && install < service,
+                "{label} must replay Dock/minimized intent, import hidden pixmaps, then service Iconic admission"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_backends_wire_the_iconify_coordinator_at_the_same_boundaries() {
+        let pending_batch = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn service_pending_iconify_admissions",
+        );
+        assert!(
+            pending_batch.contains("for window in self.iconify.awaiting_windows()")
+                && pending_batch
+                    .contains("if let Err(error) = self.service_iconify_admission_for(window)")
+                && !pending_batch.contains("self.service_iconify_admission_for(window)?"),
+            "late Iconic admission must isolate per-window failures instead of poisoning an already-live compositor or starving the batch"
+        );
+
+        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+            assert!(
+                source.contains("iconify: IconifyCoordinator,")
+                    && source.contains("iconify: IconifyCoordinator::default(),"),
+                "{label} must own and initialize backend-lifetime Iconic coordination"
+            );
+
+            let events = impl_body_after(source, "fn compositor_handle_event");
+            let observe = events
+                .find("self.observe_iconify_event(event)")
+                .unwrap_or_else(|| panic!("{label} must observe Iconic lifecycle events"));
+            let compositor_gate = events
+                .find("let Some(compositor) = self.compositor.as_mut()")
+                .unwrap_or_else(|| panic!("{label} must gate live compositor event work"));
+            assert!(
+                observe < compositor_gate,
+                "{label} must acknowledge/retire Iconic state even while compositing is disabled"
+            );
+
+            let render = impl_body_after(source, "fn compositor_render_frame");
+            let frame = render
+                .find("compositor.render_frame(&x11_scene, focused_x11)")
+                .unwrap_or_else(|| panic!("{label} must render the X11 scene"));
+            let admission = render
+                .find("self.service_pending_iconify_admissions();")
+                .unwrap_or_else(|| panic!("{label} must retry pending Iconic admission"));
+            assert!(
+                frame < admission,
+                "{label} must retry admission only after the frame can produce a CPU snapshot"
+            );
+
+            let toggle = impl_body_after(source, "fn set_compositor_enabled");
+            let prepare = toggle
+                .find("self.prepare_iconify_compositor_disable()?")
+                .unwrap_or_else(|| panic!("{label} must prepare Iconic clients for teardown"));
+            let drop_compositor = toggle
+                .find("self.compositor.take()")
+                .unwrap_or_else(|| panic!("{label} must drop its compositor"));
+            assert!(
+                prepare < drop_compositor,
+                "{label} must complete checked remaps and reservation release before compositor teardown"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_recapture_crosses_current_context_before_both_admission_batches() {
+        let render = impl_body_after(X11_COMPOSITOR_RENDER_SRC, "pub(crate) fn render_frame");
+        let frame_marker = render
+            .find("self.renderer_ctx(\"frame: make context current\")")
+            .expect("X11 render must have an explicit frame make-current barrier");
+        let context_guard = render[..frame_marker]
+            .rfind("if !self.context_current")
+            .expect("X11 render must guard a non-current frame context");
+        let make_current = render[..frame_marker]
+            .rfind("self.graphics.make_current()")
+            .expect("X11 frame barrier must call make_current");
+        let failed_return = render[frame_marker..]
+            .find("return false;")
+            .map(|offset| frame_marker + offset)
+            .expect("failed make-current must return without rendering");
+        let mark_current = render[failed_return..]
+            .find("self.context_current = true;")
+            .map(|offset| failed_return + offset)
+            .expect("successful make-current must update context state");
+        let recapture = render
+            .find("self.service_iconic_snapshot_recaptures_current_context();")
+            .expect("X11 render must service retained Iconic recaptures");
+        assert!(
+            context_guard < make_current
+                && make_current < failed_return
+                && failed_return < mark_current
+                && mark_current < recapture,
+            "failed make-current must return with demand intact; retained readback may run only after success"
+        );
+
+        let capture = impl_body_after(
+            X11_COMPOSITOR_EFFECTS_SRC,
+            "pub(super) fn cache_minimized_snapshot_from_texture",
+        );
+        let guard = capture
+            .find("if !self.context_current")
+            .expect("thumbnail capture must fail safe when the context is not current");
+        let defer = capture
+            .find("request_iconic_snapshot_recapture(x11_win)")
+            .expect("a non-current thumbnail capture must be deferred");
+        let stop = capture
+            .find("return false;")
+            .expect("a non-current thumbnail capture must stop before GL");
+        let gl_capture = capture
+            .find("capture_minimized_snapshot_from_texture(")
+            .expect("current-context thumbnail capture implementation missing");
+        assert!(
+            guard < defer && defer < stop && stop < gl_capture,
+            "context=false minimize must arm a later render without issuing thumbnail GL work"
+        );
+
+        for (label, method) in [
+            ("explicit minimize", "pub(super) fn start_genie_animation"),
+            (
+                "late minimized settlement",
+                "pub(super) fn settle_late_minimized_window",
+            ),
+        ] {
+            let body = impl_body_after(X11_COMPOSITOR_EFFECTS_SRC, method);
+            assert!(
+                body.contains("request_iconic_snapshot_recapture(x11_win)")
+                    && !body.contains("cache_minimized_snapshot_from_texture(")
+                    && !body.contains("capture_minimized_snapshot_from_texture("),
+                "{label} must only retain/arm; render-after-make-current owns thumbnail readback"
+            );
+        }
+
+        let static_capture = impl_body_after(
+            X11_COMPOSITOR_FEATURES_SRC,
+            "fn arm_static_minimized_capture",
+        );
+        let retained_branch = static_capture
+            .find("StaticMinimizedCapturePlan::RecaptureRetained =>")
+            .expect("static capture must recognize retained recapture demand");
+        let import_branch = static_capture[retained_branch..]
+            .find("StaticMinimizedCapturePlan::ArmAndImport")
+            .map(|offset| retained_branch + offset)
+            .expect("retained branch must precede the pixmap-import branch");
+        let retained_branch = &static_capture[retained_branch..import_branch];
+        assert!(
+            retained_branch.contains("self.needs_render = true")
+                && !retained_branch.contains("cache_minimized_snapshot_from_texture(")
+                && !retained_branch.contains("capture_minimized_snapshot_from_texture("),
+            "RecaptureRetained must only schedule the current-context render service"
+        );
+
+        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+            let transport = impl_body_after(source, "fn compositor_render_frame");
+            let frame = transport
+                .find("compositor.render_frame(&x11_scene, focused_x11)")
+                .unwrap_or_else(|| panic!("{label} must render the shared X11 compositor"));
+            let admission = transport
+                .find("self.service_pending_iconify_admissions();")
+                .unwrap_or_else(|| panic!("{label} must service pending Iconic admission"));
+            assert!(
+                frame < admission,
+                "{label} must reserve/pin/unmap only after current-context recapture returns"
+            );
+        }
+
+        let reserve = impl_body_after(
+            X11_COMPOSITOR_EFFECTS_SRC,
+            "pub(crate) fn reserve_iconic_snapshot",
+        );
+        assert!(reserve.contains("reserve_current_iconic_snapshot("));
+        assert!(
+            !reserve.contains("service_iconic_snapshot_recaptures")
+                && !reserve.contains("cache_minimized_snapshot_from_texture")
+                && !reserve.contains("capture_minimized_snapshot_from_texture")
+                && !reserve.contains("read_pixels"),
+            "WM-facing Iconic reserve must remain a CPU-only transaction"
+        );
+    }
+
+    #[test]
+    fn shared_x11_iconify_bridge_preserves_generation_and_snapshot_ownership() {
+        let admission = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn service_iconify_admission_for",
+        );
+        let reserve = admission
+            .find("reserve_iconic_snapshot(x11_window)")
+            .expect("Iconic admission must reserve a CPU snapshot");
+        let unmap = admission
+            .find("unmap_managed_window(")
+            .expect("Iconic admission must issue a managed unmap");
+        let sent = admission
+            .find("finish_checked_unmap(")
+            .expect("Iconic admission must commit the checked unmap");
+        assert!(
+            reserve < unmap
+                && unmap < sent
+                && admission.contains("ManagedUnmapReason::IconifyRetain { generation }")
+                && admission
+                    .contains("release_iconic_snapshot_reservation(x11_window, generation)"),
+            "admission must reserve first, send a generation-fenced checked unmap, and release only on send failure"
+        );
+
+        let observe = impl_body_after(X11_COMPOSITOR_DELEGATION_SRC, "fn observe_iconify_event");
+        assert!(
+            observe.contains("ManagedUnmapReason::IconifyRetain")
+                && observe.contains("self.iconify.acknowledge(*window, *generation)")
+                && observe.contains("from_configure: false")
+                && observe.contains("self.iconify.retire(*window)"),
+            "the shared event bridge must fence acknowledgements and retire external withdraw/destroy"
+        );
+
+        let cancel = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn compositor_cancel_window_iconify",
+        );
+        let checked_map = cancel
+            .find("let map_result = self.window_ops.map_window(window)")
+            .expect("physical Iconic cancellation must map first");
+        let transaction = cancel
+            .find("finish_checked_cancel(")
+            .expect("physical Iconic cancellation must use the shared transaction");
+        let viewable = cancel
+            .find("get_window_attributes(window)")
+            .expect("physical Iconic cancellation must confirm viewability");
+        assert!(
+            checked_map < transaction
+                && transaction < viewable
+                && cancel.contains(".map_state_viewable")
+                && cancel.contains("ViewabilityVerification::ConfirmedNotViewable")
+                && cancel.contains("ViewabilityVerification::QueryError")
+                && !cancel.contains("get_window_attributes(window)?")
+                && !cancel.contains("release_iconic_snapshot_reservation"),
+            "normal restore must preserve false versus query-error viewability before removing coordination and keep the sole CPU snapshot pinned"
+        );
+        let finish_cancel = impl_body_after(X11_ICONIFY_SRC, "pub(crate) fn finish_checked_cancel");
+        let verify = finish_cancel
+            .find("verify_viewable()")
+            .expect("cancel transaction must verify the checked map");
+        let confirmed_not_viewable = finish_cancel
+            .find("ViewabilityVerification::ConfirmedNotViewable(error) => return Err(error)")
+            .expect("confirmed-unmapped cancellation must return without another unmap");
+        let query_error = finish_cancel
+            .find("ViewabilityVerification::QueryError(error)")
+            .expect("an attributes error must retain conservative rollback");
+        let rollback = finish_cancel
+            .find("rollback_unmap(window, generation)")
+            .expect("unknown viewability must reverse the sent map");
+        let remove = finish_cancel
+            .find("finish_mapped_cancel(window, generation)")
+            .expect("only a confirmed map may remove coordinator state");
+        assert!(
+            verify < confirmed_not_viewable
+                && confirmed_not_viewable < query_error
+                && query_error < rollback
+                && rollback < remove
+        );
+
+        let disable = impl_body_after(
+            X11_COMPOSITOR_DELEGATION_SRC,
+            "fn prepare_iconify_compositor_disable",
+        );
+        let map = disable
+            .find("window_ops.map_window(window)")
+            .expect("compositor teardown must checked-map Iconic clients");
+        let viewable = disable
+            .find("window_ops.get_window_attributes(window)")
+            .expect("compositor teardown must confirm ordered viewability");
+        let release = disable
+            .find("release_iconic_snapshot_reservation(x11_window, generation)")
+            .expect("compositor teardown must release reservations");
+        assert!(
+            disable.contains("prepare_compositor_loss_transaction(")
+                && map < viewable
+                && viewable < release
+                && disable.contains(".map_state_viewable")
+                && disable.contains("ViewabilityVerification::ConfirmedNotViewable")
+                && disable.contains("ViewabilityVerification::QueryError")
+                && !disable.contains("get_window_attributes(window)?")
+                && disable.contains("unmap_managed_window(")
+                && disable.contains("ManagedUnmapReason::IconifyRetain"),
+            "teardown must preserve false versus query-error viewability transactionally before releasing reservations"
+        );
+
+        let finish_unmap = impl_body_after(X11_ICONIFY_SRC, "pub(crate) fn finish_checked_unmap");
+        assert!(
+            finish_unmap.contains("release_failed_reservation()")
+                && finish_unmap.contains("return Err(error)")
+                && finish_unmap.contains("coordinator.mark_unmap_sent(window, generation)"),
+            "failed async unmap must release its pin and remain Awaiting; only success commits UnmapSent"
+        );
+
+        let teardown = impl_body_after(
+            X11_ICONIFY_SRC,
+            "pub(crate) fn prepare_compositor_loss_transaction",
+        );
+        let map_all = teardown
+            .find("map_window(window)")
+            .expect("teardown transaction must map each client");
+        let rollback = teardown
+            .find("rollback_unmap(mapped_window, mapped_generation)")
+            .expect("teardown transaction must roll back prior maps");
+        let release_all = teardown
+            .find("release_reservation(x11_window, generation)")
+            .expect("teardown transaction must release pins after mapping");
+        let requeue = teardown
+            .find("mark_awaiting_after_compositor_loss(window, generation)")
+            .expect("teardown transaction must requeue capture admission");
+        assert!(
+            map_all < rollback && rollback < release_all && release_all < requeue,
+            "teardown failure must return through rollback before any pin release or phase mutation"
+        );
+        assert!(
+            teardown.contains("let mut confirmed_viewable")
+                && teardown.contains("ViewabilityVerification::ConfirmedNotViewable(error)")
+                && teardown.contains("ViewabilityVerification::QueryError(error)"),
+            "teardown rollback eligibility must be typed instead of treating an ordered false reply as an attributes query error"
+        );
+    }
+
+    #[test]
+    fn both_x11_map_transports_are_checked_for_true_deiconify() {
+        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+            assert!(
+                source.contains("delegate_compositor_capabilities!("),
+                "{label} must instantiate the shared typed Iconic viewability transaction"
+            );
+        }
+
+        let x11rb = impl_body_after(X11RB_BACKEND_SRC, "fn map_window");
+        assert!(
+            x11rb.contains("self.conn.map_window(w)?.check()?")
+                && !x11rb.contains("self.conn.map_window(w)?;"),
+            "x11rb MapWindow must synchronously check server errors"
+        );
+        let x11rb_attributes = impl_body_after(X11RB_BACKEND_SRC, "fn get_window_attributes");
+        assert!(
+            x11rb_attributes.contains("get_window_attributes(w)?.reply()?")
+                && x11rb_attributes.contains("map_state == MapState::VIEWABLE"),
+            "x11rb must await the same-connection attributes reply and report viewability"
+        );
+
+        let xcb = impl_body_after(XCB_BACKEND_SRC, "fn map_window");
+        assert!(
+            xcb.contains("send_and_check_request(&x::MapWindow"),
+            "XCB MapWindow must synchronously check server errors"
+        );
+        let xcb_attributes = impl_body_after(XCB_BACKEND_SRC, "fn get_window_attributes");
+        assert!(
+            xcb_attributes.contains("wait_for_reply(cookie)")
+                && xcb_attributes.contains("map_state() == x::MapState::Viewable"),
+            "XCB must await the same-connection attributes reply and report viewability"
+        );
+    }
+
+    #[test]
+    fn both_x11_window_scans_query_the_selected_backend_root() {
+        let x11rb = impl_body_after(X11RB_BACKEND_SRC, "fn scan_windows");
+        assert!(
+            x11rb.contains("query_tree(self.root_x11)") && !x11rb.contains("setup().roots[0].root"),
+            "x11rb QueryTree must use the root selected by DISPLAY's screen number"
+        );
+
+        let xcb = impl_body_after(XCB_BACKEND_SRC, "fn scan_windows");
+        assert!(
+            xcb.contains("QueryTree { window: self.root }")
+                || (xcb.contains("QueryTree") && xcb.contains("window: self.root")),
+            "XCB QueryTree must use the backend's selected root"
+        );
+    }
+
+    #[test]
+    fn both_x11_event_bridges_retire_only_terminal_state_without_a_compositor() {
+        for (label, source) in [("x11rb", X11RB_BACKEND_SRC), ("xcb", XCB_BACKEND_SRC)] {
+            let body = impl_body_after(source, "fn compositor_handle_event");
+            assert!(
+                body.contains("from_configure: false"),
+                "{label} configure-unmap must preserve durable minimized desired state"
+            );
+            let retire = body
+                .find("self.compositor_desired.retire_window(*window)")
+                .unwrap_or_else(|| panic!("{label} event bridge must retire desired state"));
+            let optional_compositor = body
+                .find("let Some(compositor) = self.compositor.as_mut()")
+                .unwrap_or_else(|| panic!("{label} event bridge must gate live compositor work"));
+            assert!(
+                retire < optional_compositor,
+                "{label} unmap/destroy retirement must run while the compositor is disabled"
+            );
+        }
     }
 
     #[test]
@@ -5270,6 +6003,188 @@ mod parity_tests {
     }
 
     #[test]
+    fn both_x11_property_backends_use_the_strict_shared_minimized_restore_codec() {
+        for (label, source, atom_spelling) in [
+            ("x11rb", X11RB_BACKEND_SRC, "_JWM_MINIMIZED_RESTORE_V1"),
+            ("xcb", XCB_BACKEND_SRC, "jwm_minimized_restore_v1"),
+        ] {
+            let get = impl_body_after(source, "fn get_minimized_restore_state");
+            assert!(
+                get.contains(atom_spelling)
+                    && get.contains("MINIMIZED_RESTORE_V1_LONG_LENGTH")
+                    && get.contains("decode_minimized_restore_v1")
+                    && get.contains("bytes_after")
+                    && (get.contains("CARDINAL") || get.contains(".cardinal")),
+                "{label} getter must validate the complete CARDINAL reply through the shared V1 codec"
+            );
+
+            let set = impl_body_after(source, "fn set_minimized_restore_state");
+            assert!(
+                set.contains(atom_spelling) && set.contains("encode_minimized_restore_v1"),
+                "{label} setter must encode and replace the exact V1 property"
+            );
+
+            let clear = impl_body_after(source, "fn clear_minimized_restore_state");
+            assert!(
+                clear.contains(atom_spelling)
+                    && (clear.contains("delete_property") || clear.contains("DeleteProperty")),
+                "{label} clearer must delete the exact V1 property"
+            );
+        }
+    }
+
+    #[test]
+    fn xcb_wm_state_decoder_accepts_only_a_complete_icccm_property() {
+        let expected_type = x::ATOM_ATOM;
+        let values = [3, 0];
+
+        assert_eq!(
+            decode_wm_state_property(expected_type, expected_type, 32, 2, 0, &values),
+            3
+        );
+        assert_eq!(
+            decode_wm_state_property(x::ATOM_CARDINAL, expected_type, 32, 2, 0, &values),
+            -1,
+            "a mismatched property type is not ICCCM WM_STATE"
+        );
+        assert_eq!(
+            decode_wm_state_property(expected_type, expected_type, 16, 2, 0, &values),
+            -1,
+            "WM_STATE is a 32-bit property"
+        );
+        assert_eq!(
+            decode_wm_state_property(expected_type, expected_type, 32, 1, 0, &values),
+            -1,
+            "the X11 reply length must agree with the decoded value"
+        );
+        assert_eq!(
+            decode_wm_state_property(expected_type, expected_type, 32, 2, 4, &values),
+            -1,
+            "a truncated WM_STATE property cannot prove Iconic state"
+        );
+        assert_eq!(
+            decode_wm_state_property(expected_type, expected_type, 32, 1, 0, &[3]),
+            -1,
+            "ICCCM WM_STATE contains both state and icon-window fields"
+        );
+    }
+
+    #[test]
+    fn xcb_net_wm_state_decoder_rejects_malformed_or_truncated_lists() {
+        let expected_type = x::ATOM_ATOM;
+        let target = 0x77;
+        let values = [0x22, target];
+
+        assert!(decode_net_wm_state_flag(
+            expected_type,
+            expected_type,
+            32,
+            2,
+            0,
+            &values,
+            target,
+        ));
+        assert!(!decode_net_wm_state_flag(
+            expected_type,
+            expected_type,
+            32,
+            2,
+            0,
+            &values,
+            0x99,
+        ));
+        for (actual_type, format, reply_length, bytes_after) in [
+            (x::ATOM_CARDINAL, 32, 2, 0),
+            (expected_type, 16, 2, 0),
+            (expected_type, 32, 1, 0),
+            (expected_type, 32, 2, 4),
+        ] {
+            assert!(
+                !decode_net_wm_state_flag(
+                    actual_type,
+                    expected_type,
+                    format,
+                    reply_length,
+                    bytes_after,
+                    &values,
+                    target,
+                ),
+                "invalid property metadata must not assert an EWMH state"
+            );
+        }
+    }
+
+    #[test]
+    fn xcb_iconic_property_reads_propagate_checked_reply_errors() {
+        for (method, decoder) in [
+            ("fn get_wm_state", "decode_wm_state_property"),
+            ("fn has_net_wm_state_flag", "decode_net_wm_state_flag"),
+        ] {
+            let body = impl_body_after(XCB_BACKEND_SRC, method);
+            assert!(
+                body.contains("send_request(&x::GetProperty")
+                    && body.contains("wait_for_reply(cookie).map_err(xcb_err)?")
+                    && body.contains("reply.r#type()")
+                    && body.contains("reply.format()")
+                    && body.contains("reply.length()")
+                    && body.contains("reply.bytes_after()")
+                    && body.contains(decoder),
+                "XCB {method} must propagate GetProperty reply errors and validate the complete reply"
+            );
+            assert!(
+                !body.contains("get_u32s") && !body.contains("get_atoms("),
+                "XCB {method} must not use a helper that converts reply errors to an empty property"
+            );
+        }
+    }
+
+    #[test]
+    fn both_x11_property_backends_acknowledge_iconic_handoff_writes() {
+        // A successful handoff mutation must mean that the X server accepted it,
+        // not merely that the client library queued it.  Besides surfacing
+        // BadWindow/BadAtom, the checked round trip orders any following
+        // property read or physical Map/UnmapWindow on the same connection.
+        for method in ["fn set_net_wm_state_atoms", "fn set_wm_state"] {
+            let body = impl_body_after(X11RB_BACKEND_SRC, method);
+            assert!(
+                body.contains("change_property32(") && body.contains(".check()?"),
+                "x11rb {method} must check its ChangeProperty VoidCookie"
+            );
+        }
+        for method in [
+            "fn set_minimized_restore_state",
+            "fn clear_minimized_restore_state",
+        ] {
+            let body = impl_body_after(X11RB_BACKEND_SRC, method);
+            assert!(
+                body.contains("_JWM_MINIMIZED_RESTORE_V1") && body.contains(".check()?"),
+                "x11rb {method} must check its V1 property VoidCookie"
+            );
+        }
+
+        let change_u32s = impl_body_after(XCB_BACKEND_SRC, "fn change_u32s");
+        assert!(
+            change_u32s.contains("send_and_check_request(&x::ChangeProperty"),
+            "XCB property mutations must keep using checked ChangeProperty requests"
+        );
+        for method in [
+            "fn set_net_wm_state_flag",
+            "fn set_wm_state",
+            "fn set_minimized_restore_state",
+        ] {
+            assert!(
+                impl_body_after(XCB_BACKEND_SRC, method).contains("change_u32s("),
+                "XCB {method} must use the checked ChangeProperty helper"
+            );
+        }
+        let clear = impl_body_after(XCB_BACKEND_SRC, "fn clear_minimized_restore_state");
+        assert!(
+            clear.contains("send_and_check_request(&x::DeleteProperty"),
+            "XCB V1 cleanup must keep using checked DeleteProperty"
+        );
+    }
+
+    #[test]
     fn xcb_normal_hints_use_wm_size_hints_type() {
         let start = XCB_BACKEND_SRC
             .find("fn fetch_normal_hints")
@@ -5310,6 +6225,133 @@ mod parity_tests {
             },
             "destroyed XCB window ids must be cleaned after event dispatch"
         );
+    }
+
+    #[test]
+    fn x11rb_destroy_notify_defers_id_cleanup_until_after_dispatch() {
+        let start = X11RB_BACKEND_SRC
+            .find("XEvent::DestroyNotify(e)")
+            .expect("missing x11rb DestroyNotify arm");
+        let end = X11RB_BACKEND_SRC[start..]
+            .find("XEvent::ConfigureNotify(e)")
+            .map(|idx| start + idx)
+            .expect("missing x11rb ConfigureNotify arm after DestroyNotify");
+        let destroy_arm = &X11RB_BACKEND_SRC[start..end];
+
+        assert!(
+            !destroy_arm.contains("remove_x11") && !destroy_arm.contains("remove_id"),
+            "DestroyNotify must keep the X11<->WindowId mapping alive until dispatch"
+        );
+
+        let backend_body = impl_body_after(X11RB_BACKEND_SRC, "impl X11rbBackend");
+        assert!(
+            backend_body.contains("fn cleanup_destroyed_window")
+                && backend_body.contains("self.ids.remove_x11(x11)"),
+            "x11rb backend must provide deferred destroyed-id cleanup"
+        );
+        assert!(
+            X11RB_BACKEND_SRC.contains("data.backend.compositor_handle_event(&event)")
+                && X11RB_BACKEND_SRC
+                    .contains("data.backend.cleanup_destroyed_window(destroyed_window)"),
+            "x11rb must clean destroyed ids only after compositor and event dispatch"
+        );
+    }
+
+    #[test]
+    fn both_x11_transports_classify_managed_unmaps_before_dispatch() {
+        let x11rb_unmap = impl_body_after(X11RB_BACKEND_SRC, "fn unmap_managed_window");
+        assert!(
+            x11rb_unmap.contains("sequence_number()")
+                && x11rb_unmap.contains("cookie.check()")
+                && x11rb_unmap.contains(".record(w, sequence, reason)"),
+            "x11rb must record the checked UnmapWindow cookie sequence and caller reason"
+        );
+        let x11rb_admission = x11rb_unmap
+            .find(".ensure_capacity(w)")
+            .expect("x11rb must admit managed unmaps before sending them");
+        let x11rb_send = x11rb_unmap
+            .find("self.conn.unmap_window(w)")
+            .expect("x11rb must send UnmapWindow after admission");
+        let x11rb_record = x11rb_unmap
+            .find(".record(w, sequence, reason)")
+            .expect("x11rb must record the checked request");
+        assert!(
+            x11rb_unmap.contains("let mut managed_unmaps = self.managed_unmaps.lock_safe()")
+                && x11rb_admission < x11rb_send
+                && x11rb_send < x11rb_record,
+            "x11rb must hold one tracker lock across admission, send, and record"
+        );
+
+        let xcb_unmap = impl_body_after(XCB_BACKEND_SRC, "fn unmap_managed_window");
+        assert!(
+            xcb_unmap.contains("cookie.sequence()")
+                && xcb_unmap.contains("check_request(cookie)")
+                && xcb_unmap.contains(".record(window.resource_id(), sequence, reason)"),
+            "XCB must record the checked UnmapWindow cookie sequence and caller reason"
+        );
+        let xcb_admission = xcb_unmap
+            .find(".ensure_capacity(window.resource_id())")
+            .expect("XCB must admit managed unmaps before sending them");
+        let xcb_send = xcb_unmap
+            .find("self.conn.send_request_checked(&x::UnmapWindow")
+            .expect("XCB must send UnmapWindow after admission");
+        let xcb_record = xcb_unmap
+            .find(".record(window.resource_id(), sequence, reason)")
+            .expect("XCB must record the checked request");
+        assert!(
+            xcb_unmap.contains("let mut managed_unmaps = self.managed_unmaps.lock_safe()")
+                && xcb_admission < xcb_send
+                && xcb_send < xcb_record,
+            "XCB must hold one tracker lock across admission, send, and record"
+        );
+
+        for (label, source, unmap_start, destroy_start) in [
+            (
+                "x11rb",
+                X11RB_BACKEND_SRC,
+                "XEvent::UnmapNotify(e)",
+                "XEvent::DestroyNotify(e)",
+            ),
+            (
+                "xcb",
+                XCB_BACKEND_SRC,
+                "xcb::Event::X(x::Event::UnmapNotify(ev))",
+                "xcb::Event::X(x::Event::DestroyNotify(ev))",
+            ),
+        ] {
+            let unmap_pos = source.find(unmap_start).expect("missing UnmapNotify arm");
+            let destroy_pos = source[unmap_pos..]
+                .find(destroy_start)
+                .map(|offset| unmap_pos + offset)
+                .expect("missing following DestroyNotify arm");
+            let unmap_arm = &source[unmap_pos..destroy_pos];
+            assert!(
+                unmap_arm.contains("managed_unmaps")
+                    && unmap_arm.contains(".classify(")
+                    && unmap_arm.contains("response_type")
+                    && unmap_arm.contains("from_configure")
+                    && unmap_arm.contains("ManagedUnmapDisposition::ManagerOwned(reason)")
+                    && unmap_arm.contains("BackendEvent::WindowManagerUnmapped")
+                    && unmap_arm.contains("reason,")
+                    && unmap_arm.contains("ManagedUnmapDisposition::ManagerDuplicate => None"),
+                "{label} must classify complete raw metadata, preserve either managed-unmap reason, and suppress the second delivery"
+            );
+
+            let destroy_tail = &source[destroy_pos..];
+            let destroy_end = destroy_tail
+                .find("ConfigureNotify")
+                .or_else(|| destroy_tail.find("ConfigureRequest"))
+                .expect("missing event arm after DestroyNotify");
+            let destroy_arm = &destroy_tail[..destroy_end];
+            assert!(
+                destroy_arm.contains("managed_unmaps") && destroy_arm.contains(".clear("),
+                "{label} DestroyNotify must invalidate managed-unmap markers"
+            );
+            assert!(
+                !destroy_arm.contains("remove_x11") && !destroy_arm.contains("remove_id"),
+                "{label} must retain the XID mapping until compositor/systray/JWM dispatch"
+            );
+        }
     }
 
     #[test]

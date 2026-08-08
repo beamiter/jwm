@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import select
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -16,6 +17,8 @@ class DemoWindows:
     def __init__(self, binary: Path, ipc: JwmIpc, tmp: Path) -> None:
         self.binary, self.ipc, self.tmp = binary, ipc, tmp
         self.processes: list[subprocess.Popen[str]] = []
+        self.control_sockets: dict[int, Path] = {}
+        self.last_minimized_window_id: int | None = None
 
     @property
     def pids(self) -> list[int]:
@@ -36,8 +39,50 @@ class DemoWindows:
             line = process.stdout.readline().strip() if ready else ""
             if not line:
                 raise RuntimeError(f"demo client failed to start: {process.stderr.read() if process.stderr else ''}")
-            json.loads(line)
+            metadata = json.loads(line)
+            window_id = int(metadata["window_id"])
+            reported_socket = Path(metadata["socket"])
+            if reported_socket != socket:
+                process.terminate()
+                raise RuntimeError(
+                    f"demo client reported unexpected control socket: {reported_socket}"
+                )
             self.processes.append(process)
+            self.control_sockets[window_id] = socket
+
+    def control(self, window_id: int, command: str, timeout: float = 3.0) -> dict:
+        if command not in ("minimize", "restore"):
+            raise ValueError(f"unsupported demo window control: {command}")
+        path = self.control_sockets.get(window_id)
+        if path is None:
+            raise RuntimeError(f"demo window {window_id} has no control socket")
+
+        payload = (json.dumps({"command": command}, separators=(",", ":")) + "\n").encode()
+        deadline = time.monotonic() + timeout
+        last_error: OSError | None = None
+        while time.monotonic() < deadline:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
+                    stream.settimeout(max(0.1, deadline - time.monotonic()))
+                    stream.connect(str(path))
+                    stream.sendall(payload)
+                    response = stream.makefile("r", encoding="utf-8").readline()
+                result = json.loads(response)
+                if not result.get("success"):
+                    raise RuntimeError(
+                        f"demo window {window_id} rejected {command}: {result}"
+                    )
+                if command == "minimize":
+                    self.last_minimized_window_id = window_id
+                elif self.last_minimized_window_id == window_id:
+                    self.last_minimized_window_id = None
+                return result
+            except (FileNotFoundError, ConnectionRefusedError) as exc:
+                last_error = exc
+                time.sleep(0.02)
+        raise TimeoutError(
+            f"demo window {window_id} control socket did not accept {command}: {last_error}"
+        )
 
     def wait_managed(self, count: int, timeout: float = 10.0) -> list[dict]:
         deadline = time.monotonic() + timeout
@@ -55,3 +100,5 @@ class DemoWindows:
             try: process.wait(timeout=2)
             except subprocess.TimeoutExpired: process.kill()
         self.processes.clear()
+        self.control_sockets.clear()
+        self.last_minimized_window_id = None

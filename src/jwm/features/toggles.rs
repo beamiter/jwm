@@ -13,7 +13,7 @@ use crate::jwm::features::SystemUiState;
 use crate::jwm::features::capture::CaptureTarget;
 use crate::jwm::features::expose_plan;
 use crate::jwm::types::WMArgEnum;
-use log::{error, info};
+use log::{error, info, warn};
 use std::process::Command;
 
 impl Jwm {
@@ -996,14 +996,44 @@ impl Jwm {
     }
 
     fn release_temporary_system_ui_compositor(&mut self, backend: &mut dyn Backend, label: &str) {
-        if !std::mem::take(&mut self.features.system_ui_temporary_compositor) {
+        if !self.features.system_ui_temporary_compositor {
             return;
         }
+
+        // A previous transition may already have completed even though the UI
+        // lease flag survived (for example after an error response).  There is
+        // nothing left to release in that case.
+        if !backend.has_compositor() {
+            self.features.system_ui_temporary_compositor = false;
+            return;
+        }
+
+        if let Err(error) = self.park_hidden_clients_before_compositor_disable(backend) {
+            // Keep the lease flag: the compositor is still the temporary one,
+            // and a later close/reload can retry the safe hand-back.
+            log::warn!(
+                "Could not restore compositor to OFF after {label}; hidden-window parking barrier failed: {error}"
+            );
+            return;
+        }
+
         match backend.set_compositor_enabled(false) {
-            Ok(true) => log::info!("Restored compositor to OFF after {label}"),
-            Ok(false) if !backend.has_compositor() => {}
+            Ok(true) if !backend.has_compositor() => {
+                self.features.system_ui_temporary_compositor = false;
+                log::info!("Restored compositor to OFF after {label}");
+            }
+            Ok(false) if !backend.has_compositor() => {
+                self.features.system_ui_temporary_compositor = false;
+            }
+            Ok(true) => {
+                log::warn!(
+                    "Could not restore compositor to OFF after {label}: backend reported a transition but remains ON"
+                );
+            }
             Ok(false) => {
-                log::warn!("Could not restore compositor to OFF after {label}: state unchanged");
+                log::warn!(
+                    "Could not restore compositor to OFF after {label}: state unchanged (still ON)"
+                );
             }
             Err(error) => {
                 log::warn!("Could not restore compositor to OFF after {label}: {error}");
@@ -1162,7 +1192,7 @@ impl Jwm {
         let Some(client_key) = self.get_selected_client_key() else {
             return Ok(());
         };
-        self.set_client_minimized(backend, client_key, true);
+        let _changed = self.set_client_minimized(backend, client_key, true)?;
         Ok(())
     }
 
@@ -1259,6 +1289,12 @@ impl Jwm {
             // worse, an invisible lock screen. Honor OFF as soon as it closes.
             self.features.system_ui_temporary_compositor = true;
             log::info!("Compositor disable deferred until the system UI closes");
+            return Ok(());
+        }
+        if !enable && let Err(error) = self.park_hidden_clients_before_compositor_disable(backend) {
+            log::warn!(
+                "Compositor remains ON; hidden-window parking barrier failed before disable: {error}"
+            );
             return Ok(());
         }
         match backend.set_compositor_enabled(enable) {
@@ -2223,74 +2259,80 @@ impl Jwm {
                     self.arrange(backend, Some(mk));
                 }
             } else {
-                // Show: animate downward from top
-                let sel_mon_key = self.state.sel_mon;
-                if let Some(mon_key) = sel_mon_key {
-                    let current_tags = self
-                        .state
-                        .monitors
-                        .get(mon_key)
-                        .map(|m| m.get_active_tags())
-                        .unwrap_or(1);
+                let was_minimized = self
+                    .state
+                    .clients
+                    .get(sp_key)
+                    .is_some_and(|client| client.state.is_hidden);
+                let window = self
+                    .state
+                    .clients
+                    .get(sp_key)
+                    .map(|client| client.win)
+                    .ok_or("scratchpad disappeared before reveal")?;
 
-                    if let Some(client) = self.state.clients.get_mut(sp_key) {
-                        client.state.tags = current_tags;
-                        client.mon = Some(mon_key);
-                        client.state.is_floating = true;
-                    }
+                if !self.reveal_and_focus(backend, window)? {
+                    return Err("scratchpad disappeared before reveal".into());
+                }
 
-                    self.reorder_client_in_monitor_groups(sp_key);
+                // A minimized scratchpad already has the compositor's reverse
+                // Genie. Starting the scratchpad Appear animation as well would
+                // fight over the same geometry and can flash the real surface.
+                // A merely parked scratchpad keeps its original downward reveal.
+                if !was_minimized
+                    && let Some(mon_key) = self.state.sel_mon
+                    && let Some(area) = self.monitor_work_area(mon_key)
+                {
+                    let w = area.w.saturating_mul(4) / 5;
+                    let h = area.h.saturating_mul(4) / 5;
+                    let x = area.x + (area.w - w) / 2;
+                    let y = area.y + (area.h - h) / 2;
 
-                    // Center at 80% of monitor work area
-                    if let Some(area) = self.monitor_work_area(mon_key) {
-                        let w = (area.w as f32 * 0.8) as i32;
-                        let h = (area.h as f32 * 0.8) as i32;
-                        let x = area.x + (area.w - w) / 2;
-                        let y = area.y + (area.h - h) / 2;
+                    if cfg.animation_enabled() {
+                        // Animate from above screen to target position
+                        // from_y: window top is at (area.y - h), so window is completely above visible area
+                        let from_y = area.y - h;
+                        let from_rect = Rect::new(x, from_y, w, h);
+                        let to_rect = Rect::new(x, y, w, h);
 
-                        // Suppress animation during resize to set target position
-                        let suppress_flag = self.suppress_layout_animation;
-                        self.suppress_layout_animation = true;
-                        self.resize_client(backend, sp_key, x, y, w, h, false);
-                        self.suppress_layout_animation = suppress_flag;
-                    }
+                        info!(
+                            "[togglescratchpad] scratchpad show animation from y={} to y={}",
+                            from_y, y
+                        );
 
-                    self.focus(backend, Some(sp_key))?;
-                    self.arrange(backend, Some(mon_key));
-
-                    // After arrange, get actual position and start downward animation
-                    if let Some(area) = self.monitor_work_area(mon_key) {
-                        let w = (area.w as f32 * 0.8) as i32;
-                        let h = (area.h as f32 * 0.8) as i32;
-                        let x = area.x + (area.w - w) / 2;
-                        let y = area.y + (area.h - h) / 2;
-
-                        if cfg.animation_enabled() {
-                            // Animate from above screen to target position
-                            // from_y: window top is at (area.y - h), so window is completely above visible area
-                            let from_y = area.y - h;
-                            let from_rect = Rect::new(x, from_y, w, h);
-                            let to_rect = Rect::new(x, y, w, h);
-
-                            info!(
-                                "[togglescratchpad] scratchpad show animation from y={} to y={}",
-                                from_y, y
-                            );
-
-                            self.animations.start(
-                                sp_key,
-                                from_rect,
-                                to_rect,
-                                cfg.animation_duration(),
-                                cfg.animation_easing(),
-                                AnimationKind::Appear,
-                            );
-                        }
+                        self.animations.start(
+                            sp_key,
+                            from_rect,
+                            to_rect,
+                            cfg.animation_duration(),
+                            cfg.animation_easing(),
+                            AnimationKind::Appear,
+                        );
                     }
                 }
             }
         } else {
-            // No scratchpad with this name — spawn command, mark pending
+            // No scratchpad with this name — spawn once and bind the pending
+            // identity to the exact child PID. Repeated toggles while startup
+            // is in flight are no-ops; different names remain independent.
+            let now = std::time::Instant::now();
+            self.expire_pending_scratchpads(now);
+            if let Err(error) = self.scratchpad_pending.ensure_name_can_spawn(&name) {
+                match error {
+                    crate::jwm::scratchpad_pending::PendingRegistrationError::DuplicateName {
+                        pid,
+                        ..
+                    } => info!(
+                        "[togglescratchpad] '{}' is already pending for PID {}; not spawning a duplicate",
+                        name, pid
+                    ),
+                    other => error!(
+                        "[togglescratchpad] refusing to spawn pending '{}': {}",
+                        name, other
+                    ),
+                }
+                return Ok(());
+            }
             if let Some(prog) = spawn_cmd.first() {
                 let mut command = Command::new(prog);
                 command.args(&spawn_cmd[1..]);
@@ -2304,8 +2346,30 @@ impl Jwm {
 
                 match command.spawn() {
                     Ok(child) => {
-                        info!("[togglescratchpad] spawned '{}' PID: {}", name, child.id());
-                        self.scratchpad_pending_name = Some(name);
+                        let pid = child.id();
+                        let process_start_time =
+                            crate::jwm::scratchpad_pending::linux_process_start_time(pid);
+                        if process_start_time.is_none() {
+                            warn!(
+                                "[togglescratchpad] could not read /proc/{pid}/stat; '{}' will use strict PID matching with a short timeout",
+                                name
+                            );
+                        }
+                        match self.scratchpad_pending.register_spawned(
+                            pid,
+                            name.clone(),
+                            process_start_time,
+                            now,
+                        ) {
+                            Ok(()) => info!(
+                                "[togglescratchpad] spawned '{}' PID: {} (starttime={:?})",
+                                name, pid, process_start_time
+                            ),
+                            Err(error) => error!(
+                                "[togglescratchpad] spawned '{}' PID {} but could not register its identity: {}",
+                                name, pid, error
+                            ),
+                        }
                     }
                     Err(e) => {
                         error!("[togglescratchpad] failed to spawn '{}': {}", name, e);
@@ -2338,62 +2402,7 @@ impl Jwm {
             .map(|c| c.state.is_pip)
             .unwrap_or(false);
 
-        if is_pip {
-            // Exit PiP: restore state
-            if let Some(client) = self.state.clients.get_mut(sel_client_key) {
-                client.state.is_pip = false;
-                client.state.is_floating = client.state.old_state;
-                client.state.is_sticky = false;
-            }
-            self.reorder_client_in_monitor_groups(sel_client_key);
-            let (fx, fy, fw, fh) = if let Some(client) = self.state.clients.get(sel_client_key) {
-                (
-                    client.geometry.floating_x,
-                    client.geometry.floating_y,
-                    client.geometry.floating_w,
-                    client.geometry.floating_h,
-                )
-            } else {
-                return Ok(());
-            };
-            if fw > 0 && fh > 0 {
-                self.resize_client(backend, sel_client_key, fx, fy, fw, fh, false);
-            }
-            self.arrange(backend, Some(sel_mon_key));
-        } else {
-            // Enter PiP: save state, shrink to bottom-right
-            if let Some(client) = self.state.clients.get_mut(sel_client_key) {
-                client.state.old_state = client.state.is_floating;
-                client.geometry.floating_x = client.geometry.x;
-                client.geometry.floating_y = client.geometry.y;
-                client.geometry.floating_w = client.geometry.w;
-                client.geometry.floating_h = client.geometry.h;
-                client.state.is_pip = true;
-                client.state.is_floating = true;
-                client.state.is_sticky = true;
-            }
-
-            self.reorder_client_in_monitor_groups(sel_client_key);
-
-            // Position at bottom-right, 25% of monitor, 10px padding
-            if let Some(area) = self.monitor_work_area(sel_mon_key) {
-                let w = (area.w as f32 * 0.25) as i32;
-                let h = (area.h as f32 * 0.25) as i32;
-                let x = area.x + area.w - w - 10;
-                let y = area.y + area.h - h - 10;
-                self.resize_client(backend, sel_client_key, x, y, w, h, false);
-            }
-
-            self.arrange(backend, Some(sel_mon_key));
-            self.restack(backend, Some(sel_mon_key))?;
-        }
-
-        // Notify compositor of PiP state change
-        if backend.has_compositor() {
-            if let Some(client) = self.state.clients.get(sel_client_key) {
-                backend.compositor_set_window_pip(client.win, client.state.is_pip);
-            }
-        }
+        let _ = self.set_client_pip(backend, sel_client_key, !is_pip)?;
 
         Ok(())
     }

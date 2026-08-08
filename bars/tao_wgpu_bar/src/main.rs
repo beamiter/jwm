@@ -3,7 +3,7 @@ use log::warn;
 use pango::FontDescription;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopBuilder;
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::{
@@ -499,6 +499,21 @@ fn main() -> Result<()> {
             Event::RedrawRequested(window_id) if Some(window_id) == app.window_id => {
                 if let Err(error) = app.redraw() {
                     warn!("redraw failed: {error}");
+                }
+            }
+            Event::MainEventsCleared => {
+                let now = Instant::now();
+                if app
+                    .bar
+                    .next_dock_deadline(now)
+                    .is_some_and(|deadline| deadline <= now)
+                {
+                    let update = app.bar.poll_transport();
+                    app.handle_runtime_update(update);
+                    app.sync_transport_wake();
+                }
+                if let Some(deadline) = app.bar.next_dock_deadline(Instant::now()) {
+                    *control_flow = ControlFlow::WaitUntil(deadline);
                 }
             }
             _ => {}

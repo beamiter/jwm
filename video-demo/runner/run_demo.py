@@ -58,8 +58,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def validate_scene(scene: dict) -> None:
+    minimized = False
+    round_trips = 0
+    for index, action in enumerate(scene.get("actions", [])):
+        command = action.get("command")
+        if command == "minimize_demo":
+            if minimized:
+                raise RuntimeError(
+                    f"scene {scene['id']} action {index} minimizes twice without restoring"
+                )
+            minimized = True
+        elif command == "restore_demo":
+            if not minimized:
+                raise RuntimeError(
+                    f"scene {scene['id']} action {index} restores without a preceding minimize"
+                )
+            minimized = False
+            round_trips += 1
+    if minimized:
+        raise RuntimeError(f"scene {scene['id']} leaves a demo window minimized")
+    if "minimize_restore_round_trip" in scene.get("assertions", []) and round_trips == 0:
+        raise RuntimeError(
+            f"scene {scene['id']} asserts a minimize/restore round trip but does not perform one"
+        )
+
+
 def load_scenes(args: argparse.Namespace) -> list[dict]:
     data = tomllib.loads((BASE / "manifest/scenes.toml").read_text())
+    for scene in data["scene"]:
+        validate_scene(scene)
     scenes = {item["id"]: item for item in data["scene"]}
     ids = ([args.scene] if args.scene else
            [item.strip() for item in args.scenes.split(",") if item.strip()] if args.scenes else
@@ -124,6 +152,27 @@ def focused_demo_window(ipc: JwmIpc) -> dict | None:
 
 def demo_window_by_id(ipc: JwmIpc, window_id: int) -> dict | None:
     return next((item for item in demo_window_list(ipc) if int(item["id"]) == window_id), None)
+
+
+def window_fully_left_of_desktop(window: dict, monitors: list[dict]) -> bool:
+    if not monitors:
+        return False
+    desktop_left = min(int(monitor["x"]) for monitor in monitors)
+    return int(window["x"]) + max(1, int(window["w"])) <= desktop_left
+
+
+def window_intersects_monitor(window: dict, monitors: list[dict]) -> bool:
+    x = int(window["x"])
+    y = int(window["y"])
+    right = x + max(1, int(window["w"]))
+    bottom = y + max(1, int(window["h"]))
+    return any(
+        right > int(monitor["x"])
+        and x < int(monitor["x"]) + int(monitor["w"])
+        and bottom > int(monitor["y"])
+        and y < int(monitor["y"]) + int(monitor["h"])
+        for monitor in monitors
+    )
 
 
 def select_tag(ipc: JwmIpc, tag: int) -> None:
@@ -226,10 +275,58 @@ def execute_action(action: dict, ipc: JwmIpc, windows: DemoWindows, input_driver
     before_windows = demo_window_list(ipc)
     effect_before = ipc.query("get_effect_status") or {}
     dispatched_command = command
+    target_window_id = before_window["id"] if before_window else None
+    state_probe: dict = {}
     if command == "spawn_demo":
         old_count = len(before_windows)
         windows.spawn(int(action.get("count", 1)), str(action.get("content", "grid")), float(action.get("opacity", 1.0)))
         response = {"managed": len(windows.wait_managed(old_count + int(action.get("count", 1))))}
+    elif command == "minimize_demo":
+        if not before_window:
+            raise RuntimeError("minimize_demo requires a focused demo window")
+        target_window_id = int(before_window["id"])
+        response = windows.control(target_window_id, "minimize")
+        monitors = ipc.query("get_monitors") or []
+        minimized_window = wait_until(
+            "demo client remained managed and moved fully offscreen after minimize",
+            lambda: (
+                window
+                if (window := demo_window_by_id(ipc, target_window_id))
+                and not window.get("is_focused")
+                and window_fully_left_of_desktop(window, monitors)
+                else None
+            ),
+        )
+        state_probe = {
+            "managed": True,
+            "focused": bool(minimized_window.get("is_focused")),
+            "fully_left_of_desktop": True,
+        }
+    elif command == "restore_demo":
+        target_window_id = windows.last_minimized_window_id
+        if target_window_id is None:
+            raise RuntimeError("restore_demo requires a preceding minimize_demo action")
+        if not demo_window_by_id(ipc, target_window_id):
+            raise RuntimeError(
+                f"minimized demo window {target_window_id} is no longer managed before restore"
+            )
+        response = windows.control(target_window_id, "restore")
+        monitors = ipc.query("get_monitors") or []
+        restored_window = wait_until(
+            "same demo client became visible and focused after restore",
+            lambda: (
+                window
+                if (window := demo_window_by_id(ipc, target_window_id))
+                and window.get("is_focused")
+                and window_intersects_monitor(window, monitors)
+                else None
+            ),
+        )
+        state_probe = {
+            "managed": True,
+            "focused": bool(restored_window.get("is_focused")),
+            "intersects_monitor": True,
+        }
     elif command == "drag_demo":
         if not before_window: raise RuntimeError("drag_demo requires a focused demo window")
         start = (int(before_window["x"] + before_window["w"] / 2), int(before_window["y"] + 24))
@@ -302,7 +399,8 @@ def execute_action(action: dict, ipc: JwmIpc, windows: DemoWindows, input_driver
         "command": command, "dispatched_command": dispatched_command, "args": args, "response": response,
         "focused_before": before_window["id"] if before_window else None,
         "focused_after": after_window["id"] if after_window else None,
-        "target_window_id": before_window["id"] if before_window else None,
+        "target_window_id": target_window_id,
+        "state_probe": state_probe,
         "window_count_before": len(before_windows),
         "workspace_before": before_workspace,
         "workspace_after": focused_workspace(ipc),
@@ -379,6 +477,23 @@ def run_scene(scene: dict, ipc: JwmIpc, recorder: Recorder, windows: DemoWindows
             assertions[assertion] = any(int(item.get("tags", 0)) & alternate_tag for item in demo_window_list(ipc))
         elif assertion == "effect_changed":
             assertions[assertion] = any(trace["effect_before"] != trace["effect_after"] for trace in traces)
+        elif assertion == "minimize_restore_round_trip":
+            minimized = {
+                trace["target_window_id"]: trace["state_probe"]
+                for trace in traces
+                if trace["command"] == "minimize_demo"
+                and trace["state_probe"].get("managed")
+                and trace["state_probe"].get("fully_left_of_desktop")
+                and not trace["state_probe"].get("focused")
+            }
+            assertions[assertion] = any(
+                trace["command"] == "restore_demo"
+                and trace["target_window_id"] in minimized
+                and trace["state_probe"].get("managed")
+                and trace["state_probe"].get("intersects_monitor")
+                and trace["state_probe"].get("focused")
+                for trace in traces
+            )
         if assertion in assertions and not assertions[assertion]:
             raise AssertionError(f"scene assertion failed: {assertion}")
     write_text_assets(scene, generated)

@@ -16,7 +16,7 @@ use xbar_core::{
     BarEffect, BarRuntime, BarSnapshot, ModelConfig, PlatformEffectHandler, RuntimeUpdate,
     TransportRecoveryConfig, UserAction,
 };
-use xbar_gtk::{BarSurface, BarTheme, Dispatch};
+use xbar_gtk::{BarSurface, BarTheme, Dispatch, DispatchCompletion};
 use xbar_linux_actions::ProcessActionHandler;
 
 const BAR_NAME: &str = "relm_bar";
@@ -30,7 +30,7 @@ pub enum AppInput {
     /// One projected control was activated. The projection carries the action
     /// already, so this bar never has to name a control to know what a click
     /// on it means.
-    Activate(UserAction),
+    Activate(UserAction, Option<DispatchCompletion>),
     PollTransport,
     Tick,
 }
@@ -90,7 +90,9 @@ impl SimpleComponent for AppModel {
         // its action straight over without re-entering the runtime mid-click.
         let dispatch: Dispatch = {
             let sender = sender.clone();
-            Rc::new(move |action| sender.input(AppInput::Activate(action)))
+            Rc::new(move |action, completion| {
+                sender.input(AppInput::Activate(action, completion));
+            })
         };
         let surface = BarSurface::new(&theme, dispatch);
         root.set_child(Some(surface.widget()));
@@ -151,7 +153,12 @@ impl SimpleComponent for AppModel {
 
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>) {
         match message {
-            AppInput::Activate(action) => self.dispatch(action),
+            AppInput::Activate(action, completion) => {
+                let accepted = self.dispatch(action);
+                if let Some(completion) = completion {
+                    let _ = completion.send(accepted);
+                }
+            }
             AppInput::PollTransport => {
                 let update = self.runtime.poll_transport();
                 self.handle_runtime_update(update);
@@ -166,9 +173,11 @@ impl SimpleComponent for AppModel {
 }
 
 impl AppModel {
-    fn dispatch(&mut self, action: UserAction) {
+    fn dispatch(&mut self, action: UserAction) -> bool {
         let update = self.runtime.dispatch(action);
+        let accepted = !update.has_issues();
         self.handle_runtime_update(update);
+        accepted
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {

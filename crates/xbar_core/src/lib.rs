@@ -62,9 +62,9 @@ pub use display::{
     format_transfer_rate, usage_tone, volume_level, volume_level_for_device,
 };
 pub use dock::{
-    DOCK_PREVIEW_LEASE_INTERVAL, DOCK_RETRY_INTERVAL, DockGeometryReport, DockReporter,
-    DockReporterInput, dock_geometry_reports, global_physical_geometry,
-    interactive_dock_geometry_reports,
+    DOCK_PREVIEW_ANCHOR_INTERVAL, DOCK_PREVIEW_LEASE_INTERVAL, DOCK_RETRY_INTERVAL,
+    DockGeometryReport, DockReporter, DockReporterInput, dock_geometry_reports,
+    global_physical_geometry, interactive_dock_geometry_reports,
 };
 pub use frontend::{
     ActionRequest, ActionRequestError, FrontendEnvelope, FrontendPartitions, FrontendSession,
@@ -95,7 +95,8 @@ pub use runtime::{
 pub use toolkit_dock::{
     DOCK_HOVER_SCALE, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_NEIGHBOUR_SCALE,
     DOCK_OVERFLOW_WIDTH, DOCK_SECOND_NEIGHBOUR_SCALE, DOCK_SEPARATOR_WIDTH, DOCK_SHELF_PADDING,
-    DOCK_SLOT_WIDTH, DockBridge, shelf_width as toolkit_dock_shelf_width,
+    DOCK_SLOT_WIDTH, DockBridge, DockItemBinding, dock_wake_delay,
+    shelf_width as toolkit_dock_shelf_width,
 };
 
 #[cfg(all(feature = "runtime-linux", feature = "transport-shared"))]

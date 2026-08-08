@@ -17,19 +17,33 @@ use crate::backend::wayland_x11::backend::WaylandX11Backend;
 use crate::backend::x11rb::backend::X11rbBackend;
 #[cfg(feature = "backend-xcb")]
 use crate::backend::xcb::backend::XcbBackend;
-use crate::config::{BackendFamily, Config, ConfigDiagnostics, ConfigError, set_backend_family};
-use log::{error, info};
+use crate::config::{
+    BackendFamily, CONFIG, Config, ConfigDiagnostics, ConfigError, set_backend_family,
+};
+use crate::jwm::scratchpad_handoff::{
+    LEGACY_SCRATCHPAD_HANDOFF_ENV, SCRATCHPAD_HANDOFF_ENV, ScratchpadRestartHandoff,
+};
+use log::{error, info, warn};
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 pub const BACKEND_ENV: &str = "JWM_BACKEND";
 pub const BENCHMARK_ENV: &str = "JWM_BENCHMARK";
 pub const BENCHMARK_WARMUP_ENV: &str = "JWM_BENCHMARK_WARMUP";
+const RESTART_MARKER_ENV: &str = "JWM_RESTARTING";
+const RESTART_BOOTSTRAP_BACKOFFS: [Duration; 4] = [
+    Duration::from_millis(20),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendChoice {
@@ -303,6 +317,138 @@ fn create_backend(choice: BackendChoice) -> Result<Box<dyn Backend>, Box<dyn std
     )?)
 }
 
+/// Temporarily expose restart intent to backends that must distinguish their
+/// own inherited display socket from a genuinely nested session. The marker is
+/// restored as soon as backend construction finishes, so the replacement WM's
+/// event loop and subsequently spawned children do not inherit a one-shot
+/// bootstrap signal.
+struct RestartMarkerGuard {
+    previous: Option<OsString>,
+}
+
+impl RestartMarkerGuard {
+    fn install() -> Self {
+        let previous = env::var_os(RESTART_MARKER_ENV);
+        // SAFETY: application bootstrap owns process-environment mutation at
+        // this boundary, before the new backend and its worker threads exist.
+        unsafe { env::set_var(RESTART_MARKER_ENV, "1") };
+        Self { previous }
+    }
+}
+
+impl Drop for RestartMarkerGuard {
+    fn drop(&mut self) {
+        // SAFETY: this guard is scoped to synchronous backend construction and
+        // is dropped before the replacement JWM starts its event loop.
+        unsafe {
+            if let Some(previous) = self.previous.as_ref() {
+                env::set_var(RESTART_MARKER_ENV, previous);
+            } else {
+                env::remove_var(RESTART_MARKER_ENV);
+            }
+        }
+    }
+}
+
+fn take_restart_intent_from_environment() -> bool {
+    let marker = env::var_os(RESTART_MARKER_ENV);
+    // Consume the exec marker once at the composition root. A narrowly scoped
+    // guard reinstalls it around backend construction when it is authoritative.
+    // SAFETY: this runs before any backend or application worker is created.
+    unsafe { env::remove_var(RESTART_MARKER_ENV) };
+    let restarting = marker.as_deref() == Some(OsStr::new("1"));
+    if marker.is_some() && !restarting {
+        warn!("[application] ignoring invalid {RESTART_MARKER_ENV} marker");
+    }
+    restarting
+}
+
+fn reload_validated_global_config(choice: BackendChoice) -> Result<(), ConfigError> {
+    let path = config_path(choice);
+    if !path.exists() {
+        // There is no disk snapshot to install. Keeping the current validated
+        // in-memory value is safer for an in-process recovery than silently
+        // replacing it with unrelated defaults.
+        return Ok(());
+    }
+
+    let config = Config::load_from_file(&path)?;
+    // CONFIG's Lazy initializer also resolves a backend-specific path. Set the
+    // family before the first possible access, especially in a freshly exec'd
+    // Wayland process where X11 would otherwise be the compatibility default.
+    set_backend_family(choice.family());
+    CONFIG.store(Arc::new(config));
+    Ok(())
+}
+
+fn create_backend_for_startup(
+    choice: BackendChoice,
+    restart_intent: bool,
+) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
+    let _restart_marker = restart_intent.then(RestartMarkerGuard::install);
+    create_backend(choice)
+}
+
+fn bootstrap_jwm_instance(
+    options: ApplicationOptions,
+    scratchpad_handoff: Option<&ScratchpadRestartHandoff>,
+    restart_intent: bool,
+) -> Result<(Box<dyn Backend>, Jwm), Box<dyn std::error::Error>> {
+    if restart_intent {
+        // A real exec would initialize CONFIG from disk in the replacement
+        // process. Do the same after exec(2) fails instead of accidentally
+        // carrying the old process's ArcSwap value into a fresh backend.
+        reload_validated_global_config(options.backend)?;
+    }
+
+    info!(
+        "[application] starting JWM instance with backend {}",
+        options.backend.as_str()
+    );
+    let mut backend = create_backend_for_startup(options.backend, restart_intent)?;
+    backend.check_existing_wm().backend_context(
+        options.backend.as_str(),
+        ErrorBoundary::Display,
+        "acquire window-manager selection",
+    )?;
+
+    let mut jwm = Jwm::new_with_runtime_backend(&mut *backend, options.backend.as_str())?;
+    if let Some(handoff) = scratchpad_handoff {
+        // Borrow the immutable handoff for every bounded attempt. Ownership is
+        // consumed only after a complete setup succeeds.
+        jwm.install_pending_scratchpad_restart_handoff(handoff);
+    }
+    jwm.setup(&mut *backend)?;
+    Ok((backend, jwm))
+}
+
+fn run_restart_bootstrap_with_retry<T>(
+    mut attempt: impl FnMut() -> Result<T, Box<dyn std::error::Error>>,
+    mut wait: impl FnMut(Duration),
+) -> Result<T, Box<dyn std::error::Error>> {
+    let total_attempts = RESTART_BOOTSTRAP_BACKOFFS.len() + 1;
+    for (failure_index, delay) in RESTART_BOOTSTRAP_BACKOFFS.iter().copied().enumerate() {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                warn!(
+                    "[application] restart bootstrap attempt {}/{} failed: {error}; retrying in {} ms",
+                    failure_index + 1,
+                    total_attempts,
+                    delay.as_millis()
+                );
+                wait(delay);
+            }
+        }
+    }
+
+    attempt().map_err(|error| {
+        Box::new(std::io::Error::other(format!(
+            "restart bootstrap exhausted {total_attempts} attempts: {error}"
+        ))) as Box<dyn std::error::Error>
+    })
+}
+
 #[derive(Debug)]
 struct RestartCommand {
     executable: OsString,
@@ -320,11 +466,118 @@ impl RestartCommand {
         }
     }
 
-    fn exec(&self) -> std::io::Error {
-        Command::new(&self.executable)
+    fn command(&self, scratchpad_handoff: Option<&str>) -> Command {
+        let mut command = Command::new(&self.executable);
+        command
             .args(&self.arguments)
-            .env("JWM_RESTARTING", "1")
-            .exec()
+            .env(RESTART_MARKER_ENV, "1")
+            // Never accidentally forward a payload inherited from an older
+            // process. Only the snapshot captured for this exact exec may be
+            // installed below.
+            .env_remove(SCRATCHPAD_HANDOFF_ENV)
+            .env_remove(LEGACY_SCRATCHPAD_HANDOFF_ENV);
+        if let Some(payload) = scratchpad_handoff {
+            command.env(SCRATCHPAD_HANDOFF_ENV, payload);
+        }
+        command
+    }
+
+    fn exec(&self, scratchpad_handoff: Option<&str>) -> std::io::Error {
+        self.command(scratchpad_handoff).exec()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartPreparationStage {
+    FlushLayout,
+    ValidateConfig,
+    CaptureScratchpads,
+    PrepareClients,
+}
+
+impl RestartPreparationStage {
+    const ORDER: [Self; 4] = [
+        Self::FlushLayout,
+        Self::ValidateConfig,
+        Self::CaptureScratchpads,
+        Self::PrepareClients,
+    ];
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::FlushLayout => "layout persistence",
+            Self::ValidateConfig => "configuration validation",
+            Self::CaptureScratchpads => "scratchpad identity handoff",
+            Self::PrepareClients => "X11 client discovery handoff",
+        }
+    }
+}
+
+/// Run the cancellable restart stages in their safety order. The caller keeps
+/// every captured proof in local storage and crosses into cleanup only after
+/// this function has visited the complete sequence.
+fn run_restart_preparation_steps<E>(
+    mut step: impl FnMut(RestartPreparationStage) -> Result<(), E>,
+) -> Result<(), (RestartPreparationStage, E)> {
+    for stage in RestartPreparationStage::ORDER {
+        step(stage).map_err(|error| (stage, error))?;
+    }
+    Ok(())
+}
+
+/// A successful handoff preflight is the restart transaction's commit point.
+/// Cleanup after that point is best-effort: dropping the old backend releases
+/// its remaining display resources, while aborting here would leave clients in
+/// restart-preserved hidden geometry with no replacement window manager.
+fn execute_restart_after_cleanup<T>(
+    cleanup_result: Result<(), Box<dyn std::error::Error>>,
+    executor: impl FnOnce() -> T,
+) -> T {
+    if let Err(error) = cleanup_result {
+        error!(
+            "[application] restart cleanup was incomplete after successful handoff: {error}; continuing with exec"
+        );
+    }
+    executor()
+}
+
+fn decode_restart_handoff(
+    restarting: bool,
+    payload: Option<&OsStr>,
+    current_pid: u32,
+) -> Result<Option<ScratchpadRestartHandoff>, String> {
+    // A payload without JWM's exec marker is ordinary inherited environment
+    // residue and has no authority over newly managed windows.
+    if !restarting {
+        return Ok(None);
+    }
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let payload = payload
+        .to_str()
+        .ok_or_else(|| format!("{SCRATCHPAD_HANDOFF_ENV} is not valid UTF-8"))?;
+    ScratchpadRestartHandoff::decode_for_pid(payload, current_pid)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn take_restart_handoff_from_environment(restarting: bool) -> Option<ScratchpadRestartHandoff> {
+    let payload = env::var_os(SCRATCHPAD_HANDOFF_ENV);
+    // This is called at the process composition root before a backend (and
+    // its worker threads) is constructed. Consuming the value prevents JWM's
+    // own children or a later restart from inheriting a replayable payload.
+    unsafe { env::remove_var(SCRATCHPAD_HANDOFF_ENV) };
+    // V1 never carried pending launches. It is deliberately not decoded by
+    // the strict V2 reader, but remove it so an upgraded exec cannot leak the
+    // obsolete one-shot capability to children.
+    unsafe { env::remove_var(LEGACY_SCRATCHPAD_HANDOFF_ENV) };
+    match decode_restart_handoff(restarting, payload.as_deref(), std::process::id()) {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            error!("[application] rejecting scratchpad restart handoff: {error}");
+            None
+        }
     }
 }
 
@@ -336,40 +589,143 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// Run JWM until it exits or replaces itself during a restart.
 pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::error::Error>> {
     let restart_command = RestartCommand::current();
+    let inherited_restart_intent = take_restart_intent_from_environment();
+    let mut pending_scratchpad_handoff =
+        take_restart_handoff_from_environment(inherited_restart_intent);
+    let mut restart_bootstrap = inherited_restart_intent;
 
     loop {
-        info!(
-            "[application] starting JWM instance with backend {}",
-            options.backend.as_str()
-        );
-        let mut backend = create_backend(options.backend)?;
+        let startup = || {
+            bootstrap_jwm_instance(
+                options,
+                pending_scratchpad_handoff.as_ref(),
+                restart_bootstrap,
+            )
+        };
+        let (mut backend, mut jwm) = if restart_bootstrap {
+            run_restart_bootstrap_with_retry(startup, std::thread::sleep)?
+        } else {
+            startup()?
+        };
 
-        backend.check_existing_wm().backend_context(
-            options.backend.as_str(),
-            ErrorBoundary::Display,
-            "acquire window-manager selection",
-        )?;
-
-        let mut jwm = Jwm::new_with_runtime_backend(&mut *backend, options.backend.as_str())?;
-        jwm.setup(&mut *backend)?;
-        jwm.setup_initial_windows(&mut *backend)?;
+        // `Jwm::setup` owns the one authoritative root-child scan. Running a
+        // second QueryTree pass here both duplicates management work and can
+        // turn a successful adoption into startup failure if the redundant
+        // round-trip races a disconnect.
+        if let Some(handoff) = pending_scratchpad_handoff.take() {
+            jwm.adopt_scratchpad_restart_handoff(&*backend, handoff);
+        }
         configure_benchmark(&mut *backend, options.benchmark);
-        jwm.run(&mut *backend)?;
-        jwm.cleanup(&mut *backend)?;
 
-        if jwm.is_restarting.load(Ordering::SeqCst) {
+        // Exit preparation is fail-closed. Keep this JWM and its ClientKeys
+        // alive when either restart identity encoding or the bounded
+        // swallowed-parent remap cannot be completed. In particular, cleanup
+        // must not drop the only registry that knows an unmapped parent.
+        let (prepared_scratchpad_handoff, prepared_restart_clients, prepared_normal_exit_handoff) = loop {
+            jwm.run(&mut *backend)?;
+            let restarting = jwm.is_restarting.load(Ordering::SeqCst);
+            if restarting {
+                let mut prepared = None;
+                let mut restart_clients = None;
+                let preparation = run_restart_preparation_steps(
+                    |stage| -> Result<(), Box<dyn std::error::Error>> {
+                        match stage {
+                            RestartPreparationStage::FlushLayout => {
+                                jwm.flush_layout_persistence_on_exit()?;
+                            }
+                            RestartPreparationStage::ValidateConfig => {
+                                preflight_config(options.backend)?;
+                            }
+                            RestartPreparationStage::CaptureScratchpads => {
+                                let handoff = jwm.capture_scratchpad_restart_handoff(&*backend)?;
+                                let payload = handoff.encode()?;
+                                prepared = Some((handoff, payload));
+                            }
+                            RestartPreparationStage::PrepareClients => {
+                                restart_clients = Some(jwm.prepare_restart_clients(&mut *backend)?);
+                            }
+                        }
+                        Ok(())
+                    },
+                );
+                if let Err((stage, error)) = preparation {
+                    error!(
+                        "[application] restart cancelled during {}: {error}",
+                        stage.description()
+                    );
+                    jwm.is_restarting.store(false, Ordering::SeqCst);
+                    jwm.running.store(true, Ordering::SeqCst);
+                    continue;
+                }
+                break (prepared, restart_clients, None);
+            }
+
+            match jwm.prepare_normal_exit_handoff(&mut *backend) {
+                Ok(handoff) => break (None, None, Some(handoff)),
+                Err(error) => {
+                    if error.resume_safe() {
+                        // Phase A restored every touched client in reverse
+                        // order and verified the resulting server state. Keep
+                        // this backend and its ClientKeys alive instead of
+                        // crossing into destructive cleanup.
+                        error!(
+                            "[application] shutdown cancelled; verified rollback restored the active WM: {error}"
+                        );
+                    } else {
+                        // Dropping the backend here would lose the remaining
+                        // WM/compositor ownership and any pinned Iconic
+                        // snapshot. The least destructive fallback is to keep
+                        // servicing this display with the same JWM while
+                        // making the unconfirmed rollback explicit. A future
+                        // exit request retries the idempotent preflight.
+                        error!(
+                            "[application] CRITICAL: shutdown cancelled after an unconfirmed rollback; retaining the active WM and refusing destructive cleanup: {error}"
+                        );
+                    }
+                    jwm.is_restarting.store(false, Ordering::SeqCst);
+                    jwm.running.store(true, Ordering::SeqCst);
+                }
+            }
+        };
+        let restarting = jwm.is_restarting.load(Ordering::SeqCst);
+        let cleanup_result = if restarting {
+            let _restart_clients = prepared_restart_clients
+                .expect("restart cannot cross cleanup without a client preflight proof");
+            jwm.cleanup(&mut *backend)
+        } else {
+            jwm.cleanup_after_normal_exit_handoff(
+                &mut *backend,
+                prepared_normal_exit_handoff
+                    .expect("normal exit cannot cross cleanup without a handoff proof"),
+            )
+        };
+
+        if restarting {
             info!("[application] restarting via exec");
+            let (handoff, payload) = prepared_scratchpad_handoff
+                .expect("a restart cannot pass the handoff preparation guard without a payload");
             drop(jwm);
             drop(backend);
 
-            let error = restart_command.exec();
+            let error = execute_restart_after_cleanup(cleanup_result, || {
+                restart_command.exec(Some(&payload))
+            });
             error!("[application] exec failed: {error}; falling back to in-process restart");
+            // `exec` failure leaves us in the original process. The old JWM
+            // is gone, but the immutable identity table reconstructs the same
+            // scratchpad mapping after the fallback instance adopts its
+            // windows. Swallowed parents need no payload: exit preflight
+            // already made that bounded set viewable, so the new backend's
+            // ordinary startup scan will find them too.
+            pending_scratchpad_handoff = Some(handoff);
+            restart_bootstrap = true;
             continue;
         }
 
         if let Err(error) = Command::new("jwm-tool").arg("quit").spawn() {
             error!("[application] failed to quit jwm daemon: {error}");
         }
+        cleanup_result?;
         return Ok(());
     }
 }
@@ -431,11 +787,46 @@ fn configure_benchmark<B: CompositorBenchmark + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::{
-        ApplicationOptions, BackendChoice, BenchmarkRequest, config_path, configure_benchmark,
-        parse_benchmark,
+        ApplicationOptions, BackendChoice, BenchmarkRequest, RESTART_BOOTSTRAP_BACKOFFS,
+        RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage, config_path,
+        configure_benchmark, decode_restart_handoff, execute_restart_after_cleanup,
+        parse_benchmark, run_restart_bootstrap_with_retry, run_restart_preparation_steps,
     };
     use crate::backend::api::CompositorBenchmark;
     use crate::config::BackendFamily;
+    use crate::core::state::WMState;
+    use crate::jwm::scratchpad_handoff::{
+        LEGACY_SCRATCHPAD_HANDOFF_ENV, SCRATCHPAD_HANDOFF_ENV, ScratchpadRestartHandoff,
+    };
+    use std::cell::Cell;
+    use std::ffi::{OsStr, OsString};
+    use std::io;
+
+    const APPLICATION_SRC: &str = include_str!("application.rs");
+
+    fn function_body_after<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing `{signature}`"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset + 1)
+            .unwrap_or_else(|| panic!("missing body for `{signature}`"));
+        let mut depth = 1usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated body for `{signature}`");
+    }
 
     #[derive(Default)]
     struct BenchmarkSpy {
@@ -524,6 +915,97 @@ mod tests {
     }
 
     #[test]
+    fn application_startup_delegates_initial_window_scan_to_setup_once() {
+        let startup = function_body_after(APPLICATION_SRC, "fn bootstrap_jwm_instance");
+        assert_eq!(
+            startup.matches("jwm.setup(&mut *backend)?;").count(),
+            1,
+            "one bootstrap attempt must enter Jwm::setup exactly once"
+        );
+        assert!(
+            !startup.contains("jwm.setup_initial_windows("),
+            "Jwm::setup already owns QueryTree adoption; a second application-level scan can turn a successful adoption into startup failure"
+        );
+
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        assert!(application.contains("bootstrap_jwm_instance("));
+        assert!(!application.contains("jwm.setup_initial_windows("));
+    }
+
+    #[test]
+    fn restart_bootstrap_retry_is_bounded_backed_off_and_keeps_handoff_immutable() {
+        let handoff = ScratchpadRestartHandoff::capture(
+            &Default::default(),
+            &WMState::new(),
+            &Default::default(),
+            std::time::Instant::now(),
+            8123,
+        )
+        .unwrap();
+        let expected = handoff.clone();
+        let attempts = Cell::new(0usize);
+        let mut waits = Vec::new();
+
+        let adopted = run_restart_bootstrap_with_retry(
+            || {
+                assert_eq!(handoff, expected, "retry must only borrow the handoff");
+                let attempt = attempts.get() + 1;
+                attempts.set(attempt);
+                if attempt < 4 {
+                    Err(Box::new(io::Error::other("injected bootstrap failure"))
+                        as Box<dyn std::error::Error>)
+                } else {
+                    Ok(handoff.clone())
+                }
+            },
+            |delay| waits.push(delay),
+        )
+        .unwrap();
+
+        assert_eq!(adopted, expected);
+        assert_eq!(attempts.get(), 4);
+        assert_eq!(waits, RESTART_BOOTSTRAP_BACKOFFS[..3]);
+    }
+
+    #[test]
+    fn restart_bootstrap_retry_returns_the_final_failure_without_a_hot_loop() {
+        let attempts = Cell::new(0usize);
+        let mut waits = Vec::new();
+        let error = run_restart_bootstrap_with_retry::<()>(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(Box::new(io::Error::other("persistent bootstrap failure")))
+            },
+            |delay| waits.push(delay),
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts.get(), RESTART_BOOTSTRAP_BACKOFFS.len() + 1);
+        assert_eq!(waits, RESTART_BOOTSTRAP_BACKOFFS);
+        assert!(error.to_string().contains("exhausted"));
+        assert!(error.to_string().contains("persistent bootstrap failure"));
+    }
+
+    #[test]
+    fn restart_bootstrap_scopes_marker_and_reloads_config_before_backend_creation() {
+        let intent =
+            function_body_after(APPLICATION_SRC, "fn take_restart_intent_from_environment");
+        assert!(intent.contains("env::remove_var(RESTART_MARKER_ENV)"));
+
+        let create = function_body_after(APPLICATION_SRC, "fn create_backend_for_startup");
+        assert!(create.contains("restart_intent.then(RestartMarkerGuard::install)"));
+
+        let bootstrap = function_body_after(APPLICATION_SRC, "fn bootstrap_jwm_instance");
+        let reload = bootstrap
+            .find("reload_validated_global_config(options.backend)?")
+            .expect("restart bootstrap must load and store a validated disk config");
+        let create = bootstrap
+            .find("create_backend_for_startup(options.backend, restart_intent)?")
+            .expect("restart bootstrap must construct its backend");
+        assert!(reload < create, "validated CONFIG must be installed first");
+    }
+
+    #[test]
     fn benchmark_configuration_uses_narrow_capability() {
         let mut backend = BenchmarkSpy::default();
         configure_benchmark(&mut backend, Some(BenchmarkRequest::new(120, 30).unwrap()));
@@ -585,5 +1067,123 @@ mod tests {
             BenchmarkRequest::new(1, BenchmarkRequest::MAX_WARMUP_FRAMES + 1).unwrap_err();
         assert!(warmup_error.contains("warm-up"));
         assert!(warmup_error.contains(&BenchmarkRequest::MAX_WARMUP_FRAMES.to_string()));
+    }
+
+    #[test]
+    fn restart_handoff_requires_marker_and_same_exec_pid() {
+        let handoff = ScratchpadRestartHandoff::capture(
+            &Default::default(),
+            &WMState::new(),
+            &Default::default(),
+            std::time::Instant::now(),
+            8123,
+        )
+        .unwrap();
+        let payload = handoff.encode().unwrap();
+
+        assert_eq!(
+            decode_restart_handoff(false, Some(OsStr::new(&payload)), 8123).unwrap(),
+            None,
+            "ordinary startup must ignore inherited handoff residue"
+        );
+        assert_eq!(
+            decode_restart_handoff(false, Some(OsStr::new("malformed residue")), 8123).unwrap(),
+            None
+        );
+        assert!(decode_restart_handoff(true, Some(OsStr::new(&payload)), 8124).is_err());
+        assert_eq!(
+            decode_restart_handoff(true, Some(OsStr::new(&payload)), 8123)
+                .unwrap()
+                .unwrap(),
+            handoff
+        );
+    }
+
+    #[test]
+    fn restart_command_replaces_inherited_handoff_instead_of_forwarding_it() {
+        let restart = RestartCommand {
+            executable: OsString::from("jwm"),
+            arguments: vec![OsString::from("--example")],
+        };
+
+        let without_payload = restart.command(None);
+        let removed = without_payload
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(SCRATCHPAD_HANDOFF_ENV));
+        assert!(
+            removed.is_some(),
+            "the inherited payload needs an explicit tombstone"
+        );
+        assert_eq!(removed.unwrap().1, None);
+        let legacy_removed = without_payload
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(LEGACY_SCRATCHPAD_HANDOFF_ENV));
+        assert!(legacy_removed.is_some());
+        assert_eq!(legacy_removed.unwrap().1, None);
+        assert_eq!(
+            without_payload
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(RESTART_MARKER_ENV))
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("1"))
+        );
+
+        let with_payload = restart.command(Some("bounded-payload"));
+        assert_eq!(
+            with_payload
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(SCRATCHPAD_HANDOFF_ENV))
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("bounded-payload"))
+        );
+    }
+
+    #[test]
+    fn restart_executor_runs_after_post_handoff_cleanup_failure() {
+        let invoked = Cell::new(false);
+        let cleanup_result: Result<(), Box<dyn std::error::Error>> =
+            Err(Box::new(io::Error::other("injected X11 cleanup failure")));
+
+        let result = execute_restart_after_cleanup(cleanup_result, || {
+            invoked.set(true);
+            "exec attempted"
+        });
+
+        assert!(invoked.get());
+        assert_eq!(result, "exec attempted");
+    }
+
+    #[test]
+    fn restart_preparation_uses_the_commit_safe_order() {
+        let mut observed = Vec::new();
+        run_restart_preparation_steps(|stage| {
+            observed.push(stage);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert_eq!(observed, RestartPreparationStage::ORDER);
+    }
+
+    #[test]
+    fn restart_preparation_failure_returns_to_the_loop_before_later_stages() {
+        for (failed_index, &failed_stage) in RestartPreparationStage::ORDER.iter().enumerate() {
+            let mut observed = Vec::new();
+            let result = run_restart_preparation_steps(|stage| {
+                observed.push(stage);
+                if stage == failed_stage {
+                    Err("injected preflight failure")
+                } else {
+                    Ok(())
+                }
+            });
+
+            assert_eq!(result, Err((failed_stage, "injected preflight failure")));
+            assert_eq!(
+                observed,
+                RestartPreparationStage::ORDER[..=failed_index],
+                "no post-failure stage may cross the cleanup commit point"
+            );
+        }
     }
 }

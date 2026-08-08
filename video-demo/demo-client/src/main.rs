@@ -7,10 +7,14 @@ use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
-    AtomEnum, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask, Gcontext, PropMode,
-    Rectangle, Window, WindowClass,
+    Atom, AtomEnum, ClientMessageEvent, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask,
+    Gcontext, PropMode, Rectangle, Window, WindowClass,
 };
 use x11rb::wrapper::ConnectionExt as _;
+use x11rb::x11_utils::Serialize;
+
+const ICONIC_STATE: u32 = 3;
+const EWMH_SOURCE_APPLICATION: u32 = 1;
 
 #[derive(Parser, Debug)]
 #[command(about = "Deterministic X11 windows for JWM video automation")]
@@ -42,6 +46,7 @@ struct Args {
 enum Control {
     Close,
     Minimize,
+    Restore,
     Title(String),
     Theme(String),
     Urgent(bool),
@@ -83,6 +88,33 @@ fn set_urgent<C: Connection>(
         hints,
         &[flags, 0, 0, 0, 0, 0, 0, 0, 0],
     )?;
+    Ok(())
+}
+
+fn root_wm_request_mask() -> EventMask {
+    EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY
+}
+
+fn minimize_request(window: Window, wm_change_state: Atom) -> ClientMessageEvent {
+    ClientMessageEvent::new(32, window, wm_change_state, [ICONIC_STATE, 0, 0, 0, 0])
+}
+
+fn restore_request(window: Window, net_active_window: Atom) -> ClientMessageEvent {
+    ClientMessageEvent::new(
+        32,
+        window,
+        net_active_window,
+        [EWMH_SOURCE_APPLICATION, x11rb::CURRENT_TIME, 0, 0, 0],
+    )
+}
+
+fn send_root_wm_request<C: Connection>(
+    conn: &C,
+    root: Window,
+    event: ClientMessageEvent,
+) -> Result<(), Box<dyn std::error::Error>> {
+    conn.send_event(false, root, root_wm_request_mask(), event.serialize())?;
+    conn.flush()?;
     Ok(())
 }
 
@@ -206,6 +238,7 @@ fn control_server(path: PathBuf, tx: mpsc::Sender<Control>) -> std::io::Result<(
             let command = match value.get("command").and_then(|v| v.as_str()) {
                 Some("close") => Some(Control::Close),
                 Some("minimize") => Some(Control::Minimize),
+                Some("restore") => Some(Control::Restore),
                 Some("title") => value
                     .get("value")
                     .and_then(|v| v.as_str())
@@ -271,6 +304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let wm_protocols = intern(&conn, b"WM_PROTOCOLS")?;
     let wm_delete = intern(&conn, b"WM_DELETE_WINDOW")?;
+    let wm_change_state = intern(&conn, b"WM_CHANGE_STATE")?;
+    let net_active_window = intern(&conn, b"_NET_ACTIVE_WINDOW")?;
     conn.change_property32(
         PropMode::REPLACE,
         window,
@@ -312,9 +347,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match control {
                 Control::Close => running = false,
                 Control::Minimize => {
-                    conn.unmap_window(window)?;
-                    conn.flush()?;
+                    send_root_wm_request(
+                        &conn,
+                        screen.root,
+                        minimize_request(window, wm_change_state),
+                    )?;
                 }
+                Control::Restore => send_root_wm_request(
+                    &conn,
+                    screen.root,
+                    restore_request(window, net_active_window),
+                )?,
                 Control::Title(value) => {
                     title = value;
                     set_title(&conn, window, &title)?;
@@ -356,4 +399,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     conn.flush()?;
     let _ = std::fs::remove_file(Path::new(&socket));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn minimize_uses_icccm_change_state_message() {
+        let window = 0x0102_0304;
+        let atom = 0x0506_0708;
+        let event = minimize_request(window, atom);
+
+        assert_eq!(event.format, 32);
+        assert_eq!(event.window, window);
+        assert_eq!(event.type_, atom);
+        assert_eq!(event.data.as_data32(), [ICONIC_STATE, 0, 0, 0, 0]);
+        assert_eq!(
+            root_wm_request_mask(),
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY
+        );
+    }
+
+    #[test]
+    fn restore_uses_ewmh_active_window_message() {
+        let window = 0x0102_0304;
+        let atom = 0x0506_0708;
+        let event = restore_request(window, atom);
+
+        assert_eq!(event.format, 32);
+        assert_eq!(event.window, window);
+        assert_eq!(event.type_, atom);
+        assert_eq!(
+            event.data.as_data32(),
+            [EWMH_SOURCE_APPLICATION, x11rb::CURRENT_TIME, 0, 0, 0]
+        );
+    }
 }

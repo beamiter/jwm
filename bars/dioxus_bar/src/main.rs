@@ -18,9 +18,9 @@ use xbar_core::logging::init as initialize_logging;
 use xbar_core::presentation::{Palette, Rgba};
 use xbar_core::{
     AudioDeviceInfo, BarEffect, BarRuntime, BarSnapshot, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH,
-    DOCK_SLOT_WIDTH, DockBridge, LayoutId, MinimizedWindow, ModelConfig, MonitorGeometry, Percent,
-    PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails, TagId, TagState,
-    TransportRecoveryConfig, UserAction, WindowToken,
+    DOCK_SLOT_WIDTH, DockBridge, DockItemBinding, LayoutId, MinimizedWindow, ModelConfig,
+    MonitorGeometry, Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails,
+    TagId, TagState, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
 
@@ -111,11 +111,14 @@ impl RuntimeOwner {
         (update, self.runtime.snapshot())
     }
 
-    fn poll_transport(&mut self, scale_factor: f64) -> (RuntimeUpdate, BarSnapshot) {
+    fn poll_transport(&mut self, scale_factor: f64) -> (RuntimeUpdate, BarSnapshot, Duration) {
         let mut update = self.runtime.poll_transport();
         let dock_update = self.service_dock(scale_factor);
         update.merge(dock_update);
-        (update, self.runtime.snapshot())
+        let wait = self
+            .dock
+            .next_wake_delay(Instant::now(), TRANSPORT_POLL_INTERVAL);
+        (update, self.runtime.snapshot(), wait)
     }
 
     fn dispatch(&mut self, action: UserAction) -> (RuntimeUpdate, BarSnapshot) {
@@ -150,45 +153,50 @@ impl RuntimeOwner {
 
     fn dock_enter(
         &mut self,
-        token: WindowToken,
-        wm_session_id: u64,
+        binding: DockItemBinding,
         scale_factor: f64,
     ) -> (RuntimeUpdate, BarSnapshot) {
-        let _ = self.dock.enter(token, wm_session_id);
+        let _ = self.dock.enter(binding);
         let update = self.service_dock(scale_factor);
         (update, self.runtime.snapshot())
     }
 
     fn dock_leave(
         &mut self,
-        token: WindowToken,
-        wm_session_id: u64,
+        binding: DockItemBinding,
         scale_factor: f64,
     ) -> (RuntimeUpdate, BarSnapshot) {
-        let _ = self.dock.leave(token, wm_session_id);
+        let _ = self.dock.leave(binding);
         let update = self.service_dock(scale_factor);
         (update, self.runtime.snapshot())
     }
 
     fn dock_restore(
         &mut self,
-        token: WindowToken,
-        wm_session_id: u64,
+        binding: DockItemBinding,
         scale_factor: f64,
     ) -> (RuntimeUpdate, BarSnapshot) {
-        let _ = self.dock.request_restore(token, wm_session_id);
+        let _ = self.dock.request_restore(binding);
         let update = self.service_dock(scale_factor);
         (update, self.runtime.snapshot())
     }
 
-    fn dock_ui(&self) -> (Vec<(MinimizedWindow, f32)>, bool, bool, f32) {
+    fn dock_ui(
+        &self,
+    ) -> (
+        Vec<(MinimizedWindow, f32, DockItemBinding)>,
+        bool,
+        bool,
+        f32,
+    ) {
         (
             self.dock
                 .visible_windows()
                 .cloned()
-                .map(|window| {
+                .filter_map(|window| {
                     let scale = self.dock.scale_for(window.token);
-                    (window, scale)
+                    let binding = self.dock.item_binding(window.token)?;
+                    Some((window, scale, binding))
                 })
                 .collect(),
             self.dock.overflow(),
@@ -760,6 +768,7 @@ fn App() -> Element {
     let mut mode_css = use_signal(|| mode_style(translucent_at_launch));
     let mut pressed_button = use_signal(|| None::<usize>);
     let runtime = use_signal(move || Arc::new(Mutex::new(RuntimeOwner::new(shared_path))));
+    let dock_wake = use_hook(|| Arc::new(tokio::sync::Notify::new()));
     let initial_runtime = runtime.read().clone();
     let mut bar_snapshot = use_signal(move || {
         initial_runtime
@@ -784,9 +793,11 @@ fn App() -> Element {
     // crosses into Dioxus reactive state.
     use_effect({
         let runtime = runtime.read().clone();
+        let dock_wake = Arc::clone(&dock_wake);
         let window = window.clone();
         move || {
             let runtime = Arc::clone(&runtime);
+            let dock_wake = Arc::clone(&dock_wake);
             let window = window.clone();
             let mut observed_scale_factor = window.scale_factor();
             spawn(async move {
@@ -809,6 +820,7 @@ fn App() -> Element {
                         }
 
                         bar_snapshot.set(snapshot);
+                        dock_wake.notify_one();
                     } else {
                         error!("xbar runtime mutex was poisoned");
                     }
@@ -822,9 +834,11 @@ fn App() -> Element {
     // owner, so a replaced shared-memory endpoint is rediscovered promptly.
     use_effect({
         let runtime = runtime.read().clone();
+        let dock_wake = Arc::clone(&dock_wake);
         let window = window.clone();
         move || {
             let runtime = Arc::clone(&runtime);
+            let dock_wake = Arc::clone(&dock_wake);
             let window = window.clone();
             spawn(async move {
                 loop {
@@ -832,16 +846,21 @@ fn App() -> Element {
                         .lock()
                         .ok()
                         .map(|mut runtime| runtime.poll_transport(window.scale_factor()));
-                    if let Some((update, snapshot)) = result {
+                    let wait = if let Some((update, snapshot, wait)) = result {
                         let needs_redraw = update.needs_redraw();
                         handle_runtime_update(update, &window, window_baseline);
                         if needs_redraw {
                             bar_snapshot.set(snapshot);
                         }
+                        wait
                     } else {
                         error!("xbar runtime mutex was poisoned");
+                        TRANSPORT_POLL_INTERVAL
+                    };
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {}
+                        () = dock_wake.notified() => {}
                     }
-                    tokio::time::sleep(TRANSPORT_POLL_INTERVAL).await;
                 }
             });
         }
@@ -866,43 +885,49 @@ fn App() -> Element {
 
     let dispatch_dock_enter = {
         let runtime = runtime.read().clone();
+        let dock_wake = Arc::clone(&dock_wake);
         let window = window.clone();
-        use_callback(move |(token, session): (WindowToken, u64)| {
+        use_callback(move |binding: DockItemBinding| {
             let result = runtime
                 .lock()
                 .ok()
-                .map(|mut runtime| runtime.dock_enter(token, session, window.scale_factor()));
+                .map(|mut runtime| runtime.dock_enter(binding, window.scale_factor()));
             if let Some((update, snapshot)) = result {
                 handle_runtime_update(update, &window, window_baseline);
                 bar_snapshot.set(snapshot);
+                dock_wake.notify_one();
             }
         })
     };
     let dispatch_dock_leave = {
         let runtime = runtime.read().clone();
+        let dock_wake = Arc::clone(&dock_wake);
         let window = window.clone();
-        use_callback(move |(token, session): (WindowToken, u64)| {
+        use_callback(move |binding: DockItemBinding| {
             let result = runtime
                 .lock()
                 .ok()
-                .map(|mut runtime| runtime.dock_leave(token, session, window.scale_factor()));
+                .map(|mut runtime| runtime.dock_leave(binding, window.scale_factor()));
             if let Some((update, snapshot)) = result {
                 handle_runtime_update(update, &window, window_baseline);
                 bar_snapshot.set(snapshot);
+                dock_wake.notify_one();
             }
         })
     };
     let dispatch_dock_restore = {
         let runtime = runtime.read().clone();
+        let dock_wake = Arc::clone(&dock_wake);
         let window = window.clone();
-        use_callback(move |(token, session): (WindowToken, u64)| {
+        use_callback(move |binding: DockItemBinding| {
             let result = runtime
                 .lock()
                 .ok()
-                .map(|mut runtime| runtime.dock_restore(token, session, window.scale_factor()));
+                .map(|mut runtime| runtime.dock_restore(binding, window.scale_factor()));
             if let Some((update, snapshot)) = result {
                 handle_runtime_update(update, &window, window_baseline);
                 bar_snapshot.set(snapshot);
+                dock_wake.notify_one();
             }
         })
     };
@@ -925,7 +950,6 @@ fn App() -> Element {
         .ok()
         .map(|runtime| runtime.dock_ui())
         .unwrap_or_default();
-    let dock_session = state.wm_session_id;
 
     let mut handle_button_press = move |index: usize| {
         info!("Button {} pressed", index);
@@ -1065,7 +1089,7 @@ fn App() -> Element {
                     class: "minimized-dock",
                     style: "width: {dock_width}px",
                     title: if dock_collapsed { "Minimized windows hidden on this narrow bar" } else { "Minimized windows" },
-                    for (window, magnification) in dock_windows {
+                    for (window, magnification, binding) in dock_windows {
                         {
                             let token = window.token;
                             let title = if window.title.trim().is_empty() {
@@ -1082,12 +1106,12 @@ fn App() -> Element {
                             let height = DOCK_ITEM_HEIGHT * magnification;
                             rsx! {
                                 div {
-                                    key: "{token.get()}",
+                                    key: "{binding.wm_session_id}-{binding.minimized_generation}-{token.get()}",
                                     class: "minimized-dock-slot",
                                     style: "width: {DOCK_SLOT_WIDTH}px",
-                                    onmouseenter: move |_| dispatch_dock_enter.call((token, dock_session)),
-                                    onmouseleave: move |_| dispatch_dock_leave.call((token, dock_session)),
-                                    onclick: move |_| dispatch_dock_restore.call((token, dock_session)),
+                                    onmouseenter: move |_| dispatch_dock_enter.call(binding),
+                                    onmouseleave: move |_| dispatch_dock_leave.call(binding),
+                                    onclick: move |_| dispatch_dock_restore.call(binding),
                                     div {
                                         class: "{class}",
                                         title: "{title}",

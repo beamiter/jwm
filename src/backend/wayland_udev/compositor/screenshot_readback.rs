@@ -122,6 +122,21 @@ impl ScreenshotReadback {
             }
         }
     }
+
+    /// Cancel all outstanding readbacks and release their raw GLES objects.
+    /// Pending PNG jobs have not read any pixels yet, so a compositor disable
+    /// deliberately cancels them rather than waiting on their fences.
+    pub(crate) unsafe fn clear(&mut self, gl: &ffi::Gles2) {
+        unsafe {
+            gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
+            while let Some(job) = self.pending.pop_front() {
+                gl.DeleteSync(job.fence);
+                if job.pbo != 0 {
+                    gl.DeleteBuffers(1, &job.pbo);
+                }
+            }
+        }
+    }
 }
 
 impl Default for ScreenshotReadback {

@@ -6,7 +6,7 @@ use pango::FontDescription;
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
 use xbar_core::presentation::{Point, PointerAction, Size};
@@ -656,7 +656,32 @@ fn main() -> Result<()> {
     let mut ready_tokens = Vec::new();
     loop {
         ready_tokens.clear();
-        ready_tokens.extend(epoll.wait()?);
+        let now = Instant::now();
+        let dock_timeout = bar
+            .next_dock_deadline(now)
+            .map(|deadline| deadline.saturating_duration_since(now));
+        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        if ready_tokens.is_empty() {
+            // A Dock deadline is independent from the aligned one-second
+            // provider timer. Service it promptly so a final magnified anchor
+            // and a command-ring backpressure retry are not stranded until
+            // the next clock tick.
+            let update = bar.poll_transport();
+            let needs_redraw = window.apply_runtime_update(update)?;
+            sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
+            if needs_redraw {
+                redraw(
+                    &cairo_xcb,
+                    &window,
+                    &mut back,
+                    gc,
+                    current_width,
+                    current_height,
+                    &mut bar,
+                )?;
+            }
+            continue;
+        }
         for token in &ready_tokens {
             match *token {
                 X_TOKEN => drain_x_events(

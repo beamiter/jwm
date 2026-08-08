@@ -11,10 +11,17 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::*;
 use yew::prelude::*;
 
+type PreviewBinding = (u64, u64, u64);
+const PREVIEW_ENTER_RETRY_MS: u32 = 100;
+const PREVIEW_RENEWAL_MS: u32 = 2_000;
+
 thread_local! {
-    static PREVIEW_RENEWALS: RefCell<HashMap<u64, Interval>> = RefCell::new(HashMap::new());
+    static PREVIEW_ENTER_ATTEMPTS: RefCell<HashMap<PreviewBinding, u64>> = RefCell::new(HashMap::new());
+    static PREVIEW_RENEWALS: RefCell<HashMap<PreviewBinding, (u64, Interval, web_sys::Element)>> = RefCell::new(HashMap::new());
+    static PREVIEW_ATTEMPT_CLOCK: Cell<u64> = const { Cell::new(0) };
     static BAR_ORIGIN: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
     static WM_SESSION_ID: Cell<u64> = const { Cell::new(0) };
+    static MINIMIZED_GENERATION: Cell<u64> = const { Cell::new(0) };
     static DOCK_GEOMETRY_RETRY: RefCell<Option<Timeout>> = const { RefCell::new(None) };
 }
 
@@ -104,6 +111,8 @@ struct PhysicalPosition {
 struct BarSnapshot {
     wm_available: bool,
     #[serde(default)]
+    wm_sequence: Option<u64>,
+    #[serde(default)]
     wm_session_id: u64,
     #[serde(default)]
     geometry: Option<DockGeometry>,
@@ -158,19 +167,24 @@ enum ActionRequest {
     Screenshot,
     RestoreWindow {
         wm_session_id: u64,
+        minimized_generation: u64,
         window_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         geometry: Option<DockGeometry>,
     },
     PreviewWindow {
         wm_session_id: u64,
+        minimized_generation: u64,
         window_id: u64,
         visible: bool,
+        #[serde(default)]
+        renewal: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         geometry: Option<DockGeometry>,
     },
     SetDockGeometry {
         wm_session_id: u64,
+        minimized_generation: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         window_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -386,25 +400,36 @@ fn event_element(event: &MouseEvent) -> Option<web_sys::Element> {
     event.current_target()?.dyn_into().ok()
 }
 
-fn restore_minimized(window_id: u64, event: MouseEvent) {
+fn restore_minimized(
+    window_id: u64,
+    wm_session_id: u64,
+    minimized_generation: u64,
+    event: MouseEvent,
+) {
     let Some(element) = event_element(&event) else {
         return;
     };
-    let wm_session_id = WM_SESSION_ID.with(Cell::get);
     wasm_bindgen_futures::spawn_local(async move {
         let geometry = window_metrics()
             .await
             .map(|(origin, scale)| physical_geometry(&element, &origin, scale));
         dispatch_action(ActionRequest::RestoreWindow {
             wm_session_id,
+            minimized_generation,
             window_id,
             geometry,
         });
     });
 }
 
-fn preview_element(window_id: u64, visible: bool, element: web_sys::Element) {
-    let wm_session_id = WM_SESSION_ID.with(Cell::get);
+fn preview_element(
+    window_id: u64,
+    wm_session_id: u64,
+    minimized_generation: u64,
+    visible: bool,
+    renewal: bool,
+    element: web_sys::Element,
+) {
     wasm_bindgen_futures::spawn_local(async move {
         let geometry = window_metrics()
             .await
@@ -414,38 +439,306 @@ fn preview_element(window_id: u64, visible: bool, element: web_sys::Element) {
         }
         dispatch_action(ActionRequest::PreviewWindow {
             wm_session_id,
+            minimized_generation,
             window_id,
             visible,
+            renewal,
             geometry,
         });
     });
 }
 
-fn begin_preview(window_id: u64, event: MouseEvent) {
-    let Some(element) = event_element(&event) else {
-        return;
-    };
-    PREVIEW_RENEWALS.with(|renewals| {
-        renewals.borrow_mut().remove(&window_id);
-    });
-    preview_element(window_id, true, element.clone());
-    let renewal_element = element;
-    let renewal = Interval::new(2_000, move || {
-        if renewal_element.matches(":hover").unwrap_or(false) {
-            preview_element(window_id, true, renewal_element.clone());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewEnterDecision {
+    Cancel,
+    CompensateLeave,
+    RetryFreshEnter,
+    StartRenewal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewBindingStatus {
+    Current,
+    Superseded,
+    Cancelled,
+}
+
+const fn preview_enter_decision(
+    binding: PreviewBindingStatus,
+    target_hovered: bool,
+    delivered: bool,
+) -> PreviewEnterDecision {
+    match (binding, target_hovered, delivered) {
+        (PreviewBindingStatus::Superseded, _, _) => PreviewEnterDecision::Cancel,
+        (PreviewBindingStatus::Current, true, true) => PreviewEnterDecision::StartRenewal,
+        (PreviewBindingStatus::Current, true, false) => PreviewEnterDecision::RetryFreshEnter,
+        (PreviewBindingStatus::Current | PreviewBindingStatus::Cancelled, _, true) => {
+            PreviewEnterDecision::CompensateLeave
         }
-    });
+        (PreviewBindingStatus::Current | PreviewBindingStatus::Cancelled, _, false) => {
+            PreviewEnterDecision::Cancel
+        }
+    }
+}
+
+fn next_preview_attempt() -> u64 {
+    PREVIEW_ATTEMPT_CLOCK.with(|clock| {
+        let next = clock.get().wrapping_add(1).max(1);
+        clock.set(next);
+        next
+    })
+}
+
+fn preview_enter_is_current(binding: PreviewBinding, attempt: u64) -> bool {
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| attempts.borrow().get(&binding) == Some(&attempt))
+}
+
+fn preview_binding_status(binding: PreviewBinding, attempt: u64) -> PreviewBindingStatus {
+    if let Some(status) = PREVIEW_ENTER_ATTEMPTS.with(|attempts| {
+        attempts.borrow().get(&binding).map(|current| {
+            if *current == attempt {
+                PreviewBindingStatus::Current
+            } else {
+                PreviewBindingStatus::Superseded
+            }
+        })
+    }) {
+        return status;
+    }
     PREVIEW_RENEWALS.with(|renewals| {
-        renewals.borrow_mut().insert(window_id, renewal);
+        renewals.borrow().get(&binding).map_or(
+            PreviewBindingStatus::Cancelled,
+            |(current, _, _)| {
+                if *current == attempt {
+                    PreviewBindingStatus::Current
+                } else {
+                    PreviewBindingStatus::Superseded
+                }
+            },
+        )
+    })
+}
+
+fn preview_target_hovered(element: &web_sys::Element) -> bool {
+    element.is_connected() && element.matches(":hover").unwrap_or(false)
+}
+
+fn preview_binding_has_delivery(binding: PreviewBinding) -> bool {
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| attempts.borrow().contains_key(&binding))
+        || PREVIEW_RENEWALS.with(|renewals| renewals.borrow().contains_key(&binding))
+}
+
+const fn preview_owner_retirement_requires_leave(current_epoch: bool, token_present: bool) -> bool {
+    current_epoch && !token_present
+}
+
+fn preview_leave_unless_reentered(binding: PreviewBinding, element: web_sys::Element) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let geometry = window_metrics()
+            .await
+            .map(|(origin, scale)| physical_geometry(&element, &origin, scale));
+        if preview_binding_has_delivery(binding) {
+            return;
+        }
+        let (wm_session_id, minimized_generation, window_id) = binding;
+        if let Err(error) = dispatch_action_result(ActionRequest::PreviewWindow {
+            wm_session_id,
+            minimized_generation,
+            window_id,
+            visible: false,
+            renewal: false,
+            geometry,
+        })
+        .await
+        {
+            error!(format!("preview LEAVE failed: {error:?}"));
+        }
     });
 }
 
-fn end_preview(window_id: u64, event: MouseEvent) {
+fn retain_current_preview_deliveries(snapshot: &BarSnapshot) {
+    let current_session = snapshot.wm_session_id;
+    let current_generation = snapshot.wm_sequence.unwrap_or_default();
+    let mut retired_owners = Vec::new();
     PREVIEW_RENEWALS.with(|renewals| {
-        renewals.borrow_mut().remove(&window_id);
+        renewals.borrow_mut().retain(|binding, (_, _, element)| {
+            let current_epoch = binding.0 == current_session && binding.1 == current_generation;
+            let token_present = snapshot
+                .minimized_windows
+                .iter()
+                .any(|window| window.token == binding.2);
+            let keep = current_epoch && token_present;
+            if !keep && preview_owner_retirement_requires_leave(current_epoch, token_present) {
+                retired_owners.push((*binding, element.clone()));
+            }
+            keep
+        });
     });
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| {
+        attempts.borrow_mut().retain(|binding, _| {
+            binding.0 == current_session
+                && binding.1 == current_generation
+                && snapshot
+                    .minimized_windows
+                    .iter()
+                    .any(|window| window.token == binding.2)
+        });
+    });
+    for (binding, element) in retired_owners {
+        preview_leave_unless_reentered(binding, element);
+    }
+}
+
+fn remove_preview_enter_if_current(binding: PreviewBinding, attempt: u64) {
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| {
+        let mut attempts = attempts.borrow_mut();
+        if attempts.get(&binding) == Some(&attempt) {
+            attempts.remove(&binding);
+        }
+    });
+}
+
+fn remove_preview_renewal_if_current(binding: PreviewBinding, attempt: u64) {
+    PREVIEW_RENEWALS.with(|renewals| {
+        let mut renewals = renewals.borrow_mut();
+        if renewals
+            .get(&binding)
+            .is_some_and(|(current, _, _)| *current == attempt)
+        {
+            renewals.remove(&binding);
+        }
+    });
+}
+
+fn cancel_preview_delivery(binding: PreviewBinding) {
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| {
+        attempts.borrow_mut().remove(&binding);
+    });
+    PREVIEW_RENEWALS.with(|renewals| {
+        renewals.borrow_mut().remove(&binding);
+    });
+}
+
+fn start_preview_renewal(binding: PreviewBinding, attempt: u64, element: web_sys::Element) {
+    if !preview_enter_is_current(binding, attempt) || !preview_target_hovered(&element) {
+        remove_preview_enter_if_current(binding, attempt);
+        return;
+    }
+    remove_preview_enter_if_current(binding, attempt);
+    let (wm_session_id, minimized_generation, window_id) = binding;
+    let owner_element = element.clone();
+    let renewal_element = element;
+    let renewal = Interval::new(PREVIEW_RENEWAL_MS, move || {
+        let current = PREVIEW_RENEWALS.with(|renewals| {
+            renewals
+                .borrow()
+                .get(&binding)
+                .is_some_and(|(current, _, _)| *current == attempt)
+        });
+        if !current {
+            return;
+        }
+        if preview_target_hovered(&renewal_element) {
+            preview_element(
+                window_id,
+                wm_session_id,
+                minimized_generation,
+                true,
+                true,
+                renewal_element.clone(),
+            );
+        } else {
+            remove_preview_renewal_if_current(binding, attempt);
+            preview_leave_unless_reentered(binding, renewal_element.clone());
+        }
+    });
+    PREVIEW_RENEWALS.with(|renewals| {
+        renewals
+            .borrow_mut()
+            .insert(binding, (attempt, renewal, owner_element));
+    });
+}
+
+fn attempt_preview_enter(binding: PreviewBinding, attempt: u64, element: web_sys::Element) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if !preview_enter_is_current(binding, attempt) || !preview_target_hovered(&element) {
+            remove_preview_enter_if_current(binding, attempt);
+            return;
+        }
+        let geometry = window_metrics()
+            .await
+            .map(|(origin, scale)| physical_geometry(&element, &origin, scale));
+        if !preview_enter_is_current(binding, attempt) || !preview_target_hovered(&element) {
+            remove_preview_enter_if_current(binding, attempt);
+            return;
+        }
+        let (wm_session_id, minimized_generation, window_id) = binding;
+        let delivered = dispatch_action_result(ActionRequest::PreviewWindow {
+            wm_session_id,
+            minimized_generation,
+            window_id,
+            visible: true,
+            // Fresh ENTER remains fresh until the invoke is acknowledged.
+            renewal: false,
+            geometry,
+        })
+        .await;
+        if let Err(error) = &delivered {
+            error!(format!("preview ENTER failed; retrying: {error:?}"));
+        }
+        match preview_enter_decision(
+            preview_binding_status(binding, attempt),
+            preview_target_hovered(&element),
+            delivered.is_ok(),
+        ) {
+            PreviewEnterDecision::StartRenewal => {
+                start_preview_renewal(binding, attempt, element);
+            }
+            PreviewEnterDecision::RetryFreshEnter => {
+                gloo_timers::future::TimeoutFuture::new(PREVIEW_ENTER_RETRY_MS).await;
+                if preview_enter_is_current(binding, attempt) {
+                    attempt_preview_enter(binding, attempt, element);
+                }
+            }
+            PreviewEnterDecision::CompensateLeave => {
+                remove_preview_enter_if_current(binding, attempt);
+                // Compensate a delivered ENTER that outlived its binding.
+                if let Err(error) = dispatch_action_result(ActionRequest::PreviewWindow {
+                    wm_session_id,
+                    minimized_generation,
+                    window_id,
+                    visible: false,
+                    renewal: false,
+                    geometry,
+                })
+                .await
+                {
+                    error!(format!("compensating preview LEAVE failed: {error:?}"));
+                }
+            }
+            PreviewEnterDecision::Cancel => remove_preview_enter_if_current(binding, attempt),
+        }
+    });
+}
+
+fn begin_preview(window_id: u64, wm_session_id: u64, minimized_generation: u64, event: MouseEvent) {
+    let Some(element) = event_element(&event) else {
+        return;
+    };
+    let binding = (wm_session_id, minimized_generation, window_id);
+    cancel_preview_delivery(binding);
+    let attempt = next_preview_attempt();
+    PREVIEW_ENTER_ATTEMPTS.with(|attempts| {
+        attempts.borrow_mut().insert(binding, attempt);
+    });
+    attempt_preview_enter(binding, attempt, element);
+}
+
+fn end_preview(window_id: u64, wm_session_id: u64, minimized_generation: u64, event: MouseEvent) {
+    let binding = (wm_session_id, minimized_generation, window_id);
+    cancel_preview_delivery(binding);
     if let Some(element) = event_element(&event) {
-        preview_element(window_id, false, element);
+        preview_leave_unless_reentered(binding, element);
     }
 }
 
@@ -486,6 +779,7 @@ fn schedule_dock_geometry_retry(wm_session_id: u64) {
 }
 
 fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
+    let minimized_generation = MINIMIZED_GENERATION.with(Cell::get);
     wasm_bindgen_futures::spawn_local(async move {
         if defer_one_turn {
             gloo_timers::future::TimeoutFuture::new(0).await;
@@ -509,6 +803,7 @@ fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
         }
         if let Err(error) = dispatch_action_result(ActionRequest::SetDockGeometry {
             wm_session_id,
+            minimized_generation,
             window_id: None,
             geometry: Some(physical_geometry(&dock, &origin, scale)),
         })
@@ -538,6 +833,7 @@ fn start_dock_geometry_publish(wm_session_id: u64, defer_one_turn: bool) {
             };
             if let Err(error) = dispatch_action_result(ActionRequest::SetDockGeometry {
                 wm_session_id,
+                minimized_generation,
                 window_id: Some(window_id),
                 geometry: Some(resting_item_geometry(&item, &dock, &origin, scale)),
             })
@@ -616,8 +912,16 @@ fn app() -> Html {
                             session.set(envelope.snapshot.wm_session_id);
                             changed
                         });
-                        if session_changed {
+                        let generation_changed = MINIMIZED_GENERATION.with(|generation| {
+                            let next = envelope.snapshot.wm_sequence.unwrap_or_default();
+                            let changed = generation.get() != next;
+                            generation.set(next);
+                            changed
+                        });
+                        if session_changed || generation_changed {
                             cancel_dock_geometry_retry();
+                            // JWM retires old-epoch owners centrally during generation reconciliation.
+                            PREVIEW_ENTER_ATTEMPTS.with(|attempts| attempts.borrow_mut().clear());
                             PREVIEW_RENEWALS.with(|renewals| renewals.borrow_mut().clear());
                         }
                         BAR_ORIGIN.with(|origin| {
@@ -629,8 +933,9 @@ fn app() -> Html {
                             );
                         });
                         let signature = format!(
-                            "{}|{:?}|{}|{}",
+                            "{}|{}|{:?}|{}|{}",
                             envelope.snapshot.wm_session_id,
+                            envelope.snapshot.wm_sequence.unwrap_or_default(),
                             envelope.snapshot.geometry,
                             envelope
                                 .snapshot
@@ -645,15 +950,7 @@ fn app() -> Html {
                         if geometry_changed {
                             *callback_dock_signature.borrow_mut() = signature;
                         }
-                        PREVIEW_RENEWALS.with(|renewals| {
-                            renewals.borrow_mut().retain(|window_id, _| {
-                                envelope
-                                    .snapshot
-                                    .minimized_windows
-                                    .iter()
-                                    .any(|window| window.token == *window_id)
-                            });
-                        });
+                        retain_current_preview_deliveries(&envelope.snapshot);
                         snapshot.set(Some(envelope.snapshot));
                         if geometry_changed {
                             publish_dock_geometry_later();
@@ -692,6 +989,8 @@ fn app() -> Html {
     };
 
     let wm_available = current.wm_available;
+    let wm_session_id = current.wm_session_id;
+    let minimized_generation = current.wm_sequence.unwrap_or_default();
     let monitor = current.monitor;
     let tags = current.tags;
     let layout_symbol = current.layout_symbol;
@@ -920,21 +1219,36 @@ fn app() -> Html {
                         let preview_available = window.flags & 1 != 0;
                         let class = classes!("minimized-item", urgent.then_some("is-urgent"));
                         let restore = Callback::from(move |event: MouseEvent| {
-                            restore_minimized(window_id, event);
+                            restore_minimized(
+                                window_id,
+                                wm_session_id,
+                                minimized_generation,
+                                event,
+                            );
                         });
                         let preview_enter = Callback::from(move |event: MouseEvent| {
                             if preview_available {
-                                begin_preview(window_id, event);
+                                begin_preview(
+                                    window_id,
+                                    wm_session_id,
+                                    minimized_generation,
+                                    event,
+                                );
                             }
                         });
                         let preview_leave = Callback::from(move |event: MouseEvent| {
                             if preview_available {
-                                end_preview(window_id, event);
+                                end_preview(
+                                    window_id,
+                                    wm_session_id,
+                                    minimized_generation,
+                                    event,
+                                );
                             }
                         });
                         html! {
                             <button
-                                key={window_id}
+                                key={format!("{wm_session_id}:{minimized_generation}:{window_id}")}
                                 class={class}
                                 data-window-id={window_id.to_string()}
                                 disabled={!wm_available}
@@ -1081,5 +1395,39 @@ mod tests {
         assert!(!dock_retry_allowed(41, 42, true));
         assert!(!dock_retry_allowed(41, 41, false));
         assert!(!dock_retry_allowed(0, 0, true));
+    }
+
+    #[test]
+    fn preview_enter_retries_fresh_until_delivery_then_renews() {
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Current, true, false),
+            PreviewEnterDecision::RetryFreshEnter
+        );
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Current, true, true),
+            PreviewEnterDecision::StartRenewal
+        );
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Cancelled, true, false),
+            PreviewEnterDecision::Cancel
+        );
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Current, false, false),
+            PreviewEnterDecision::Cancel
+        );
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Cancelled, false, true),
+            PreviewEnterDecision::CompensateLeave
+        );
+        assert_eq!(
+            preview_enter_decision(PreviewBindingStatus::Superseded, false, true),
+            PreviewEnterDecision::Cancel,
+            "a stale same-triple completion cannot clear its replacement"
+        );
+        assert_eq!(PREVIEW_ENTER_RETRY_MS, 100);
+        assert_eq!(PREVIEW_RENEWAL_MS, 2_000);
+        assert!(preview_owner_retirement_requires_leave(true, false));
+        assert!(!preview_owner_retirement_requires_leave(true, true));
+        assert!(!preview_owner_retirement_requires_leave(false, false));
     }
 }

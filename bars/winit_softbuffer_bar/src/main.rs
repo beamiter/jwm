@@ -4,13 +4,13 @@ use pango::FontDescription;
 use std::env;
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use winit::event_loop::OwnedDisplayHandle;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     window::{Window, WindowAttributes, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
@@ -388,6 +388,24 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self
+            .bar
+            .next_dock_deadline(now)
+            .is_some_and(|deadline| deadline <= now)
+        {
+            let update = self.bar.poll_transport();
+            self.handle_runtime_update(update);
+            self.sync_transport_wake();
+        }
+        event_loop.set_control_flow(
+            self.bar
+                .next_dock_deadline(Instant::now())
+                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+        );
     }
 }
 

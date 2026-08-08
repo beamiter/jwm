@@ -2000,6 +2000,7 @@ mod tests {
             Some(UserAction::RestoreWindow {
                 window: WindowToken(11),
                 wm_session_id: 7,
+                minimized_generation: 1,
                 geometry: crate::DockItemGeometry::default(),
             })
         );

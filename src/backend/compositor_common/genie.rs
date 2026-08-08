@@ -2,6 +2,86 @@
 
 use crate::backend::api::CompositorRect;
 
+/// Resources and state atomically detached when a hidden client leaves the
+/// minimized Dock projection without being restored.
+///
+/// The generic payloads keep animation/cache retirement shared by the X11
+/// native resource owner and Wayland's strong `GlesTexture` owners. Live
+/// resources use [`take_live_window_preserving_metadata`] so their lightweight
+/// semantic state survives independently.
+pub(crate) struct ForgottenMinimizedResources<Animation, Visual> {
+    pub(crate) animations: Vec<Animation>,
+    pub(crate) visual: Option<Visual>,
+    pub(crate) preview_removed: bool,
+    pub(crate) state_changed: bool,
+}
+
+/// Remove every compositor-owned key for one minimized window in a single,
+/// idempotent operation. JWM's semantic hidden state is intentionally not an
+/// input: callers use this only after the window loses Dock eligibility.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn take_forgotten_minimized_resources<Key, Target, Animation, Visual>(
+    window: Key,
+    minimized_windows: &mut std::collections::HashSet<Key>,
+    pending_captures: &mut std::collections::HashSet<Key>,
+    targets: &mut std::collections::HashMap<Key, Target>,
+    animations: &mut Vec<Animation>,
+    mut animation_window: impl FnMut(&Animation) -> Key,
+    visuals: &mut std::collections::HashMap<Key, Visual>,
+    preview_window: Option<Key>,
+) -> ForgottenMinimizedResources<Animation, Visual>
+where
+    Key: Copy + Eq + std::hash::Hash,
+{
+    let mut state_changed = minimized_windows.remove(&window);
+    state_changed |= pending_captures.remove(&window);
+    state_changed |= targets.remove(&window).is_some();
+
+    let mut removed_animations = Vec::new();
+    let mut index = 0;
+    while index < animations.len() {
+        if animation_window(&animations[index]) == window {
+            removed_animations.push(animations.remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    state_changed |= !removed_animations.is_empty();
+
+    let visual = visuals.remove(&window);
+    state_changed |= visual.is_some();
+    let preview_removed = preview_window == Some(window);
+    state_changed |= preview_removed;
+
+    ForgottenMinimizedResources {
+        animations: removed_animations,
+        visual,
+        preview_removed,
+        state_changed,
+    }
+}
+
+/// Move a resource-bearing live entry out of the render set while retaining a
+/// resource-free semantic snapshot for later static adoption or restore.
+///
+/// Keeping this operation shared prevents the two compositors from fixing a
+/// texture leak by accidentally throwing away PiP, class/rule, urgency, shape,
+/// frame, or opacity state. A repeated call is a no-op and leaves the first
+/// snapshot intact.
+pub(crate) fn take_live_window_preserving_metadata<Key, Live, Metadata>(
+    window: Key,
+    live_windows: &mut std::collections::HashMap<Key, Live>,
+    metadata: &mut std::collections::HashMap<Key, Metadata>,
+    snapshot: impl FnOnce(&Live) -> Metadata,
+) -> Option<Live>
+where
+    Key: Copy + Eq + std::hash::Hash,
+{
+    let live = live_windows.remove(&window)?;
+    metadata.insert(window, snapshot(&live));
+    Some(live)
+}
+
 pub(crate) const PREVIEW_MAX_WIDTH: f32 = 320.0;
 const PREVIEW_MAX_HEIGHT: f32 = 240.0;
 const PREVIEW_GAP: f32 = 10.0;
@@ -96,6 +176,17 @@ pub(crate) fn retarget_genie_timeline(
 pub(crate) enum PreviewDirection {
     Show,
     Hide,
+}
+
+/// A new anchor for the same visible preview is a geometry update, not a new
+/// enter transition. Keeping this policy shared prevents one compositor from
+/// restarting the spring/fade whenever the bar's magnification moves.
+#[must_use]
+pub(crate) const fn preview_request_reuses_timeline(
+    same_window: bool,
+    direction: PreviewDirection,
+) -> bool {
+    same_window && matches!(direction, PreviewDirection::Show)
 }
 
 /// Return the remaining time on a visible preview lease. Hidden previews do
@@ -466,6 +557,22 @@ mod tests {
             preview_lease_timeout(PreviewDirection::Hide, now, deadline),
             None
         );
+    }
+
+    #[test]
+    fn moving_the_same_visible_preview_reuses_its_timeline() {
+        assert!(preview_request_reuses_timeline(
+            true,
+            PreviewDirection::Show
+        ));
+        assert!(!preview_request_reuses_timeline(
+            false,
+            PreviewDirection::Show
+        ));
+        assert!(!preview_request_reuses_timeline(
+            true,
+            PreviewDirection::Hide
+        ));
     }
 
     #[test]

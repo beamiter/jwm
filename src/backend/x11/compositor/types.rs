@@ -1,6 +1,10 @@
 use crate::backend::api::CompositorRect;
 use crate::backend::compositor_common::effects::MotionTrail;
 use crate::backend::compositor_common::genie::{GenieDirection, PreviewDirection};
+use crate::backend::compositor_common::minimized_thumbnail::{
+    MinimizedSnapshot, SnapshotGeneration, ThumbnailPurpose, ThumbnailSource,
+    preferred_thumbnail_source,
+};
 use crate::backend::x11::compositor::{WallpaperMode, WobblyState};
 pub(super) use crate::backend::x11::compositor_common::effects::{
     Particle, ParticleSystem, RippleState,
@@ -179,9 +183,98 @@ pub(super) struct WindowTexture {
     pub(super) audio_sync_target: Option<f32>,
 }
 
+/// Resource-free visual state retained while an X11 client's pixmap owners
+/// are detached from the compositor.
+///
+/// This deliberately excludes geometry, animation progress, Damage/Pixmap
+/// handles, and GL objects. It is small enough to keep for a hidden client
+/// after Dock eligibility is withdrawn, then reapply to the next static import
+/// or real restore.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WindowVisualMetadata {
+    pub(super) class_name: String,
+    pub(super) opacity_override: Option<f32>,
+    pub(super) is_fullscreen: bool,
+    pub(super) bypass_compositor: u8,
+    pub(super) corner_radius_override: Option<f32>,
+    pub(super) scale: f32,
+    pub(super) frame_extents: [u32; 4],
+    pub(super) is_shaped: bool,
+    pub(super) is_urgent: bool,
+    pub(super) is_pip: bool,
+    pub(super) is_frosted: bool,
+    pub(super) is_override_redirect: bool,
+    pub(super) audio_sync_target: Option<f32>,
+}
+
+impl Default for WindowVisualMetadata {
+    fn default() -> Self {
+        Self {
+            class_name: String::new(),
+            opacity_override: None,
+            is_fullscreen: false,
+            bypass_compositor: 0,
+            corner_radius_override: None,
+            scale: 1.0,
+            frame_extents: [0; 4],
+            is_shaped: false,
+            is_urgent: false,
+            is_pip: false,
+            is_frosted: false,
+            is_override_redirect: false,
+            audio_sync_target: None,
+        }
+    }
+}
+
+impl From<&WindowTexture> for WindowVisualMetadata {
+    fn from(window: &WindowTexture) -> Self {
+        Self {
+            class_name: window.class_name.clone(),
+            opacity_override: window.opacity_override,
+            is_fullscreen: window.is_fullscreen,
+            bypass_compositor: window.bypass_compositor,
+            corner_radius_override: window.corner_radius_override,
+            scale: window.scale,
+            frame_extents: window.frame_extents,
+            is_shaped: window.is_shaped,
+            is_urgent: window.is_urgent,
+            is_pip: window.is_pip,
+            is_frosted: window.is_frosted,
+            is_override_redirect: window.is_override_redirect,
+            audio_sync_target: window.audio_sync_target,
+        }
+    }
+}
+
+impl WindowVisualMetadata {
+    pub(super) fn apply_to(&self, window: &mut WindowTexture) {
+        window.class_name.clone_from(&self.class_name);
+        window.opacity_override = self.opacity_override;
+        window.is_fullscreen = self.is_fullscreen;
+        window.bypass_compositor = self.bypass_compositor;
+        window.corner_radius_override = self.corner_radius_override;
+        window.scale = self.scale;
+        window.frame_extents = self.frame_extents;
+        window.is_shaped = self.is_shaped;
+        window.is_urgent = self.is_urgent;
+        window.is_pip = self.is_pip;
+        window.is_frosted = self.is_frosted;
+        window.is_override_redirect = self.is_override_redirect;
+        window.audio_sync_target = self.audio_sync_target;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PixmapRefreshState, xcomposite_backing_changed};
+    use super::{
+        MinimizedThumbnailAvailability, PixmapRefreshState, SnapshotDrawCoordinates,
+        SnapshotTextureStorage, next_snapshot_generation, select_minimized_thumbnail_source,
+        snapshot_texture_uv_rect, xcomposite_backing_changed,
+    };
+    use crate::backend::compositor_common::minimized_thumbnail::{
+        ThumbnailPurpose, ThumbnailSource,
+    };
     use std::time::{Duration, Instant};
 
     #[test]
@@ -330,6 +423,85 @@ mod tests {
         assert!(
             !state.needs_refresh_at(now),
             "GLX must not pay for the EGL resize confirmation workaround"
+        );
+    }
+
+    #[test]
+    fn local_snapshot_generation_never_emits_zero_even_after_wrap() {
+        let mut clock = u64::MAX - 1;
+        assert_eq!(next_snapshot_generation(&mut clock).get(), u64::MAX);
+        assert_eq!(next_snapshot_generation(&mut clock).get(), 1);
+    }
+
+    #[test]
+    fn texture_orientation_matches_cpu_upload_and_fbo_storage_contracts() {
+        fn rendered_top_to_bottom(
+            storage_bottom_to_top: [&'static str; 2],
+            uv_rect: [f32; 4],
+            coordinates: SnapshotDrawCoordinates,
+        ) -> [&'static str; 2] {
+            let vertex_zero_to_one = if uv_rect[3] < 0.0 {
+                [storage_bottom_to_top[1], storage_bottom_to_top[0]]
+            } else {
+                storage_bottom_to_top
+            };
+            match coordinates {
+                SnapshotDrawCoordinates::TopDownQuad => vertex_zero_to_one,
+                SnapshotDrawCoordinates::BottomUpFace => {
+                    [vertex_zero_to_one[1], vertex_zero_to_one[0]]
+                }
+            }
+        }
+
+        for coordinates in [
+            SnapshotDrawCoordinates::TopDownQuad,
+            SnapshotDrawCoordinates::BottomUpFace,
+        ] {
+            // Top-left CPU row zero is uploaded into OpenGL's bottom storage
+            // row, while an FBO attachment keeps the visual bottom there.
+            for (storage, rows) in [
+                (SnapshotTextureStorage::CpuTopLeftUpload, ["top", "bottom"]),
+                (
+                    SnapshotTextureStorage::FramebufferAttachment,
+                    ["bottom", "top"],
+                ),
+            ] {
+                let uv_rect = snapshot_texture_uv_rect(storage, coordinates);
+                assert_eq!(
+                    rendered_top_to_bottom(rows, uv_rect, coordinates),
+                    ["top", "bottom"],
+                    "orientation diverged for {storage:?} on {coordinates:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn x11_consumers_keep_static_hover_and_restore_quality_contracts_distinct() {
+        let all = MinimizedThumbnailAvailability {
+            live: true,
+            retained: true,
+            gpu: true,
+            cpu: true,
+        };
+        assert_eq!(
+            select_minimized_thumbnail_source(ThumbnailPurpose::StaticDockCard, all),
+            Some(ThumbnailSource::GpuSnapshot)
+        );
+        assert_eq!(
+            select_minimized_thumbnail_source(ThumbnailPurpose::HoverPreview, all),
+            Some(ThumbnailSource::RetainedVisual)
+        );
+        assert_eq!(
+            select_minimized_thumbnail_source(
+                ThumbnailPurpose::RestoreAnimation,
+                MinimizedThumbnailAvailability {
+                    gpu: true,
+                    cpu: true,
+                    ..Default::default()
+                }
+            ),
+            None
         );
     }
 }
@@ -628,6 +800,112 @@ pub(super) struct GenieUniforms {
     pub(super) grid_size: Option<glow::UniformLocation>,
 }
 
+pub(super) struct ThumbnailDownsampleUniforms {
+    pub(super) texture: Option<glow::UniformLocation>,
+    pub(super) uv_rect: Option<glow::UniformLocation>,
+    pub(super) output_size: Option<glow::UniformLocation>,
+    pub(super) has_alpha: Option<glow::UniformLocation>,
+}
+
+/// Where row zero lives in a texture used by a snapshot consumer.
+///
+/// CPU snapshots are top-left RGBA8. Uploading their first row to OpenGL puts
+/// it at the texture's bottom, which matches a top-down compositor quad without
+/// a UV transform. A texture kept directly from an FBO has the opposite
+/// storage orientation. The consumer's own Y axis is accounted for separately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SnapshotTextureStorage {
+    CpuTopLeftUpload,
+    FramebufferAttachment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SnapshotDrawCoordinates {
+    /// Screen-space quads emit `v_uv.y == 0` at their visual top.
+    TopDownQuad,
+    /// Prism faces emit `v_uv.y == 0` at their geometric bottom.
+    BottomUpFace,
+}
+
+pub(super) const fn snapshot_texture_uv_rect(
+    storage: SnapshotTextureStorage,
+    coordinates: SnapshotDrawCoordinates,
+) -> [f32; 4] {
+    match (storage, coordinates) {
+        (SnapshotTextureStorage::CpuTopLeftUpload, SnapshotDrawCoordinates::TopDownQuad)
+        | (SnapshotTextureStorage::FramebufferAttachment, SnapshotDrawCoordinates::BottomUpFace) => {
+            [0.0, 0.0, 1.0, 1.0]
+        }
+        (SnapshotTextureStorage::FramebufferAttachment, SnapshotDrawCoordinates::TopDownQuad)
+        | (SnapshotTextureStorage::CpuTopLeftUpload, SnapshotDrawCoordinates::BottomUpFace) => {
+            [0.0, 1.0, 1.0, -1.0]
+        }
+    }
+}
+
+pub(super) const MINIMIZED_GPU_CACHE_MAX_BYTES: usize = 12 * 1024 * 1024;
+pub(super) const MINIMIZED_GPU_CACHE_MAX_ENTRIES: usize = 64;
+
+pub(super) struct MinimizedGpuSnapshot {
+    pub(super) texture: glow::Texture,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) has_alpha: bool,
+    pub(super) generation: SnapshotGeneration,
+    pub(super) storage: SnapshotTextureStorage,
+    pub(super) last_use: u64,
+}
+
+impl MinimizedGpuSnapshot {
+    pub(super) const fn estimated_bytes(&self) -> usize {
+        self.width as usize * self.height as usize * 4
+    }
+
+    pub(super) const fn uv_rect(&self) -> [f32; 4] {
+        snapshot_texture_uv_rect(self.storage, SnapshotDrawCoordinates::TopDownQuad)
+    }
+}
+
+pub(super) struct CapturedMinimizedSnapshot {
+    pub(super) cpu: MinimizedSnapshot,
+    pub(super) gpu: MinimizedGpuSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct MinimizedThumbnailAvailability {
+    pub(super) live: bool,
+    pub(super) retained: bool,
+    pub(super) gpu: bool,
+    pub(super) cpu: bool,
+}
+
+pub(super) fn select_minimized_thumbnail_source(
+    purpose: ThumbnailPurpose,
+    available: MinimizedThumbnailAvailability,
+) -> Option<ThumbnailSource> {
+    preferred_thumbnail_source(
+        purpose,
+        [
+            available.live.then_some(ThumbnailSource::LiveMappedTexture),
+            available
+                .retained
+                .then_some(ThumbnailSource::RetainedVisual),
+            available.gpu.then_some(ThumbnailSource::GpuSnapshot),
+            available.cpu.then_some(ThumbnailSource::CpuSnapshot),
+        ]
+        .into_iter()
+        .flatten(),
+    )
+}
+
+pub(super) fn next_snapshot_generation(clock: &mut u64) -> SnapshotGeneration {
+    *clock = clock.wrapping_add(1);
+    if *clock == 0 {
+        *clock = 1;
+    }
+    SnapshotGeneration::new(*clock).expect("snapshot generation clock skips zero")
+}
+
 pub(super) struct GenieAnimation {
     pub(super) x11_win: u32,
     pub(super) start: std::time::Instant,
@@ -645,6 +923,21 @@ pub(super) struct GenieAnimation {
     pub(super) binding: Option<PixmapBinding>,
     pub(super) pixmap: u32,
     pub(super) damage: u32,
+}
+
+/// The last WM lifecycle request for a window that is still logically
+/// minimized.
+///
+/// `minimized_windows` records the durable state used by the renderer.  This
+/// intent is deliberately separate: an AddWindow that races a minimize means
+/// "import these late pixels and retain them", while an AddWindow after an
+/// explicit restore means "start the reverse animation".  Treating both as a
+/// restore was especially visible while adopting IconicState clients at
+/// startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MinimizedWindowIntent {
+    PendingMinimize,
+    ExplicitRestore,
 }
 
 pub(super) struct MinimizedVisual {
@@ -671,4 +964,8 @@ pub(super) struct DockPreview {
     pub(super) direction: PreviewDirection,
     pub(super) opacity: f32,
     pub(super) scale: f32,
+    /// The Dock still owns this preview request, but its retained texture was
+    /// evicted (or has not arrived yet).  Keep the intent without advancing
+    /// the show animation or lease until a one-shot static import settles.
+    pub(super) awaiting_source: bool,
 }

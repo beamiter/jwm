@@ -137,39 +137,43 @@ fn command_to_shared(command: WmCommand) -> SharedCommand {
         WmCommand::RestoreWindow {
             window,
             wm_session_id,
+            minimized_generation,
             monitor,
             geometry,
         } => SharedCommand::restore_minimized(
             window.get(),
             wm_session_id,
+            minimized_generation,
             monitor.0,
             geometry_to_shared(geometry),
         ),
         WmCommand::PreviewWindow {
             window,
             wm_session_id,
+            minimized_generation,
             monitor,
             visible,
+            renewal,
             geometry,
         } => SharedCommand::preview_minimized(
             window.get(),
             wm_session_id,
+            minimized_generation,
             monitor.0,
-            if visible {
-                shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
-            } else {
-                0
-            },
+            u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+                | u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL,
             geometry_to_shared(geometry),
         ),
         WmCommand::SetDockGeometry {
             window,
             wm_session_id,
+            minimized_generation,
             monitor,
             geometry,
         } => SharedCommand::set_minimized_geometry(
             window.map_or(0, WindowToken::get),
             wm_session_id,
+            minimized_generation,
             monitor.0,
             geometry_to_shared(geometry),
         ),
@@ -307,6 +311,7 @@ mod tests {
         let restore = command_to_shared(WmCommand::RestoreWindow {
             window: token,
             wm_session_id: 71,
+            minimized_generation: 171,
             monitor: MonitorId(-3),
             geometry,
         });
@@ -316,15 +321,18 @@ mod tests {
         );
         assert_eq!(restore.get_window_id(), token.get());
         assert_eq!(restore.get_wm_session_id(), 71);
+        assert_eq!(restore.get_minimized_generation(), 171);
         assert_eq!(restore.get_monitor_id(), -3);
         assert_eq!(restore.anchor(), anchor);
 
-        for visible in [false, true] {
+        for (visible, renewal) in [(false, false), (true, false), (true, true)] {
             let preview = command_to_shared(WmCommand::PreviewWindow {
                 window: token,
                 wm_session_id: 72,
+                minimized_generation: 172,
                 monitor: MonitorId(4),
                 visible,
+                renewal,
                 geometry,
             });
             assert_eq!(
@@ -333,15 +341,13 @@ mod tests {
             );
             assert_eq!(preview.minimized_window_id(), Some(token.get()));
             assert_eq!(preview.get_wm_session_id(), 72);
+            assert_eq!(preview.get_minimized_generation(), 172);
             assert_eq!(preview.get_monitor_id(), 4);
             assert_eq!(preview.anchor(), anchor);
             assert_eq!(
                 preview.get_flags(),
-                if visible {
-                    shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
-                } else {
-                    0
-                }
+                u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+                    | u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL
             );
         }
 
@@ -349,6 +355,7 @@ mod tests {
             let report = command_to_shared(WmCommand::SetDockGeometry {
                 window,
                 wm_session_id: 73,
+                minimized_generation: 173,
                 monitor: MonitorId(5),
                 geometry,
             });
@@ -359,6 +366,7 @@ mod tests {
             assert_eq!(report.get_window_id(), window.map_or(0, WindowToken::get));
             assert_eq!(report.minimized_window_id(), window.map(WindowToken::get));
             assert_eq!(report.get_wm_session_id(), 73);
+            assert_eq!(report.get_minimized_generation(), 173);
             assert_eq!(report.get_monitor_id(), 5);
             assert_eq!(report.anchor(), anchor);
         }

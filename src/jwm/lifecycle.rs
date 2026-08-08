@@ -1,19 +1,282 @@
 // Lifecycle management: cleanup, config reload, and resource management
 
 use crate::Jwm;
-use crate::backend::api::{Backend, WindowChanges};
+use crate::backend::api::{Backend, Geometry, ManagedUnmapReason, WindowChanges};
 use crate::backend::common_define::{ArgbColor, ColorScheme, EventMaskBits, SchemeType, WindowId};
 use crate::config::CONFIG;
-use crate::core::models::{ClientKey, MonitorKey};
+use crate::core::models::{ClientKey, MonitorKey, WMClient};
+use crate::core::types::Rect;
 use crate::ipc::IpcResponse;
+use crate::jwm::statusbar::StatusBarBuilder;
+use crate::jwm::visibility::restore_hidden_geometry;
+use crate::jwm::window_state::x11_geometry_fully_left_of_desktop;
 use log::{info, warn};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
+use std::error::Error;
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 const CONFIG_RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
 const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+type CleanupResult = Result<(), Box<dyn Error>>;
+
+#[derive(Debug)]
+struct CleanupFailure {
+    stage: String,
+    error: Box<dyn Error>,
+}
+
+#[derive(Debug)]
+struct CleanupError {
+    failures: Vec<CleanupFailure>,
+}
+
+impl fmt::Display for CleanupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} cleanup stage(s) failed", self.failures.len())?;
+        for failure in &self.failures {
+            write!(formatter, "; {}: {}", failure.stage, failure.error)?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for CleanupError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.failures.first().map(|failure| failure.error.as_ref())
+    }
+}
+
+#[derive(Debug, Default)]
+struct CleanupFailures {
+    failures: Vec<CleanupFailure>,
+}
+
+impl CleanupFailures {
+    fn record(&mut self, stage: impl Into<String>, result: CleanupResult) {
+        if let Err(error) = result {
+            let stage = stage.into();
+            warn!("[cleanup] {stage} failed: {error}");
+            self.failures.push(CleanupFailure { stage, error });
+        }
+    }
+
+    fn finish(self) -> CleanupResult {
+        if self.failures.is_empty() {
+            Ok(())
+        } else {
+            Err(Box::new(CleanupError {
+                failures: self.failures,
+            }))
+        }
+    }
+}
+
+fn boxed_cleanup_result<E>(result: Result<(), E>) -> CleanupResult
+where
+    E: Error + 'static,
+{
+    result.map_err(|error| Box::new(error) as Box<dyn Error>)
+}
+
+fn run_best_effort_cleanup<S: Copy>(
+    stages: &[(S, &'static str)],
+    mut run_stage: impl FnMut(S) -> CleanupResult,
+) -> CleanupResult {
+    let mut failures = CleanupFailures::default();
+    for &(stage, label) in stages {
+        failures.record(label, run_stage(stage));
+    }
+    failures.finish()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EssentialCleanupStage {
+    X11Resources,
+    SystemResources,
+    ThemePixels,
+    DisplayFlush,
+}
+
+const ESSENTIAL_CLEANUP_STAGES: &[(EssentialCleanupStage, &str)] = &[
+    (EssentialCleanupStage::X11Resources, "X11 resources"),
+    (EssentialCleanupStage::SystemResources, "system resources"),
+    (EssentialCleanupStage::ThemePixels, "theme pixels"),
+    (EssentialCleanupStage::DisplayFlush, "display flush"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum X11CleanupStage {
+    ClientState,
+    KeyGrabs,
+    InputFocus,
+    Backend,
+    Cursor,
+}
+
+const X11_CLEANUP_STAGES: &[(X11CleanupStage, &str)] = &[
+    (X11CleanupStage::ClientState, "client X11 state"),
+    (X11CleanupStage::KeyGrabs, "key grabs"),
+    (X11CleanupStage::InputFocus, "input focus"),
+    (X11CleanupStage::Backend, "backend resources"),
+    (X11CleanupStage::Cursor, "cursor resources"),
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemCleanupStage {
+    StatusBars,
+    SharedMemory,
+}
+
+const SYSTEM_CLEANUP_STAGES: &[(SystemCleanupStage, &str)] = &[
+    (SystemCleanupStage::StatusBars, "status bar processes"),
+    (SystemCleanupStage::SharedMemory, "shared memory"),
+];
+
+/// Build shutdown work from the authoritative client registry, not monitor
+/// stacks. Parked scratchpads deliberately have no monitor and therefore do
+/// not occur in any stack, but a normal WM exit must still return their real
+/// windows from JWM's off-screen hiding coordinate and clear public state.
+fn x11_client_cleanup_plan(
+    client_order: &[ClientKey],
+    clients: &slotmap::SlotMap<ClientKey, WMClient>,
+) -> Vec<(WindowId, i32, ClientKey)> {
+    client_order
+        .iter()
+        .filter_map(|&client_key| {
+            clients
+                .get(client_key)
+                .map(|client| (client.win, client.geometry.old_border_w, client_key))
+        })
+        .collect()
+}
+
+/// Proof that normal-exit Phase A completed for every managed client and for
+/// every swallowed parent.  Its private field prevents a caller from entering
+/// destructive Phase B without going through the checked handoff transaction.
+pub(crate) struct NormalExitHandoff {
+    _private: (),
+}
+
+/// A failed normal-exit preflight is not automatically permission to resume
+/// the ordinary event loop.  `resume_safe` is granted only after the rollback
+/// postconditions were queried from the display server for every client that
+/// Phase A touched.
+#[derive(Debug)]
+pub(crate) struct NormalExitPrepareError {
+    primary: String,
+    rollback_diagnostics: Vec<String>,
+    resume_safe: bool,
+}
+
+impl NormalExitPrepareError {
+    fn new(
+        primary: impl Into<String>,
+        rollback_diagnostics: Vec<String>,
+        resume_safe: bool,
+    ) -> Self {
+        Self {
+            primary: primary.into(),
+            rollback_diagnostics,
+            resume_safe,
+        }
+    }
+
+    /// True only when every touched client was observed in a state from which
+    /// the existing JWM can safely continue managing it.
+    pub(crate) const fn resume_safe(&self) -> bool {
+        self.resume_safe
+    }
+}
+
+impl fmt::Display for NormalExitPrepareError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}", self.primary)?;
+        if !self.rollback_diagnostics.is_empty() {
+            write!(
+                formatter,
+                "; rollback diagnostics: {}",
+                self.rollback_diagnostics.join("; ")
+            )?;
+        }
+        if !self.resume_safe {
+            write!(
+                formatter,
+                "; rollback postconditions are unsafe for event-loop resume"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Error for NormalExitPrepareError {}
+
+#[derive(Debug, Clone)]
+struct PreparedNormalExitClient {
+    client_key: ClientKey,
+    previous_client: WMClient,
+    server_geometry: Geometry,
+    was_viewable: bool,
+}
+
+fn geometry_matches(actual: Geometry, expected: Geometry) -> bool {
+    actual.x == expected.x
+        && actual.y == expected.y
+        && actual.w == expected.w
+        && actual.h == expected.h
+        && actual.border == expected.border
+}
+
+fn geometry_intersects_rect(geometry: Geometry, rect: Rect) -> bool {
+    if rect.w <= 0 || rect.h <= 0 || geometry.w == 0 || geometry.h == 0 {
+        return false;
+    }
+    let geometry_right = i64::from(geometry.x)
+        .saturating_add(i64::from(geometry.w))
+        .saturating_add(i64::from(geometry.border).saturating_mul(2));
+    let geometry_bottom = i64::from(geometry.y)
+        .saturating_add(i64::from(geometry.h))
+        .saturating_add(i64::from(geometry.border).saturating_mul(2));
+    let rect_right = i64::from(rect.x).saturating_add(i64::from(rect.w));
+    let rect_bottom = i64::from(rect.y).saturating_add(i64::from(rect.h));
+
+    i64::from(geometry.x) < rect_right
+        && geometry_right > i64::from(rect.x)
+        && i64::from(geometry.y) < rect_bottom
+        && geometry_bottom > i64::from(rect.y)
+}
+
+fn clamp_geometry_to_rect(mut geometry: Geometry, rect: Rect) -> Geometry {
+    let border2 = i32::try_from(geometry.border)
+        .unwrap_or(i32::MAX)
+        .saturating_mul(2);
+    let total_width = i32::try_from(geometry.w)
+        .unwrap_or(i32::MAX)
+        .saturating_add(border2)
+        .max(1);
+    let total_height = i32::try_from(geometry.h)
+        .unwrap_or(i32::MAX)
+        .saturating_add(border2)
+        .max(1);
+    let max_x = rect
+        .x
+        .saturating_add(rect.w.max(1).saturating_sub(total_width).max(0));
+    let max_y = rect
+        .y
+        .saturating_add(rect.h.max(1).saturating_sub(total_height).max(0));
+    geometry.x = geometry.x.clamp(rect.x, max_x);
+    geometry.y = geometry.y.clamp(rect.y, max_y);
+    geometry
+}
+
+#[derive(Debug, Default)]
+struct NormalExitRollbackOutcome {
+    diagnostics: Vec<String>,
+    resume_safe: bool,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct PendingConfigReload {
@@ -123,6 +386,532 @@ impl ConfigReloadTracker {
 }
 
 impl Jwm {
+    fn normal_exit_geometry_intersects_output(&self, geometry: Geometry) -> bool {
+        self.state.monitors.values().any(|monitor| {
+            geometry_intersects_rect(
+                geometry,
+                Rect::new(
+                    monitor.geometry.m_x,
+                    monitor.geometry.m_y,
+                    monitor.geometry.m_w,
+                    monitor.geometry.m_h,
+                ),
+            )
+        })
+    }
+
+    fn normal_exit_monitor_area(&self, monitor: MonitorKey) -> Option<Rect> {
+        self.monitor_work_area(monitor)
+            .filter(|area| area.w > 0 && area.h > 0)
+            .or_else(|| {
+                self.state.monitors.get(monitor).and_then(|monitor| {
+                    let output = Rect::new(
+                        monitor.geometry.m_x,
+                        monitor.geometry.m_y,
+                        monitor.geometry.m_w,
+                        monitor.geometry.m_h,
+                    );
+                    (output.w > 0 && output.h > 0).then_some(output)
+                })
+            })
+    }
+
+    fn normal_exit_fallback_area(&self, client: &WMClient) -> Option<Rect> {
+        client
+            .mon
+            .and_then(|monitor| self.normal_exit_monitor_area(monitor))
+            .or_else(|| {
+                self.state
+                    .sel_mon
+                    .and_then(|monitor| self.normal_exit_monitor_area(monitor))
+            })
+            .or_else(|| {
+                self.state
+                    .monitor_order
+                    .iter()
+                    .find_map(|&monitor| self.normal_exit_monitor_area(monitor))
+            })
+    }
+
+    fn client_needs_normal_exit_handoff(&self, client: &WMClient) -> bool {
+        let represented = Geometry {
+            x: client.geometry.x,
+            y: client.geometry.y,
+            w: u32::try_from(client.geometry.w.max(1)).unwrap_or(u32::MAX),
+            h: u32::try_from(client.geometry.h.max(1)).unwrap_or(u32::MAX),
+            border: u32::try_from(client.geometry.border_w.max(0)).unwrap_or(u32::MAX),
+        };
+        client.state.is_swallowed
+            || client.state.is_hidden
+            || client.geometry.hidden_x.is_some()
+            || client.geometry.hidden_restore_rect.is_some()
+            || x11_geometry_fully_left_of_desktop(represented, self.desktop_left_edge())
+    }
+
+    fn normal_exit_target_geometry(
+        &self,
+        client: &WMClient,
+        server_border: u32,
+    ) -> Option<Geometry> {
+        if !self.client_needs_normal_exit_handoff(client) {
+            return None;
+        }
+
+        let desktop_left = self.desktop_left_edge();
+        let mut geometry = client.geometry.clone();
+        let legacy_fallback_x = client
+            .mon
+            .and_then(|monitor| self.monitor_work_area(monitor))
+            .map_or(desktop_left, |area| area.x);
+        restore_hidden_geometry(&mut geometry, desktop_left, legacy_fallback_x);
+        let target = Geometry {
+            x: geometry.x,
+            y: geometry.y,
+            w: u32::try_from(geometry.w.max(1)).unwrap_or(u32::MAX),
+            h: u32::try_from(geometry.h.max(1)).unwrap_or(u32::MAX),
+            // Phase A must not release JWM's decoration ownership. Preserve
+            // the server's exact current border until the global barrier.
+            border: server_border,
+        };
+        if self.normal_exit_geometry_intersects_output(target) {
+            return Some(target);
+        }
+
+        // A restore rectangle can still name an output that disappeared
+        // while the client was parked (off-tag clients do not participate in
+        // minimized-output migration). Put the complete window into a live
+        // work area when it fits, or anchor its top-left there when it does
+        // not, before any MapWindow can expose it.
+        self.normal_exit_fallback_area(client)
+            .map_or(Some(target), |area| {
+                Some(clamp_geometry_to_rect(target, area))
+            })
+    }
+
+    /// Restore every Phase-A mutation in reverse order.  Public Hidden,
+    /// WM_STATE and V1 properties were deliberately untouched, so rollback
+    /// only needs to restore server geometry, JWM's snapshot and the backend's
+    /// true-Iconic desired owner.
+    fn rollback_normal_exit_client_handoff(
+        &mut self,
+        backend: &mut dyn Backend,
+        prepared: &[PreparedNormalExitClient],
+    ) -> NormalExitRollbackOutcome {
+        let mut outcome = NormalExitRollbackOutcome {
+            diagnostics: Vec::new(),
+            resume_safe: true,
+        };
+        for entry in prepared.iter().rev() {
+            let win = entry.previous_client.win;
+            if let Some(client) = self.state.clients.get_mut(entry.client_key) {
+                *client = entry.previous_client.clone();
+            } else {
+                outcome
+                    .diagnostics
+                    .push(format!("managed client {win:?} vanished during rollback"));
+                outcome.resume_safe = false;
+                continue;
+            }
+
+            let geometry = entry.server_geometry;
+            if let Err(error) = backend.window_ops().configure(
+                win,
+                geometry.x,
+                geometry.y,
+                geometry.w,
+                geometry.h,
+                geometry.border,
+            ) {
+                // The request result is diagnostic, not the safety verdict:
+                // a checked request can report an error after the server has
+                // already reached the desired state.  The final readback
+                // below is authoritative.
+                outcome
+                    .diagnostics
+                    .push(format!("restore server geometry for {win:?}: {error}"));
+            }
+
+            let mut hidden_owner_restored = true;
+            if entry.previous_client.state.is_swallowed {
+                // The swallowed batch already attempted its own reverse
+                // unmaps. Retry only a parent that is still viewable (or whose
+                // state cannot be queried): a second UnmapWindow against an
+                // already-unmapped client produces no UnmapNotify, leaving an
+                // unconsumable managed-unmap sequence marker behind.
+                let needs_unmap_retry = match backend.window_ops().get_window_attributes(win) {
+                    Ok(attributes) => attributes.map_state_viewable,
+                    Err(error) => {
+                        outcome.diagnostics.push(format!(
+                            "query swallowed-parent rollback state for {win:?}: {error}"
+                        ));
+                        true
+                    }
+                };
+                if needs_unmap_retry
+                    && let Err(error) = backend
+                        .window_ops()
+                        .unmap_managed_window(win, ManagedUnmapReason::SwallowDiscard)
+                {
+                    outcome.diagnostics.push(format!(
+                        "restore swallowed-parent unmap for {win:?}: {error}"
+                    ));
+                }
+            } else if entry.previous_client.state.is_hidden {
+                let eligible = StatusBarBuilder::is_minimized_dock_eligible(&entry.previous_client);
+                let policy_result =
+                    self.request_iconify_for_hidden_dock_client(backend, entry.client_key);
+                hidden_owner_restored = policy_result.is_ok();
+                if let Err(policy_error) = policy_result {
+                    outcome.diagnostics.push(format!(
+                        "restore checked true-Iconic owner for {win:?}: {policy_error}"
+                    ));
+                }
+
+                // The policy helper deliberately no-ops for Dock-ineligible
+                // clients.  A client that was genuinely unmapped before Phase
+                // A still needs its backend generation retained, even after a
+                // mid-flight eligibility change made it targetless.
+                if !eligible && !entry.was_viewable || !hidden_owner_restored {
+                    match backend.compositor_request_window_iconify(win) {
+                        Ok(()) => hidden_owner_restored = true,
+                        Err(error) => {
+                            hidden_owner_restored = false;
+                            outcome.diagnostics.push(format!(
+                                "restore backend true-Iconic owner for {win:?}: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let geometry_confirmed = match backend.window_ops().get_geometry(win) {
+                Ok(actual) if geometry_matches(actual, geometry) => true,
+                Ok(actual) => {
+                    outcome.diagnostics.push(format!(
+                        "server geometry rollback for {win:?} was not confirmed: expected {geometry:?}, observed {actual:?}"
+                    ));
+                    false
+                }
+                Err(error) => {
+                    outcome.diagnostics.push(format!(
+                        "query server geometry after rolling back {win:?}: {error}"
+                    ));
+                    false
+                }
+            };
+
+            let physical_state_confirmed = match backend.window_ops().get_window_attributes(win) {
+                Ok(attributes) if entry.previous_client.state.is_swallowed => {
+                    if attributes.map_state_viewable {
+                        outcome
+                            .diagnostics
+                            .push(format!("rollback left swallowed parent {win:?} viewable"));
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Ok(attributes) if entry.previous_client.state.is_hidden => {
+                    if !attributes.map_state_viewable {
+                        if !hidden_owner_restored {
+                            outcome.diagnostics.push(format!(
+                                    "rollback left hidden client {win:?} unmapped without a confirmed Iconic owner"
+                                ));
+                        }
+                        hidden_owner_restored
+                    } else {
+                        match backend.window_ops().get_geometry(win) {
+                            Ok(actual)
+                                if x11_geometry_fully_left_of_desktop(
+                                    actual,
+                                    self.desktop_left_edge(),
+                                ) =>
+                            {
+                                true
+                            }
+                            Ok(actual) => {
+                                outcome.diagnostics.push(format!(
+                                        "rollback left hidden client {win:?} viewable inside the desktop at {actual:?}"
+                                    ));
+                                false
+                            }
+                            Err(error) => {
+                                outcome.diagnostics.push(format!(
+                                    "query mapped hidden geometry for {win:?}: {error}"
+                                ));
+                                false
+                            }
+                        }
+                    }
+                }
+                Ok(attributes) => {
+                    if attributes.map_state_viewable != entry.was_viewable {
+                        outcome.diagnostics.push(format!(
+                                "rollback map state for {win:?} changed from viewable={} to viewable={}",
+                                entry.was_viewable, attributes.map_state_viewable
+                            ));
+                        false
+                    } else {
+                        true
+                    }
+                }
+                Err(error) => {
+                    outcome.diagnostics.push(format!(
+                        "query map state after rolling back {win:?}: {error}"
+                    ));
+                    false
+                }
+            };
+
+            if !geometry_confirmed || !physical_state_confirmed {
+                outcome.resume_safe = false;
+            }
+        }
+        outcome
+    }
+
+    fn normal_exit_handoff_error(
+        &mut self,
+        backend: &mut dyn Backend,
+        prepared: &[PreparedNormalExitClient],
+        primary: impl Into<String>,
+    ) -> NormalExitPrepareError {
+        let primary = primary.into();
+        let rollback = self.rollback_normal_exit_client_handoff(backend, prepared);
+        NormalExitPrepareError::new(primary, rollback.diagnostics, rollback.resume_safe)
+    }
+
+    /// Phase A of normal shutdown. Every true-Iconic or off-screen parked
+    /// managed client is made viewable at its saved geometry and synchronously
+    /// verified before any event mask, grab, border or public state is touched.
+    fn prepare_normal_exit_clients(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<Vec<PreparedNormalExitClient>, NormalExitPrepareError> {
+        // True ICCCM ownership and server-side parking are X11 concepts.
+        // Wayland backends retain their ordinary surface teardown and must not
+        // be asked to emulate synchronous X11 GetGeometry/MapState replies.
+        if !backend.capabilities().supports_client_list {
+            return Ok(Vec::new());
+        }
+        let client_keys = self.state.client_order.clone();
+        let desktop_left = self.desktop_left_edge();
+        let mut prepared = Vec::new();
+
+        for client_key in client_keys {
+            let Some(mut previous_client) = self.state.clients.get(client_key).cloned() else {
+                continue;
+            };
+            if !self.client_needs_normal_exit_handoff(&previous_client) {
+                continue;
+            }
+            let win = previous_client.win;
+
+            // Snapshot the server before the first possible mutation. Merely
+            // querying an unmapped true-Iconic/swallowed window cannot expose
+            // it, while doing this after parking repair would make a failed
+            // repair impossible to roll back exactly.
+            let before_attributes = match backend.window_ops().get_window_attributes(win) {
+                Ok(attributes) => attributes,
+                Err(error) => {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("query pre-handoff map state for {win:?}: {error}"),
+                    ));
+                }
+            };
+            let server_geometry = match backend.window_ops().get_geometry(win) {
+                Ok(geometry) => geometry,
+                Err(error) => {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("query pre-handoff geometry for {win:?}: {error}"),
+                    ));
+                }
+            };
+            let original_client = previous_client.clone();
+            prepared.push(PreparedNormalExitClient {
+                client_key,
+                previous_client: original_client,
+                server_geometry,
+                was_viewable: before_attributes.map_state_viewable,
+            });
+
+            // Repair the parking endpoint while a true-Iconic client is still
+            // unmapped. A hotplug failure may have left its remembered X
+            // coordinate inside the new desktop; mapping before this check
+            // would expose a live input surface during shutdown.
+            if previous_client.state.is_hidden {
+                if let Err(error) = self.retry_x11_minimized_client_park(backend, client_key) {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("repair safe Iconic parking for {win:?}: {error}"),
+                    ));
+                }
+                let Some(repaired_client) = self.state.clients.get(client_key).cloned() else {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("managed client {win:?} vanished after parking repair"),
+                    ));
+                };
+                previous_client = repaired_client;
+                // A successful topology repair is itself a safe, durable
+                // improvement. If a later client aborts the global handoff,
+                // roll back to this freshly verified parking endpoint rather
+                // than resurrecting a coordinate from a disconnected output.
+                let repaired_server_geometry = match backend.window_ops().get_geometry(win) {
+                    Ok(geometry) => geometry,
+                    Err(error) => {
+                        return Err(self.normal_exit_handoff_error(
+                            backend,
+                            &prepared,
+                            format!("query repaired Iconic parking for {win:?}: {error}"),
+                        ));
+                    }
+                };
+                if let Some(entry) = prepared.last_mut() {
+                    entry.previous_client = previous_client.clone();
+                    entry.server_geometry = repaired_server_geometry;
+                }
+            }
+            let Some(target) =
+                self.normal_exit_target_geometry(&previous_client, server_geometry.border)
+            else {
+                continue;
+            };
+            if !self.normal_exit_geometry_intersects_output(target) {
+                return Err(self.normal_exit_handoff_error(
+                    backend,
+                    &prepared,
+                    format!(
+                        "saved visible geometry for {win:?} does not intersect any current output"
+                    ),
+                ));
+            }
+
+            // Swallowed parents must remain unmapped until the bounded global
+            // swallowed-parent batch, which is deliberately the final Phase-A
+            // operation. Configure their saved visible geometry now and let
+            // that batch perform MapWindow + IsViewable verification later.
+            if !previous_client.state.is_swallowed {
+                if previous_client.state.is_hidden
+                    && let Err(error) = backend.compositor_cancel_window_iconify(win)
+                {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("map true-Iconic client {win:?} for normal exit: {error}"),
+                    ));
+                }
+                match backend.window_ops().get_window_attributes(win) {
+                    Ok(attributes) if attributes.map_state_viewable => {}
+                    Ok(_) => {
+                        return Err(self.normal_exit_handoff_error(
+                            backend,
+                            &prepared,
+                            format!("normal-exit client {win:?} is not viewable after mapping"),
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(self.normal_exit_handoff_error(
+                            backend,
+                            &prepared,
+                            format!("confirm mapped normal-exit client {win:?}: {error}"),
+                        ));
+                    }
+                }
+            }
+
+            if let Err(error) = backend.window_ops().configure(
+                win,
+                target.x,
+                target.y,
+                target.w,
+                target.h,
+                target.border,
+            ) {
+                return Err(self.normal_exit_handoff_error(
+                    backend,
+                    &prepared,
+                    format!("restore visible server geometry for {win:?}: {error}"),
+                ));
+            }
+            match backend.window_ops().get_geometry(win) {
+                Ok(actual) if geometry_matches(actual, target) => {}
+                Ok(actual) => {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!(
+                            "visible geometry for {win:?} was not confirmed: expected {target:?}, observed {actual:?}"
+                        ),
+                    ));
+                }
+                Err(error) => {
+                    return Err(self.normal_exit_handoff_error(
+                        backend,
+                        &prepared,
+                        format!("confirm visible geometry for {win:?}: {error}"),
+                    ));
+                }
+            }
+
+            let mut committed_geometry = previous_client.geometry.clone();
+            let legacy_fallback_x = previous_client
+                .mon
+                .and_then(|monitor| self.monitor_work_area(monitor))
+                .map_or(desktop_left, |area| area.x);
+            restore_hidden_geometry(&mut committed_geometry, desktop_left, legacy_fallback_x);
+            // `target` may have been clamped away from a stale output. Keep
+            // JWM's semantic snapshot identical to the server geometry that
+            // the Phase-A proof actually confirmed.
+            committed_geometry.x = target.x;
+            committed_geometry.y = target.y;
+            committed_geometry.w = i32::try_from(target.w).unwrap_or(i32::MAX);
+            committed_geometry.h = i32::try_from(target.h).unwrap_or(i32::MAX);
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.geometry = committed_geometry;
+            } else {
+                return Err(self.normal_exit_handoff_error(
+                    backend,
+                    &prepared,
+                    format!("managed client {win:?} vanished while committing handoff geometry"),
+                ));
+            }
+        }
+
+        Ok(prepared)
+    }
+
+    /// Prepare the complete normal-exit handoff transaction. Swallowed
+    /// parents are deliberately last: their own helper is transactional, and
+    /// if it fails all earlier client maps/geometries can still be reversed.
+    pub(crate) fn prepare_normal_exit_handoff(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<NormalExitHandoff, NormalExitPrepareError> {
+        if self.is_restarting.load(Ordering::SeqCst) {
+            return Err(NormalExitPrepareError::new(
+                "normal-exit handoff requested while seamless restart is active",
+                Vec::new(),
+                true,
+            ));
+        }
+        let prepared = self.prepare_normal_exit_clients(backend)?;
+        if let Err(error) = self.prepare_swallowed_parents_for_handoff(backend) {
+            return Err(self.normal_exit_handoff_error(
+                backend,
+                &prepared,
+                format!("swallowed-parent handoff failed after client preflight: {error}"),
+            ));
+        }
+        Ok(NormalExitHandoff { _private: () })
+    }
+
     fn record_config_reload_result(&mut self, success: bool, error: Option<String>) {
         self.config_reload_count = self.config_reload_count.saturating_add(1);
         self.config_reload_last_unix_ms = std::time::SystemTime::now()
@@ -133,28 +922,77 @@ impl Jwm {
         self.config_reload_last_error = error;
     }
 
-    pub fn cleanup(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn cleanup(&mut self, backend: &mut dyn Backend) -> Result<(), Box<dyn Error>> {
+        if self.is_restarting.load(Ordering::SeqCst) {
+            // Application preflight already handed swallowed parents off as
+            // its final fallible client stage. This is a defensive idempotent
+            // no-op for that path and preserves the direct cleanup() contract
+            // used outside the composition root. True-Iconic and parked
+            // clients remain restart-preserved for the replacement to adopt.
+            self.prepare_swallowed_parents_for_handoff(backend)?;
+            self.cleanup_after_handoff(backend, false)
+        } else {
+            let handoff = self.prepare_normal_exit_handoff(backend)?;
+            self.cleanup_after_normal_exit_handoff(backend, handoff)
+        }
+    }
+
+    /// Enter destructive normal-exit Phase B only with proof that the global
+    /// physical handoff barrier succeeded. The application obtains this proof
+    /// before leaving its cancellable run loop.
+    pub(crate) fn cleanup_after_normal_exit_handoff(
+        &mut self,
+        backend: &mut dyn Backend,
+        _handoff: NormalExitHandoff,
+    ) -> Result<(), Box<dyn Error>> {
+        self.cleanup_after_handoff(backend, true)
+    }
+
+    fn cleanup_after_handoff(
+        &mut self,
+        backend: &mut dyn Backend,
+        normal_exit_prepared: bool,
+    ) -> Result<(), Box<dyn Error>> {
         info!("[cleanup] Starting essential cleanup (letting Rust handle memory)");
         // Before anything can fail: a layout changed seconds before a restart
         // is exactly the one the next process has to come back to.
-        self.flush_layout_persistence_on_exit();
+        if let Err(error) = self.flush_layout_persistence_on_exit() {
+            // Normal-exit cleanup is already beyond its physical handoff
+            // commit point, while restart has validated this write before
+            // entering cleanup. Record a late failure without skipping the
+            // remaining X11/system teardown stages.
+            warn!("[cleanup] could not flush pending layout persistence: {error}");
+        }
         // Shut down IPC server (also handled by Drop, but explicit is clearer)
         if let Some(ref mut ipc) = self.ipc_server {
             ipc.shutdown();
         }
         self.ipc_server = None;
-        self.cleanup_x11_resources(backend)?;
-        self.cleanup_system_resources()?;
-        backend.color_allocator().free_all_theme_pixels()?;
-        backend.window_ops().flush()?;
-        info!("[cleanup] Essential cleanup completed (Rust will handle the rest)");
-        Ok(())
+        let result = run_best_effort_cleanup(ESSENTIAL_CLEANUP_STAGES, |stage| match stage {
+            EssentialCleanupStage::X11Resources => {
+                self.cleanup_x11_resources_after_handoff(backend, normal_exit_prepared)
+            }
+            EssentialCleanupStage::SystemResources => self.cleanup_system_resources(),
+            EssentialCleanupStage::ThemePixels => {
+                boxed_cleanup_result(backend.color_allocator().free_all_theme_pixels())
+            }
+            EssentialCleanupStage::DisplayFlush => {
+                boxed_cleanup_result(backend.window_ops().flush())
+            }
+        });
+        if result.is_ok() {
+            info!("[cleanup] Essential cleanup completed (Rust will handle the rest)");
+        } else {
+            warn!("[cleanup] Essential cleanup completed with failures");
+        }
+        result
     }
 
-    pub(crate) fn cleanup_x11_resources(
+    fn cleanup_x11_resources_after_handoff(
         &mut self,
         backend: &mut dyn Backend,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+        normal_exit_prepared: bool,
+    ) -> Result<(), Box<dyn Error>> {
         info!("[cleanup_x11_resources] Cleaning X11 resources");
 
         // Stop recording on shutdown. We do NOT cross-restart resume: previously
@@ -185,89 +1023,162 @@ impl Jwm {
             }
         }
 
-        self.cleanup_all_clients_x11_state(backend)?;
-
-        self.cleanup_key_grabs(backend)?;
-
-        self.reset_input_focus(backend)?;
-
-        backend.cleanup()?;
-
-        if let Err(e) = backend.cursor_provider().cleanup() {
-            log::warn!("cursor cleanup failed: {:?}", e);
+        let result = run_best_effort_cleanup(X11_CLEANUP_STAGES, |stage| match stage {
+            X11CleanupStage::ClientState => {
+                if normal_exit_prepared {
+                    self.commit_normal_exit_client_state(backend)
+                } else {
+                    self.cleanup_restarting_clients_x11_state(backend)
+                }
+            }
+            X11CleanupStage::KeyGrabs => self.cleanup_key_grabs(backend),
+            X11CleanupStage::InputFocus => self.reset_input_focus(backend),
+            X11CleanupStage::Backend => boxed_cleanup_result(backend.cleanup()),
+            X11CleanupStage::Cursor => boxed_cleanup_result(backend.cursor_provider().cleanup()),
+        });
+        if result.is_ok() {
+            info!("[cleanup_x11_resources] X11 resources cleaned");
+        } else {
+            warn!("[cleanup_x11_resources] X11 cleanup completed with failures");
         }
-
-        info!("[cleanup_x11_resources] X11 resources cleaned");
-        Ok(())
+        result
     }
 
-    pub(crate) fn cleanup_system_resources(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub(crate) fn cleanup_system_resources(&mut self) -> Result<(), Box<dyn Error>> {
         info!("[cleanup_system_resources] Cleaning system resources");
 
-        self.cleanup_statusbar_processes()?;
-
-        self.cleanup_shared_memory_resources()?;
-
-        info!("[cleanup_system_resources] System resources cleaned");
-        Ok(())
+        let result = run_best_effort_cleanup(SYSTEM_CLEANUP_STAGES, |stage| match stage {
+            SystemCleanupStage::StatusBars => self.cleanup_statusbar_processes(),
+            SystemCleanupStage::SharedMemory => self.cleanup_shared_memory_resources(),
+        });
+        if result.is_ok() {
+            info!("[cleanup_system_resources] System resources cleaned");
+        } else {
+            warn!("[cleanup_system_resources] System cleanup completed with failures");
+        }
+        result
     }
 
+    #[cfg(test)]
     pub(crate) fn cleanup_all_clients_x11_state(
         &mut self,
         backend: &mut dyn Backend,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn Error>> {
         info!("[cleanup_all_clients_x11_state]");
-        let restarting = self.is_restarting.load(Ordering::SeqCst);
-
-        let mut clients_to_process = Vec::new();
-        for &mon_key in &self.state.monitor_order {
-            if let Some(stack) = self.state.monitor_stack.get(mon_key) {
-                for &ck in stack {
-                    if let Some(c) = self.state.clients.get(ck) {
-                        clients_to_process.push((c.win, c.geometry.old_border_w, ck));
-                    }
-                }
-            }
+        if self.is_restarting.load(Ordering::SeqCst) {
+            self.cleanup_restarting_clients_x11_state(backend)
+        } else {
+            let _handoff = self.prepare_normal_exit_handoff(backend)?;
+            self.commit_normal_exit_client_state(backend)
         }
-        for (win, old_border_w, ck) in clients_to_process {
-            if let Some(_) = self.state.clients.get(ck) {
-                if restarting {
-                    backend.window_ops().ungrab_all_buttons(win)?;
-                } else {
-                    let _ = self.restore_client_x11_state(backend, win, old_border_w);
-                }
-            }
-        }
-
-        Ok(())
     }
 
-    pub(crate) fn restore_client_x11_state(
+    fn cleanup_restarting_clients_x11_state(
         &mut self,
         backend: &mut dyn Backend,
-        win: WindowId,
-        old_border_w: i32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Err(e) = backend
-            .window_ops()
-            .change_event_mask(win, EventMaskBits::NONE.bits())
-        {
-            log::warn!("Failed to clear events for {:?}: {:?}", win, e);
+    ) -> Result<(), Box<dyn Error>> {
+        let mut failures = CleanupFailures::default();
+        let clients_to_process =
+            x11_client_cleanup_plan(&self.state.client_order, &self.state.clients);
+        for (win, _, client_key) in clients_to_process {
+            if !self.state.clients.contains_key(client_key) {
+                continue;
+            }
+            if let Err(error) = self.persist_minimized_restore_state(backend, client_key) {
+                // Keep the previous valid property if refreshing it fails.
+                // Restart adoption may still use legacy state.
+                warn!("Failed to refresh minimized restore state for {win:?}: {error}");
+            }
+            failures.record(
+                format!("ungrab client buttons for {win:?}"),
+                boxed_cleanup_result(backend.window_ops().ungrab_all_buttons(win)),
+            );
         }
-        let changes = WindowChanges {
-            border_width: Some(old_border_w as u32),
-            ..Default::default()
-        };
-        if let Err(e) = backend.window_ops().apply_window_changes(win, changes) {
-            log::warn!("Failed to restore border for {:?}: {:?}", win, e);
+        failures.finish()
+    }
+
+    /// Phase B. The ownership-release pass is intentionally global: no client
+    /// loses events, grabs or borders until Phase A has verified every parked
+    /// client. Public protocol state is then retired in Hidden -> Withdrawn ->
+    /// V1 order; later failures are reported while teardown remains best-effort.
+    fn commit_normal_exit_client_state(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn Error>> {
+        let clients_to_process =
+            x11_client_cleanup_plan(&self.state.client_order, &self.state.clients);
+        let mut failures = CleanupFailures::default();
+        backend.compositor_set_minimized_window_preview(None, None);
+
+        // Ownership release is one batch after the global physical barrier.
+        for (win, old_border_w, client_key) in &clients_to_process {
+            if !self.state.clients.contains_key(*client_key) {
+                continue;
+            }
+            failures.record(
+                format!("clear client event mask for {win:?}"),
+                boxed_cleanup_result(
+                    backend
+                        .window_ops()
+                        .change_event_mask(*win, EventMaskBits::NONE.bits()),
+                ),
+            );
+            failures.record(
+                format!("restore client border for {win:?}"),
+                boxed_cleanup_result(backend.window_ops().apply_window_changes(
+                    *win,
+                    WindowChanges {
+                        border_width: Some(
+                            u32::try_from((*old_border_w).max(0)).unwrap_or(u32::MAX),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+            );
+            failures.record(
+                format!("ungrab client buttons for {win:?}"),
+                boxed_cleanup_result(backend.window_ops().ungrab_all_buttons(*win)),
+            );
         }
-        if let Err(e) = backend.window_ops().ungrab_all_buttons(win) {
-            log::warn!("Failed to ungrab buttons for {:?}: {:?}", win, e);
+
+        // Retire public state only after every client crossed the ownership
+        // barrier. Keep V1 when Withdrawn could not be written so another JWM
+        // still has recovery metadata rather than a half-retired client.
+        for (win, _, client_key) in clients_to_process {
+            if !self.state.clients.contains_key(client_key) {
+                continue;
+            }
+            failures.record(
+                format!("clear EWMH Hidden for {win:?}"),
+                boxed_cleanup_result(backend.property_ops().set_net_wm_state_flag(
+                    win,
+                    crate::backend::api::NetWmState::Hidden,
+                    false,
+                )),
+            );
+            let withdrew =
+                match self.setclientstate(backend, win, crate::jwm::WITHDRAWN_STATE as i64) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        failures.record(format!("write WithdrawnState for {win:?}"), Err(error));
+                        false
+                    }
+                };
+
+            if withdrew {
+                failures.record(
+                    format!("clear minimized restore state for {win:?}"),
+                    boxed_cleanup_result(backend.property_ops().clear_minimized_restore_state(win)),
+                );
+            }
+            if let Some(client) = self.state.clients.get_mut(client_key) {
+                client.state.is_hidden = false;
+                client.state.minimized_order = 0;
+            }
+            backend.compositor_set_window_dock_geometry(win, None);
         }
-        if let Err(e) = self.setclientstate(backend, win, crate::jwm::WITHDRAWN_STATE as i64) {
-            log::warn!("Failed to set withdrawn state for {:?}: {:?}", win, e);
-        }
-        Ok(())
+
+        failures.finish()
     }
 
     pub(crate) fn cleanup_statusbar_processes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -357,13 +1268,10 @@ impl Jwm {
     pub(crate) fn cleanup_key_grabs(
         &mut self,
         backend: &mut dyn Backend,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Err(e) = backend
+    ) -> Result<(), Box<dyn Error>> {
+        backend
             .key_ops()
-            .clear_key_grabs(backend.root_window().expect("no root window"))
-        {
-            warn!("[cleanup_key_grabs] Failed to ungrab keys: {:?}", e);
-        }
+            .clear_key_grabs(backend.root_window().expect("no root window"))?;
         Ok(())
     }
     fn perform_config_reload(&mut self, backend: &mut dyn Backend) -> IpcResponse {
@@ -552,6 +1460,16 @@ impl Jwm {
             // screen. The common close path applies the requested OFF state.
             self.features.system_ui_temporary_compositor = true;
             log::info!("Deferring compositor disable until the system UI closes");
+        } else if !compositor_wanted
+            && compositor_active
+            && let Err(error) = self.park_hidden_clients_before_compositor_disable(backend)
+        {
+            // Config reload is another compositor-loss entry point. Keep the
+            // active renderer and its pinned Iconic snapshots when even one
+            // hidden client's real X11 geometry cannot be made safely parked.
+            log::warn!(
+                "Compositor remains ON after config reload; hidden-window parking barrier failed: {error}"
+            );
         } else if compositor_wanted != compositor_active {
             match backend.set_compositor_enabled(compositor_wanted) {
                 Ok(true) => log::info!(
@@ -750,5 +1668,972 @@ mod config_reload_tests {
             tracker.take_due_attempt(now + CONFIG_RELOAD_DEBOUNCE * 3),
             Some(fixed)
         );
+    }
+}
+
+#[cfg(test)]
+mod client_cleanup_plan_tests {
+    use super::*;
+
+    #[test]
+    fn normal_shutdown_includes_clients_parked_outside_monitor_stacks() {
+        let mut clients = slotmap::SlotMap::with_key();
+        let attached = clients.insert(WMClient::new(WindowId::from_raw(41)));
+        let parked = clients.insert(WMClient::new(WindowId::from_raw(42)));
+
+        // A parked scratchpad has no monitor/stack membership. `client_order`
+        // remains the authoritative registry for both ordinary and parked
+        // managed clients.
+        assert!(clients[parked].mon.is_none());
+        let plan = x11_client_cleanup_plan(&[attached, parked], &clients);
+
+        assert_eq!(
+            plan.iter()
+                .map(|(window, ..)| window.raw())
+                .collect::<Vec<_>>(),
+            vec![41, 42]
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_failure_tests {
+    use super::{
+        CleanupResult, ESSENTIAL_CLEANUP_STAGES, EssentialCleanupStage, X11_CLEANUP_STAGES,
+        X11CleanupStage, run_best_effort_cleanup,
+    };
+    use std::error::Error;
+    use std::io;
+
+    fn injected_failure(message: &'static str) -> CleanupResult {
+        Err(Box::new(io::Error::other(message)))
+    }
+
+    #[test]
+    fn essential_cleanup_reaches_system_and_final_stages_after_failures() {
+        let mut calls = Vec::new();
+        let result = run_best_effort_cleanup(ESSENTIAL_CLEANUP_STAGES, |stage| {
+            calls.push(stage);
+            match stage {
+                EssentialCleanupStage::X11Resources => injected_failure("injected X11 failure"),
+                EssentialCleanupStage::ThemePixels => injected_failure("injected theme failure"),
+                EssentialCleanupStage::SystemResources | EssentialCleanupStage::DisplayFlush => {
+                    Ok(())
+                }
+            }
+        });
+
+        assert_eq!(
+            calls,
+            vec![
+                EssentialCleanupStage::X11Resources,
+                EssentialCleanupStage::SystemResources,
+                EssentialCleanupStage::ThemePixels,
+                EssentialCleanupStage::DisplayFlush,
+            ]
+        );
+        let error = result.expect_err("injected cleanup failures must be returned");
+        let rendered = error.to_string();
+        assert!(rendered.contains("X11 resources: injected X11 failure"));
+        assert!(rendered.contains("theme pixels: injected theme failure"));
+        assert_eq!(
+            Error::source(error.as_ref()).map(ToString::to_string),
+            Some("injected X11 failure".to_string()),
+            "the primary failure remains the aggregate error source"
+        );
+    }
+
+    #[test]
+    fn x11_cleanup_continues_after_client_state_failure() {
+        let mut calls = Vec::new();
+        let result = run_best_effort_cleanup(X11_CLEANUP_STAGES, |stage| {
+            calls.push(stage);
+            if stage == X11CleanupStage::ClientState {
+                injected_failure("injected client cleanup failure")
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_err());
+        assert_eq!(
+            calls,
+            vec![
+                X11CleanupStage::ClientState,
+                X11CleanupStage::KeyGrabs,
+                X11CleanupStage::InputFocus,
+                X11CleanupStage::Backend,
+                X11CleanupStage::Cursor,
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod normal_exit_transaction_tests {
+    use super::*;
+    use crate::backend::api::{
+        BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
+        CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
+        CompositorWorkspaceEffects, CursorProvider, DisplayControl, InputOps, KeyOps, OutputOps,
+        PropertyOps, RenderScheduler, WindowAttributes, WindowOps,
+    };
+    use crate::backend::common_define::Pixel;
+    use crate::backend::error::BackendError;
+    use crate::backend::wayland_dummy_ops::{
+        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyPropertyOps,
+    };
+    use crate::core::types::Rect;
+    use std::any::Any;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ExitOperation {
+        Configure(WindowId, i32),
+        Map(WindowId),
+        UnmapSwallowed(WindowId),
+        CancelIconic(WindowId),
+        RequestIconic(WindowId),
+        ReleaseOwnership(WindowId),
+        BackendCleanup,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct ServerWindow {
+        geometry: Geometry,
+        viewable: bool,
+    }
+
+    struct ExitWindowOps {
+        windows: Mutex<HashMap<WindowId, ServerWindow>>,
+        operations: Arc<Mutex<Vec<ExitOperation>>>,
+        fail_visible_configure_once_for: AtomicU64,
+        fail_rollback_configure_once_for: AtomicU64,
+        fail_map_once_for: AtomicU64,
+        fail_unmap_once_for: AtomicU64,
+        fail_attributes_for: AtomicU64,
+        fail_attributes_on_call: AtomicU64,
+        attribute_calls: Mutex<HashMap<WindowId, u64>>,
+    }
+
+    impl ExitWindowOps {
+        fn new(operations: Arc<Mutex<Vec<ExitOperation>>>) -> Self {
+            Self {
+                windows: Mutex::new(HashMap::new()),
+                operations,
+                fail_visible_configure_once_for: AtomicU64::new(0),
+                fail_rollback_configure_once_for: AtomicU64::new(0),
+                fail_map_once_for: AtomicU64::new(0),
+                fail_unmap_once_for: AtomicU64::new(0),
+                fail_attributes_for: AtomicU64::new(0),
+                fail_attributes_on_call: AtomicU64::new(0),
+                attribute_calls: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn insert(&self, window: WindowId, geometry: Geometry, viewable: bool) {
+            self.windows
+                .lock()
+                .expect("server windows lock")
+                .insert(window, ServerWindow { geometry, viewable });
+        }
+
+        fn snapshot(&self, window: WindowId) -> ServerWindow {
+            self.windows.lock().expect("server windows lock")[&window]
+        }
+
+        fn set_viewable(&self, window: WindowId, viewable: bool) -> Result<(), BackendError> {
+            let mut windows = self.windows.lock().expect("server windows lock");
+            let state = windows
+                .get_mut(&window)
+                .ok_or_else(|| BackendError::Message(format!("unknown test window {window:?}")))?;
+            state.viewable = viewable;
+            Ok(())
+        }
+    }
+
+    impl WindowOps for ExitWindowOps {
+        fn set_position(&self, window: WindowId, x: i32, y: i32) -> Result<(), BackendError> {
+            let geometry = self.get_geometry(window)?;
+            self.configure(window, x, y, geometry.w, geometry.h, geometry.border)
+        }
+
+        fn configure(
+            &self,
+            window: WindowId,
+            x: i32,
+            y: i32,
+            width: u32,
+            height: u32,
+            border: u32,
+        ) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::Configure(window, x));
+            if x >= 0
+                && self
+                    .fail_visible_configure_once_for
+                    .compare_exchange(
+                        window.raw(),
+                        0,
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                self.fail_rollback_configure_once_for
+                    .store(window.raw(), AtomicOrdering::SeqCst);
+                return Err(BackendError::Message(
+                    "injected visible geometry failure".into(),
+                ));
+            }
+            if x < 0
+                && self
+                    .fail_rollback_configure_once_for
+                    .compare_exchange(
+                        window.raw(),
+                        0,
+                        AtomicOrdering::SeqCst,
+                        AtomicOrdering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                return Err(BackendError::Message(
+                    "injected rollback geometry failure".into(),
+                ));
+            }
+            let mut windows = self.windows.lock().expect("server windows lock");
+            let state = windows
+                .get_mut(&window)
+                .ok_or_else(|| BackendError::Message(format!("unknown test window {window:?}")))?;
+            state.geometry = Geometry {
+                x,
+                y,
+                w: width,
+                h: height,
+                border,
+            };
+            Ok(())
+        }
+
+        fn set_decoration_style(
+            &self,
+            _window: WindowId,
+            _border_width: u32,
+            _border_color: Pixel,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn raise_window(&self, _window: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn map_window(&self, window: WindowId) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::Map(window));
+            if self
+                .fail_map_once_for
+                .compare_exchange(
+                    window.raw(),
+                    0,
+                    AtomicOrdering::SeqCst,
+                    AtomicOrdering::SeqCst,
+                )
+                .is_ok()
+            {
+                return Err(BackendError::Message("injected map failure".into()));
+            }
+            self.set_viewable(window, true)
+        }
+
+        fn unmap_window(&self, window: WindowId) -> Result<(), BackendError> {
+            self.set_viewable(window, false)
+        }
+
+        fn unmap_managed_window(
+            &self,
+            window: WindowId,
+            reason: ManagedUnmapReason,
+        ) -> Result<(), BackendError> {
+            if reason == ManagedUnmapReason::SwallowDiscard {
+                self.operations
+                    .lock()
+                    .expect("exit operations lock")
+                    .push(ExitOperation::UnmapSwallowed(window));
+            }
+            if self
+                .fail_unmap_once_for
+                .compare_exchange(
+                    window.raw(),
+                    0,
+                    AtomicOrdering::SeqCst,
+                    AtomicOrdering::SeqCst,
+                )
+                .is_ok()
+            {
+                return Err(BackendError::Message("injected unmap failure".into()));
+            }
+            self.unmap_window(window)
+        }
+
+        fn close_window(&self, _window: WindowId) -> Result<CloseResult, BackendError> {
+            Ok(CloseResult::Graceful)
+        }
+
+        fn set_input_focus(&self, _window: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn set_input_focus_root(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn get_window_attributes(
+            &self,
+            window: WindowId,
+        ) -> Result<WindowAttributes, BackendError> {
+            let call = {
+                let mut calls = self.attribute_calls.lock().expect("attribute calls lock");
+                let call = calls.entry(window).or_insert(0);
+                *call = call.saturating_add(1);
+                *call
+            };
+            if self.fail_attributes_for.load(AtomicOrdering::SeqCst) == window.raw()
+                && self.fail_attributes_on_call.load(AtomicOrdering::SeqCst) == call
+            {
+                return Err(BackendError::Message(
+                    "injected attributes query failure".into(),
+                ));
+            }
+            let state = self.snapshot(window);
+            Ok(WindowAttributes {
+                override_redirect: false,
+                map_state_viewable: state.viewable,
+            })
+        }
+
+        fn get_geometry(&self, window: WindowId) -> Result<Geometry, BackendError> {
+            Ok(self.snapshot(window).geometry)
+        }
+
+        fn scan_windows(&self) -> Result<Vec<WindowId>, BackendError> {
+            Ok(Vec::new())
+        }
+
+        fn flush(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn kill_client(&self, _window: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn apply_window_changes(
+            &self,
+            _window: WindowId,
+            _changes: WindowChanges,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn change_event_mask(&self, window: WindowId, _mask: u32) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::ReleaseOwnership(window));
+            Ok(())
+        }
+    }
+
+    struct ExitBackend {
+        window_ops: ExitWindowOps,
+        input_ops: DummyInputOps,
+        property_ops: DummyPropertyOps,
+        output_ops: DummyOutputOps,
+        key_ops: DummyKeyOps,
+        cursor_provider: DummyCursorProvider,
+        color_allocator: DummyColorAllocator,
+        operations: Arc<Mutex<Vec<ExitOperation>>>,
+    }
+
+    impl ExitBackend {
+        fn new() -> Self {
+            let operations = Arc::new(Mutex::new(Vec::new()));
+            Self {
+                window_ops: ExitWindowOps::new(operations.clone()),
+                input_ops: DummyInputOps,
+                property_ops: DummyPropertyOps,
+                output_ops: DummyOutputOps,
+                key_ops: DummyKeyOps,
+                cursor_provider: DummyCursorProvider,
+                color_allocator: DummyColorAllocator,
+                operations,
+            }
+        }
+    }
+
+    impl CompositorBenchmark for ExitBackend {}
+    impl BackendDiagnostics for ExitBackend {}
+    impl CompositorControl for ExitBackend {}
+    impl CompositorMedia for ExitBackend {}
+    impl CompositorWorkspaceEffects for ExitBackend {}
+    impl CompositorAnnotation for ExitBackend {}
+    impl DisplayControl for ExitBackend {}
+    impl RenderScheduler for ExitBackend {
+        fn has_compositor(&self) -> bool {
+            true
+        }
+    }
+    impl CompositorWindowEffects for ExitBackend {
+        fn compositor_cancel_window_iconify(
+            &mut self,
+            window: WindowId,
+        ) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::CancelIconic(window));
+            self.window_ops.set_viewable(window, true)
+        }
+
+        fn compositor_request_window_iconify(
+            &mut self,
+            window: WindowId,
+        ) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::RequestIconic(window));
+            self.window_ops.set_viewable(window, false)
+        }
+    }
+
+    impl Backend for ExitBackend {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                supports_client_list: true,
+                ..Capabilities::default()
+            }
+        }
+
+        fn root_window(&self) -> Option<WindowId> {
+            Some(WindowId::from_raw(1))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn check_existing_wm(&self) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn window_ops(&self) -> &dyn WindowOps {
+            &self.window_ops
+        }
+
+        fn input_ops(&self) -> &dyn InputOps {
+            &self.input_ops
+        }
+
+        fn property_ops(&self) -> &dyn PropertyOps {
+            &self.property_ops
+        }
+
+        fn output_ops(&self) -> &dyn OutputOps {
+            &self.output_ops
+        }
+
+        fn key_ops(&self) -> &dyn KeyOps {
+            &self.key_ops
+        }
+
+        fn key_ops_mut(&mut self) -> &mut dyn KeyOps {
+            &mut self.key_ops
+        }
+
+        fn cursor_provider(&mut self) -> &mut dyn CursorProvider {
+            &mut self.cursor_provider
+        }
+
+        fn color_allocator(&mut self) -> &mut dyn ColorAllocator {
+            &mut self.color_allocator
+        }
+
+        fn cleanup(&mut self) -> Result<(), BackendError> {
+            self.operations
+                .lock()
+                .expect("exit operations lock")
+                .push(ExitOperation::BackendCleanup);
+            Ok(())
+        }
+
+        fn run(
+            &mut self,
+            _handler: &mut dyn crate::backend::api::EventHandler,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+    }
+
+    fn add_iconic_client(
+        jwm: &mut Jwm,
+        backend: &ExitBackend,
+        window: WindowId,
+        hidden_x: i32,
+        visible_x: i32,
+    ) -> ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1;
+        client.state.is_hidden = true;
+        client.state.minimized_order = window.raw();
+        client.geometry.x = hidden_x;
+        client.geometry.y = 70;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        client.geometry.hidden_x = Some(hidden_x);
+        client.geometry.hidden_restore_rect = Some(Rect::new(visible_x, 70, 640, 480));
+        let client_key = jwm.state.clients.insert(client);
+        jwm.state.client_order.push(client_key);
+        jwm.state.win_to_client.insert(window, client_key);
+        backend.window_ops.insert(
+            window,
+            Geometry {
+                x: hidden_x,
+                y: 70,
+                w: 640,
+                h: 480,
+                border: 0,
+            },
+            false,
+        );
+        client_key
+    }
+
+    fn add_swallowed_offtag_client(
+        jwm: &mut Jwm,
+        backend: &ExitBackend,
+        window: WindowId,
+        hidden_x: i32,
+        visible_x: i32,
+    ) -> ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1 << 4;
+        client.state.is_swallowed = true;
+        client.geometry.x = hidden_x;
+        client.geometry.y = 90;
+        client.geometry.w = 600;
+        client.geometry.h = 420;
+        client.geometry.hidden_x = Some(hidden_x);
+        client.geometry.hidden_restore_rect = Some(Rect::new(visible_x, 90, 600, 420));
+        let client_key = jwm.state.clients.insert(client);
+        jwm.state.client_order.push(client_key);
+        jwm.state.win_to_client.insert(window, client_key);
+        backend.window_ops.insert(
+            window,
+            Geometry {
+                x: hidden_x,
+                y: 90,
+                w: 600,
+                h: 420,
+                border: 0,
+            },
+            false,
+        );
+        client_key
+    }
+
+    fn add_parked_offtag_client(
+        jwm: &mut Jwm,
+        backend: &ExitBackend,
+        window: WindowId,
+        hidden_x: i32,
+        restore: Rect,
+    ) -> ClientKey {
+        let monitor = jwm.state.monitor_order[0];
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = 1 << 5;
+        client.geometry.x = hidden_x;
+        client.geometry.y = restore.y;
+        client.geometry.w = restore.w;
+        client.geometry.h = restore.h;
+        client.geometry.hidden_x = Some(hidden_x);
+        client.geometry.hidden_restore_rect = Some(restore);
+        let client_key = jwm.state.clients.insert(client);
+        jwm.state.client_order.push(client_key);
+        jwm.state.win_to_client.insert(window, client_key);
+        backend.window_ops.insert(
+            window,
+            Geometry {
+                x: hidden_x,
+                y: restore.y,
+                w: restore.w.max(1) as u32,
+                h: restore.h.max(1) as u32,
+                border: 0,
+            },
+            true,
+        );
+        client_key
+    }
+
+    fn two_iconic_clients() -> (
+        Jwm,
+        ExitBackend,
+        (WindowId, ClientKey, i32, i32),
+        (WindowId, ClientKey, i32, i32),
+    ) {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let first = WindowId::from_raw(0x9101);
+        let second = WindowId::from_raw(0x9102);
+        let first_hidden = -2400;
+        let second_hidden = -2500;
+        let first_visible = 120;
+        let second_visible = 820;
+        let first_key = add_iconic_client(&mut jwm, &backend, first, first_hidden, first_visible);
+        let second_key =
+            add_iconic_client(&mut jwm, &backend, second, second_hidden, second_visible);
+        (
+            jwm,
+            backend,
+            (first, first_key, first_hidden, first_visible),
+            (second, second_key, second_hidden, second_visible),
+        )
+    }
+
+    #[test]
+    fn second_client_phase_a_failure_rolls_back_every_client_and_blocks_teardown() {
+        let (mut jwm, mut backend, first, second) = two_iconic_clients();
+        backend
+            .window_ops
+            .fail_visible_configure_once_for
+            .store(second.0.raw(), AtomicOrdering::SeqCst);
+
+        let error = jwm
+            .cleanup(&mut backend)
+            .expect_err("the global handoff must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("injected visible geometry failure")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("injected rollback geometry failure")
+        );
+
+        for (window, client_key, _, _) in [first, second] {
+            let client = &jwm.state.clients[client_key];
+            assert!(client.state.is_hidden);
+            assert!(client.geometry.hidden_restore_rect.is_some());
+            let server = backend.window_ops.snapshot(window);
+            assert_eq!(server.geometry.x, client.geometry.x);
+            assert!(x11_geometry_fully_left_of_desktop(
+                server.geometry,
+                jwm.desktop_left_edge()
+            ));
+            assert!(!server.viewable, "rollback must restore true Iconic state");
+        }
+
+        let operations = backend
+            .operations
+            .lock()
+            .expect("exit operations lock")
+            .clone();
+        assert!(
+            !operations.iter().any(|operation| matches!(
+                operation,
+                ExitOperation::ReleaseOwnership(_) | ExitOperation::BackendCleanup
+            )),
+            "Phase A failure must not cross into event/grab/border or backend teardown: {operations:?}"
+        );
+        let reiconified = operations
+            .iter()
+            .filter_map(|operation| match operation {
+                ExitOperation::RequestIconic(window) => Some(*window),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reiconified, vec![second.0, first.0]);
+    }
+
+    #[test]
+    fn successful_phase_a_is_a_global_barrier_before_ownership_release() {
+        let (mut jwm, mut backend, first, second) = two_iconic_clients();
+
+        jwm.cleanup(&mut backend).unwrap();
+
+        let operations = backend
+            .operations
+            .lock()
+            .expect("exit operations lock")
+            .clone();
+        let first_release = operations
+            .iter()
+            .position(|operation| matches!(operation, ExitOperation::ReleaseOwnership(_)))
+            .expect("Phase B must release client ownership");
+        for (window, _, _, visible_x) in [first, second] {
+            let handoff = operations
+                .iter()
+                .position(|operation| *operation == ExitOperation::Configure(window, visible_x))
+                .expect("each client must reach its visible geometry");
+            assert!(
+                handoff < first_release,
+                "every visible handoff must precede the first destructive release: {operations:?}"
+            );
+            let server = backend.window_ops.snapshot(window);
+            assert_eq!(server.geometry.x, visible_x);
+            assert!(server.viewable);
+        }
+        assert!(operations.contains(&ExitOperation::BackendCleanup));
+        assert!(!jwm.state.clients[first.1].state.is_hidden);
+        assert!(!jwm.state.clients[second.1].state.is_hidden);
+    }
+
+    #[test]
+    fn stale_restore_rects_right_above_and_below_outputs_are_clamped_before_proof() {
+        for case in ["right", "above", "below"] {
+            let mut backend = ExitBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+            let monitor = jwm.state.monitor_order[0];
+            let monitor_geometry = &jwm.state.monitors[monitor].geometry;
+            let output = Rect::new(
+                monitor_geometry.m_x,
+                monitor_geometry.m_y,
+                monitor_geometry.m_w,
+                monitor_geometry.m_h,
+            );
+            let stale = match case {
+                "right" => Rect::new(
+                    output.x.saturating_add(output.w).saturating_add(700),
+                    output.y.saturating_add(100),
+                    600,
+                    420,
+                ),
+                "above" => Rect::new(
+                    output.x.saturating_add(100),
+                    output.y.saturating_sub(1120),
+                    600,
+                    420,
+                ),
+                "below" => Rect::new(
+                    output.x.saturating_add(100),
+                    output.y.saturating_add(output.h).saturating_add(700),
+                    600,
+                    420,
+                ),
+                _ => unreachable!(),
+            };
+            assert!(!geometry_intersects_rect(
+                Geometry {
+                    x: stale.x,
+                    y: stale.y,
+                    w: stale.w as u32,
+                    h: stale.h as u32,
+                    border: 0,
+                },
+                output,
+            ));
+            let window = WindowId::from_raw(match case {
+                "right" => 0x9251,
+                "above" => 0x9252,
+                "below" => 0x9253,
+                _ => unreachable!(),
+            });
+            let hidden_x = output.x.saturating_sub(2400);
+            let client_key = add_parked_offtag_client(&mut jwm, &backend, window, hidden_x, stale);
+
+            let _handoff = jwm
+                .prepare_normal_exit_handoff(&mut backend)
+                .unwrap_or_else(|error| panic!("{case} stale restore must be repaired: {error}"));
+
+            let actual = backend.window_ops.snapshot(window).geometry;
+            assert!(
+                jwm.normal_exit_geometry_intersects_output(actual),
+                "{case} target must intersect a live output: {actual:?}"
+            );
+            assert_ne!((actual.x, actual.y), (stale.x, stale.y));
+            assert_eq!(jwm.state.clients[client_key].geometry.x, actual.x);
+            assert_eq!(jwm.state.clients[client_key].geometry.y, actual.y);
+        }
+    }
+
+    #[test]
+    fn swallowed_offtag_parent_gets_visible_geometry_before_the_final_map_batch() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let window = WindowId::from_raw(0x9201);
+        let hidden_x = -2600;
+        let visible_x = 360;
+        let client_key =
+            add_swallowed_offtag_client(&mut jwm, &backend, window, hidden_x, visible_x);
+
+        let handoff = jwm
+            .prepare_normal_exit_handoff(&mut backend)
+            .expect("swallowed parent handoff must succeed");
+
+        let server = backend.window_ops.snapshot(window);
+        assert!(server.viewable);
+        assert_eq!(server.geometry.x, visible_x);
+        assert!(!jwm.state.clients[client_key].state.is_swallowed);
+        assert_eq!(jwm.state.clients[client_key].geometry.x, visible_x);
+        assert!(
+            jwm.state.clients[client_key]
+                .geometry
+                .hidden_restore_rect
+                .is_none()
+        );
+
+        let operations = backend
+            .operations
+            .lock()
+            .expect("exit operations lock")
+            .clone();
+        let configured = operations
+            .iter()
+            .position(|operation| *operation == ExitOperation::Configure(window, visible_x))
+            .expect("parent visible geometry configure");
+        let mapped = operations
+            .iter()
+            .position(|operation| *operation == ExitOperation::Map(window))
+            .expect("final swallowed-parent map");
+        assert!(
+            configured < mapped,
+            "an unmapped swallowed parent must be moved before it is exposed: {operations:?}"
+        );
+
+        jwm.cleanup_after_normal_exit_handoff(&mut backend, handoff)
+            .unwrap();
+        assert!(backend.window_ops.snapshot(window).viewable);
+    }
+
+    #[test]
+    fn swallowed_batch_query_and_first_unmap_failure_are_retried_to_resume_safe() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let window = WindowId::from_raw(0x9202);
+        let hidden_x = -2700;
+        let client_key = add_swallowed_offtag_client(&mut jwm, &backend, window, hidden_x, 420);
+        backend
+            .window_ops
+            .fail_attributes_for
+            .store(window.raw(), AtomicOrdering::SeqCst);
+        backend
+            .window_ops
+            .fail_attributes_on_call
+            .store(2, AtomicOrdering::SeqCst);
+        backend
+            .window_ops
+            .fail_unmap_once_for
+            .store(window.raw(), AtomicOrdering::SeqCst);
+
+        let error = match jwm.prepare_normal_exit_handoff(&mut backend) {
+            Ok(_) => panic!("the swallowed batch query was injected to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.resume_safe(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("injected attributes query failure")
+        );
+        assert!(error.to_string().contains("injected unmap failure"));
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_swallowed);
+        assert_eq!(client.geometry.x, hidden_x);
+        assert!(!backend.window_ops.snapshot(window).viewable);
+        let unmaps = backend
+            .operations
+            .lock()
+            .expect("exit operations lock")
+            .iter()
+            .filter(|operation| **operation == ExitOperation::UnmapSwallowed(window))
+            .count();
+        assert_eq!(
+            unmaps, 2,
+            "outer rollback must retry the swallowed helper's failed unmap"
+        );
+    }
+
+    #[test]
+    fn successful_swallowed_rollback_is_not_reunmapped_without_an_event() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let window = WindowId::from_raw(0x9204);
+        add_swallowed_offtag_client(&mut jwm, &backend, window, -2850, 540);
+        backend
+            .window_ops
+            .fail_attributes_for
+            .store(window.raw(), AtomicOrdering::SeqCst);
+        backend
+            .window_ops
+            .fail_attributes_on_call
+            .store(2, AtomicOrdering::SeqCst);
+
+        let error = match jwm.prepare_normal_exit_handoff(&mut backend) {
+            Ok(_) => panic!("the swallowed batch query was injected to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.resume_safe(), "{error}");
+        assert!(!backend.window_ops.snapshot(window).viewable);
+        let unmaps = backend
+            .operations
+            .lock()
+            .expect("exit operations lock")
+            .iter()
+            .filter(|operation| **operation == ExitOperation::UnmapSwallowed(window))
+            .count();
+        assert_eq!(
+            unmaps, 1,
+            "an already-unmapped parent has no second UnmapNotify to consume, so outer rollback must not issue a duplicate managed unmap"
+        );
+    }
+
+    #[test]
+    fn rollback_attributes_failure_is_typed_as_unsafe_to_resume() {
+        let mut backend = ExitBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test-x11").unwrap();
+        let window = WindowId::from_raw(0x9203);
+        add_swallowed_offtag_client(&mut jwm, &backend, window, -2800, 500);
+        backend
+            .window_ops
+            .fail_map_once_for
+            .store(window.raw(), AtomicOrdering::SeqCst);
+        backend
+            .window_ops
+            .fail_attributes_for
+            .store(window.raw(), AtomicOrdering::SeqCst);
+        backend
+            .window_ops
+            .fail_attributes_on_call
+            .store(3, AtomicOrdering::SeqCst);
+
+        let error = match jwm.prepare_normal_exit_handoff(&mut backend) {
+            Ok(_) => panic!("the swallowed map was injected to fail"),
+            Err(error) => error,
+        };
+
+        assert!(!error.resume_safe(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("query map state after rolling back")
+        );
+        assert!(!backend.window_ops.snapshot(window).viewable);
     }
 }

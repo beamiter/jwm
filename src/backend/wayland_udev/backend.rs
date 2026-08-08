@@ -6,13 +6,13 @@ use crate::sync_ext::MutexExt;
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
-use super::compositor::WaylandCompositor;
+use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
 use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
     CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-    EventHandler, HitTarget, InputOps, KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler,
-    ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps, WindowType,
+    EventHandler, HitTarget, InputOps, KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps,
+    RenderScheduler, ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps, WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
@@ -41,7 +41,8 @@ use smithay::backend::renderer::{
 };
 use smithay::utils::{Physical, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::{
-    RectangleKind, RegionAttributes, SurfaceAttributes, get_children, with_states,
+    RectangleKind, RegionAttributes, SurfaceAttributes, TraversalAction, get_children, with_states,
+    with_surface_tree_downward,
 };
 use smithay::wayland::shell::xdg::SurfaceCachedState;
 use smithay::wayland::viewporter::ViewportCachedState;
@@ -120,6 +121,28 @@ fn surface_declares_opaque_rect(
         };
         region_fully_covers_rect(region, target)
     })
+}
+
+fn surface_tree_has_committed_buffer(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> bool {
+    let mut has_buffer = false;
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |_, states, _| {
+            if has_buffer {
+                return;
+            }
+            has_buffer = states
+                .data_map
+                .get::<RendererSurfaceStateUserData>()
+                .is_some_and(|data| data.lock_safe().buffer().is_some());
+        },
+        |_, _, _| true,
+    );
+    has_buffer
 }
 
 // libinput/evdev does not generate key repeat events for us (X11 does).
@@ -467,10 +490,18 @@ impl WindowOps for WaylandWindowOps {
         self.request_flush();
         Ok(())
     }
-    fn map_window(&self, _win: WindowId) -> Result<(), BackendError> {
+    fn map_window(&self, win: WindowId) -> Result<(), BackendError> {
+        unsafe {
+            self.with_state_mut(|state| state.set_manager_window_mapped(win, true));
+        }
+        self.request_flush();
         Ok(())
     }
-    fn unmap_window(&self, _win: WindowId) -> Result<(), BackendError> {
+    fn unmap_window(&self, win: WindowId) -> Result<(), BackendError> {
+        unsafe {
+            self.with_state_mut(|state| state.set_manager_window_mapped(win, false));
+        }
+        self.request_flush();
         Ok(())
     }
     fn close_window(
@@ -668,6 +699,21 @@ impl PropertyOps for WaylandPropertyOps {
         unsafe { self.with_state_mut(|state| state.window_layer_info.get(&win).copied()) }
     }
 
+    fn set_net_wm_state_flag(
+        &self,
+        win: WindowId,
+        state: NetWmState,
+        on: bool,
+    ) -> Result<(), BackendError> {
+        unsafe {
+            self.with_state_mut(|wayland_state| {
+                wayland_state.update_foreign_toplevel_net_state(win, state, on);
+            });
+        }
+        self.request_flush();
+        Ok(())
+    }
+
     fn is_fullscreen(&self, win: WindowId) -> bool {
         unsafe { self.with_state_mut(|state| state.window_is_fullscreen.get(&win).copied()) }
             .unwrap_or(false)
@@ -677,6 +723,7 @@ impl PropertyOps for WaylandPropertyOps {
         unsafe {
             self.with_state_mut(|state| {
                 state.window_is_fullscreen.insert(win, on);
+                state.update_foreign_toplevel_fullscreen(win, on);
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         if on {
@@ -764,6 +811,153 @@ impl PropertyOps for WaylandPropertyOps {
     }
 }
 
+#[derive(Debug, Default)]
+struct CompositorDesiredState {
+    monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
+    minimized_windows: HashSet<u64>,
+    dock_targets: HashMap<u64, CompositorRect>,
+}
+
+impl CompositorDesiredState {
+    fn set_minimized(&mut self, window_id: u64, minimized: bool) {
+        if minimized {
+            self.minimized_windows.insert(window_id);
+        } else {
+            self.minimized_windows.remove(&window_id);
+            self.dock_targets.remove(&window_id);
+        }
+    }
+
+    fn set_dock_target(&mut self, window_id: u64, target: Option<CompositorRect>) {
+        match target.and_then(CompositorRect::normalized) {
+            Some(target) => {
+                self.dock_targets.insert(window_id, target);
+            }
+            None => {
+                self.dock_targets.remove(&window_id);
+            }
+        }
+    }
+
+    fn ensure_minimized(&mut self, window_id: u64) {
+        self.minimized_windows.insert(window_id);
+    }
+
+    fn retire_window(&mut self, window_id: u64) {
+        self.minimized_windows.remove(&window_id);
+        self.dock_targets.remove(&window_id);
+    }
+}
+
+const MAX_MINIMIZED_CAPTURE_BACKOFF_SHIFT: u8 = 6;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MinimizedCaptureAttemptResult {
+    /// The surface tree has not committed a usable buffer. A known commit
+    /// epoch makes this terminal for that epoch; an unknown epoch falls back
+    /// to bounded exponential polling.
+    AwaitSurfaceCommit,
+    /// Import/render failed despite a committed buffer. Retry with bounded
+    /// exponential backoff because fence readiness and GPU pressure can clear
+    /// without another client commit.
+    TransientFailure,
+    /// The compositor received a usable strong texture owner.
+    Success,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MinimizedCaptureAttempt {
+    commit_epoch: Option<u64>,
+    next_attempt_frame: u64,
+    transient_failures: u8,
+    waiting_for_commit: bool,
+}
+
+#[derive(Debug, Default)]
+struct MinimizedCaptureAttemptGate {
+    windows: HashMap<u64, MinimizedCaptureAttempt>,
+}
+
+impl MinimizedCaptureAttemptGate {
+    fn begin_attempt(&mut self, window_id: u64, commit_epoch: Option<u64>, frame: u64) -> bool {
+        match self.windows.entry(window_id) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(MinimizedCaptureAttempt {
+                    commit_epoch,
+                    next_attempt_frame: frame.saturating_add(1),
+                    transient_failures: 0,
+                    waiting_for_commit: false,
+                });
+                true
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let attempt = entry.get_mut();
+                if attempt.commit_epoch != commit_epoch {
+                    *attempt = MinimizedCaptureAttempt {
+                        commit_epoch,
+                        next_attempt_frame: frame.saturating_add(1),
+                        transient_failures: 0,
+                        waiting_for_commit: false,
+                    };
+                    return true;
+                }
+                if attempt.waiting_for_commit || frame < attempt.next_attempt_frame {
+                    return false;
+                }
+                // Prevent a duplicate begin in the same frame even if a
+                // caller exits before recording the result.
+                attempt.next_attempt_frame = frame.saturating_add(1);
+                true
+            }
+        }
+    }
+
+    fn finish_attempt(
+        &mut self,
+        window_id: u64,
+        frame: u64,
+        result: MinimizedCaptureAttemptResult,
+    ) {
+        if result == MinimizedCaptureAttemptResult::Success {
+            self.windows.remove(&window_id);
+            return;
+        }
+        let Some(attempt) = self.windows.get_mut(&window_id) else {
+            return;
+        };
+        if result == MinimizedCaptureAttemptResult::AwaitSurfaceCommit
+            && attempt.commit_epoch.is_some()
+        {
+            attempt.waiting_for_commit = true;
+            return;
+        }
+
+        attempt.waiting_for_commit = false;
+        attempt.transient_failures = attempt
+            .transient_failures
+            .saturating_add(1)
+            .min(MAX_MINIMIZED_CAPTURE_BACKOFF_SHIFT);
+        let delay = 1u64 << attempt.transient_failures;
+        attempt.next_attempt_frame = frame.saturating_add(delay);
+    }
+
+    fn withdraw(&mut self, window_id: u64) {
+        self.windows.remove(&window_id);
+    }
+
+    fn clear(&mut self) {
+        self.windows.clear();
+    }
+}
+
+const fn should_release_minimized_offscreen_owner(
+    desired_minimized: bool,
+    texture_capture_pending: bool,
+    in_drawable_scene: bool,
+) -> bool {
+    desired_minimized && !texture_capture_pending && !in_drawable_scene
+}
+
 pub struct UdevBackend {
     display_handle: DisplayHandle,
     event_loop: SendWrapper<EventLoop<'static, JwmWaylandState>>,
@@ -789,14 +983,20 @@ pub struct UdevBackend {
     color_allocator: Box<dyn ColorAllocator>,
 
     compositor: Option<WaylandCompositor>,
+    // JWM is constructed and performs its initial arrange before Backend::run
+    // creates the GL compositor. Keep the durable part of that command stream
+    // here so initial creation, hot enable, and KMS-context recreation all
+    // converge on the same monitor/minimize state.
+    compositor_desired: CompositorDesiredState,
     drag: Option<UdevDragState>,
     last_inactive_session_log: Option<Instant>,
     output_management_tx_seq: u64,
     last_output_management_tx: Option<crate::backend::api::OutputManagementTransactionStatus>,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame) to avoid
-    // two heap allocations per frame in compositor_render_frame.
+    // heap allocations in compositor_render_frame.
     scratch_tex_updates: Vec<(u64, GlesTexture, u32, u32, bool, bool, [f32; 4])>,
+    scratch_texture_scene: Vec<(u64, i32, i32, u32, u32)>,
     scratch_full_scene: Vec<(u64, i32, i32, u32, u32)>,
 
     // Per-window offscreen textures used to composite subsurface-based clients
@@ -804,6 +1004,12 @@ pub struct UdevBackend {
     // across frames and reused while the window size is unchanged. Tuple is
     // (texture, width, height).
     offscreen_window_textures: HashMap<u64, (GlesTexture, u32, u32)>,
+
+    /// Retry state for one-shot imports of minimized clients that are absent
+    /// from the drawable scene. Normal visible-window imports never consult
+    /// this gate.
+    minimized_capture_attempts: MinimizedCaptureAttemptGate,
+    minimized_capture_frame: u64,
 }
 
 // NOTE: smithay state + calloop handle types are not thread-safe.
@@ -958,6 +1164,89 @@ impl UdevBackend {
         }
     }
 
+    fn desired_monitor_refresh_rates(&self) -> Vec<(u32, u32)> {
+        let shared = self.shared.lock_safe();
+        self.compositor_desired
+            .monitors
+            .iter()
+            .map(|&(id, x, y, _, _, _)| {
+                let hz = shared
+                    .outputs
+                    .iter()
+                    .find(|output| output.x == x && output.y == y)
+                    .map(|output| (output.refresh_rate / 1000).max(1))
+                    .unwrap_or(60);
+                (id, hz)
+            })
+            .collect()
+    }
+
+    fn replay_compositor_desired_state(&mut self) {
+        let monitors = self.compositor_desired.monitors.clone();
+        let refresh_rates = self.desired_monitor_refresh_rates();
+        let mut dock_targets = self
+            .compositor_desired
+            .dock_targets
+            .iter()
+            .map(|(&window_id, &target)| (window_id, target))
+            .collect::<Vec<_>>();
+        dock_targets.sort_unstable_by_key(|(window_id, _)| *window_id);
+        let mut minimized_windows = self
+            .compositor_desired
+            .minimized_windows
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        minimized_windows.sort_unstable();
+
+        let Some(compositor) = self.compositor.as_mut() else {
+            return;
+        };
+        compositor.set_monitors(&monitors);
+        compositor.apply_per_monitor_refresh_rates(&refresh_rates);
+        // Recreated compositors have no trustworthy live source geometry.
+        // Publish addressable targets first, then adopt minimized markers
+        // statically; target-less overflow/bar-hidden entries remain known but
+        // do not consume a one-shot texture import until geometry returns.
+        for (window_id, target) in dock_targets {
+            compositor.set_window_dock_geometry(window_id, Some(target));
+        }
+        for window_id in minimized_windows {
+            compositor.ensure_minimized_window_visual(window_id);
+        }
+    }
+
+    fn retire_queued_compositor_dead_windows(&mut self) {
+        let dead_windows = std::mem::take(&mut self.state.compositor_dead_windows);
+        for dead in dead_windows {
+            self.compositor_desired.retire_window(dead);
+            self.minimized_capture_attempts.withdraw(dead);
+            // Retire first: WaylandCompositor retains the strong GlesTexture
+            // owner needed by close-fade rendering. Only then may the backend
+            // release its offscreen owner.
+            if let Some(compositor) = self.compositor.as_mut() {
+                compositor.remove_window(dead);
+            }
+            self.offscreen_window_textures.remove(&dead);
+        }
+    }
+
+    fn install_compositor(&mut self, mut compositor: WaylandCompositor) {
+        // new deliberately constructs a conservative all-off baseline.
+        // Apply live config before replaying state-dependent commands.
+        compositor.apply_config();
+        // A disabled compositor cannot receive render callbacks, so consume
+        // destruction notifications before replaying the cached command set.
+        self.retire_queued_compositor_dead_windows();
+        self.minimized_capture_attempts.clear();
+        self.compositor = Some(compositor);
+        self.replay_compositor_desired_state();
+        if let Some(kms) = self.kms.as_ref() {
+            kms.borrow_mut().reload_cursor_config();
+        }
+        RenderScheduler::request_render(self);
+    }
+
     fn drop_kms(&mut self) {
         if let Some(old) = self.kms.take() {
             if let Some(token) = old.borrow_mut().registration_token.take() {
@@ -1018,25 +1307,39 @@ impl UdevBackend {
     }
 
     fn recreate_compositor_for_current_kms(&mut self) {
+        // These backend-owned textures were allocated by the same old EGL
+        // context as the compositor. Reusing a same-sized offscreen entry with
+        // the fresh renderer would make late minimized capture fail forever.
+        self.scratch_tex_updates.clear();
+        self.offscreen_window_textures.clear();
+        self.minimized_capture_attempts.clear();
         if self.compositor.is_none() {
             return;
         }
 
         self.compositor = None;
-        if let Some(kms) = &self.kms {
+        let recreated = if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
             let (w, h) = kms_ref.total_screen_size();
             let hdr_10bit = kms_ref.supports_10bit();
             match kms_ref.with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
             {
-                Ok(Ok(compositor)) => self.compositor = Some(compositor),
+                Ok(Ok(compositor)) => Some(compositor),
                 Ok(Err(e)) => {
-                    log::error!("[udev] compositor recreate after KMS reinit failed: {e}")
+                    log::error!("[udev] compositor recreate after KMS reinit failed: {e}");
+                    None
                 }
-                Err(e) => log::error!("[udev] GL access for compositor recreate failed: {e:?}"),
+                Err(e) => {
+                    log::error!("[udev] GL access for compositor recreate failed: {e:?}");
+                    None
+                }
             }
+        } else {
+            None
+        };
+        if let Some(compositor) = recreated {
+            self.install_compositor(compositor);
         }
-        self.compositor_apply_config();
     }
 
     fn maybe_reinit_kms(&mut self) {
@@ -2779,13 +3082,17 @@ impl UdevBackend {
             color_allocator: Box::new(DummyColorAllocator),
 
             compositor: None,
+            compositor_desired: CompositorDesiredState::default(),
             drag: None,
             last_inactive_session_log: None,
             output_management_tx_seq: 0,
             last_output_management_tx: None,
             scratch_tex_updates: Vec::new(),
+            scratch_texture_scene: Vec::new(),
             scratch_full_scene: Vec::new(),
             offscreen_window_textures: HashMap::new(),
+            minimized_capture_attempts: MinimizedCaptureAttemptGate::default(),
+            minimized_capture_frame: 0,
         })
     }
 }
@@ -3347,21 +3654,9 @@ impl CompositorWorkspaceEffects for UdevBackend {
     }
 
     fn compositor_set_monitors(&mut self, monitors: &[(u32, i32, i32, u32, u32, u32)]) {
-        let refresh_rates = {
-            let shared = self.shared.lock_safe();
-            monitors
-                .iter()
-                .map(|&(id, x, y, _, _, _)| {
-                    let hz = shared
-                        .outputs
-                        .iter()
-                        .find(|output| output.x == x && output.y == y)
-                        .map(|output| (output.refresh_rate / 1000).max(1))
-                        .unwrap_or(60);
-                    (id, hz)
-                })
-                .collect::<Vec<_>>()
-        };
+        self.compositor_desired.monitors.clear();
+        self.compositor_desired.monitors.extend_from_slice(monitors);
+        let refresh_rates = self.desired_monitor_refresh_rates();
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_monitors(monitors);
             compositor.apply_per_monitor_refresh_rates(&refresh_rates);
@@ -3430,6 +3725,9 @@ impl CompositorWindowEffects for UdevBackend {
     }
 
     fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
+        self.minimized_capture_attempts.withdraw(window.raw());
+        self.compositor_desired
+            .set_minimized(window.raw(), minimized);
         if let Some(compositor) = self.compositor.as_mut() {
             if minimized {
                 compositor.minimize_window(window.raw());
@@ -3440,11 +3738,48 @@ impl CompositorWindowEffects for UdevBackend {
         self.request_render();
     }
 
+    fn compositor_forget_minimized_window_visual(&mut self, window: WindowId) {
+        let window_id = window.raw();
+        // Forget the durable command first, so a compositor/KMS recreation
+        // cannot replay the client while live resources are being retired.
+        self.compositor_desired.retire_window(window_id);
+        self.minimized_capture_attempts.withdraw(window_id);
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.forget_minimized_window_visual(window_id);
+        }
+        // Subsurface/viewport capture has a backend-owned strong texture in
+        // addition to WaylandCompositor's WindowState/retained owner.
+        self.offscreen_window_textures.remove(&window_id);
+        self.scratch_tex_updates
+            .retain(|(candidate, ..)| *candidate != window_id);
+        self.request_render();
+    }
+
+    fn compositor_ensure_minimized_window_visual(&mut self, window: WindowId) {
+        self.compositor_desired.ensure_minimized(window.raw());
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.ensure_minimized_window_visual(window.raw());
+        }
+        self.request_render();
+    }
+
     fn compositor_set_window_dock_geometry(
         &mut self,
         window: WindowId,
         target: Option<CompositorRect>,
     ) {
+        let target = target.and_then(CompositorRect::normalized);
+        let was_addressable = self
+            .compositor_desired
+            .dock_targets
+            .contains_key(&window.raw());
+        if target.is_none() || !was_addressable {
+            // Withdrawal cancels a stale wait, while None -> Some is a new
+            // capture lease that must be allowed to try immediately.
+            self.minimized_capture_attempts.withdraw(window.raw());
+        }
+        self.compositor_desired
+            .set_dock_target(window.raw(), target);
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_window_dock_geometry(window.raw(), target);
         }
@@ -3461,6 +3796,9 @@ impl CompositorWindowEffects for UdevBackend {
                 .zip(anchor)
                 .map(|(window, anchor)| (window.raw(), anchor));
             compositor.set_minimized_window_preview(request);
+            self.minimized_capture_attempts
+                .windows
+                .retain(|window_id, _| compositor.needs_minimized_window_texture(*window_id));
         }
         self.request_render();
     }
@@ -3948,35 +4286,97 @@ impl Backend for UdevBackend {
 
     fn set_compositor_enabled(&mut self, enabled: bool) -> Result<bool, BackendError> {
         if enabled && self.compositor.is_none() {
-            if let Some(kms) = &self.kms {
+            let created = if let Some(kms) = &self.kms {
                 let mut kms_ref = kms.borrow_mut();
                 let (w, h) = kms_ref.total_screen_size();
                 let hdr_10bit = kms_ref.supports_10bit();
                 match kms_ref
                     .with_renderer(|gl| unsafe { WaylandCompositor::new(gl, w, h, hdr_10bit) })
                 {
-                    Ok(Ok(mut compositor)) => {
-                        // `new` deliberately constructs a conservative all-off
-                        // baseline. Apply the live snapshot before publishing
-                        // the compositor so startup honors the same effect
-                        // settings as hot reload and KMS recreation.
-                        compositor.apply_config();
-                        self.compositor = Some(compositor);
-                        return Ok(true);
-                    }
+                    Ok(Ok(compositor)) => Some(compositor),
                     Ok(Err(e)) => {
                         log::error!("Failed to create wayland compositor: {}", e);
-                        return Ok(false);
+                        None
                     }
                     Err(e) => {
                         log::error!("Failed to access GL context: {:?}", e);
-                        return Ok(false);
+                        None
                     }
                 }
+            } else {
+                None
+            };
+            if let Some(compositor) = created {
+                self.install_compositor(compositor);
+                Ok(true)
+            } else {
+                Ok(false)
             }
-            Ok(false)
         } else if !enabled && self.compositor.is_some() {
+            // A runtime toggle leaves KMS and its EGL context alive. Acquire
+            // that exact context before mutating any owner; if acquisition
+            // fails, keep the compositor intact so a later retry can release
+            // its raw names instead of losing the only ownership record.
+            let Some(kms) = self.kms.clone() else {
+                return Err(BackendError::Message(
+                    "cannot disable Wayland compositor without its KMS renderer".into(),
+                ));
+            };
+            let (output_texture, output_generation) = self
+                .compositor
+                .as_ref()
+                .map(|compositor| {
+                    (
+                        compositor.output_texture_id(),
+                        compositor.output_texture_generation(),
+                    )
+                })
+                .expect("compositor presence was checked");
+            let mut kms_ref = kms.borrow_mut();
+            let renderer_owns_output = kms_ref
+                .compositor_output_texture_is_renderer_owned(output_texture, output_generation);
+            let output_ownership = if renderer_owns_output {
+                CompositorOutputTextureOwnership::SmithayRenderer
+            } else {
+                CompositorOutputTextureOwnership::RawCompositor
+            };
+            let release_result = {
+                let compositor = self
+                    .compositor
+                    .as_mut()
+                    .expect("compositor presence was checked");
+                kms_ref.with_renderer(|gl| unsafe {
+                    compositor.release_gpu_resources(gl, output_ownership)
+                })
+            };
+            let released = match release_result {
+                Ok(released) => released,
+                Err(error) => {
+                    return Err(BackendError::Message(format!(
+                        "failed to acquire the KMS GL context for compositor teardown: {error}"
+                    )));
+                }
+            };
+            if renderer_owns_output
+                && !kms_ref.retire_compositor_output_texture(output_texture, output_generation)
+            {
+                // The ownership decision and retirement happen under one
+                // exclusive KMS borrow; disagreement would mean the raw name
+                // was neither deleted nor retained by a live Smithay owner.
+                log::error!(
+                    "[udev] compositor output texture ownership changed during runtime teardown"
+                );
+                debug_assert!(false, "renderer-owned compositor texture was not retired");
+            }
+            drop(kms_ref);
+            debug_assert!(
+                released,
+                "live compositor GPU resources were already released"
+            );
             self.compositor = None;
+            self.minimized_capture_attempts.clear();
+            self.scratch_tex_updates.clear();
+            self.offscreen_window_textures.clear();
             // Force a KMS frame immediately so the compositor's last wallpaper
             // framebuffer is replaced by the non-composited black background.
             RenderScheduler::request_render(self);
@@ -3991,31 +4391,50 @@ impl Backend for UdevBackend {
         scene: &[(u64, i32, i32, u32, u32)],
         focused_window: Option<u64>,
     ) -> Result<bool, BackendError> {
+        // Evict compositor state for windows whose client surface was destroyed.
+        // Do this even while compositing/KMS is disabled: otherwise a dead id
+        // can survive in desired state and be replayed into a later compositor.
+        self.retire_queued_compositor_dead_windows();
+
         if self.compositor.is_none() || self.kms.is_none() {
             return Ok(false);
         }
-
-        // Evict compositor state for windows whose client surface was destroyed.
-        // Without this the per-window maps grow unbounded for the process lifetime.
-        if !self.state.compositor_dead_windows.is_empty() {
-            if let Some(compositor) = self.compositor.as_mut() {
-                for dead in self.state.compositor_dead_windows.drain(..) {
-                    // Retire first: WaylandCompositor retains the strong
-                    // GlesTexture owner needed by close-fade rendering.
-                    // Only then may the backend release its offscreen owner.
-                    compositor.remove_window(dead);
-                    self.offscreen_window_textures.remove(&dead);
-                }
-            } else {
-                self.state.compositor_dead_windows.clear();
-            }
-        }
+        self.minimized_capture_frame = self.minimized_capture_frame.saturating_add(1);
+        let minimized_capture_frame = self.minimized_capture_frame;
 
         // Phase 1: Import surface textures into GL cache (borrow kms only, no compositor borrow).
         // Reuse a persistent scratch buffer (taken out so we can freely borrow
         // other self fields below) instead of allocating one each frame.
         let mut tex_updates = std::mem::take(&mut self.scratch_tex_updates);
         tex_updates.clear();
+        let mut texture_scene = std::mem::take(&mut self.scratch_texture_scene);
+        texture_scene.clear();
+        texture_scene.extend_from_slice(scene);
+        // A minimized client is absent from JWM's drawable scene. After an
+        // initial compositor create/recreate there is therefore no ordinary
+        // path that could repopulate its retained Dock texture. Import only
+        // compositor-confirmed pending ids, and keep them out of full_scene so
+        // their live surfaces are never drawn at the hidden geometry.
+        if let Some(compositor) = self
+            .compositor
+            .as_ref()
+            .filter(|compositor| compositor.has_pending_minimized_window_textures())
+        {
+            for &window_id in &self.compositor_desired.minimized_windows {
+                if !compositor.needs_minimized_window_texture(window_id)
+                    || texture_scene.iter().any(|(id, ..)| *id == window_id)
+                {
+                    continue;
+                }
+                let win = WindowId::from_raw(window_id);
+                if let Some(geometry) = self.state.window_geometry.get(&win).copied()
+                    && geometry.w > 0
+                    && geometry.h > 0
+                {
+                    texture_scene.push((window_id, geometry.x, geometry.y, geometry.w, geometry.h));
+                }
+            }
+        }
         // Taken out so the per-window loop can borrow it mutably while `self.kms`
         // is also borrowed; restored at the end of Phase 1.
         let mut offscreen = std::mem::take(&mut self.offscreen_window_textures);
@@ -4041,8 +4460,26 @@ impl Backend for UdevBackend {
 
         if let Some(kms) = &self.kms {
             let mut kms_ref = kms.borrow_mut();
-            for &(win_id, _, _, w, h) in scene {
+            for &(win_id, _, _, w, h) in &texture_scene {
                 let win = crate::backend::common_define::WindowId::from_raw(win_id);
+                let hidden_minimized_capture =
+                    !scene.iter().any(|(live_id, _, _, _, _)| *live_id == win_id)
+                        && self.compositor_desired.minimized_windows.contains(&win_id)
+                        && self.compositor.as_ref().is_some_and(|compositor| {
+                            compositor.needs_minimized_window_texture(win_id)
+                        });
+                let surface_commit_epoch = hidden_minimized_capture
+                    .then(|| self.state.surface_commit_epoch(win))
+                    .flatten();
+                if hidden_minimized_capture
+                    && !self.minimized_capture_attempts.begin_attempt(
+                        win_id,
+                        surface_commit_epoch,
+                        minimized_capture_frame,
+                    )
+                {
+                    continue;
+                }
                 let surface_opt = self.state.surface_for_window(win);
                 if crf_log_this {
                     let is_x11 = self.state.x11_surfaces.contains_key(&win);
@@ -4062,6 +4499,14 @@ impl Backend for UdevBackend {
                     );
                 }
                 if let Some(surface) = surface_opt {
+                    if hidden_minimized_capture && !surface_tree_has_committed_buffer(&surface) {
+                        self.minimized_capture_attempts.finish_attempt(
+                            win_id,
+                            minimized_capture_frame,
+                            MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
+                        );
+                        continue;
+                    }
                     let has_viewport_state = with_states(&surface, |states| {
                         let mut cached = states.cached_state.get::<ViewportCachedState>();
                         let current = cached.current();
@@ -4103,6 +4548,13 @@ impl Backend for UdevBackend {
                                     committed_h,
                                     w,
                                     h
+                                );
+                            }
+                            if hidden_minimized_capture {
+                                self.minimized_capture_attempts.finish_attempt(
+                                    win_id,
+                                    minimized_capture_frame,
+                                    MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
                                 );
                             }
                             continue;
@@ -4198,6 +4650,19 @@ impl Backend for UdevBackend {
                                 false,
                                 [0.0, 0.0, 1.0, 1.0],
                             ));
+                            if hidden_minimized_capture {
+                                self.minimized_capture_attempts.finish_attempt(
+                                    win_id,
+                                    minimized_capture_frame,
+                                    MinimizedCaptureAttemptResult::Success,
+                                );
+                            }
+                        } else if hidden_minimized_capture {
+                            self.minimized_capture_attempts.finish_attempt(
+                                win_id,
+                                minimized_capture_frame,
+                                MinimizedCaptureAttemptResult::TransientFailure,
+                            );
                         }
                         continue;
                     }
@@ -4301,18 +4766,41 @@ impl Backend for UdevBackend {
                             y_inverted,
                             content_uv,
                         ));
+                        if hidden_minimized_capture {
+                            self.minimized_capture_attempts.finish_attempt(
+                                win_id,
+                                minimized_capture_frame,
+                                MinimizedCaptureAttemptResult::Success,
+                            );
+                        }
+                    } else if hidden_minimized_capture {
+                        self.minimized_capture_attempts.finish_attempt(
+                            win_id,
+                            minimized_capture_frame,
+                            // A renderer may report either an import error or
+                            // a successful no-op while the committed buffer is
+                            // not usable in this context yet. Both are
+                            // transient and receive the bounded backoff.
+                            MinimizedCaptureAttemptResult::TransientFailure,
+                        );
                     }
+                } else if hidden_minimized_capture {
+                    self.minimized_capture_attempts.finish_attempt(
+                        win_id,
+                        minimized_capture_frame,
+                        MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
+                    );
                 }
             }
         }
         if flush_after_resize_configure {
             self.request_flush();
         }
-        if crf_log_this || (!scene.is_empty() && tex_updates.len() != scene.len()) {
+        if crf_log_this || (!texture_scene.is_empty() && tex_updates.len() != texture_scene.len()) {
             log::debug!(
-                "[crf] tex_updates={} scene={}",
+                "[crf] tex_updates={} texture_scene={}",
                 tex_updates.len(),
-                scene.len()
+                texture_scene.len()
             );
         }
 
@@ -4719,8 +5207,32 @@ impl Backend for UdevBackend {
             false
         };
 
+        // A subsurface/wp_viewport client uses a backend-created offscreen
+        // texture. Once a minimized window has left the drawable scene and
+        // the compositor has cloned/cached that texture, keeping this second
+        // strong owner would defeat the retained-cache LRU byte budget.
+        if let Some(compositor) = self.compositor.as_ref()
+            && !self.compositor_desired.minimized_windows.is_empty()
+        {
+            offscreen.retain(|window_id, _| {
+                !should_release_minimized_offscreen_owner(
+                    self.compositor_desired
+                        .minimized_windows
+                        .contains(window_id),
+                    compositor.minimized_window_texture_is_pending(*window_id),
+                    scene.iter().any(|(live_id, ..)| live_id == window_id),
+                )
+            });
+        }
+
+        // Retain the allocation, not last frame's strong texture owners.
+        // In particular, a one-shot late minimize import must not keep the
+        // offscreen texture alive after the compositor cache owns it.
+        tex_updates.clear();
+
         // Return the scratch buffers for reuse on the next frame.
         self.scratch_tex_updates = tex_updates;
+        self.scratch_texture_scene = texture_scene;
         self.scratch_full_scene = full_scene;
         self.offscreen_window_textures = offscreen;
         Ok(result)
@@ -5330,6 +5842,154 @@ mod udev_backend_selection_tests {
             "[wayland-udev/device] configure output: no KMS backend available".to_string(),
         );
         assert_eq!(failure.field.as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn compositor_desired_state_retains_precreation_snapshot() {
+        let mut desired = CompositorDesiredState::default();
+        desired.monitors.push((7, -1920, 0, 1920, 1080, 3));
+        let target = CompositorRect::new(-64.0, 1032.0, 48.0, 48.0);
+        desired.set_dock_target(42, Some(target));
+        desired.ensure_minimized(42);
+
+        assert_eq!(desired.monitors, vec![(7, -1920, 0, 1920, 1080, 3)]);
+        assert_eq!(desired.dock_targets.get(&42), Some(&target));
+        assert!(desired.minimized_windows.contains(&42));
+    }
+
+    #[test]
+    fn runtime_disable_releases_full_gpu_inventory_before_drop_and_is_fail_safe() {
+        let source = include_str!("backend.rs");
+        let start = source
+            .find("fn set_compositor_enabled(&mut self, enabled: bool)")
+            .expect("runtime compositor toggle missing");
+        let end = start
+            + source[start..]
+                .find("fn compositor_render_frame(")
+                .expect("toggle body terminator missing");
+        let body = &source[start..end];
+
+        let release = body
+            .find("compositor.release_gpu_resources(gl, output_ownership)")
+            .expect("runtime disable must release the complete GPU inventory");
+        let drop_owner = body
+            .find("self.compositor = None")
+            .expect("runtime disable must eventually drop compositor state");
+        assert!(release < drop_owner);
+        assert!(body.contains("kms_ref.with_renderer(|gl| unsafe"));
+        assert!(body.contains("failed to acquire the KMS GL context for compositor teardown"));
+        assert!(body.contains("return Err(BackendError::Message"));
+        assert!(!body.contains("release_minimized_thumbnail_gpu_resources"));
+    }
+
+    #[test]
+    fn restore_and_visual_forget_remove_replayable_window_state_idempotently() {
+        let mut desired = CompositorDesiredState::default();
+        let target = CompositorRect::new(100.0, 900.0, 48.0, 48.0);
+
+        desired.set_dock_target(1, Some(target));
+        desired.set_minimized(1, true);
+        desired.set_minimized(1, false);
+        assert!(!desired.minimized_windows.contains(&1));
+        assert!(!desired.dock_targets.contains_key(&1));
+
+        desired.set_dock_target(2, Some(target));
+        desired.set_minimized(2, true);
+        desired.retire_window(2);
+        desired.retire_window(2);
+        assert!(!desired.minimized_windows.contains(&2));
+        assert!(!desired.dock_targets.contains_key(&2));
+
+        desired.set_dock_target(3, Some(CompositorRect::new(0.0, 0.0, 0.0, 1.0)));
+        assert!(!desired.dock_targets.contains_key(&3));
+    }
+
+    #[test]
+    fn minimized_offscreen_owner_drops_only_after_retained_capture() {
+        assert!(should_release_minimized_offscreen_owner(true, false, false));
+        assert!(!should_release_minimized_offscreen_owner(true, true, false));
+        assert!(!should_release_minimized_offscreen_owner(true, false, true));
+        assert!(!should_release_minimized_offscreen_owner(
+            false, false, false
+        ));
+    }
+
+    #[test]
+    fn hidden_capture_without_buffer_attempts_once_per_known_commit_epoch() {
+        let mut gate = MinimizedCaptureAttemptGate::default();
+        let window_id = 41;
+
+        assert!(gate.begin_attempt(window_id, Some(7), 0));
+        gate.finish_attempt(
+            window_id,
+            0,
+            MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
+        );
+        for frame in 1..=100 {
+            assert!(!gate.begin_attempt(window_id, Some(7), frame));
+        }
+
+        // A client commit bypasses the old epoch's wait immediately; the 100
+        // unrelated compositor frames above do not affect it.
+        assert!(gate.begin_attempt(window_id, Some(8), 101));
+        gate.finish_attempt(
+            window_id,
+            101,
+            MinimizedCaptureAttemptResult::AwaitSurfaceCommit,
+        );
+        assert!(!gate.begin_attempt(window_id, Some(8), 102));
+    }
+
+    #[test]
+    fn hidden_capture_transient_failures_use_bounded_exponential_backoff() {
+        let mut gate = MinimizedCaptureAttemptGate::default();
+        let mut attempts = Vec::new();
+        for frame in 0..100 {
+            if gate.begin_attempt(9, Some(3), frame) {
+                attempts.push(frame);
+                gate.finish_attempt(9, frame, MinimizedCaptureAttemptResult::TransientFailure);
+            }
+        }
+        assert_eq!(attempts, vec![0, 2, 6, 14, 30, 62]);
+
+        // The exponent is capped: a long-lived transient renderer failure is
+        // retried occasionally rather than being abandoned forever.
+        assert!(gate.begin_attempt(9, Some(3), 126));
+        gate.finish_attempt(9, 126, MinimizedCaptureAttemptResult::TransientFailure);
+        assert!(!gate.begin_attempt(9, Some(3), 189));
+        assert!(gate.begin_attempt(9, Some(3), 190));
+    }
+
+    #[test]
+    fn hidden_capture_without_known_epoch_falls_back_to_bounded_polling() {
+        let mut gate = MinimizedCaptureAttemptGate::default();
+        let mut attempts = Vec::new();
+        for frame in 0..15 {
+            if gate.begin_attempt(12, None, frame) {
+                attempts.push(frame);
+                gate.finish_attempt(12, frame, MinimizedCaptureAttemptResult::AwaitSurfaceCommit);
+            }
+        }
+        assert_eq!(attempts, vec![0, 2, 6, 14]);
+    }
+
+    #[test]
+    fn hidden_capture_success_withdraw_and_recreate_clear_retry_state() {
+        let mut gate = MinimizedCaptureAttemptGate::default();
+
+        assert!(gate.begin_attempt(1, Some(1), 0));
+        gate.finish_attempt(1, 0, MinimizedCaptureAttemptResult::Success);
+        assert!(gate.begin_attempt(1, Some(1), 1));
+
+        gate.finish_attempt(1, 1, MinimizedCaptureAttemptResult::AwaitSurfaceCommit);
+        gate.withdraw(1);
+        assert!(gate.begin_attempt(1, Some(1), 2));
+
+        assert!(gate.begin_attempt(2, None, 2));
+        gate.clear();
+        assert!(gate.windows.is_empty());
+        assert!(gate.begin_attempt(1, Some(1), 3));
+        assert!(gate.begin_attempt(2, None, 3));
     }
 }
 

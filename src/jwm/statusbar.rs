@@ -14,6 +14,16 @@ use xbar_core::shared_structures::{
 pub struct StatusBarBuilder;
 
 impl StatusBarBuilder {
+    /// Whether a client belongs in the user-facing minimized-window Dock.
+    ///
+    /// This predicate deliberately does not inspect `is_hidden`: callers use
+    /// it before changing minimize state to decide whether the compositor
+    /// should retain a thumbnail, while the bar projection combines it with
+    /// `is_hidden` to decide whether to publish a Dock item.
+    pub(crate) fn is_minimized_dock_eligible(client: &WMClient) -> bool {
+        !client.state.skip_taskbar && !client.state.is_dock && !client.state.is_swallowed
+    }
+
     /// 计算标签掩码（已占用和紧急）
     ///
     /// # 参数
@@ -137,12 +147,7 @@ impl StatusBarBuilder {
         let mut windows: Vec<_> = monitor_clients
             .iter()
             .filter_map(|client_key| clients.get(*client_key))
-            .filter(|client| {
-                client.state.is_hidden
-                    && !client.state.skip_taskbar
-                    && !client.state.is_dock
-                    && !client.state.is_swallowed
-            })
+            .filter(|client| client.state.is_hidden && Self::is_minimized_dock_eligible(client))
             .map(|client| {
                 // The compositor captures/retains the live window visual at
                 // minimize time even when the Genie preference is disabled,

@@ -35,6 +35,24 @@ pub const DOCK_SEPARATOR_WIDTH: f32 = 1.0;
 /// Width reserved for the overflow indicator.
 pub const DOCK_OVERFLOW_WIDTH: f32 = 12.0;
 const MAX_VIEWPORT_FRACTION: f32 = 0.45;
+const MIN_DOCK_WAKE_DELAY: Duration = Duration::from_millis(1);
+
+/// Cap a host's normal sleep with a pending Dock deadline.
+///
+/// An overdue deadline yields a short non-zero delay so callers can service
+/// it promptly without accidentally selecting a busy-polling control flow.
+#[must_use]
+pub fn dock_wake_delay(now: Instant, fallback: Duration, deadline: Option<Instant>) -> Duration {
+    let fallback = fallback.max(MIN_DOCK_WAKE_DELAY);
+    deadline
+        .map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .max(MIN_DOCK_WAKE_DELAY)
+                .min(fallback)
+        })
+        .unwrap_or(fallback)
+}
 
 #[derive(Debug, Clone, Copy)]
 struct DockLayout {
@@ -43,18 +61,33 @@ struct DockLayout {
     shelf: Rect,
 }
 
+/// Immutable identity captured by one rendered minimized-window control.
+///
+/// A numeric window token may be reused after restore/re-minimize while the
+/// WM session stays alive.  Retained widgets therefore keep the projection
+/// generation alongside the token instead of looking up the bridge's newest
+/// generation when an old callback eventually fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DockItemBinding {
+    /// WM session that owned the rendered control.
+    pub wm_session_id: u64,
+    /// Exact minimized projection generation rendered by the control.
+    pub minimized_generation: u64,
+    /// Window represented by the control in that projection.
+    pub token: WindowToken,
+}
+
 /// Protocol/reporting state used by custom retained toolkits.
 #[derive(Debug, Default)]
 pub struct DockBridge {
     reporter: DockReporter,
-    state_key: Option<(u64, u64)>,
+    state_key: Option<(u64, u64, u64)>,
     windows: Vec<MinimizedWindow>,
     visible_tokens: Vec<WindowToken>,
     hovered: Option<WindowToken>,
     layout: Option<DockLayout>,
     overflow: bool,
     collapsed: bool,
-    pending_withdrawals: Vec<UserAction>,
     pending_restore: Option<UserAction>,
     retry_not_before: Option<Instant>,
 }
@@ -77,54 +110,32 @@ impl DockBridge {
         bar_height: f32,
         right_padding: f32,
     ) {
-        let next_key = snapshot
-            .wm_available
-            .then_some((snapshot.wm_session_id, transport_generation));
-        let previous_session = self.session();
-        let continuing_session =
-            previous_session == next_key.map(|(session, _)| session) && previous_session.is_some();
-        if continuing_session {
-            self.pending_withdrawals.retain(|action| match action {
-                UserAction::SetDockGeometry {
-                    window: Some(token),
-                    wm_session_id,
-                    ..
-                } => {
-                    *wm_session_id == snapshot.wm_session_id
-                        && !snapshot
-                            .minimized_windows
-                            .iter()
-                            .any(|window| window.token == *token)
-                }
-                _ => false,
-            });
-            for token in self
-                .reporter
-                .acknowledged_geometry()
-                .iter()
-                .filter_map(|report| report.window)
-                .filter(|token| {
-                    !snapshot
-                        .minimized_windows
-                        .iter()
-                        .any(|window| window.token == *token)
-                })
-            {
-                let withdrawal = UserAction::SetDockGeometry {
-                    window: Some(token),
-                    wm_session_id: snapshot.wm_session_id,
-                    geometry: DockItemGeometry::default(),
-                };
-                if !self.pending_withdrawals.contains(&withdrawal) {
-                    self.pending_withdrawals.push(withdrawal);
-                }
-            }
-        } else {
-            self.pending_withdrawals.clear();
+        let next_key = snapshot.wm_available.then_some((
+            snapshot.wm_session_id,
+            snapshot.wm_sequence.unwrap_or_default(),
+            transport_generation,
+        ));
+        // Unavailability is not evidence that a click is stale: managed
+        // transport recovery normally publishes an unavailable frame between
+        // the retired and replacement handles. Keep the bounded intent while
+        // offline, but let the first authoritative snapshot validate the full
+        // projection identity before it can be emitted again.
+        if snapshot.wm_available
+            && self
+                .pending_restore
+                .as_ref()
+                .is_some_and(|action| !restore_matches_snapshot(action, snapshot))
+        {
+            self.pending_restore = None;
+            self.retry_not_before = None;
         }
         if self.state_key != next_key {
             self.hovered = None;
-            self.pending_restore = None;
+            // A replacement channel may have capacity immediately even when
+            // the retired one returned QueueFull. Retry preserved intent on
+            // the new transport instead of carrying its old backoff across.
+            // While offline this remains unarmed because pending actions and
+            // deadlines require a matching available projection below.
             self.retry_not_before = None;
             self.state_key = next_key;
         }
@@ -179,11 +190,12 @@ impl DockBridge {
             shelf,
         });
 
-        let scene = dock_scene(shelf, &self.visible_tokens);
+        let scene = dock_scene(shelf, &self.visible_tokens, self.hovered);
         let presentation = dock_presentation();
         self.reporter.synchronize(DockReporterInput {
             wm_available: snapshot.wm_available,
             wm_session_id: snapshot.wm_session_id,
+            minimized_generation: snapshot.wm_sequence.unwrap_or_default(),
             transport_generation,
             monitor_geometry: snapshot.geometry,
             minimized_windows: &self.windows,
@@ -199,6 +211,23 @@ impl DockBridge {
         self.windows
             .iter()
             .filter(|window| self.visible_tokens.contains(&window.token))
+    }
+
+    /// Returns the immutable identity a rendered control must capture.
+    ///
+    /// The returned value remains intentionally detached from the bridge. If
+    /// the projection changes before the callback runs, [`Self::enter`],
+    /// [`Self::leave`], and [`Self::request_restore`] reject it.
+    #[must_use]
+    pub fn item_binding(&self, token: WindowToken) -> Option<DockItemBinding> {
+        let (wm_session_id, minimized_generation, _) = self.state_key?;
+        self.visible_tokens
+            .contains(&token)
+            .then_some(DockItemBinding {
+                wm_session_id,
+                minimized_generation,
+                token,
+            })
     }
 
     /// Returns the minimized window currently hovered by the pointer.
@@ -228,44 +257,35 @@ impl DockBridge {
     /// Returns the macOS-style neighbour magnification for `token`.
     #[must_use]
     pub fn scale_for(&self, token: WindowToken) -> f32 {
-        let Some(hovered) = self.hovered else {
-            return 1.0;
-        };
         let Some(index) = self.visible_tokens.iter().position(|item| *item == token) else {
             return 1.0;
         };
-        let Some(hover_index) = self.visible_tokens.iter().position(|item| *item == hovered) else {
-            return 1.0;
-        };
-        match index.abs_diff(hover_index) {
-            0 => DOCK_HOVER_SCALE,
-            1 => DOCK_NEIGHBOUR_SCALE,
-            2 => DOCK_SECOND_NEIGHBOUR_SCALE,
-            _ => 1.0,
-        }
+        dock_item_scale(&self.visible_tokens, self.hovered, index)
     }
 
-    /// Session and token are captured by the rendered event closure. A stale
-    /// DOM/retained node can therefore never silently rebind after a WM restart.
-    pub fn enter(&mut self, token: WindowToken, wm_session_id: u64) -> bool {
-        if self.session() != Some(wm_session_id)
-            || !self.visible_tokens.contains(&token)
+    /// The full projection identity is captured by the rendered event
+    /// closure. A stale retained node can therefore never silently rebind
+    /// after a WM restart or a same-session token reuse.
+    pub fn enter(&mut self, binding: DockItemBinding) -> bool {
+        if !self.matches(binding)
+            || !self.visible_tokens.contains(&binding.token)
             || !self
                 .windows
                 .iter()
-                .any(|window| window.token == token && window.preview_available())
+                .any(|window| window.token == binding.token && window.preview_available())
         {
             return false;
         }
-        self.hovered = Some(token);
+        self.hovered = Some(binding.token);
         self.reporter
-            .set_hover(Some(NodeId::MinimizedWindow(token)), &self.windows);
+            .set_hover(Some(NodeId::MinimizedWindow(binding.token)), &self.windows);
         true
     }
 
-    /// Clears hover only if `token` still owns it in the captured WM session.
-    pub fn leave(&mut self, token: WindowToken, wm_session_id: u64) -> bool {
-        if self.session() != Some(wm_session_id) || self.hovered != Some(token) {
+    /// Clears hover only if the captured control still owns it in the exact
+    /// minimized projection.
+    pub fn leave(&mut self, binding: DockItemBinding) -> bool {
+        if !self.matches(binding) || self.hovered != Some(binding.token) {
             return false;
         }
         self.hovered = None;
@@ -273,9 +293,12 @@ impl DockBridge {
         true
     }
 
-    /// Clears any hover owned by the captured WM session.
-    pub fn leave_shelf(&mut self, wm_session_id: u64) -> bool {
-        if self.session() != Some(wm_session_id) || self.hovered.is_none() {
+    /// Clears any hover owned by the exact projection captured by the shelf.
+    pub fn leave_shelf(&mut self, wm_session_id: u64, minimized_generation: u64) -> bool {
+        if self.state_key.is_none_or(|(session, generation, _)| {
+            session != wm_session_id || generation != minimized_generation
+        }) || self.hovered.is_none()
+        {
             return false;
         }
         self.hovered = None;
@@ -286,21 +309,22 @@ impl DockBridge {
     /// Restore carries the magnified visual rectangle seen by the user, while
     /// normal geometry reports remain the untransformed 30x20 resting slots.
     #[must_use]
-    pub fn restore_action(&self, token: WindowToken, wm_session_id: u64) -> Option<UserAction> {
-        if self.session() != Some(wm_session_id) || !self.visible_tokens.contains(&token) {
+    pub fn restore_action(&self, binding: DockItemBinding) -> Option<UserAction> {
+        if !self.matches(binding) || !self.visible_tokens.contains(&binding.token) {
             return None;
         }
         Some(UserAction::RestoreWindow {
-            window: token,
-            wm_session_id,
-            geometry: self.visual_geometry(token),
+            window: binding.token,
+            wm_session_id: binding.wm_session_id,
+            minimized_generation: binding.minimized_generation,
+            geometry: self.visual_geometry(binding.token),
         })
     }
 
     /// Queue a restore so transient queue pressure or a reconnect cannot eat
     /// the user's click. Only one click is retained, bounding pointer storms.
-    pub fn request_restore(&mut self, token: WindowToken, wm_session_id: u64) -> bool {
-        let Some(action) = self.restore_action(token, wm_session_id) else {
+    pub fn request_restore(&mut self, binding: DockItemBinding) -> bool {
+        let Some(action) = self.restore_action(binding) else {
             return false;
         };
         self.hovered = None;
@@ -315,11 +339,7 @@ impl DockBridge {
     #[must_use]
     pub fn pending_actions(&self, now: Instant) -> Vec<UserAction> {
         let local_retry_ready = self.retry_not_before.is_none_or(|deadline| now >= deadline);
-        let mut actions = if local_retry_ready {
-            self.pending_withdrawals.clone()
-        } else {
-            Vec::new()
-        };
+        let mut actions = Vec::new();
         let reported: Vec<_> = self
             .reporter
             .pending_actions(now)
@@ -328,12 +348,16 @@ impl DockBridge {
                 UserAction::PreviewWindow {
                     window,
                     wm_session_id,
+                    minimized_generation,
                     visible,
+                    renewal,
                     ..
                 } => UserAction::PreviewWindow {
                     window,
                     wm_session_id,
+                    minimized_generation,
                     visible,
+                    renewal,
                     geometry: self.visual_geometry(window),
                 },
                 action => action,
@@ -344,7 +368,10 @@ impl DockBridge {
                 actions.push(action);
             }
         }
-        if local_retry_ready && let Some(restore) = self.pending_restore {
+        if local_retry_ready
+            && self.pending_restore_ready()
+            && let Some(restore) = self.pending_restore
+        {
             actions.push(restore);
         }
         actions
@@ -358,8 +385,6 @@ impl DockBridge {
             }
             self.retry_not_before = None;
         } else {
-            self.pending_withdrawals
-                .retain(|withdrawal| *withdrawal != action);
             let _ = self.reporter.acknowledge(action, now);
             self.retry_not_before = None;
         }
@@ -376,7 +401,7 @@ impl DockBridge {
     pub fn next_retry_deadline(&self, now: Instant) -> Option<Instant> {
         match (
             self.reporter.next_retry_deadline(now),
-            (!self.pending_withdrawals.is_empty() || self.pending_restore.is_some()).then(|| {
+            self.pending_restore_ready().then(|| {
                 self.retry_not_before
                     .map_or(now, |deadline| deadline.max(now))
             }),
@@ -386,9 +411,41 @@ impl DockBridge {
         }
     }
 
+    /// Delay an event loop may sleep before servicing Dock work again.
+    ///
+    /// `fallback` is the host's existing transport/runtime cadence. Pending
+    /// Dock work may shorten it, while the non-zero floor prevents an overdue
+    /// deadline from turning a retained-mode event loop into a busy loop.
     #[must_use]
-    fn session(&self) -> Option<u64> {
-        self.state_key.map(|(session, _)| session)
+    pub fn next_wake_delay(&self, now: Instant, fallback: Duration) -> Duration {
+        dock_wake_delay(now, fallback, self.next_retry_deadline(now))
+    }
+
+    #[must_use]
+    fn matches(&self, binding: DockItemBinding) -> bool {
+        self.state_key.is_some_and(|(session, generation, _)| {
+            session == binding.wm_session_id && generation == binding.minimized_generation
+        })
+    }
+
+    #[must_use]
+    fn pending_restore_ready(&self) -> bool {
+        let Some((session, generation, _)) = self.state_key else {
+            return false;
+        };
+        self.pending_restore.as_ref().is_some_and(|action| {
+            matches!(
+                action,
+                UserAction::RestoreWindow {
+                    window,
+                    wm_session_id,
+                    minimized_generation,
+                    ..
+                } if *wm_session_id == session
+                    && *minimized_generation == generation
+                    && self.windows.iter().any(|candidate| candidate.token == *window)
+            )
+        })
     }
 
     #[must_use]
@@ -399,23 +456,27 @@ impl DockBridge {
         let Some(index) = self.visible_tokens.iter().position(|item| *item == token) else {
             return DockItemGeometry::default();
         };
-        let scale = self.scale_for(token);
-        let base_x = layout.shelf.x
-            + DOCK_SHELF_PADDING * 2.0
-            + DOCK_SEPARATOR_WIDTH
-            + index as f32 * (DOCK_SLOT_WIDTH + DOCK_ITEM_GAP)
-            + (DOCK_SLOT_WIDTH - DOCK_ITEM_WIDTH) * 0.5;
-        let base_y = layout.shelf.y + (layout.shelf.height - DOCK_ITEM_HEIGHT) * 0.5;
-        let width = DOCK_ITEM_WIDTH * scale;
-        let height = DOCK_ITEM_HEIGHT * scale;
-        let visual = Rect::new(
-            base_x + (DOCK_ITEM_WIDTH - width) * 0.5,
-            base_y + (DOCK_ITEM_HEIGHT - height) * 0.5,
-            width,
-            height,
-        );
+        let visual = dock_item_visual_rect(layout.shelf, &self.visible_tokens, self.hovered, index);
         global_physical_geometry(visual, layout.monitor, layout.scale_factor)
     }
+}
+
+#[must_use]
+fn restore_matches_snapshot(action: &UserAction, snapshot: &BarSnapshot) -> bool {
+    matches!(
+        action,
+        UserAction::RestoreWindow {
+            window,
+            wm_session_id,
+            minimized_generation,
+            ..
+        } if *wm_session_id == snapshot.wm_session_id
+            && *minimized_generation == snapshot.wm_sequence.unwrap_or_default()
+            && snapshot
+                .minimized_windows
+                .iter()
+                .any(|candidate| candidate.token == *window)
+    )
 }
 
 #[must_use]
@@ -448,7 +509,43 @@ fn dock_presentation() -> PresentationConfig {
     }
 }
 
-fn dock_scene(shelf: Rect, tokens: &[WindowToken]) -> Scene {
+fn dock_item_scale(tokens: &[WindowToken], hovered: Option<WindowToken>, index: usize) -> f32 {
+    let Some(hover_index) = hovered.and_then(|token| tokens.iter().position(|item| *item == token))
+    else {
+        return 1.0;
+    };
+    match index.abs_diff(hover_index) {
+        0 => DOCK_HOVER_SCALE,
+        1 => DOCK_NEIGHBOUR_SCALE,
+        2 => DOCK_SECOND_NEIGHBOUR_SCALE,
+        _ => 1.0,
+    }
+}
+
+fn dock_item_visual_rect(
+    shelf: Rect,
+    tokens: &[WindowToken],
+    hovered: Option<WindowToken>,
+    index: usize,
+) -> Rect {
+    let scale = dock_item_scale(tokens, hovered, index);
+    let base_x = shelf.x
+        + DOCK_SHELF_PADDING * 2.0
+        + DOCK_SEPARATOR_WIDTH
+        + index as f32 * (DOCK_SLOT_WIDTH + DOCK_ITEM_GAP)
+        + (DOCK_SLOT_WIDTH - DOCK_ITEM_WIDTH) * 0.5;
+    let base_y = shelf.y + (shelf.height - DOCK_ITEM_HEIGHT) * 0.5;
+    let width = DOCK_ITEM_WIDTH * scale;
+    let height = DOCK_ITEM_HEIGHT * scale;
+    Rect::new(
+        base_x + (DOCK_ITEM_WIDTH - width) * 0.5,
+        base_y + (DOCK_ITEM_HEIGHT - height) * 0.5,
+        width,
+        height,
+    )
+}
+
+fn dock_scene(shelf: Rect, tokens: &[WindowToken], hovered: Option<WindowToken>) -> Scene {
     let mut scene = Scene {
         viewport: Size::new((shelf.x + shelf.width).max(1.0), shelf.height.max(1.0)),
         clip: Rect::new(
@@ -470,12 +567,7 @@ fn dock_scene(shelf: Rect, tokens: &[WindowToken]) -> Scene {
     for (index, token) in tokens.iter().copied().enumerate() {
         scene.hits.push(HitRegion {
             id: NodeId::MinimizedWindow(token),
-            bounds: Rect::new(
-                shelf.x + index as f32 * (DOCK_SLOT_WIDTH + DOCK_ITEM_GAP),
-                shelf.y,
-                DOCK_SLOT_WIDTH,
-                shelf.height,
-            ),
+            bounds: dock_item_visual_rect(shelf, tokens, hovered, index),
             primary: None,
             secondary: None,
             scroll_up: None,
@@ -536,14 +628,80 @@ mod tests {
     }
 
     #[test]
-    fn stale_closure_cannot_rebind_reused_window_token() {
+    fn overdue_or_zero_wake_inputs_keep_a_nonzero_floor() {
+        let now = Instant::now();
+        assert_eq!(
+            dock_wake_delay(now, Duration::ZERO, Some(now)),
+            MIN_DOCK_WAKE_DELAY
+        );
+        assert_eq!(
+            dock_wake_delay(
+                now,
+                Duration::from_millis(100),
+                now.checked_sub(Duration::from_secs(1))
+            ),
+            MIN_DOCK_WAKE_DELAY
+        );
+    }
+
+    #[test]
+    fn stale_closure_cannot_rebind_reused_window_token_in_a_new_generation() {
+        let now = Instant::now();
         let mut bridge = DockBridge::new();
-        bridge.synchronize(&snapshot(11), 1, 2.0, 40.0, 6.0);
-        assert!(bridge.enter(WindowToken(7), 11));
-        bridge.synchronize(&snapshot(12), 2, 2.0, 40.0, 6.0);
-        assert!(!bridge.enter(WindowToken(7), 11));
-        assert!(bridge.restore_action(WindowToken(7), 11).is_none());
-        assert!(bridge.restore_action(WindowToken(7), 12).is_some());
+        let mut first = snapshot(11);
+        first.wm_sequence = Some(1);
+        bridge.synchronize(&first, 1, 2.0, 40.0, 6.0);
+        for action in bridge.pending_actions(now) {
+            bridge.acknowledge(action, now);
+        }
+        let stale = bridge
+            .item_binding(WindowToken(7))
+            .expect("first rendered control identity");
+        assert!(bridge.enter(stale));
+
+        let mut second = snapshot(11);
+        second.wm_sequence = Some(2);
+        bridge.synchronize(&second, 1, 2.0, 40.0, 6.0);
+
+        let current_actions = bridge.pending_actions(now);
+        assert!(!current_actions.iter().any(|action| matches!(
+            action,
+            UserAction::SetDockGeometry {
+                window: Some(WindowToken(7)),
+                geometry,
+                ..
+            } if geometry.is_empty()
+        )));
+        assert!(current_actions.iter().any(|action| matches!(
+            action,
+            UserAction::SetDockGeometry {
+                window: Some(WindowToken(7)),
+                minimized_generation: 2,
+                geometry,
+                ..
+            } if !geometry.is_empty()
+        )));
+        assert!(!bridge.enter(stale));
+        assert!(bridge.restore_action(stale).is_none());
+        assert!(!bridge.request_restore(stale));
+        assert!(
+            !bridge.pending_actions(Instant::now()).iter().any(|action| {
+                matches!(
+                    action,
+                    UserAction::RestoreWindow { .. }
+                        | UserAction::PreviewWindow { visible: true, .. }
+                )
+            })
+        );
+
+        let current = bridge
+            .item_binding(WindowToken(7))
+            .expect("replacement rendered control identity");
+        assert_ne!(stale, current);
+        assert!(bridge.enter(current));
+        assert!(!bridge.leave(stale));
+        assert_eq!(bridge.hovered(), Some(current.token));
+        assert!(bridge.restore_action(current).is_some());
     }
 
     #[test]
@@ -562,10 +720,10 @@ mod tests {
                 _ => None,
             })
             .expect("static item geometry");
-        assert!(bridge.enter(WindowToken(7), 21));
-        let UserAction::RestoreWindow { geometry, .. } = bridge
-            .restore_action(WindowToken(7), 21)
-            .expect("fresh restore")
+        let binding = bridge.item_binding(WindowToken(7)).expect("dock binding");
+        assert!(bridge.enter(binding));
+        let UserAction::RestoreWindow { geometry, .. } =
+            bridge.restore_action(binding).expect("fresh restore")
         else {
             unreachable!();
         };
@@ -643,13 +801,15 @@ mod tests {
     fn removed_window_explicitly_withdraws_its_acknowledged_target() {
         let now = Instant::now();
         let mut bridge = DockBridge::new();
-        let populated = snapshot(46);
+        let mut populated = snapshot(46);
+        populated.wm_sequence = Some(1);
         bridge.synchronize(&populated, 1, 2.0, 40.0, 6.0);
         for action in bridge.pending_actions(now) {
             bridge.acknowledge(action, now);
         }
 
         let mut empty = populated;
+        empty.wm_sequence = Some(2);
         empty.minimized_windows.clear();
         bridge.synchronize(&empty, 1, 2.0, 40.0, 6.0);
         let withdrawal = bridge
@@ -660,6 +820,7 @@ mod tests {
                     action,
                     UserAction::SetDockGeometry {
                         window: Some(WindowToken(7)),
+                        minimized_generation: 2,
                         geometry,
                         ..
                     } if geometry.is_empty()
@@ -685,7 +846,8 @@ mod tests {
             bridge.acknowledge(action, now);
         }
 
-        assert!(bridge.request_restore(WindowToken(7), 51));
+        let binding = bridge.item_binding(WindowToken(7)).expect("dock binding");
+        assert!(bridge.request_restore(binding));
         assert!(bridge.pending_actions(now).iter().any(|action| matches!(
             action,
             UserAction::RestoreWindow {
@@ -715,6 +877,110 @@ mod tests {
     }
 
     #[test]
+    fn queued_restore_survives_same_incarnation_transport_reconnect() {
+        let now = Instant::now();
+        let model = snapshot(52);
+        let mut bridge = DockBridge::new();
+        bridge.synchronize(&model, 1, 2.0, 40.0, 6.0);
+        for action in bridge.pending_actions(now) {
+            bridge.acknowledge(action, now);
+        }
+
+        let binding = bridge.item_binding(WindowToken(7)).expect("dock binding");
+        assert!(bridge.request_restore(binding));
+        bridge.record_failure(now);
+        assert!(bridge.pending_actions(now).is_empty());
+
+        let mut unavailable = model.clone();
+        unavailable.wm_available = false;
+        bridge.synchronize(&unavailable, 2, 2.0, 40.0, 6.0);
+        assert!(
+            !bridge
+                .pending_actions(now + Duration::from_secs(1))
+                .iter()
+                .any(|action| matches!(action, UserAction::RestoreWindow { .. })),
+            "offline intent is retained but must not be emitted"
+        );
+        assert_eq!(bridge.next_retry_deadline(now), None);
+
+        bridge.synchronize(&model, 3, 2.0, 40.0, 6.0);
+        assert!(bridge.pending_actions(now).iter().any(|action| matches!(
+            action,
+            UserAction::RestoreWindow {
+                window: WindowToken(7),
+                wm_session_id: 52,
+                minimized_generation: 0,
+                ..
+            }
+        )));
+        assert_eq!(bridge.next_retry_deadline(now), Some(now));
+
+        let mut new_incarnation = model;
+        new_incarnation.wm_sequence = Some(1);
+        bridge.synchronize(&new_incarnation, 4, 2.0, 40.0, 6.0);
+        assert!(
+            !bridge
+                .pending_actions(now)
+                .iter()
+                .any(|action| matches!(action, UserAction::RestoreWindow { .. })),
+            "a projection epoch change must still retire the old click"
+        );
+    }
+
+    #[test]
+    fn wake_delay_services_stale_anchor_then_queue_full_backoff() {
+        let start = Instant::now();
+        let model = snapshot(52);
+        let mut bridge = DockBridge::new();
+        bridge.synchronize(&model, 1, 2.0, 40.0, 6.0);
+        for action in bridge.pending_actions(start) {
+            bridge.acknowledge(action, start);
+        }
+
+        let binding = bridge.item_binding(WindowToken(7)).expect("dock binding");
+        assert!(bridge.enter(binding));
+        bridge.synchronize(&model, 1, 2.0, 40.0, 6.0);
+        for action in bridge.pending_actions(start) {
+            bridge.acknowledge(action, start);
+        }
+
+        // A retained toolkit lays the magnified card out at a new scale one
+        // frame later. Geometry reports can be acknowledged immediately, but
+        // the preview anchor itself remains throttled until 50ms.
+        let moved = start + Duration::from_millis(1);
+        bridge.synchronize(&model, 1, 1.5, 40.0, 6.0);
+        for action in bridge.pending_actions(moved) {
+            assert!(!matches!(action, UserAction::PreviewWindow { .. }));
+            bridge.acknowledge(action, moved);
+        }
+        assert_eq!(
+            bridge.next_retry_deadline(moved),
+            start.checked_add(crate::DOCK_PREVIEW_ANCHOR_INTERVAL)
+        );
+        assert_eq!(
+            bridge.next_wake_delay(moved, Duration::from_millis(250)),
+            Duration::from_millis(49)
+        );
+
+        let anchor_due = start + crate::DOCK_PREVIEW_ANCHOR_INTERVAL;
+        assert!(
+            bridge
+                .pending_actions(anchor_due)
+                .iter()
+                .any(|action| matches!(action, UserAction::PreviewWindow { renewal: true, .. }))
+        );
+        // QueueFull leaves that action pending. The event loop must now honor
+        // the reporter's 100ms backoff instead of spinning on an overdue
+        // anchor deadline or sleeping for the host's 250ms fallback.
+        bridge.record_failure(anchor_due);
+        assert!(bridge.pending_actions(anchor_due).is_empty());
+        assert_eq!(
+            bridge.next_wake_delay(anchor_due, Duration::from_millis(250)),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
     fn preview_enter_leave_and_two_second_renewal_keep_visual_anchor() {
         let now = Instant::now();
         let model = snapshot(61);
@@ -724,7 +990,8 @@ mod tests {
             bridge.acknowledge(action, now);
         }
 
-        assert!(bridge.enter(WindowToken(7), 61));
+        let binding = bridge.item_binding(WindowToken(7)).expect("dock binding");
+        assert!(bridge.enter(binding));
         bridge.synchronize(&model, 1, 2.0, 40.0, 6.0);
         let enter = bridge
             .pending_actions(now)
@@ -734,6 +1001,7 @@ mod tests {
         assert!(matches!(
             enter,
             UserAction::PreviewWindow {
+                renewal: false,
                 geometry: DockItemGeometry {
                     width: 93,
                     height: 62,
@@ -753,16 +1021,24 @@ mod tests {
             bridge
                 .pending_actions(now + Duration::from_secs(2))
                 .iter()
-                .any(|action| matches!(action, UserAction::PreviewWindow { visible: true, .. }))
+                .any(|action| matches!(
+                    action,
+                    UserAction::PreviewWindow {
+                        visible: true,
+                        renewal: true,
+                        ..
+                    }
+                ))
         );
 
-        assert!(bridge.leave(WindowToken(7), 61));
+        assert!(bridge.leave(binding));
         assert!(bridge.pending_actions(now).iter().any(|action| matches!(
             action,
             UserAction::PreviewWindow {
                 window: WindowToken(7),
                 wm_session_id: 61,
                 visible: false,
+                renewal: false,
                 ..
             }
         )));

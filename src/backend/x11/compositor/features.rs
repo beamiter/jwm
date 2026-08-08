@@ -15,6 +15,70 @@ use std::sync::Arc;
 #[allow(unused_imports)]
 use std::sync::mpsc;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StaticMinimizedCapturePlan {
+    Ignore,
+    ArmAndImport,
+    RetryImport,
+    RecaptureRetained,
+}
+
+const fn static_minimized_capture_plan(
+    dock_addressable: bool,
+    minimized: bool,
+    cached_visual: bool,
+    active_animation: bool,
+    restore_pending: bool,
+    static_capture_pending: bool,
+    iconic_recapture_due: bool,
+) -> StaticMinimizedCapturePlan {
+    if !dock_addressable || !minimized || restore_pending {
+        StaticMinimizedCapturePlan::Ignore
+    } else if iconic_recapture_due && (cached_visual || active_animation) {
+        // A retained full-resolution owner satisfies visual presentation but
+        // not true-Iconic durability. An explicit demand/capacity epoch may
+        // sample it once without importing another X pixmap.
+        StaticMinimizedCapturePlan::RecaptureRetained
+    } else if cached_visual || active_animation {
+        StaticMinimizedCapturePlan::Ignore
+    } else if static_capture_pending {
+        // The previous synchronous geometry/pixmap import may have failed.
+        // A later explicit ensure or Dock lease renewal is a bounded retry;
+        // successful cache settlement removes the pending marker and makes
+        // the next request Ignore.
+        StaticMinimizedCapturePlan::RetryImport
+    } else {
+        StaticMinimizedCapturePlan::ArmAndImport
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreviewSourcePlan {
+    awaiting_source: bool,
+    request_full_source: bool,
+}
+
+const fn preview_source_plan(any_drawable_source: bool, full_source: bool) -> PreviewSourcePlan {
+    PreviewSourcePlan {
+        // A bounded snapshot paints immediately; only a total source miss
+        // pauses the show animation.
+        awaiting_source: !any_drawable_source,
+        // Hover still requests full pixels in parallel and upgrades in place.
+        request_full_source: !full_source,
+    }
+}
+
+const fn minimized_preview_source_is_drawable(
+    full_source: bool,
+    gpu_snapshot: bool,
+    _cpu_snapshot: bool,
+) -> bool {
+    // OpenGL cannot sample the durable CPU copy directly.  It is only a
+    // candidate for a separately armed one-shot upload, never a reason to
+    // keep fullscreen composition enabled indefinitely.
+    full_source || gpu_snapshot
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
         // Opening a panel springs it out of the bar; closing one forgets its
@@ -124,12 +188,18 @@ impl<C: CompositorConnection> Compositor<C> {
             wt.is_urgent = urgent;
             self.needs_render = true;
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.is_urgent = urgent;
+        }
     }
 
     pub(crate) fn set_window_pip(&mut self, x11_win: u32, pip: bool) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_pip = pip;
             self.needs_render = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.is_pip = pip;
         }
     }
 
@@ -141,6 +211,9 @@ impl<C: CompositorConnection> Compositor<C> {
             .register_stream(x11_win, fps, buffer_latency_ms);
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.audio_sync_target = Some(fps);
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.audio_sync_target = Some(fps);
         }
         // Register with OML for per-window vblank timing too
         if let Some(oml) = &mut self.oml {
@@ -391,8 +464,9 @@ impl<C: CompositorConnection> Compositor<C> {
         &mut self,
         x11_win: u32,
         target: Option<crate::backend::api::CompositorRect>,
-    ) {
-        match target.and_then(crate::backend::api::CompositorRect::normalized) {
+    ) -> bool {
+        let target = target.and_then(crate::backend::api::CompositorRect::normalized);
+        match target {
             Some(target) => {
                 self.genie_targets.insert(x11_win, target);
                 if let Some(animation) = self
@@ -405,9 +479,31 @@ impl<C: CompositorConnection> Compositor<C> {
                 if let Some(visual) = self.minimized_visuals.get_mut(&x11_win) {
                     visual.target = Some(target);
                 }
+                self.touch_minimized_visual(x11_win, std::time::Instant::now());
+                self.touch_minimized_snapshot(x11_win);
+                self.arm_minimized_gpu_upload(x11_win);
             }
             None => {
+                self.pending_minimized_gpu_uploads.remove(&x11_win);
                 self.genie_targets.remove(&x11_win);
+                // Keep the bounded CPU copy across a bar restart, but reclaim
+                // its upload while no Dock consumer can address the window.
+                self.remove_minimized_gpu_snapshot(x11_win);
+                // Geometry withdrawal can race the synchronous pixmap query
+                // used by static recapture. Cancel only that pending import;
+                // the authoritative minimized marker remains, and a future
+                // addressable target will rearm it without replaying Genie.
+                if self.minimized_window_intents.get(&x11_win)
+                    == Some(&MinimizedWindowIntent::PendingMinimize)
+                    && !self.minimized_visuals.contains_key(&x11_win)
+                    && !self
+                        .genie_active
+                        .iter()
+                        .any(|animation| animation.x11_win == x11_win)
+                {
+                    self.minimized_window_intents.remove(&x11_win);
+                }
+                self.pending_static_minimized_captures.remove(&x11_win);
                 let fallback = self.genie_target_for(x11_win);
                 if let Some(animation) = self
                     .genie_active
@@ -428,6 +524,132 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         self.needs_render = true;
+        self.arm_static_minimized_capture(x11_win, target.is_some())
+    }
+
+    /// Adopt a WM-hidden window into the compositor's durable minimized
+    /// lifecycle without playing a Genie from its deliberately off-screen
+    /// parking geometry. A Dock target gates the actual import; this lets a
+    /// later bar layout command be the first point at which the pixels become
+    /// addressable.
+    pub(crate) fn ensure_minimized_window_visual(&mut self, x11_win: u32) -> bool {
+        self.ensure_minimized_snapshot_generation(x11_win);
+        self.request_iconic_snapshot_recapture(x11_win);
+        self.minimized_windows.insert(x11_win);
+        self.arm_static_minimized_capture(x11_win, self.genie_targets.contains_key(&x11_win))
+    }
+
+    /// Return true when the backend must synchronously import the X pixmap.
+    /// If it is already tracked, settle it here so a duplicate AddWindow does
+    /// not allocate a second native pixmap/damage pair.
+    fn arm_static_minimized_capture(&mut self, x11_win: u32, dock_addressable: bool) -> bool {
+        let active_animation = self
+            .genie_active
+            .iter()
+            .any(|animation| animation.x11_win == x11_win);
+        let restore_pending = self.minimized_window_intents.get(&x11_win)
+            == Some(&MinimizedWindowIntent::ExplicitRestore);
+        let plan = static_minimized_capture_plan(
+            dock_addressable,
+            self.minimized_windows.contains(&x11_win),
+            self.minimized_visuals.contains_key(&x11_win),
+            active_animation,
+            restore_pending,
+            self.pending_static_minimized_captures.contains(&x11_win),
+            self.iconic_snapshot_recapture_due(x11_win),
+        );
+        match plan {
+            StaticMinimizedCapturePlan::Ignore => return false,
+            StaticMinimizedCapturePlan::RecaptureRetained => {
+                // The explicit demand was armed by ensure/minimize/iconify.
+                // Wake render, but never issue GL work from this WM-facing
+                // feature bridge: only the post-make-current render service
+                // may consume the gate.
+                self.needs_render = true;
+                return false;
+            }
+            StaticMinimizedCapturePlan::ArmAndImport | StaticMinimizedCapturePlan::RetryImport => {}
+        }
+
+        self.pending_static_minimized_captures.insert(x11_win);
+        self.minimized_window_intents
+            .insert(x11_win, MinimizedWindowIntent::PendingMinimize);
+        if self.windows.contains_key(&x11_win) {
+            self.settle_late_minimized_window(x11_win);
+            false
+        } else {
+            true
+        }
+    }
+
+    pub(super) fn current_minimized_cpu_snapshot_available(&self, x11_win: u32) -> bool {
+        self.minimized_snapshot_generations
+            .get(&x11_win)
+            .is_some_and(|generation| {
+                self.minimized_snapshots
+                    .peek(&x11_win)
+                    .is_some_and(|snapshot| snapshot.generation() == *generation)
+            })
+    }
+
+    pub(super) fn current_minimized_gpu_snapshot_available(&self, x11_win: u32) -> bool {
+        self.minimized_snapshot_generations
+            .get(&x11_win)
+            .is_some_and(|generation| {
+                self.minimized_gpu_snapshots
+                    .get(&x11_win)
+                    .is_some_and(|snapshot| snapshot.generation == *generation)
+            })
+    }
+
+    pub(super) fn minimized_full_preview_source_available(&self, x11_win: u32) -> bool {
+        self.minimized_visuals.contains_key(&x11_win)
+            || self
+                .genie_active
+                .iter()
+                .any(|animation| animation.x11_win == x11_win)
+            || self.windows.contains_key(&x11_win)
+    }
+
+    pub(super) fn minimized_preview_source_available(&self, x11_win: u32) -> bool {
+        self.minimized_full_preview_source_available(x11_win)
+            || self.current_minimized_gpu_snapshot_available(x11_win)
+            || self.current_minimized_cpu_snapshot_available(x11_win)
+    }
+
+    /// Whether pixels already live in a GL-sampleable owner this frame.
+    /// CPU-only snapshots remain candidates for one explicitly armed upload,
+    /// but cannot by themselves defeat fullscreen unredirect.
+    pub(super) fn minimized_preview_drawable_source_available(&self, x11_win: u32) -> bool {
+        minimized_preview_source_is_drawable(
+            self.minimized_full_preview_source_available(x11_win),
+            self.current_minimized_gpu_snapshot_available(x11_win),
+            self.current_minimized_cpu_snapshot_available(x11_win),
+        )
+    }
+
+    /// Start the preview timeline only once pixels exist. A hidden-surface
+    /// import can take longer than a frame, especially after an LRU eviction;
+    /// consuming the show animation and lease while there is nothing to draw
+    /// would make the eventual texture pop in or expire unseen.
+    pub(super) fn resume_minimized_preview_after_capture(&mut self, x11_win: u32) {
+        let Some(preview) = self
+            .dock_preview
+            .as_mut()
+            .filter(|preview| preview.x11_win == x11_win && preview.awaiting_source)
+        else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        preview.started = now;
+        preview.lease_deadline = now + std::time::Duration::from_secs(4);
+        preview.start_opacity = 0.0;
+        preview.start_scale = 0.86;
+        preview.direction = crate::backend::compositor_common::genie::PreviewDirection::Show;
+        preview.opacity = 0.0;
+        preview.scale = 0.86;
+        preview.awaiting_source = false;
+        self.needs_render = true;
     }
 
     /// Animate the compositor-owned preview rather than asking every bar
@@ -435,32 +657,55 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_minimized_window_preview(
         &mut self,
         request: Option<(u32, crate::backend::api::CompositorRect)>,
-    ) {
-        use crate::backend::compositor_common::genie::{PreviewDirection, preview_motion};
+    ) -> bool {
+        use crate::backend::compositor_common::genie::{
+            PreviewDirection, preview_motion, preview_request_reuses_timeline,
+        };
 
         let request = request
             .and_then(|(x11_win, anchor)| anchor.normalized().map(|anchor| (x11_win, anchor)))
             .filter(|(x11_win, _)| {
-                self.minimized_visuals.contains_key(x11_win)
-                    || self
-                        .genie_active
-                        .iter()
-                        .any(|animation| animation.x11_win == *x11_win)
-                    || self.windows.contains_key(x11_win)
+                self.minimized_preview_source_available(*x11_win)
+                    || self.minimized_windows.contains(x11_win)
             });
         let now = std::time::Instant::now();
         match request {
             Some((x11_win, anchor)) => {
+                self.touch_minimized_visual(x11_win, now);
+                self.touch_minimized_snapshot(x11_win);
+                self.arm_minimized_gpu_upload(x11_win);
+                let source_plan = preview_source_plan(
+                    self.minimized_preview_source_available(x11_win),
+                    self.minimized_full_preview_source_available(x11_win),
+                );
                 if self.dock_preview.is_some_and(|preview| {
-                    preview.x11_win == x11_win
-                        && preview.anchor == anchor
-                        && preview.direction == PreviewDirection::Show
+                    preview_request_reuses_timeline(preview.x11_win == x11_win, preview.direction)
                 }) {
-                    if let Some(preview) = self.dock_preview.as_mut() {
+                    let (awaiting_source, anchor_changed) = {
+                        let preview = self
+                            .dock_preview
+                            .as_mut()
+                            .expect("matching Dock preview disappeared");
+                        let anchor_changed = preview.anchor != anchor;
+                        preview.anchor = anchor;
                         preview.lease_deadline = now + std::time::Duration::from_secs(4);
+                        (preview.awaiting_source, anchor_changed)
+                    };
+                    if anchor_changed {
+                        // Keep the existing show timeline/opacity. Replacing
+                        // the preview here would restart its fade on every
+                        // bounded macOS-style magnification anchor refresh.
+                        self.needs_render = true;
                     }
-                    return;
+                    // The first renewal after an active preview's source was
+                    // evicted services that retained intent. If that
+                    // synchronous import fails, later lease renewals retry;
+                    // successful cache settlement makes subsequent renewals
+                    // source-backed and therefore import-free.
+                    return (awaiting_source || source_plan.request_full_source)
+                        && self.arm_static_minimized_capture(x11_win, true);
                 }
+                let awaiting_source = source_plan.awaiting_source;
                 self.dock_preview = Some(DockPreview {
                     x11_win,
                     anchor,
@@ -471,14 +716,24 @@ impl<C: CompositorConnection> Compositor<C> {
                     direction: PreviewDirection::Show,
                     opacity: 0.0,
                     scale: 0.86,
+                    awaiting_source,
                 });
+                let needs_import = source_plan.request_full_source
+                    && self.arm_static_minimized_capture(x11_win, true);
+                self.needs_render = true;
+                needs_import
             }
             None => {
                 let Some(preview) = self.dock_preview.as_mut() else {
-                    return;
+                    return false;
                 };
                 if preview.direction == PreviewDirection::Hide {
-                    return;
+                    return false;
+                }
+                if preview.awaiting_source {
+                    self.dock_preview = None;
+                    self.needs_render = true;
+                    return false;
                 }
                 let (opacity, scale, _) = preview_motion(
                     preview.start_opacity,
@@ -492,9 +747,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 preview.opacity = opacity;
                 preview.scale = scale;
                 preview.direction = PreviewDirection::Hide;
+                self.needs_render = true;
+                false
             }
         }
-        self.needs_render = true;
     }
 
     #[allow(dead_code)]
@@ -1429,5 +1685,130 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod minimized_recapture_tests {
+    use super::{
+        PreviewSourcePlan, StaticMinimizedCapturePlan, minimized_preview_source_is_drawable,
+        preview_source_plan, static_minimized_capture_plan,
+    };
+
+    fn service_preview_renewal(
+        cached: &mut bool,
+        pending: &mut bool,
+        import_attempts: &mut usize,
+        import_succeeds: bool,
+    ) -> StaticMinimizedCapturePlan {
+        let plan =
+            static_minimized_capture_plan(true, true, *cached, false, false, *pending, false);
+        if plan != StaticMinimizedCapturePlan::Ignore {
+            *pending = true;
+            *import_attempts += 1;
+            if import_succeeds {
+                *cached = true;
+                *pending = false;
+            }
+        }
+        plan
+    }
+
+    #[test]
+    fn failed_first_import_retries_on_renewal_then_stops_after_capture() {
+        // Eviction leaves the authoritative minimized lifecycle and Dock
+        // addressability intact, but no cached/animated source. The first
+        // hover/ensure request therefore arms a static import.
+        let mut cached = false;
+        let mut pending = false;
+        let mut import_attempts = 0;
+        assert_eq!(
+            service_preview_renewal(&mut cached, &mut pending, &mut import_attempts, false,),
+            StaticMinimizedCapturePlan::ArmAndImport,
+        );
+        assert!(pending);
+        assert!(!cached);
+        // Model a failed get_geometry/add_window: pending remains but there is
+        // still no cached source. The next lease renewal must retry rather
+        // than leaving the preview permanently blank.
+        assert_eq!(
+            service_preview_renewal(&mut cached, &mut pending, &mut import_attempts, true,),
+            StaticMinimizedCapturePlan::RetryImport,
+        );
+        assert!(!pending);
+        assert!(cached);
+        // Successful static settlement installs the cache and clears pending;
+        // every later renewal is import-free.
+        assert_eq!(
+            service_preview_renewal(&mut cached, &mut pending, &mut import_attempts, true,),
+            StaticMinimizedCapturePlan::Ignore,
+        );
+        assert_eq!(import_attempts, 2);
+        assert_eq!(
+            static_minimized_capture_plan(true, true, false, true, false, false, false),
+            StaticMinimizedCapturePlan::Ignore,
+            "an active Genie owns the pixels and must never be duplicated"
+        );
+        assert_eq!(
+            static_minimized_capture_plan(false, true, false, false, false, false, false),
+            StaticMinimizedCapturePlan::Ignore
+        );
+        assert_eq!(
+            static_minimized_capture_plan(true, false, false, false, false, false, false),
+            StaticMinimizedCapturePlan::Ignore
+        );
+        assert_eq!(
+            static_minimized_capture_plan(true, true, false, false, true, false, false),
+            StaticMinimizedCapturePlan::Ignore
+        );
+    }
+
+    #[test]
+    fn explicit_iconic_demand_recaptures_even_with_a_full_retained_owner() {
+        assert_eq!(
+            static_minimized_capture_plan(true, true, true, false, false, false, true),
+            StaticMinimizedCapturePlan::RecaptureRetained
+        );
+        assert_eq!(
+            static_minimized_capture_plan(true, true, false, true, false, false, true),
+            StaticMinimizedCapturePlan::RecaptureRetained
+        );
+        assert_eq!(
+            static_minimized_capture_plan(true, true, true, false, false, false, false),
+            StaticMinimizedCapturePlan::Ignore,
+            "retained pixels alone must not cause per-frame CPU readback"
+        );
+    }
+
+    #[test]
+    fn low_resolution_hover_draws_now_while_requesting_full_pixels() {
+        assert_eq!(
+            preview_source_plan(true, false),
+            PreviewSourcePlan {
+                awaiting_source: false,
+                request_full_source: true,
+            }
+        );
+        assert_eq!(
+            preview_source_plan(false, false),
+            PreviewSourcePlan {
+                awaiting_source: true,
+                request_full_source: true,
+            }
+        );
+        assert_eq!(
+            preview_source_plan(true, true),
+            PreviewSourcePlan {
+                awaiting_source: false,
+                request_full_source: false,
+            }
+        );
+    }
+
+    #[test]
+    fn cpu_only_snapshot_is_not_a_drawable_preview_source() {
+        assert!(!minimized_preview_source_is_drawable(false, false, true));
+        assert!(minimized_preview_source_is_drawable(false, true, true));
+        assert!(minimized_preview_source_is_drawable(true, false, true));
     }
 }

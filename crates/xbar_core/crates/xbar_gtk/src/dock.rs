@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::{Rc, Weak};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use gtk4::prelude::*;
@@ -22,6 +23,7 @@ use crate::{Dispatch, Metrics};
 /// uses the same cadence so a bounded command queue that was full on the
 /// layout turn naturally gets another chance without pointer-event flooding.
 const DOCK_RENEW_INTERVAL: Duration = Duration::from_secs(2);
+const DOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_WITHDRAW_RETRY_WINDOW: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -139,6 +141,7 @@ impl GeometryLedger {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HoveredWindow {
     wm_session_id: u64,
+    minimized_generation: u64,
     token: WindowToken,
 }
 
@@ -149,11 +152,24 @@ struct PreviewWithdrawal {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewAttemptKind {
+    Fresh,
+    Renewal,
+}
+
+struct PreviewAttempt {
+    hovered: HoveredWindow,
+    result: Receiver<bool>,
+    expires_at: Instant,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct DockFrame {
     wm_available: bool,
     has_geometry: bool,
     wm_session_id: u64,
+    minimized_generation: u64,
     origin_x: i32,
     origin_y: i32,
 }
@@ -164,6 +180,7 @@ impl Default for DockFrame {
             wm_available: false,
             has_geometry: false,
             wm_session_id: 0,
+            minimized_generation: 0,
             origin_x: 0,
             origin_y: 0,
         }
@@ -174,7 +191,10 @@ struct DockState {
     frame: DockFrame,
     preview_available: HashSet<WindowToken>,
     hovered: Option<HoveredWindow>,
+    confirmed_preview: Option<HoveredWindow>,
     preview_last_sent: Option<Instant>,
+    preview_retry_not_before: Option<Instant>,
+    preview_attempt: Option<PreviewAttempt>,
     preview_withdrawal: Option<PreviewWithdrawal>,
     geometry_last_sent: Option<Instant>,
     ledger: GeometryLedger,
@@ -187,7 +207,10 @@ impl Default for DockState {
             frame: DockFrame::default(),
             preview_available: HashSet::new(),
             hovered: None,
+            confirmed_preview: None,
             preview_last_sent: None,
+            preview_retry_not_before: None,
+            preview_attempt: None,
             preview_withdrawal: None,
             geometry_last_sent: None,
             ledger: GeometryLedger::default(),
@@ -196,8 +219,80 @@ impl Default for DockState {
     }
 }
 
+impl DockState {
+    fn cancel_preview_delivery(&mut self) {
+        self.confirmed_preview = None;
+        self.preview_last_sent = None;
+        self.preview_retry_not_before = None;
+        // Dropping the receiver makes a late frontend result inert. In
+        // particular, an old result can never emit a LEAVE that clears a
+        // same-token preview acquired by a newer hover attempt.
+        self.preview_attempt = None;
+    }
+
+    fn finish_preview_attempt(&mut self, now: Instant) {
+        let Some(attempt) = self.preview_attempt.as_ref() else {
+            return;
+        };
+        let delivered = match attempt.result.try_recv() {
+            Ok(delivered) => delivered,
+            Err(TryRecvError::Empty) if now < attempt.expires_at => return,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => false,
+        };
+        let attempt = self
+            .preview_attempt
+            .take()
+            .expect("preview attempt was present while polling its receipt");
+        let still_current = self.hovered == Some(attempt.hovered)
+            && self.frame.wm_available
+            && self.frame.wm_session_id == attempt.hovered.wm_session_id
+            && self.frame.minimized_generation == attempt.hovered.minimized_generation
+            && self.preview_available.contains(&attempt.hovered.token);
+        if !still_current {
+            return;
+        }
+
+        if delivered {
+            self.confirmed_preview = Some(attempt.hovered);
+            self.preview_last_sent = Some(now);
+            self.preview_retry_not_before = None;
+        } else {
+            // A failed renewal no longer proves ownership either. Reacquire
+            // with a fresh ENTER after the short bounded-queue backoff.
+            self.confirmed_preview = None;
+            self.preview_last_sent = None;
+            self.preview_retry_not_before = Some(retry_deadline(now));
+        }
+    }
+
+    fn preview_attempt_kind(
+        &self,
+        now: Instant,
+        geometry_ready: bool,
+    ) -> Option<PreviewAttemptKind> {
+        let hovered = self.hovered?;
+        if self.preview_attempt.is_some() || !geometry_ready {
+            return None;
+        }
+        if self.confirmed_preview == Some(hovered) {
+            return self
+                .preview_last_sent
+                .is_none_or(|last| now.saturating_duration_since(last) >= DOCK_RENEW_INTERVAL)
+                .then_some(PreviewAttemptKind::Renewal);
+        }
+        self.preview_retry_not_before
+            .is_none_or(|deadline| now >= deadline)
+            .then_some(PreviewAttemptKind::Fresh)
+    }
+}
+
+fn retry_deadline(now: Instant) -> Instant {
+    now.checked_add(DOCK_RETRY_INTERVAL).unwrap_or(now)
+}
+
 struct DockCard {
     wm_session_id: u64,
+    minimized_generation: u64,
     token: WindowToken,
     slot: gtk4::Box,
     button: Button,
@@ -260,6 +355,7 @@ impl DockInner {
             wm_available: snapshot.wm_available,
             has_geometry: snapshot.geometry.is_some(),
             wm_session_id: snapshot.wm_session_id,
+            minimized_generation: snapshot.wm_sequence.unwrap_or_default(),
             origin_x,
             origin_y,
         };
@@ -268,6 +364,7 @@ impl DockInner {
             cards.len() == controls.len()
                 && cards.iter().zip(controls).all(|(card, control)| {
                     card.wm_session_id == snapshot.wm_session_id
+                        && card.minimized_generation == snapshot.wm_sequence.unwrap_or_default()
                         && matches!(
                             control.id,
                             xbar_core::presentation::NodeId::MinimizedWindow(token)
@@ -276,11 +373,14 @@ impl DockInner {
                 })
         };
 
-        {
+        let cancelled_preview = {
             let mut state = self.state.borrow_mut();
-            if state.frame.wm_session_id != next_frame.wm_session_id {
+            let projection_changed = state.frame.wm_session_id != next_frame.wm_session_id
+                || state.frame.minimized_generation != next_frame.minimized_generation;
+            let old_hover = state.hovered;
+            if projection_changed {
                 state.hovered = None;
-                state.preview_last_sent = None;
+                state.cancel_preview_delivery();
                 state.preview_withdrawal = None;
                 state.geometry_last_sent = None;
                 state.ledger.clear();
@@ -292,8 +392,10 @@ impl DockInner {
                 .filter(|window| window.preview_available())
                 .map(|window| window.token)
                 .collect();
-            if state.hovered.is_some_and(|hovered| {
+            let hovered_retired = state.hovered.is_some_and(|hovered| {
                 hovered.wm_session_id != snapshot.wm_session_id
+                    || hovered.minimized_generation != snapshot.wm_sequence.unwrap_or_default()
+                    || !state.preview_available.contains(&hovered.token)
                     || !controls.iter().any(|control| {
                         matches!(
                             control.id,
@@ -301,15 +403,27 @@ impl DockInner {
                                 if token == hovered.token
                         )
                     })
-            }) {
+            });
+            if hovered_retired {
                 state.hovered = None;
-                state.preview_last_sent = None;
+                state.cancel_preview_delivery();
                 state.preview_withdrawal = None;
             }
+            (projection_changed || hovered_retired)
+                .then_some(old_hover)
+                .flatten()
+                .map(|hovered| Self::preview_action(&state, hovered, false, false))
+        };
+        if let Some(action) = cancelled_preview {
+            (self.dispatch)(action, None);
         }
 
         if !identities_match {
-            self.rebuild_cards(snapshot.wm_session_id, controls);
+            self.rebuild_cards(
+                snapshot.wm_session_id,
+                snapshot.wm_sequence.unwrap_or_default(),
+                controls,
+            );
         } else {
             for (card, spec) in self.cards.borrow().iter().zip(controls) {
                 card.update(spec);
@@ -322,7 +436,12 @@ impl DockInner {
         self.schedule_reconcile();
     }
 
-    fn rebuild_cards(self: &Rc<Self>, wm_session_id: u64, controls: &[ControlSpec]) {
+    fn rebuild_cards(
+        self: &Rc<Self>,
+        wm_session_id: u64,
+        minimized_generation: u64,
+        controls: &[ControlSpec],
+    ) {
         for card in self.cards.borrow_mut().drain(..) {
             self.items.remove(&card.slot);
         }
@@ -332,7 +451,7 @@ impl DockInner {
             let xbar_core::presentation::NodeId::MinimizedWindow(token) = spec.id else {
                 continue;
             };
-            let card = self.make_card(wm_session_id, token, spec);
+            let card = self.make_card(wm_session_id, minimized_generation, token, spec);
             self.items.append(&card.slot);
             cards.push(card);
         }
@@ -341,6 +460,7 @@ impl DockInner {
     fn make_card(
         self: &Rc<Self>,
         wm_session_id: u64,
+        minimized_generation: u64,
         token: WindowToken,
         spec: &ControlSpec,
     ) -> DockCard {
@@ -376,7 +496,7 @@ impl DockInner {
             let weak = Rc::downgrade(self);
             move |_| {
                 if let Some(inner) = weak.upgrade() {
-                    inner.restore(wm_session_id, token);
+                    inner.restore(wm_session_id, minimized_generation, token);
                 }
             }
         });
@@ -388,7 +508,7 @@ impl DockInner {
             move |_, _, _| {
                 button.add_css_class("magnified");
                 if let Some(inner) = weak.upgrade() {
-                    inner.preview_enter(wm_session_id, token);
+                    inner.preview_enter(wm_session_id, minimized_generation, token);
                 }
             }
         });
@@ -398,7 +518,7 @@ impl DockInner {
             move |_| {
                 button.remove_css_class("magnified");
                 if let Some(inner) = weak.upgrade() {
-                    inner.preview_leave(wm_session_id, token);
+                    inner.preview_leave(wm_session_id, minimized_generation, token);
                 }
             }
         });
@@ -406,6 +526,7 @@ impl DockInner {
 
         let card = DockCard {
             wm_session_id,
+            minimized_generation,
             token,
             slot,
             button,
@@ -415,11 +536,12 @@ impl DockInner {
         card
     }
 
-    fn preview_enter(&self, wm_session_id: u64, token: WindowToken) {
+    fn preview_enter(&self, wm_session_id: u64, minimized_generation: u64, token: WindowToken) {
         let now = Instant::now();
-        let actions = {
+        let previous_leave = {
             let mut state = self.state.borrow_mut();
             if state.frame.wm_session_id != wm_session_id
+                || state.frame.minimized_generation != minimized_generation
                 || !state.frame.wm_available
                 || !state.preview_available.contains(&token)
             {
@@ -427,26 +549,31 @@ impl DockInner {
             }
             let hovered = HoveredWindow {
                 wm_session_id,
+                minimized_generation,
                 token,
             };
-            let mut actions = Vec::new();
-            if let Some(previous) = state.hovered
-                && previous != hovered
-            {
-                actions.push(Self::preview_action(&state, previous, false));
+            if state.hovered == Some(hovered) {
+                state.preview_withdrawal = None;
+                return;
             }
+            let previous_leave = state
+                .hovered
+                .map(|previous| Self::preview_action(&state, previous, false, false));
             state.hovered = Some(hovered);
-            state.preview_last_sent = Some(now);
+            state.cancel_preview_delivery();
             state.preview_withdrawal = None;
-            actions.push(Self::preview_action(&state, hovered, true));
-            actions
+            previous_leave
         };
-        self.dispatch_all(actions);
+        if let Some(action) = previous_leave {
+            (self.dispatch)(action, None);
+        }
+        self.drive_preview(now);
     }
 
-    fn preview_leave(&self, wm_session_id: u64, token: WindowToken) {
+    fn preview_leave(&self, wm_session_id: u64, minimized_generation: u64, token: WindowToken) {
         let hovered = HoveredWindow {
             wm_session_id,
+            minimized_generation,
             token,
         };
         let action = {
@@ -455,49 +582,67 @@ impl DockInner {
                 return;
             }
             state.hovered = None;
-            state.preview_last_sent = None;
+            state.cancel_preview_delivery();
             let now = Instant::now();
             state.preview_withdrawal = Some(PreviewWithdrawal {
                 hovered,
                 last_sent: now,
                 expires_at: now + PREVIEW_WITHDRAW_RETRY_WINDOW,
             });
-            Self::preview_action(&state, hovered, false)
+            Self::preview_action(&state, hovered, false, false)
         };
-        (self.dispatch)(action);
+        (self.dispatch)(action, None);
     }
 
-    fn restore(&self, wm_session_id: u64, token: WindowToken) {
+    fn restore(&self, wm_session_id: u64, minimized_generation: u64, token: WindowToken) {
         let hovered = HoveredWindow {
             wm_session_id,
+            minimized_generation,
             token,
         };
         let (preview_leave, geometry) = {
             let mut state = self.state.borrow_mut();
+            if state.frame.wm_session_id != wm_session_id
+                || state.frame.minimized_generation != minimized_generation
+                || !state.frame.wm_available
+            {
+                return;
+            }
             let preview_leave = (state.hovered == Some(hovered)).then(|| {
                 state.hovered = None;
-                state.preview_last_sent = None;
+                state.cancel_preview_delivery();
                 state.preview_withdrawal = None;
-                Self::preview_action(&state, hovered, false)
+                Self::preview_action(&state, hovered, false, false)
             });
             (preview_leave, Self::geometry_for(&state, Some(token)))
         };
         if let Some(preview_leave) = preview_leave {
-            (self.dispatch)(preview_leave);
+            (self.dispatch)(preview_leave, None);
         }
-        (self.dispatch)(UserAction::RestoreWindow {
-            window: token,
-            wm_session_id,
-            geometry,
-        });
+        (self.dispatch)(
+            UserAction::RestoreWindow {
+                window: token,
+                wm_session_id,
+                minimized_generation,
+                geometry,
+            },
+            None,
+        );
     }
 
-    fn preview_action(state: &DockState, hovered: HoveredWindow, visible: bool) -> UserAction {
+    fn preview_action(
+        state: &DockState,
+        hovered: HoveredWindow,
+        visible: bool,
+        renewal: bool,
+    ) -> UserAction {
         let geometry = Self::geometry_for(state, Some(hovered.token));
         UserAction::PreviewWindow {
             window: hovered.token,
             wm_session_id: hovered.wm_session_id,
+            minimized_generation: hovered.minimized_generation,
             visible,
+            renewal,
             geometry,
         }
     }
@@ -511,6 +656,51 @@ impl DockInner {
             .map_or_else(DockItemGeometry::default, |report| report.geometry)
     }
 
+    fn drive_preview(&self, now: Instant) {
+        self.state.borrow_mut().finish_preview_attempt(now);
+        let Some((action, completion)) = (|| {
+            let mut state = self.state.borrow_mut();
+            let hovered = state.hovered?;
+            let geometry = Self::geometry_for(&state, Some(hovered.token));
+            let geometry_ready = !geometry.is_empty();
+            let Some(kind) = state.preview_attempt_kind(now, geometry_ready) else {
+                if !geometry_ready
+                    && state.preview_attempt.is_none()
+                    && state.confirmed_preview != Some(hovered)
+                    && state.preview_retry_not_before.is_none()
+                {
+                    state.preview_retry_not_before = Some(retry_deadline(now));
+                }
+                return None;
+            };
+            let (completion, result) = mpsc::channel();
+            state.preview_attempt = Some(PreviewAttempt {
+                hovered,
+                result,
+                expires_at: retry_deadline(now),
+            });
+            state.preview_retry_not_before = None;
+            Some((
+                UserAction::PreviewWindow {
+                    window: hovered.token,
+                    wm_session_id: hovered.wm_session_id,
+                    minimized_generation: hovered.minimized_generation,
+                    visible: true,
+                    renewal: kind == PreviewAttemptKind::Renewal,
+                    geometry,
+                },
+                completion,
+            ))
+        })() else {
+            return;
+        };
+
+        (self.dispatch)(action, Some(completion));
+        // gtk_bar completes synchronously. Relm returns on a later main-loop
+        // turn and is polled by `maintain`; both paths share the same state.
+        self.state.borrow_mut().finish_preview_attempt(now);
+    }
+
     fn maintain(&self, now: Instant) {
         let force_geometry = self
             .state
@@ -521,35 +711,34 @@ impl DockInner {
             self.reconcile_geometry(true, now);
         }
 
-        let preview_actions = {
+        self.state.borrow_mut().finish_preview_attempt(now);
+
+        let withdrawal_actions = {
             let mut state = self.state.borrow_mut();
             let mut actions = Vec::new();
             if let Some(withdrawal) = state.preview_withdrawal {
                 if now >= withdrawal.expires_at
                     || state.frame.wm_session_id != withdrawal.hovered.wm_session_id
+                    || state.frame.minimized_generation != withdrawal.hovered.minimized_generation
                 {
                     state.preview_withdrawal = None;
                 } else if now.saturating_duration_since(withdrawal.last_sent) >= DOCK_RENEW_INTERVAL
                 {
-                    actions.push(Self::preview_action(&state, withdrawal.hovered, false));
+                    actions.push(Self::preview_action(
+                        &state,
+                        withdrawal.hovered,
+                        false,
+                        false,
+                    ));
                     if let Some(withdrawal) = state.preview_withdrawal.as_mut() {
                         withdrawal.last_sent = now;
                     }
                 }
             }
-            if let Some(hovered) = state.hovered
-                && state.frame.wm_available
-                && state.frame.wm_session_id == hovered.wm_session_id
-                && state
-                    .preview_last_sent
-                    .is_none_or(|last| now.saturating_duration_since(last) >= DOCK_RENEW_INTERVAL)
-            {
-                actions.push(Self::preview_action(&state, hovered, true));
-                state.preview_last_sent = Some(now);
-            }
             actions
         };
-        self.dispatch_all(preview_actions);
+        self.dispatch_all(withdrawal_actions);
+        self.drive_preview(now);
     }
 
     fn reconcile_geometry(&self, force: bool, now: Instant) {
@@ -562,6 +751,7 @@ impl DockInner {
                 return;
             }
             let wm_session_id = state.frame.wm_session_id;
+            let minimized_generation = state.frame.minimized_generation;
             let changes = state.ledger.reconcile(&desired, force);
             state.geometry_last_sent = Some(now);
             changes
@@ -569,6 +759,7 @@ impl DockInner {
                 .map(|report| UserAction::SetDockGeometry {
                     window: report.window,
                     wm_session_id,
+                    minimized_generation,
                     geometry: report.geometry,
                 })
                 .collect::<Vec<_>>()
@@ -623,7 +814,7 @@ impl DockInner {
 
     fn dispatch_all(&self, actions: Vec<UserAction>) {
         for action in actions {
-            (self.dispatch)(action);
+            (self.dispatch)(action, None);
         }
     }
 }
@@ -787,8 +978,43 @@ fn connect_geometry_changes(inner: &Rc<DockInner>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GeometryLedger, GeometryReport, LogicalRect, global_physical_geometry};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        DOCK_RENEW_INTERVAL, DOCK_RETRY_INTERVAL, DockState, GeometryLedger, GeometryReport,
+        HoveredWindow, LogicalRect, PreviewAttempt, PreviewAttemptKind, global_physical_geometry,
+    };
     use xbar_core::{DockItemGeometry, WindowToken};
+
+    fn preview_state() -> (DockState, HoveredWindow) {
+        let hovered = HoveredWindow {
+            wm_session_id: 91,
+            minimized_generation: 73,
+            token: WindowToken(41),
+        };
+        let mut state = DockState::default();
+        state.frame.wm_available = true;
+        state.frame.wm_session_id = hovered.wm_session_id;
+        state.frame.minimized_generation = hovered.minimized_generation;
+        state.preview_available.insert(hovered.token);
+        state.hovered = Some(hovered);
+        (state, hovered)
+    }
+
+    fn install_attempt(
+        state: &mut DockState,
+        hovered: HoveredWindow,
+        now: Instant,
+    ) -> mpsc::Sender<bool> {
+        let (completion, result) = mpsc::channel();
+        state.preview_attempt = Some(PreviewAttempt {
+            hovered,
+            result,
+            expires_at: now + DOCK_RETRY_INTERVAL,
+        });
+        completion
+    }
 
     #[test]
     fn logical_geometry_uses_snapshot_origin_and_gtk_scale() {
@@ -838,6 +1064,91 @@ mod tests {
                 window: Some(token),
                 geometry: DockItemGeometry::default(),
             }]
+        );
+    }
+
+    #[test]
+    fn failed_fresh_enter_retries_as_fresh_before_any_renewal() {
+        let now = Instant::now();
+        let (mut state, hovered) = preview_state();
+        assert_eq!(
+            state.preview_attempt_kind(now, true),
+            Some(PreviewAttemptKind::Fresh)
+        );
+
+        let completion = install_attempt(&mut state, hovered, now);
+        completion.send(false).unwrap();
+        state.finish_preview_attempt(now);
+        assert_eq!(state.confirmed_preview, None);
+        assert_eq!(
+            state.preview_attempt_kind(now + DOCK_RETRY_INTERVAL - Duration::from_millis(1), true),
+            None
+        );
+        assert_eq!(
+            state.preview_attempt_kind(now + DOCK_RETRY_INTERVAL, true),
+            Some(PreviewAttemptKind::Fresh)
+        );
+    }
+
+    #[test]
+    fn empty_geometry_waits_then_success_starts_the_renewal_clock() {
+        let now = Instant::now();
+        let (mut state, hovered) = preview_state();
+        assert_eq!(state.preview_attempt_kind(now, false), None);
+        assert_eq!(
+            state.preview_attempt_kind(now, true),
+            Some(PreviewAttemptKind::Fresh)
+        );
+
+        let completion = install_attempt(&mut state, hovered, now);
+        completion.send(true).unwrap();
+        state.finish_preview_attempt(now);
+        assert_eq!(state.confirmed_preview, Some(hovered));
+        assert_eq!(
+            state.preview_attempt_kind(now + DOCK_RENEW_INTERVAL - Duration::from_millis(1), true),
+            None
+        );
+        assert_eq!(
+            state.preview_attempt_kind(now + DOCK_RENEW_INTERVAL, true),
+            Some(PreviewAttemptKind::Renewal)
+        );
+    }
+
+    #[test]
+    fn cancellation_drops_a_late_receipt_without_touching_a_new_attempt() {
+        let now = Instant::now();
+        let (mut state, hovered) = preview_state();
+        let old_completion = install_attempt(&mut state, hovered, now);
+
+        state.cancel_preview_delivery();
+        state.hovered = Some(hovered);
+        let new_completion = install_attempt(&mut state, hovered, now);
+        assert!(old_completion.send(true).is_err());
+        new_completion.send(true).unwrap();
+        state.finish_preview_attempt(now);
+
+        assert_eq!(state.confirmed_preview, Some(hovered));
+        assert_eq!(state.preview_last_sent, Some(now));
+    }
+
+    #[test]
+    fn failed_renewal_falls_back_to_a_fresh_enter() {
+        let now = Instant::now();
+        let (mut state, hovered) = preview_state();
+        state.confirmed_preview = Some(hovered);
+        state.preview_last_sent = Some(now - DOCK_RENEW_INTERVAL);
+        assert_eq!(
+            state.preview_attempt_kind(now, true),
+            Some(PreviewAttemptKind::Renewal)
+        );
+
+        let completion = install_attempt(&mut state, hovered, now);
+        completion.send(false).unwrap();
+        state.finish_preview_attempt(now);
+        assert_eq!(state.confirmed_preview, None);
+        assert_eq!(
+            state.preview_attempt_kind(now + DOCK_RETRY_INTERVAL, true),
+            Some(PreviewAttemptKind::Fresh)
         );
     }
 }

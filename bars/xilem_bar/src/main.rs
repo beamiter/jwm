@@ -39,8 +39,9 @@ use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH,
-    DockBridge, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeSchedule,
-    RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig, UserAction, WindowToken,
+    DockBridge, DockItemBinding, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler,
+    RuntimeSchedule, RuntimeUpdate, ShellRoute, TagId, ThemeMode, TransportRecoveryConfig,
+    UserAction, dock_wake_delay,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -447,6 +448,34 @@ fn surface_alpha_capable(conn: &XCBConnection, screen_num: usize) -> bool {
 #[derive(Debug, Default)]
 struct WorkerSignal {
     pending: AtomicBool,
+    dock_deadline: Mutex<Option<Instant>>,
+    wake: tokio::sync::Notify,
+}
+
+impl WorkerSignal {
+    fn publish_dock_deadline(&self, deadline: Option<Instant>) {
+        let mut current = match self.dock_deadline.lock() {
+            Ok(current) => current,
+            Err(error) => error.into_inner(),
+        };
+        if *current != deadline {
+            *current = deadline;
+            self.wake.notify_one();
+        }
+    }
+
+    fn next_wait(&self, now: Instant) -> Duration {
+        let deadline = match self.dock_deadline.lock() {
+            Ok(current) => *current,
+            Err(error) => *error.into_inner(),
+        };
+        dock_wake_delay(now, TRANSPORT_POLL_INTERVAL, deadline)
+    }
+
+    fn drive_finished(&self) {
+        self.pending.store(false, Ordering::Release);
+        self.wake.notify_one();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +490,7 @@ struct XilemBar {
     process_actions: ProcessActionHandler,
     geometry_bridge: Arc<GeometryBridge>,
     dock: DockBridge,
+    worker_signal: Arc<WorkerSignal>,
     theme: Theme,
 
     /// The startup decision from `main`: a translucent window washes its
@@ -516,6 +546,7 @@ impl XilemBar {
             process_actions: ProcessActionHandler::default(),
             geometry_bridge,
             dock: DockBridge::new(),
+            worker_signal: Arc::new(WorkerSignal::default()),
             theme: Theme::from_mode(theme_mode),
             translucent,
             background_opacity,
@@ -563,18 +594,20 @@ impl XilemBar {
                 break;
             }
         }
+        self.worker_signal
+            .publish_dock_deadline(self.dock.next_retry_deadline(Instant::now()));
     }
 
-    fn restore_minimized(&mut self, token: WindowToken, wm_session_id: u64) {
-        let _ = self.dock.request_restore(token, wm_session_id);
+    fn restore_minimized(&mut self, binding: DockItemBinding) {
+        let _ = self.dock.request_restore(binding);
         self.service_dock();
     }
 
-    fn hover_minimized(&mut self, token: WindowToken, wm_session_id: u64, hovered: bool) {
+    fn hover_minimized(&mut self, binding: DockItemBinding, hovered: bool) {
         let changed = if hovered {
-            self.dock.enter(token, wm_session_id)
+            self.dock.enter(binding)
         } else {
-            self.dock.leave(token, wm_session_id)
+            self.dock.leave(binding)
         };
         if changed {
             // Rebuild immediately so the hovered card and its two neighbours
@@ -610,7 +643,7 @@ impl XilemBar {
                 let update = self.schedule.service(&mut self.runtime);
                 self.handle_runtime_update(update);
                 self.service_dock();
-                signal.pending.store(false, Ordering::Release);
+                signal.drive_finished();
             }
         }
     }
@@ -1363,7 +1396,7 @@ where
 fn minimized_item(state: &XilemBar, index: usize) -> Option<impl WidgetView<XilemBar> + use<>> {
     let minimized = state.dock.visible_windows().nth(index)?.clone();
     let token = minimized.token;
-    let session = state.runtime.view().wm_session_id;
+    let binding = state.dock.item_binding(token)?;
     let scale = state.dock.scale_for(token);
     let background = if minimized.urgent() {
         state.theme.urgent_bg
@@ -1388,12 +1421,12 @@ fn minimized_item(state: &XilemBar, index: usize) -> Option<impl WidgetView<Xile
                 .color(Color::WHITE),
             move |state: &mut XilemBar| {
                 info!("restore minimized window {title}");
-                state.restore_minimized(token, session);
+                state.restore_minimized(binding);
             },
         ),
         tooltip_title,
         move |state: &mut XilemBar, hovered| {
-            state.hover_minimized(token, session, hovered);
+            state.hover_minimized(binding, hovered);
         },
     ))
     .dims(Dimensions::new(
@@ -1518,27 +1551,35 @@ fn app_logic(state: &mut XilemBar) -> impl WidgetView<XilemBar> + use<> {
 
 // -------- Background workers -------------------------------------------------
 
-// One coalesced driver task keeps at most one event in the winit queue. Polls
-// retain 100ms transport latency, while every tenth poll also advances the
-// core clock/providers.
+// One coalesced driver task keeps at most one event in the winit queue. The
+// ordinary transport fallback remains 100ms, but a moving Dock anchor can
+// shorten the next sleep to its 50ms protocol deadline.
 fn driver_task() -> impl View<XilemBar, (), ViewCtx, Element = NoElement> + use<> {
     task_raw(
-        |proxy: MessageProxy<WorkerEvent>, _state: &mut XilemBar| async move {
-            let signal = Arc::new(WorkerSignal::default());
-            let mut iv = tokio::time::interval(TRANSPORT_POLL_INTERVAL);
-            iv.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                iv.tick().await;
-                if signal
-                    .pending
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                    && proxy
-                        .message(WorkerEvent::Drive(Arc::clone(&signal)))
-                        .is_err()
-                {
-                    signal.pending.store(false, Ordering::Release);
-                    break;
+        |proxy: MessageProxy<WorkerEvent>, state: &mut XilemBar| {
+            let signal = Arc::clone(&state.worker_signal);
+            async move {
+                loop {
+                    if signal.pending.load(Ordering::Acquire) {
+                        signal.wake.notified().await;
+                        continue;
+                    }
+                    let wait = signal.next_wait(Instant::now());
+                    tokio::select! {
+                        () = tokio::time::sleep(wait) => {}
+                        () = signal.wake.notified() => {}
+                    }
+                    if signal
+                        .pending
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                        && proxy
+                            .message(WorkerEvent::Drive(Arc::clone(&signal)))
+                            .is_err()
+                    {
+                        signal.pending.store(false, Ordering::Release);
+                        break;
+                    }
                 }
             }
         },

@@ -108,9 +108,14 @@ impl BarApp {
         let instance = Rc::new_cyclic(|weak: &Weak<Self>| {
             let dispatch: Dispatch = {
                 let weak = weak.clone();
-                Rc::new(move |action| {
+                Rc::new(move |action, completion| {
                     if let Some(app) = weak.upgrade() {
-                        app.dispatch(action);
+                        let accepted = app.dispatch(action);
+                        if let Some(completion) = completion {
+                            let _ = completion.send(accepted);
+                        }
+                    } else if let Some(completion) = completion {
+                        let _ = completion.send(false);
                     }
                 })
             };
@@ -164,9 +169,11 @@ impl BarApp {
         });
     }
 
-    fn dispatch(&self, action: UserAction) {
+    fn dispatch(&self, action: UserAction) -> bool {
         let update = self.runtime.borrow_mut().dispatch(action);
+        let accepted = !update.has_issues();
         self.handle_runtime_update(update);
+        accepted
     }
 
     fn handle_runtime_update(&self, update: RuntimeUpdate) {

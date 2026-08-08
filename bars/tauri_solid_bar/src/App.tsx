@@ -46,6 +46,7 @@ interface DockGeometry {
 
 interface BarSnapshot {
   wm_available: boolean;
+  wm_sequence: number | null;
   wm_session_id: number;
   geometry: DockGeometry | null;
   tags: TagState[];
@@ -102,19 +103,23 @@ type ActionRequest =
   | {
       action: "restore_window";
       wm_session_id: number;
+      minimized_generation: number;
       window_id: number;
       geometry?: DockGeometry;
     }
   | {
       action: "preview_window";
       wm_session_id: number;
+      minimized_generation: number;
       window_id: number;
       visible: boolean;
+      renewal: boolean;
       geometry?: DockGeometry;
     }
   | {
       action: "set_dock_geometry";
       wm_session_id: number;
+      minimized_generation: number;
       window_id?: number | null;
       geometry?: DockGeometry;
     }
@@ -253,12 +258,14 @@ const geometryForElement = async (element: HTMLElement): Promise<DockGeometry | 
 const restoreMinimized = async (
   windowId: number,
   wmSessionId: number,
+  minimizedGeneration: number,
   element: HTMLElement,
 ) => {
   const geometry = await geometryForElement(element);
   await dispatchAction({
     action: "restore_window",
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: windowId,
     geometry,
   });
@@ -267,7 +274,9 @@ const restoreMinimized = async (
 const previewMinimized = async (
   windowId: number,
   wmSessionId: number,
+  minimizedGeneration: number,
   visible: boolean,
+  renewal: boolean,
   element: HTMLElement,
 ) => {
   const geometry = await geometryForElement(element);
@@ -275,46 +284,188 @@ const previewMinimized = async (
   await dispatchAction({
     action: "preview_window",
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: windowId,
     visible,
+    renewal,
     geometry,
   });
 };
 
-const previewRenewals = new Map<number, number>();
+const PREVIEW_ENTER_RETRY_MS = 100;
+const PREVIEW_RENEWAL_MS = 2_000;
+// Fresh ENTER remains fresh until the invoke is acknowledged.
+const PREVIEW_ENTER_REQUEST = { visible: true, renewal: false } as const;
+const PREVIEW_RENEWAL_REQUEST = { visible: true, renewal: true } as const;
 
-const stopPreviewRenewal = (windowId: number) => {
-  const renewal = previewRenewals.get(windowId);
-  if (renewal !== undefined) window.clearInterval(renewal);
-  previewRenewals.delete(windowId);
+interface PreviewDelivery {
+  windowId: number;
+  wmSessionId: number;
+  minimizedGeneration: number;
+  element: HTMLElement;
+  retryTimer?: number;
+  renewalTimer?: number;
+}
+
+const previewDeliveries = new Map<string, PreviewDelivery>();
+const previewBindingKey = (windowId: number, wmSessionId: number, minimizedGeneration: number) =>
+  `${wmSessionId}:${minimizedGeneration}:${windowId}`;
+
+const stopPreviewDelivery = (bindingKey: string, expected?: PreviewDelivery) => {
+  const delivery = previewDeliveries.get(bindingKey);
+  if (!delivery || (expected !== undefined && delivery !== expected)) return;
+  previewDeliveries.delete(bindingKey);
+  if (delivery.retryTimer !== undefined) window.clearTimeout(delivery.retryTimer);
+  if (delivery.renewalTimer !== undefined) window.clearInterval(delivery.renewalTimer);
 };
 
-const beginPreview = (windowId: number, wmSessionId: number, element: HTMLElement) => {
-  stopPreviewRenewal(windowId);
-  previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
-  const renewal = window.setInterval(() => {
-    if (!element.isConnected || !element.matches(":hover")) {
-      stopPreviewRenewal(windowId);
-      previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+const previewDeliveryIsActive = (bindingKey: string, delivery: PreviewDelivery) =>
+  previewDeliveries.get(bindingKey) === delivery &&
+  delivery.element.isConnected &&
+  delivery.element.matches(":hover");
+
+const sendPreviewLeaveUnlessReentered = async (
+  bindingKey: string,
+  delivery: PreviewDelivery,
+) => {
+  const geometry = await geometryForElement(delivery.element);
+  const current = previewDeliveries.get(bindingKey);
+  if (current !== undefined && current !== delivery) return;
+  await dispatchAction({
+    action: "preview_window",
+    wm_session_id: delivery.wmSessionId,
+    minimized_generation: delivery.minimizedGeneration,
+    window_id: delivery.windowId,
+    visible: false,
+    renewal: false,
+    geometry,
+  });
+};
+
+const sendAutomaticPreviewLeave = (bindingKey: string, delivery: PreviewDelivery) => {
+  if (previewDeliveries.get(bindingKey) !== delivery) return;
+  stopPreviewDelivery(bindingKey, delivery);
+  sendPreviewLeaveUnlessReentered(bindingKey, delivery).catch(console.error);
+};
+
+const compensateDeliveredPreviewEnter = (bindingKey: string, delivery: PreviewDelivery) => {
+  const current = previewDeliveries.get(bindingKey);
+  if (current !== undefined && current !== delivery) return;
+  if (current === delivery) stopPreviewDelivery(bindingKey, delivery);
+  // Compensate a delivered ENTER that outlived its binding.
+  sendPreviewLeaveUnlessReentered(bindingKey, delivery).catch(console.error);
+};
+
+function schedulePreviewEnterRetry(bindingKey: string, delivery: PreviewDelivery, error: unknown) {
+  if (previewDeliveries.get(bindingKey) !== delivery) return;
+  console.error("Failed to enter minimized preview; retrying:", error);
+  if (!previewDeliveryIsActive(bindingKey, delivery)) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+    return;
+  }
+  if (delivery.renewalTimer !== undefined) {
+    window.clearInterval(delivery.renewalTimer);
+    delivery.renewalTimer = undefined;
+  }
+  if (delivery.retryTimer !== undefined) return;
+  delivery.retryTimer = window.setTimeout(() => {
+    delivery.retryTimer = undefined;
+    deliverPreviewEnter(bindingKey, delivery);
+  }, PREVIEW_ENTER_RETRY_MS);
+}
+
+function startPreviewRenewal(bindingKey: string, delivery: PreviewDelivery) {
+  if (!previewDeliveryIsActive(bindingKey, delivery) || delivery.renewalTimer !== undefined) return;
+  delivery.renewalTimer = window.setInterval(() => {
+    if (!previewDeliveryIsActive(bindingKey, delivery)) {
+      sendAutomaticPreviewLeave(bindingKey, delivery);
       return;
     }
-    previewMinimized(windowId, wmSessionId, true, element).catch(console.error);
-  }, 2_000);
-  previewRenewals.set(windowId, renewal);
+    previewMinimized(
+      delivery.windowId,
+      delivery.wmSessionId,
+      delivery.minimizedGeneration,
+      PREVIEW_RENEWAL_REQUEST.visible,
+      PREVIEW_RENEWAL_REQUEST.renewal,
+      delivery.element,
+    ).catch((error) => schedulePreviewEnterRetry(bindingKey, delivery, error));
+  }, PREVIEW_RENEWAL_MS);
+}
+
+function deliverPreviewEnter(bindingKey: string, delivery: PreviewDelivery) {
+  if (!previewDeliveryIsActive(bindingKey, delivery)) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+    return;
+  }
+  previewMinimized(
+    delivery.windowId,
+    delivery.wmSessionId,
+    delivery.minimizedGeneration,
+    PREVIEW_ENTER_REQUEST.visible,
+    PREVIEW_ENTER_REQUEST.renewal,
+    delivery.element,
+  )
+    .then(() => {
+      // A superseded binding must not turn a late ENTER success into a lease.
+      if (previewDeliveryIsActive(bindingKey, delivery)) {
+        startPreviewRenewal(bindingKey, delivery);
+      } else {
+        compensateDeliveredPreviewEnter(bindingKey, delivery);
+      }
+    })
+    .catch((error) => schedulePreviewEnterRetry(bindingKey, delivery, error));
+}
+
+const beginPreview = (
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+  element: HTMLElement,
+) => {
+  const bindingKey = previewBindingKey(windowId, wmSessionId, minimizedGeneration);
+  stopPreviewDelivery(bindingKey);
+  const delivery: PreviewDelivery = {
+    windowId,
+    wmSessionId,
+    minimizedGeneration,
+    element,
+  };
+  previewDeliveries.set(bindingKey, delivery);
+  deliverPreviewEnter(bindingKey, delivery);
 };
 
-const endPreview = (windowId: number, wmSessionId: number, element: HTMLElement) => {
-  stopPreviewRenewal(windowId);
-  previewMinimized(windowId, wmSessionId, false, element).catch(console.error);
+const endPreview = (
+  windowId: number,
+  wmSessionId: number,
+  minimizedGeneration: number,
+  element: HTMLElement,
+) => {
+  const bindingKey = previewBindingKey(windowId, wmSessionId, minimizedGeneration);
+  const delivery = previewDeliveries.get(bindingKey);
+  if (delivery) {
+    sendAutomaticPreviewLeave(bindingKey, delivery);
+  } else {
+    sendPreviewLeaveUnlessReentered(bindingKey, {
+      windowId,
+      wmSessionId,
+      minimizedGeneration,
+      element,
+    }).catch(console.error);
+  }
 };
 
-const publishDockGeometry = async (dock: HTMLElement, wmSessionId: number) => {
+const publishDockGeometry = async (
+  dock: HTMLElement,
+  wmSessionId: number,
+  minimizedGeneration: number,
+) => {
   const metrics = await windowMetrics();
   if (!dock.isConnected) return;
   if (!metrics) throw new Error("Dock window metrics are temporarily unavailable");
   await dispatchAction({
     action: "set_dock_geometry",
     wm_session_id: wmSessionId,
+    minimized_generation: minimizedGeneration,
     window_id: null,
     geometry: physicalGeometry(dock, metrics),
   });
@@ -324,6 +475,7 @@ const publishDockGeometry = async (dock: HTMLElement, wmSessionId: number) => {
     await dispatchAction({
       action: "set_dock_geometry",
       wm_session_id: wmSessionId,
+      minimized_generation: minimizedGeneration,
       window_id: windowId,
       geometry: restingItemGeometry(item, dock, metrics),
     });
@@ -335,12 +487,13 @@ function MinimizedDock(props: {
   overflow: boolean;
   available: boolean;
   wmSessionId: number;
+  minimizedGeneration: number;
   barGeometry: DockGeometry | null;
 }) {
   let dock!: HTMLDivElement;
   const geometrySignature = createMemo(
     () =>
-      `${props.available}|${props.wmSessionId}|${props.barGeometry?.x},${props.barGeometry?.y},${props.barGeometry?.width},${props.barGeometry?.height}|${props.windows
+      `${props.available}|${props.wmSessionId}|${props.minimizedGeneration}|${props.barGeometry?.x},${props.barGeometry?.y},${props.barGeometry?.width},${props.barGeometry?.height}|${props.windows
         .map((window) => window.token)
         .join(",")}|${props.overflow}`,
   );
@@ -376,7 +529,7 @@ function MinimizedDock(props: {
         return;
       }
       publishInFlight = true;
-      publishDockGeometry(dock, props.wmSessionId)
+      publishDockGeometry(dock, props.wmSessionId, props.minimizedGeneration)
         .then(() => {
           publishInFlight = false;
           if (republishRequested) {
@@ -401,7 +554,9 @@ function MinimizedDock(props: {
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       observer?.disconnect();
       window.removeEventListener("resize", publish);
-      props.windows.forEach((window) => stopPreviewRenewal(window.token));
+      for (const [bindingKey, delivery] of Array.from(previewDeliveries)) {
+        sendAutomaticPreviewLeave(bindingKey, delivery);
+      }
     });
   });
 
@@ -414,6 +569,12 @@ function MinimizedDock(props: {
         <span class="minimized-divider" aria-hidden="true" />
         <For each={props.windows}>
           {(window) => {
+            // Capture the projection identity when this keyed control is
+            // created. Reading reactive props inside the event handler would
+            // silently upgrade an old token to the newest generation.
+            const windowId = window.token;
+            const wmSessionId = props.wmSessionId;
+            const minimizedGeneration = props.minimizedGeneration;
             const label = () =>
               window.title.trim() || window.app_id.trim() || "Minimized window";
             const urgent = () => (window.flags & 2) !== 0;
@@ -421,21 +582,21 @@ function MinimizedDock(props: {
             return (
               <button
                 class={`minimized-item${urgent() ? " is-urgent" : ""}`}
-                data-window-id={window.token}
+                data-window-id={windowId}
                 disabled={!props.available}
                 onClick={(event) =>
-                  restoreMinimized(window.token, props.wmSessionId, event.currentTarget).catch(
+                  restoreMinimized(windowId, wmSessionId, minimizedGeneration, event.currentTarget).catch(
                     console.error,
                   )
                 }
                 onMouseEnter={(event) => {
                   if (previewAvailable()) {
-                    beginPreview(window.token, props.wmSessionId, event.currentTarget);
+                    beginPreview(windowId, wmSessionId, minimizedGeneration, event.currentTarget);
                   }
                 }}
                 onMouseLeave={(event) => {
                   if (previewAvailable()) {
-                    endPreview(window.token, props.wmSessionId, event.currentTarget);
+                    endPreview(windowId, wmSessionId, minimizedGeneration, event.currentTarget);
                   }
                 }}
                 title={`${label()} — click to restore`}
@@ -619,6 +780,7 @@ function App() {
                 overflow={current().minimized_overflow}
                 available={current().wm_available}
                 wmSessionId={current().wm_session_id}
+                minimizedGeneration={current().wm_sequence ?? 0}
                 barGeometry={current().geometry}
               />
               <div class="system-info-container">

@@ -6,6 +6,7 @@ use super::prism::{
     MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismFace, PrismKind, PrismPass,
     build_prism_pieces, mirror_matrix,
 };
+use super::{SnapshotDrawCoordinates, SnapshotTextureStorage, snapshot_texture_uv_rect};
 use glow::HasContext;
 
 /// Share of the monitor height the front face covers.
@@ -260,15 +261,10 @@ impl<C: CompositorConnection> Compositor<C> {
         max_size: u32,
     ) -> Option<glow::Texture> {
         let (pixels, width, height) = self.capture_window_thumbnail(x11_win, max_size)?;
-        let row_bytes = (width * 4) as usize;
-        let mut flipped = vec![0u8; pixels.len()];
-        for y in 0..height as usize {
-            let src_row = (height as usize - 1 - y) * row_bytes;
-            let dst_row = y * row_bytes;
-            flipped[dst_row..dst_row + row_bytes]
-                .copy_from_slice(&pixels[src_row..src_row + row_bytes]);
-        }
-        self.upload_overview_snapshot_texture(&flipped, width, height)
+        // capture_window_thumbnail already returns the shared top-left RGBA8
+        // contract. Upload row zero unchanged; the ordinary top-down quad UV
+        // convention samples that OpenGL bottom storage row as the visual top.
+        self.upload_overview_snapshot_texture(&pixels, width, height)
     }
 
     pub(super) fn refresh_overview_snapshots(&mut self) {
@@ -452,8 +448,14 @@ impl<C: CompositorConnection> Compositor<C> {
             face_entries[slot] = Some(idx);
             faces[slot] = PrismFace {
                 texture: self.entry_texture(entry),
-                // Snapshots are stored bottom-up; flip them onto the face.
-                uv_rect: [0.0, 1.0, 1.0, -1.0],
+                // Prism `v_uv.y == 0` is the geometric bottom, unlike the
+                // compositor's screen-space quads. Both a top-left CPU upload
+                // and the live X11 fallback expose the visual top at texture
+                // v=0, so traverse them in reverse on the face.
+                uv_rect: snapshot_texture_uv_rect(
+                    SnapshotTextureStorage::CpuTopLeftUpload,
+                    SnapshotDrawCoordinates::BottomUpFace,
+                ),
                 accent: if entry.is_selected { 1.0 } else { 0.15 },
                 desat: if entry.is_selected { 0.0 } else { 0.30 },
                 brightness: if entry.is_selected { 1.0 } else { 0.82 },

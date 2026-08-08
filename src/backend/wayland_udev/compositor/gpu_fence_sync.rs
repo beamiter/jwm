@@ -113,6 +113,17 @@ impl GpuFenceSyncManager {
         }
     }
 
+    /// Release every fence owned by this manager while its GLES context is
+    /// current.  This is intentionally explicit rather than a `Drop`
+    /// implementation: runtime compositor toggles keep the KMS EGL context
+    /// alive, while ordinary KMS teardown may drop this value with no current
+    /// context at all.
+    pub(crate) unsafe fn clear(&mut self, gl: &ffi::Gles2) {
+        for (_, state) in self.fences.drain() {
+            unsafe { gl.DeleteSync(state.fence) };
+        }
+    }
+
     pub(crate) fn stats(&self) -> (u64, u64, u64, usize) {
         (
             self.fences_created,

@@ -57,9 +57,12 @@ native/provider input -> BarRuntime -> RuntimeFrame -> FrontendEnvelope
   monotonic cadence.
 - `LayoutEngine` produces a renderer-neutral retained `Scene` and semantic hit
   map. `Scene::damage_from` invalidates both old and new component bounds.
-- `DockReporter` owns acknowledged shelf/item geometry, hover leases, and
-  bounded retries. `toolkit_dock::DockBridge` adds the shared retained-toolkit
-  layout without coupling one bar package to another.
+- `DockReporter` owns acknowledged shelf/item geometry, hover leases,
+  50 ms-bounded moving-anchor refreshes, and bounded retries.
+  `toolkit_dock::DockBridge` adds the shared retained-toolkit
+  layout without coupling one bar package to another. Each rendered item
+  captures its `DockItemBinding`; callbacks never reconstruct an action from
+  the bridge's newer session/generation state.
 - `CairoBar` is the high-level native facade combining runtime, layout,
   interaction, and Cairo rendering. Its `handle_pointer` API owns hover and
   matching press/release semantics.
@@ -117,6 +120,10 @@ Event loops can use `next_service_deadline` to sleep until either the next
 provider tick or an earlier managed-transport retry. Web bridges may instead
 own a `FrontendSession`, which applies that schedule and snapshot
 deduplication together without owning a thread or framework handle.
+Native presenters that render the minimized Dock also combine that wake with
+`CairoBar::next_dock_deadline` or `DockBridge::next_retry_deadline`. Provider
+ticks keep their normal cadence; only a pending 50 ms anchor, 100 ms
+backpressure retry, or two-second preview lease wakes the loop sooner.
 Toolkits consume the geometry-free control projection, while web bridges send
 a complete `FrontendEnvelope` and dispatch a single `ActionRequest`. They do
 not depend on `shared_structures` or instantiate provider managers themselves.

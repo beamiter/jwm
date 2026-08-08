@@ -3,6 +3,7 @@
 use crate::backend::api::LayerSurfaceInfo;
 use crate::backend::common_define::WindowId;
 use crate::core::layout::LayoutEnum;
+use crate::core::types::Rect;
 use slotmap::DefaultKey;
 use std::collections::HashSet;
 use std::fmt;
@@ -297,6 +298,20 @@ pub struct ClientGeometry {
     pub border_w: i32,
     pub old_border_w: i32,
 
+    /// Exact off-screen x chosen by JWM while this client is hidden. Keeping
+    /// an explicit marker avoids mistaking legitimate windows on a monitor
+    /// with a negative global origin and lets topology changes preserve the
+    /// first visible restore slot while the client is parked.
+    pub hidden_x: Option<i32>,
+
+    /// Visible geometry to restore after JWM parks the real window off-screen.
+    ///
+    /// This is deliberately separate from `old_*`: `resizeclient` uses those
+    /// fields as the previous layout/fullscreen rectangle. Reusing `old_x` for
+    /// hiding corrupts a fullscreen client's return position when it is
+    /// minimized before leaving fullscreen.
+    pub hidden_restore_rect: Option<Rect>,
+
     pub floating_x: i32,
     pub floating_y: i32,
     pub floating_w: i32,
@@ -340,6 +355,10 @@ pub struct ClientState {
     pub is_fullscreen: bool,
     pub is_sticky: bool,
     pub is_pip: bool,
+    /// Sticky state to reinstate when PiP exits. PiP temporarily forces a
+    /// client to be sticky, but a client that was already sticky must remain
+    /// so afterwards.
+    pub pip_restore_sticky: bool,
     pub is_dock: bool,
     pub is_maximized_vert: bool,
     pub is_maximized_horz: bool,

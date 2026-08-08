@@ -1,4 +1,6 @@
-use crate::backend::api::{BackendEvent, Geometry, LayerSurfaceInfo, PropertyKind, WindowType};
+use crate::backend::api::{
+    BackendEvent, Geometry, LayerSurfaceInfo, NetWmState, PropertyKind, WindowType,
+};
 use crate::backend::common_define::WindowId;
 use crate::sync_ext::MutexExt;
 
@@ -42,7 +44,7 @@ use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::Format as DmabufFormat;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    with_states, with_surface_tree_downward, BufferAssignment, CompositorClientState,
+    get_parent, with_states, with_surface_tree_downward, BufferAssignment, CompositorClientState,
     CompositorHandler, CompositorState, SurfaceAttributes, TraversalAction,
 };
 use smithay::wayland::dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier};
@@ -411,6 +413,10 @@ pub struct JwmWaylandState {
     pub toplevels: HashMap<WindowId, ToplevelSurface>,
     pub layer_surfaces: HashMap<WindowId, WlSurface>,
     pub surface_to_window: HashMap<ObjectId, WindowId>,
+    /// Monotonic per-window generation advanced by commits on the root
+    /// surface or any of its subsurfaces. The udev renderer uses this to avoid
+    /// retrying a hidden minimized-surface import on every unrelated frame.
+    surface_commit_epochs: HashMap<WindowId, u64>,
 
     pub pending_initial_configure: HashMap<WindowId, Instant>,
     pending_size_reconfigure: HashMap<WindowId, ((u32, u32), Instant)>,
@@ -430,6 +436,10 @@ pub struct JwmWaylandState {
     pub window_stack: Vec<WindowId>,
 
     pub mapped_windows: HashSet<WindowId>,
+    /// Windows deliberately hidden by the window manager while their client
+    /// surface remains alive. A later buffer commit must not map one again
+    /// behind JWM's back.
+    manager_unmapped_windows: HashSet<WindowId>,
     pub window_title: HashMap<WindowId, String>,
     pub window_app_id: HashMap<WindowId, String>,
     pub window_activation_app_id: HashMap<WindowId, String>,
@@ -486,7 +496,101 @@ pub struct ImPopupAnchor {
     pub area_bottom: i32,
 }
 
+// This file is also compiled through a compatibility module; only the shared
+// udev state instance receives WindowOps callbacks in that build.
+#[allow(dead_code)]
+fn apply_manager_mapping_state(
+    mapped_windows: &mut HashSet<WindowId>,
+    manager_unmapped_windows: &mut HashSet<WindowId>,
+    win: WindowId,
+    mapped: bool,
+) {
+    if mapped {
+        manager_unmapped_windows.remove(&win);
+        mapped_windows.insert(win);
+    } else {
+        manager_unmapped_windows.insert(win);
+        mapped_windows.remove(&win);
+    }
+}
+
+fn manager_allows_surface_map(manager_unmapped_windows: &HashSet<WindowId>, win: WindowId) -> bool {
+    !manager_unmapped_windows.contains(&win)
+}
+
+fn take_window_mapping_state(
+    mapped_windows: &mut HashSet<WindowId>,
+    manager_unmapped_windows: &mut HashSet<WindowId>,
+    win: WindowId,
+) -> bool {
+    let was_manager_unmapped = manager_unmapped_windows.remove(&win);
+    let was_mapped = mapped_windows.remove(&win);
+    was_manager_unmapped || was_mapped
+}
+
 impl JwmWaylandState {
+    #[allow(dead_code)]
+    pub(crate) fn set_manager_window_mapped(&mut self, win: WindowId, mapped: bool) {
+        apply_manager_mapping_state(
+            &mut self.mapped_windows,
+            &mut self.manager_unmapped_windows,
+            win,
+            mapped,
+        );
+        self.needs_redraw = true;
+    }
+
+    fn manager_allows_surface_map(&self, win: WindowId) -> bool {
+        manager_allows_surface_map(&self.manager_unmapped_windows, win)
+    }
+
+    fn take_window_mapping(&mut self, win: WindowId) -> bool {
+        take_window_mapping_state(
+            &mut self.mapped_windows,
+            &mut self.manager_unmapped_windows,
+            win,
+        )
+    }
+
+    /// Return the latest commit generation observed for a window's surface
+    /// tree. `None` is possible for legacy XWayland association paths whose
+    /// first commit predated the WindowId mapping; callers must retain a
+    /// bounded fallback retry for that case.
+    // This source is also compiled under `backend::wayland_udev::state` as a
+    // compatibility module; the udev backend consumes the shared
+    // `backend::wayland::state` instance.
+    #[allow(dead_code)]
+    pub(crate) fn surface_commit_epoch(&self, win: WindowId) -> Option<u64> {
+        self.surface_commit_epochs.get(&win).copied()
+    }
+
+    fn committed_surface_window(&self, surface: &WlSurface) -> Option<WindowId> {
+        let mut candidate = Some(surface.clone());
+        // Wayland surface trees cannot contain cycles. Keep a defensive bound
+        // so malformed internal state can never turn a client commit into an
+        // unbounded walk.
+        for _ in 0..64 {
+            let current = candidate?;
+            if let Some(win) = self.surface_to_window.get(&current.id()).copied() {
+                return Some(win);
+            }
+            candidate = get_parent(&current);
+        }
+        None
+    }
+
+    fn note_surface_tree_commit(&mut self, surface: &WlSurface) {
+        let Some(win) = self.committed_surface_window(surface) else {
+            return;
+        };
+        let epoch = self.surface_commit_epochs.entry(win).or_default();
+        *epoch = epoch.saturating_add(1);
+    }
+
+    fn forget_surface_commit_epoch(&mut self, win: WindowId) {
+        self.surface_commit_epochs.remove(&win);
+    }
+
     pub(crate) fn set_toplevel_tiled_state(state: &mut ToplevelState, tiled: bool) {
         let edges = [
             xdg_toplevel::State::TiledLeft,
@@ -1203,9 +1307,10 @@ impl XwmHandler for JwmWaylandState {
         info!("[xwayland] unmapped_window: id={}", x11_id);
 
         if let Some(win_id) = self.x11_surface_to_window.remove(&x11_id) {
+            self.forget_surface_commit_epoch(win_id);
             self.x11_surfaces.remove(&win_id);
             self.x11_wl_surfaces.remove(&win_id);
-            let was_mapped = self.mapped_windows.remove(&win_id);
+            let was_managed = self.take_window_mapping(win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
             self.window_geometry.remove(&win_id);
             self.window_stack.retain(|w| *w != win_id);
@@ -1216,9 +1321,12 @@ impl XwmHandler for JwmWaylandState {
 
             self.needs_redraw = true;
 
-            if was_mapped {
+            if was_managed {
                 self.compositor_dead_windows.push(win_id.raw());
-                self.push_event(BackendEvent::WindowUnmapped(win_id));
+                self.push_event(BackendEvent::WindowUnmapped {
+                    window: win_id,
+                    from_configure: false,
+                });
             }
         }
     }
@@ -1228,9 +1336,10 @@ impl XwmHandler for JwmWaylandState {
         info!("[xwayland] destroyed_window: id={}", x11_id);
 
         if let Some(win_id) = self.x11_surface_to_window.remove(&x11_id) {
+            self.forget_surface_commit_epoch(win_id);
             self.x11_surfaces.remove(&win_id);
             self.x11_wl_surfaces.remove(&win_id);
-            self.mapped_windows.remove(&win_id);
+            self.take_window_mapping(win_id);
             self.surface_to_window.retain(|_, w| *w != win_id);
             self.window_geometry.remove(&win_id);
             self.window_stack.retain(|w| *w != win_id);
@@ -1494,6 +1603,15 @@ impl JwmWaylandState {
 
         let prev = self.active_toplevel.take();
         self.sync_keyboard_shortcuts_inhibitors(prev, win);
+        if let Some(ref foreign_toplevel_mgmt) = self.foreign_toplevel_mgmt {
+            use crate::backend::wayland_udev::foreign_toplevel_management::StateFlag;
+            if let Some(prev_win) = prev {
+                foreign_toplevel_mgmt.update_state(prev_win, StateFlag::Activated, false);
+            }
+            if let Some(new_win) = win {
+                foreign_toplevel_mgmt.update_state(new_win, StateFlag::Activated, true);
+            }
+        }
         if debug_focus {
             info!("[udev/focus] active_toplevel {:?} -> {:?}", prev, win);
         }
@@ -1536,6 +1654,33 @@ impl JwmWaylandState {
                 });
                 toplevel.send_pending_configure();
             }
+        }
+    }
+
+    pub fn update_foreign_toplevel_net_state(
+        &mut self,
+        win: WindowId,
+        state: NetWmState,
+        on: bool,
+    ) {
+        use crate::backend::wayland_udev::foreign_toplevel_management::StateFlag;
+
+        let flag = match state {
+            NetWmState::Hidden => StateFlag::Minimized,
+            NetWmState::MaximizedHorz => StateFlag::MaximizedHorz,
+            NetWmState::MaximizedVert => StateFlag::MaximizedVert,
+            _ => return,
+        };
+        if let Some(ref foreign_toplevel_mgmt) = self.foreign_toplevel_mgmt {
+            foreign_toplevel_mgmt.update_state(win, flag, on);
+        }
+    }
+
+    pub fn update_foreign_toplevel_fullscreen(&mut self, win: WindowId, on: bool) {
+        use crate::backend::wayland_udev::foreign_toplevel_management::StateFlag;
+
+        if let Some(ref foreign_toplevel_mgmt) = self.foreign_toplevel_mgmt {
+            foreign_toplevel_mgmt.update_state(win, StateFlag::Fullscreen, on);
         }
     }
 
@@ -1860,6 +2005,7 @@ impl JwmWaylandState {
                 toplevels: HashMap::new(),
                 layer_surfaces: HashMap::new(),
                 surface_to_window: HashMap::new(),
+                surface_commit_epochs: HashMap::new(),
 
                 pending_initial_configure: HashMap::new(),
                 pending_size_reconfigure: HashMap::new(),
@@ -1879,6 +2025,7 @@ impl JwmWaylandState {
                 window_stack: Vec::new(),
 
                 mapped_windows: HashSet::new(),
+                manager_unmapped_windows: HashSet::new(),
                 window_title: HashMap::new(),
                 window_app_id: HashMap::new(),
                 window_activation_app_id: HashMap::new(),
@@ -2825,13 +2972,18 @@ impl CompositorHandler for JwmWaylandState {
             }
         }
 
+        // Count commits after legacy XWayland association has had a chance to
+        // establish the root mapping. Descendant commits are attributed to
+        // the same WindowId by walking the subsurface parent chain.
+        self.note_surface_tree_commit(surface);
+
         let win = self.surface_to_window.get(&surface.id()).copied();
 
         // Root-surface mapping/unmapping -> translate into JWM window events.
         if let Some(win) = win {
             match buf_state {
                 BufferState::NewBuffer => {
-                    if self.mapped_windows.insert(win) {
+                    if self.manager_allows_surface_map(win) && self.mapped_windows.insert(win) {
                         info!("[udev/wayland] window mapped win={win:?}");
 
                         let offset = self.surface_window_geometry_loc(surface);
@@ -2889,10 +3041,15 @@ impl CompositorHandler for JwmWaylandState {
                     self.needs_redraw = true;
                 }
                 BufferState::Removed => {
-                    if self.mapped_windows.remove(&win) {
+                    let was_managed = self.take_window_mapping(win);
+                    self.forget_surface_commit_epoch(win);
+                    if was_managed {
                         info!("[udev/wayland] window unmapped win={win:?}");
                         self.compositor_dead_windows.push(win.raw());
-                        self.push_event(BackendEvent::WindowUnmapped(win));
+                        self.push_event(BackendEvent::WindowUnmapped {
+                            window: win,
+                            from_configure: false,
+                        });
                     }
                     self.needs_redraw = true;
                 }
@@ -2999,6 +3156,8 @@ impl CompositorHandler for JwmWaylandState {
         }
 
         if let Some(win) = self.surface_to_window.remove(&surface.id()) {
+            self.forget_surface_commit_epoch(win);
+            self.take_window_mapping(win);
             log::info!(
                 "[udev/wayland] surface_destroyed win={win:?} (client disconnected abruptly)"
             );
@@ -3023,7 +3182,6 @@ impl CompositorHandler for JwmWaylandState {
             self.pending_size_reconfigure.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
-            self.mapped_windows.remove(&win);
             self.window_title.remove(&win);
             self.window_app_id.remove(&win);
             self.window_activation_app_id.remove(&win);
@@ -3546,13 +3704,14 @@ impl XdgShellHandler for JwmWaylandState {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(win) = self.surface_to_window.remove(&surface.wl_surface().id()) {
+            self.forget_surface_commit_epoch(win);
+            self.take_window_mapping(win);
             info!("[udev/wayland] toplevel_destroyed win={win:?}");
             self.toplevels.remove(&win);
             self.layer_surfaces.remove(&win);
             self.pending_initial_configure.remove(&win);
             self.window_geometry.remove(&win);
             self.window_stack.retain(|w| *w != win);
-            self.mapped_windows.remove(&win);
             self.window_title.remove(&win);
             self.window_app_id.remove(&win);
             self.window_activation_app_id.remove(&win);
@@ -3834,8 +3993,12 @@ fn match_x11_window_by_surface_id(
 
 #[cfg(test)]
 mod xwayland_legacy_assoc_tests {
-    use super::{JwmWaylandState, match_x11_window_by_surface_id};
+    use super::{
+        JwmWaylandState, apply_manager_mapping_state, manager_allows_surface_map,
+        match_x11_window_by_surface_id, take_window_mapping_state,
+    };
     use crate::backend::common_define::WindowId;
+    use std::collections::HashSet;
 
     #[test]
     fn matches_window_with_equal_surface_id() {
@@ -3869,6 +4032,65 @@ mod xwayland_legacy_assoc_tests {
     fn empty_candidates_returns_none() {
         let empty: Vec<(WindowId, Option<u32>)> = Vec::new();
         assert_eq!(match_x11_window_by_surface_id(empty, 5), None);
+    }
+
+    #[test]
+    fn manager_unmap_survives_client_commits_until_explicit_remap() {
+        let win = WindowId::from_raw(7);
+        let mut mapped = HashSet::from([win]);
+        let mut manager_unmapped = HashSet::new();
+
+        apply_manager_mapping_state(&mut mapped, &mut manager_unmapped, win, false);
+        assert!(!mapped.contains(&win));
+        assert!(!manager_allows_surface_map(&manager_unmapped, win));
+
+        // A later buffer commit must not resurrect a swallowed parent.
+        if manager_allows_surface_map(&manager_unmapped, win) {
+            mapped.insert(win);
+        }
+        assert!(!mapped.contains(&win));
+
+        apply_manager_mapping_state(&mut mapped, &mut manager_unmapped, win, true);
+        assert!(mapped.contains(&win));
+        assert!(manager_allows_surface_map(&manager_unmapped, win));
+    }
+
+    #[test]
+    fn real_client_unmap_after_manager_hide_is_observable_once() {
+        let hidden = WindowId::from_raw(7);
+        let visible = WindowId::from_raw(8);
+        let mut mapped = HashSet::from([hidden, visible]);
+        let mut manager_unmapped = HashSet::new();
+
+        apply_manager_mapping_state(&mut mapped, &mut manager_unmapped, hidden, false);
+        assert!(take_window_mapping_state(
+            &mut mapped,
+            &mut manager_unmapped,
+            hidden
+        ));
+        assert!(manager_unmapped.is_empty());
+        assert!(
+            !take_window_mapping_state(&mut mapped, &mut manager_unmapped, hidden),
+            "duplicate surface-unmap delivery must be suppressed"
+        );
+
+        assert!(take_window_mapping_state(
+            &mut mapped,
+            &mut manager_unmapped,
+            visible
+        ));
+        assert!(!mapped.contains(&visible));
+    }
+
+    #[test]
+    fn udev_window_ops_publish_manager_mapping_to_shared_state() {
+        let backend = include_str!("backend.rs");
+        assert!(backend.contains("state.set_manager_window_mapped(win, true)"));
+        assert!(backend.contains("state.set_manager_window_mapped(win, false)"));
+        assert!(
+            backend.matches("self.request_flush();").count() >= 2,
+            "map and unmap operations must wake the native render loop"
+        );
     }
 
     #[test]

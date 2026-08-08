@@ -2,7 +2,7 @@ use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorWindowEffects,
     CompositorWorkspaceEffects, CursorProvider, DisplayControl, EventHandler, HitTarget, InputOps,
-    KeyOps, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
+    KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps, RenderScheduler, ScreenInfo, WindowOps,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, WindowId};
 use crate::backend::error::BackendError;
@@ -459,6 +459,21 @@ impl PropertyOps for WaylandPropertyOps {
         unsafe { self.with_state_mut(|state| state.window_layer_info.get(&win).copied()) }
     }
 
+    fn set_net_wm_state_flag(
+        &self,
+        win: WindowId,
+        state: NetWmState,
+        on: bool,
+    ) -> Result<(), BackendError> {
+        unsafe {
+            self.with_state_mut(|wayland_state| {
+                wayland_state.update_foreign_toplevel_net_state(win, state, on);
+            });
+        }
+        self.request_flush();
+        Ok(())
+    }
+
     fn is_fullscreen(&self, win: WindowId) -> bool {
         unsafe { self.with_state_mut(|state| state.window_is_fullscreen.get(&win).copied()) }
             .unwrap_or(false)
@@ -468,6 +483,7 @@ impl PropertyOps for WaylandPropertyOps {
         unsafe {
             self.with_state_mut(|state| {
                 state.window_is_fullscreen.insert(win, on);
+                state.update_foreign_toplevel_fullscreen(win, on);
                 if let Some(toplevel) = state.try_lookup_toplevel(win) {
                     toplevel.with_pending_state(|s| {
                         if on {

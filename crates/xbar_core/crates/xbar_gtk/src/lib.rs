@@ -22,7 +22,7 @@ use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::presentation::{Palette, PresentationConfig, PresentationLabels};
 use xbar_core::{BarSnapshot, ThemeMode};
 
-pub use crate::pill::{Dispatch, Pill, PillRow, PillStyle};
+pub use crate::pill::{Dispatch, DispatchCompletion, Pill, PillRow, PillStyle};
 pub use crate::theme::Metrics;
 
 /// Everything derived from one bar configuration: the presentation the

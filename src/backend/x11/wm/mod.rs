@@ -13,6 +13,12 @@ pub mod batch;
 pub mod compositor_delegation;
 /// Transport-free planning of compositor effects for backend events.
 pub mod event_bridge;
+/// Generation-fenced state machine for true ICCCM Iconic transitions.
+pub(crate) mod iconify;
+/// Sequence-aware classification of JWM-owned X11 unmap requests.
+pub(crate) mod managed_unmap;
+/// Strict codec for JWM's private minimized-client exec-restart snapshot.
+pub(crate) mod minimized_restore;
 
 #[derive(Clone, Copy)]
 pub struct WindowTypeAtoms<A> {
@@ -131,7 +137,7 @@ pub struct ClientMessageAtoms<A> {
 /// minimises itself — which is what `XIconifyWindow`, and therefore most
 /// toolkits' minimise buttons and most taskbars, ends up doing — sends
 /// `WM_CHANGE_STATE` carrying this, not an `_NET_WM_STATE_HIDDEN` request.
-pub const ICCCM_ICONIC_STATE: u32 = 3;
+pub const ICCCM_ICONIC_STATE: u32 = crate::backend::api::ICCCM_ICONIC_STATE as u32;
 
 pub enum ClientMessageKind {
     WindowState {

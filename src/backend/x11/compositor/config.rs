@@ -101,7 +101,11 @@ impl<C: CompositorConnection> Compositor<C> {
     }
 
     pub(crate) fn needs_render(&self) -> bool {
-        if self.needs_render || self.damage_render_pending || self.recording_active {
+        if self.needs_render
+            || self.damage_render_pending
+            || self.recording_active
+            || self.iconic_snapshot_recapture_pending()
+        {
             return true;
         }
         // A failed resize import must recover even when the client stops
@@ -140,14 +144,15 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.genie_active.is_empty()
             || !self.ripple_active.is_empty()
             || self.dock_preview.is_some_and(|preview| {
-                preview.direction
-                    == crate::backend::compositor_common::genie::PreviewDirection::Hide
-                    || preview.started.elapsed().as_secs_f32() < 0.22
-                    || crate::backend::compositor_common::genie::preview_lease_timeout(
-                        preview.direction,
-                        std::time::Instant::now(),
-                        preview.lease_deadline,
-                    ) == Some(std::time::Duration::ZERO)
+                !preview.awaiting_source
+                    && (preview.direction
+                        == crate::backend::compositor_common::genie::PreviewDirection::Hide
+                        || preview.started.elapsed().as_secs_f32() < 0.22
+                        || crate::backend::compositor_common::genie::preview_lease_timeout(
+                            preview.direction,
+                            std::time::Instant::now(),
+                            preview.lease_deadline,
+                        ) == Some(std::time::Duration::ZERO))
             })
         {
             return true;
@@ -787,7 +792,12 @@ impl<C: CompositorConnection> Compositor<C> {
                             );
                         }
                         self.minimized_windows.remove(&animation.x11_win);
+                        self.minimized_window_intents.remove(&animation.x11_win);
+                        self.pending_static_minimized_captures
+                            .remove(&animation.x11_win);
                         self.genie_targets.remove(&animation.x11_win);
+                        self.minimized_window_metadata.remove(&animation.x11_win);
+                        self.discard_minimized_snapshot_resources(animation.x11_win);
                         if self
                             .dock_preview
                             .is_some_and(|preview| preview.x11_win == animation.x11_win)

@@ -1,5 +1,7 @@
 use super::Compositor;
-use super::{PixmapBinding, RippleState, WindowTexture, xcomposite_backing_changed};
+use super::{
+    MinimizedWindowIntent, PixmapBinding, RippleState, WindowTexture, xcomposite_backing_changed,
+};
 use crate::backend::compositor_common::window_glow::WindowGlowSettings;
 use glow::HasContext;
 
@@ -13,6 +15,80 @@ enum WindowRetirement {
 
 fn retirement_uses_genie(reason: WindowRetirement, genie_enabled: bool) -> bool {
     genie_enabled && reason == WindowRetirement::ExplicitlyMinimized
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddWindowMinimizeDisposition {
+    TrackNormally,
+    SettlePendingMinimize,
+    StartExplicitRestore,
+}
+
+const fn refreshed_window_settles_pending_minimize(
+    intent: Option<MinimizedWindowIntent>,
+    import_succeeded: bool,
+) -> bool {
+    import_succeeded && matches!(intent, Some(MinimizedWindowIntent::PendingMinimize))
+}
+
+fn restore_cancels_uncaptured_direct_minimize(
+    is_manually_unredirected: bool,
+    intent: Option<MinimizedWindowIntent>,
+    has_live_texture: bool,
+    has_detached_pixels: bool,
+) -> bool {
+    is_manually_unredirected
+        && matches!(intent, Some(MinimizedWindowIntent::PendingMinimize))
+        && has_live_texture
+        && !has_detached_pixels
+}
+
+const fn requested_minimized_window_intent(
+    minimized: bool,
+    lifecycle_active: bool,
+) -> Option<MinimizedWindowIntent> {
+    if minimized {
+        Some(MinimizedWindowIntent::PendingMinimize)
+    } else if lifecycle_active {
+        Some(MinimizedWindowIntent::ExplicitRestore)
+    } else {
+        None
+    }
+}
+
+fn prepare_window_restore_collections(
+    pending_captures: &mut std::collections::HashSet<u32>,
+    pending_uploads: &mut std::collections::HashSet<u32>,
+    intents: &mut std::collections::HashMap<u32, MinimizedWindowIntent>,
+    x11_win: u32,
+    lifecycle_active: bool,
+) {
+    pending_captures.remove(&x11_win);
+    pending_uploads.remove(&x11_win);
+    match requested_minimized_window_intent(false, lifecycle_active) {
+        Some(intent) => {
+            intents.insert(x11_win, intent);
+        }
+        None => {
+            // Idempotent restore after completion must not poison a future
+            // ordinary AddWindow for a reused XID.
+            intents.remove(&x11_win);
+        }
+    }
+}
+
+const fn add_window_minimize_disposition(
+    intent: Option<MinimizedWindowIntent>,
+) -> AddWindowMinimizeDisposition {
+    match intent {
+        Some(MinimizedWindowIntent::PendingMinimize) => {
+            AddWindowMinimizeDisposition::SettlePendingMinimize
+        }
+        Some(MinimizedWindowIntent::ExplicitRestore) => {
+            AddWindowMinimizeDisposition::StartExplicitRestore
+        }
+        None => AddWindowMinimizeDisposition::TrackNormally,
+    }
 }
 
 impl<C: CompositorConnection> Compositor<C> {
@@ -74,6 +150,9 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.frame_extents = [left, right, top, bottom];
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.frame_extents = [left, right, top, bottom];
+        }
     }
 
     // =====================================================================
@@ -82,6 +161,9 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_window_shaped(&mut self, x11_win: u32, shaped: bool) {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_shaped = shaped;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.is_shaped = shaped;
         }
     }
 
@@ -92,6 +174,9 @@ impl<C: CompositorConnection> Compositor<C> {
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             wt.is_override_redirect = is_or;
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.is_override_redirect = is_or;
+        }
     }
 
     // ----- Window management -----
@@ -101,7 +186,8 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         let confirm_pixmap_on_damage = self.graphics.is_gles();
-        let restoring = self.minimized_windows.contains(&x11_win);
+        let disposition =
+            add_window_minimize_disposition(self.minimized_window_intents.get(&x11_win).copied());
         if let Some(wt) = self.windows.get_mut(&x11_win) {
             if wt.fading_out {
                 // A client can remap the same XID before its unmap fade has
@@ -126,16 +212,15 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
                 self.needs_render = true;
             }
-            if restoring {
-                let (rx, ry, rw, rh) = (x as f32, y as f32, w as f32, h as f32);
-                self.start_genie_restore(x11_win, rx, ry, rw, rh);
-            }
+            self.finish_add_window_minimize_lifecycle(x11_win, disposition, x, y, w, h);
             return;
         }
 
-        // A restoring window may still have a detached minimize texture. Keep
+        // An explicit restore may still have a detached minimize texture. Keep
         // it until the reverse mesh finishes; the newly imported live entry is
-        // filtered out of ordinary passes meanwhile.
+        // filtered out of ordinary passes meanwhile. A pending minimize takes
+        // the opposite path after import: it is converted straight into a
+        // bounded retained visual without animating from hidden coordinates.
         log::debug!(
             "compositor: add_window START 0x{:x} {}x{} at ({},{})",
             x11_win,
@@ -231,8 +316,13 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        let initial_fade = if self.fading { 0.0 } else { 1.0 };
-        if self.fading || self.window_animation {
+        let ordinary_add = disposition == AddWindowMinimizeDisposition::TrackNormally;
+        let initial_fade = if ordinary_add && self.fading {
+            0.0
+        } else {
+            1.0
+        };
+        if ordinary_add && (self.fading || self.window_animation) {
             self.effect_tick_clock.reset();
         }
         self.windows.insert(
@@ -263,7 +353,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 scale: 1.0,
                 frame_extents: [0; 4],
                 is_shaped: false,
-                anim_scale: if self.window_animation {
+                anim_scale: if ordinary_add && self.window_animation {
                     self.window_animation_scale
                 } else {
                     1.0
@@ -278,17 +368,21 @@ impl<C: CompositorConnection> Compositor<C> {
                 audio_sync_target: None,
             },
         );
+        if let (Some(metadata), Some(window)) = (
+            self.minimized_window_metadata.get(&x11_win),
+            self.windows.get_mut(&x11_win),
+        ) {
+            metadata.apply_to(window);
+        }
 
-        if self.ripple_on_open {
+        if ordinary_add && self.ripple_on_open {
             self.ripple_active.push(RippleState {
                 x11_win,
                 start: std::time::Instant::now(),
             });
         }
         self.needs_render = true;
-        if restoring {
-            self.start_genie_restore(x11_win, x as f32, y as f32, w as f32, h as f32);
-        }
+        self.finish_add_window_minimize_lifecycle(x11_win, disposition, x, y, w, h);
         log::debug!(
             "compositor: add_window 0x{:x} {}x{} at ({},{}) via {}",
             x11_win,
@@ -298,6 +392,30 @@ impl<C: CompositorConnection> Compositor<C> {
             y,
             self.graphics.api_name()
         );
+    }
+
+    fn finish_add_window_minimize_lifecycle(
+        &mut self,
+        x11_win: u32,
+        disposition: AddWindowMinimizeDisposition,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+    ) {
+        match disposition {
+            AddWindowMinimizeDisposition::TrackNormally => {}
+            AddWindowMinimizeDisposition::SettlePendingMinimize => {
+                self.settle_late_minimized_window(x11_win);
+            }
+            AddWindowMinimizeDisposition::StartExplicitRestore => {
+                // Consume only after add_window has a usable live texture. If
+                // pixmap import failed, add_window returned earlier and the
+                // explicit intent remains available for the next retry.
+                self.minimized_window_intents.remove(&x11_win);
+                self.start_genie_restore(x11_win, x as f32, y as f32, w as f32, h as f32);
+            }
+        }
     }
 
     /// Update the compositor's screen dimensions (e.g. after a RandR hotplug).
@@ -394,8 +512,30 @@ impl<C: CompositorConnection> Compositor<C> {
     /// close fade (and close particles), but must never target the Dock with a
     /// genie animation merely because that effect is configured.
     pub(crate) fn remove_window(&mut self, x11_win: u32) {
+        self.minimized_window_metadata.remove(&x11_win);
         self.discard_minimized_visual(x11_win);
         self.retire_window(x11_win, WindowRetirement::Closed);
+    }
+
+    /// Release a live texture for a client that remains under WM ownership.
+    ///
+    /// Swallowing is neither a close nor a minimize: it must not create close
+    /// particles/fades, and it has no retained Dock visual. Restore Composite
+    /// redirection first when fullscreen direct presentation was active so a
+    /// later unswallow can import the remapped window normally.
+    pub(crate) fn discard_window_silently(&mut self, x11_win: u32) {
+        let retry_redirect = if self.unredirected_window.take() == Some(x11_win) {
+            !self.restore_unredirected_window(x11_win, "managed window was silently unmapped")
+        } else {
+            false
+        };
+        self.remove_window_immediate(x11_win);
+        if retry_redirect {
+            // `remove_window_immediate` clears the ordinary live marker. Keep
+            // this one solely so the render loop can retry the failed protocol
+            // transition before the window is mapped again.
+            self.unredirected_window = Some(x11_win);
+        }
     }
 
     /// Retire a window after an explicit WM minimize request.
@@ -404,8 +544,77 @@ impl<C: CompositorConnection> Compositor<C> {
     /// native pixmap resources into a genie animation. Restoring the same XID
     /// through `add_window` cancels that detached animation safely.
     pub(crate) fn minimize_window(&mut self, x11_win: u32) {
+        self.ensure_minimized_snapshot_generation(x11_win);
+        self.request_iconic_snapshot_recapture(x11_win);
         self.minimized_windows.insert(x11_win);
+        self.pending_static_minimized_captures.remove(&x11_win);
+        self.minimized_window_intents.insert(
+            x11_win,
+            requested_minimized_window_intent(true, true)
+                .expect("a minimize request always has an intent"),
+        );
         self.retire_window(x11_win, WindowRetirement::ExplicitlyMinimized);
+    }
+
+    /// Mark a restore before the backend performs any fallible geometry or
+    /// metadata queries. A later MapNotify/lazy add can then finish the same
+    /// request instead of being mistaken for a late minimize import.
+    pub(crate) fn prepare_window_restore(&mut self, x11_win: u32) {
+        // A restore supersedes any hover/adoption recapture that has not yet
+        // imported pixels. The live AddWindow path owns the next texture, but
+        // a pinned CPU snapshot remains the only durable source until that
+        // fallible import succeeds.
+        self.clear_iconic_snapshot_recapture(x11_win);
+        let lifecycle_active = self.minimized_windows.contains(&x11_win);
+        let previous_intent = self.minimized_window_intents.get(&x11_win).copied();
+        prepare_window_restore_collections(
+            &mut self.pending_static_minimized_captures,
+            &mut self.pending_minimized_gpu_uploads,
+            &mut self.minimized_window_intents,
+            x11_win,
+            lifecycle_active,
+        );
+
+        // A directly-presented fullscreen client can be restored before the
+        // first compositor frame has re-redirected and captured it. In that
+        // state the existing WindowTexture belongs to the old Composite
+        // backing and must never be borrowed by a reverse Genie: the refresh
+        // would free that GL texture underneath the animation. No minimize
+        // pixels ever became visible, so cancel the pending lifecycle and keep
+        // the X server's direct-presentation owner intact. The restored client
+        // simply remains live/fullscreen without a synthetic animation.
+        let has_detached_pixels = self.minimized_visuals.contains_key(&x11_win)
+            || self
+                .genie_active
+                .iter()
+                .any(|animation| animation.x11_win == x11_win);
+        if restore_cancels_uncaptured_direct_minimize(
+            self.unredirected_window == Some(x11_win),
+            previous_intent,
+            self.windows.contains_key(&x11_win),
+            has_detached_pixels,
+        ) {
+            self.minimized_windows.remove(&x11_win);
+            self.minimized_window_intents.remove(&x11_win);
+            self.pending_static_minimized_captures.remove(&x11_win);
+            self.genie_targets.remove(&x11_win);
+            self.minimized_window_metadata.remove(&x11_win);
+            if self
+                .dock_preview
+                .is_some_and(|preview| preview.x11_win == x11_win)
+            {
+                self.set_minimized_window_preview(None);
+            }
+            self.needs_render = true;
+            return;
+        }
+        if lifecycle_active {
+            // Protect a retained source while the backend queries geometry
+            // and imports the remapped live pixmap. A cache insertion can
+            // otherwise evict the old-but-current restore between these two
+            // asynchronous lifecycle steps.
+            self.touch_minimized_visual(x11_win, std::time::Instant::now());
+        }
     }
 
     fn retire_window(&mut self, x11_win: u32, reason: WindowRetirement) {
@@ -441,10 +650,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
                 return;
             }
-            // A texture-less/stale client has no pixels that can be retained.
-            // Retire it immediately rather than manufacturing a placeholder in
-            // the compositor layer; the bar owns its fallback presentation.
-            self.remove_window_immediate(x11_win);
+            // Keep the explicit pending-minimize intent. Startup adoption and
+            // compositor bootstrap can announce IconicState before the X
+            // pixmap is importable; a later add_window will retain those pixels
+            // statically instead of interpreting their arrival as a restore.
             return;
         }
 
@@ -490,6 +699,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
     /// Actually remove a window (no fade). Used internally.
     pub(super) fn remove_window_immediate(&mut self, x11_win: u32) {
+        self.minimized_window_intents.remove(&x11_win);
+        self.minimized_window_metadata.remove(&x11_win);
         let Some(wt) = self.windows.remove(&x11_win) else {
             return;
         };
@@ -624,6 +835,13 @@ impl<C: CompositorConnection> Compositor<C> {
             return false;
         }
 
+        // Reuse the candidate scratch vector to remember only successfully
+        // refreshed PendingMinimize clients.  A manually-unredirected
+        // fullscreen minimize remains live until this exact point; settling
+        // before the replacement import succeeds would retain its stale TFP
+        // binding, while retrying every frame would defeat the existing
+        // backoff policy.
+        refresh_wins.clear();
         for (win, pixmap) in new_pixmaps.drain(..) {
             let (texture, x11_win, visual, depth) = {
                 let wt = &self.windows[&win];
@@ -683,6 +901,12 @@ impl<C: CompositorConnection> Compositor<C> {
                     if old_pixmap != 0 {
                         let _ = self.conn.free_window_pixmap(old_pixmap);
                     }
+                    if refreshed_window_settles_pending_minimize(
+                        self.minimized_window_intents.get(&win).copied(),
+                        true,
+                    ) {
+                        refresh_wins.push(win);
+                    }
                 }
                 Err(error) => {
                     log::warn!(
@@ -698,6 +922,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                 }
             }
+        }
+
+        for win in refresh_wins.iter().copied() {
+            self.settle_late_minimized_window(win);
         }
 
         self.scratch_refresh_wins = refresh_wins;
@@ -773,39 +1001,57 @@ impl<C: CompositorConnection> Compositor<C> {
         // Detect games for VRR
         let is_game = self.detect_game_window(class_name);
 
-        if let Some(wt) = self.windows.get_mut(&x11_win) {
-            if wt.class_name != class_name {
-                wt.class_name = class_name.to_string();
-                wt.opacity_override = opacity_override;
-                wt.corner_radius_override = corner_radius_override;
-                wt.is_frosted = is_frosted;
-                if let Some(s) = scale {
-                    wt.scale = s;
-                }
-                self.needs_render = true;
-
-                // Auto-enable audio sync for known video players
-                if is_video_player && wt.audio_sync_target.is_none() {
-                    log::info!(
-                        "compositor: detected video player {} (0x{:x}), enabling audio sync",
-                        class_name,
-                        x11_win
-                    );
-                    // Default audio sync at 60fps; will be overridden by app notification
-                    wt.audio_sync_target = Some(60.0);
-                }
-
-                // Track game windows for VRR
-                if is_game {
-                    self.is_game_window.insert(x11_win, true);
-                    log::debug!(
-                        "compositor: detected game window: {} (0x{:x})",
-                        class_name,
-                        x11_win
-                    );
-                } else {
-                    self.is_game_window.remove(&x11_win);
-                }
+        let mut changed = false;
+        if let Some(wt) = self.windows.get_mut(&x11_win)
+            && wt.class_name != class_name
+        {
+            wt.class_name = class_name.to_string();
+            wt.opacity_override = opacity_override;
+            wt.corner_radius_override = corner_radius_override;
+            wt.is_frosted = is_frosted;
+            if let Some(s) = scale {
+                wt.scale = s;
+            }
+            if is_video_player && wt.audio_sync_target.is_none() {
+                // Default audio sync at 60fps; an app notification can
+                // override it later.
+                wt.audio_sync_target = Some(60.0);
+            }
+            changed = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win)
+            && metadata.class_name != class_name
+        {
+            metadata.class_name = class_name.to_string();
+            metadata.opacity_override = opacity_override;
+            metadata.corner_radius_override = corner_radius_override;
+            metadata.is_frosted = is_frosted;
+            if let Some(s) = scale {
+                metadata.scale = s;
+            }
+            if is_video_player && metadata.audio_sync_target.is_none() {
+                metadata.audio_sync_target = Some(60.0);
+            }
+            changed = true;
+        }
+        if changed {
+            self.needs_render = true;
+            if is_video_player {
+                log::info!(
+                    "compositor: detected video player {} (0x{:x}), enabling audio sync",
+                    class_name,
+                    x11_win
+                );
+            }
+            if is_game {
+                self.is_game_window.insert(x11_win, true);
+                log::debug!(
+                    "compositor: detected game window: {} (0x{:x})",
+                    class_name,
+                    x11_win
+                );
+            } else {
+                self.is_game_window.remove(&x11_win);
             }
         }
     }
@@ -838,6 +1084,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.needs_render = true;
             }
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.is_fullscreen = fullscreen;
+        }
     }
 
     /// Apply the EWMH compositor bypass preference.
@@ -856,12 +1105,27 @@ impl<C: CompositorConnection> Compositor<C> {
             wt.bypass_compositor = value;
             self.needs_render = true;
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&x11_win) {
+            metadata.bypass_compositor = value;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowRetirement, retirement_uses_genie};
+    use super::{
+        AddWindowMinimizeDisposition, WindowRetirement, add_window_minimize_disposition,
+        prepare_window_restore_collections, refreshed_window_settles_pending_minimize,
+        requested_minimized_window_intent, restore_cancels_uncaptured_direct_minimize,
+        retirement_uses_genie,
+    };
+    use crate::backend::compositor_common::minimized_thumbnail::{
+        AdmissionOutcome, MinimizedSnapshot, MinimizedSnapshotCache, SnapshotGeneration,
+        SnapshotRetention,
+    };
+    use crate::backend::x11::compositor::MinimizedWindowIntent;
+    use crate::backend::x11::compositor::effects::discard_minimized_cpu_snapshot_state;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn genie_is_reserved_for_explicit_minimize() {
@@ -874,5 +1138,119 @@ mod tests {
             WindowRetirement::ExplicitlyMinimized,
             true,
         ));
+    }
+
+    #[test]
+    fn late_add_distinguishes_pending_minimize_from_explicit_restore() {
+        let pending = requested_minimized_window_intent(true, false);
+        assert_eq!(pending, Some(MinimizedWindowIntent::PendingMinimize));
+        assert_eq!(
+            add_window_minimize_disposition(pending),
+            AddWindowMinimizeDisposition::SettlePendingMinimize
+        );
+
+        let restore = requested_minimized_window_intent(false, true);
+        assert_eq!(restore, Some(MinimizedWindowIntent::ExplicitRestore));
+        assert_eq!(
+            add_window_minimize_disposition(restore),
+            AddWindowMinimizeDisposition::StartExplicitRestore
+        );
+    }
+
+    #[test]
+    fn idempotent_restore_does_not_mark_a_future_add() {
+        assert_eq!(requested_minimized_window_intent(false, false), None);
+        assert_eq!(
+            add_window_minimize_disposition(None),
+            AddWindowMinimizeDisposition::TrackNormally
+        );
+    }
+
+    #[test]
+    fn only_a_successful_refresh_settles_a_pending_minimize() {
+        let pending = Some(MinimizedWindowIntent::PendingMinimize);
+        assert!(!refreshed_window_settles_pending_minimize(pending, false));
+        assert!(refreshed_window_settles_pending_minimize(pending, true));
+        assert!(!refreshed_window_settles_pending_minimize(
+            Some(MinimizedWindowIntent::ExplicitRestore),
+            true,
+        ));
+        assert!(!refreshed_window_settles_pending_minimize(None, true));
+    }
+
+    #[test]
+    fn rapid_restore_cancels_only_an_uncaptured_direct_minimize() {
+        let pending = Some(MinimizedWindowIntent::PendingMinimize);
+        assert!(restore_cancels_uncaptured_direct_minimize(
+            true, pending, true, false,
+        ));
+        assert!(!restore_cancels_uncaptured_direct_minimize(
+            false, pending, true, false,
+        ));
+        assert!(!restore_cancels_uncaptured_direct_minimize(
+            true, pending, false, false,
+        ));
+        assert!(!restore_cancels_uncaptured_direct_minimize(
+            true, pending, true, true,
+        ));
+        assert!(!restore_cancels_uncaptured_direct_minimize(
+            true,
+            Some(MinimizedWindowIntent::ExplicitRestore),
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn pinned_snapshot_survives_prepare_and_failed_import_until_live_restore_starts() {
+        let window = 42_u32;
+        let generation = SnapshotGeneration::new(7).unwrap();
+        let mut generations = HashMap::from([(window, generation)]);
+        let mut snapshots = MinimizedSnapshotCache::new();
+        let snapshot = MinimizedSnapshot::try_new(1, 1, generation.get(), true, vec![7; 4])
+            .expect("valid CPU snapshot");
+        assert!(matches!(
+            snapshots.admit(window, snapshot, SnapshotRetention::RecapturableMapped),
+            AdmissionOutcome::Admitted { evicted } if evicted.is_empty()
+        ));
+        snapshots
+            .reserve_iconic_snapshot(&window, generation)
+            .expect("current CPU snapshot can be pinned");
+
+        let mut pending_captures = HashSet::from([window]);
+        let mut pending_uploads = HashSet::from([window]);
+        let mut intents = HashMap::from([(window, MinimizedWindowIntent::PendingMinimize)]);
+        prepare_window_restore_collections(
+            &mut pending_captures,
+            &mut pending_uploads,
+            &mut intents,
+            window,
+            true,
+        );
+
+        assert!(!pending_captures.contains(&window));
+        assert!(!pending_uploads.contains(&window));
+        assert_eq!(
+            intents.get(&window),
+            Some(&MinimizedWindowIntent::ExplicitRestore)
+        );
+        assert!(snapshots.has_iconic_snapshot_reservation(&window, generation));
+
+        // Every fallible add/import branch returns before start_genie_restore,
+        // so a simulated failure performs no snapshot retirement.
+        assert!(snapshots.has_iconic_snapshot_reservation(&window, generation));
+        assert!(generations.contains_key(&window));
+
+        // start_genie_restore reaches this transaction only after add_window
+        // has installed a usable live WindowTexture.
+        assert!(discard_minimized_cpu_snapshot_state(
+            &mut pending_uploads,
+            &mut snapshots,
+            &mut generations,
+            window,
+        ));
+        assert!(!pending_uploads.contains(&window));
+        assert!(snapshots.peek(&window).is_none());
+        assert!(!generations.contains_key(&window));
     }
 }

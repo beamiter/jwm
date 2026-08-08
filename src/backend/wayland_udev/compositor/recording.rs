@@ -62,6 +62,12 @@ impl RecordingState {
             return Err("Recording already active".to_string());
         }
 
+        // Open the diagnostic sink before allocating any GL objects. An early
+        // filesystem error must not leave an inactive RecordingState holding
+        // FBO/PBO names which `stop` would historically skip.
+        let stderr = std::fs::File::create("/tmp/jwm-wayland-recording-ffmpeg.log")
+            .map_err(|e| format!("create ffmpeg log: {e}"))?;
+
         self.source_width = width;
         self.source_height = height;
         self.region = region;
@@ -101,8 +107,6 @@ impl RecordingState {
 
         // Keep ffmpeg diagnostics available: discarding stderr makes a failed
         // encoder look like a successfully-created but unplayable MP4.
-        let stderr = std::fs::File::create("/tmp/jwm-wayland-recording-ffmpeg.log")
-            .map_err(|e| format!("create ffmpeg log: {e}"))?;
         let size = format!("{}x{}", self.width, self.height);
         let fps = fps.to_string();
         use crate::backend::compositor_common::media::{
@@ -209,14 +213,7 @@ impl RecordingState {
         {
             Ok(child) => child,
             Err(error) => {
-                unsafe {
-                    gl.DeleteBuffers(2, self.pbo.as_ptr());
-                    gl.DeleteFramebuffers(1, &self.capture_fbo);
-                    gl.DeleteTextures(1, &self.capture_texture);
-                }
-                self.pbo = [0; 2];
-                self.capture_fbo = 0;
-                self.capture_texture = 0;
+                unsafe { self.release_gpu_resources(gl) };
                 return Err(format!("Failed to spawn ffmpeg: {error}"));
             }
         };
@@ -322,6 +319,9 @@ impl RecordingState {
 
     pub(crate) unsafe fn stop(&mut self, gl: &ffi::Gles2) {
         if !self.active {
+            // Also heals a partially-initialized state from any future start
+            // failure introduced after raw allocation.
+            unsafe { self.release_gpu_resources(gl) };
             return;
         }
 
@@ -367,8 +367,19 @@ impl RecordingState {
             }
         }
 
+        unsafe { self.release_gpu_resources(gl) };
+
+        self.active = false;
+    }
+
+    /// Release raw recording objects regardless of the business-level
+    /// `active` flag. Every handle is cleared after deletion, making this safe
+    /// to call from both error rollback and compositor teardown.
+    pub(crate) unsafe fn release_gpu_resources(&mut self, gl: &ffi::Gles2) {
         unsafe {
-            gl.DeleteBuffers(2, self.pbo.as_ptr());
+            if self.pbo.iter().any(|&buffer| buffer != 0) {
+                gl.DeleteBuffers(2, self.pbo.as_ptr());
+            }
             if self.capture_fbo != 0 {
                 gl.DeleteFramebuffers(1, &self.capture_fbo);
             }
@@ -379,8 +390,6 @@ impl RecordingState {
         self.pbo = [0; 2];
         self.capture_fbo = 0;
         self.capture_texture = 0;
-
-        self.active = false;
     }
 
     pub(crate) fn is_active(&self) -> bool {
@@ -397,6 +406,23 @@ impl RecordingState {
 
     pub(crate) fn elapsed(&self) -> Option<Duration> {
         self.start_time.map(|t| t.elapsed())
+    }
+
+    #[cfg(test)]
+    pub(crate) unsafe fn seed_inactive_gpu_resources_for_tests(&mut self, gl: &ffi::Gles2) {
+        debug_assert!(!self.active);
+        debug_assert_eq!(self.pbo, [0; 2]);
+        unsafe {
+            let (framebuffer, texture) = super::create_fbo_texture(gl, 2, 2);
+            self.capture_fbo = framebuffer;
+            self.capture_texture = texture;
+            gl.GenBuffers(2, self.pbo.as_mut_ptr());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn gpu_resources_for_tests(&self) -> ([u32; 2], u32, u32) {
+        (self.pbo, self.capture_fbo, self.capture_texture)
     }
 }
 

@@ -38,8 +38,8 @@ use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
-    LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate, ShellRoute,
-    TagId, TransportRecoveryConfig, UserAction, WindowToken,
+    DockItemBinding, LayoutId, ModelConfig, PlatformEffectHandler, RuntimeSchedule, RuntimeUpdate,
+    ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -318,13 +318,11 @@ enum Message {
     BrightnessAdjust(i32),
 
     DockHover {
-        token: WindowToken,
-        wm_session_id: u64,
+        binding: DockItemBinding,
         hovered: bool,
     },
     DockRestore {
-        token: WindowToken,
-        wm_session_id: u64,
+        binding: DockItemBinding,
     },
 }
 
@@ -493,24 +491,17 @@ impl IcedBar {
 
             Message::BrightnessAdjust(delta) => self.dispatch(UserAction::AdjustBrightness(delta)),
 
-            Message::DockHover {
-                token,
-                wm_session_id,
-                hovered,
-            } => {
+            Message::DockHover { binding, hovered } => {
                 if hovered {
-                    let _ = self.dock.enter(token, wm_session_id);
+                    let _ = self.dock.enter(binding);
                 } else {
-                    let _ = self.dock.leave(token, wm_session_id);
+                    let _ = self.dock.leave(binding);
                 }
                 Task::none()
             }
 
-            Message::DockRestore {
-                token,
-                wm_session_id,
-            } => {
-                let _ = self.dock.request_restore(token, wm_session_id);
+            Message::DockRestore { binding } => {
+                let _ = self.dock.request_restore(binding);
                 Task::none()
             }
 
@@ -660,7 +651,10 @@ impl IcedBar {
             // Keep this wake active even while initial size/position/scale
             // queries are in flight. Dock geometry and preview retries must
             // never silently fall back to the one-second provider tick.
-            let shared = time::every(TRANSPORT_POLL_INTERVAL).map(|_| Message::TransportPoll);
+            let wait = self
+                .dock
+                .next_wake_delay(Instant::now(), TRANSPORT_POLL_INTERVAL);
+            let shared = time::every(wait).map(|_| Message::TransportPoll);
             Subscription::batch(vec![shared, window_events])
         }
     }
@@ -1106,10 +1100,12 @@ impl IcedBar {
     }
 
     fn minimized_dock(&self) -> Element<'_, Message> {
-        let session = self.runtime.view().wm_session_id;
         let mut items = Row::new().spacing(4).align_y(iced::Alignment::Center);
         for minimized in self.dock.visible_windows() {
             let token = minimized.token;
+            let Some(binding) = self.dock.item_binding(token) else {
+                continue;
+            };
             let magnification = self.dock.scale_for(token);
             let urgent = minimized.urgent();
             let title = if minimized.title.trim().is_empty() {
@@ -1151,19 +1147,14 @@ impl IcedBar {
             );
             let interactive = mouse_area(titled)
                 .on_enter(Message::DockHover {
-                    token,
-                    wm_session_id: session,
+                    binding,
                     hovered: true,
                 })
                 .on_exit(Message::DockHover {
-                    token,
-                    wm_session_id: session,
+                    binding,
                     hovered: false,
                 })
-                .on_press(Message::DockRestore {
-                    token,
-                    wm_session_id: session,
-                });
+                .on_press(Message::DockRestore { binding });
             items = items.push(
                 container(interactive)
                     .width(DOCK_SLOT_WIDTH)

@@ -22,7 +22,7 @@
 //! ([`Config::persist_layout_tags`]), not a re-serialization of the file, so
 //! the comments and formatting around it survive.
 
-use crate::config::{CONFIG, Config, LayoutTagConfig};
+use crate::config::{CONFIG, Config, ConfigError, LayoutTagConfig};
 use crate::core::layout::LayoutEnum;
 use crate::core::models::WMMonitor;
 use crate::jwm::Jwm;
@@ -43,6 +43,10 @@ const MIN_M_FACT: f32 = 0.05;
 const MAX_M_FACT: f32 = 0.95;
 const MAX_N_MASTER: u32 = 32;
 const MAX_GAP: i32 = 100;
+
+fn settle_layout_persist_dirty(dirty: &mut Option<Instant>, retry_at: Instant, succeeded: bool) {
+    *dirty = if succeeded { None } else { Some(retry_at) };
+}
 
 /// Fill `monitor`'s pertag block from the config entries matching monitor
 /// index `mon_index`, then re-apply the current tag so the monitor shows what
@@ -123,7 +127,13 @@ impl Jwm {
         if self.config_reload_is_pending() {
             return;
         }
-        self.save_layout_tags();
+        if let Err(error) = self.save_layout_tags() {
+            // Keep the write pending, but restart the debounce so a read-only
+            // filesystem or transient rename failure does not turn the update
+            // loop into a tight I/O retry loop.
+            settle_layout_persist_dirty(&mut self.layout_persist_dirty, now, false);
+            warn!("[layout] could not save per-tag layouts: {error}");
+        }
     }
 
     /// Write out anything still pending, debounce or not.
@@ -132,30 +142,37 @@ impl Jwm {
     /// window keeps the arrangement that was on screen — which is the whole
     /// point on the restart path, where the next process reads it straight
     /// back in.
-    pub(crate) fn flush_layout_persistence_on_exit(&mut self) {
+    pub(crate) fn flush_layout_persistence_on_exit(&mut self) -> Result<(), ConfigError> {
         if self.layout_persist_dirty.is_none() || !CONFIG.load().layout_persist_tags() {
-            return;
+            return Ok(());
         }
-        self.save_layout_tags();
+        match self.save_layout_tags() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // Preserve an explicit retryable marker. Restart preparation
+                // propagates the error and resumes this same event loop; a
+                // later periodic flush therefore gets another chance.
+                settle_layout_persist_dirty(&mut self.layout_persist_dirty, Instant::now(), false);
+                Err(error)
+            }
+        }
     }
 
-    fn save_layout_tags(&mut self) {
-        self.layout_persist_dirty = None;
-
+    fn save_layout_tags(&mut self) -> Result<(), ConfigError> {
         let entries = self.layout_tag_entries();
         let config = CONFIG.load_full();
-        match config.persist_layout_tags(&entries) {
-            Ok(revision) => {
-                // Keep the live config in step with the file, so a later
-                // whole-file write does not resurrect the previous entries.
-                let mut updated = (*config).clone();
-                updated.set_layout_tags(entries);
-                CONFIG.store(Arc::new(updated));
-                self.note_config_written_by_us(revision);
-                debug!("[layout] saved per-tag layouts");
-            }
-            Err(error) => warn!("[layout] could not save per-tag layouts: {error}"),
-        }
+        let revision = config.persist_layout_tags(&entries)?;
+
+        // Keep the live config in step with the file, so a later whole-file
+        // write does not resurrect the previous entries. Clear dirty only
+        // after the durable write succeeded.
+        let mut updated = (*config).clone();
+        updated.set_layout_tags(entries);
+        CONFIG.store(Arc::new(updated));
+        self.note_config_written_by_us(revision);
+        settle_layout_persist_dirty(&mut self.layout_persist_dirty, Instant::now(), true);
+        debug!("[layout] saved per-tag layouts");
+        Ok(())
     }
 
     /// Every monitor's per-tag layout, as config entries.
@@ -234,6 +251,19 @@ mod tests {
         let mut config = Config::default();
         config.set_layout_tags(tags);
         config
+    }
+
+    #[test]
+    fn failed_layout_write_stays_dirty_while_success_commits_it() {
+        let original = Instant::now();
+        let retry_at = original + Duration::from_secs(7);
+        let mut dirty = Some(original);
+
+        settle_layout_persist_dirty(&mut dirty, retry_at, false);
+        assert_eq!(dirty, Some(retry_at));
+
+        settle_layout_persist_dirty(&mut dirty, retry_at, true);
+        assert_eq!(dirty, None);
     }
 
     #[test]

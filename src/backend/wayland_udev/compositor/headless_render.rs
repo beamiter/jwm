@@ -767,9 +767,10 @@ fn render_waterlily_volume_frame(
     }
 }
 
-/// Every shader constant in the Wayland backend's `shaders` module, tagged with
-/// its pipeline stage. Keep in sync with the `pub const *_SHADER`/`*_VERTEX`/
-/// `*_FRAGMENT` declarations — a missing entry just isn't compile-checked.
+/// Every shader used by the Wayland backend, tagged with its pipeline stage.
+/// Most live in `shaders`; purpose-specific programs such as the minimized
+/// thumbnail downsampler are listed explicitly as well. A missing entry simply
+/// is not compile-checked.
 fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
     use super::shaders as s;
     use Stage::{Fragment as F, Vertex as V};
@@ -828,6 +829,16 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ),
         ("LINE_VERTEX_SHADER", V, s::LINE_VERTEX_SHADER),
         ("LINE_FRAGMENT_SHADER", F, s::LINE_FRAGMENT_SHADER),
+        (
+            "MINIMIZED_THUMBNAIL_VERTEX_SHADER",
+            V,
+            super::minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_VERTEX_SHADER,
+        ),
+        (
+            "MINIMIZED_THUMBNAIL_FRAGMENT_SHADER",
+            F,
+            crate::backend::compositor_common::minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_FRAGMENT_SHADER,
+        ),
     ]
 }
 
@@ -947,6 +958,374 @@ fn assert_all_compile<N: AsRef<str>, S: AsRef<str>>(
 #[test]
 fn wayland_shaders_compile() {
     assert_all_compile(GlApi::Gles3, "wayland_shaders_compile", wayland_shaders());
+}
+
+#[test]
+fn wayland_minimized_thumbnail_program_links() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping minimized thumbnail link test");
+        return;
+    };
+    let program = link(
+        &h.gl,
+        super::minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_VERTEX_SHADER,
+        crate::backend::compositor_common::minimized_thumbnail::THUMBNAIL_DOWNSAMPLE_FRAGMENT_SHADER,
+    )
+    .unwrap_or_else(|error| panic!("minimized thumbnail shader failed to link: {error}"));
+    unsafe { h.gl.delete_program(program) };
+}
+
+fn assert_constructor_probe_names_are_deleted(
+    gl: &smithay::backend::renderer::gles::ffi::Gles2,
+    probe: &super::CompositorConstructionProbe,
+) {
+    unsafe {
+        for &program in &probe.programs {
+            assert_eq!(
+                gl.IsProgram(program),
+                0,
+                "constructor program {program} survived rollback"
+            );
+        }
+        for &vertex_array in &probe.vertex_arrays {
+            assert_eq!(
+                gl.IsVertexArray(vertex_array),
+                0,
+                "constructor VAO {vertex_array} survived rollback"
+            );
+        }
+        for &buffer in &probe.buffers {
+            assert_eq!(
+                gl.IsBuffer(buffer),
+                0,
+                "constructor buffer {buffer} survived rollback"
+            );
+        }
+        for &framebuffer in &probe.framebuffers {
+            assert_eq!(
+                gl.IsFramebuffer(framebuffer),
+                0,
+                "constructor framebuffer {framebuffer} survived rollback"
+            );
+        }
+        for &texture in &probe.textures {
+            assert_eq!(
+                gl.IsTexture(texture),
+                0,
+                "constructor texture {texture} survived rollback"
+            );
+        }
+
+        for (binding, label) in [
+            (
+                smithay::backend::renderer::gles::ffi::CURRENT_PROGRAM,
+                "program",
+            ),
+            (
+                smithay::backend::renderer::gles::ffi::VERTEX_ARRAY_BINDING,
+                "vertex array",
+            ),
+            (
+                smithay::backend::renderer::gles::ffi::ARRAY_BUFFER_BINDING,
+                "array buffer",
+            ),
+            (
+                smithay::backend::renderer::gles::ffi::FRAMEBUFFER_BINDING,
+                "framebuffer",
+            ),
+            (
+                smithay::backend::renderer::gles::ffi::TEXTURE_BINDING_2D,
+                "2D texture",
+            ),
+        ] {
+            let mut value = -1;
+            gl.GetIntegerv(binding, &mut value);
+            assert_eq!(value, 0, "constructor rollback left {label} bound");
+        }
+    }
+}
+
+unsafe fn expect_constructor_error(
+    gl: &smithay::backend::renderer::gles::ffi::Gles2,
+    result: Result<super::WaylandCompositor, String>,
+    message: &str,
+) -> String {
+    match result {
+        Err(error) => error,
+        Ok(mut compositor) => {
+            unsafe {
+                compositor.release_gpu_resources(
+                    gl,
+                    super::CompositorOutputTextureOwnership::RawCompositor,
+                );
+            }
+            panic!("{message}");
+        }
+    }
+}
+
+#[test]
+fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping constructor rollback test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    unsafe {
+        // A synthetic shader-stage failure exercises the same `?` exits as a
+        // real compile/link error and includes the independently-owned
+        // thumbnail program in the rollback inventory.
+        let mut program_failure = super::CompositorConstructionProbe {
+            fail_before_program_count: Some(12),
+            ..Default::default()
+        };
+        let error = expect_constructor_error(
+            &gl,
+            super::WaylandCompositor::new_inner(&gl, 64, 48, false, Some(&mut program_failure)),
+            "injected program construction failure must propagate",
+        );
+        assert!(error.contains("before program 12"));
+        assert_eq!(program_failure.programs.len(), 12);
+        assert!(program_failure.vertex_arrays.is_empty());
+        assert_constructor_probe_names_are_deleted(&gl, &program_failure);
+
+        // Fail after several complete framebuffer pairs.  The failing helper
+        // owns and self-cleans its incomplete pair; the guard must clean every
+        // earlier program, VAO/VBO, FBO and texture.
+        let mut framebuffer_failure = super::CompositorConstructionProbe {
+            fail_before_framebuffer_count: Some(4),
+            ..Default::default()
+        };
+        let error = expect_constructor_error(
+            &gl,
+            super::WaylandCompositor::new_inner(&gl, 64, 48, false, Some(&mut framebuffer_failure)),
+            "injected framebuffer construction failure must propagate",
+        );
+        assert!(error.contains("framebuffer"));
+        assert_eq!(framebuffer_failure.programs.len(), 24);
+        assert_eq!(framebuffer_failure.vertex_arrays.len(), 1);
+        assert_eq!(framebuffer_failure.buffers.len(), 1);
+        assert_eq!(framebuffer_failure.framebuffers.len(), 4);
+        assert_eq!(framebuffer_failure.textures.len(), 4);
+        assert_constructor_probe_names_are_deleted(&gl, &framebuffer_failure);
+
+        // The final injection happens after the complete Self value exists,
+        // proving the guard remains armed through particle resources and all
+        // aggregate field initialization until the explicit commit.
+        let mut commit_failure = super::CompositorConstructionProbe {
+            fail_before_commit: true,
+            ..Default::default()
+        };
+        let error = expect_constructor_error(
+            &gl,
+            super::WaylandCompositor::new_inner(&gl, 64, 48, false, Some(&mut commit_failure)),
+            "injected pre-commit failure must propagate",
+        );
+        assert!(error.contains("before commit"));
+        assert_eq!(commit_failure.programs.len(), 24);
+        assert_eq!(commit_failure.vertex_arrays.len(), 2);
+        assert_eq!(commit_failure.buffers.len(), 2);
+        assert!(commit_failure.framebuffers.len() >= 10);
+        assert_eq!(
+            commit_failure.framebuffers.len(),
+            commit_failure.textures.len()
+        );
+        assert_constructor_probe_names_are_deleted(&gl, &commit_failure);
+    }
+}
+
+#[test]
+fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping runtime GPU release test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false)
+            .expect("headless Wayland compositor must initialize");
+        let genie_program = compositor.genie_program;
+        let line_program = compositor.line_program;
+        let thumbnail_program = compositor
+            .minimized_thumbnails
+            .downsample_program_for_tests();
+        let output_fbo = compositor.output_fbo;
+        let output_texture = compositor.output_texture;
+        let quad_vao = compositor.quad_vao;
+        let quad_vbo = compositor.quad_vbo;
+
+        let allocate_texture = || {
+            let mut texture = 0;
+            gl.GenTextures(1, &mut texture);
+            gl.BindTexture(smithay::backend::renderer::gles::ffi::TEXTURE_2D, texture);
+            gl.TexImage2D(
+                smithay::backend::renderer::gles::ffi::TEXTURE_2D,
+                0,
+                smithay::backend::renderer::gles::ffi::RGBA8 as i32,
+                1,
+                1,
+                0,
+                smithay::backend::renderer::gles::ffi::RGBA,
+                smithay::backend::renderer::gles::ffi::UNSIGNED_BYTE,
+                [0u8; 4].as_ptr().cast(),
+            );
+            texture
+        };
+        let cached_textures = (0..12).map(|_| allocate_texture()).collect::<Vec<_>>();
+        compositor.overview_title_textures = vec![cached_textures[0]];
+        compositor.tab_title_textures = vec![vec![Some((cached_textures[1], 1, 1))]];
+        compositor.annotation_label_textures = vec![Some((cached_textures[2], 1, 1))];
+        compositor.screenshot_toolbar_icons = vec![Some((cached_textures[3], 1, 1))];
+        compositor.hud_textures[0] = Some((cached_textures[4], 1, 1));
+        compositor.sysui_textures[0] = Some((cached_textures[5], 1, 1));
+        compositor
+            .toast_textures
+            .insert(1, [Some((cached_textures[6], 1, 1)), None]);
+        compositor.osd_texture = Some(("test".into(), cached_textures[7], 1, 1));
+        compositor.wallpaper_texture = Some(cached_textures[8]);
+        compositor.old_wallpaper_texture = Some(cached_textures[9]);
+        compositor.monitor_wallpapers.push(super::MonitorWallpaper {
+            mon_x: 0,
+            mon_y: 0,
+            mon_w: 1,
+            mon_h: 1,
+            texture: Some(cached_textures[10]),
+            mode: crate::backend::compositor_common::wallpaper::WallpaperMode::Fill,
+            img_w: 1,
+            img_h: 1,
+            current_path: String::new(),
+        });
+        compositor
+            .retired_wallpaper_textures
+            .push(cached_textures[11]);
+
+        let (previous_blur_fbo, previous_blur_texture) = super::create_fbo_texture(&gl, 2, 2);
+        let (temporal_mix_fbo, temporal_mix_texture) = super::create_fbo_texture(&gl, 2, 2);
+        compositor.prev_blur_fbo = Some((previous_blur_fbo, previous_blur_texture));
+        compositor.temporal_mix_fbo = Some((temporal_mix_fbo, temporal_mix_texture));
+        gl.GenFramebuffers(1, &mut compositor.blur_blit_src_fbo);
+        let blur_blit_src_fbo = compositor.blur_blit_src_fbo;
+
+        let pooled_texture = compositor.texture_pool.acquire(&gl, 2, 2);
+        assert_eq!(compositor.texture_pool.in_use_count(), 1);
+        assert!(compositor.pbo_uploader.upload_texture(
+            &gl,
+            output_texture,
+            1,
+            1,
+            smithay::backend::renderer::gles::ffi::RGBA,
+            &[0, 0, 0, 0],
+        ));
+        compositor.gpu_fence_sync_mgr.register_fence(&gl, 7);
+        gl.BindFramebuffer(
+            smithay::backend::renderer::gles::ffi::FRAMEBUFFER,
+            output_fbo,
+        );
+        compositor.screenshot_readback.enqueue(
+            &gl,
+            std::path::PathBuf::from("/tmp/jwm-cancelled-headless-readback.png"),
+            0,
+            0,
+            1,
+            1,
+        );
+        compositor
+            .recording
+            .seed_inactive_gpu_resources_for_tests(&gl);
+        let (recording_pbos, recording_fbo, recording_texture) =
+            compositor.recording.gpu_resources_for_tests();
+
+        assert_ne!(gl.IsProgram(genie_program), 0);
+        assert_ne!(gl.IsProgram(line_program), 0);
+        assert_ne!(gl.IsProgram(thumbnail_program), 0);
+        assert_ne!(gl.IsFramebuffer(output_fbo), 0);
+        assert_ne!(gl.IsTexture(output_texture), 0);
+        assert_ne!(gl.IsVertexArray(quad_vao), 0);
+        assert_ne!(gl.IsBuffer(quad_vbo), 0);
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+        assert_eq!(gl.IsProgram(genie_program), 0);
+        assert_eq!(gl.IsProgram(line_program), 0);
+        assert_eq!(gl.IsProgram(thumbnail_program), 0);
+        assert_eq!(gl.IsFramebuffer(output_fbo), 0);
+        assert_eq!(gl.IsTexture(output_texture), 0);
+        assert_eq!(gl.IsVertexArray(quad_vao), 0);
+        assert_eq!(gl.IsBuffer(quad_vbo), 0);
+        for texture in cached_textures.iter().copied().chain([
+            pooled_texture,
+            previous_blur_texture,
+            temporal_mix_texture,
+            recording_texture,
+        ]) {
+            assert_eq!(
+                gl.IsTexture(texture),
+                0,
+                "texture {texture} survived teardown"
+            );
+        }
+        for framebuffer in [
+            previous_blur_fbo,
+            temporal_mix_fbo,
+            blur_blit_src_fbo,
+            recording_fbo,
+        ] {
+            assert_eq!(
+                gl.IsFramebuffer(framebuffer),
+                0,
+                "framebuffer {framebuffer} survived teardown"
+            );
+        }
+        for buffer in recording_pbos {
+            assert_eq!(
+                gl.IsBuffer(buffer),
+                0,
+                "recording PBO {buffer} survived teardown"
+            );
+        }
+        assert!(!compositor.screenshot_readback.has_pending());
+        assert_eq!(compositor.gpu_fence_sync_mgr.stats().3, 0);
+        assert_eq!(compositor.pbo_uploader.stats().2, 0);
+        assert_eq!(compositor.texture_pool.available_count(), 0);
+        assert_eq!(compositor.texture_pool.in_use_count(), 0);
+        assert_eq!(
+            compositor.recording.gpu_resources_for_tests(),
+            ([0; 2], 0, 0)
+        );
+        assert!(!compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+
+        // A renderer-owned output is the sole texture exception: the
+        // compositor removes its FBO/raw alias, while Smithay performs the
+        // one and only texture delete after its GlesTexture wrapper retires.
+        let mut renderer_owned = super::WaylandCompositor::new(&gl, 32, 24, false)
+            .expect("same-context compositor recreation must initialize");
+        let renderer_owned_output = renderer_owned.output_texture;
+        assert!(renderer_owned.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::SmithayRenderer,
+        ));
+        assert_ne!(gl.IsTexture(renderer_owned_output), 0);
+        gl.DeleteTextures(1, &renderer_owned_output);
+        assert_eq!(gl.IsTexture(renderer_owned_output), 0);
+
+        let mut recreated = super::WaylandCompositor::new(&gl, 16, 16, false)
+            .expect("release must leave the same EGL context reusable");
+        assert!(recreated.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
 }
 
 #[cfg(feature = "x11-backends")]

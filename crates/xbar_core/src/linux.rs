@@ -194,13 +194,28 @@ impl Epoll {
     /// Block until at least one registered descriptor is readable and return
     /// the ready tokens in kernel order.
     pub fn wait(&mut self) -> io::Result<impl Iterator<Item = u64> + '_> {
+        self.wait_timeout(None)
+    }
+
+    /// Wait for descriptor readiness, bounded by an optional monotonic
+    /// duration.
+    ///
+    /// Positive sub-millisecond durations round up to one millisecond. This
+    /// is important for retry deadlines: rounding down could repeatedly wake
+    /// an event loop before the work is due and create a busy loop. `None`
+    /// retains the blocking behaviour of [`Self::wait`].
+    pub fn wait_timeout(
+        &mut self,
+        timeout: Option<Duration>,
+    ) -> io::Result<impl Iterator<Item = u64> + '_> {
+        let timeout_ms = epoll_timeout_millis(timeout);
         let ready = loop {
             let count = unsafe {
                 libc::epoll_wait(
                     self.fd.as_raw_fd(),
                     self.ready.as_mut_ptr(),
                     i32::try_from(self.ready.len()).unwrap_or(i32::MAX),
-                    -1,
+                    timeout_ms,
                 )
             };
             if count >= 0 {
@@ -213,6 +228,18 @@ impl Epoll {
         };
         Ok(self.ready[..ready].iter().map(|event| event.u64))
     }
+}
+
+fn epoll_timeout_millis(timeout: Option<Duration>) -> i32 {
+    let Some(timeout) = timeout else {
+        return -1;
+    };
+    if timeout.is_zero() {
+        return 0;
+    }
+
+    let rounded_up = timeout.as_nanos().saturating_add(999_999) / 1_000_000;
+    i32::try_from(rounded_up).unwrap_or(i32::MAX)
 }
 
 impl AsFd for Epoll {
@@ -318,6 +345,17 @@ mod tests {
         let tokens: Vec<u64> = epoll.wait().unwrap().collect();
         assert_eq!(tokens, vec![7]);
         assert!(timer.drain().unwrap() >= 1);
+    }
+
+    #[test]
+    fn epoll_timeout_rounds_up_and_zero_is_nonblocking() {
+        assert_eq!(epoll_timeout_millis(None), -1);
+        assert_eq!(epoll_timeout_millis(Some(Duration::ZERO)), 0);
+        assert_eq!(epoll_timeout_millis(Some(Duration::from_nanos(1))), 1);
+        assert_eq!(epoll_timeout_millis(Some(Duration::from_millis(50))), 50);
+
+        let mut epoll = Epoll::new().unwrap();
+        assert_eq!(epoll.wait_timeout(Some(Duration::ZERO)).unwrap().count(), 0);
     }
 
     #[test]

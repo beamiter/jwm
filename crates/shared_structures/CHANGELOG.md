@@ -6,12 +6,13 @@
 
 ### Added
 
+- 协议 v13 的三类 Dock 命令新增 minimized generation 回显；窗口管理器可精确拒绝同一 session/monitor 内延迟到下一次最小化 incarnation 的 geometry、preview 与 restore。
 - 协议 v12 新增固定上限的最小化窗口投影：`SharedMessage` 携带 WM session、generation、overflow 状态及最多 16 个 `MinimizedWindowInfo`（窗口 ID、monitor、flags、title、app-id/class）。
 - 新增 `RestoreMinimized`、`PreviewMinimized` 和 `SetMinimizedGeometry` 命令；56 字节命令 payload 保留旧 `parameter` 并新增窗口/session 标识、flags 和 anchor 矩形。`SetMinimizedGeometry` 的窗口 ID 为 0 时表示 tray/shelf，非 0 时表示具体 item。
 
 ### Changed
 
-- 共享内存协议提升到 v12；消息与命令 slot 布局已改变，与 v11 及更早映射不兼容，需协调重启并重建映射。
+- 共享内存协议提升到 v13；命令 payload 从 56 字节扩为 64 字节，与 v12 及更早映射不兼容，需协调重启并重建映射。
 
 ### Fixed
 

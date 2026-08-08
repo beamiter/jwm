@@ -11,7 +11,7 @@
 - `SharedMessage`、`MonitorInfo`、`TagStatus`、`MinimizedWindowInfo`：固定上限的状态快照，包括最小化窗口投影。
 - `SharedCommand`、`CommandType`：查看标签、切换标签、设置布局，以及恢复/预览最小化窗口等命令。
 - `SharedRingBufferOptions`：集中配置同步策略、消息容量和自适应轮询次数。
-- 协议 v12：header 记录后端、映射长度、容量、槽大小、布局标记和创建者 PID；打开时先验证再派生槽位地址。
+- 协议 v13：header 记录后端、映射长度、容量、槽大小、布局标记和创建者 PID；打开时先验证再派生槽位地址。
 - 崩溃恢复：方向锁存持有者 PID，持有者崩溃后被自动夺回；`reclaim_stale` 可回收创建者已死的残留映射。
 - 三种 Linux 同步后端：Futex、进程共享 POSIX Semaphore 和 EventFd。
 - 消息与命令校验和、显式 `destroy`、运行状态快照。
@@ -23,7 +23,7 @@
 - Linux；
 - Rust 1.86 或更新版本；
 - flink 所在文件系统支持同目录硬链接（用于原子发布已初始化映射）；
-- 共享同一映射的进程使用协议 v12、相同端序和兼容目标架构；
+- 共享同一映射的进程使用协议 v13、相同端序和兼容目标架构；
 - 使用 EventFd 时，创建者需要保持 FD 传递 socket 可用，直到不再接受新 opener。
 
 ## 引入
@@ -189,7 +189,7 @@ fn open_or_create() -> std::io::Result<()> {
 }
 ```
 
-显式策略的 `open` 会验证该策略与 v12 header 一致。若当前构建没有包含映射所需后端，`open_auto` 返回 `Unsupported`，不会用另一种布局解释共享内存。
+显式策略的 `open` 会验证该策略与 v13 header 一致。若当前构建没有包含映射所需后端，`open_auto` 返回 `Unsupported`，不会用另一种布局解释共享内存。
 
 ## 队列 API 结果
 
@@ -214,7 +214,7 @@ fn open_or_create() -> std::io::Result<()> {
 
 ## 命令类型
 
-`SharedCommand` 的 `cmd_type` 取值由 `CommandType` 定义。`parameter` 保留给原有命令；最小化窗口命令使用 `window_id`、`wm_session_id`、`monitor_id`、`flags` 和以全局物理像素表示的 anchor 矩形：
+`SharedCommand` 的 `cmd_type` 取值由 `CommandType` 定义。`parameter` 保留给原有命令；最小化窗口命令使用 `window_id`、`wm_session_id`、`minimized_generation`、`monitor_id`、`flags` 和以全局物理像素表示的 anchor 矩形：
 
 | `CommandType` | 值 | `parameter` |
 | --- | --- | --- |
@@ -231,7 +231,7 @@ fn open_or_create() -> std::io::Result<()> {
 
 `SharedCommand::shell_hub(route, monitor_id)` 构造这类命令，`shell_hub_route()` 读回路由（其它命令类型返回 `None`）。
 
-Shell Hub 路由的取值兼容性保持不变：未知路由经 `ShellHubRoute::from_raw_or_hub` 退化为 Hub 首页，需要严格解析时使用 `from_raw`。但 v12 扩展了消息和命令的 wire 布局，不能与 v11 或更早映射混用。
+Shell Hub 路由的取值兼容性保持不变：未知路由经 `ShellHubRoute::from_raw_or_hub` 退化为 Hub 首页，需要严格解析时使用 `from_raw`。但 v13 扩展了命令 wire 布局，不能与 v12 或更早映射混用。
 
 ## 状态与统计
 
@@ -294,7 +294,7 @@ cargo build --release --no-default-features --features use-futex
 - `MonitorInfo` 最多包含 `MAX_TAGS` 个标签状态；client name 和 layout symbol 使用固定字节数组。
 - `SharedMessage` 最多携带 `MAX_MINIMIZED_WINDOWS` (16) 个最小化窗口；title 和 app-id/class 分别使用 96/64 字节的固定数组。`window_id` 只在对应 `wm_session_id` 中稳定。
 - 时间戳是 Unix epoch 起的毫秒数。`SharedMessage::default()` 是零值（`timestamp == 0`）；`SharedMessage::new()` 才打当前时间戳。
-- v12 映射不兼容 v11 及更早映射。升级进程必须协调重启并重建共享映射。
+- v13 映射不兼容 v12 及更早映射。升级进程必须协调重启并重建共享映射。
 - 校验和用于发现撕裂写入或损坏，不提供防篡改能力。
 - 共享路径不是安全边界；应放在权限受控目录中。
 

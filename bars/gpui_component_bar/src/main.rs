@@ -22,8 +22,8 @@ use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, fallback_rgb};
 use xbar_core::logging::init as initialize_logging;
 use xbar_core::{
     BarEffect, BarRuntime, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_SLOT_WIDTH, DockBridge,
-    LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate, ShellRoute,
-    TagId, TransportRecoveryConfig, UserAction, WindowToken,
+    DockItemBinding, LayoutId, ModelConfig, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate,
+    ShellRoute, TagId, TransportRecoveryConfig, UserAction,
 };
 use xbar_linux_actions::ProcessActionHandler;
 
@@ -137,9 +137,18 @@ impl GpuiComponentBar {
     fn spawn_transport_poller(&mut self, cx: &mut Context<Self>) {
         let task = cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor()
-                    .timer(TRANSPORT_POLL_INTERVAL)
-                    .await;
+                let mut wait = TRANSPORT_POLL_INTERVAL;
+                if this
+                    .update(cx, |this, _| {
+                        wait = this
+                            .dock
+                            .next_wake_delay(Instant::now(), TRANSPORT_POLL_INTERVAL);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(wait).await;
                 let _ = this.update(cx, |this, cx| {
                     let mut update = this.runtime.poll_transport();
                     let dock_update = this.service_dock();
@@ -191,20 +200,24 @@ impl GpuiComponentBar {
         combined
     }
 
-    fn dock_hover(&mut self, token: WindowToken, session: u64, hovered: bool) {
+    fn dock_hover(&mut self, binding: DockItemBinding, hovered: bool, cx: &mut Context<Self>) {
         if hovered {
-            let _ = self.dock.enter(token, session);
+            let _ = self.dock.enter(binding);
         } else {
-            let _ = self.dock.leave(token, session);
+            let _ = self.dock.leave(binding);
         }
         let update = self.service_dock();
         self.handle_runtime_update(update);
+        // Replacing the owned task cancels its old 100ms fallback sleep so a
+        // newly-created 50ms anchor deadline takes effect immediately.
+        self.spawn_transport_poller(cx);
     }
 
-    fn dock_restore(&mut self, token: WindowToken, session: u64) {
-        let _ = self.dock.request_restore(token, session);
+    fn dock_restore(&mut self, binding: DockItemBinding, cx: &mut Context<Self>) {
+        let _ = self.dock.request_restore(binding);
         let update = self.service_dock();
         self.handle_runtime_update(update);
+        self.spawn_transport_poller(cx);
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -581,7 +594,6 @@ impl GpuiComponentBar {
     }
 
     fn render_minimized_dock(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let session = self.runtime.view().wm_session_id;
         let windows: Vec<_> = self.dock.visible_windows().cloned().collect();
         let mut shelf = div()
             .id("minimized-dock")
@@ -597,6 +609,9 @@ impl GpuiComponentBar {
             .border_color(slate_700());
         for minimized in windows {
             let token = minimized.token;
+            let Some(binding) = self.dock.item_binding(token) else {
+                continue;
+            };
             let scale = self.dock.scale_for(token);
             let title = if minimized.title.trim().is_empty() {
                 minimized.app_id.clone()
@@ -612,8 +627,10 @@ impl GpuiComponentBar {
             };
             let card = div()
                 .id(SharedString::from(format!(
-                    "minimized-card-{}",
-                    token.get()
+                    "minimized-card-{}-{}-{}",
+                    binding.wm_session_id,
+                    binding.minimized_generation,
+                    token.get(),
                 )))
                 .w(px(DOCK_ITEM_WIDTH * scale))
                 .h(px(DOCK_ITEM_HEIGHT * scale))
@@ -633,7 +650,7 @@ impl GpuiComponentBar {
                 .child(minimized.initial().to_string())
                 .tooltip(move |window, cx| Tooltip::new(tooltip_title.clone()).build(window, cx))
                 .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-                    this.dock_hover(token, session, *hovered);
+                    this.dock_hover(binding, *hovered, cx);
                     if *hovered {
                         debug!("minimized Dock hover: {hover_title}");
                     }
@@ -642,7 +659,7 @@ impl GpuiComponentBar {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _event, _window, cx| {
-                        this.dock_restore(token, session);
+                        this.dock_restore(binding, cx);
                         cx.notify();
                     }),
                 );

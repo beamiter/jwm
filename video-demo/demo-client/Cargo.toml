@@ -7,3 +7,8 @@ edition = "2024"
 clap = { version = "4.6.1", features = ["derive"] }
 serde_json = "1"
 x11rb = "0.13.2"
+
+# Keep this independently built demo binary out of JWM's core workspace. The
+# video runner invokes Cargo with this manifest directly.
+[workspace]
+resolver = "3"

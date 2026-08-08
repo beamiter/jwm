@@ -599,6 +599,7 @@ impl CairoBar {
         self.dock_reporter.synchronize(DockReporterInput {
             wm_available: view.wm_available,
             wm_session_id: view.wm_session_id,
+            minimized_generation: view.wm_sequence.unwrap_or_default(),
             transport_generation,
             monitor_geometry: view.geometry,
             minimized_windows: view.minimized_windows,
@@ -615,6 +616,7 @@ impl CairoBar {
         self.dock_reporter.synchronize_model(
             view.wm_available,
             view.wm_session_id,
+            view.wm_sequence.unwrap_or_default(),
             transport_generation,
             view.minimized_windows,
             self.interaction.hovered(),
@@ -657,10 +659,12 @@ impl CairoBar {
             UserAction::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry,
             } if geometry.is_empty() => UserAction::RestoreWindow {
                 window,
                 wm_session_id,
+                minimized_generation,
                 geometry: self.dock_reporter.geometry_for(window),
             },
             action => action,
@@ -1916,6 +1920,7 @@ mod tests {
         assert_eq!(
             renewed[0].get_flags(),
             shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
+                | shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL
         );
 
         let left = bar.handle_pointer(PointerInput::Leave);

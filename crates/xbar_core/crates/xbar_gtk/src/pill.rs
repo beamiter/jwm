@@ -7,6 +7,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::mpsc::Sender;
 
 use gtk4::pango::FontDescription;
 use gtk4::prelude::*;
@@ -24,8 +25,15 @@ use crate::theme::Metrics;
 /// the Cairo renderer leaves between a pill's bottom edge and its line.
 const PROGRESS_ROW_HEIGHT: i32 = 3;
 
-/// Sends a user action into the runtime.
-pub type Dispatch = Rc<dyn Fn(UserAction)>;
+/// Optional one-shot result channel for actions whose delivery policy depends
+/// on bounded-queue acceptance. Most controls are fire-and-forget; the Dock
+/// preview uses this receipt to distinguish a fresh ENTER from a renewal.
+pub type DispatchCompletion = Sender<bool>;
+
+/// Sends a user action into the runtime. When a completion sender is present,
+/// the frontend reports whether the runtime accepted the action without an
+/// issue (notably `QueueFull`).
+pub type Dispatch = Rc<dyn Fn(UserAction, Option<DispatchCompletion>)>;
 
 /// Everything a pill needs that does not come from its own control.
 #[derive(Clone)]
@@ -155,7 +163,7 @@ impl Pill {
             move |_| {
                 let action = bindings.borrow().action(PointerAction::Primary);
                 if let Some(action) = action {
-                    dispatch(action);
+                    dispatch(action, None);
                 }
             }
         });
@@ -168,7 +176,7 @@ impl Pill {
             move |_, _, _, _| {
                 let action = bindings.borrow().action(PointerAction::Secondary);
                 if let Some(action) = action {
-                    dispatch(action);
+                    dispatch(action, None);
                 }
             }
         });
@@ -186,7 +194,7 @@ impl Pill {
                 let action = bindings.borrow().action(input);
                 match action {
                     Some(action) => {
-                        dispatch(action);
+                        dispatch(action, None);
                         glib::Propagation::Stop
                     }
                     None => glib::Propagation::Proceed,

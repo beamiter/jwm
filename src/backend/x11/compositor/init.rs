@@ -131,6 +131,24 @@ impl<C: CompositorConnection> Compositor<C> {
             shaders::VERTEX_SHADER,
             shaders::FRAGMENT_SHADER,
         )?;
+        let thumbnail_downsample_fragment =
+            crate::backend::compositor_common::minimized_thumbnail::thumbnail_downsample_fragment_shader(
+                crate::backend::compositor_common::minimized_thumbnail::ThumbnailShaderDialect::Gl330,
+            );
+        let thumbnail_downsample_program = shader_cache.get_or_compile(
+            &gl,
+            "minimized-thumbnail-downsample",
+            super::postprocess::THUMBNAIL_DOWNSAMPLE_VERTEX_SHADER,
+            thumbnail_downsample_fragment.as_ref(),
+        )?;
+        let thumbnail_downsample_uniforms = unsafe {
+            ThumbnailDownsampleUniforms {
+                texture: gl.get_uniform_location(thumbnail_downsample_program, "u_texture"),
+                uv_rect: gl.get_uniform_location(thumbnail_downsample_program, "u_uv_rect"),
+                output_size: gl.get_uniform_location(thumbnail_downsample_program, "u_output_size"),
+                has_alpha: gl.get_uniform_location(thumbnail_downsample_program, "u_has_alpha"),
+            }
+        };
         let shadow_program = shader_cache.get_or_compile(
             &gl,
             "shadow",
@@ -882,6 +900,8 @@ impl<C: CompositorConnection> Compositor<C> {
             gl_version,
             shader_cache,
             program,
+            thumbnail_downsample_program,
+            thumbnail_downsample_uniforms,
             shadow_program,
             blur_down_program,
             blur_up_program,
@@ -1257,7 +1277,19 @@ impl<C: CompositorConnection> Compositor<C> {
             genie_active: Vec::new(),
             genie_targets: HashMap::new(),
             minimized_windows: HashSet::new(),
+            minimized_window_intents: HashMap::new(),
+            pending_static_minimized_captures: HashSet::new(),
+            pending_minimized_gpu_uploads: HashSet::new(),
             minimized_visuals: HashMap::new(),
+            minimized_snapshots:
+                crate::backend::compositor_common::minimized_thumbnail::MinimizedSnapshotCache::new(
+                ),
+            minimized_gpu_snapshots: HashMap::new(),
+            minimized_snapshot_generation_clock: 0,
+            minimized_snapshot_generations: HashMap::new(),
+            iconic_snapshot_recapture_gates: HashMap::new(),
+            minimized_gpu_use_clock: 0,
+            minimized_window_metadata: HashMap::new(),
             dock_preview: None,
             dock_position: (0.5 * screen_w as f32, screen_h as f32),
             // Phase 3.3: Ripple on open

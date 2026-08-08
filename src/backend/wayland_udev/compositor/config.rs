@@ -48,6 +48,22 @@ fn collect_absent_auxiliary_window_ids(
         .extend(known_ids.filter(|id| is_auxiliary_window_id(*id) && !live_ids.contains(id)));
 }
 
+const fn should_request_static_minimized_capture(
+    dock_addressable: bool,
+    minimized: bool,
+    cached_visual: bool,
+    active_animation: bool,
+    restore_pending: bool,
+    static_capture_pending: bool,
+) -> bool {
+    dock_addressable
+        && minimized
+        && !cached_visual
+        && !active_animation
+        && !restore_pending
+        && !static_capture_pending
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WindowRetirement {
     Closed,
@@ -361,7 +377,7 @@ impl WaylandCompositor {
                     Some(DisabledGenieAction::CacheMinimized) => {
                         let window_id = animation.window_id;
                         self.cache_minimized_visual(animation);
-                        self.windows.remove(&window_id);
+                        self.take_live_window_preserving_metadata(window_id);
                     }
                     Some(DisabledGenieAction::CompleteRestore) => {
                         self.complete_genie_restore_immediately(animation.window_id);
@@ -525,7 +541,7 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_window_urgent(&mut self, window: u64, urgent: bool) {
-        let changed = if let Some(win) = self.windows.get_mut(&window) {
+        let mut changed = if let Some(win) = self.windows.get_mut(&window) {
             let changed = win.is_urgent != urgent;
             win.is_urgent = urgent;
             let pending_changed = self.pending_window_urgency.discard(window);
@@ -533,6 +549,11 @@ impl WaylandCompositor {
         } else {
             self.pending_window_urgency.update(window, urgent)
         };
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window) {
+            changed |= metadata.is_urgent != urgent;
+            metadata.is_urgent = urgent;
+            self.pending_window_urgency.discard(window);
+        }
         if changed {
             self.needs_render = true;
         }
@@ -542,6 +563,9 @@ impl WaylandCompositor {
         if let Some(win) = self.windows.get_mut(&window) {
             win.is_pip = pip;
             self.needs_render = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window) {
+            metadata.is_pip = pip;
         }
     }
 
@@ -556,12 +580,18 @@ impl WaylandCompositor {
         if let Some(win) = self.windows.get_mut(&window) {
             win.frame_extents = [left, right, top, bottom];
         }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window) {
+            metadata.frame_extents = [left, right, top, bottom];
+        }
     }
 
     pub(crate) fn set_window_shaped(&mut self, window: u64, shaped: bool) {
         if let Some(win) = self.windows.get_mut(&window) {
             win.is_shaped = shaped;
             self.needs_render = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window) {
+            metadata.is_shaped = shaped;
         }
     }
 
@@ -571,6 +601,9 @@ impl WaylandCompositor {
         {
             win.is_fullscreen = fullscreen;
             self.needs_render = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window) {
+            metadata.is_fullscreen = fullscreen;
         }
     }
 
@@ -684,9 +717,17 @@ impl WaylandCompositor {
                 if let Some(visual) = self.minimized_visuals.get_mut(&window_id) {
                     visual.target = Some(target);
                 }
+                self.touch_minimized_visual(window_id, Instant::now());
+                self.touch_minimized_snapshot(window_id);
             }
             None => {
                 self.genie_targets.remove(&window_id);
+                // A target can disappear (overflow, hidden/crashed bar, or
+                // output migration) after a recapture was armed but before a
+                // hidden surface commits a usable buffer. Do not spend GPU
+                // memory importing an item that is no longer addressable; a
+                // later non-empty geometry deterministically rearms it.
+                self.pending_minimized_visuals.remove(&window_id);
                 if let Some(animation) = self
                     .genie_active
                     .iter_mut()
@@ -711,6 +752,63 @@ impl WaylandCompositor {
                 }
             }
         }
+        if self.minimized_windows.contains(&window_id) {
+            self.arm_minimized_snapshot_capture(window_id);
+        }
+        self.arm_static_minimized_capture(window_id);
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
+    /// Reconcile an already-hidden JWM client without replaying a Genie from
+    /// its off-screen parking geometry. The Dock target is the addressability
+    /// gate; if no bar has published one yet, a later geometry update arms the
+    /// one-shot hidden-surface import.
+    pub(crate) fn ensure_minimized_window_visual(&mut self, window_id: u64) {
+        self.minimized_windows.insert(window_id);
+        self.arm_minimized_snapshot_capture(window_id);
+        self.arm_static_minimized_capture(window_id);
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+    }
+
+    pub(super) fn arm_static_minimized_capture(&mut self, window_id: u64) -> bool {
+        if should_request_static_minimized_capture(
+            self.genie_targets.contains_key(&window_id)
+                || self
+                    .dock_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.window_id == window_id),
+            self.minimized_windows.contains(&window_id),
+            self.minimized_visuals.contains_key(&window_id),
+            self.genie_active
+                .iter()
+                .any(|animation| animation.window_id == window_id),
+            self.pending_genie_restores.contains(&window_id),
+            self.pending_minimized_visuals.contains(&window_id),
+        ) {
+            return self.pending_minimized_visuals.insert(window_id);
+        }
+        false
+    }
+
+    pub(super) fn resume_minimized_preview_after_capture(&mut self, window_id: u64) {
+        let Some(preview) = self
+            .dock_preview
+            .as_mut()
+            .filter(|preview| preview.window_id == window_id && preview.awaiting_source)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        preview.started = now;
+        preview.lease_deadline = now + std::time::Duration::from_secs(4);
+        preview.start_opacity = 0.0;
+        preview.start_scale = 0.86;
+        preview.direction = crate::backend::compositor_common::genie::PreviewDirection::Show;
+        preview.opacity = 0.0;
+        preview.scale = 0.86;
+        preview.awaiting_source = false;
         self.force_full_damage_next = true;
         self.needs_render = true;
     }
@@ -719,7 +817,9 @@ impl WaylandCompositor {
         &mut self,
         request: Option<(u64, crate::backend::api::CompositorRect)>,
     ) {
-        use crate::backend::compositor_common::genie::{PreviewDirection, preview_motion};
+        use crate::backend::compositor_common::genie::{
+            PreviewDirection, preview_motion, preview_request_reuses_timeline,
+        };
 
         let request = request
             .and_then(|(window_id, anchor)| anchor.normalized().map(|anchor| (window_id, anchor)))
@@ -730,20 +830,42 @@ impl WaylandCompositor {
                         .iter()
                         .any(|animation| animation.window_id == *window_id)
                     || self.windows.contains_key(window_id)
+                    || self.minimized_windows.contains(window_id)
             });
         let now = Instant::now();
         match request {
             Some((window_id, anchor)) => {
+                self.touch_minimized_visual(window_id, now);
+                self.touch_minimized_snapshot(window_id);
                 if self.dock_preview.as_ref().is_some_and(|preview| {
-                    preview.window_id == window_id
-                        && preview.anchor == anchor
-                        && preview.direction == PreviewDirection::Show
+                    preview_request_reuses_timeline(
+                        preview.window_id == window_id,
+                        preview.direction,
+                    )
                 }) {
-                    if let Some(preview) = self.dock_preview.as_mut() {
+                    let (awaiting_source, anchor_changed) = {
+                        let preview = self
+                            .dock_preview
+                            .as_mut()
+                            .expect("matching Dock preview disappeared");
+                        let anchor_changed = preview.anchor != anchor;
+                        preview.anchor = anchor;
                         preview.lease_deadline = now + std::time::Duration::from_secs(4);
+                        (preview.awaiting_source, anchor_changed)
+                    };
+                    if anchor_changed {
+                        // Preserve the in-flight show animation; moving an
+                        // existing preview must not fade it in again at every
+                        // throttled Dock anchor update.
+                        self.force_full_damage_next = true;
+                        self.needs_render = true;
+                    }
+                    if awaiting_source || !self.minimized_full_source_available(window_id) {
+                        self.arm_static_minimized_capture(window_id);
                     }
                     return;
                 }
+                let awaiting_source = !self.minimized_preview_source_available(window_id);
                 self.dock_preview = Some(super::DockPreview {
                     window_id,
                     anchor,
@@ -754,13 +876,36 @@ impl WaylandCompositor {
                     direction: PreviewDirection::Show,
                     opacity: 0.0,
                     scale: 0.86,
+                    awaiting_source,
                 });
+                if awaiting_source || !self.minimized_full_source_available(window_id) {
+                    self.arm_static_minimized_capture(window_id);
+                }
             }
             None => {
                 let Some(preview) = self.dock_preview.as_mut() else {
                     return;
                 };
+                let window_id = preview.window_id;
+                if !self.genie_targets.contains_key(&window_id) {
+                    // A hover upgrade can be pending even while a low-res
+                    // source is already animating. Once the hover lease ends,
+                    // target-less clients no longer justify a hidden import.
+                    self.pending_minimized_visuals.remove(&window_id);
+                }
                 if preview.direction == PreviewDirection::Hide {
+                    return;
+                }
+                if preview.awaiting_source {
+                    self.dock_preview = None;
+                    // A hover-only capture lease ended before pixels became
+                    // available. Do not leave a hidden surface import armed
+                    // forever when there is no persistent Dock target.
+                    if !self.genie_targets.contains_key(&window_id) {
+                        self.pending_minimized_visuals.remove(&window_id);
+                    }
+                    self.force_full_damage_next = true;
+                    self.needs_render = true;
                     return;
                 }
                 let (opacity, scale, _) = preview_motion(
@@ -785,6 +930,15 @@ impl WaylandCompositor {
     /// and its final scene geometry. This avoids animating stale minimize-time
     /// pixels to a guessed layout rectangle.
     pub(crate) fn restore_window(&mut self, window_id: u64) {
+        // The bounded Dock snapshot is deliberately not a restore source.
+        // Retire its CPU/GPU tiers and generation before any reverse Genie
+        // borrows the exact retained or freshly mapped texture.
+        self.discard_minimized_snapshot(window_id);
+        // Restore is newer intent than a still-waiting late minimize capture.
+        // The live scene will provide the restored texture through its normal
+        // import path, so never pull the hidden surface solely for the cache.
+        self.pending_minimized_visuals.remove(&window_id);
+        self.touch_minimized_visual(window_id, Instant::now());
         if !self.minimized_windows.contains(&window_id)
             && !self.minimized_visuals.contains_key(&window_id)
             && !self
@@ -809,6 +963,7 @@ impl WaylandCompositor {
     /// the preview disappears immediately so a runtime feature disable can
     /// make the window eligible for direct scanout on the very next frame.
     fn complete_genie_restore_immediately(&mut self, window_id: u64) {
+        self.discard_minimized_snapshot(window_id);
         self.genie_active
             .retain(|animation| animation.window_id != window_id);
         let clear_preview = clear_immediate_restore_collections(
@@ -1102,7 +1257,21 @@ impl WaylandCompositor {
         self.fps
     }
 
-    /// Add a window to the compositor
+    /// Detach a resource-bearing live entry but retain its semantic state for
+    /// a later static import or restore.
+    pub(super) fn take_live_window_preserving_metadata(
+        &mut self,
+        window_id: u64,
+    ) -> Option<WindowState> {
+        crate::backend::compositor_common::genie::take_live_window_preserving_metadata(
+            window_id,
+            &mut self.windows,
+            &mut self.minimized_window_metadata,
+            |window| WindowVisualMetadata::from(window),
+        )
+    }
+
+    /// Add a window to the compositor.
     #[allow(dead_code)]
     pub(crate) fn add_window(&mut self, window_id: u64) {
         let fading_enabled = self.fading_enabled;
@@ -1149,6 +1318,9 @@ impl WaylandCompositor {
             }
         });
         if inserted && let Some(win) = self.windows.get_mut(&window_id) {
+            if let Some(metadata) = self.minimized_window_metadata.get(&window_id) {
+                metadata.apply_to(win);
+            }
             win.fade_opacity = if fading_enabled { 0.0 } else { 1.0 };
             win.anim_scale = if window_animation_enabled {
                 window_animation_scale
@@ -1168,6 +1340,7 @@ impl WaylandCompositor {
     /// may use the close fade but never targets the Dock with a genie effect.
     pub(crate) fn remove_window(&mut self, window_id: u64) {
         self.pending_window_urgency.discard(window_id);
+        self.minimized_window_metadata.remove(&window_id);
         self.discard_minimized_visual(window_id);
         if let Some(win) = self.windows.get_mut(&window_id) {
             // A close-fading WindowState can outlive its client. Clear the
@@ -1185,14 +1358,42 @@ impl WaylandCompositor {
     /// live surface/offscreen cache releases its owner.
     pub(crate) fn minimize_window(&mut self, window_id: u64) {
         self.minimized_windows.insert(window_id);
+        self.arm_minimized_snapshot_capture(window_id);
         if self.prepare_genie_minimize(window_id) {
+            self.pending_minimized_visuals.remove(&window_id);
             return;
         }
         self.retire_window(window_id, WindowRetirement::ExplicitlyMinimized);
     }
 
+    /// Whether the backend should import this minimized client's surface even
+    /// though it is intentionally absent from the drawable JWM scene.
+    pub(crate) fn has_pending_minimized_window_textures(&self) -> bool {
+        !self.pending_minimized_visuals.is_empty()
+    }
+
+    pub(crate) fn minimized_window_texture_is_pending(&self, window_id: u64) -> bool {
+        self.pending_minimized_visuals.contains(&window_id)
+    }
+
+    pub(crate) fn needs_minimized_window_texture(&self, window_id: u64) -> bool {
+        self.pending_minimized_visuals.contains(&window_id)
+            && !self
+                .windows
+                .get(&window_id)
+                .is_some_and(|window| window.texture_owner.is_some())
+    }
+
     fn retire_window(&mut self, window_id: u64, reason: WindowRetirement) {
         if !self.windows.contains_key(&window_id) {
+            if reason == WindowRetirement::ExplicitlyMinimized
+                && !self.minimized_visuals.contains_key(&window_id)
+            {
+                self.pending_minimized_visuals.insert(window_id);
+                self.needs_render = true;
+            } else {
+                self.pending_minimized_visuals.remove(&window_id);
+            }
             self.predictive_render_mgr.remove_window(window_id);
             self.is_game_window.remove(&window_id);
             return;
@@ -1249,6 +1450,7 @@ impl WaylandCompositor {
                             target,
                         };
                         self.genie_active.push(animation);
+                        self.pending_minimized_visuals.remove(&window_id);
                         started_genie = true;
                     }
                 }
@@ -1258,6 +1460,7 @@ impl WaylandCompositor {
             // The Dock still needs real pixels when the mesh animation is
             // disabled. Detach a strong texture clone into the same bounded
             // cache and retire the live compositor state immediately.
+            let mut cached_visual = false;
             if let (Some((x, y, w, h)), Some(win)) = (closing_rect, self.windows.get(&window_id))
                 && let Some(texture_owner) = win.texture_owner.clone()
             {
@@ -1278,9 +1481,17 @@ impl WaylandCompositor {
                     target: self.genie_target_for(window_id),
                 };
                 self.cache_minimized_visual(animation);
+                cached_visual = true;
             }
-            self.windows.remove(&window_id);
-            self.refresh_any_color_transform_active();
+            if cached_visual {
+                self.take_live_window_preserving_metadata(window_id);
+                self.refresh_any_color_transform_active();
+            } else {
+                // No previous visible geometry and/or no imported buffer yet.
+                // Keep any partial WindowState and let render_frame settle a
+                // static retained visual as soon as the texture arrives.
+                self.pending_minimized_visuals.insert(window_id);
+            }
         } else if !started_genie {
             if let Some(win) = self.windows.get_mut(&window_id) {
                 win.fading_out = true;
@@ -1347,6 +1558,7 @@ impl WaylandCompositor {
                         == crate::backend::compositor_common::genie::GenieDirection::Restore
             });
         let remains_minimized = self.minimized_windows.contains(&window_id) && !restore_requested;
+        let preserved_metadata = self.minimized_window_metadata.get(&window_id).cloned();
         let was_retiring = self
             .windows
             .get(&window_id)
@@ -1398,6 +1610,9 @@ impl WaylandCompositor {
             }
         });
         if inserted {
+            if let Some(metadata) = preserved_metadata.as_ref() {
+                metadata.apply_to(win);
+            }
             win.fade_opacity = if restore_requested {
                 1.0
             } else if fading_enabled {
@@ -1450,6 +1665,19 @@ impl WaylandCompositor {
         win.has_alpha = has_alpha;
         win.y_inverted = y_inverted;
         win.content_uv = content_uv;
+        if inserted
+            && let Some(metadata) = preserved_metadata.as_ref()
+            && !metadata.class_name.is_empty()
+        {
+            self.subpixel_mgr
+                .register_window(window_id, &metadata.class_name);
+        }
+        if inserted && preserved_metadata.is_some() && !remains_minimized {
+            // The semantic snapshot has reached a real live entry. Static
+            // hidden adoption keeps it because that entry is immediately
+            // retired back into the Dock cache.
+            self.minimized_window_metadata.remove(&window_id);
+        }
         self.needs_render = true;
 
         // Record content damage for partial-damage (scissored) redraw.
@@ -1466,11 +1694,18 @@ impl WaylandCompositor {
     /// lookups only run when the class actually changes, which is essentially
     /// only at window map time.
     pub(crate) fn set_window_class(&mut self, window_id: u64, class_name: &str) {
-        // Fast path: bail before any rule lookups if nothing changed.
-        match self.windows.get(&window_id) {
-            Some(win) if win.class_name == class_name => return,
-            None => return,
-            _ => {}
+        // Fast path: bail before any rule lookups if neither the live entry nor
+        // its detached minimized metadata needs an update.
+        let live_changed = self
+            .windows
+            .get(&window_id)
+            .is_some_and(|window| window.class_name != class_name);
+        let metadata_changed = self
+            .minimized_window_metadata
+            .get(&window_id)
+            .is_some_and(|metadata| metadata.class_name != class_name);
+        if !live_changed && !metadata_changed {
+            return;
         }
 
         let frosted = self.lookup_frosted_glass_rule(class_name);
@@ -1489,6 +1724,16 @@ impl WaylandCompositor {
             }
             self.subpixel_mgr.register_window(window_id, class_name);
             self.needs_render = true;
+        }
+        if let Some(metadata) = self.minimized_window_metadata.get_mut(&window_id) {
+            metadata.class_name = class_name.to_string();
+            metadata.is_frosted = frosted.is_some();
+            metadata.frosted_strength = frosted.unwrap_or(0.0);
+            metadata.opacity_override = opacity_override;
+            metadata.corner_radius_override = corner_radius_override;
+            if let Some(s) = scale {
+                metadata.scale = s;
+            }
         }
     }
 
@@ -1611,6 +1856,7 @@ mod tests {
         XDG_POPUP_WINDOW_ID_PREFIX, clear_immediate_restore_collections,
         collect_absent_auxiliary_window_ids, disabled_genie_action, is_auxiliary_window_id,
         mouse_position_requires_render, postprocess_is_active, retirement_uses_genie,
+        should_request_static_minimized_capture,
     };
     use crate::backend::compositor_common::genie::GenieDirection;
     use std::collections::{HashMap, HashSet};
@@ -1741,6 +1987,31 @@ mod tests {
         assert!(retirement_uses_genie(
             WindowRetirement::ExplicitlyMinimized,
             true
+        ));
+    }
+
+    #[test]
+    fn eviction_then_hover_arms_exactly_one_static_recapture() {
+        assert!(should_request_static_minimized_capture(
+            true, true, false, false, false, false
+        ));
+        assert!(!should_request_static_minimized_capture(
+            true, true, false, false, false, true
+        ));
+        assert!(!should_request_static_minimized_capture(
+            true, true, true, false, false, false
+        ));
+        assert!(!should_request_static_minimized_capture(
+            true, true, false, true, false, false
+        ));
+        assert!(!should_request_static_minimized_capture(
+            false, true, false, false, false, false
+        ));
+        assert!(!should_request_static_minimized_capture(
+            true, false, false, false, false, false
+        ));
+        assert!(!should_request_static_minimized_capture(
+            true, true, false, false, true, false
         ));
     }
 

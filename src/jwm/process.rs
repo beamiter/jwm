@@ -198,7 +198,13 @@ impl Jwm {
         Ok(())
     }
 
-    pub(super) fn reap_zombies(&mut self) {
+    /// Reap exited children without racing the `Child` handles owned by bars.
+    ///
+    /// Managed bars are removed here, but their compositor cleanup and retry
+    /// policy need a backend. Return those failures to the event dispatcher so
+    /// SIGCHLD follows the same teardown path as the periodic supervisor.
+    pub(super) fn reap_zombies(&mut self) -> Vec<(i32, String)> {
+        let mut failed_bars = Vec::new();
         // 回收已退出的子进程。
         //
         // 关键:状态栏(secondary_bars)进程由 `std::process::Child` 句柄拥有,关闭路径
@@ -226,29 +232,45 @@ impl Jwm {
             if let Some(key) = bar_key {
                 // 通过 Child 句柄回收(内部 waitpid(pid)),Rust 会缓存退出状态,
                 // 使关闭路径的 try_wait() 拿到正确结果而非 ECHILD。
-                if let Some(bar) = self.secondary_bars.get_mut(&key) {
+                let reason = if let Some(bar) = self.secondary_bars.get_mut(&key) {
                     match bar.child.try_wait() {
-                        Ok(Some(status)) => info!("Status bar child {} reaped: {:?}", raw, status),
-                        _ => {
+                        Ok(Some(status)) => {
+                            info!("Status bar child {} reaped: {:?}", raw, status);
+                            format!("exited: {status}")
+                        }
+                        Ok(None) => {
                             // 兜底:句柄回收异常时仍消费掉该僵尸,避免死循环。
                             let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                            "SIGCHLD reported an exited bar but Child still appeared live"
+                                .to_owned()
+                        }
+                        Err(error) => {
+                            let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                            format!("try_wait after SIGCHLD failed: {error}")
                         }
                     }
-                }
+                } else {
+                    let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+                    "SIGCHLD bar bookkeeping disappeared before reap".to_owned()
+                };
                 // 该 bar 已退出,从表中移除:既避免向已死进程的 shm 写状态,
                 // 也防止关闭路径按已被内核复用的 PID 误发信号。
                 self.secondary_bars.remove(&key);
+                failed_bars.push((key, reason));
             } else {
                 match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
                     Ok(WaitStatus::Exited(p, status)) => {
+                        self.remove_exited_pending_scratchpad(raw);
                         info!("Child process {} exited with status {}", p, status);
                     }
                     Ok(WaitStatus::Signaled(p, sig, _)) => {
+                        self.remove_exited_pending_scratchpad(raw);
                         info!("Child process {} killed by signal {:?}", p, sig);
                     }
                     _ => {}
                 }
             }
         }
+        failed_bars
     }
 }
