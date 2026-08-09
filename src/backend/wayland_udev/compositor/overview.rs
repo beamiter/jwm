@@ -905,12 +905,10 @@ impl WaylandCompositor {
             self.overview_rotation = effective_target;
         }
 
-        // Fade in/out
-        let target_opacity = if self.overview_active { 1.0 } else { 0.0 };
-        let opacity_blend = 1.0 - (-6.0 * dt).exp();
-        self.overview_opacity += (target_opacity - self.overview_opacity) * opacity_blend;
-
-        if self.overview_opacity > 0.001 || self.overview_active {
+        // Opacity is advanced once by tick_overview; keep this routine solely
+        // responsible for prism rotation so activation speed is independent
+        // of how many overview sub-effects are enabled.
+        if (effective_target - self.overview_rotation).abs() >= 0.001 {
             self.needs_render = true;
         }
     }

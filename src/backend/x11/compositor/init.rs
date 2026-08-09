@@ -1136,6 +1136,7 @@ impl<C: CompositorConnection> Compositor<C> {
             frosted_glass_rules: behavior.frosted_glass_rules.clone(),
             frosted_glass_strength: behavior.frosted_glass_strength,
             // Overview
+            overview_enabled: behavior.overview_enabled,
             overview_active: false,
             overview_windows: Vec::new(),
             overview_opacity: 0.0,

@@ -3327,12 +3327,14 @@ impl<C: CompositorConnection> Compositor<C> {
         // Tick particle and motion-trail lifetimes before the unchanged-frame
         // gate so their state cannot get stuck behind that optimization.
         let particles_active = self.tick_particles(effect_dt);
-        self.effect_tick_clock
-            .finish_frame(fades_active || particles_active);
         let motion_trails_active = self.tick_motion_trails();
-        let tilt_pending = self.window_tilt
-            && ((self.tilt_current_x - self.tilt_target_x).abs() > 0.0001
-                || (self.tilt_current_y - self.tilt_target_y).abs() > 0.0001);
+        let tilt_pending = super::effects::tilt_animation_pending(
+            self.window_tilt,
+            self.tilt_current_x,
+            self.tilt_current_y,
+            self.tilt_target_x,
+            self.tilt_target_y,
+        );
         let attention_active =
             self.attention_animation && self.windows.values().any(|wt| wt.is_urgent);
         // A rotating gradient border needs continuous frames while a border
@@ -5219,9 +5221,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // === Pass 2b: Genie minimize animations ===
-        if !self.genie_active.is_empty() {
+        let genie_frame_sample_time = (!self.genie_active.is_empty()).then(std::time::Instant::now);
+        if let Some(now) = genie_frame_sample_time {
             let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
-            let now = std::time::Instant::now();
             unsafe {
                 self.gl.use_program(Some(self.genie_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -5419,11 +5421,13 @@ impl<C: CompositorConnection> Compositor<C> {
         // Tick tilt after the render loop has set tilt_target from the focused window.
         // If no focused window set tilt_target this frame, it keeps 0 from the reset
         // at the start of the loop (see the tilt branch which sets tilt_target_x/y).
-        {
-            let tilt_animating = self.tick_tilt(effect_dt);
-            if tilt_animating {
-                self.needs_render = true;
-            }
+        let tilt_animating = self.tick_tilt(effect_dt);
+        self.effect_tick_clock.finish_frame(
+            std::time::Instant::now(),
+            fades_active || particles_active || tilt_animating,
+        );
+        if tilt_animating {
+            self.needs_render = true;
         }
 
         // === Always update frame stats (decoupled from HUD rendering) ===
@@ -6165,6 +6169,14 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.buffer_age_damage_history.record(frame_damage);
         self.waterlily_layer_dirty = false;
+
+        // Genie completion owns native texture teardown/cache transfer. Do it
+        // only after the exact terminal mesh sampled above has reached the
+        // front buffer; an early return or failed swap keeps the owner intact
+        // for a retry instead of deleting an animation before it is visible.
+        if let Some(frame_sample_time) = genie_frame_sample_time {
+            self.finish_genie_frame(frame_sample_time);
+        }
 
         // Schedule re-render if fades or transition are still in progress
         if fades_active

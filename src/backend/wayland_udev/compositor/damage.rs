@@ -46,6 +46,11 @@ fn overview_animation_pending(active: bool, opacity: f32, rotation: f32, target:
                 || angular_distance(rotation, target) > 0.001))
 }
 
+fn peek_animation_pending(active: bool, opacity: f32) -> bool {
+    let target_opacity = if active { 1.0 } else { 0.0 };
+    !opacity.is_finite() || (target_opacity - opacity).abs() > 0.0001
+}
+
 /// Simple damage tracking for the Wayland compositor.
 /// Tracks whether a redraw is needed based on scene changes.
 impl WaylandCompositor {
@@ -69,6 +74,7 @@ impl WaylandCompositor {
             || self.expose_active
             || !self.expose_entries.is_empty()
             || self.peek_active
+            || self.peek_opacity > 0.0
             || (self.window_tabs_enabled && !self.window_groups.is_empty())
             || !self.particle_systems.is_empty()
             || (self.edge_glow_enabled
@@ -206,7 +212,7 @@ impl WaylandCompositor {
         if self.snap_preview.is_some() || self.snap_preview_opacity > EPSILON {
             return Some("snap preview requires composition");
         }
-        if self.peek_active {
+        if self.peek_active || self.peek_opacity > EPSILON {
             return Some("peek mode requires composition");
         }
         if !self.toast_stack.is_empty() {
@@ -364,11 +370,14 @@ impl WaylandCompositor {
         ) {
             return true;
         }
-        // Snap preview animation
-        if self.snap_preview.is_some() && self.snap_preview_opacity < 1.0 {
+        if peek_animation_pending(self.peek_active, self.peek_opacity) {
             return true;
         }
-        if self.snap_preview.is_none() && self.snap_preview_opacity > 0.0 {
+        // Snap preview animation
+        if self.snap_preview_target_visible && self.snap_preview_opacity < 1.0 {
+            return true;
+        }
+        if !self.snap_preview_target_visible && self.snap_preview_opacity > 0.0 {
             return true;
         }
         // Wallpaper crossfade in progress
@@ -417,7 +426,8 @@ mod tests {
     use super::{
         CompositorRect, attention_requires_composition, border_requires_composition,
         expose_animation_pending, inactive_window_styling_requires_composition,
-        minimized_dock_requires_composition, overview_animation_pending, rect_animation_pending,
+        minimized_dock_requires_composition, overview_animation_pending, peek_animation_pending,
+        rect_animation_pending,
     };
 
     #[test]
@@ -553,5 +563,14 @@ mod tests {
             [10.0, 20.0, 300.0, 200.0],
             [10.25, 20.0, 300.0, 200.0],
         ));
+    }
+
+    #[test]
+    fn peek_animation_liveness_covers_activation_and_release() {
+        assert!(!peek_animation_pending(false, 0.0));
+        assert!(!peek_animation_pending(true, 1.0));
+        assert!(peek_animation_pending(true, 0.0));
+        assert!(peek_animation_pending(false, 1.0));
+        assert!(peek_animation_pending(false, f32::NAN));
     }
 }

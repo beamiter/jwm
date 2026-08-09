@@ -54,7 +54,7 @@ use crate::backend::xcb::compositor_protocol::{
 use crate::backend::xcb::present::load_present_manager as load_xcb_present_manager;
 use calloop::signals::{Signal, Signals};
 use calloop::{
-    EventLoop,
+    EventLoop, EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory,
     timer::{TimeoutAction, Timer},
 };
 use std::any::Any;
@@ -826,6 +826,167 @@ struct XcbLoopData<'a> {
     backend: &'a mut XcbBackend,
     handler: &'a mut dyn EventHandler,
     should_exit: bool,
+}
+
+/// Bound the amount of XCB work performed in one calloop dispatch.  libxcb may
+/// move an arbitrarily large socket backlog into its userspace queue while
+/// returning a single event, so draining until `None` can starve timers and
+/// rendering even though the source itself is non-blocking.
+const XCB_EVENT_BATCH_LIMIT: usize = 64;
+
+enum XcbBatchPoll<T, E> {
+    Event(T),
+    Empty,
+    Skipped,
+    Fatal(E),
+}
+
+/// Collect at most one fair dispatch batch.  Every poll attempt consumes the
+/// budget, including ignored protocol errors, so a stream of malformed events
+/// cannot turn this into an unbounded loop either.  Any prefetched overflow is
+/// kept in order for the next synthetic wakeup.
+fn collect_xcb_event_batch<T, E>(
+    prefetched: &mut Vec<T>,
+    mut poll: impl FnMut() -> XcbBatchPoll<T, E>,
+) -> Result<Vec<T>, E> {
+    let mut events = Vec::with_capacity(XCB_EVENT_BATCH_LIMIT);
+    let prefetched_count = prefetched.len().min(XCB_EVENT_BATCH_LIMIT);
+    events.extend(prefetched.drain(..prefetched_count));
+
+    for _ in prefetched_count..XCB_EVENT_BATCH_LIMIT {
+        match poll() {
+            XcbBatchPoll::Event(event) => events.push(event),
+            XcbBatchPoll::Empty => break,
+            XcbBatchPoll::Skipped => {}
+            XcbBatchPoll::Fatal(error) => return Err(error),
+        }
+    }
+
+    Ok(events)
+}
+
+/// calloop source for XCB's socket plus its userspace event queue.
+///
+/// A synchronous reply can consume a ClientMessage from the socket and leave
+/// it in libxcb's queue.  At that point the fd is no longer readable, so a
+/// generic fd source can sleep indefinitely even though an event is ready.
+struct XcbEventSource {
+    conn: Arc<xcb::Connection>,
+    prefetched: Vec<xcb::Event>,
+    wake_token: Option<Token>,
+}
+
+impl XcbEventSource {
+    fn new(conn: Arc<xcb::Connection>) -> Self {
+        Self {
+            conn,
+            prefetched: Vec::new(),
+            wake_token: None,
+        }
+    }
+
+    fn prefetch_queued_before_sleep(&mut self) -> XcbResult<bool> {
+        if !self.prefetched.is_empty() {
+            return Ok(true);
+        }
+
+        for _ in 0..XCB_EVENT_BATCH_LIMIT {
+            match self.conn.poll_for_queued_event() {
+                Ok(Some(event)) => {
+                    self.prefetched.push(event);
+                    return Ok(true);
+                }
+                Ok(None) => return Ok(false),
+                // Preserve the old event loop's handling of asynchronous X11
+                // protocol errors: log the error and continue draining rather
+                // than terminating the window manager.
+                Err(error) => log::error!("queued XCB event error (continuing): {error}"),
+            }
+        }
+
+        // The bounded scan only observed protocol errors.  Schedule one fair
+        // dispatch rather than continuing to spin here; process_events and the
+        // next before_sleep pass will resume the remaining libxcb queue.
+        Ok(true)
+    }
+}
+
+impl EventSource for XcbEventSource {
+    type Event = Vec<xcb::Event>;
+    type Metadata = ();
+    type Ret = ();
+    type Error = BackendError;
+
+    const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
+
+    fn process_events<F>(
+        &mut self,
+        _readiness: Readiness,
+        _token: Token,
+        mut callback: F,
+    ) -> Result<PostAction, Self::Error>
+    where
+        F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
+    {
+        let conn = &self.conn;
+        let events =
+            collect_xcb_event_batch(&mut self.prefetched, || match conn.poll_for_event() {
+                Ok(Some(event)) => XcbBatchPoll::Event(event),
+                Ok(None) => XcbBatchPoll::Empty,
+                Err(xcb::Error::Protocol(error)) => {
+                    log::error!("XCB event error (continuing): {error}");
+                    XcbBatchPoll::Skipped
+                }
+                Err(xcb::Error::Connection(error)) => XcbBatchPoll::Fatal(xcb_err(error)),
+            })?;
+        if !events.is_empty() {
+            callback(events, &mut ());
+        }
+        Ok(PostAction::Continue)
+    }
+
+    fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
+        if !self
+            .prefetch_queued_before_sleep()
+            .map_err(|error| calloop::Error::OtherError(Box::new(error)))?
+        {
+            return Ok(None);
+        }
+
+        let token = self.wake_token.ok_or(calloop::Error::InvalidToken)?;
+        Ok(Some((Readiness::EMPTY, token)))
+    }
+
+    fn register(
+        &mut self,
+        poll: &mut Poll,
+        token_factory: &mut TokenFactory,
+    ) -> calloop::Result<()> {
+        let token = token_factory.token();
+        self.wake_token = Some(token);
+        let fd = unsafe { BorrowedFd::borrow_raw(self.conn.as_raw_fd()) };
+        // SAFETY: the Arc-owned XCB connection (and therefore its fd) outlives
+        // this event source's registration with calloop.
+        unsafe { poll.register(fd, Interest::READ, Mode::Level, token) }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &mut Poll,
+        token_factory: &mut TokenFactory,
+    ) -> calloop::Result<()> {
+        let token = token_factory.token();
+        self.wake_token = Some(token);
+        let fd = unsafe { BorrowedFd::borrow_raw(self.conn.as_raw_fd()) };
+        poll.reregister(fd, Interest::READ, Mode::Level, token)
+    }
+
+    fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
+        let fd = unsafe { BorrowedFd::borrow_raw(self.conn.as_raw_fd()) };
+        poll.unregister(fd)?;
+        self.wake_token = None;
+        Ok(())
+    }
 }
 
 /// Expose every raw ConfigureNotify to XComposite while retaining only the
@@ -2351,48 +2512,31 @@ impl Backend for XcbBackend {
         }
         let handle = event_loop.handle();
 
-        let fd = self.conn.as_raw_fd();
         handle
-            .insert_source(
-                calloop::generic::Generic::new(
-                    unsafe { BorrowedFd::borrow_raw(fd) },
-                    calloop::Interest::READ,
-                    calloop::Mode::Level,
-                ),
-                |_, _, data| {
-                    let mut pending_motion = None;
-                    let mut pending_configure = None;
-                    loop {
-                        let event = match data.backend.conn.poll_for_event() {
-                            Ok(Some(event)) => event,
-                            Ok(None) => break,
-                            Err(err) => {
-                                log::error!("XCB event error (continuing): {err}");
-                                continue;
-                            }
-                        };
-                        if let Some(mapped) = data.backend.map_event(event) {
-                            data.dispatch_backend_event(
-                                mapped,
-                                &mut pending_motion,
-                                &mut pending_configure,
-                                "XCB event",
-                            );
-                        }
-                        while let Some(mapped) = data.backend.pending.pop_front() {
-                            data.dispatch_backend_event(
-                                mapped,
-                                &mut pending_motion,
-                                &mut pending_configure,
-                                "queued XCB event",
-                            );
-                        }
+            .insert_source(XcbEventSource::new(self.conn.clone()), |events, _, data| {
+                let mut pending_motion = None;
+                let mut pending_configure = None;
+                for event in events {
+                    if let Some(mapped) = data.backend.map_event(event) {
+                        data.dispatch_backend_event(
+                            mapped,
+                            &mut pending_motion,
+                            &mut pending_configure,
+                            "XCB event",
+                        );
                     }
-                    data.flush_pending_motion(&mut pending_motion, "XCB event");
-                    data.flush_pending_configure(&mut pending_configure, "XCB event");
-                    Ok(calloop::PostAction::Continue)
-                },
-            )
+                    while let Some(mapped) = data.backend.pending.pop_front() {
+                        data.dispatch_backend_event(
+                            mapped,
+                            &mut pending_motion,
+                            &mut pending_configure,
+                            "queued XCB event",
+                        );
+                    }
+                }
+                data.flush_pending_motion(&mut pending_motion, "XCB event");
+                data.flush_pending_configure(&mut pending_configure, "XCB event");
+            })
             .map_err(|e| BackendError::Message(format!("Failed to insert XCB source: {e}")))?;
 
         let signals = Signals::new(&[Signal::SIGCHLD])?;
@@ -5299,8 +5443,8 @@ where
 #[cfg(test)]
 mod parity_tests {
     use super::{
-        XcbIdRegistry, decode_net_wm_state_flag, decode_wm_state_property,
-        observe_and_coalesce_configure,
+        XCB_EVENT_BATCH_LIMIT, XcbBatchPoll, XcbIdRegistry, collect_xcb_event_batch,
+        decode_net_wm_state_flag, decode_wm_state_property, observe_and_coalesce_configure,
     };
     use crate::backend::api::BackendEvent;
     use crate::backend::common_define::WindowId;
@@ -6374,6 +6518,118 @@ mod parity_tests {
                 && body.contains("self.deliver_backend_event_after_compositor(event, context)"),
             "every raw ConfigureNotify must reach the compositor before WM-side coalescing"
         );
+    }
+
+    #[test]
+    fn both_x11_event_sources_wake_for_client_library_queues_before_sleep() {
+        let x11rb_source =
+            impl_body_after(X11RB_BACKEND_SRC, "impl EventSource for X11EventSource");
+        assert!(
+            x11rb_source.contains("const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true")
+                && x11rb_source.contains("fn before_sleep")
+                && x11rb_source.contains("prefetch_before_sleep()")
+                && x11rb_source.contains("Readiness::EMPTY")
+                && x11rb_source.contains("self.wake_token"),
+            "x11rb must synthesize a calloop readiness event when its userspace queue is non-empty"
+        );
+
+        let x11rb_poll = impl_body_after(X11RB_BACKEND_SRC, "fn poll_event");
+        assert!(
+            x11rb_poll.contains("self.pending.pop_front()")
+                && x11rb_poll.contains("poll_mapped_event_with_budget"),
+            "x11rb must preserve pending order and use bounded raw polling"
+        );
+        let x11rb_bounded_poll =
+            impl_body_after(X11RB_BACKEND_SRC, "fn poll_mapped_event_with_budget");
+        assert!(
+            x11rb_bounded_poll.contains("while *raw_attempts_remaining > 0")
+                && x11rb_bounded_poll.contains("X11RawPoll::Ignored")
+                && x11rb_bounded_poll.contains("X11BoundedPoll::BudgetExhausted"),
+            "x11rb ignored raw events must consume a finite fairness budget"
+        );
+        let x11rb_prefetch = impl_body_after(X11RB_BACKEND_SRC, "fn prefetch_before_sleep");
+        assert!(
+            x11rb_prefetch.contains("self.pending.push_front(event)")
+                && x11rb_prefetch.contains("X11BoundedPoll::BudgetExhausted => Ok(true)"),
+            "x11rb must preserve two-atom ordering and synthesize a continuation after raw-budget exhaustion"
+        );
+        let x11rb_process = impl_body_after(X11RB_BACKEND_SRC, "fn process_events");
+        assert!(
+            x11rb_process.contains("for _ in 0..X11_EVENT_DISPATCH_LIMIT")
+                && x11rb_process.contains("raw_attempts_remaining"),
+            "x11rb mapped-event dispatch must also be bounded"
+        );
+
+        let xcb_source = impl_body_after(XCB_BACKEND_SRC, "impl EventSource for XcbEventSource");
+        assert!(
+            xcb_source.contains("const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true")
+                && xcb_source.contains("fn before_sleep")
+                && xcb_source.contains("prefetch_queued_before_sleep()")
+                && xcb_source.contains("Readiness::EMPTY")
+                && xcb_source.contains("self.wake_token"),
+            "XCB must synthesize a calloop readiness event when libxcb's queue is non-empty"
+        );
+        let xcb_prefetch = impl_body_after(XCB_BACKEND_SRC, "fn prefetch_queued_before_sleep");
+        assert!(
+            xcb_prefetch.contains("self.conn.poll_for_queued_event()")
+                && xcb_prefetch.contains("self.prefetched.push(event)"),
+            "XCB before_sleep must poll and preserve events already buffered by libxcb"
+        );
+        let xcb_process = impl_body_after(XCB_BACKEND_SRC, "fn process_events");
+        assert!(
+            xcb_process.contains("collect_xcb_event_batch(&mut self.prefetched")
+                && xcb_process.contains("callback(events, &mut ())"),
+            "XCB dispatch must use the bounded batch while preserving its callback contract"
+        );
+        // Split the contract string so this assertion cannot satisfy itself
+        // through include_str! when the production constructor is removed.
+        let queue_aware_ctor = ["XcbEvent", "Source::new(self.conn.clone())"].concat();
+        assert!(
+            XCB_BACKEND_SRC.matches(&queue_aware_ctor).count() == 1,
+            "the XCB backend must use its queue-aware source instead of a raw-fd-only Generic source"
+        );
+    }
+
+    #[test]
+    fn xcb_event_batches_bound_continuous_events_and_retryable_errors() {
+        let mut prefetched = vec![0_usize];
+        let mut poll_attempts = 0_usize;
+        let batch: Vec<usize> = collect_xcb_event_batch(&mut prefetched, || {
+            poll_attempts += 1;
+            if poll_attempts.is_multiple_of(5) {
+                XcbBatchPoll::<usize, ()>::Skipped
+            } else {
+                XcbBatchPoll::<usize, ()>::Event(poll_attempts)
+            }
+        })
+        .expect("the synthetic poll stream has no fatal error");
+
+        assert_eq!(poll_attempts, XCB_EVENT_BATCH_LIMIT - 1);
+        assert!(batch.len() <= XCB_EVENT_BATCH_LIMIT);
+        assert_eq!(batch.first(), Some(&0));
+        assert!(prefetched.is_empty());
+    }
+
+    #[test]
+    fn xcb_event_batches_preserve_prefetched_overflow_for_the_next_wakeup() {
+        let mut prefetched = (0..XCB_EVENT_BATCH_LIMIT + 3).collect::<Vec<_>>();
+        let mut poll_attempts = 0_usize;
+        let batch: Vec<usize> = collect_xcb_event_batch(&mut prefetched, || {
+            poll_attempts += 1;
+            XcbBatchPoll::<usize, ()>::Empty
+        })
+        .expect("the synthetic poll stream has no fatal error");
+
+        assert_eq!(batch, (0..XCB_EVENT_BATCH_LIMIT).collect::<Vec<_>>());
+        assert_eq!(
+            prefetched,
+            vec![
+                XCB_EVENT_BATCH_LIMIT,
+                XCB_EVENT_BATCH_LIMIT + 1,
+                XCB_EVENT_BATCH_LIMIT + 2
+            ]
+        );
+        assert_eq!(poll_attempts, 0);
     }
 
     #[test]

@@ -378,6 +378,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let disabling_wallpaper_crossfade =
             self.wallpaper_crossfade && !behavior.wallpaper_crossfade;
         let disabling_edge_glow = self.edge_glow && !behavior.edge_glow;
+        let disabling_overview = self.overview_enabled && !behavior.overview_enabled;
         let disabling_expose = self.expose_enabled && !behavior.expose_enabled;
         let disabling_snap_preview = self.snap_preview_enabled && !behavior.snap_preview;
         let disabling_peek = self.peek_enabled && !behavior.peek_enabled;
@@ -594,6 +595,9 @@ impl<C: CompositorConnection> Compositor<C> {
         self.frosted_glass_rules
             .clone_from(&behavior.frosted_glass_rules);
         self.frosted_glass_strength = behavior.frosted_glass_strength;
+
+        // --- Overview ---
+        self.overview_enabled = behavior.overview_enabled;
 
         // --- Wobbly windows ---
         self.wobbly_windows = behavior.wobbly_windows;
@@ -834,6 +838,9 @@ impl<C: CompositorConnection> Compositor<C> {
         if disabling_edge_glow {
             self.edge_glow_active = false;
             self.edge_glow_suppressed = false;
+        }
+        if disabling_overview {
+            self.clear_overview_mode_immediate();
         }
         if disabling_expose {
             self.expose_active = false;

@@ -4,6 +4,12 @@ use crate::backend::compositor_common::window_tabs;
 use crate::backend::compositor_font;
 use smithay::backend::renderer::gles::ffi;
 
+fn snap_preview_colors(color: [f32; 4], opacity: f32) -> ([f32; 4], [f32; 4]) {
+    let [r, g, b, a] = color;
+    let alpha = a * opacity.clamp(0.0, 1.0);
+    ([r, g, b, alpha], [r * 1.5, g * 1.5, b * 1.5, alpha * 2.0])
+}
+
 impl WaylandCompositor {
     /// Render the expose (mission control) mode overlay.
     /// Shows all windows arranged in a grid layout with animation.
@@ -188,7 +194,8 @@ impl WaylandCompositor {
             return;
         }
 
-        let opacity = self.snap_preview_opacity;
+        let (fill_color, outline_color) =
+            snap_preview_colors(self.snap_preview_color, self.snap_preview_opacity);
 
         unsafe {
             self.bind_quad_vao(gl);
@@ -204,10 +211,10 @@ impl WaylandCompositor {
             gl.Uniform4f(self.border_uniforms.rect, x, y, w, h);
             gl.Uniform4f(
                 self.border_uniforms.border_color,
-                0.3,
-                0.5,
-                0.9,
-                0.3 * opacity,
+                fill_color[0],
+                fill_color[1],
+                fill_color[2],
+                fill_color[3],
             );
             gl.Uniform2f(self.border_uniforms.size, w, h);
             gl.Uniform1f(self.border_uniforms.radius, 8.0);
@@ -219,10 +226,10 @@ impl WaylandCompositor {
             // Draw border outline (2px solid)
             gl.Uniform4f(
                 self.border_uniforms.border_color,
-                0.4,
-                0.6,
-                1.0,
-                0.8 * opacity,
+                outline_color[0],
+                outline_color[1],
+                outline_color[2],
+                outline_color[3],
             );
             gl.Uniform1f(self.border_uniforms.border_width, 2.0);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -295,7 +302,7 @@ impl WaylandCompositor {
         focused: Option<u64>,
         scene: &[(u64, i32, i32, u32, u32)],
     ) {
-        if !self.peek_active {
+        if self.peek_opacity <= 0.0 {
             return;
         }
 
@@ -328,7 +335,7 @@ impl WaylandCompositor {
                 gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
             }
             if opacity_loc >= 0 {
-                gl.Uniform1f(opacity_loc, 0.7);
+                gl.Uniform1f(opacity_loc, 0.7 * self.peek_opacity.clamp(0.0, 1.0));
             }
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
@@ -627,5 +634,21 @@ impl WaylandCompositor {
         if changed {
             self.needs_render = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snap_preview_colors;
+
+    #[test]
+    fn snap_preview_uses_configured_rgba_and_derives_a_brighter_outline() {
+        let (fill, outline) = snap_preview_colors([0.2, 0.4, 0.6, 0.3], 0.5);
+        assert_eq!(fill, [0.2, 0.4, 0.6, 0.15]);
+        assert_eq!(outline, [0.3, 0.6, 0.90000004, 0.3]);
+
+        let (hidden, hidden_outline) = snap_preview_colors([0.2, 0.4, 0.6, 0.3], -1.0);
+        assert_eq!(hidden[3], 0.0);
+        assert_eq!(hidden_outline[3], 0.0);
     }
 }

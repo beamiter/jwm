@@ -2403,6 +2403,7 @@ mod event_source {
     use std::os::unix::io::{AsRawFd, BorrowedFd};
     use std::sync::Arc;
     use x11rb::connection::Connection;
+    use x11rb::errors::ConnectionError;
     use x11rb::protocol::{Event as XEvent, xproto};
     use x11rb::rust_connection::RustConnection;
 
@@ -2421,6 +2422,46 @@ mod event_source {
 
     use calloop::{EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory};
 
+    /// Bound both raw x11rb polling and mapped-event dispatch so a continuous
+    /// producer cannot monopolize one calloop iteration.  A level-readable fd
+    /// or before_sleep's synthetic readiness resumes the remaining queue.
+    const X11_EVENT_RAW_POLL_LIMIT: usize = 64;
+    const X11_EVENT_DISPATCH_LIMIT: usize = 64;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum X11RawPoll<T> {
+        Event(T),
+        Ignored,
+        Empty,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum X11BoundedPoll<T> {
+        Event(T),
+        Empty,
+        BudgetExhausted,
+    }
+
+    /// Poll raw events until one maps, the queue is empty, or this dispatch's
+    /// raw-attempt budget is spent.  Ignored events consume budget as well;
+    /// otherwise an endless stream of unmapped extension events can starve
+    /// timers just as effectively as mapped events can.
+    fn poll_mapped_event_with_budget<T, E>(
+        raw_attempts_remaining: &mut usize,
+        mut poll_raw: impl FnMut() -> Result<X11RawPoll<T>, E>,
+    ) -> Result<X11BoundedPoll<T>, E> {
+        while *raw_attempts_remaining > 0 {
+            *raw_attempts_remaining -= 1;
+            match poll_raw()? {
+                X11RawPoll::Event(event) => return Ok(X11BoundedPoll::Event(event)),
+                X11RawPoll::Ignored => {}
+                X11RawPoll::Empty => return Ok(X11BoundedPoll::Empty),
+            }
+        }
+
+        Ok(X11BoundedPoll::BudgetExhausted)
+    }
+
     pub(super) struct X11EventSource {
         conn: Arc<RustConnection>,
         atoms: Atoms,
@@ -2431,6 +2472,9 @@ mod event_source {
         // Events produced beyond the single one returned by map_event (e.g. a
         // _NET_WM_STATE ClientMessage carrying two state atoms). Drained first.
         pending: VecDeque<BackendEvent>,
+        // Token used to turn an event already buffered inside x11rb into a
+        // synthetic calloop readiness notification before the loop sleeps.
+        wake_token: Option<Token>,
     }
 
     impl X11EventSource {
@@ -2450,6 +2494,7 @@ mod event_source {
                 ids,
                 managed_unmaps,
                 pending: VecDeque::new(),
+                wake_token: None,
             }
         }
 
@@ -2805,14 +2850,45 @@ mod event_source {
             }
         }
 
-        pub(super) fn poll_event(
+        fn poll_event(
             &mut self,
-        ) -> Result<Option<BackendEvent>, Box<dyn std::error::Error>> {
+            raw_attempts_remaining: &mut usize,
+        ) -> Result<X11BoundedPoll<BackendEvent>, ConnectionError> {
             if let Some(ev) = self.pending.pop_front() {
-                return Ok(Some(ev));
+                return Ok(X11BoundedPoll::Event(ev));
             }
-            let ev = self.conn.poll_for_event()?;
-            Ok(ev.and_then(|e| self.map_event(e)))
+
+            poll_mapped_event_with_budget(raw_attempts_remaining, || {
+                let Some(event) = self.conn.poll_for_event()? else {
+                    return Ok(X11RawPoll::Empty);
+                };
+                Ok(match self.map_event(event) {
+                    Some(event) => X11RawPoll::Event(event),
+                    None => X11RawPoll::Ignored,
+                })
+            })
+        }
+
+        fn prefetch_before_sleep(&mut self) -> Result<bool, ConnectionError> {
+            if !self.pending.is_empty() {
+                return Ok(true);
+            }
+
+            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
+            match self.poll_event(&mut raw_attempts_remaining)? {
+                X11BoundedPoll::Event(event) => {
+                    // map_event may have appended the second half of a two-atom
+                    // _NET_WM_STATE request.  Put the first event back at the
+                    // front so dispatch order remains identical to socket reads.
+                    self.pending.push_front(event);
+                    Ok(true)
+                }
+                X11BoundedPoll::Empty => Ok(false),
+                // We consumed only ignored raw events up to the fairness limit.
+                // Ask calloop for an immediate bounded continuation rather than
+                // either spinning here or sleeping on an already-drained fd.
+                X11BoundedPoll::BudgetExhausted => Ok(true),
+            }
         }
     }
 
@@ -2821,6 +2897,8 @@ mod event_source {
         type Metadata = ();
         type Ret = ();
         type Error = BackendError;
+
+        const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
 
         fn process_events<F>(
             &mut self,
@@ -2833,10 +2911,11 @@ mod event_source {
         {
             // Batch events and coalesce motion events for better performance
             let mut pending_motion: Option<BackendEvent> = None;
+            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
 
-            loop {
-                match self.poll_event() {
-                    Ok(Some(event)) => {
+            for _ in 0..X11_EVENT_DISPATCH_LIMIT {
+                match self.poll_event(&mut raw_attempts_remaining) {
+                    Ok(X11BoundedPoll::Event(event)) => {
                         match &event {
                             BackendEvent::MotionNotify { target, .. } => {
                                 // Coalesce motion events - only keep the latest one.
@@ -2867,13 +2946,7 @@ mod event_source {
                             }
                         }
                     }
-                    Ok(None) => {
-                        // No more events - flush any pending motion event
-                        if let Some(m) = pending_motion.take() {
-                            callback(m, &mut ());
-                        }
-                        break;
-                    }
+                    Ok(X11BoundedPoll::Empty | X11BoundedPoll::BudgetExhausted) => break,
                     Err(e) => {
                         log::error!("X11 poll error: {:?}", e);
                         let err_msg = format!("X11 poll error: {}", e);
@@ -2884,7 +2957,24 @@ mod event_source {
                     }
                 }
             }
+            // Flush coalesced motion both when the queue empties and when a
+            // fairness budget ends the batch.
+            if let Some(m) = pending_motion.take() {
+                callback(m, &mut ());
+            }
             Ok(PostAction::Continue)
+        }
+
+        fn before_sleep(&mut self) -> calloop::Result<Option<(Readiness, Token)>> {
+            if !self
+                .prefetch_before_sleep()
+                .map_err(|error| calloop::Error::OtherError(Box::new(error)))?
+            {
+                return Ok(None);
+            }
+
+            let token = self.wake_token.ok_or(calloop::Error::InvalidToken)?;
+            Ok(Some((Readiness::EMPTY, token)))
         }
 
         fn register(
@@ -2893,9 +2983,11 @@ mod event_source {
             token_factory: &mut TokenFactory,
         ) -> calloop::Result<()> {
             let raw_fd = self.conn.stream().as_raw_fd();
+            let token = token_factory.token();
+            self.wake_token = Some(token);
             unsafe {
                 let fd = BorrowedFd::borrow_raw(raw_fd);
-                poll.register(fd, Interest::READ, Mode::Level, token_factory.token())
+                poll.register(fd, Interest::READ, Mode::Level, token)
             }
         }
 
@@ -2905,14 +2997,61 @@ mod event_source {
             token_factory: &mut TokenFactory,
         ) -> calloop::Result<()> {
             let raw_fd = self.conn.stream().as_raw_fd();
+            let token = token_factory.token();
+            self.wake_token = Some(token);
             let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-            poll.reregister(fd, Interest::READ, Mode::Level, token_factory.token())
+            poll.reregister(fd, Interest::READ, Mode::Level, token)
         }
 
         fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
             let raw_fd = self.conn.stream().as_raw_fd();
             let fd = unsafe { BorrowedFd::borrow_raw(raw_fd) };
-            poll.unregister(fd)
+            poll.unregister(fd)?;
+            self.wake_token = None;
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            X11_EVENT_RAW_POLL_LIMIT, X11BoundedPoll, X11RawPoll, poll_mapped_event_with_budget,
+        };
+        use std::collections::VecDeque;
+
+        #[test]
+        fn ignored_x11_events_consume_the_raw_fairness_budget() {
+            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
+            let mut poll_attempts = 0_usize;
+            let result: X11BoundedPoll<u32> =
+                poll_mapped_event_with_budget(&mut raw_attempts_remaining, || {
+                    poll_attempts += 1;
+                    Ok::<_, ()>(X11RawPoll::Ignored)
+                })
+                .expect("the synthetic raw stream has no connection error");
+
+            assert_eq!(result, X11BoundedPoll::BudgetExhausted);
+            assert_eq!(poll_attempts, X11_EVENT_RAW_POLL_LIMIT);
+            assert_eq!(raw_attempts_remaining, 0);
+        }
+
+        #[test]
+        fn bounded_x11_poll_stops_at_the_first_mapped_event_in_order() {
+            let mut raw_attempts_remaining = X11_EVENT_RAW_POLL_LIMIT;
+            let mut raw = VecDeque::from([
+                X11RawPoll::Ignored,
+                X11RawPoll::Ignored,
+                X11RawPoll::Event(7_u32),
+                X11RawPoll::Event(8_u32),
+            ]);
+            let result = poll_mapped_event_with_budget(&mut raw_attempts_remaining, || {
+                Ok::<_, ()>(raw.pop_front().unwrap_or(X11RawPoll::Empty))
+            })
+            .expect("the synthetic raw stream has no connection error");
+
+            assert_eq!(result, X11BoundedPoll::Event(7));
+            assert_eq!(raw_attempts_remaining, X11_EVENT_RAW_POLL_LIMIT - 3);
+            assert_eq!(raw, VecDeque::from([X11RawPoll::Event(8)]));
         }
     }
 }

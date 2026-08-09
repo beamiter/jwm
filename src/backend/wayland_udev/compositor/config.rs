@@ -48,6 +48,18 @@ fn collect_absent_auxiliary_window_ids(
         .extend(known_ids.filter(|id| is_auxiliary_window_id(*id) && !live_ids.contains(id)));
 }
 
+fn apply_expose_terminal_cleanup<Id>(
+    entries: &mut Vec<crate::backend::compositor_common::expose::ExposeEntry<Id>>,
+    clear_entries: bool,
+) -> bool {
+    if clear_entries {
+        entries.clear();
+        true
+    } else {
+        false
+    }
+}
+
 const fn should_request_static_minimized_capture(
     dock_addressable: bool,
     minimized: bool,
@@ -169,6 +181,10 @@ impl WaylandCompositor {
         let disabling_ripple = self.ripple_on_open_enabled && !b.ripple_on_open;
         let disabling_particles = self.particle_effects_enabled && !b.particle_effects;
         let disabling_tilt = self.window_tilt_enabled && !b.window_tilt;
+        let disabling_overview = self.overview_enabled && !b.overview_enabled;
+        let disabling_expose = self.expose_enabled && !b.expose_enabled;
+        let disabling_snap_preview = self.snap_preview_enabled && !b.snap_preview;
+        let disabling_peek = self.peek_enabled && !b.peek_enabled;
 
         // --- Static visual settings ---
         self.corner_radius = b.corner_radius;
@@ -225,6 +241,10 @@ impl WaylandCompositor {
         self.focus_highlight_enabled = b.focus_highlight;
         self.particle_effects_enabled = b.particle_effects;
         self.window_tilt_enabled = b.window_tilt;
+        self.overview_enabled = b.overview_enabled;
+        self.expose_enabled = b.expose_enabled;
+        self.snap_preview_enabled = b.snap_preview;
+        self.peek_enabled = b.peek_enabled;
 
         // --- Transition mode ---
         self.transition_mode = TransitionMode::from_name_or_none(b.transition_mode.as_str());
@@ -246,11 +266,11 @@ impl WaylandCompositor {
         self.border_gradient_speed = b.border_gradient_speed;
 
         // --- Fullscreen unredirect ---
-        // Note: the `fullscreen_unredirect` behavior flag is consumed directly
-        // in udev_kms.rs at the KMS direct-scanout eligibility check; no
-        // compositor field is needed here.
+        // KMS consumes both flags directly. Mirror their combined gate in the
+        // compositor-side diagnostic tracker so it cannot report an active
+        // eligibility session while the actual fast path is configured off.
         self.direct_scanout_mgr
-            .set_enabled(b.direct_scanout_enabled);
+            .set_enabled(b.direct_scanout_enabled && b.fullscreen_unredirect);
 
         // --- VRR ---
         // vrr_active is managed by update_vrr_state(), we just note config is read
@@ -298,7 +318,7 @@ impl WaylandCompositor {
         self.edge_glow_width = finite_clamp(b.edge_glow_width, 0.0, 512.0, 8.0);
         self.attention_color = b.attention_color;
         self.snap_preview_color = b.snap_preview_color;
-        self.snap_animation_duration_ms = b.snap_animation_duration_ms;
+        self.snap_animation_duration_ms = b.snap_animation_duration_ms.clamp(1, 30_000);
         self.peek_exclude.clone_from(&b.peek_exclude);
         self.expose_gap = finite_clamp(b.expose_gap, 0.0, 512.0, 20.0);
         self.particle_count = b
@@ -408,6 +428,18 @@ impl WaylandCompositor {
             self.tilt_y = 0.0;
             self.tilt_target_x = 0.0;
             self.tilt_target_y = 0.0;
+        }
+        if disabling_overview {
+            self.clear_overview_state_immediate();
+        }
+        if disabling_expose {
+            self.clear_expose_state_immediate();
+        }
+        if disabling_snap_preview {
+            self.clear_snap_preview_state_immediate();
+        }
+        if disabling_peek {
+            self.clear_peek_state_immediate();
         }
 
         self.needs_render = true;
@@ -607,37 +639,86 @@ impl WaylandCompositor {
         }
     }
 
+    fn clear_overview_state_immediate(&mut self) {
+        self.overview_active = false;
+        self.overview_opacity = 0.0;
+        self.overview_entries.clear();
+        self.overview_selection = None;
+        self.overview_rotation = 0.0;
+        self.overview_target_rotation = 0.0;
+        self.force_full_damage_next = true;
+    }
+
+    fn clear_expose_state_immediate(&mut self) {
+        self.expose_active = false;
+        self.expose_opacity = 0.0;
+        self.expose_entries.clear();
+        self.expose_start = None;
+        self.force_full_damage_next = true;
+    }
+
+    fn clear_snap_preview_state_immediate(&mut self) {
+        self.snap_preview = None;
+        self.snap_preview_target_visible = false;
+        self.snap_preview_opacity = 0.0;
+        self.force_full_damage_next = true;
+    }
+
+    fn clear_peek_state_immediate(&mut self) {
+        self.peek_active = false;
+        self.peek_opacity = 0.0;
+        self.peek_start = None;
+        self.force_full_damage_next = true;
+    }
+
     pub(crate) fn set_overview_mode(
         &mut self,
         active: bool,
         windows: &[(u64, f32, f32, f32, f32, bool, String)],
     ) {
-        self.overview_active = active;
-        self.overview_entries = windows
-            .iter()
-            .map(|(id, x, y, w, h, focused, title)| OverviewEntry {
-                window_id: *id,
-                x: *x,
-                y: *y,
-                w: *w,
-                h: *h,
-                focused: *focused,
-                title: title.clone(),
-            })
-            .collect();
-        self.overview_selection = if active {
-            self.overview_entries
+        if !self.overview_enabled {
+            self.clear_overview_state_immediate();
+            self.needs_render = true;
+            return;
+        }
+
+        if active {
+            if windows.is_empty() {
+                self.clear_overview_state_immediate();
+                self.needs_render = true;
+                return;
+            }
+            self.overview_entries = windows
+                .iter()
+                .map(|(id, x, y, w, h, focused, title)| OverviewEntry {
+                    window_id: *id,
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                    focused: *focused,
+                    title: title.clone(),
+                })
+                .collect();
+            self.overview_selection = self
+                .overview_entries
                 .iter()
                 .find(|entry| entry.focused)
                 .or_else(|| self.overview_entries.first())
-                .map(|entry| entry.window_id)
+                .map(|entry| entry.window_id);
+            self.overview_active = true;
         } else {
-            None
-        };
+            // Keep the entries and selection alive until tick_overview reaches
+            // zero opacity, otherwise the closing frame has nothing to draw.
+            self.overview_active = false;
+        }
         self.needs_render = true;
     }
 
     pub(crate) fn set_overview_selection(&mut self, window: u64) {
+        if !self.overview_enabled || !self.overview_active {
+            return;
+        }
         self.overview_selection = Some(window);
         self.needs_render = true;
     }
@@ -651,10 +732,15 @@ impl WaylandCompositor {
         active: bool,
         windows: Vec<(u64, i32, i32, u32, u32)>,
     ) {
+        if !self.expose_enabled {
+            self.clear_expose_state_immediate();
+            self.needs_render = true;
+            return;
+        }
+
         if active {
             if windows.is_empty() {
-                self.expose_active = false;
-                self.expose_entries.clear();
+                self.clear_expose_state_immediate();
                 self.needs_render = true;
                 return;
             }
@@ -662,31 +748,57 @@ impl WaylandCompositor {
             self.expose_entries = crate::backend::compositor_common::expose::build_expose_entries(
                 self.screen_w as f32,
                 self.screen_h as f32,
-                20.0,
+                self.expose_gap,
                 &windows,
             );
 
             self.expose_active = true;
             self.expose_opacity = 0.0;
+            self.expose_start = Some(std::time::Instant::now());
         } else {
             self.expose_active = false;
+            self.expose_start = Some(std::time::Instant::now());
         }
         self.needs_render = true;
     }
 
     pub(crate) fn set_snap_preview(&mut self, preview: Option<(f32, f32, f32, f32)>) {
-        self.snap_preview = preview;
+        if !self.snap_preview_enabled {
+            self.clear_snap_preview_state_immediate();
+            self.needs_render = true;
+            return;
+        }
+
+        match preview {
+            Some(rect) => {
+                self.snap_preview = Some(rect);
+                self.snap_preview_target_visible = true;
+            }
+            None => {
+                // Retain the last rectangle until its configured fade-out has
+                // completed; clearing it here would animate invisible frames.
+                self.snap_preview_target_visible = false;
+            }
+        }
         self.needs_render = true;
     }
 
     pub(crate) fn clear_snap_preview_immediate(&mut self) {
-        self.snap_preview = None;
-        self.snap_preview_opacity = 0.0;
+        self.clear_snap_preview_state_immediate();
         self.needs_render = true;
     }
 
     pub(crate) fn set_peek_mode(&mut self, active: bool) {
+        if !self.peek_enabled {
+            self.clear_peek_state_immediate();
+            self.needs_render = true;
+            return;
+        }
+        if self.peek_active == active && self.peek_start.is_none() {
+            return;
+        }
         self.peek_active = active;
+        self.peek_start = Some(std::time::Instant::now());
         self.needs_render = true;
     }
 
@@ -1842,8 +1954,12 @@ impl WaylandCompositor {
             &mut self.expose_opacity,
             dt,
         );
-        if result.clear_entries {
-            self.expose_entries.clear();
+        if apply_expose_terminal_cleanup(&mut self.expose_entries, result.clear_entries) {
+            // Expose is a full-screen overlay rendered outside the ordinary
+            // client damage boxes. Its terminal disappearance must repair the
+            // whole output once, otherwise a partial frame can retain stale
+            // thumbnails outside the current client damage.
+            self.force_full_damage_next = true;
         }
         self.needs_render = true;
     }
@@ -1853,13 +1969,37 @@ impl WaylandCompositor {
 mod tests {
     use super::{
         DisabledGenieAction, IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency, WindowRetirement,
-        XDG_POPUP_WINDOW_ID_PREFIX, clear_immediate_restore_collections,
-        collect_absent_auxiliary_window_ids, disabled_genie_action, is_auxiliary_window_id,
-        mouse_position_requires_render, postprocess_is_active, retirement_uses_genie,
-        should_request_static_minimized_capture,
+        XDG_POPUP_WINDOW_ID_PREFIX, apply_expose_terminal_cleanup,
+        clear_immediate_restore_collections, collect_absent_auxiliary_window_ids,
+        disabled_genie_action, is_auxiliary_window_id, mouse_position_requires_render,
+        postprocess_is_active, retirement_uses_genie, should_request_static_minimized_capture,
     };
     use crate::backend::compositor_common::genie::GenieDirection;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn expose_terminal_cleanup_requests_one_full_repair() {
+        let mut entries = vec![crate::backend::compositor_common::expose::ExposeEntry {
+            id: 1_u64,
+            orig_x: 0.0,
+            orig_y: 0.0,
+            orig_w: 100.0,
+            orig_h: 100.0,
+            target_x: 10.0,
+            target_y: 10.0,
+            target_w: 80.0,
+            target_h: 80.0,
+            current_x: 0.0,
+            current_y: 0.0,
+            current_w: 100.0,
+            current_h: 100.0,
+            is_hovered: false,
+        }];
+        assert!(!apply_expose_terminal_cleanup(&mut entries, false));
+        assert_eq!(entries.len(), 1);
+        assert!(apply_expose_terminal_cleanup(&mut entries, true));
+        assert!(entries.is_empty());
+    }
 
     #[test]
     fn postprocess_activation_tracks_runtime_controls() {

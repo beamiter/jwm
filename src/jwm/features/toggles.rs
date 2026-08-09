@@ -16,6 +16,12 @@ use crate::jwm::types::WMArgEnum;
 use log::{error, info, warn};
 use std::process::Command;
 
+const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
+    // Config flags gate entry only. An already-active mode must always retain
+    // its exit path so it can release input grabs and compositor state.
+    active || enabled
+}
+
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
     /// (percentage points) and show the OSD with the result.
@@ -1424,6 +1430,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !configured_feature_toggle_allowed(
+            self.features.overview.active,
+            CONFIG.load().behavior().overview_enabled,
+        ) {
+            return Ok(());
+        }
         if self.features.overview.active {
             // End overview: focus selected window and promote it to master
             if let Some(&client_key) = self
@@ -1568,6 +1580,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !configured_feature_toggle_allowed(
+            self.features.peek_active,
+            CONFIG.load().behavior().peek_enabled,
+        ) {
+            return Ok(());
+        }
         self.features.peek_active = !self.features.peek_active;
         backend.compositor_set_peek_mode(self.features.peek_active);
         Ok(())
@@ -2094,6 +2112,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !configured_feature_toggle_allowed(
+            self.features.expose_active,
+            CONFIG.load().behavior().expose_enabled,
+        ) {
+            return Ok(());
+        }
         // Collect windows visible on their monitor; eligibility filtering and
         // the enter/exit decision live in the pure plan.
         let mut candidates: Vec<expose_plan::ExposeCandidate> = Vec::new();
@@ -2405,5 +2429,18 @@ impl Jwm {
         let _ = self.set_client_pip(backend, sel_client_key, !is_pip)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod configured_feature_gate_tests {
+    use super::configured_feature_toggle_allowed;
+
+    #[test]
+    fn disabled_feature_blocks_entry_but_preserves_exit() {
+        assert!(configured_feature_toggle_allowed(false, true));
+        assert!(configured_feature_toggle_allowed(true, true));
+        assert!(configured_feature_toggle_allowed(true, false));
+        assert!(!configured_feature_toggle_allowed(false, false));
     }
 }

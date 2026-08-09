@@ -96,6 +96,10 @@ fn attention_requires_continuous_frames(animation_enabled: bool, has_urgent_wind
     attention_signal_active(animation_enabled, has_urgent_window)
 }
 
+fn snap_preview_allows_partial_damage(preview_present: bool, opacity: f32) -> bool {
+    !preview_present && opacity <= 0.0001
+}
+
 pub(super) fn edge_glow_requires_continuous_frames(
     enabled: bool,
     width: f32,
@@ -155,6 +159,7 @@ mod tests {
         attention_requires_continuous_frames, edge_glow_requires_continuous_frames,
         is_opaque_output_occluder, oriented_content_uv, overlay_output_is_scene_linear,
         postprocess_requires_continuous_frames, premultiplied_blend_factors, retained_color_plan,
+        snap_preview_allows_partial_damage,
     };
     use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
     use smithay::backend::renderer::gles::ffi;
@@ -231,6 +236,14 @@ mod tests {
         assert!(attention_requires_continuous_frames(true, true));
         assert!(!attention_requires_continuous_frames(false, true));
         assert!(!attention_requires_continuous_frames(true, false));
+    }
+
+    #[test]
+    fn snap_preview_blocks_partial_damage_until_its_overlay_is_fully_gone() {
+        assert!(snap_preview_allows_partial_damage(false, 0.0));
+        assert!(!snap_preview_allows_partial_damage(true, 0.0));
+        assert!(!snap_preview_allows_partial_damage(true, 1.0));
+        assert!(!snap_preview_allows_partial_damage(false, 0.25));
     }
 
     #[test]
@@ -1030,6 +1043,61 @@ impl WaylandCompositor {
         self.needs_render = true;
     }
 
+    /// Refresh compositor-side direct-scanout eligibility diagnostics after
+    /// effect ticks have committed their state for this frame.
+    fn update_direct_scanout_diagnostics(
+        &mut self,
+        scene: &[(u64, i32, i32, u32, u32)],
+        focused: Option<u64>,
+    ) {
+        let diagnostic_output_rect = crate::backend::api::CompositorRect::new(
+            0.0,
+            0.0,
+            self.screen_w as f32,
+            self.screen_h as f32,
+        );
+        if let Some(reason) = self.direct_scanout_block_reason(diagnostic_output_rect) {
+            self.direct_scanout_mgr.block_for_composition(reason);
+            return;
+        }
+        if self.has_system_ui() {
+            self.direct_scanout_mgr
+                .block_for_composition("JWM system UI requires composition");
+            return;
+        }
+        if self.recording_requires_composition() {
+            self.direct_scanout_mgr
+                .block_for_composition("screen recording requires composition");
+            return;
+        }
+
+        let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
+        scanout_windows.clear();
+        for &(win_id, x, y, w, h) in scene {
+            if let Some(ws) = self.windows.get(&win_id) {
+                scanout_windows.push((
+                    win_id,
+                    direct_scanout::WindowScanoutInfo {
+                        x,
+                        y,
+                        width: w,
+                        height: h,
+                        is_fullscreen: ws.is_fullscreen,
+                        has_alpha: ws.has_alpha,
+                        has_blur: ws.is_frosted,
+                        has_shadow: self.shadow_enabled,
+                        corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
+                        opacity: ws.fade_opacity,
+                    },
+                ));
+            }
+        }
+        let _ = self
+            .direct_scanout_mgr
+            .check_scene(&scanout_windows, focused);
+        self.scratch_scanout = scanout_windows;
+    }
+
     /// Main rendering function. Composites the entire scene into the output FBO.
     /// `scene` is a list of (window_id, x, y, w, h) in bottom-to-top order.
     /// `focused` is the currently focused window.
@@ -1133,54 +1201,6 @@ impl WaylandCompositor {
                 "[compositor] Shader hot-reload: {} shaders changed",
                 reloaded_shaders.len()
             );
-        }
-
-        // Direct scanout eligibility tracking (stats only).
-        //
-        // The actual zero-copy bypass happens at the KMS level in udev_kms.rs
-        // (`direct_scanout_eligible`): when one fullscreen window owns the
-        // output, smithay's DrmCompositor skips our FBO entirely and assigns
-        // the client surface to the primary plane. Our GL composite work is
-        // still done here because we don't know in advance whether KMS will
-        // actually accept the plane assignment (format/modifier mismatch
-        // would force smithay's GL fallback — which uses our FBO).
-        //
-        // Previously this site also returned early when eligibility held,
-        // skipping the GL composite. That was unsafe: if KMS could not take
-        // the fast path (e.g. cursor moved between this decision and the
-        // KMS render), smithay would scan out a stale FBO. SOTA #4 Phase 4.1
-        // removed the early return; we now only track eligibility for metrics.
-        if !self.transition_active
-            && !self.overview_active
-            && !self.expose_active
-            && !self.postprocess_active
-            && !self.recording_requires_composition()
-        {
-            let mut scanout_windows = std::mem::take(&mut self.scratch_scanout);
-            scanout_windows.clear();
-            for &(win_id, x, y, w, h) in scene {
-                if let Some(ws) = self.windows.get(&win_id) {
-                    scanout_windows.push((
-                        win_id,
-                        direct_scanout::WindowScanoutInfo {
-                            x,
-                            y,
-                            width: w,
-                            height: h,
-                            is_fullscreen: ws.is_fullscreen,
-                            has_alpha: ws.has_alpha,
-                            has_blur: ws.is_frosted,
-                            has_shadow: self.shadow_enabled,
-                            corner_radius: ws.corner_radius_override.unwrap_or(self.corner_radius),
-                            opacity: ws.fade_opacity,
-                        },
-                    ));
-                }
-            }
-            let _ = self
-                .direct_scanout_mgr
-                .check_scene(&scanout_windows, focused);
-            self.scratch_scanout = scanout_windows;
         }
 
         // =================================================================
@@ -1311,6 +1331,7 @@ impl WaylandCompositor {
         self.tick_snap_preview(effect_dt);
         self.tick_overview(effect_dt);
         self.tick_overview_prism(effect_dt);
+        self.tick_peek(effect_dt);
         self.tilt_target_x = 0.0;
         self.tilt_target_y = 0.0;
         if self.window_tilt_enabled
@@ -1351,6 +1372,13 @@ impl WaylandCompositor {
                     (start.elapsed().as_millis() as u64) < self.focus_highlight_duration_ms
                 })
                 .unwrap_or(false);
+
+        // Direct scanout eligibility is diagnostics only; the actual zero-copy
+        // decision lives in udev_kms.rs. Evaluate it after terminal animation
+        // cleanup and one-shot activation so this frame's telemetry describes
+        // exactly the visual state that is about to be drawn.
+        self.update_direct_scanout_diagnostics(scene, focused);
+
         // Motion trail keeps the loop ticking until trails drain to empty,
         // even if the user has stopped moving the window.
         let motion_trail_active =
@@ -1449,6 +1477,15 @@ impl WaylandCompositor {
             && !any_animating
             && !force_render
             && !self.peek_active
+            && self.peek_opacity <= 0.0001
+            // Snap preview is drawn after the scene scissor is released. A
+            // stable visible preview must therefore keep the whole frame out
+            // of partial repair, or unchanged pixels would be alpha-blended a
+            // second time and the previous rectangle could survive a move.
+            && snap_preview_allows_partial_damage(
+                self.snap_preview.is_some(),
+                self.snap_preview_opacity,
+            )
             && !self.postprocess_active
             && self.overview_opacity <= 0.0001
             && self.expose_opacity <= 0.0001
@@ -2590,7 +2627,11 @@ impl WaylandCompositor {
         // =================================================================
         // 14. Overview overlay
         // =================================================================
-        if self.overview_active {
+        if self.overview_entries.is_empty() {
+            if !self.overview_title_textures.is_empty() {
+                self.clear_overview_textures(gl);
+            }
+        } else if self.overview_opacity > 0.0 {
             self.render_overview(gl, &projection);
         }
 
@@ -2604,7 +2645,7 @@ impl WaylandCompositor {
         // =================================================================
         // 15b. Peek mode (fade out non-focused windows)
         // =================================================================
-        if self.peek_active {
+        if self.peek_opacity > 0.0 {
             self.render_peek_mode(gl, &projection, focused, scene);
         }
 

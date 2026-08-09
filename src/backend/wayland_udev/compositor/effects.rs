@@ -25,6 +25,46 @@ enum CompletedGenieAction {
     ClearMinimizedAndRestoreMarkers,
 }
 
+const OVERVIEW_FADE_DURATION_MS: u64 = 200;
+const PEEK_FADE_DURATION_MS: u64 = 200;
+
+/// Advance a normalized overlay opacity over a configured wall-clock
+/// duration.  This stays pure so entry retention and duration behaviour can be
+/// verified without constructing a GL compositor.
+fn advance_overlay_opacity(
+    opacity: f32,
+    target_visible: bool,
+    dt: f32,
+    duration_ms: u64,
+) -> (f32, bool) {
+    let target = if target_visible { 1.0 } else { 0.0 };
+    let opacity = if opacity.is_finite() {
+        opacity.clamp(0.0, 1.0)
+    } else {
+        target
+    };
+    let duration_seconds = duration_ms.max(1) as f32 / 1_000.0;
+    let step = sanitize_animation_dt(dt) / duration_seconds;
+    let next = if target_visible {
+        (opacity + step).min(1.0)
+    } else {
+        (opacity - step).max(0.0)
+    };
+    if (target - next).abs() > 0.0001 {
+        (next, true)
+    } else {
+        // Exact terminal values matter outside the animation itself: several
+        // scanout/damage gates intentionally use zero as an ownership marker.
+        // Leaving a sub-epsilon alpha behind would keep composition alive
+        // forever even though the scheduler correctly stopped ticking.
+        (target, false)
+    }
+}
+
+fn retain_overview_entries(active: bool, opacity: f32) -> bool {
+    active || (opacity.is_finite() && opacity > 0.0001)
+}
+
 const fn completed_genie_action(direction: GenieDirection) -> CompletedGenieAction {
     match direction {
         GenieDirection::Minimize => CompletedGenieAction::CacheMinimizedAndRemoveLive,
@@ -783,31 +823,76 @@ impl WaylandCompositor {
 
     /// Tick snap preview opacity animation
     pub(crate) fn tick_snap_preview(&mut self, dt: f32) {
-        if self.snap_preview.is_some() {
-            self.snap_preview_opacity += dt * 6.0;
-            if self.snap_preview_opacity > 1.0 {
-                self.snap_preview_opacity = 1.0;
-            }
-        } else {
-            self.snap_preview_opacity -= dt * 6.0;
-            if self.snap_preview_opacity < 0.0 {
-                self.snap_preview_opacity = 0.0;
-            }
+        if self.snap_preview.is_none() {
+            self.snap_preview_target_visible = false;
+            self.snap_preview_opacity = 0.0;
+            return;
+        }
+
+        let (opacity, animating) = advance_overlay_opacity(
+            self.snap_preview_opacity,
+            self.snap_preview_target_visible,
+            dt,
+            self.snap_animation_duration_ms,
+        );
+        self.snap_preview_opacity = opacity;
+        if !self.snap_preview_target_visible && !animating {
+            self.snap_preview = None;
+            self.force_full_damage_next = true;
+        }
+        if animating {
+            self.needs_render = true;
         }
     }
 
     /// Tick overview mode animation
     pub(crate) fn tick_overview(&mut self, dt: f32) {
-        if self.overview_active {
-            self.overview_opacity += dt * 5.0;
-            if self.overview_opacity > 1.0 {
-                self.overview_opacity = 1.0;
+        if self.overview_entries.is_empty() {
+            self.overview_active = false;
+            self.overview_opacity = 0.0;
+            return;
+        }
+
+        let (opacity, animating) = advance_overlay_opacity(
+            self.overview_opacity,
+            self.overview_active,
+            dt,
+            OVERVIEW_FADE_DURATION_MS,
+        );
+        self.overview_opacity = opacity;
+        if !retain_overview_entries(self.overview_active, self.overview_opacity) {
+            self.overview_entries.clear();
+            self.overview_selection = None;
+            self.overview_rotation = 0.0;
+            self.overview_target_rotation = 0.0;
+            self.force_full_damage_next = true;
+        }
+        if animating {
+            self.needs_render = true;
+        }
+    }
+
+    /// Tick Peek's spotlight strength.  Both activation and release use the
+    /// same 200ms envelope as the X11 compositor instead of switching in one
+    /// frame.
+    pub(crate) fn tick_peek(&mut self, dt: f32) {
+        if self.peek_start.is_none() {
+            return;
+        }
+        let (opacity, animating) = advance_overlay_opacity(
+            self.peek_opacity,
+            self.peek_active,
+            dt,
+            PEEK_FADE_DURATION_MS,
+        );
+        self.peek_opacity = opacity;
+        if !animating {
+            self.peek_start = None;
+            if !self.peek_active {
+                self.force_full_damage_next = true;
             }
-        } else if self.overview_opacity > 0.0 {
-            self.overview_opacity -= dt * 5.0;
-            if self.overview_opacity < 0.0 {
-                self.overview_opacity = 0.0;
-            }
+        } else {
+            self.needs_render = true;
         }
     }
 
@@ -974,14 +1059,55 @@ fn suspend_preview_for_eviction<T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompletedGenieAction, GenieDirection, MinimizeRestoreDisposition, completed_genie_action,
-        late_minimized_visual_dimensions, preview_loses_source_after_full_eviction,
-        retained_lru_candidate, retained_texture_allocation_bytes,
-        should_settle_pending_minimized_visual, suspend_preview_for_eviction,
-        take_minimize_restore_disposition, touch_retained_visual,
+        CompletedGenieAction, GenieDirection, MinimizeRestoreDisposition, advance_overlay_opacity,
+        completed_genie_action, late_minimized_visual_dimensions,
+        preview_loses_source_after_full_eviction, retain_overview_entries, retained_lru_candidate,
+        retained_texture_allocation_bytes, should_settle_pending_minimized_visual,
+        suspend_preview_for_eviction, take_minimize_restore_disposition, touch_retained_visual,
     };
     use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn overlay_opacity_uses_the_configured_duration_in_both_directions() {
+        assert_eq!(advance_overlay_opacity(0.0, true, 0.05, 200), (0.25, true));
+        assert_eq!(advance_overlay_opacity(0.0, true, 0.05, 100), (0.5, true));
+        assert_eq!(advance_overlay_opacity(1.0, false, 0.05, 200), (0.75, true));
+        assert_eq!(
+            advance_overlay_opacity(0.25, false, 0.05, 200),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn overlay_opacity_sanitizes_time_and_settles_invalid_state() {
+        assert_eq!(
+            advance_overlay_opacity(f32::NAN, true, 0.016, 200),
+            (1.0, false)
+        );
+        assert_eq!(
+            advance_overlay_opacity(0.5, true, f32::NAN, 200),
+            (0.5, true)
+        );
+        assert_eq!(advance_overlay_opacity(0.0, true, 0.001, 0), (1.0, false));
+        assert_eq!(
+            advance_overlay_opacity(0.999_95, true, 0.0, 200),
+            (1.0, false)
+        );
+        assert_eq!(
+            advance_overlay_opacity(0.000_05, false, 0.0, 200),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn overview_entries_survive_the_entire_fade_out() {
+        assert!(retain_overview_entries(true, 0.0));
+        assert!(retain_overview_entries(false, 0.75));
+        assert!(retain_overview_entries(false, 0.001));
+        assert!(!retain_overview_entries(false, 0.0));
+        assert!(!retain_overview_entries(false, f32::NAN));
+    }
 
     #[test]
     fn visual_forget_drops_every_wayland_strong_owner_once() {

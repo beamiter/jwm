@@ -1410,6 +1410,29 @@ impl Jwm {
         // Simpler: trust config — reload reflects user's saved preference.
         self.do_not_disturb = cfg.behavior().do_not_disturb;
 
+        // Config hot-disable must close already-active modal features as well
+        // as gate future entry. Otherwise JWM can keep an invisible keyboard
+        // or pointer grab after the compositor has correctly dropped its
+        // corresponding visual state.
+        if self.features.overview.active && !cfg.behavior().overview_enabled {
+            self.features.overview.deactivate();
+            backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
+            info!("[config] closed overview after overview_enabled=false");
+        }
+        if self.features.expose_active && !cfg.behavior().expose_enabled {
+            self.features.expose_active = false;
+            backend.compositor_set_expose_mode(false, Vec::new());
+            let _ = backend.key_ops().ungrab_keyboard();
+            let _ = backend.input_ops().ungrab_pointer();
+            info!("[config] closed expose after expose_enabled=false");
+        }
+        if self.features.peek_active && !cfg.behavior().peek_enabled {
+            self.features.peek_active = false;
+            backend.compositor_set_peek_mode(false);
+            info!("[config] closed peek after peek_enabled=false");
+        }
+
         // 2. Re-apply color schemes
         let colors = cfg.colors();
         let alloc = backend.color_allocator();

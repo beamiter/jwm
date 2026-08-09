@@ -35,6 +35,34 @@ fn temporal_cache_matches(
     valid && cached_hash == below_hash && cached_levels == blur_levels
 }
 
+fn blur_status_snapshot(
+    current_strength: u32,
+    temporal_enabled: bool,
+    temporal_reuse_count: u64,
+    temporal_total_count: u64,
+    mut hz_table: Vec<(u32, u32)>,
+    mut per_monitor_hz: Vec<(u32, u32)>,
+    mut blur_quality_by_monitor: Vec<(u32, String)>,
+) -> crate::backend::api::BlurStatus {
+    hz_table.sort_by_key(|&(hz, _)| hz);
+    per_monitor_hz.sort_by_key(|&(id, _)| id);
+    blur_quality_by_monitor.sort_by_key(|(id, _)| *id);
+    let temporal_reuse_rate_pct = if temporal_total_count > 0 {
+        100.0 * temporal_reuse_count as f32 / temporal_total_count as f32
+    } else {
+        0.0
+    };
+
+    crate::backend::api::BlurStatus {
+        current_strength,
+        temporal_enabled,
+        temporal_reuse_rate_pct,
+        hz_table,
+        per_monitor_hz,
+        blur_quality_by_monitor,
+    }
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     /// Look up per-window opacity from opacity_rules.
     pub(super) fn lookup_opacity_rule(&self, class_name: &str) -> Option<f32> {
@@ -233,6 +261,30 @@ impl<C: CompositorConnection> Compositor<C> {
             .get(&monitor_id)
             .copied()
             .unwrap_or(60) // Fallback to 60Hz if not found
+    }
+
+    /// Diagnostic snapshot used by the shared X11 backend delegation.
+    ///
+    /// Keeping this on the compositor makes `None` mean that the compositor
+    /// is genuinely absent, rather than that an X11 transport forgot to
+    /// expose otherwise-live state through
+    /// [`crate::backend::api::BackendDiagnostics`].
+    pub(crate) fn get_blur_status(&self) -> crate::backend::api::BlurStatus {
+        blur_status_snapshot(
+            self.blur_strength,
+            self.temporal_blur_enabled,
+            self.temporal_blur_reuse_count,
+            self.temporal_blur_total_count,
+            self.blur_strength_by_hz.clone(),
+            self.monitor_refresh_rates
+                .iter()
+                .map(|(&id, &hz)| (id, hz))
+                .collect(),
+            self.blur_quality_by_monitor
+                .iter()
+                .map(|(&id, quality)| (id, format!("{quality:?}")))
+                .collect(),
+        )
     }
 
     /// Rebuild monitor geometry + refresh-rate maps from RandR after a layout
@@ -708,7 +760,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blur_cache_matches, temporal_cache_matches};
+    use super::{blur_cache_matches, blur_status_snapshot, temporal_cache_matches};
 
     #[test]
     fn empty_below_scene_is_cacheable() {
@@ -729,5 +781,31 @@ mod tests {
         assert!(!temporal_cache_matches(true, 41, 42, 3, 3));
         assert!(!temporal_cache_matches(true, 41, 41, 2, 3));
         assert!(!temporal_cache_matches(false, 41, 41, 3, 3));
+    }
+
+    #[test]
+    fn blur_status_snapshot_reports_sorted_live_x11_state() {
+        let status = blur_status_snapshot(
+            3,
+            true,
+            3,
+            4,
+            vec![(144, 4), (60, 2)],
+            vec![(2, 75), (0, 60)],
+            vec![(2, "Minimal".to_string()), (0, "Full".to_string())],
+        );
+
+        assert_eq!(status.current_strength, 3);
+        assert!(status.temporal_enabled);
+        assert_eq!(status.temporal_reuse_rate_pct, 75.0);
+        assert_eq!(status.hz_table, vec![(60, 2), (144, 4)]);
+        assert_eq!(status.per_monitor_hz, vec![(0, 60), (2, 75)]);
+        assert_eq!(
+            status.blur_quality_by_monitor,
+            vec![(0, "Full".to_string()), (2, "Minimal".to_string())]
+        );
+
+        let no_samples = blur_status_snapshot(1, false, 9, 0, vec![], vec![], vec![]);
+        assert_eq!(no_samples.temporal_reuse_rate_pct, 0.0);
     }
 }

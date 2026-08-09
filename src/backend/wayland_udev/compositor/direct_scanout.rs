@@ -128,6 +128,14 @@ impl DirectScanoutManager {
         }
     }
 
+    /// End compositor-side eligibility tracking when a visual owned outside
+    /// the ordinary window list requires composition.
+    pub(crate) fn block_for_composition(&mut self, reason: &'static str) {
+        self.last_candidate_count = 0;
+        self.end_scanout();
+        self.last_reason = reason.into();
+    }
+
     /// End the current scanout session, updating bypass time stats.
     fn end_scanout(&mut self) {
         if let Some(start) = self.scanout_start.take() {
@@ -254,5 +262,19 @@ mod tests {
             mgr.last_reason(),
             "window size 1280x1080 does not match screen 1920x1080"
         );
+    }
+
+    #[test]
+    fn compositor_overlay_ends_active_diagnostic_session_with_reason() {
+        let mut mgr = DirectScanoutManager::new(1920, 1080);
+        assert!(mgr.check_scene(&[(42, fullscreen_info())], Some(42)).0);
+        assert!(mgr.is_active());
+
+        mgr.block_for_composition("snap preview requires composition");
+
+        assert!(!mgr.is_active());
+        assert_eq!(mgr.current_scanout(), None);
+        assert_eq!(mgr.candidate_count(), 0);
+        assert_eq!(mgr.last_reason(), "snap preview requires composition");
     }
 }

@@ -41,13 +41,31 @@ pub fn build_expose_entries<Id: Copy>(
         return Vec::new();
     }
 
+    let screen_w = if screen_w.is_finite() {
+        screen_w.max(1.0)
+    } else {
+        1.0
+    };
+    let screen_h = if screen_h.is_finite() {
+        screen_h.max(1.0)
+    } else {
+        1.0
+    };
     let screen_aspect = screen_w / screen_h.max(1.0);
     let cols = ((n as f32 * screen_aspect).sqrt()).ceil() as u32;
     let cols = cols.max(1);
     let rows = (n as u32).div_ceil(cols).max(1);
 
-    let cell_w = (screen_w - gap * (cols as f32 + 1.0)) / cols as f32;
-    let cell_h = (screen_h - gap * (rows as f32 + 1.0)) / rows as f32;
+    // Leave at least one pixel for every row and column. A configured gap is
+    // user input and may be much larger than a small output; allowing it to
+    // consume the whole grid produces negative thumbnails and reversed hit
+    // boxes on both compositors.
+    let requested_gap = if gap.is_finite() { gap.max(0.0) } else { 0.0 };
+    let max_gap_w = ((screen_w - cols as f32) / (cols as f32 + 1.0)).max(0.0);
+    let max_gap_h = ((screen_h - rows as f32) / (rows as f32 + 1.0)).max(0.0);
+    let gap = requested_gap.min(max_gap_w.min(max_gap_h));
+    let cell_w = ((screen_w - gap * (cols as f32 + 1.0)) / cols as f32).max(1.0);
+    let cell_h = ((screen_h - gap * (rows as f32 + 1.0)) / rows as f32).max(1.0);
 
     windows
         .iter()
@@ -204,6 +222,21 @@ mod tests {
         let windows = vec![(u64::MAX, 0, 0, 640, 480)];
         let entries = build_expose_entries(1920.0, 1080.0, 20.0, &windows);
         assert_eq!(entries[0].id, u64::MAX);
+    }
+
+    #[test]
+    fn expose_layout_clamps_extreme_gap_before_cells_can_invert() {
+        let windows = vec![(1u32, 0, 0, 640, 480)];
+        for gap in [512.0, f32::INFINITY, f32::NAN, -20.0] {
+            let entries = build_expose_entries(1280.0, 720.0, gap, &windows);
+            let entry = &entries[0];
+            assert!(entry.target_x.is_finite() && entry.target_y.is_finite());
+            assert!(entry.target_w.is_finite() && entry.target_w >= 1.0);
+            assert!(entry.target_h.is_finite() && entry.target_h >= 1.0);
+            assert!(entry.target_x >= 0.0 && entry.target_y >= 0.0);
+            assert!(entry.target_x + entry.target_w <= 1280.0);
+            assert!(entry.target_y + entry.target_h <= 720.0);
+        }
     }
 
     #[test]

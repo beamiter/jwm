@@ -79,6 +79,33 @@ const fn minimized_preview_source_is_drawable(
     full_source || gpu_snapshot
 }
 
+const fn scene_window_is_tracked(
+    has_live_texture: bool,
+    has_active_genie: bool,
+    has_durable_minimized_owner: bool,
+) -> bool {
+    // A Genie owns the detached live texture while the WM's independent Hide
+    // timeline may still carry the same XID in the scene. Treat that texture
+    // as tracked so scene reconciliation cannot import and immediately free a
+    // duplicate TFP binding on every animation frame. Keep the same protection
+    // after the Genie settles into the retained minimized lifecycle: stale
+    // core Hide/stacking entries must not manufacture a new live owner.
+    has_live_texture || has_active_genie || has_durable_minimized_owner
+}
+
+const fn durable_minimized_scene_owner(minimized: bool, explicit_restore_pending: bool) -> bool {
+    // An explicit restore deliberately reopens scene-driven import as a retry
+    // path when the synchronous backend import failed. All other minimized
+    // states own their pixels outside the ordinary live-window map.
+    minimized && !explicit_restore_pending
+}
+
+const fn overview_request_allowed(enabled: bool, requested_active: bool) -> bool {
+    // Disabling the feature blocks only entry/refresh requests. Exit must
+    // remain callable so an already-open modal can always release its state.
+    enabled || !requested_active
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
         // Opening a panel springs it out of the bar; closing one forgets its
@@ -282,6 +309,9 @@ impl<C: CompositorConnection> Compositor<C> {
         active: bool,
         windows: Vec<(u32, f32, f32, f32, f32, bool, String)>,
     ) {
+        if !overview_request_allowed(self.overview_enabled, active) {
+            return;
+        }
         if !active && self.overview_active && !self.overview_closing {
             // Begin exit animation — don't clear state yet
             self.overview_closing = true;
@@ -755,7 +785,18 @@ impl<C: CompositorConnection> Compositor<C> {
 
     #[allow(dead_code)]
     pub(crate) fn has_window(&self, x11_win: u32) -> bool {
-        self.windows.contains_key(&x11_win)
+        let has_durable_minimized_owner = durable_minimized_scene_owner(
+            self.minimized_windows.contains(&x11_win),
+            self.minimized_window_intents.get(&x11_win)
+                == Some(&super::MinimizedWindowIntent::ExplicitRestore),
+        );
+        scene_window_is_tracked(
+            self.windows.contains_key(&x11_win),
+            self.genie_active
+                .iter()
+                .any(|animation| animation.x11_win == x11_win),
+            has_durable_minimized_owner,
+        )
     }
 
     // =====================================================================
@@ -1691,8 +1732,9 @@ impl<C: CompositorConnection> Compositor<C> {
 #[cfg(test)]
 mod minimized_recapture_tests {
     use super::{
-        PreviewSourcePlan, StaticMinimizedCapturePlan, minimized_preview_source_is_drawable,
-        preview_source_plan, static_minimized_capture_plan,
+        PreviewSourcePlan, StaticMinimizedCapturePlan, durable_minimized_scene_owner,
+        minimized_preview_source_is_drawable, overview_request_allowed, preview_source_plan,
+        scene_window_is_tracked, static_minimized_capture_plan,
     };
 
     fn service_preview_renewal(
@@ -1761,6 +1803,27 @@ mod minimized_recapture_tests {
             static_minimized_capture_plan(true, true, false, false, true, false, false),
             StaticMinimizedCapturePlan::Ignore
         );
+    }
+
+    #[test]
+    fn genie_and_settled_minimize_own_scene_xid_until_restore() {
+        assert!(!scene_window_is_tracked(false, false, false));
+        assert!(scene_window_is_tracked(true, false, false));
+        assert!(scene_window_is_tracked(false, true, false));
+        assert!(scene_window_is_tracked(false, false, true));
+        assert!(scene_window_is_tracked(true, true, true));
+
+        assert!(durable_minimized_scene_owner(true, false));
+        assert!(!durable_minimized_scene_owner(true, true));
+        assert!(!durable_minimized_scene_owner(false, false));
+    }
+
+    #[test]
+    fn disabled_overview_blocks_entry_but_never_blocks_exit() {
+        assert!(overview_request_allowed(true, true));
+        assert!(overview_request_allowed(true, false));
+        assert!(!overview_request_allowed(false, true));
+        assert!(overview_request_allowed(false, false));
     }
 
     #[test]

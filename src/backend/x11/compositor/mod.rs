@@ -610,6 +610,7 @@ where
     window_blur_caches: HashMap<u32, WindowBlurCache>,
 
     // --- Alt-Tab overview ---
+    overview_enabled: bool,
     overview_active: bool,
     overview_windows: Vec<OverviewEntry>,
     overview_opacity: f32,

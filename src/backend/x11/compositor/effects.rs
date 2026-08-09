@@ -44,8 +44,13 @@ impl EffectTickClock {
             .unwrap_or(0.0)
     }
 
-    pub(super) fn finish_frame(&mut self, still_active: bool) {
-        if !still_active {
+    pub(super) fn finish_frame(&mut self, now: std::time::Instant, still_active: bool) {
+        if still_active {
+            // Some effects (notably pointer-driven tilt) discover their target
+            // during drawing, after `delta` sampled an inactive clock. Prime
+            // the clock here so their next frame receives a non-zero delta.
+            self.last_tick.get_or_insert(now);
+        } else {
             self.reset();
         }
     }
@@ -221,6 +226,20 @@ pub(super) fn discard_minimized_cpu_snapshot_state(
     let removed_cpu = snapshots.remove(&x11_win).is_some();
     let removed_generation = generations.remove(&x11_win).is_some();
     removed_cpu || removed_generation
+}
+
+pub(super) fn tilt_animation_pending(
+    enabled: bool,
+    current_x: f32,
+    current_y: f32,
+    target_x: f32,
+    target_y: f32,
+) -> bool {
+    enabled && ((current_x - target_x).abs() > 0.0001 || (current_y - target_y).abs() > 0.0001)
+}
+
+const fn completed_genie_may_settle(done_at_frame_sample: bool, frame_presented: bool) -> bool {
+    done_at_frame_sample && frame_presented
 }
 
 impl<C: CompositorConnection> Compositor<C> {
@@ -644,6 +663,13 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(super) fn incremental_effects_active(&self) -> bool {
         (!self.particle_systems.is_empty() && self.particle_effects)
+            || tilt_animation_pending(
+                self.window_tilt,
+                self.tilt_current_x,
+                self.tilt_current_y,
+                self.tilt_target_x,
+                self.tilt_target_y,
+            )
             || self.windows.values().any(|wt| {
                 (self.fading && (wt.fading_out || wt.fade_opacity < 1.0))
                     || (self.window_animation
@@ -951,15 +977,26 @@ impl<C: CompositorConnection> Compositor<C> {
     // Phase 3.2: Genie minimize tick
     // =================================================================
 
-    /// Tick genie animations. Returns true if any are active.
+    /// Tick Genie-adjacent state. Returns true if a Genie or Dock preview is active.
+    ///
+    /// Completed Genie owners are deliberately retained here. This method runs
+    /// before drawing, so settling them now can delete the texture before its
+    /// terminal mesh is ever presented. `finish_genie_frame` performs that
+    /// ownership transfer only after a successful swap.
     pub(super) fn tick_genie(&mut self) -> bool {
         let preview_active = self.tick_dock_preview();
+        !self.genie_active.is_empty() || preview_active
+    }
+
+    /// Settle animations whose terminal state was sampled by the frame that
+    /// has just been presented.
+    pub(super) fn finish_genie_frame(&mut self, frame_sample_time: std::time::Instant) {
         let duration_secs = self.genie_duration_ms.max(1) as f32 / 1000.0;
-        let now = std::time::Instant::now();
         let mut i = 0;
         while i < self.genie_active.len() {
-            let (_, done) = genie_animation_progress(&self.genie_active[i], now, duration_secs);
-            if done {
+            let (_, done) =
+                genie_animation_progress(&self.genie_active[i], frame_sample_time, duration_secs);
+            if completed_genie_may_settle(done, true) {
                 let ga = self.genie_active.remove(i);
                 match ga.direction {
                     GenieDirection::Minimize if ga.owns_resources => {
@@ -994,7 +1031,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 i += 1;
             }
         }
-        !self.genie_active.is_empty() || preview_active
     }
 
     /// Start a genie animation for a window explicitly being minimized.
@@ -1338,9 +1374,9 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         if !self.current_minimized_cpu_snapshot_available(newest_window) {
             // Settlement publishes a stable retained source and arms one
-            // fallback demand, but tick_genie runs before render_frame's
-            // make-current barrier. The render-only service performs the
-            // actual readback later in this same frame.
+            // fallback demand. Genie settlement now happens after presenting
+            // its terminal frame, so the render-only service performs the
+            // readback on the follow-up frame already armed by this method.
             self.request_iconic_snapshot_recapture(newest_window);
         }
         self.resume_minimized_preview_after_capture(newest_window);
@@ -1733,12 +1769,14 @@ mod tests {
     use super::{
         EffectTickClock, FadeTick, LateMinimizedWindowDisposition, ReverseRestoreResourceAction,
         arm_full_redraw_after_retained_discard, begin_retained_recapture_attempt,
-        consume_minimized_gpu_upload_request, discard_minimized_cpu_snapshot_state,
-        gpu_snapshot_lru_candidate, has_iconic_snapshot_token, late_minimized_visual_dimensions,
+        completed_genie_may_settle, consume_minimized_gpu_upload_request,
+        discard_minimized_cpu_snapshot_state, gpu_snapshot_lru_candidate,
+        has_iconic_snapshot_token, late_minimized_visual_dimensions,
         late_minimized_window_disposition, minimized_capture_source_dimensions,
         minimized_capture_waits_for_redirect, preview_loses_source_after_full_eviction,
         release_iconic_snapshot_token, reserve_current_iconic_snapshot, retained_lru_candidate,
-        reverse_restore_resource_action, suspend_preview_for_eviction, touch_retained_visual,
+        reverse_restore_resource_action, suspend_preview_for_eviction, tilt_animation_pending,
+        touch_retained_visual,
     };
     use crate::backend::common_define::WindowId;
     use crate::backend::compositor_common::minimized_thumbnail::{
@@ -2174,8 +2212,34 @@ mod tests {
         let start = Instant::now();
 
         assert_eq!(clock.delta(start, true), 0.0);
-        clock.finish_frame(false);
+        clock.finish_frame(start, false);
         assert_eq!(clock.delta(start + Duration::from_secs(10), true), 0.0);
+    }
+
+    #[test]
+    fn tilt_pending_keeps_the_incremental_clock_running_after_its_zero_delta_frame() {
+        let mut clock = EffectTickClock::default();
+        let start = Instant::now();
+
+        assert!(!tilt_animation_pending(true, 0.0, 0.0, 0.0, 0.0));
+        assert_eq!(clock.delta(start, false), 0.0);
+
+        // The render pass discovers the pointer-derived target after the
+        // frame delta has already been sampled. Preserve that first frame as
+        // active so the following frame receives a real delta.
+        assert!(tilt_animation_pending(true, 0.0, 0.0, 0.08, -0.04));
+        clock.finish_frame(start, true);
+        let next_delta = clock.delta(start + Duration::from_millis(16), true);
+        assert!((next_delta - 0.016).abs() < 0.000_001);
+
+        assert!(!tilt_animation_pending(false, 0.0, 0.0, 0.08, -0.04));
+    }
+
+    #[test]
+    fn completed_genie_retains_its_texture_until_terminal_frame_is_presented() {
+        assert!(!completed_genie_may_settle(true, false));
+        assert!(!completed_genie_may_settle(false, true));
+        assert!(completed_genie_may_settle(true, true));
     }
 
     #[test]

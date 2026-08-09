@@ -35,6 +35,28 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Drop every compositor-owned overview resource without playing the exit
+    /// animation. Config hot-disable uses this path because no later frame may
+    /// assume the disabled feature still owns snapshots or modal scene state.
+    pub(super) fn clear_overview_mode_immediate(&mut self) {
+        self.clear_overview_snapshots();
+        self.clear_overview_title_textures();
+        self.overview_windows.clear();
+        self.overview_active = false;
+        self.overview_closing = false;
+        self.overview_opacity = 0.0;
+        self.overview_entry_progress = 1.0;
+        self.overview_exit_progress = 1.0;
+        self.overview_prism_target_angle = 0.0;
+        self.overview_prism_current_angle = 0.0;
+        self.overview_prism_last_tick = None;
+        self.overview_prism_sides = 4;
+        self.overview_prism_spin = 0.0;
+        self.overview_slide_offset = 0;
+        self.overview_total_clients = 0;
+        self.needs_render = true;
+    }
+
     /// Render a title string into an RGBA pixel buffer using a simple embedded bitmap font.
     /// Returns (pixels, width, height) or None if the title is empty.
     pub(super) fn render_title_to_pixels(
@@ -348,13 +370,7 @@ impl<C: CompositorConnection> Compositor<C> {
             self.overview_opacity = self.overview_exit_progress;
             if self.overview_exit_progress < 0.01 {
                 // Animation complete: actually deactivate
-                self.overview_active = false;
-                self.overview_closing = false;
-                self.overview_exit_progress = 1.0;
-                self.overview_opacity = 0.0;
-                self.clear_overview_snapshots();
-                self.clear_overview_title_textures();
-                self.overview_windows.clear();
+                self.clear_overview_mode_immediate();
             }
             self.needs_render = true;
         }

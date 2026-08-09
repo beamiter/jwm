@@ -908,6 +908,7 @@ pub(crate) struct WaylandCompositor {
     transition_direction: i32,
 
     // Overview (3D prism carousel)
+    overview_enabled: bool,
     overview_active: bool,
     overview_opacity: f32,
     overview_entries: Vec<OverviewEntry>,
@@ -918,15 +919,20 @@ pub(crate) struct WaylandCompositor {
     overview_title_textures: Vec<u32>,
 
     // Expose
+    expose_enabled: bool,
     expose_active: bool,
     expose_opacity: f32,
     expose_entries: Vec<ExposeEntry>,
 
     // Snap preview
+    snap_preview_enabled: bool,
     snap_preview: Option<(f32, f32, f32, f32)>,
+    /// Desired visibility.  The rectangle remains retained while fading out.
+    snap_preview_target_visible: bool,
     snap_preview_opacity: f32,
 
     // Peek mode
+    peek_enabled: bool,
     peek_active: bool,
 
     // Particles
@@ -2124,6 +2130,7 @@ impl WaylandCompositor {
                 transition_direction: 0,
 
                 // Overview
+                overview_enabled: false,
                 overview_active: false,
                 overview_opacity: 0.0,
                 overview_entries: Vec::new(),
@@ -2134,15 +2141,19 @@ impl WaylandCompositor {
                 overview_title_textures: Vec::new(),
 
                 // Expose
+                expose_enabled: false,
                 expose_active: false,
                 expose_opacity: 0.0,
                 expose_entries: Vec::new(),
 
                 // Snap preview
+                snap_preview_enabled: false,
                 snap_preview: None,
+                snap_preview_target_visible: false,
                 snap_preview_opacity: 0.0,
 
                 // Peek mode
+                peek_enabled: false,
                 peek_active: false,
 
                 // Particles

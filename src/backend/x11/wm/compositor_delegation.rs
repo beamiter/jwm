@@ -359,6 +359,12 @@ macro_rules! delegate_compositor_capabilities {
                     .as_ref()
                     .map(|compositor| compositor.get_metrics())
             }
+
+            fn compositor_blur_status(&self) -> Option<crate::backend::api::BlurStatus> {
+                self.compositor
+                    .as_ref()
+                    .map(|compositor| compositor.get_blur_status())
+            }
         }
 
         impl crate::backend::api::CompositorControl for $backend {

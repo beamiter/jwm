@@ -173,10 +173,37 @@ pub fn absolute_wayland_display(host_runtime_dir: &str, wayland_display: &str) -
     }
 }
 
+/// Private user-directory environment shared by jwm and every nested client.
+///
+/// Keeping this in one helper prevents a smoke fixture from accidentally
+/// reading or writing the invoking user's configuration while the window
+/// manager itself is already isolated.
+#[must_use]
+pub fn private_user_env_overrides(private_runtime_dir: &Path) -> Vec<(String, String)> {
+    [
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_CACHE_HOME", "cache"),
+        ("XDG_DATA_HOME", "data"),
+        ("HOME", "home"),
+    ]
+    .into_iter()
+    .map(|(name, relative)| {
+        (
+            name.to_string(),
+            private_runtime_dir.join(relative).display().to_string(),
+        )
+    })
+    .collect()
+}
+
 /// Environment overrides for the nested jwm child process.
 ///
 /// Returns `(set, remove)` pairs; pure so the isolation policy is testable.
 /// `nested_x11_display` is the Xephyr display the X11 transports run inside.
+/// Config, state, cache, data, and home paths are all scoped to this run. In
+/// particular, layout persistence must never rewrite the invoking user's JWM
+/// config or let the first X11 transport change the second one's baseline.
 #[must_use]
 pub fn child_env_overrides(
     kind: NestedBackendKind,
@@ -195,6 +222,7 @@ pub fn child_env_overrides(
             kind.jwm_backend_value().to_string(),
         ),
     ];
+    set.extend(private_user_env_overrides(private_runtime_dir));
     let mut remove = Vec::new();
     match kind {
         NestedBackendKind::Winit => {
@@ -1156,6 +1184,16 @@ fn create_private_runtime_dir(kind: NestedBackendKind) -> io::Result<PathBuf> {
             Ok(()) => {
                 // A pre-existing path was skipped; make sure ours is private.
                 fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))?;
+                // The config watcher needs its parent to exist at startup;
+                // create every private XDG/home root before launching jwm.
+                // Keeping all of them below the retained artifact directory
+                // also makes any unexpected writes inspectable on failure.
+                for relative in ["config/jwm", "state", "cache", "data", "home"] {
+                    if let Err(error) = fs::create_dir_all(candidate.join(relative)) {
+                        let _ = fs::remove_dir_all(&candidate);
+                        return Err(error);
+                    }
+                }
                 return Ok(candidate);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -1228,6 +1266,24 @@ fn window_count(socket: &Path) -> Result<usize, String> {
         .ok_or_else(|| format!("get_windows returned a non-array payload: {response}"))
 }
 
+fn blur_health_summary(response: &serde_json::Value) -> Result<String, String> {
+    let data = response
+        .get("data")
+        .ok_or_else(|| format!("get_blur_status omitted data: {response}"))?;
+    let strength = data
+        .get("current_strength")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| format!("get_blur_status omitted current_strength: {response}"))?;
+    let temporal = data
+        .get("temporal_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| format!("get_blur_status omitted temporal_enabled: {response}"))?;
+    Ok(format!(
+        "blur strength: {strength}, temporal: {}",
+        if temporal { "enabled" } else { "disabled" }
+    ))
+}
+
 // --- Steps -----------------------------------------------------------------
 
 fn run_startup_step(spec: &StepSpec, context: &mut RunContext) -> StepReport {
@@ -1295,6 +1351,47 @@ fn run_ipc_health_step(spec: &StepSpec, context: &RunContext) -> StepReport {
                 .unwrap_or("missing")
                 .to_string();
             let failed = health == "missing" || health == "error";
+            // `get_metrics.renderer_api` exists only for a live X11
+            // compositor; the WM-only fallback has just window/monitor/tag
+            // counts. Require the adjacent blur diagnostic in the live case,
+            // while preserving smoke coverage on hosts where no compositor
+            // graphics API is available.
+            let compositor_diagnostics_active =
+                if context.kind.family() == NestedFamily::X11 && !failed {
+                    match ipc_query(&socket, "get_metrics") {
+                        Ok(metrics) => metrics["data"]["renderer_api"].is_string(),
+                        Err(error) => {
+                            return step_fail(
+                                spec,
+                                started,
+                                format!("X11 compositor metrics diagnostic failed: {error}"),
+                                context,
+                            );
+                        }
+                    }
+                } else {
+                    false
+                };
+            let blur = if context.kind.family() == NestedFamily::X11
+                && compositor_diagnostics_active
+                && !failed
+            {
+                match ipc_query(&socket, "get_blur_status")
+                    .and_then(|response| blur_health_summary(&response))
+                {
+                    Ok(summary) => Some(summary),
+                    Err(error) => {
+                        return step_fail(
+                            spec,
+                            started,
+                            format!("X11 compositor blur diagnostic failed: {error}"),
+                            context,
+                        );
+                    }
+                }
+            } else {
+                None
+            };
             StepReport {
                 name: spec.name,
                 status: if failed {
@@ -1304,7 +1401,10 @@ fn run_ipc_health_step(spec: &StepSpec, context: &RunContext) -> StepReport {
                 },
                 required: spec.required,
                 duration_ms: elapsed_ms(started),
-                detail: format!("health status: {health}"),
+                detail: blur.map_or_else(
+                    || format!("health status: {health}"),
+                    |blur| format!("health status: {health}; {blur}"),
+                ),
                 action: failed.then(|| {
                     format!(
                         "run `jwm-tool health --json` against {} for the failing reasons",
@@ -1362,6 +1462,9 @@ fn spawn_nested_client(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .env("XDG_RUNTIME_DIR", &context.runtime_dir);
+    for (key, value) in private_user_env_overrides(&context.runtime_dir) {
+        command.env(key, value);
+    }
     match kind.family() {
         NestedFamily::Wayland => {
             let nested_socket = find_nested_wayland_socket(&context.runtime_dir)
@@ -2153,6 +2256,15 @@ mod tests {
     #[test]
     fn child_environment_isolates_the_runtime_dir_per_backend() {
         let private = PathBuf::from("/tmp/private");
+        let private_user_env = private_user_env_overrides(&private);
+        let assert_private_user_dirs = |set: &[(String, String)]| {
+            for (name, value) in &private_user_env {
+                assert!(
+                    set.contains(&(name.clone(), value.clone())),
+                    "{name} must be private"
+                );
+            }
+        };
         let (set, remove) = child_env_overrides(
             NestedBackendKind::Winit,
             &private,
@@ -2162,6 +2274,7 @@ mod tests {
         );
         assert!(set.contains(&("XDG_RUNTIME_DIR".to_string(), "/tmp/private".to_string())));
         assert!(set.contains(&("JWM_BACKEND".to_string(), "wayland-winit".to_string())));
+        assert_private_user_dirs(&set);
         // The host compositor stays reachable through an absolute path.
         assert!(set.contains(&(
             "WAYLAND_DISPLAY".to_string(),
@@ -2177,19 +2290,57 @@ mod tests {
             None,
         );
         assert!(set.contains(&("JWM_BACKEND".to_string(), "wayland-x11".to_string())));
+        assert_private_user_dirs(&set);
         assert!(remove.contains(&"WAYLAND_DISPLAY"));
 
-        // The X11 transports run inside Xephyr, never the host session.
-        let (set, remove) = child_env_overrides(
-            NestedBackendKind::Xcb,
-            &private,
-            Some("/run/user/1000"),
-            Some("wayland-1"),
-            Some(":91"),
+        // Each X11 transport gets its own Xephyr session and private config,
+        // so the x11rb scenario cannot persist a new baseline for xcb.
+        for (kind, backend) in [
+            (NestedBackendKind::X11rb, "x11rb"),
+            (NestedBackendKind::Xcb, "xcb"),
+        ] {
+            let (set, remove) = child_env_overrides(
+                kind,
+                &private,
+                Some("/run/user/1000"),
+                Some("wayland-1"),
+                Some(":91"),
+            );
+            assert!(set.contains(&("JWM_BACKEND".to_string(), backend.to_string())));
+            assert!(set.contains(&("DISPLAY".to_string(), ":91".to_string())));
+            assert_private_user_dirs(&set);
+            assert!(remove.contains(&"WAYLAND_DISPLAY"));
+        }
+    }
+
+    #[test]
+    fn private_runtime_precreates_all_isolated_user_roots() {
+        let runtime =
+            create_private_runtime_dir(NestedBackendKind::X11rb).expect("private runtime");
+        for relative in ["config/jwm", "state", "cache", "data", "home"] {
+            assert!(
+                runtime.join(relative).is_dir(),
+                "missing isolated {relative} directory"
+            );
+        }
+        fs::remove_dir_all(runtime).expect("remove private runtime");
+    }
+
+    #[test]
+    fn blur_health_summary_requires_a_live_diagnostic_payload() {
+        assert_eq!(
+            blur_health_summary(&serde_json::json!({
+                "success": true,
+                "data": {"current_strength": 3, "temporal_enabled": true}
+            }))
+            .unwrap(),
+            "blur strength: 3, temporal: enabled"
         );
-        assert!(set.contains(&("JWM_BACKEND".to_string(), "xcb".to_string())));
-        assert!(set.contains(&("DISPLAY".to_string(), ":91".to_string())));
-        assert!(remove.contains(&"WAYLAND_DISPLAY"));
+        assert!(
+            blur_health_summary(&serde_json::json!({"success": true, "data": {}}))
+                .unwrap_err()
+                .contains("current_strength")
+        );
     }
 
     #[test]
