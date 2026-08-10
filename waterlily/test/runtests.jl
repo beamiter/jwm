@@ -1,4 +1,5 @@
 using JwmWaterLily
+using Random
 using Sockets
 using Test
 
@@ -744,28 +745,142 @@ end
     @test pale_pixels < length(stable_alpha) ÷ 20
 end
 
-@testset "turbulence seeds vortices and stirs along strokes" begin
-    case = build_case("turbulence", (64, 64); memory=Array)
+@testset "turbulence publishes sparse signed 3D vortices" begin
+    @test JwmWaterLily.turbulence_domain((64, 64)) == (32, 16, 32)
+    @test JwmWaterLily.turbulence_domain((128, 64)) == (64, 16, 32)
+    @test JwmWaterLily.turbulence_domain((1280, 800)) == (96, 32, 64)
+    @test JwmWaterLily.turbulence_domain((1280, 800); accelerated=true) ==
+          (128, 48, 80)
+
+    # A rectangular fixture makes every transport axis independently
+    # observable: solver (x, depth, vertical) becomes frame
+    # (width, height, front-to-back slices).
+    Random.seed!(0x4a574d5455524233)
+    case = build_case("turbulence", (128, 64); memory=Array)
     @test JwmWaterLily.case_palette_name(case) == "fluent"
     @test JwmWaterLily.body_bounds(case, 0.0) === nothing
+    @test case.domain == (64, 16, 32)
+    @test JwmWaterLily.frame_geometry(case) == (64, 32, 16)
+    @test JwmWaterLily.publish_geometry(case, false) == (64, 32, 16)
+    @test JwmWaterLily.publish_geometry(case, true) == (128, 64, 1)
+    @test length(case.volume_rgba) == 4 * 64 * 32 * 16
 
-    # The seeded field starts alive.
-    @test sum(abs2, case.simulation.flow.u) > 0
+    @test JwmWaterLily.turbulence_volume_offset(64, 32, 1, 1, 32) == 1
+    @test JwmWaterLily.turbulence_volume_offset(64, 32, 64, 1, 32) ==
+          4 * 63 + 1
+    @test JwmWaterLily.turbulence_volume_offset(64, 32, 1, 1, 1) ==
+          4 * 64 * 31 + 1
+    @test JwmWaterLily.turbulence_volume_offset(64, 32, 1, 2, 32) ==
+          4 * 64 * 32 + 1
+
+    # The simulation is genuinely three-dimensional: its staggered velocity
+    # field has three spatial axes and all three components start alive.
+    velocity = case.simulation.flow.u
+    @test ndims(velocity) == 4
+    @test size(velocity, 4) == 3
+    component_energy = ntuple(3) do component
+        sum(abs2, @view velocity[:, :, :, component])
+    end
+    @test all(>(0), component_energy)
+
+    # Both display metrics must overwrite the complete reused scalar scratch,
+    # including all periodic ghost planes. A stale ghost feeds directly into
+    # the seven-point reconstruction at the tank boundary.
+    sentinel = 1234.0f0
+    fill!(case.simulation.flow.σ, sentinel)
+    magnitude, signed = JwmWaterLily.download_turbulence_vorticity!(case)
+    for field in (magnitude, signed)
+        @test all(!=(sentinel), field)
+        @views begin
+            @test field[1, :, :] == field[end - 1, :, :]
+            @test field[end, :, :] == field[2, :, :]
+            @test field[:, 1, :] == field[:, end - 1, :]
+            @test field[:, end, :] == field[:, 2, :]
+            @test field[:, :, 1] == field[:, :, end - 1]
+            @test field[:, :, end] == field[:, :, 2]
+        end
+    end
 
     # The first pointer event only anchors the stroke; the second stirs a
-    # dipole in along the motion.
-    energy_before = sum(abs2, case.simulation.flow.u)
+    # depth-localized 3D dipole in along the motion.
+    energy_before = sum(abs2, velocity)
     JwmWaterLily.handle_pointer!(case, 0.3, 0.5)
-    @test sum(abs2, case.simulation.flow.u) ≈ energy_before
+    @test sum(abs2, velocity) ≈ energy_before
     JwmWaterLily.handle_pointer!(case, 0.7, 0.5)
-    @test sum(abs2, case.simulation.flow.u) > energy_before
+    @test sum(abs2, velocity) > energy_before
+
+    # Edge injections move the complete Gaussian pair inward instead of
+    # clipping a core against the tile boundary, and refresh all velocity
+    # ghosts before the same-frame vorticity render.
+    JwmWaterLily.inject_dipole!(case, 0.5, 0.5, 0.5, 1.0, 0.0, 0.5)
+    @views begin
+        @test velocity[1, :, :, :] == velocity[end - 1, :, :, :]
+        @test velocity[end, :, :, :] == velocity[2, :, :, :]
+        @test velocity[:, 1, :, :] == velocity[:, end - 1, :, :]
+        @test velocity[:, end, :, :] == velocity[:, 2, :, :]
+        @test velocity[:, :, 1, :] == velocity[:, :, end - 1, :]
+        @test velocity[:, :, end, :] == velocity[:, :, 2, :]
+    end
+    @test all(isfinite, velocity)
+
+    # Prefilling the alpha lane catches a renderer that skips quiet voxels
+    # and leaks uninitialized data (or anatomy from the preceding jelly
+    # frame) into a geometry-compatible volume.
+    @views case.volume_rgba[4:4:end] .= 0xff
+    volume = JwmWaterLily.render_volume!(case)
+    @test volume === case.volume_rgba
+    @test length(volume) == 4 * prod(JwmWaterLily.frame_geometry(case))
+    first_volume = copy(volume)
+    alphas = first_volume[4:4:end]
+    @test all(<=(JwmWaterLily.TURBULENCE_MAX_ALPHA), alphas)
+    @test any(==(0x00), alphas)
+    @test any(>(0x00), alphas)
+
+    # Signed depth-axis vorticity must exercise both halves of the Fluent
+    # palette. Only occupied voxels count; zero-alpha RGB deliberately keeps
+    # its local hue for stable tricubic reconstruction at filament edges.
+    pixels = reshape(first_volume, 4, :)
+    active = findall(>(0x00), alphas)
+    @test any(index -> pixels[3, index] > pixels[1, index], active)
+    @test any(index -> pixels[1, index] > pixels[3, index], active)
+
+    # At least two front-to-back slabs differ, ruling out a replicated planar
+    # field masquerading as a version-2 volume.
+    frame_width, frame_height, frame_depth = JwmWaterLily.frame_geometry(case)
+    slice_bytes = 4 * frame_width * frame_height
+    front_slice = @view first_volume[1:slice_bytes]
+    depth_varies = any(2:frame_depth) do depth
+        start = (depth - 1) * slice_bytes + 1
+        @view(first_volume[start:(start + slice_bytes - 1)]) != front_slice
+    end
+    @test depth_varies
+
+    # Rendering an unchanged CPU field is byte-deterministic. Palette
+    # hot-swapping changes occupied emission colors but never the physical
+    # opacity transfer used by the compositor's wake branch.
+    @test copy(JwmWaterLily.render_volume!(case)) == first_volume
+    violet_volume = copy(
+        JwmWaterLily.render_volume!(
+            case;
+            palette=JwmWaterLily.VIOLET_PALETTE,
+        ),
+    )
+    @test violet_volume[4:4:end] == alphas
+    violet_pixels = reshape(violet_volume, 4, :)
+    @test any(active) do index
+        violet_pixels[1:3, index] != pixels[1:3, index]
+    end
 
     # The ambient reseed fires once its deadline passes.
     case.reseed_time = -1.0
-    energy_before = sum(abs2, case.simulation.flow.u)
+    energy_before = sum(abs2, velocity)
     JwmWaterLily.frame_tick!(case)
-    @test sum(abs2, case.simulation.flow.u) != energy_before
+    @test sum(abs2, velocity) != energy_before
     @test case.reseed_time > JwmWaterLily.simulation_time(case)
+
+    JwmWaterLily.advance!(case, 0.02)
+    @test JwmWaterLily.simulation_time(case) >= 0.02
+    @test all(isfinite, velocity)
 end
 
 @testset "rain drops pin, run, and wipe the mist" begin

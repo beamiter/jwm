@@ -22,7 +22,7 @@ public `AutoBody` and `Simulation` APIs:
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
 | `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
 | `stylus` | Cylinder chasing the mouse pointer through quiescent fluid on a critically damped spring, so every cursor stroke writes vorticity onto the canvas | fluent rainbow |
-| `turbulence` | Free two-dimensional turbulence: random seeded vortices merge and strain into filaments while pointer strokes stir new dipoles in and an ambient reseed keeps the canvas alive | fluent rainbow |
+| `turbulence` | True 3D free turbulence in a periodic tank: randomly oriented Gaussian vortex blobs stretch into filaments, pointer strokes inject depth-localized 3D dipoles, and sparse ambient forcing keeps the cascade alive; vorticity magnitude controls volume density while signed depth-axis vorticity selects the fluent palette's cold/warm side | fluent rainbow |
 | `waltz` | Cylinder following the mouse pointer through a uniform stream with dance's transverse heave riding the chase spring, trailing the braided wake from the cursor | mica teal/amethyst |
 | `wander` | Cylinder roaming quiescent fluid on a smooth non-repeating Lissajous path, trailing its wake across the whole canvas (default) | aurora teal/magenta |
 
@@ -48,22 +48,36 @@ JWM X11 compositor
 ```
 
 Planar cases publish a display-shaped 2D frame exactly as before. Cases with
-a true 3D solve (currently `jelly`) publish their tank as an RGBA8 voxel
-volume instead; the compositor uploads it as an OpenGL 3D texture and
-ray-marches it inside a projected glass aquarium that fills about 92% of the
-limiting viewport axis. The camera stays in front of the tank and adds small,
-slow yaw and elevation waves for parallax rather than orbiting behind it. Its
-pose derives from the frame timestamp, so re-rendering an unchanged frame is
-bit-stable for damage tracking while each new simulation frame advances the
-parallax smoothly.
+a true 3D solve (currently `jelly` and `turbulence`) publish their tank as an
+RGBA8 voxel volume instead; the compositor uploads it as an OpenGL 3D texture
+and ray-marches it inside a projected glass aquarium that fills about 92% of
+the limiting viewport axis. The camera stays in front of the tank and adds
+small, slow yaw and elevation waves for parallax rather than orbiting behind
+it. Its pose derives from the frame timestamp, so re-rendering an unchanged
+frame is bit-stable for damage tracking while each new simulation frame
+advances the parallax smoothly.
 
-The volume includes the animated anatomy — bell membranes shaded from rim
+The jelly volume includes the animated anatomy — bell membranes shaded from rim
 lavender to apex violet, the rose gonad crown visible through each
 translucent bell, four thick curling oral arms, and five thin trailing
-filaments — together with the vorticity wakes from the 3D solve. Before
-publication, a centre-heavy isotropic seven-point filter (the cell plus its
-six axial neighbours) attenuates isolated solver-grid impulses in the displayed
-wake without blurring the analytic anatomy.
+filaments — together with the vorticity wakes from the 3D solve.
+
+The turbulence volume contains no synthetic surface or extruded 2D sheet. Its
+periodic three-dimensional solve starts from randomly positioned and oriented
+divergence-free Gaussian vortex blobs; pointer strokes add counter-signed 3D
+dipoles at a smoothly wandering virtual depth, and occasional ambient dipoles
+replace energy lost through the forward cascade. Filtered vorticity magnitude
+sets a sparse opacity field, while filtered signed depth-axis vorticity chooses
+the cold or warm half of the selected diverging palette. A fixed activity floor
+leaves quiet water at zero alpha for occupancy skipping, and the rational
+density knee is deterministic rather than rescaling and flickering from frame
+to frame. `JWM_WATERLILY_PLANAR` retains the signed strongest-magnitude sample
+along each depth ray and publishes that projection through the version-1 path.
+
+Both native-volume cases apply a centre-heavy isotropic seven-point filter (the
+cell plus its six axial neighbours) to displayed solver vorticity. Jelly
+composites its analytic anatomy after filtering, so the filter attenuates
+isolated grid impulses without softening bells, arms, organs, or filaments.
 
 The shader performs front-to-back emission/absorption compositing on a fixed,
 unjittered midpoint lattice at two samples per voxel. Each step first samples
@@ -81,22 +95,25 @@ capturing the shallow refracting surface; a bell swimming through its own rough
 wake therefore keeps stable desktop refraction without paying that cost along
 the rest of the ray.
 
-Low-alpha turbulent wake shades as a normalized Henyey-Greenstein
-forward-scattering medium in its own palette hue. As density rises, shading
-blends continuously into smooth participating-tissue illumination driven by
-authored apex-to-rim color, world height, and view-path depth. Deliberately not
-reapplying per-step Lambert, self-shadow, and narrow specular to the one-cell
-display shell prevents its voxel coverage from reappearing as concentric rings
-or salt-and-pepper highlights. Per-voxel opacity remains a strictly monotone
-transfer instead of flattening ranges into plateaus. The first tissue interface
-is accumulated over a shallow weighted band for stable scene refraction. A
-small confidence-gated directional cue is then applied once to that coherent
-front interface, rather than independently to every density layer. Refraction
-strength uses the same weight and normal-coherence confidence, so weak or
-opposing gradients fade continuously instead of snapping on. A
-display-referred exponential shoulder rolls off only accumulated volume
-highlights before premultiplication, preserving hue without remapping the
-transmitted desktop.
+Low-alpha turbulent wake — both Jelly's simulated wake and every non-empty
+turbulence voxel — shades as a normalized Henyey-Greenstein forward-scattering
+medium in its own palette hue. Turbulence caps authored alpha at `0x1c`
+(`28/255`, below the shader's `0.115` wake ceiling), so even its strongest
+vortex remains in this branch and cannot be mistaken for a refracting membrane.
+Only Jelly's higher-alpha analytic anatomy enters the smooth participating-
+tissue illumination driven by authored apex-to-rim color, world height, and
+view-path depth. Deliberately not reapplying per-step Lambert, self-shadow, and
+narrow specular to the one-cell display shell prevents its voxel coverage from
+reappearing as concentric rings or salt-and-pepper highlights. Per-voxel opacity
+remains a strictly monotone transfer instead of flattening ranges into plateaus.
+The first Jelly tissue interface is accumulated over a shallow weighted band
+for stable scene refraction. A small confidence-gated directional cue is then
+applied once to that coherent front interface, rather than independently to
+every density layer. Refraction strength uses the same weight and
+normal-coherence confidence, so weak or opposing gradients fade continuously
+instead of snapping on. A display-referred exponential shoulder rolls off only
+accumulated volume highlights before premultiplication, preserving hue without
+remapping the transmitted desktop.
 
 The aquarium has perspective-correct front and rear glass rims and a
 world-space open water surface below a narrow air gap. Rays through the water
@@ -115,23 +132,29 @@ grain leaking into the volume as speckle. All sampling and camera/swell phases
 are deterministic: an unchanged volume and timestamp render bit-identically,
 and the marcher deliberately uses no stochastic per-pixel depth jitter.
 
-Focused regressions protect these properties. Occupancy unit tests cover
-one-voxel dilation, edge clamping, and reuse without stale support; headless
-real-shader tests compare a sparse B-spline tail against a no-skip oracle,
-verify repeatability and premultiplied output, exercise a chord immediately
-around a fractional-step
-boundary, and render a curved analytic bell over a smooth scene texture to
-reject isolated dark holes, bright fireflies, and oscillating concentric luma
-bands. A paired test-only control with interface confidence disabled confirms
-that the scene-enabled regression receives a measurable contribution from the
-lighting/refraction path instead of merely drawing tissue over a backdrop.
+Focused regressions protect these properties. Julia tests pin each native
+producer's non-square `(width, vertical, depth)` geometry and front-to-back
+slice mapping. Turbulence-specific coverage verifies a genuine three-component
+solve, complete overwrite of the reusable RGBA volume, sparse zero-alpha water,
+the `0x1c` material ceiling, cold and warm signed-vorticity colors, palette-
+independent alpha, depth variation, and the signed strongest-magnitude planar
+fallback. Compositor occupancy unit tests cover one-voxel dilation, edge
+clamping, and reuse without stale support; headless real-shader tests compare a
+sparse B-spline tail against a no-skip oracle, verify repeatability,
+premultiplied output, and preservation of a low-alpha wake's authored hue,
+exercise a chord immediately around a fractional-step boundary, and render a
+curved analytic bell over a smooth scene texture to reject isolated dark holes,
+bright fireflies, and oscillating concentric luma bands. A paired test-only
+control with interface confidence disabled confirms that the scene-enabled
+regression receives a measurable contribution from the lighting/refraction
+path instead of merely drawing tissue over a backdrop.
 
 Volume upload also treats RGBA and occupancy as one coupled snapshot. It
 isolates and restores texture-unit, pixel-unpack-buffer, and unpack-alignment
 state around transfers; if either upload reports a GL error, both textures are
 discarded and rebuilt together on the next publication. A 64 MiB volumetric
 frame ceiling bounds the compositor-thread dilation buffers and GPU allocation;
-the default accelerated jelly volume remains below 2 MiB.
+the default accelerated jelly and turbulence volumes each remain below 2 MiB.
 
 This implementation is currently limited to the shared X11 compositor used by
 the `x11rb` and `xcb` backends. It is not available on the Wayland backends.
@@ -161,9 +184,11 @@ layer is visible because both paths would bypass compositor-owned visuals.
 
 There is no hand tracking in this design. It does not use a camera, MediaPipe,
 landmarks, or a selected window. The chosen WaterLily case advances on its own
-simulation clock; the interactive `stylus` and `waltz` cases additionally
-receive the pointer position, which the compositor streams to the worker as
-throttled `pointer X Y` control commands while the layer is visible.
+simulation clock; the interactive `puddle`, `rain`, `stylus`, `turbulence`, and
+`waltz` cases additionally receive the pointer position, which the compositor
+streams to the worker as throttled `pointer X Y` control commands while the
+layer is visible. Turbulence maps that 2D point to the tank's x/vertical face
+and supplies a slowly varying virtual depth for volumetric stirring.
 
 ## Quick start
 
@@ -315,11 +340,12 @@ Planar frames are stretched across the display, while volumetric frames are
 sampled inside the projected aquarium, so either way the `--sim-size` choice
 trades solver cost against on-screen sharpness; `640x400` reads well on common
 16:9/16:10 outputs, and `1280x800` is comfortable on a discrete GPU. At
-`1280x800`, the jelly CPU path caps its `(width, depth, height)` solve at
-`96x32x64`, while CUDA and ROCm use the finer `128x48x80` domain. The higher
-accelerator ceiling improves curved coverage before tricubic reconstruction;
-the CPU cap keeps publication latency practical. Start the worker with
-`--threads=auto` to keep the colorize loop parallel.
+`1280x800`, both Jelly and turbulence cap their `(width, depth, height)` CPU
+solve at `96x32x64`, while CUDA and ROCm use the finer `128x48x80` domain.
+The higher accelerator ceiling improves curved anatomy and vortex-filament
+coverage before tricubic reconstruction; the CPU cap keeps 3D solve and
+publication latency practical. Start the worker with `--threads=auto` to keep
+the colorize loop parallel.
 Publishing is paced against an absolute schedule and the solver advances
 under a per-frame time budget: when the simulation cannot reach real time
 within the budget, the publish cadence stays fixed and the simulation clock
@@ -378,6 +404,16 @@ the resting camera) to back, each laid out exactly like a version-1 frame;
 voxel RGB is emission color and voxel alpha is the opacity a ray accumulates
 crossing one voxel straight through, which the compositor renormalizes by its
 actual ray-march step length.
+
+The bundled volume shader also assigns material meaning to producer alpha;
+this is a rendering convention layered on the transport, not a new protocol
+field. Alpha at or below `0.115` is low-density wake and receives
+hue-preserving forward scattering without contributing a tissue-interface
+normal. The smooth material transition begins at `0.12` and reaches tissue by
+`0.28`; Jelly's analytic anatomy occupies that higher band for coherent
+lighting and scene refraction. Turbulence deliberately publishes at most
+`0x1c` (`28/255`) and therefore remains entirely below the wake ceiling, while
+zero-alpha voxels remain eligible for conservative empty-space skipping.
 
 The producer takes an exclusive advisory file lock, writes a complete
 non-published slot, publishes its slot, sequence, and timestamp, and then

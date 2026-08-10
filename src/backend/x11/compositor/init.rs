@@ -333,9 +333,9 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         };
 
-        // Volumetric WaterLily frames (a true 3D solve such as the jellyfish
-        // smack) ray-march through a perspective camera instead of stretching
-        // a pre-projected quad.
+        // Volumetric WaterLily frames (true 3D solves such as jellyfish and
+        // turbulence) ray-march through a perspective camera instead of
+        // stretching a pre-projected quad.
         let waterlily_volume_program = Self::optional_program(
             &shader_cache,
             &gl,

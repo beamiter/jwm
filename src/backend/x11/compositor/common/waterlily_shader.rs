@@ -335,9 +335,9 @@ void main() {
 /// Native 3D display of version-2 volumetric frames: a perspective camera
 /// ray-marches the RGBA volume with front-to-back emission/absorption,
 /// captures a stable front-interface normal, and applies continuous-medium
-/// lighting, glass Fresnel, and scene refraction. A true 3D solve (the
-/// jellyfish smack) therefore shows parallax, occlusion, and view-dependent
-/// material depth instead of a baked planar projection.
+/// lighting, glass Fresnel, and scene refraction. True 3D solves such as the
+/// jellyfish smack and free turbulence therefore show parallax, occlusion,
+/// and view-dependent material depth instead of a baked planar projection.
 ///
 /// World conventions shared with the producer contract and the CPU-side
 /// camera: the volume box is centered at the origin; +X is screen right and
@@ -382,10 +382,10 @@ out vec4 frag_color;
 
 const int MAX_STEPS = 240;
 const float TAU = 6.28318530717958647692;
-// Producer material bands, matching the jelly worker's authored voxel
-// opacities: turbulent wake publishes below ~0.10 while bell tissue, oral
-// arms, and gonads publish about 0.28-0.35. The separation keeps turbulent
-// wake out of the front-interface normal used for refraction.
+// Producer material bands shared by the volumetric cases: fluid and turbulent
+// wake publish below ~0.115 while jelly bell tissue, oral arms, and gonads
+// publish about 0.28-0.35. The separation keeps wake-only volumes out of the
+// front-interface normal used for tissue refraction.
 const float WAKE_ALPHA_CEILING = 0.115;
 // The aquarium is deliberately a little clearer than the full-screen planar
 // frost.  It now has a real projected silhouette, so water need not obscure
@@ -981,7 +981,7 @@ void main() {
         water_backdrop_alpha = 0.0;
     }
 
-    // Back rim lies behind the volume and is naturally occluded by a jelly.
+    // Back rim lies behind the volume and is naturally occluded by material.
     // The front pane/rim and water surface are then composited over it.  All
     // terms remain premultiplied to match the compositor blend state.
     float rear_glass_alpha = 0.20 * back_edge;

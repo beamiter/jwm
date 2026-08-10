@@ -1076,7 +1076,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // limit before allocating them. Keep the tight-RGBA check here as
         // defense in depth for directly constructed frames or future readers:
         // a volume additionally needs two CPU occupancy buffers and a 3D R8
-        // texture. Current accelerated jelly domains are under 2 MiB RGBA.
+        // texture. Current accelerated volume domains are under 2 MiB RGBA.
         if target == glow::TEXTURE_3D && frame.rgba.len() > MAX_WATERLILY_VOLUME_BYTES {
             log::warn!(
                 "compositor: rejected {} MiB WaterLily volume (limit {} MiB)",
