@@ -34,6 +34,49 @@ fn overlay_output_is_scene_linear(scene_linear_active: bool, hw_encode_active: b
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverviewRenderRoute {
+    LegacyEncoded,
+    DirectLinear,
+    SoftwareReentry,
+}
+
+const fn overview_render_route(
+    scene_linear_active: bool,
+    hw_encode_active: bool,
+) -> OverviewRenderRoute {
+    match (scene_linear_active, hw_encode_active) {
+        (true, true) => OverviewRenderRoute::DirectLinear,
+        (true, false) => OverviewRenderRoute::SoftwareReentry,
+        (false, _) => OverviewRenderRoute::LegacyEncoded,
+    }
+}
+
+/// Clip a top-left-origin compositor rectangle to the global framebuffer and
+/// return the matching bottom-left-origin GLES scissor rectangle.
+fn overview_monitor_scissor(
+    monitor: (i32, i32, u32, u32),
+    screen_w: u32,
+    screen_h: u32,
+) -> Option<[i32; 4]> {
+    let screen_w = i64::from(screen_w.min(i32::MAX as u32));
+    let screen_h = i64::from(screen_h.min(i32::MAX as u32));
+    let x0 = i64::from(monitor.0).clamp(0, screen_w);
+    let y0 = i64::from(monitor.1).clamp(0, screen_h);
+    let x1 = (i64::from(monitor.0) + i64::from(monitor.2)).clamp(0, screen_w);
+    let y1 = (i64::from(monitor.1) + i64::from(monitor.3)).clamp(0, screen_h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+
+    Some([
+        i32::try_from(x0).ok()?,
+        i32::try_from(screen_h - y1).ok()?,
+        i32::try_from(x1 - x0).ok()?,
+        i32::try_from(y1 - y0).ok()?,
+    ])
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetainedTexturePass {
     Genie,
     StaticDockItem,
@@ -155,11 +198,11 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OcclusionCandidate, RetainedTexturePass, RetainedTextureProgram,
+        OcclusionCandidate, OverviewRenderRoute, RetainedTexturePass, RetainedTextureProgram,
         attention_requires_continuous_frames, edge_glow_requires_continuous_frames,
         is_opaque_output_occluder, oriented_content_uv, overlay_output_is_scene_linear,
-        postprocess_requires_continuous_frames, premultiplied_blend_factors, retained_color_plan,
-        snap_preview_allows_partial_damage,
+        overview_monitor_scissor, overview_render_route, postprocess_requires_continuous_frames,
+        premultiplied_blend_factors, retained_color_plan, snap_preview_allows_partial_damage,
     };
     use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
     use smithay::backend::renderer::gles::ffi;
@@ -195,6 +238,59 @@ mod tests {
         assert!(!overlay_output_is_scene_linear(false, true));
         assert!(!overlay_output_is_scene_linear(true, false));
         assert!(overlay_output_is_scene_linear(true, true));
+    }
+
+    #[test]
+    fn overview_render_route_covers_every_scene_and_hardware_combination() {
+        assert_eq!(
+            overview_render_route(false, false),
+            OverviewRenderRoute::LegacyEncoded
+        );
+        assert_eq!(
+            overview_render_route(false, true),
+            OverviewRenderRoute::LegacyEncoded
+        );
+        assert_eq!(
+            overview_render_route(true, true),
+            OverviewRenderRoute::DirectLinear
+        );
+        assert_eq!(
+            overview_render_route(true, false),
+            OverviewRenderRoute::SoftwareReentry
+        );
+    }
+
+    #[test]
+    fn overview_monitor_scissor_clips_and_flips_to_gles_coordinates() {
+        assert_eq!(
+            overview_monitor_scissor((0, 0, 1920, 1080), 1920, 1080),
+            Some([0, 0, 1920, 1080])
+        );
+        assert_eq!(
+            overview_monitor_scissor((1920, 0, 1920, 1080), 3840, 1080),
+            Some([1920, 0, 1920, 1080])
+        );
+        assert_eq!(
+            overview_monitor_scissor((100, 200, 800, 600), 1920, 1080),
+            Some([100, 280, 800, 600])
+        );
+        assert_eq!(
+            overview_monitor_scissor((-100, -50, 400, 300), 1920, 1080),
+            Some([0, 830, 300, 250])
+        );
+        assert_eq!(
+            overview_monitor_scissor((1800, 1000, 500, 500), 1920, 1080),
+            Some([1800, 0, 120, 80])
+        );
+        assert_eq!(overview_monitor_scissor((0, 0, 0, 100), 1920, 1080), None);
+        assert_eq!(
+            overview_monitor_scissor((-500, 0, 100, 100), 1920, 1080),
+            None
+        );
+        assert_eq!(
+            overview_monitor_scissor((0, 1200, 100, 100), 1920, 1080),
+            None
+        );
     }
 
     #[test]
@@ -832,13 +928,26 @@ impl WaylandCompositor {
     }
 
     // SOTA #2 Phase 2.3: Linearize the currently-encoded output_fbo into
-    // linear_fbo so subsequent window draws (with u_scene_linear=1) blend
-    // correctly over the wallpaper/shadows. Called only when self.linear_fbo
-    // != 0. Disables blending — this is a full overwrite.
-    fn dispatch_scene_linear_decode_pass(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    // linear_fbo so subsequent draws (with u_scene_linear=1) blend correctly.
+    // The initial scene pass supplies the legacy sRGB default; a late overlay
+    // re-entry supplies the exact transfer function used by the preceding
+    // software encode. Disables blending because every selected pixel is a
+    // full overwrite.
+    fn dispatch_scene_linear_decode_pass(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        decode_tf: i32,
+        decode_gamma: f32,
+        scissor: Option<[i32; 4]>,
+    ) {
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.linear_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if let Some([x, y, width, height]) = scissor {
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(x, y, width, height);
+            }
             gl.Disable(ffi::BLEND);
             gl.UseProgram(self.scene_linear_decode_program);
             self.set_projection_uniform(
@@ -855,6 +964,8 @@ impl WaylandCompositor {
                 self.screen_h as f32,
             );
             gl.Uniform1i(self.scene_linear_decode_uniforms.texture, 0);
+            gl.Uniform1i(self.scene_linear_decode_uniforms.decode_tf, decode_tf);
+            gl.Uniform1f(self.scene_linear_decode_uniforms.decode_gamma, decode_gamma);
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.output_texture);
             gl.BindVertexArray(self.quad_vao);
@@ -862,6 +973,9 @@ impl WaylandCompositor {
             gl.BindVertexArray(0);
             gl.UseProgram(0);
             gl.Enable(ffi::BLEND);
+            if scissor.is_some() {
+                gl.Disable(ffi::SCISSOR_TEST);
+            }
         }
     }
 
@@ -875,10 +989,15 @@ impl WaylandCompositor {
         projection: &[f32; 16],
         encode_tf: i32,
         encode_gamma: f32,
+        scissor: Option<[i32; 4]>,
     ) {
         unsafe {
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if let Some([x, y, width, height]) = scissor {
+                gl.Enable(ffi::SCISSOR_TEST);
+                gl.Scissor(x, y, width, height);
+            }
             gl.Disable(ffi::BLEND);
             gl.UseProgram(self.scene_linear_encode_program);
             self.set_projection_uniform(
@@ -904,6 +1023,9 @@ impl WaylandCompositor {
             gl.BindVertexArray(0);
             gl.UseProgram(0);
             gl.Enable(ffi::BLEND);
+            if scissor.is_some() {
+                gl.Disable(ffi::SCISSOR_TEST);
+            }
         }
     }
 
@@ -1918,7 +2040,10 @@ impl WaylandCompositor {
         // OETF; linear-aware overlays bind the resulting domain explicitly.
         let scene_linear_active = self.linear_fbo != 0;
         if scene_linear_active {
-            self.dispatch_scene_linear_decode_pass(gl, &projection);
+            // Wallpaper, shadows and the other pre-window producers are legacy
+            // sRGB. A negative discriminant deliberately selects the decoder's
+            // sRGB fallback while preserving any active damage scissor.
+            self.dispatch_scene_linear_decode_pass(gl, &projection, -1, 1.0, None);
         }
         self.frame_profiler.zone_start("windows");
         unsafe {
@@ -2290,14 +2415,16 @@ impl WaylandCompositor {
                     &projection,
                     shader_encode_tf,
                     shader_encode_gamma,
+                    None,
                 );
             }
         }
 
-        // Every remaining window-program draw is an overlay on output_fbo.
-        // Synchronize the domain once at that boundary so expose, peek,
-        // overview labels, debug HUD and system UI cannot inherit the main
-        // scene's u_scene_linear=1 after a shader encode pass.
+        // Establish the default domain for post-scene overlays. Software
+        // overview rendering temporarily re-enters linear_fbo and restores
+        // this encoded state afterward; the hardware-OETF route remains
+        // linear throughout. This prevents expose, peek, debug HUD and system
+        // UI from inheriting stale main-scene uniforms.
         let overlay_scene_linear =
             overlay_output_is_scene_linear(scene_linear_active, hw_encode_active);
         unsafe {
@@ -2629,7 +2756,49 @@ impl WaylandCompositor {
                 self.clear_overview_textures(gl);
             }
         } else if self.overview_opacity > 0.0 {
-            self.render_overview(gl, &projection, overlay_scene_linear);
+            match overview_render_route(scene_linear_active, hw_encode_active) {
+                OverviewRenderRoute::LegacyEncoded => {
+                    self.render_overview(gl, &projection, false);
+                }
+                OverviewRenderRoute::DirectLinear => {
+                    self.render_overview(gl, &projection, true);
+                }
+                OverviewRenderRoute::SoftwareReentry => {
+                    // The main scene has already been software-encoded into
+                    // output_fbo so encoded-only overlays can keep their legacy
+                    // ordering. Re-enter linear light only over the overview's
+                    // monitor, composite every generated material and unmanaged
+                    // texture there, then encode the exact same region back.
+                    if let Some(scissor) = overview_monitor_scissor(
+                        self.overview_monitor,
+                        self.screen_w,
+                        self.screen_h,
+                    ) {
+                        self.dispatch_scene_linear_decode_pass(
+                            gl,
+                            &projection,
+                            shader_encode_tf,
+                            shader_encode_gamma,
+                            Some(scissor),
+                        );
+                        self.render_overview(gl, &projection, true);
+                        self.dispatch_scene_linear_encode_pass(
+                            gl,
+                            &projection,
+                            shader_encode_tf,
+                            shader_encode_gamma,
+                            Some(scissor),
+                        );
+                        unsafe {
+                            // The title and strip deliberately selected the
+                            // temporary linear domain. Restore the persistent
+                            // shared programs before Expose/Peek/system UI draw
+                            // into the now target-encoded output FBO.
+                            self.sync_overlay_color_domain(gl, false);
+                        }
+                    }
+                }
+            }
         }
 
         // =================================================================

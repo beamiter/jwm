@@ -184,7 +184,11 @@ src/backend/api.rs          platform boundary
   static skydome program owns the horizon and floor-light environment, leaving
   the simpler Expose/Peek background program untouched and avoiding idle-frame
   scheduling. Solid and reflected live faces share the ordinary window's
-  per-surface color-transform plan. The GLES adapters transform straight color
+  per-surface color-transform plan. A software-encoded non-sRGB frame re-enters
+  the FP16 target only over the overview monitor, draws the complete prism in
+  linear light at its original layer, then target-encodes that same scissored
+  region; hardware-OETF and legacy encoded routes remain direct. The GLES
+  adapters transform straight color
   (unpremultiply, decode, gamut matrix, optional encode, repremultiply), retain
   explicit same-space PQ/HLG plans for scene-linear rendering, and normalize
   runtime 3x3 uploads to column-major data with `GL_FALSE`; filler and legacy

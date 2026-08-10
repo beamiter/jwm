@@ -628,7 +628,8 @@ void main() {
 //
 // Fullscreen quad that reads the FP16 linear-scene FBO and applies the
 // output's forward EOTF, writing display-encoded values to output_fbo.
-// Phase 2.3 binds and dispatches this pass at the end of the window draw.
+// The compositor dispatches it at the main-scene boundary and reuses it for
+// monitor-local late-overlay re-entry after software output encoding.
 //
 // Uses BLUR_DOWN_VERTEX for the vertex stage (same gl_VertexID-based
 // fullscreen quad). The TF discriminant values match TransferKind in
@@ -693,16 +694,25 @@ void main() {
 }
 "#;
 
-// Companion fullscreen-quad decode pass: reads the encoded output_fbo
-// (containing wallpaper + shadows + anything else not yet linear-aware)
-// and writes its linearization into the FP16 linear_fbo, so the window
-// draws blend correctly over it. Defaults to sRGB since legacy passes
-// produce sRGB-encoded values.
+// Companion fullscreen-quad decode pass: reads the encoded output_fbo and
+// writes its linearization into the FP16 linear_fbo. Initial scene ingress
+// supplies the legacy sRGB default; a monitor-local late-overlay re-entry
+// supplies the exact transfer used by the preceding software encode.
 
 pub const SCENE_LINEAR_DECODE_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
 
+const int TF_LINEAR = 0;
+const int TF_POWER = 1;
+const int TF_BT1886 = 2;
+const int TF_GAMMA22 = 3;
+const int TF_PQ = 4;
+const int TF_HLG = 5;
+const int TF_SRGB = 6;
+
 uniform sampler2D u_texture;
+uniform int   u_decode_tf;
+uniform float u_decode_gamma;
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -712,9 +722,43 @@ vec3 srgb_inverse(vec3 c) {
     return mix(lo, hi, step(0.04045, c));
 }
 
+vec3 pq_inverse(vec3 e) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 ep_m2 = pow(max(e, 0.0), vec3(1.0 / M2));
+    vec3 num = max(ep_m2 - C1, 0.0);
+    vec3 den = max(C2 - C3 * ep_m2, 1e-12);
+    return pow(num / den, vec3(1.0 / M1));
+}
+
+vec3 hlg_inverse(vec3 e) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = (e * e) / 3.0;
+    vec3 hi = (exp((e - C) / A) + B) / 12.0;
+    return mix(lo, hi, step(0.5, e));
+}
+
+vec3 decode_eotf(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    if (u_decode_tf == TF_LINEAR)       return c;
+    if (u_decode_tf == TF_POWER)        return pow(c, vec3(max(u_decode_gamma, 1e-3)));
+    if (u_decode_tf == TF_BT1886)       return pow(c, vec3(2.4));
+    if (u_decode_tf == TF_GAMMA22)      return pow(c, vec3(2.2));
+    if (u_decode_tf == TF_PQ)           return pq_inverse(c);
+    if (u_decode_tf == TF_HLG)          return hlg_inverse(c);
+    if (u_decode_tf == TF_SRGB)         return srgb_inverse(c);
+    // The -1 legacy default and unknown future values decode sRGB.
+    return srgb_inverse(c);
+}
+
 void main() {
     vec4 texel = texture(u_texture, v_uv);
-    frag_color = vec4(srgb_inverse(clamp(texel.rgb, 0.0, 1.0)), texel.a);
+    frag_color = vec4(decode_eotf(texel.rgb), texel.a);
 }
 "#;
 

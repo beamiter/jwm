@@ -250,6 +250,24 @@ fn assert_pixel(got: [u8; 4], want: [u8; 4], tol: i32, label: &str) {
     }
 }
 
+fn transfer_pixel_oracle(
+    input: [u8; 4],
+    transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    decode: bool,
+) -> [u8; 4] {
+    let mut expected = input;
+    for (source, target) in input[..3].iter().zip(expected[..3].iter_mut()) {
+        let normalized = f32::from(*source) / 255.0;
+        let mapped = if decode {
+            transfer.inverse(normalized)
+        } else {
+            transfer.forward(normalized)
+        };
+        *target = (mapped.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    expected
+}
+
 /// Render a fullscreen quad with `prog` over a solid `input` texel into a WxH
 /// RGBA8 FBO and return the center pixel. The input is a 2x2 solid texture with
 /// NEAREST/CLAMP_TO_EDGE, so every neighbour fetch returns the same texel —
@@ -831,6 +849,16 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             F,
             s::POSTPROCESS_FRAGMENT_SHADER,
         ),
+        (
+            "SCENE_LINEAR_ENCODE_FRAGMENT",
+            F,
+            s::SCENE_LINEAR_ENCODE_FRAGMENT,
+        ),
+        (
+            "SCENE_LINEAR_DECODE_FRAGMENT",
+            F,
+            s::SCENE_LINEAR_DECODE_FRAGMENT,
+        ),
         ("GLASS_FRAGMENT_SHADER", F, s::GLASS_FRAGMENT_SHADER),
         ("HUD_FRAGMENT_SHADER", F, s::HUD_FRAGMENT_SHADER),
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
@@ -1011,6 +1039,514 @@ fn assert_all_compile<N: AsRef<str>, S: AsRef<str>>(
 #[test]
 fn wayland_shaders_compile() {
     assert_all_compile(GlApi::Gles3, "wayland_shaders_compile", wayland_shaders());
+}
+
+#[test]
+fn wayland_scene_transfer_shaders_match_cpu_oracle() {
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping scene transfer shader test");
+        return;
+    };
+    let gl = &h.gl;
+    let decode_program = link(
+        gl,
+        super::shaders::BLUR_DOWN_VERTEX,
+        super::shaders::SCENE_LINEAR_DECODE_FRAGMENT,
+    )
+    .expect("scene-linear decode shaders must link");
+    let encode_program = link(
+        gl,
+        super::shaders::BLUR_DOWN_VERTEX,
+        super::shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+    )
+    .expect("scene-linear encode shaders must link");
+
+    for (program, label, uniforms) in [
+        (
+            decode_program,
+            "decode",
+            [
+                "u_rect",
+                "u_projection",
+                "u_texture",
+                "u_decode_tf",
+                "u_decode_gamma",
+            ],
+        ),
+        (
+            encode_program,
+            "encode",
+            [
+                "u_rect",
+                "u_projection",
+                "u_texture",
+                "u_encode_tf",
+                "u_encode_gamma",
+            ],
+        ),
+    ] {
+        for name in uniforms {
+            assert!(
+                unsafe { gl.get_uniform_location(program, name) }.is_some(),
+                "scene-linear {label} program optimized out required uniform {name}"
+            );
+        }
+    }
+
+    let render =
+        |program: glow::Program, input: [u8; 4], transfer_id: i32, gamma: f32, decode: bool| {
+            render_quad(gl, program, input, 8, 8, |gl| unsafe {
+                let u = |name: &str| gl.get_uniform_location(program, name);
+                gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+                gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+                gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+                if decode {
+                    gl.uniform_1_i32(u("u_decode_tf").as_ref(), transfer_id);
+                    gl.uniform_1_f32(u("u_decode_gamma").as_ref(), gamma);
+                } else {
+                    gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer_id);
+                    gl.uniform_1_f32(u("u_encode_gamma").as_ref(), gamma);
+                }
+            })
+        };
+
+    let transfers = [
+        ("Linear", TransferKind::Linear),
+        (
+            "Power-1.8",
+            TransferKind::Power {
+                gamma_x10000: 18_000,
+            },
+        ),
+        ("BT.1886", TransferKind::Bt1886),
+        ("Gamma-2.2", TransferKind::Gamma22),
+        ("PQ", TransferKind::St2084Pq),
+        ("HLG", TransferKind::Hlg),
+        ("sRGB", TransferKind::Srgb),
+    ];
+    // The frame transform normally sees an opaque completed output. The second
+    // vector deliberately carries premultiplied-looking half-alpha storage to
+    // lock the shader boundary: RGB is transformed exactly as stored and alpha
+    // is passed through; this fullscreen pass must not infer surface coverage
+    // and unpremultiply a framebuffer that is opaque in production.
+    let inputs = [
+        ("opaque", [51, 127, 204, 255]),
+        ("sRGB toe", [3, 26, 180, 255]),
+        ("half-alpha storage", [26, 64, 102, 128]),
+    ];
+
+    for (transfer_label, transfer) in transfers {
+        for (input_label, input) in inputs {
+            let gamma = transfer.gamma_for_shader();
+            let decoded = render(decode_program, input, transfer.shader_id(), gamma, true);
+            assert_pixel(
+                decoded,
+                transfer_pixel_oracle(input, transfer, true),
+                1,
+                &format!("{transfer_label} {input_label} decode"),
+            );
+            let encoded = render(encode_program, input, transfer.shader_id(), gamma, false);
+            assert_pixel(
+                encoded,
+                transfer_pixel_oracle(input, transfer, false),
+                1,
+                &format!("{transfer_label} {input_label} encode"),
+            );
+            assert_eq!(
+                decoded[3], input[3],
+                "{transfer_label} decode changed alpha"
+            );
+            assert_eq!(
+                encoded[3], input[3],
+                "{transfer_label} encode changed alpha"
+            );
+        }
+    }
+
+    // The renderer uses -1 for the historical/default sRGB decode, and unknown
+    // IDs intentionally share that fallback on both sides of the round trip.
+    let fallback_input = [37, 149, 221, 173];
+    for (program, decode) in [(decode_program, true), (encode_program, false)] {
+        for (transfer_id, id_label) in [(-1, "default"), (99, "unknown")] {
+            let got = render(program, fallback_input, transfer_id, 1.0, decode);
+            assert_pixel(
+                got,
+                transfer_pixel_oracle(fallback_input, TransferKind::Srgb, decode),
+                1,
+                &format!(
+                    "{id_label} sRGB {}",
+                    if decode { "decode" } else { "encode" }
+                ),
+            );
+        }
+    }
+
+    // The software overview re-entry dispatches both programs under a monitor
+    // scissor. Exercise the real shaders over a sentinel-filled framebuffer so
+    // a fullscreen overwrite, an origin mix-up, or accidental alpha rewrite is
+    // observable without depending on compositor geometry.
+    const REGION_W: i32 = 8;
+    const REGION_H: i32 = 6;
+    const REGION: [i32; 4] = [2, 1, 4, 3];
+    let region_input = [73, 151, 219, 137];
+    let sentinel = [13, 29, 47, 211];
+    let clear = sentinel.map(|channel| f32::from(channel) / 255.0);
+    let transfer = TransferKind::Hlg;
+    for (program, decode, label) in [
+        (decode_program, true, "decode"),
+        (encode_program, false, "encode"),
+    ] {
+        let frame = render_program_frame(
+            gl,
+            program,
+            region_input,
+            REGION_W,
+            REGION_H,
+            clear,
+            |gl| unsafe {
+                let u = |name: &str| gl.get_uniform_location(program, name);
+                gl.uniform_4_f32(
+                    u("u_rect").as_ref(),
+                    0.0,
+                    0.0,
+                    REGION_W as f32,
+                    REGION_H as f32,
+                );
+                gl.uniform_matrix_4_f32_slice(
+                    u("u_projection").as_ref(),
+                    false,
+                    &ortho(REGION_W as f32, REGION_H as f32),
+                );
+                gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+                if decode {
+                    gl.uniform_1_i32(u("u_decode_tf").as_ref(), transfer.shader_id());
+                    gl.uniform_1_f32(u("u_decode_gamma").as_ref(), transfer.gamma_for_shader());
+                } else {
+                    gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer.shader_id());
+                    gl.uniform_1_f32(u("u_encode_gamma").as_ref(), transfer.gamma_for_shader());
+                }
+            },
+            |gl| unsafe {
+                gl.enable(glow::SCISSOR_TEST);
+                gl.scissor(REGION[0], REGION[1], REGION[2], REGION[3]);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                gl.disable(glow::SCISSOR_TEST);
+            },
+        );
+        let transformed = transfer_pixel_oracle(region_input, transfer, decode);
+        for y in 0..REGION_H {
+            for x in 0..REGION_W {
+                let offset = ((y * REGION_W + x) * 4) as usize;
+                let got = [
+                    frame[offset],
+                    frame[offset + 1],
+                    frame[offset + 2],
+                    frame[offset + 3],
+                ];
+                let inside = x >= REGION[0]
+                    && x < REGION[0] + REGION[2]
+                    && y >= REGION[1]
+                    && y < REGION[1] + REGION[3];
+                assert_pixel(
+                    got,
+                    if inside { transformed } else { sentinel },
+                    if inside { 1 } else { 0 },
+                    &format!("scissored {label} pixel ({x}, {y})"),
+                );
+            }
+        }
+    }
+
+    unsafe {
+        gl.delete_program(decode_program);
+        gl.delete_program(encode_program);
+    }
+}
+
+#[test]
+fn wayland_scissored_overview_reentry_composites_before_hlg_encode() {
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping overview re-entry integration test");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 8;
+    const H: i32 = 6;
+    const REGION: [i32; 4] = [2, 1, 4, 4];
+    let transfer = TransferKind::Hlg;
+    let source_srgb = [0.62_f32, 0.40, 0.15];
+    let destination_srgb = [0.10_f32, 0.20, 0.35];
+    let source_alpha = 0.5_f32;
+    let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let mut sentinel = [0_u8; 4];
+    for channel in 0..3 {
+        sentinel[channel] =
+            quantize(transfer.forward(TransferKind::Srgb.inverse(destination_srgb[channel])));
+    }
+    sentinel[3] = 255;
+    let target_pixels: Vec<u8> = sentinel
+        .iter()
+        .copied()
+        .cycle()
+        .take((W * H * 4) as usize)
+        .collect();
+
+    unsafe {
+        let decode_program = link(
+            gl,
+            super::shaders::BLUR_DOWN_VERTEX,
+            super::shaders::SCENE_LINEAR_DECODE_FRAGMENT,
+        )
+        .expect("scene-linear decode shaders must link");
+        let encode_program = link(
+            gl,
+            super::shaders::BLUR_DOWN_VERTEX,
+            super::shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+        )
+        .expect("scene-linear encode shaders must link");
+        let border_program = link(
+            gl,
+            super::shaders::VERTEX_SHADER,
+            super::shaders::BORDER_FRAGMENT_SHADER,
+        )
+        .expect("border shaders must link");
+        let (vao, vbo) = create_quad_vao(gl);
+
+        let create_target =
+            |internal_format: i32, pixel_type: u32, pixels: Option<&[u8]>, label: &str| {
+                let texture = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    internal_format,
+                    W,
+                    H,
+                    0,
+                    glow::RGBA,
+                    pixel_type,
+                    glow::PixelUnpackData::Slice(pixels),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+                }
+                for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+                }
+                let framebuffer = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(texture),
+                    0,
+                );
+                assert_eq!(
+                    gl.check_framebuffer_status(glow::FRAMEBUFFER),
+                    glow::FRAMEBUFFER_COMPLETE,
+                    "{label} framebuffer is incomplete"
+                );
+                (framebuffer, texture)
+            };
+        let (output_fbo, output_texture) = create_target(
+            glow::RGBA8 as i32,
+            glow::UNSIGNED_BYTE,
+            Some(&target_pixels),
+            "encoded output",
+        );
+        let (linear_fbo, linear_texture) = create_target(
+            glow::RGBA16F as i32,
+            glow::HALF_FLOAT,
+            None,
+            "linear intermediate",
+        );
+
+        let dither_was_enabled = gl.is_enabled(glow::DITHER);
+        gl.disable(glow::DITHER);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.disable(glow::BLEND);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(linear_fbo));
+        gl.viewport(0, 0, W, H);
+        // A deliberately unrelated clear makes a missing encode scissor alter
+        // the sentinel outside REGION instead of hiding behind a round trip.
+        gl.clear_color(0.73, 0.11, 0.49, 1.0);
+        gl.clear(glow::COLOR_BUFFER_BIT);
+        gl.bind_vertex_array(Some(vao));
+        gl.enable(glow::SCISSOR_TEST);
+        gl.scissor(REGION[0], REGION[1], REGION[2], REGION[3]);
+
+        // Pass 1: decode the already target-encoded output into an FP16 linear
+        // intermediate, restricted to the overview monitor.
+        gl.use_program(Some(decode_program));
+        let decode_uniform = |name: &str| gl.get_uniform_location(decode_program, name);
+        gl.uniform_4_f32(
+            decode_uniform("u_rect").as_ref(),
+            0.0,
+            0.0,
+            W as f32,
+            H as f32,
+        );
+        gl.uniform_matrix_4_f32_slice(
+            decode_uniform("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_1_i32(decode_uniform("u_texture").as_ref(), 0);
+        gl.uniform_1_i32(decode_uniform("u_decode_tf").as_ref(), transfer.shader_id());
+        gl.uniform_1_f32(
+            decode_uniform("u_decode_gamma").as_ref(),
+            transfer.gamma_for_shader(),
+        );
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(output_texture));
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+        // Pass 2: the overview strip's real border shader decodes its authored
+        // sRGB material and blends premultiplied RGB in the linear intermediate.
+        gl.use_program(Some(border_program));
+        let border_uniform = |name: &str| gl.get_uniform_location(border_program, name);
+        gl.uniform_4_f32(
+            border_uniform("u_rect").as_ref(),
+            0.0,
+            0.0,
+            W as f32,
+            H as f32,
+        );
+        gl.uniform_matrix_4_f32_slice(
+            border_uniform("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_4_f32(
+            border_uniform("u_border_color").as_ref(),
+            source_srgb[0],
+            source_srgb[1],
+            source_srgb[2],
+            source_alpha,
+        );
+        gl.uniform_2_f32(border_uniform("u_size").as_ref(), W as f32, H as f32);
+        gl.uniform_1_f32(border_uniform("u_radius").as_ref(), 0.0);
+        gl.uniform_1_f32(border_uniform("u_radius_top").as_ref(), 0.0);
+        gl.uniform_1_f32(border_uniform("u_border_width").as_ref(), W as f32);
+        gl.uniform_1_i32(border_uniform("u_scene_linear").as_ref(), 1);
+        gl.enable(glow::BLEND);
+        gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+        // Pass 3: encode the same monitor region back into the original target.
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(encode_program));
+        let encode_uniform = |name: &str| gl.get_uniform_location(encode_program, name);
+        gl.uniform_4_f32(
+            encode_uniform("u_rect").as_ref(),
+            0.0,
+            0.0,
+            W as f32,
+            H as f32,
+        );
+        gl.uniform_matrix_4_f32_slice(
+            encode_uniform("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_1_i32(encode_uniform("u_texture").as_ref(), 0);
+        gl.uniform_1_i32(encode_uniform("u_encode_tf").as_ref(), transfer.shader_id());
+        gl.uniform_1_f32(
+            encode_uniform("u_encode_gamma").as_ref(),
+            transfer.gamma_for_shader(),
+        );
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(linear_texture));
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.disable(glow::SCISSOR_TEST);
+        gl.finish();
+
+        let mut frame = vec![0_u8; (W * H * 4) as usize];
+        gl.read_pixels(
+            0,
+            0,
+            W,
+            H,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut frame)),
+        );
+
+        let mut expected = [0_u8; 4];
+        let mut direct_encoded_blend = [0_u8; 4];
+        for channel in 0..3 {
+            let destination_linear = transfer.inverse(f32::from(sentinel[channel]) / 255.0);
+            let source_linear = TransferKind::Srgb.inverse(source_srgb[channel]);
+            expected[channel] =
+                quantize(transfer.forward(
+                    source_linear * source_alpha + destination_linear * (1.0 - source_alpha),
+                ));
+            let source_encoded = transfer.forward(source_linear);
+            direct_encoded_blend[channel] = quantize(
+                source_encoded * source_alpha
+                    + f32::from(sentinel[channel]) / 255.0 * (1.0 - source_alpha),
+            );
+        }
+        expected[3] = 255;
+        direct_encoded_blend[3] = 255;
+
+        for y in 0..H {
+            for x in 0..W {
+                let offset = ((y * W + x) * 4) as usize;
+                let got = [
+                    frame[offset],
+                    frame[offset + 1],
+                    frame[offset + 2],
+                    frame[offset + 3],
+                ];
+                let inside = x >= REGION[0]
+                    && x < REGION[0] + REGION[2]
+                    && y >= REGION[1]
+                    && y < REGION[1] + REGION[3];
+                assert_pixel(
+                    got,
+                    if inside { expected } else { sentinel },
+                    if inside { 2 } else { 0 },
+                    &format!("three-pass HLG pixel ({x}, {y})"),
+                );
+            }
+        }
+        let centre_offset =
+            (((REGION[1] + REGION[3] / 2) * W + REGION[0] + REGION[2] / 2) * 4) as usize;
+        let centre = [
+            frame[centre_offset],
+            frame[centre_offset + 1],
+            frame[centre_offset + 2],
+            frame[centre_offset + 3],
+        ];
+        assert!(
+            (i32::from(centre[0]) - i32::from(direct_encoded_blend[0])).abs() > 30,
+            "linear HLG composition must differ visibly from encoded-domain blending: linear={centre:?}, encoded={direct_encoded_blend:?}"
+        );
+
+        gl.use_program(None);
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(linear_fbo);
+        gl.delete_framebuffer(output_fbo);
+        gl.delete_texture(linear_texture);
+        gl.delete_texture(output_texture);
+        gl.delete_program(border_program);
+        gl.delete_program(encode_program);
+        gl.delete_program(decode_program);
+        if dither_was_enabled {
+            gl.enable(glow::DITHER);
+        }
+    }
 }
 
 #[test]

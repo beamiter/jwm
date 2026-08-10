@@ -346,6 +346,8 @@ pub(crate) struct SceneLinearDecodeUniforms {
     pub rect: i32,
     pub projection: i32,
     pub texture: i32,
+    pub decode_tf: i32,
+    pub decode_gamma: i32,
 }
 
 pub(crate) struct TransitionUniforms {
@@ -1855,6 +1857,8 @@ impl WaylandCompositor {
                 rect: get_uniform_loc(gl, scene_linear_decode_program, "u_rect"),
                 projection: get_uniform_loc(gl, scene_linear_decode_program, "u_projection"),
                 texture: get_uniform_loc(gl, scene_linear_decode_program, "u_texture"),
+                decode_tf: get_uniform_loc(gl, scene_linear_decode_program, "u_decode_tf"),
+                decode_gamma: get_uniform_loc(gl, scene_linear_decode_program, "u_decode_gamma"),
             };
 
             let transition_uniforms = TransitionUniforms {

@@ -106,25 +106,32 @@ contract shared with the ordinary window renderer.
 
 The skydome, caps, title and scroll strip bind their output color domain
 explicitly, so a static overview does not by itself disable safe CRTC
-OETF/CTM offload. Generated UI is still authored as sRGB: on a non-sRGB-primary
-output where only the OETF is offloaded and no CRTC CTM is active, it has no
-separate native-gamut mapping. That is an existing global output-pipeline
-limitation rather than an overview-specific exception. Conversely, JWM only
-arms a CRTC CTM after every participating output has accepted the hardware
-OETF, because applying that linear-light matrix to shader-encoded pixels would
-be invalid. Mixed transfer-function outputs still share one final shader
-encode; per-output encode passes remain future work. When that software encode
-targets a non-sRGB transfer, generated overview UI and undescribed legacy
-textures are still drawn afterward with historical sRGB-coded values. Moving
-those overlays before the encode (or adding an overlay target-transfer pass) is
-the remaining non-sRGB fallback boundary; the scene-linear hardware-OETF path
-covered here does not have that mismatch.
+OETF/CTM offload. If software already encoded the main scene as PQ, HLG, a
+power curve or another target transfer, the overview performs a monitor-local
+linear re-entry at its original layer: it decodes that output region back into
+the FP16 scene target, composites every overview material with linear
+premultiplied-alpha blending, then re-encodes only the same scissored region.
+This preserves transition/snap/border ordering without teaching five separate
+materials how to blend in a nonlinear target domain.
+
+Generated UI is still authored as sRGB. On a non-sRGB-primary output where no
+CRTC CTM is active, it has no separate sRGB-to-native gamut mapping; this is an
+existing global output-pipeline limitation rather than an overview-specific
+exception. JWM only arms a CRTC CTM after every participating output has
+accepted the hardware OETF, because applying that linear-light matrix to
+shader-encoded pixels would be invalid. Mixed transfer-function outputs still
+share one final shader encode, and a window's overview transform is still
+planned from its pre-overview output overlap. A common linear-sRGB workspace,
+per-output matrix/encode regions and cross-output overview retargeting remain
+future work.
 
 Headless GLES pixel regressions cover selection lighting, fade premultiplication,
 opaque-region alpha, texture-independent filler faces, linked polygon caps,
 reflection contact falloff, deterministic skydome pixels, scene-linear
 materials, non-symmetric color matrices, PQ/HLG identity plans and transparent
-color-managed texels. CI forces Mesa's
+color-managed texels. The fullscreen transfer pair is also checked against the
+CPU oracle for Linear, Power, BT.1886, Gamma 2.2, PQ, HLG and sRGB, while route
+and scissor tests lock the monitor-local software fallback. CI forces Mesa's
 surfaceless EGL platform and treats a missing GL context as a failure, so these
 checks cannot silently downgrade to skipped tests. The legacy workspace-cube
 branch is also rendered with hostile lit/filler uniforms to lock its original

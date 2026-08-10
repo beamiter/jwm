@@ -215,10 +215,13 @@ mock implementing the complete backend surface. (First met by
   scene-linear PQ/HLG identities and correct straight-color conversion for
   premultiplied surfaces. Legacy 3D workspace-transition output is pixel-tested
   behind the shader's compatibility branch. Surfaceless EGL is a required CI
-  gate rather than a soft-skipped shader check. A later output-pipeline slice
-  still needs to move generated overlays ahead of software PQ/HLG encode (or
-  add an overlay target-transfer pass); the current fallback writes those
-  historical UI values as sRGB after the global encode.
+  gate rather than a soft-skipped shader check. Software PQ/HLG/Power output
+  now gives the overview a monitor-local linear island at its existing layer,
+  with target-aware decode and re-encode passes preserving both premultiplied
+  blending and pixels outside the monitor. The next output-pipeline slice is a
+  common linear-sRGB workspace plus per-output gamut/transfer encode regions;
+  mixed-transfer outputs and cross-output overview retargeting remain explicit
+  limitations until then.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay
