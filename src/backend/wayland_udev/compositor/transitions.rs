@@ -210,6 +210,8 @@ impl WaylandCompositor {
             gl.Uniform1i(self.cube_uniforms.scene_linear, 0);
             gl.Uniform1i(self.cube_uniforms.has_alpha, 1);
             gl.Uniform1i(self.cube_uniforms.filler, 0);
+            gl.Uniform1i(self.cube_uniforms.reflection, 0);
+            gl.Uniform1f(self.cube_uniforms.floor_y, 0.0);
             gl.Uniform1f(
                 self.cube_uniforms.aspect,
                 layout.draw_rect[2] / layout.draw_rect[3],

@@ -5,7 +5,8 @@ the Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition. Both are
 a lit prism standing on a mirrored floor inside a procedural skydome, so they
 read as the same cube seen twice rather than two separate effects. The Wayland
 overview now uses the same protocol-free prism camera and regular-polygon
-geometry, plus its own GLES implementations of the lit face and cap materials.
+geometry, plus its own GLES implementations of the lit face, cap, mirrored-floor
+and skydome materials.
 
 ```toml
 [behavior]
@@ -32,7 +33,9 @@ adapter in `backend::x11::compositor::prism` owns the full scene drawing:
   radial gradient, a slow angular sheen and a lit rim. Back-facing caps are
   culled on the CPU.
 - **Reflection.** The whole object is drawn a second time mirrored through the
-  floor plane at its own bottom edge, fading with distance and rippling gently.
+  floor plane at its own bottom edge and fading with distance. X11 adds a gentle
+  animated ripple; Wayland keeps the reflection static once geometry settles so
+  it does not turn an otherwise damage-driven overlay into a continuous redraw.
 - **Skydome.** A procedural backdrop: star layers that pan with the rotation,
   a glow band on the horizon, and a light pool on the floor centered where the
   prism stands. The horizon is derived from the camera pitch, so it always lines
@@ -65,8 +68,10 @@ Rotation is an exponential ease with a spin-energy term that drives the
 see-through body, an extra camera pull-back and a deeper tilt, then decays so
 the cube settles instead of snapping back to opaque.
 
-An open switcher animates continuously (twinkling sky, sheening caps), so it
-asks for frames until it closes.
+The X11 switcher animates continuously (twinkling sky, sheening caps), so it
+asks for frames until it closes. Wayland's stars, light pool, caps and reflection
+are deterministic for the current angle; after opacity and rotation converge,
+only content damage requests another frame.
 
 Wayland currently shares the solid's geometry, pitched framing and
 world-space face lighting. Selection is a bevel and inner accent rendered in
@@ -75,18 +80,27 @@ anchored below the projected selected face and remains inside its owning
 monitor. Every geometric side is drawn: unused slots in a one- or two-window
 triangular prism, and live entries whose surface or texture is temporarily
 unavailable, become dark tinted filler faces rather than holes. A separate lit
-triangle-fan material closes the visible polygon cap. Faces and caps retain the
-shared back-to-front `PrismPiece` order because the overlay has no depth buffer.
+triangle-fan material closes the visible polygon cap. The whole solid is also
+drawn through its animated bottom plane as a restrained reflection: it keeps
+only camera-facing pieces and fades from the floor contact line toward the far
+edge. Faces and caps retain the shared back-to-front `PrismPiece` order inside
+each reflected and solid pass because the overlay has no depth buffer.
 
-The GLES materials preserve premultiplied alpha, honor opaque-region semantics
-for live textures, and emit either encoded or scene-linear legacy-sRGB pixels
-to match the output pipeline. Per-surface `wp_color_management` transforms
-inside the overview remain future work. The mirrored floor and procedural
-skydome are still X11-only scene layers.
+The dedicated GLES skydome is clipped to the owning monitor while using the
+full-output viewport required by its pixel-space projection. It provides a
+static parallax star field, camera-derived horizon and floor light pool without
+reusing `overview_bg_program`; Expose and Peek therefore retain their simpler
+vignette material and cannot inherit overview-only uniform state.
+
+All GLES scene materials preserve premultiplied alpha, honor opaque-region
+semantics for live textures, and emit either encoded or scene-linear
+legacy-sRGB pixels to match the output pipeline. Per-surface
+`wp_color_management` transforms inside the overview remain future work.
 
 Headless GLES pixel regressions cover selection lighting, fade premultiplication,
 opaque-region alpha, texture-independent filler faces, linked polygon caps,
-scene-linear materials and the scene-linear backdrop. CI forces Mesa's
+reflection contact falloff, deterministic skydome pixels, scene-linear
+materials and premultiplication. CI forces Mesa's
 surfaceless EGL platform and treats a missing GL context as a failure, so these
 checks cannot silently downgrade to skipped tests. The legacy workspace-cube
 branch is also rendered with hostile lit/filler uniforms to lock its original
@@ -127,7 +141,10 @@ rather than asking for a second duration setting.
 
 ## Shader hot-reload
 
-The three programs — `overview_bg` (skydome), `overview_face`, `overview_cap` —
-participate in the compositor's shader hot-reload. Drop an `overview_face.frag`
-into the configured shader directory to iterate on the lighting without
-restarting the compositor.
+On X11 the three programs — `overview_bg` (skydome), `overview_face`,
+`overview_cap` — participate in the compositor's shader hot-reload. Drop an
+`overview_face.frag` into the configured shader directory to iterate on the
+lighting without restarting the compositor. Wayland owns a distinct
+`overview_skydome_program` in addition to the vignette program shared by Expose
+and Peek; both are constructed and released with the compositor's other raw
+GLES resources.

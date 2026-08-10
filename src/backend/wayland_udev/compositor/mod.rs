@@ -372,6 +372,8 @@ pub(crate) struct CubeUniforms {
     pub scene_linear: i32,
     pub has_alpha: i32,
     pub filler: i32,
+    pub reflection: i32,
+    pub floor_y: i32,
 }
 
 pub(crate) struct OverviewCapUniforms {
@@ -383,6 +385,18 @@ pub(crate) struct OverviewCapUniforms {
     pub color: i32,
     pub accent: i32,
     pub camera: i32,
+    pub scene_linear: i32,
+    pub reflection: i32,
+    pub floor_y: i32,
+}
+
+pub(crate) struct OverviewSkydomeUniforms {
+    pub rect: i32,
+    pub projection: i32,
+    pub opacity: i32,
+    pub angle: i32,
+    pub ground: i32,
+    pub accent: i32,
     pub scene_linear: i32,
 }
 
@@ -810,6 +824,7 @@ pub(crate) struct WaylandCompositor {
     genie_program: u32,
     particle_program: u32,
     overview_bg_program: u32,
+    overview_skydome_program: u32,
     glass_program: u32,
     hud_program: u32,
     sysui_text_program: u32,
@@ -831,6 +846,7 @@ pub(crate) struct WaylandCompositor {
     transition_uniforms: TransitionUniforms,
     cube_uniforms: CubeUniforms,
     overview_cap_uniforms: OverviewCapUniforms,
+    overview_skydome_uniforms: OverviewSkydomeUniforms,
     portal_uniforms: PortalUniforms,
     tilt_uniforms: TiltUniforms,
     wobbly_uniforms: WobblyUniforms,
@@ -1438,7 +1454,7 @@ impl<'gl, 'probe> CompositorConstructionGuard<'gl, 'probe> {
         Self {
             gl,
             probe,
-            programs: Vec::with_capacity(25),
+            programs: Vec::with_capacity(26),
             vertex_arrays: Vec::with_capacity(2),
             buffers: Vec::with_capacity(2),
             framebuffers: Vec::with_capacity(11),
@@ -1683,6 +1699,10 @@ impl WaylandCompositor {
             )?;
             let overview_bg_program = construction
                 .compile_program(shaders::VERTEX_SHADER, shaders::OVERVIEW_BG_FRAGMENT_SHADER)?;
+            let overview_skydome_program = construction.compile_program(
+                shaders::VERTEX_SHADER,
+                shaders::OVERVIEW_SKYDOME_FRAGMENT_SHADER,
+            )?;
             // Compiled unconditionally so switching `appearance.ui_theme` at
             // runtime never has to touch the GL context.
             let glass_program = construction
@@ -1854,6 +1874,8 @@ impl WaylandCompositor {
                 scene_linear: get_uniform_loc(gl, cube_program, "u_scene_linear"),
                 has_alpha: get_uniform_loc(gl, cube_program, "u_has_alpha"),
                 filler: get_uniform_loc(gl, cube_program, "u_filler"),
+                reflection: get_uniform_loc(gl, cube_program, "u_reflection"),
+                floor_y: get_uniform_loc(gl, cube_program, "u_floor_y"),
             };
 
             let overview_cap_uniforms = OverviewCapUniforms {
@@ -1866,6 +1888,18 @@ impl WaylandCompositor {
                 accent: get_uniform_loc(gl, overview_cap_program, "u_accent"),
                 camera: get_uniform_loc(gl, overview_cap_program, "u_camera"),
                 scene_linear: get_uniform_loc(gl, overview_cap_program, "u_scene_linear"),
+                reflection: get_uniform_loc(gl, overview_cap_program, "u_reflection"),
+                floor_y: get_uniform_loc(gl, overview_cap_program, "u_floor_y"),
+            };
+
+            let overview_skydome_uniforms = OverviewSkydomeUniforms {
+                rect: get_uniform_loc(gl, overview_skydome_program, "u_rect"),
+                projection: get_uniform_loc(gl, overview_skydome_program, "u_projection"),
+                opacity: get_uniform_loc(gl, overview_skydome_program, "u_opacity"),
+                angle: get_uniform_loc(gl, overview_skydome_program, "u_angle"),
+                ground: get_uniform_loc(gl, overview_skydome_program, "u_ground"),
+                accent: get_uniform_loc(gl, overview_skydome_program, "u_accent"),
+                scene_linear: get_uniform_loc(gl, overview_skydome_program, "u_scene_linear"),
             };
 
             let portal_uniforms = PortalUniforms {
@@ -2088,6 +2122,7 @@ impl WaylandCompositor {
                 genie_program,
                 particle_program,
                 overview_bg_program,
+                overview_skydome_program,
                 glass_program,
                 hud_program,
                 sysui_text_program,
@@ -2105,6 +2140,7 @@ impl WaylandCompositor {
                 transition_uniforms,
                 cube_uniforms,
                 overview_cap_uniforms,
+                overview_skydome_uniforms,
                 portal_uniforms,
                 tilt_uniforms,
                 wobbly_uniforms,
@@ -2699,6 +2735,7 @@ impl WaylandCompositor {
                 &mut self.genie_program,
                 &mut self.particle_program,
                 &mut self.overview_bg_program,
+                &mut self.overview_skydome_program,
                 &mut self.glass_program,
                 &mut self.hud_program,
                 &mut self.sysui_text_program,
@@ -2753,6 +2790,7 @@ mod gpu_release_contract_tests {
         "genie_program",
         "particle_program",
         "overview_bg_program",
+        "overview_skydome_program",
         "glass_program",
         "hud_program",
         "sysui_text_program",
@@ -2889,8 +2927,8 @@ mod gpu_release_contract_tests {
 
         assert_eq!(
             compact.matches("construction.compile_program(").count(),
-            25,
-            "all 24 compositor programs plus thumbnail must be guard-owned"
+            26,
+            "all 25 compositor programs plus thumbnail must be guard-owned"
         );
         assert!(compact.contains("MinimizedThumbnailState::from_program(gl,thumbnail_program)"));
         assert_eq!(

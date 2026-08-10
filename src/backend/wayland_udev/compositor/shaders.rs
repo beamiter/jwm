@@ -858,6 +858,8 @@ uniform float u_lit;        // 0 = byte-for-byte legacy shading, 1 = lit face
 uniform int u_scene_linear; // lit path writes into a linear output FBO
 uniform int u_has_alpha;    // source alpha is meaningful (not an opaque region)
 uniform int u_filler;       // empty/missing slot uses the built-in tinted material
+uniform int u_reflection;   // mirrored overview pass below the floor plane
+uniform float u_floor_y;    // world-space contact plane for reflection falloff
 in vec2 v_uv;
 in vec3 v_world;
 in vec3 v_normal;
@@ -947,6 +949,18 @@ void main() {
     color += accent * halo * u_accent.a * 0.20 * edge;
 
     float alpha = clamp(u_alpha, 0.0, 1.0) * mask;
+    if (u_reflection != 0) {
+        // The mirrored face touches the floor at v_uv.y == 0. Fade both in
+        // normalized face space and in world space so scaling the entry/exit
+        // animation cannot leave a hard reflected rectangle at the monitor
+        // edge. This is deliberately static: a settled overview needs no
+        // animation-only redraws.
+        float distance_below_floor = max(u_floor_y - v_world.y, 0.0);
+        float contact = pow(clamp(1.0 - v_uv.y, 0.0, 1.0), 1.45)
+                      * exp(-distance_below_floor * 0.85);
+        alpha *= contact * 0.48;
+        color = mix(color, output_domain_color(vec3(0.05, 0.06, 0.09)), 0.24) * 0.90;
+    }
     // This UI material is reflective, not emissive. Bound straight color
     // before premultiplication so highlights cannot leak through a fade.
     frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
@@ -1001,6 +1015,8 @@ uniform vec4 u_color;       // encoded base color; a = global prism fade
 uniform vec3 u_accent;      // encoded UI accent
 uniform vec3 u_camera;      // camera position in world space
 uniform int u_scene_linear; // output FBO remains linear for KMS encode
+uniform int u_reflection;   // mirrored overview pass below the floor plane
+uniform float u_floor_y;    // world-space contact plane for reflection falloff
 
 in vec2 v_local;
 in float v_edge;
@@ -1038,6 +1054,11 @@ void main() {
     color += vec3(1.0) * specular;
 
     float alpha = clamp(u_color.a, 0.0, 1.0);
+    if (u_reflection != 0) {
+        float distance_below_floor = max(u_floor_y - v_world.y, 0.0);
+        alpha *= 0.42 * exp(-distance_below_floor * 1.60);
+        color = mix(color, output_domain_color(vec3(0.05, 0.06, 0.09)), 0.30) * 0.88;
+    }
     frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
 }
 "#;
@@ -1559,6 +1580,94 @@ void main() {
     // only need enough opacity to give the 3D prism a clean dark backdrop.
     float alpha = (0.78 + vignette * 0.12) * u_opacity;
     frag_color = vec4(color * alpha, alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Overview skydome: a static lighting environment for the 3D prism
+// ---------------------------------------------------------------------------
+
+/// Unlike `OVERVIEW_BG_FRAGMENT_SHADER`, which remains shared by Expose and
+/// Peek, this program belongs only to the 3D overview. It intentionally has
+/// no time uniform: angle/layout/content damage redraw it, but a settled prism
+/// does not consume frames merely to twinkle the sky.
+pub const OVERVIEW_SKYDOME_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+uniform float u_opacity;
+uniform float u_angle;      // prism rotation in radians; static sky parallax
+uniform vec2 u_ground;      // x = horizon, y = floor contact in monitor UV
+uniform vec3 u_accent;      // encoded UI accent shared with the prism
+uniform int u_scene_linear; // output FBO remains linear for KMS encode
+uniform vec4 u_rect;        // monitor rect; z/w provide aspect ratio
+in vec2 v_uv;
+out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+vec3 output_domain_color(vec3 encoded) {
+    return u_scene_linear != 0 ? srgb_inverse(encoded) : encoded;
+}
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float star_layer(vec2 uv, float density, float seed) {
+    vec2 grid = uv * density;
+    vec2 cell = floor(grid);
+    vec2 local = fract(grid);
+    float pick = hash21(cell + seed);
+    if (pick < 0.90) {
+        return 0.0;
+    }
+    vec2 center = vec2(hash21(cell + seed + 3.1),
+                       hash21(cell + seed + 7.7));
+    return 1.0 - smoothstep(0.0, 0.07, length(local - center));
+}
+
+void main() {
+    float aspect = max(u_rect.z, 1.0) / max(u_rect.w, 1.0);
+    vec2 centered = (v_uv - vec2(0.5)) * vec2(aspect, 1.0);
+    float horizon = clamp(u_ground.x, 0.02, 0.98);
+    float above = clamp((horizon - v_uv.y) / max(horizon, 0.001), 0.0, 1.0);
+    float below = clamp((v_uv.y - horizon) / max(1.0 - horizon, 0.001), 0.0, 1.0);
+
+    vec3 accent = output_domain_color(u_accent);
+    vec3 zenith = output_domain_color(vec3(0.026, 0.036, 0.068));
+    vec3 haze = output_domain_color(vec3(0.062, 0.086, 0.140));
+    vec3 color = mix(haze, zenith, pow(above, 0.70));
+
+    // Two deterministic star layers move only when the prism itself turns.
+    float pan = u_angle * 0.16;
+    float stars = star_layer(vec2(v_uv.x * aspect + pan, v_uv.y), 26.0, 0.0)
+                + star_layer(vec2(v_uv.x * aspect + pan * 1.9, v_uv.y), 46.0, 11.0) * 0.55;
+    color += output_domain_color(vec3(0.82, 0.88, 1.0)) * stars * above * 0.85;
+
+    vec3 floor_near = output_domain_color(vec3(0.040, 0.050, 0.074));
+    vec3 floor_far = output_domain_color(vec3(0.008, 0.011, 0.018));
+    vec3 floor_color = mix(floor_near, floor_far, pow(below, 0.55));
+    vec2 pool_delta = vec2(centered.x, (v_uv.y - u_ground.y) * 2.4);
+    float pool = exp(-dot(pool_delta, pool_delta) * 2.6);
+    floor_color += accent * pool * 0.26;
+    color = mix(color, floor_color,
+                smoothstep(horizon - 0.06, horizon + 0.10, v_uv.y));
+
+    float band = exp(-pow((v_uv.y - horizon) * 9.0, 2.0));
+    color += accent * band * 0.22;
+    float vignette = 1.0 - smoothstep(0.24, 0.92, length(centered));
+    color *= mix(0.52, 1.0, vignette);
+
+    float alpha = (0.90 + (1.0 - vignette) * 0.08)
+                * clamp(u_opacity, 0.0, 1.0);
+    frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
 }
 "#;
 

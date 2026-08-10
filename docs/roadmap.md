@@ -205,10 +205,14 @@ mock implementing the complete backend surface. (First met by
   in-plane selection bevels, premultiplied-alpha/opaque-region handling and
   scene-linear output. Its adapter now consumes the complete painter-sorted
   piece stream: unavailable or unused face slots receive texture-independent
-  filler material, and generated lit triangle fans close the caps. Legacy 3D
-  workspace-transition output is pixel-tested behind the shader's compatibility
-  branch. Surfaceless EGL is a required CI gate rather than a soft-skipped
-  shader check.
+  filler material, and generated lit triangle fans close the caps. A second
+  independently sorted pass mirrors those same faces and caps through the
+  animated floor contact, while a dedicated monitor-clipped GLES skydome keeps
+  the overview environment isolated from the vignette program shared by Expose
+  and Peek. Both are deterministic once opacity and rotation settle, preserving
+  Wayland's damage-driven idle behavior. Legacy 3D workspace-transition output
+  is pixel-tested behind the shader's compatibility branch. Surfaceless EGL is
+  a required CI gate rather than a soft-skipped shader check.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

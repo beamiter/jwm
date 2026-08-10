@@ -3,7 +3,8 @@ use crate::backend::compositor_common::math::{
     mat4_mul, rotate_y_matrix, scale_matrix, translate_matrix,
 };
 use crate::backend::compositor_common::prism::{
-    MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, build_prism_pieces,
+    MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, PrismPiece, build_prism_pieces,
+    mirror_matrix,
 };
 use smithay::backend::renderer::gles::ffi;
 
@@ -38,6 +39,22 @@ enum PrismFaceSource {
         entry_index: Option<usize>,
         reason: PrismFillerReason,
     },
+}
+
+#[derive(Clone, Copy)]
+struct OverviewPrismPass {
+    reflection: bool,
+    floor_y: f32,
+}
+
+#[derive(Default)]
+struct OverviewPrismDrawStats {
+    live_faces: usize,
+    filler_faces: usize,
+    caps: usize,
+    missing_windows: usize,
+    missing_textures: usize,
+    unoccupied: usize,
 }
 
 /// Resolve every geometric face slot to either live window content or an
@@ -604,6 +621,205 @@ impl WaylandCompositor {
         }
     }
 
+    /// Draw one independently depth-sorted prism pass. The reflection and the
+    /// solid each call this with pieces built from their own model transform;
+    /// faces and caps remain interleaved in the shared painter order.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_overview_prism_pass(
+        &self,
+        gl: &ffi::Gles2,
+        camera: &PrismCamera,
+        pieces: &[PrismPiece],
+        face_plan: &[PrismFaceSource],
+        selected_idx: usize,
+        anim_scale: f32,
+        scene_linear_output: bool,
+        pass: OverviewPrismPass,
+    ) -> OverviewPrismDrawStats {
+        let mut stats = OverviewPrismDrawStats::default();
+        // The reflection is a floor hint, not an independently entering
+        // object. Suppressing the tiny early/late copy also saves both passes'
+        // worth of texture binds during the least visible animation frames.
+        if pass.reflection && anim_scale < 0.35 {
+            return stats;
+        }
+
+        unsafe {
+            gl.UseProgram(self.cube_program);
+            gl.Uniform1f(self.cube_uniforms.aspect, camera.face_aspect);
+            gl.Uniform3f(
+                self.cube_uniforms.camera,
+                camera.eye[0],
+                camera.eye[1],
+                camera.eye[2],
+            );
+            gl.Uniform1f(self.cube_uniforms.alpha, anim_scale);
+            gl.Uniform1f(self.cube_uniforms.edge, 1.0);
+            gl.Uniform1f(self.cube_uniforms.lit, 1.0);
+            gl.Uniform1i(
+                self.cube_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+            gl.Uniform1i(self.cube_uniforms.texture, 0);
+            gl.Uniform1i(self.cube_uniforms.reflection, i32::from(pass.reflection));
+            gl.Uniform1f(self.cube_uniforms.floor_y, pass.floor_y);
+
+            gl.UseProgram(self.overview_cap_program);
+            gl.Uniform1f(self.overview_cap_uniforms.radius, camera.circumradius);
+            gl.Uniform1f(self.overview_cap_uniforms.sides, camera.sides as f32);
+            gl.Uniform3f(
+                self.overview_cap_uniforms.camera,
+                camera.eye[0],
+                camera.eye[1],
+                camera.eye[2],
+            );
+            gl.Uniform3f(self.overview_cap_uniforms.accent, 0.32, 0.62, 1.0);
+            gl.Uniform1i(
+                self.overview_cap_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+            gl.Uniform1i(
+                self.overview_cap_uniforms.reflection,
+                i32::from(pass.reflection),
+            );
+            gl.Uniform1f(self.overview_cap_uniforms.floor_y, pass.floor_y);
+
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindVertexArray(self.quad_vao);
+
+            for piece in pieces {
+                match piece.kind {
+                    PrismKind::Face { slot } => {
+                        // The reflection is a floor hint rather than a second
+                        // translucent solid. Keep only surfaces presented to
+                        // the camera, in their original sorted positions.
+                        if pass.reflection && piece.facing <= 0.0 {
+                            continue;
+                        }
+
+                        let source = face_plan[slot];
+                        let entry_index = match source {
+                            PrismFaceSource::Live { entry_index } => Some(entry_index),
+                            PrismFaceSource::Filler { entry_index, .. } => entry_index,
+                        };
+                        let selected = entry_index == Some(selected_idx);
+                        let brightness = if piece.facing > 0.0 {
+                            0.70 + 0.30 * piece.facing
+                        } else {
+                            0.42
+                        } * if pass.reflection { 0.90 } else { 1.0 };
+
+                        gl.UseProgram(self.cube_program);
+                        gl.UniformMatrix4fv(
+                            self.cube_uniforms.mvp,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.mvp.as_ptr(),
+                        );
+                        gl.UniformMatrix4fv(
+                            self.cube_uniforms.model,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.model.as_ptr(),
+                        );
+                        gl.Uniform1f(self.cube_uniforms.brightness, brightness);
+                        gl.Uniform4f(
+                            self.cube_uniforms.accent,
+                            0.32,
+                            0.62,
+                            1.0,
+                            if selected { 1.0 } else { 0.15 },
+                        );
+                        let mut desat: f32 = if selected {
+                            0.0
+                        } else if piece.facing > 0.0 {
+                            0.30
+                        } else {
+                            0.65
+                        };
+                        if pass.reflection {
+                            desat = (desat + 0.18).min(1.0);
+                        }
+                        gl.Uniform1f(self.cube_uniforms.desat, desat);
+
+                        match source {
+                            PrismFaceSource::Live { entry_index } => {
+                                let entry = &self.overview_entries[entry_index];
+                                let win = self
+                                    .windows
+                                    .get(&entry.window_id)
+                                    .expect("live overview face must retain its window");
+                                let texture = win
+                                    .gl_texture
+                                    .expect("live overview face must retain its texture");
+                                let [cu, cv, cw, ch] = win.content_uv;
+                                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                                    (cu, cv, cw, ch)
+                                } else {
+                                    (cu, cv + ch, cw, -ch)
+                                };
+                                gl.Uniform1i(self.cube_uniforms.filler, 0);
+                                gl.Uniform1i(
+                                    self.cube_uniforms.has_alpha,
+                                    i32::from(win.has_alpha),
+                                );
+                                gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                                self.bind_window_texture(gl, texture);
+                                stats.live_faces += 1;
+                            }
+                            PrismFaceSource::Filler { reason, .. } => {
+                                gl.Uniform1i(self.cube_uniforms.filler, 1);
+                                gl.Uniform1i(self.cube_uniforms.has_alpha, 0);
+                                gl.Uniform4f(self.cube_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                                gl.BindTexture(ffi::TEXTURE_2D, 0);
+                                stats.filler_faces += 1;
+                                match reason {
+                                    PrismFillerReason::Unoccupied => stats.unoccupied += 1,
+                                    PrismFillerReason::MissingWindow => stats.missing_windows += 1,
+                                    PrismFillerReason::MissingTexture => {
+                                        stats.missing_textures += 1
+                                    }
+                                }
+                            }
+                        }
+
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    }
+                    PrismKind::Cap { top } => {
+                        if piece.facing <= 0.02 {
+                            continue;
+                        }
+                        gl.UseProgram(self.overview_cap_program);
+                        gl.UniformMatrix4fv(
+                            self.overview_cap_uniforms.mvp,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.mvp.as_ptr(),
+                        );
+                        gl.UniformMatrix4fv(
+                            self.overview_cap_uniforms.model,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.model.as_ptr(),
+                        );
+                        gl.Uniform1f(self.overview_cap_uniforms.y, if top { 1.0 } else { -1.0 });
+                        let (r, g, b) = if top {
+                            (0.085, 0.105, 0.155)
+                        } else {
+                            (0.055, 0.065, 0.095)
+                        };
+                        gl.Uniform4f(self.overview_cap_uniforms.color, r, g, b, 0.90 * anim_scale);
+                        let vertices = i32::try_from(camera.sides).unwrap_or(6) + 2;
+                        gl.DrawArrays(ffi::TRIANGLE_FAN, 0, vertices);
+                        stats.caps += 1;
+                    }
+                }
+            }
+        }
+
+        stats
+    }
+
     /// Render the 3D prism carousel overview.
     ///
     /// Three through six windows form the matching regular solid (four is a
@@ -635,52 +851,12 @@ impl WaylandCompositor {
             gl.Disable(ffi::DEPTH_TEST);
             gl.Disable(ffi::CULL_FACE);
 
-            // ------------------------------------------------------------------
-            // 1. Dark vignette backdrop
-            // ------------------------------------------------------------------
-            gl.UseProgram(self.overview_bg_program);
-            let rect_loc =
-                gl.GetUniformLocation(self.overview_bg_program, b"u_rect\0".as_ptr() as *const _);
-            let proj_loc = gl.GetUniformLocation(
-                self.overview_bg_program,
-                b"u_projection\0".as_ptr() as *const _,
-            );
-            let opacity_loc = gl.GetUniformLocation(
-                self.overview_bg_program,
-                b"u_opacity\0".as_ptr() as *const _,
-            );
-            let scene_linear_loc = gl.GetUniformLocation(
-                self.overview_bg_program,
-                b"u_scene_linear\0".as_ptr() as *const _,
-            );
-
             let (mon_x, mon_y, mon_w, mon_h) = self.overview_monitor;
             let mw = mon_w.max(1) as f32;
             let mh = mon_h.max(1) as f32;
 
-            if rect_loc >= 0 {
-                gl.Uniform4f(rect_loc, mon_x as f32, mon_y as f32, mw, mh);
-            }
-            if proj_loc >= 0 {
-                gl.UniformMatrix4fv(proj_loc, 1, ffi::FALSE as u8, projection.as_ptr());
-            }
-            if opacity_loc >= 0 {
-                gl.Uniform1f(opacity_loc, self.overview_opacity);
-            }
-            if scene_linear_loc >= 0 {
-                gl.Uniform1i(scene_linear_loc, i32::from(scene_linear_output));
-            }
-
-            gl.BindVertexArray(self.quad_vao);
-            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-
-            let scissor_y = self.screen_h as i32 - (mon_y + mon_h as i32);
-            gl.Enable(ffi::SCISSOR_TEST);
-            gl.Scissor(mon_x, scissor_y, mon_w as i32, mon_h as i32);
-            gl.Viewport(mon_x, scissor_y, mon_w as i32, mon_h as i32);
-
             // ------------------------------------------------------------------
-            // 2. Compute prism geometry
+            // 1. Compute the shared solid and mirrored geometry
             // ------------------------------------------------------------------
             // A regular n-gon needs apothem = half_width / tan(PI / n).
             // This used to be hard-coded to `sqrt(3) * half_width`, which is
@@ -699,6 +875,14 @@ impl WaylandCompositor {
                     &scale_matrix(anim_scale, anim_scale, anim_scale),
                 ),
             );
+            // Mirror exactly through the prism's animated bottom edge. The
+            // multiplication order is part of the geometry contract: mirroring
+            // the local model first would rotate/scale the floor itself.
+            let floor_y = lift - anim_scale;
+            let mirrored_model = mat4_mul(&mirror_matrix(floor_y), &base_model);
+            let floor_contact = camera
+                .project(&translate_matrix(0.0, 0.0, 0.0), [0.0, floor_y, 0.0])
+                .1;
 
             // Determine selected index for rotation target
             let selected_idx = self
@@ -710,9 +894,8 @@ impl WaylandCompositor {
                 })
                 .unwrap_or(0);
 
-            // ------------------------------------------------------------------
-            // 3. Resolve every slot and retain the shared painter order
-            // ------------------------------------------------------------------
+            // Resolve every slot once; both passes reuse the same live/filler
+            // decision while sorting their geometry independently.
             let availability: Vec<PrismEntryAvailability> = self
                 .overview_entries
                 .iter()
@@ -723,180 +906,89 @@ impl WaylandCompositor {
                 })
                 .collect();
             let face_plan = prism_face_plan(sides, &availability);
-            let pieces = build_prism_pieces(&camera, &base_model);
+            let reflected_pieces = build_prism_pieces(&camera, &mirrored_model);
+            let solid_pieces = build_prism_pieces(&camera, &base_model);
 
             // ------------------------------------------------------------------
-            // 4. Draw faces and caps in their original depth-sorted order
+            // 2. Static skydome, clipped to this monitor in output coordinates
             // ------------------------------------------------------------------
-            gl.UseProgram(self.cube_program);
-            gl.Uniform1f(self.cube_uniforms.aspect, face_aspect);
-            gl.Uniform3f(
-                self.cube_uniforms.camera,
-                camera.eye[0],
-                camera.eye[1],
-                camera.eye[2],
+            let scissor_y = self.screen_h as i32 - (mon_y + mon_h as i32);
+            gl.Enable(ffi::SCISSOR_TEST);
+            gl.Scissor(mon_x, scissor_y, mon_w as i32, mon_h as i32);
+            // VERTEX_SHADER consumes output-pixel rectangles and the full-output
+            // projection, so a damage rectangle or 3D monitor viewport inherited
+            // from an earlier pass would distort the skydome.
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.UseProgram(self.overview_skydome_program);
+            gl.Uniform4f(
+                self.overview_skydome_uniforms.rect,
+                mon_x as f32,
+                mon_y as f32,
+                mw,
+                mh,
             );
-            gl.Uniform1f(self.cube_uniforms.alpha, anim_scale);
-            gl.Uniform1f(self.cube_uniforms.edge, 1.0);
-            gl.Uniform1f(self.cube_uniforms.lit, 1.0);
+            gl.UniformMatrix4fv(
+                self.overview_skydome_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+            gl.Uniform1f(
+                self.overview_skydome_uniforms.opacity,
+                self.overview_opacity,
+            );
+            gl.Uniform1f(self.overview_skydome_uniforms.angle, self.overview_rotation);
+            gl.Uniform2f(
+                self.overview_skydome_uniforms.ground,
+                camera.horizon,
+                floor_contact,
+            );
+            gl.Uniform3f(self.overview_skydome_uniforms.accent, 0.32, 0.62, 1.0);
             gl.Uniform1i(
-                self.cube_uniforms.scene_linear,
+                self.overview_skydome_uniforms.scene_linear,
                 i32::from(scene_linear_output),
             );
-            gl.Uniform1i(self.cube_uniforms.texture, 0);
-
-            gl.UseProgram(self.overview_cap_program);
-            gl.Uniform1f(self.overview_cap_uniforms.radius, camera.circumradius);
-            gl.Uniform1f(self.overview_cap_uniforms.sides, sides as f32);
-            gl.Uniform3f(
-                self.overview_cap_uniforms.camera,
-                camera.eye[0],
-                camera.eye[1],
-                camera.eye[2],
-            );
-            gl.Uniform3f(self.overview_cap_uniforms.accent, 0.32, 0.62, 1.0);
-            gl.Uniform1i(
-                self.overview_cap_uniforms.scene_linear,
-                i32::from(scene_linear_output),
-            );
-
-            gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindVertexArray(self.quad_vao);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
-            let mut drawn_live_faces = 0usize;
-            let mut drawn_filler_faces = 0usize;
-            let mut drawn_caps = 0usize;
-            let mut missing_window_faces = 0usize;
-            let mut missing_texture_faces = 0usize;
-            let mut unoccupied_faces = 0usize;
-
-            for piece in &pieces {
-                match piece.kind {
-                    PrismKind::Face { slot } => {
-                        let source = face_plan[slot];
-                        let entry_index = match source {
-                            PrismFaceSource::Live { entry_index } => Some(entry_index),
-                            PrismFaceSource::Filler { entry_index, .. } => entry_index,
-                        };
-                        let selected = entry_index == Some(selected_idx);
-                        let brightness = if piece.facing > 0.0 {
-                            0.70 + 0.30 * piece.facing
-                        } else {
-                            0.42
-                        };
-
-                        gl.UseProgram(self.cube_program);
-                        gl.UniformMatrix4fv(
-                            self.cube_uniforms.mvp,
-                            1,
-                            ffi::FALSE as u8,
-                            piece.mvp.as_ptr(),
-                        );
-                        gl.UniformMatrix4fv(
-                            self.cube_uniforms.model,
-                            1,
-                            ffi::FALSE as u8,
-                            piece.model.as_ptr(),
-                        );
-                        gl.Uniform1f(self.cube_uniforms.brightness, brightness);
-                        gl.Uniform4f(
-                            self.cube_uniforms.accent,
-                            0.32,
-                            0.62,
-                            1.0,
-                            if selected { 1.0 } else { 0.15 },
-                        );
-                        gl.Uniform1f(
-                            self.cube_uniforms.desat,
-                            if selected {
-                                0.0
-                            } else if piece.facing > 0.0 {
-                                0.30
-                            } else {
-                                0.65
-                            },
-                        );
-
-                        match source {
-                            PrismFaceSource::Live { entry_index } => {
-                                let entry = &self.overview_entries[entry_index];
-                                let win = self
-                                    .windows
-                                    .get(&entry.window_id)
-                                    .expect("live overview face must retain its window");
-                                let texture = win
-                                    .gl_texture
-                                    .expect("live overview face must retain its texture");
-                                let [cu, cv, cw, ch] = win.content_uv;
-                                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
-                                    (cu, cv, cw, ch)
-                                } else {
-                                    (cu, cv + ch, cw, -ch)
-                                };
-                                gl.Uniform1i(self.cube_uniforms.filler, 0);
-                                gl.Uniform1i(
-                                    self.cube_uniforms.has_alpha,
-                                    i32::from(win.has_alpha),
-                                );
-                                gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
-                                self.bind_window_texture(gl, texture);
-                                drawn_live_faces += 1;
-                            }
-                            PrismFaceSource::Filler { reason, .. } => {
-                                gl.Uniform1i(self.cube_uniforms.filler, 1);
-                                gl.Uniform1i(self.cube_uniforms.has_alpha, 0);
-                                gl.Uniform4f(self.cube_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
-                                gl.BindTexture(ffi::TEXTURE_2D, 0);
-                                drawn_filler_faces += 1;
-                                match reason {
-                                    PrismFillerReason::Unoccupied => unoccupied_faces += 1,
-                                    PrismFillerReason::MissingWindow => missing_window_faces += 1,
-                                    PrismFillerReason::MissingTexture => missing_texture_faces += 1,
-                                }
-                            }
-                        }
-
-                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                    }
-                    PrismKind::Cap { top } => {
-                        // Only the cap whose outward normal faces the camera is
-                        // visible on an opaque closed solid. Both shared pieces
-                        // remain in the painter sequence, so a camera below the
-                        // prism naturally selects the bottom one instead.
-                        if piece.facing <= 0.02 {
-                            continue;
-                        }
-                        gl.UseProgram(self.overview_cap_program);
-                        gl.UniformMatrix4fv(
-                            self.overview_cap_uniforms.mvp,
-                            1,
-                            ffi::FALSE as u8,
-                            piece.mvp.as_ptr(),
-                        );
-                        gl.UniformMatrix4fv(
-                            self.overview_cap_uniforms.model,
-                            1,
-                            ffi::FALSE as u8,
-                            piece.model.as_ptr(),
-                        );
-                        gl.Uniform1f(self.overview_cap_uniforms.y, if top { 1.0 } else { -1.0 });
-                        let (r, g, b) = if top {
-                            (0.085, 0.105, 0.155)
-                        } else {
-                            (0.055, 0.065, 0.095)
-                        };
-                        gl.Uniform4f(self.overview_cap_uniforms.color, r, g, b, 0.90 * anim_scale);
-                        let vertices = i32::try_from(sides).unwrap_or(6) + 2;
-                        gl.DrawArrays(ffi::TRIANGLE_FAN, 0, vertices);
-                        drawn_caps += 1;
-                    }
-                }
-            }
+            // ------------------------------------------------------------------
+            // 3. Mirrored prism, then the solid; each pass owns painter order
+            // ------------------------------------------------------------------
+            gl.Viewport(mon_x, scissor_y, mon_w as i32, mon_h as i32);
+            let _reflection_stats = self.draw_overview_prism_pass(
+                gl,
+                &camera,
+                &reflected_pieces,
+                &face_plan,
+                selected_idx,
+                anim_scale,
+                scene_linear_output,
+                OverviewPrismPass {
+                    reflection: true,
+                    floor_y,
+                },
+            );
+            let solid_stats = self.draw_overview_prism_pass(
+                gl,
+                &camera,
+                &solid_pieces,
+                &face_plan,
+                selected_idx,
+                anim_scale,
+                scene_linear_output,
+                OverviewPrismPass {
+                    reflection: false,
+                    floor_y,
+                },
+            );
 
             gl.Disable(ffi::SCISSOR_TEST);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
 
-            if drawn_live_faces == 0 || missing_window_faces > 0 || missing_texture_faces > 0 {
+            if solid_stats.live_faces == 0
+                || solid_stats.missing_windows > 0
+                || solid_stats.missing_textures > 0
+            {
                 static LAST_OVERVIEW_LOG: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 let now = std::time::SystemTime::now()
@@ -910,18 +1002,18 @@ impl WaylandCompositor {
                         "[overview] entries={} sides={} live={} filler={} unoccupied={} caps={} missing_window={} missing_texture={}",
                         self.overview_entries.len(),
                         sides,
-                        drawn_live_faces,
-                        drawn_filler_faces,
-                        unoccupied_faces,
-                        drawn_caps,
-                        missing_window_faces,
-                        missing_texture_faces
+                        solid_stats.live_faces,
+                        solid_stats.filler_faces,
+                        solid_stats.unoccupied,
+                        solid_stats.caps,
+                        solid_stats.missing_windows,
+                        solid_stats.missing_textures
                     );
                 }
             }
 
             // ------------------------------------------------------------------
-            // 5. Locate the selected face for its flat title overlay
+            // 4. Locate the selected face for its flat title overlay
             // ------------------------------------------------------------------
             // Selection itself is now drawn by the face shader as a bevel in
             // the face plane. The former axis-aligned screen-space rectangle
@@ -929,7 +1021,7 @@ impl WaylandCompositor {
             let vp_x = mon_x as f32;
             let vp_y = mon_y as f32;
             let mut selected_title_anchor = None;
-            for piece in pieces.iter().rev() {
+            for piece in solid_pieces.iter().rev() {
                 if piece.kind != (PrismKind::Face { slot: selected_idx }) {
                     continue;
                 }
@@ -963,7 +1055,7 @@ impl WaylandCompositor {
             }
 
             // ------------------------------------------------------------------
-            // 6. Title label below selected window
+            // 5. Title label below selected window
             // ------------------------------------------------------------------
             if !self.overview_title_textures.is_empty()
                 && selected_idx < self.overview_title_textures.len()

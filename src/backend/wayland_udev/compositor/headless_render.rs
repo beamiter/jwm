@@ -868,6 +868,11 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
             F,
             s::OVERVIEW_BG_FRAGMENT_SHADER,
         ),
+        (
+            "OVERVIEW_SKYDOME_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_SKYDOME_FRAGMENT_SHADER,
+        ),
         ("GENIE_VERTEX_SHADER", V, s::GENIE_VERTEX_SHADER),
         ("TEMPORAL_BLUR_MIX_VERTEX", V, s::TEMPORAL_BLUR_MIX_VERTEX),
         (
@@ -1032,6 +1037,8 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         "u_scene_linear",
         "u_has_alpha",
         "u_filler",
+        "u_reflection",
+        "u_floor_y",
     ] {
         assert!(
             unsafe { gl.get_uniform_location(program, name) }.is_some(),
@@ -1064,6 +1071,8 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         gl.uniform_1_i32(u("u_scene_linear").as_ref(), 1);
         gl.uniform_1_i32(u("u_has_alpha").as_ref(), 0);
         gl.uniform_1_i32(u("u_filler").as_ref(), 1);
+        gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
+        gl.uniform_1_f32(u("u_floor_y").as_ref(), -100.0);
     });
 
     assert_pixel(pixel, [60, 40, 20, 100], 1, "cube legacy mode");
@@ -1142,6 +1151,87 @@ fn wayland_cube_shader_lit_mode_embeds_selection_in_the_face() {
             pixel[..3].iter().all(|&channel| channel <= pixel[3]),
             "lit face must remain premultiplied at highlights and rounded edges: {pixel:?}"
         );
+    }
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_cube_reflection_fades_from_contact_to_far_edge() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube reflection test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    // local y=-1 touches floor y=0; local y=+1 reaches world y=-2.
+    let mirrored_model = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, -1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, -1.0, 0.0, 1.0,
+    ];
+    let render = |scene_linear: i32| {
+        render_quad_frame(gl, program, [96, 128, 176, 255], 64, 64, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &mirrored_model);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 0.0, 4.0);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0, 0.15);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.18);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 0);
+            gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
+            gl.uniform_1_f32(u("u_floor_y").as_ref(), 0.0);
+        })
+    };
+
+    let encoded = render(0);
+    let linear = render(1);
+    let contact = (8 * 64 + 32) * 4;
+    let far = (48 * 64 + 32) * 4;
+    assert!(
+        encoded[contact + 3] > 70,
+        "reflection must remain visible at floor contact: {:?}",
+        &encoded[contact..contact + 4]
+    );
+    assert!(
+        encoded[far + 3] * 4 < encoded[contact + 3],
+        "reflection must fade strongly away from contact: near={:?}, far={:?}",
+        &encoded[contact..contact + 4],
+        &encoded[far..far + 4]
+    );
+    assert_eq!(encoded[contact + 3], linear[contact + 3]);
+    assert_ne!(
+        &encoded[contact..contact + 3],
+        &linear[contact..contact + 3]
+    );
+    for (label, frame) in [("encoded", encoded), ("linear", linear)] {
+        for pixel in frame.chunks_exact(4) {
+            assert!(
+                pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+                "{label} reflection must remain premultiplied: {pixel:?}"
+            );
+        }
     }
 
     unsafe { gl.delete_program(program) };
@@ -1313,6 +1403,8 @@ fn wayland_overview_cap_shader_links_and_renders_scene_linear_premultiplied_pixe
         "u_accent",
         "u_camera",
         "u_scene_linear",
+        "u_reflection",
+        "u_floor_y",
     ] {
         assert!(
             unsafe { gl.get_uniform_location(program, name) }.is_some(),
@@ -1353,6 +1445,8 @@ fn wayland_overview_cap_shader_links_and_renders_scene_linear_premultiplied_pixe
                 gl.uniform_3_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0);
                 gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 4.0, 0.0);
                 gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+                gl.uniform_1_i32(u("u_reflection").as_ref(), 0);
+                gl.uniform_1_f32(u("u_floor_y").as_ref(), 0.0);
             },
             |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_FAN, 0, 6) },
         )
@@ -1385,6 +1479,54 @@ fn wayland_overview_cap_shader_links_and_renders_scene_linear_premultiplied_pixe
         "pixels outside the generated polygon must remain uncovered"
     );
 
+    let render_reflection = |model_y: f32| {
+        let mut model = identity;
+        model[13] = model_y;
+        render_program_frame(
+            gl,
+            program,
+            [255, 0, 255, 0],
+            64,
+            64,
+            [0.0, 0.0, 0.0, 0.0],
+            |gl| unsafe {
+                let u = |name: &str| gl.get_uniform_location(program, name);
+                gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &cap_projection);
+                gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &model);
+                gl.uniform_1_f32(u("u_radius").as_ref(), 0.72);
+                gl.uniform_1_f32(u("u_y").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_sides").as_ref(), 4.0);
+                gl.uniform_4_f32(u("u_color").as_ref(), 0.25, 0.32, 0.45, 0.60);
+                gl.uniform_3_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0);
+                gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 4.0, 0.0);
+                gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+                gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
+                gl.uniform_1_f32(u("u_floor_y").as_ref(), 0.0);
+            },
+            |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_FAN, 0, 6) },
+        )
+    };
+    // u_y=1 plus model_y=-1 puts this cap on the floor; translating the
+    // identical projected fan further down only changes reflection falloff.
+    let contact = render_reflection(-1.0);
+    let far = render_reflection(-3.0);
+    let contact_centre = &contact[centre..centre + 4];
+    let far_centre = &far[centre..centre + 4];
+    assert!(
+        contact_centre[3] > 55,
+        "reflected cap must remain visible at contact: {contact_centre:?}"
+    );
+    assert!(
+        far_centre[3] * 4 < contact_centre[3],
+        "reflected cap must fade below the floor: contact={contact_centre:?}, far={far_centre:?}"
+    );
+    for pixel in [contact_centre, far_centre] {
+        assert!(
+            pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+            "reflected cap must remain premultiplied: {pixel:?}"
+        );
+    }
+
     unsafe { gl.delete_program(program) };
 }
 
@@ -1416,6 +1558,75 @@ fn wayland_overview_backdrop_respects_the_output_color_domain() {
     let linear = render(1);
     assert_pixel(encoded, [11, 14, 19, 199], 1, "encoded overview backdrop");
     assert_pixel(linear, [1, 1, 2, 199], 1, "linear overview backdrop");
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_overview_skydome_is_static_scene_linear_and_premultiplied() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping overview skydome test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::VERTEX_SHADER,
+        super::shaders::OVERVIEW_SKYDOME_FRAGMENT_SHADER,
+    )
+    .expect("overview skydome shaders must link");
+    for name in [
+        "u_rect",
+        "u_projection",
+        "u_opacity",
+        "u_angle",
+        "u_ground",
+        "u_accent",
+        "u_scene_linear",
+    ] {
+        assert!(
+            unsafe { gl.get_uniform_location(program, name) }.is_some(),
+            "overview skydome optimized out required uniform {name}"
+        );
+    }
+    assert!(
+        !super::shaders::OVERVIEW_SKYDOME_FRAGMENT_SHADER.contains("u_time"),
+        "a settled skydome must not introduce an animation-only time source"
+    );
+
+    let projection = ortho(32.0, 32.0);
+    let render = |scene_linear: i32| {
+        render_quad_frame(gl, program, [255, 0, 255, 0], 32, 32, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 32.0, 32.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &projection);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 0.76);
+            gl.uniform_1_f32(u("u_angle").as_ref(), 0.63);
+            gl.uniform_2_f32(u("u_ground").as_ref(), 0.38, 0.72);
+            gl.uniform_3_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+
+    let encoded = render(0);
+    assert_eq!(
+        encoded,
+        render(0),
+        "same geometry and angle must produce a bit-stable static skydome"
+    );
+    let linear = render(1);
+    let centre = (16 * 32 + 16) * 4;
+    assert_eq!(encoded[centre + 3], linear[centre + 3]);
+    assert_ne!(&encoded[centre..centre + 3], &linear[centre..centre + 3]);
+    assert!((174..=190).contains(&encoded[centre + 3]));
+    for (label, frame) in [("encoded", encoded), ("linear", linear)] {
+        for pixel in frame.chunks_exact(4) {
+            assert!(
+                pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+                "{label} skydome must remain premultiplied: {pixel:?}"
+            );
+        }
+    }
 
     unsafe { gl.delete_program(program) };
 }
@@ -1565,7 +1776,7 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
             "injected framebuffer construction failure must propagate",
         );
         assert!(error.contains("framebuffer"));
-        assert_eq!(framebuffer_failure.programs.len(), 25);
+        assert_eq!(framebuffer_failure.programs.len(), 26);
         assert_eq!(framebuffer_failure.vertex_arrays.len(), 1);
         assert_eq!(framebuffer_failure.buffers.len(), 1);
         assert_eq!(framebuffer_failure.framebuffers.len(), 4);
@@ -1585,7 +1796,7 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
             "injected pre-commit failure must propagate",
         );
         assert!(error.contains("before commit"));
-        assert_eq!(commit_failure.programs.len(), 25);
+        assert_eq!(commit_failure.programs.len(), 26);
         assert_eq!(commit_failure.vertex_arrays.len(), 2);
         assert_eq!(commit_failure.buffers.len(), 2);
         assert!(commit_failure.framebuffers.len() >= 10);
@@ -1612,6 +1823,7 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             .expect("headless Wayland compositor must initialize");
         let genie_program = compositor.genie_program;
         let line_program = compositor.line_program;
+        let overview_skydome_program = compositor.overview_skydome_program;
         let thumbnail_program = compositor
             .minimized_thumbnails
             .downsample_program_for_tests();
@@ -1703,6 +1915,7 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
 
         assert_ne!(gl.IsProgram(genie_program), 0);
         assert_ne!(gl.IsProgram(line_program), 0);
+        assert_ne!(gl.IsProgram(overview_skydome_program), 0);
         assert_ne!(gl.IsProgram(thumbnail_program), 0);
         assert_ne!(gl.IsFramebuffer(output_fbo), 0);
         assert_ne!(gl.IsTexture(output_texture), 0);
@@ -1715,6 +1928,7 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
         ));
         assert_eq!(gl.IsProgram(genie_program), 0);
         assert_eq!(gl.IsProgram(line_program), 0);
+        assert_eq!(gl.IsProgram(overview_skydome_program), 0);
         assert_eq!(gl.IsProgram(thumbnail_program), 0);
         assert_eq!(gl.IsFramebuffer(output_fbo), 0);
         assert_eq!(gl.IsTexture(output_texture), 0);

@@ -178,7 +178,12 @@ src/backend/api.rs          platform boundary
   backends. The Wayland GLES adapter preserves that ordering across live and
   filler faces plus generated polygon caps, so missing textures and the spare
   slots of one- or two-window prisms remain closed without adding renderer
-  state to the shared geometry. All close paths go through
+  state to the shared geometry. Its mirrored pass builds a second shared piece
+  stream from `mirror_matrix(floor) * base_model`; the solid and reflection are
+  therefore sorted independently without a depth buffer. An overview-only
+  static skydome program owns the horizon and floor-light environment, leaving
+  the simpler Expose/Peek background program untouched and avoiding idle-frame
+  scheduling. All close paths go through
   `OverviewState::deactivate`, which also resets the slide offset the inline
   Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
