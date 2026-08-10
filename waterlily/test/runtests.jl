@@ -717,6 +717,31 @@ end
         time_ns() + UInt64(30_000_000_000),
     )
     @test achieved ≈ 0.1
+
+    # Keep a small high-frequency component alive for long enough to catch
+    # timestep-pattern instabilities. At 30 fps the old remainder stepping
+    # alternated 7.5 ms and 3.3 ms updates: a normal splash stayed plausible
+    # for about three seconds, then exploded into an almost entirely opaque
+    # foam frame.
+    stability_case = build_case("puddle", (128, 96); memory=Array)
+    JwmWaterLily.splash!(stability_case, 32.0, 24.0, 2.5, 4.0)
+    for _ in 1:90
+        JwmWaterLily.advance!(stability_case, 1 / 30)
+    end
+    @test all(isfinite, stability_case.height)
+    @test all(isfinite, stability_case.rate)
+    @test maximum(abs, stability_case.height) < 2
+    @test maximum(abs, stability_case.rate) < 100
+
+    stable_rgba = render_rgba(stability_case)
+    stable_alpha = @view stable_rgba[4:4:end]
+    @test count(>=(0xc0), stable_alpha) < length(stable_alpha) ÷ 20
+    stable_pixels = eachcol(reshape(stable_rgba, 4, :))
+    pale_pixels = count(
+        pixel -> pixel[1] >= 0xc0 && pixel[2] >= 0xc0 && pixel[3] >= 0x98,
+        stable_pixels,
+    )
+    @test pale_pixels < length(stable_alpha) ÷ 20
 end
 
 @testset "turbulence seeds vortices and stirs along strokes" begin

@@ -156,13 +156,23 @@ function puddle_step!(case::PuddleCase, dt::Float64)
 end
 
 function advance_budgeted!(case::PuddleCase, dimensionless_step::Real, deadline_ns::UInt64)
-    remaining = Float64(dimensionless_step)
+    requested = Float64(dimensionless_step)
+    requested > 0.0 || return 0.0
+
+    # Keep every substep in a frame the same size. A remainder-sized final
+    # substep made the symplectic Euler update alternate between two timesteps
+    # (at 30 fps: 4 x 7.5 ms, then 3.3 ms). Although either timestep is stable
+    # on its own, their product parametrically excites the grid's checkerboard
+    # mode; after a few seconds a normal ripple grows without bound and the
+    # renderer turns most of the canvas into opaque foam. Dividing the frame
+    # interval evenly retains the CFL bound without that alternating-step
+    # instability.
+    substeps = ceil(Int, requested / PUDDLE_MAX_STEP)
+    dt = requested / substeps
     achieved = 0.0
-    while remaining > 0.0
-        dt = min(remaining, PUDDLE_MAX_STEP)
+    for _ in 1:substeps
         puddle_step!(case, dt)
         achieved += dt
-        remaining -= dt
         time_ns() >= deadline_ns && break
     end
     return achieved
