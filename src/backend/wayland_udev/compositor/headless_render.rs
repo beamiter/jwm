@@ -1039,6 +1039,12 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         "u_filler",
         "u_reflection",
         "u_floor_y",
+        "u_color_managed",
+        "u_color_matrix",
+        "u_decode_tf",
+        "u_decode_gamma",
+        "u_encode_tf",
+        "u_encode_gamma",
     ] {
         assert!(
             unsafe { gl.get_uniform_location(program, name) }.is_some(),
@@ -1073,6 +1079,16 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         gl.uniform_1_i32(u("u_filler").as_ref(), 1);
         gl.uniform_1_i32(u("u_reflection").as_ref(), 1);
         gl.uniform_1_f32(u("u_floor_y").as_ref(), -100.0);
+        gl.uniform_1_i32(u("u_color_managed").as_ref(), 1);
+        gl.uniform_matrix_3_f32_slice(
+            u("u_color_matrix").as_ref(),
+            false,
+            &[0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+        );
+        gl.uniform_1_i32(u("u_decode_tf").as_ref(), 4);
+        gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 7.0);
+        gl.uniform_1_i32(u("u_encode_tf").as_ref(), 5);
+        gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 0.2);
     });
 
     assert_pixel(pixel, [60, 40, 20, 100], 1, "cube legacy mode");
@@ -1313,6 +1329,276 @@ fn wayland_cube_shader_lit_mode_respects_output_domain_and_opaque_regions() {
 }
 
 #[test]
+fn wayland_cube_color_management_covers_solid_and_reflection() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube color-management test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    let identity4 = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let identity3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let render = |input: [u8; 4],
+                  managed: i32,
+                  reflection: i32,
+                  scene_linear: i32,
+                  matrix: [f32; 9],
+                  decode_tf: i32,
+                  decode_gamma: f32,
+                  encode_tf: i32,
+                  encode_gamma: f32| {
+        render_quad(gl, program, input, 16, 16, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity4);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity4);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 0.0, -4.0);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 0.0, 0.0, 0.0, 0.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 0);
+            gl.uniform_1_i32(u("u_reflection").as_ref(), reflection);
+            gl.uniform_1_f32(u("u_floor_y").as_ref(), 0.0);
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), managed);
+            gl.uniform_matrix_3_f32_slice(u("u_color_matrix").as_ref(), false, &matrix);
+            gl.uniform_1_i32(u("u_decode_tf").as_ref(), decode_tf);
+            gl.uniform_1_f32(u("u_decode_gamma").as_ref(), decode_gamma);
+            gl.uniform_1_i32(u("u_encode_tf").as_ref(), encode_tf);
+            gl.uniform_1_f32(u("u_encode_gamma").as_ref(), encode_gamma);
+        })
+    };
+
+    let input = [160, 96, 48, 255];
+    let unmanaged = render(input, 0, 0, 0, identity3, 0, 1.0, 0, 1.0);
+    let identity = render(input, 1, 0, 0, identity3, 0, 1.0, 0, 1.0);
+    assert_eq!(
+        unmanaged, identity,
+        "explicit linear identity must preserve the ordinary face material"
+    );
+
+    let channel_cycle = crate::backend::wayland_udev::color_pipeline::ColorTransform {
+        inverse_eotf: crate::backend::wayland_udev::color_pipeline::TransferKind::Linear,
+        matrix_row_major: [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+        forward_eotf: crate::backend::wayland_udev::color_pipeline::TransferKind::Linear,
+    }
+    .matrix_column_major();
+    let transformed = render(input, 1, 0, 0, channel_cycle, 0, 1.0, 0, 1.0);
+    let cycled_reference = render([96, 48, 160, 255], 0, 0, 0, identity3, 0, 1.0, 0, 1.0);
+    assert_pixel(
+        transformed,
+        cycled_reference,
+        2,
+        "non-symmetric overview gamut matrix",
+    );
+    assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR);
+
+    let reflected_unmanaged = render(input, 0, 1, 0, identity3, 0, 1.0, 0, 1.0);
+    let reflected_transformed = render(input, 1, 1, 0, channel_cycle, 0, 1.0, 0, 1.0);
+    let reflected_reference = render([96, 48, 160, 255], 0, 1, 0, identity3, 0, 1.0, 0, 1.0);
+    assert_pixel(
+        reflected_transformed,
+        reflected_reference,
+        2,
+        "mirrored non-symmetric overview gamut matrix",
+    );
+    assert_eq!(reflected_transformed[3], reflected_unmanaged[3]);
+
+    // Same-space HDR is mathematically an identity in encoded output, but it
+    // must remain an explicit plan so a scene-linear target decodes the stated
+    // EOTF instead of falling through to the undescribed-sRGB assumption.
+    for (label, tf, gamma, hdr_input) in [
+        ("Power-1.8", 1, 1.8, [128, 128, 128, 255]),
+        ("PQ", 4, 1.0, [130, 130, 130, 255]),
+        ("HLG", 5, 1.0, [128, 128, 128, 255]),
+    ] {
+        let unmanaged_encoded = render(hdr_input, 0, 0, 0, identity3, 0, 1.0, 0, 1.0);
+        let managed_encoded = render(hdr_input, 1, 0, 0, identity3, tf, gamma, tf, gamma);
+        let managed_linear = render(hdr_input, 1, 0, 1, identity3, tf, gamma, tf, gamma);
+        let fallback_linear = render(hdr_input, 0, 0, 1, identity3, 0, 1.0, 0, 1.0);
+        assert_pixel(
+            managed_encoded,
+            unmanaged_encoded,
+            3,
+            &format!("same-space {label} encoded round-trip"),
+        );
+        assert!(
+            (i32::from(managed_linear[0]) - i32::from(fallback_linear[0])).abs() > 10,
+            "explicit {label} must decode differently from legacy sRGB: managed={managed_linear:?}, fallback={fallback_linear:?}"
+        );
+        for pixel in [
+            unmanaged_encoded,
+            managed_encoded,
+            managed_linear,
+            fallback_linear,
+        ] {
+            assert!(
+                pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+                "{label} prism output must remain premultiplied: {pixel:?}"
+            );
+        }
+    }
+
+    // Nonlinear CM must operate on straight color: unpremultiply the source,
+    // decode/convert it, then premultiply the converted contribution again.
+    // The opaque backing makes the finished face opaque, so the half-alpha
+    // result is the affine mix of the same straight opaque source and a fully
+    // transparent source over that backing.
+    let straight = [96, 128, 160, 255];
+    let half_premultiplied = [48, 64, 80, 128];
+    let opaque = render(straight, 1, 0, 1, identity3, 5, 1.0, 5, 1.0);
+    let half = render(half_premultiplied, 1, 0, 1, identity3, 5, 1.0, 5, 1.0);
+    let transparent = render([0, 0, 0, 0], 1, 0, 1, identity3, 5, 1.0, 5, 1.0);
+    let hostile_transparent = render([255, 0, 255, 0], 1, 0, 1, identity3, 5, 1.0, 5, 1.0);
+    assert_eq!(
+        hostile_transparent, transparent,
+        "RGB behind alpha=0 must not leak through nonlinear color conversion"
+    );
+    let source_alpha = 128.0 / 255.0;
+    for channel in 0..3 {
+        let expected = (opaque[channel] as f32 * source_alpha
+            + transparent[channel] as f32 * (1.0 - source_alpha))
+            .round() as i32;
+        assert!(
+            (i32::from(half[channel]) - expected).abs() <= 3,
+            "premultiplied HLG channel {channel} must follow straight-color affine composition: opaque={opaque:?}, half={half:?}, transparent={transparent:?}"
+        );
+    }
+    assert_eq!(opaque[3], 255);
+    assert_eq!(half[3], 255);
+    assert_eq!(transparent[3], 255);
+
+    for pixel in [
+        unmanaged,
+        identity,
+        transformed,
+        cycled_reference,
+        reflected_unmanaged,
+        reflected_transformed,
+        reflected_reference,
+        opaque,
+        half,
+        transparent,
+        hostile_transparent,
+    ] {
+        assert!(
+            pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+            "color-managed prism output must remain premultiplied: {pixel:?}"
+        );
+    }
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_overview_color_upload_is_column_major_and_resets() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping overview color upload test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+    let transform = crate::backend::wayland_udev::color_pipeline::ColorTransform {
+        inverse_eotf: crate::backend::wayland_udev::color_pipeline::TransferKind::Power {
+            gamma_x10000: 18_000,
+        },
+        // Non-symmetric channel cycle: [r,g,b] -> [g,b,r].
+        matrix_row_major: [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+        forward_eotf: crate::backend::wayland_udev::color_pipeline::TransferKind::Hlg,
+    };
+    let expected_matrix = transform.matrix_column_major();
+
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 32, 24, false)
+            .expect("headless Wayland compositor must initialize");
+        gl.UseProgram(compositor.cube_program);
+        compositor.upload_overview_color_transform(&gl, Some(&transform));
+
+        let mut managed = -1;
+        gl.GetUniformiv(
+            compositor.cube_program,
+            compositor.cube_uniforms.color_managed,
+            &mut managed,
+        );
+        assert_eq!(managed, 1);
+        let mut matrix = [0.0_f32; 9];
+        gl.GetUniformfv(
+            compositor.cube_program,
+            compositor.cube_uniforms.color_matrix,
+            matrix.as_mut_ptr(),
+        );
+        assert_eq!(matrix, expected_matrix);
+
+        let mut decode_tf = -1;
+        let mut encode_tf = -1;
+        let mut decode_gamma = 0.0;
+        let mut encode_gamma = 0.0;
+        gl.GetUniformiv(
+            compositor.cube_program,
+            compositor.cube_uniforms.decode_tf,
+            &mut decode_tf,
+        );
+        gl.GetUniformiv(
+            compositor.cube_program,
+            compositor.cube_uniforms.encode_tf,
+            &mut encode_tf,
+        );
+        gl.GetUniformfv(
+            compositor.cube_program,
+            compositor.cube_uniforms.decode_gamma,
+            &mut decode_gamma,
+        );
+        gl.GetUniformfv(
+            compositor.cube_program,
+            compositor.cube_uniforms.encode_gamma,
+            &mut encode_gamma,
+        );
+        assert_eq!(decode_tf, 1);
+        assert_eq!(encode_tf, 5);
+        assert!((decode_gamma - 1.8).abs() < 1.0e-6);
+        assert!((encode_gamma - 1.0).abs() < 1.0e-6);
+        assert_eq!(
+            gl.GetError(),
+            smithay::backend::renderer::gles::ffi::NO_ERROR
+        );
+
+        compositor.upload_overview_color_transform(&gl, None);
+        gl.GetUniformiv(
+            compositor.cube_program,
+            compositor.cube_uniforms.color_managed,
+            &mut managed,
+        );
+        assert_eq!(managed, 0, "an unmanaged face must clear hostile CM state");
+        assert_eq!(
+            gl.GetError(),
+            smithay::backend::renderer::gles::ffi::NO_ERROR
+        );
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
 fn wayland_cube_shader_filler_is_texture_independent_and_premultiplied() {
     let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
         eprintln!("headless GL unavailable - skipping cube filler test");
@@ -1331,7 +1617,7 @@ fn wayland_cube_shader_filler_is_texture_independent_and_premultiplied() {
         0.0, 0.0, 1.0, 0.0, //
         0.0, 0.0, 0.0, 1.0,
     ];
-    let render = |input: [u8; 4], scene_linear: i32| {
+    let render = |input: [u8; 4], scene_linear: i32, color_managed: i32| {
         render_quad(gl, program, input, 16, 16, |gl| unsafe {
             let u = |name: &str| gl.get_uniform_location(program, name);
             gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
@@ -1351,16 +1637,31 @@ fn wayland_cube_shader_filler_is_texture_independent_and_premultiplied() {
             // neither sample the texture nor inherit its alpha contract.
             gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
             gl.uniform_1_i32(u("u_filler").as_ref(), 1);
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), color_managed);
+            gl.uniform_matrix_3_f32_slice(
+                u("u_color_matrix").as_ref(),
+                false,
+                &[0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            );
+            gl.uniform_1_i32(u("u_decode_tf").as_ref(), 4);
+            gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 7.0);
+            gl.uniform_1_i32(u("u_encode_tf").as_ref(), 5);
+            gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 0.2);
         })
     };
 
-    let encoded = render([255, 0, 255, 0], 0);
+    let encoded = render([255, 0, 255, 0], 0, 1);
     assert_eq!(
         encoded,
-        render([1, 240, 17, 255], 0),
+        render([1, 240, 17, 255], 0, 1),
         "filler output must not depend on the bound texture"
     );
-    let linear = render([255, 0, 255, 0], 1);
+    assert_eq!(
+        encoded,
+        render([255, 0, 255, 0], 0, 0),
+        "filler output must bypass hostile per-window color management"
+    );
+    let linear = render([255, 0, 255, 0], 1, 1);
     assert_ne!(
         &encoded[..3],
         &linear[..3],
@@ -3350,6 +3651,89 @@ fn main_window_shader_color_management_identity_is_passthrough() {
         gl.delete_buffer(vbo);
         gl.delete_vertex_array(vao);
     }
+}
+
+#[test]
+fn main_window_shader_scene_linear_transforms_straight_premultiplied_color() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping main-window premultiplied color test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::VERTEX_SHADER,
+        super::shaders::FRAGMENT_SHADER,
+    )
+    .expect("main window shaders must link");
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+
+    let render = |input: [u8; 4], managed: i32, opacity: f32| {
+        render_quad(gl, program, input, 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), opacity);
+            gl.uniform_1_f32(u("u_radius").as_ref(), 0.0);
+            gl.uniform_2_f32(u("u_size").as_ref(), 8.0, 8.0);
+            gl.uniform_1_f32(u("u_dim").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_ripple_progress").as_ref(), -1.0);
+            gl.uniform_1_f32(u("u_ripple_amplitude").as_ref(), 0.0);
+            gl.uniform_1_i32(u("u_color_managed").as_ref(), managed);
+            gl.uniform_matrix_3_f32_slice(u("u_color_matrix").as_ref(), false, &identity);
+            // HLG makes decoding premultiplied RGB observably different from
+            // decoding the straight source color.
+            gl.uniform_1_i32(u("u_decode_tf").as_ref(), 5);
+            gl.uniform_1_f32(u("u_decode_gamma").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_encode_tf").as_ref(), 5);
+            gl.uniform_1_f32(u("u_encode_gamma").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 1);
+        })
+    };
+
+    let straight = [96, 128, 160, 255];
+    let half_premultiplied = [48, 64, 80, 128];
+    for (label, managed) in [("legacy-sRGB", 0), ("managed-HLG", 1)] {
+        let opaque = render(straight, managed, -1.0);
+        let half = render(half_premultiplied, managed, -1.0);
+        let transparent = render([0, 0, 0, 0], managed, -1.0);
+        let hostile_transparent = render([255, 0, 255, 0], managed, -1.0);
+
+        assert_eq!(
+            hostile_transparent, transparent,
+            "{label} RGB behind alpha=0 must not leak through transfer conversion"
+        );
+        assert_eq!(transparent, [0, 0, 0, 0]);
+        assert_eq!(half[3], 128);
+        let source_alpha = 128.0 / 255.0;
+        for channel in 0..3 {
+            let expected = (opaque[channel] as f32 * source_alpha).round() as i32;
+            assert!(
+                (i32::from(half[channel]) - expected).abs() <= 3,
+                "{label} channel {channel} must decode straight color before repremultiplying: opaque={opaque:?}, half={half:?}"
+            );
+        }
+    }
+
+    // Force-opaque regions ignore raw texture alpha for both coverage and the
+    // color fed into the scene-linear transfer function.
+    for managed in [0, 1] {
+        let partial_raw_alpha = render([48, 64, 80, 128], managed, 1.0);
+        let opaque_raw_alpha = render([48, 64, 80, 255], managed, 1.0);
+        assert_pixel(
+            partial_raw_alpha,
+            opaque_raw_alpha,
+            0,
+            "force-opaque main-window color ignores raw alpha",
+        );
+        assert_eq!(partial_raw_alpha[3], 255);
+    }
+
+    assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR);
+    unsafe { gl.delete_program(program) };
 }
 
 /// Blurring a flat color must return that same color, whatever the kernel

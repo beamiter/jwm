@@ -12,6 +12,7 @@ const IDENTITY_MODEL: [f32; 16] = [
     0.0, 0.0, 1.0, 0.0, //
     0.0, 0.0, 0.0, 1.0,
 ];
+const IDENTITY_COLOR_MATRIX: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 /// Geometry shared by every workspace-transition mode.
 ///
@@ -212,6 +213,17 @@ impl WaylandCompositor {
             gl.Uniform1i(self.cube_uniforms.filler, 0);
             gl.Uniform1i(self.cube_uniforms.reflection, 0);
             gl.Uniform1f(self.cube_uniforms.floor_y, 0.0);
+            gl.Uniform1i(self.cube_uniforms.color_managed, 0);
+            gl.UniformMatrix3fv(
+                self.cube_uniforms.color_matrix,
+                1,
+                ffi::FALSE,
+                IDENTITY_COLOR_MATRIX.as_ptr(),
+            );
+            gl.Uniform1i(self.cube_uniforms.decode_tf, 0);
+            gl.Uniform1f(self.cube_uniforms.decode_gamma, 1.0);
+            gl.Uniform1i(self.cube_uniforms.encode_tf, 0);
+            gl.Uniform1f(self.cube_uniforms.encode_gamma, 1.0);
             gl.Uniform1f(
                 self.cube_uniforms.aspect,
                 layout.draw_rect[2] / layout.draw_rect[3],

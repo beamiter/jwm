@@ -374,6 +374,12 @@ pub(crate) struct CubeUniforms {
     pub filler: i32,
     pub reflection: i32,
     pub floor_y: i32,
+    pub color_managed: i32,
+    pub color_matrix: i32,
+    pub decode_tf: i32,
+    pub decode_gamma: i32,
+    pub encode_tf: i32,
+    pub encode_gamma: i32,
 }
 
 pub(crate) struct OverviewCapUniforms {
@@ -866,13 +872,13 @@ pub(crate) struct WaylandCompositor {
     /// Changes whenever the output texture is recreated, even if GL recycles
     /// the numeric texture id.
     output_texture_generation: u64,
-    /// SOTA #2 Phase 2.1: FP16 (RGBA16F) intermediate target used when
-    /// `behavior.scene_linear_compositing` is on. Allocated alongside
-    /// output_fbo with the same dimensions and torn down/resized in
-    /// lockstep. Zero when the gate is off — render path checks for
-    /// this sentinel and falls back to the encoded-space pipeline.
-    /// Phase 2.2 will wire the window-shader linear-output path and the
-    /// final encode pass that reads from this texture.
+    /// FP16 (RGBA16F) intermediate target used when both the color-management
+    /// render path and scene-linear compositing are requested. Creation and
+    /// hot-enable allocate it at the output dimensions; resize/disable keep it
+    /// synchronized with output_fbo. Zero when either gate is off — the render
+    /// path checks this sentinel and falls back to the encoded-space pipeline.
+    /// Window shaders write linear pixels here; the frame boundary either encodes
+    /// them in a shader or blits them for the CRTC OETF.
     scene_linear_requested: bool,
     #[allow(dead_code)]
     linear_fbo: u32,
@@ -1876,6 +1882,12 @@ impl WaylandCompositor {
                 filler: get_uniform_loc(gl, cube_program, "u_filler"),
                 reflection: get_uniform_loc(gl, cube_program, "u_reflection"),
                 floor_y: get_uniform_loc(gl, cube_program, "u_floor_y"),
+                color_managed: get_uniform_loc(gl, cube_program, "u_color_managed"),
+                color_matrix: get_uniform_loc(gl, cube_program, "u_color_matrix"),
+                decode_tf: get_uniform_loc(gl, cube_program, "u_decode_tf"),
+                decode_gamma: get_uniform_loc(gl, cube_program, "u_decode_gamma"),
+                encode_tf: get_uniform_loc(gl, cube_program, "u_encode_tf"),
+                encode_gamma: get_uniform_loc(gl, cube_program, "u_encode_gamma"),
             };
 
             let overview_cap_uniforms = OverviewCapUniforms {
@@ -2013,13 +2025,18 @@ impl WaylandCompositor {
             )?;
 
             // ----- SOTA #2 Phase 2.1: optional FP16 linear-scene FBO -----
-            // Allocated only when behavior.scene_linear_compositing is on.
+            // Allocated only when both the color-management render path and
+            // behavior.scene_linear_compositing are on.
             // Zero/zero sentinel when off; the render path (Phase 2.2) checks
             // for linear_fbo != 0 to decide whether to take the linear path.
-            let scene_linear_enabled = crate::config::CONFIG
-                .load()
-                .behavior()
-                .scene_linear_compositing;
+            let scene_linear_enabled = {
+                let config = crate::config::CONFIG.load();
+                let behavior = config.behavior();
+                crate::config::scene_linear_render_path_requested(
+                    behavior.color_management_render_path,
+                    behavior.scene_linear_compositing,
+                )
+            };
             let (linear_fbo, linear_texture) = if scene_linear_enabled {
                 match construction.create_fbo_texture(screen_w, screen_h, GL_RGBA16F) {
                     Ok(resources) => resources,

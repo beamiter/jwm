@@ -3222,6 +3222,12 @@ impl BackendDiagnostics for UdevBackend {
             .map(|compositor| compositor.get_metrics())
     }
 
+    fn compositor_scene_linear_active(&self) -> bool {
+        self.compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.scene_linear_color_path_active())
+    }
+
     fn compositor_blur_status(&self) -> Option<crate::backend::api::BlurStatus> {
         self.compositor
             .as_ref()
@@ -5125,6 +5131,7 @@ impl Backend for UdevBackend {
                 // we still need it for the "match the overlapping output"
                 // fallback.
                 let srgb_target = srgb_params();
+                let scene_linear_color_path = compositor.scene_linear_color_path_requested();
                 let output_cache: Vec<(Rectangle<i32, Logical>, _)> = if decision.hw_ctm_active {
                     Vec::new()
                 } else {
@@ -5157,7 +5164,11 @@ impl Backend for UdevBackend {
 
                     let xform = if let Some(sp) = surface_params {
                         if decision.hw_ctm_active {
-                            ColorTransform::build(sp, &srgb_target)
+                            ColorTransform::build_for_render_path(
+                                sp,
+                                &srgb_target,
+                                scene_linear_color_path,
+                            )
                         } else {
                             let win_rect = Rectangle::<i32, Logical>::new(
                                 Point::from((x, y)),
@@ -5171,7 +5182,13 @@ impl Backend for UdevBackend {
                                         .unwrap_or(0)
                                 })
                                 .map(|(_, p)| p);
-                            output_params.and_then(|op| ColorTransform::build(sp, op))
+                            output_params.and_then(|op| {
+                                ColorTransform::build_for_render_path(
+                                    sp,
+                                    op,
+                                    scene_linear_color_path,
+                                )
+                            })
                         }
                     } else {
                         None

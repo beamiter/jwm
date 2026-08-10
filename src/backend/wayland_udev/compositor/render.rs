@@ -388,13 +388,9 @@ impl WaylandCompositor {
         unsafe {
             gl.Uniform1i(locations.scene_linear, i32::from(plan.scene_linear));
             if let Some(transform) = plan.transform {
+                let matrix = transform.matrix_column_major();
                 gl.Uniform1i(locations.managed, 1);
-                gl.UniformMatrix3fv(
-                    locations.matrix,
-                    1,
-                    ffi::TRUE,
-                    transform.matrix_row_major.as_ptr(),
-                );
+                gl.UniformMatrix3fv(locations.matrix, 1, ffi::FALSE, matrix.as_ptr());
                 gl.Uniform1i(locations.decode_tf, transform.inverse_eotf.shader_id());
                 gl.Uniform1f(
                     locations.decode_gamma,
@@ -1915,11 +1911,11 @@ impl WaylandCompositor {
         // =================================================================
         // 9. Draw windows (back-to-front)
         // =================================================================
-        // SOTA #2 Phase 2.3: when scene-linear compositing is active, decode
-        // the currently-encoded output_fbo (wallpaper + shadows + blur) into
-        // linear_fbo, then route the window-draw pass there. The encode pass
-        // after the loop converts back to encoded space for genie/borders/
-        // effects (which still draw in encoded space in v2.3).
+        // When scene-linear compositing is active, decode the currently
+        // encoded output_fbo (wallpaper + shadows + blur) into linear_fbo,
+        // then route the window-draw pass there. The frame boundary either
+        // runs the output encode shader or leaves the scene linear for a CRTC
+        // OETF; linear-aware overlays bind the resulting domain explicitly.
         let scene_linear_active = self.linear_fbo != 0;
         if scene_linear_active {
             self.dispatch_scene_linear_decode_pass(gl, &projection);
@@ -2223,15 +2219,16 @@ impl WaylandCompositor {
                     }
 
                     // wp-color-management transform for this surface, if any.
-                    // GLSL's mat3 is column-major; ColorTransform stores
-                    // matrix_row_major, so pass GL_TRUE for transpose.
+                    // Normalize runtime uploads to the same column-major/FALSE
+                    // layout used by uniform capture and restore.
                     if let Some(t) = wt.color_transform.as_ref() {
+                        let matrix = t.matrix_column_major();
                         gl.Uniform1i(self.win_uniforms.color_managed, 1);
                         gl.UniformMatrix3fv(
                             self.win_uniforms.color_matrix,
                             1,
-                            ffi::TRUE,
-                            t.matrix_row_major.as_ptr(),
+                            ffi::FALSE,
+                            matrix.as_ptr(),
                         );
                         gl.Uniform1i(self.win_uniforms.decode_tf, t.inverse_eotf.shader_id());
                         gl.Uniform1f(

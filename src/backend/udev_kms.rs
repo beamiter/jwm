@@ -161,15 +161,26 @@ struct KmsOutputState {
 
 /// Outcome of `refresh_color_pipeline_offload`, threaded to the renderer so the
 /// shader path can disable the fragment-shader encode when the CRTC GAMMA_LUT
-/// took over. `hw_ctm_active` is unused in 3.3b (identity payload only — the
-/// per-surface ColorTransform target switch that consumes it lands in 3.3c),
-/// but is part of the contract so callers don't need a second refactor.
+/// took over. `hw_ctm_active` tells the per-surface transform planner to target
+/// uniform linear sRGB; the installed per-output CTM then maps that scene into
+/// each output's native primaries before its hardware OETF.
 #[derive(Clone, Copy)]
 pub(super) struct ColorPipelineDecision {
     pub hw_encode_active: bool,
     pub shader_tf: i32,
     pub shader_gamma: f32,
     pub hw_ctm_active: bool,
+}
+
+/// A CRTC CTM operates on linear light. It is therefore only valid when the
+/// output OETF has also moved into the CRTC GAMMA_LUT and the compositor is
+/// leaving scene-linear pixels for scanout.
+const fn ctm_offload_allowed(
+    gate_on: bool,
+    hw_encode_active: bool,
+    any_participating: bool,
+) -> bool {
+    gate_on && hw_encode_active && any_participating
 }
 
 pub(super) struct KmsState {
@@ -946,7 +957,7 @@ impl KmsState {
     }
 
     // ============================================================
-    // KMS color pipeline activation (GAMMA_LUT)
+    // KMS color pipeline activation (GAMMA_LUT + CTM)
     // ============================================================
 
     /// Push a `GAMMA_LUT` blob for `tf` to the output's CRTC. Creates a fresh
@@ -1076,7 +1087,8 @@ impl KmsState {
     /// Install a 3×3 CTM (color transform matrix) on the CRTC. Mirrors
     /// `install_gamma_lut`: variable-length blob via `drm_ffi::mode::
     /// create_property_blob`, atomic prop bind, free-on-failure, replace-old-
-    /// after-success. 3.3b only ever passes `IDENTITY_CTM`.
+    /// after-success. The caller supplies the cached sRGB-to-output-primary
+    /// matrix for this CRTC (identity on an sRGB-primary output).
     pub(super) fn install_ctm(
         &mut self,
         output_idx: usize,
@@ -1193,13 +1205,15 @@ impl KmsState {
 
         let behavior = crate::config::CONFIG.load();
         let gate_on = behavior.behavior().kms_color_pipeline_offload
-            && behavior.behavior().scene_linear_compositing
+            && crate::config::scene_linear_render_path_requested(
+                behavior.behavior().color_management_render_path,
+                behavior.behavior().scene_linear_compositing,
+            )
             && compositor_offload_safe;
         // CTM transforms linear RGB, and the installed GAMMA_LUT contains the
         // output OETF. Both therefore require an actually allocated linear
         // scene target. `compositor_offload_safe` also rejects frames with
         // encoded-space overlays, which the LUT would otherwise encode twice.
-        let ctm_gate_on = gate_on;
         drop(behavior);
         let n = self.outputs.len();
 
@@ -1311,20 +1325,21 @@ impl KmsState {
             decision.hw_encode_active = !lut_install_failed;
         }
 
-        // --- CTM activation: independent of LUT. Drop on non-participating,
-        // verify ctm_supported AND scene-linear gate AND ctm gate across
-        // participants, install per-output `output_ctm` (sRGB → output
-        // primaries) all-or-nothing. When `hw_ctm_active`, the per-surface
-        // ColorTransform pass in backend.rs targets sRGB primaries so the
-        // FBO is uniform-sRGB and each CRTC's CTM converts to its native
-        // primaries at scanout.
+        // --- CTM activation: only after GAMMA_LUT succeeded for every
+        // participant. A CTM is linear-light math; applying it without the
+        // hardware OETF would transform shader-encoded pixels in the wrong
+        // domain. Install per-output `output_ctm` (sRGB → output primaries)
+        // all-or-nothing. When `hw_ctm_active`, the per-surface ColorTransform
+        // pass in backend.rs targets sRGB primaries so the FBO is uniform-sRGB
+        // and each CRTC's CTM converts to native primaries at scanout.
         for i in 0..n {
             if !participating[i] && self.outputs[i].installed_ctm.is_some() {
                 let _ = self.uninstall_ctm(i);
             }
         }
 
-        let mut ctm_capable = any_participating && ctm_gate_on;
+        let mut ctm_capable =
+            ctm_offload_allowed(gate_on, decision.hw_encode_active, any_participating);
         for i in 0..n {
             if !participating[i] {
                 continue;
@@ -3870,7 +3885,7 @@ impl KmsState {
 }
 
 impl Drop for KmsState {
-    /// Best-effort cleanup of any GAMMA_LUT blobs still tracked at teardown.
+    /// Best-effort cleanup of GAMMA_LUT/CTM blobs still tracked at teardown.
     /// The kernel reclaims blobs on FD close anyway, so this is belt-and-braces
     /// — it eliminates the brief window in which an orderly shutdown leaks a
     /// blob reference and avoids "blob leaked" dmesg warnings under
@@ -3966,12 +3981,20 @@ fn save_rgba_png(
 
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
-    use super::compositor_output_texture_identity_matches;
+    use super::{compositor_output_texture_identity_matches, ctm_offload_allowed};
 
     #[test]
     fn renderer_wrapper_identity_includes_generation_not_only_recycled_gl_name() {
         assert!(compositor_output_texture_identity_matches(17, 4, 17, 4));
         assert!(!compositor_output_texture_identity_matches(17, 4, 17, 3));
         assert!(!compositor_output_texture_identity_matches(17, 4, 18, 4));
+    }
+
+    #[test]
+    fn ctm_offload_requires_successful_hardware_oetf() {
+        assert!(ctm_offload_allowed(true, true, true));
+        assert!(!ctm_offload_allowed(false, true, true));
+        assert!(!ctm_offload_allowed(true, false, true));
+        assert!(!ctm_offload_allowed(true, true, false));
     }
 }

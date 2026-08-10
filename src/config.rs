@@ -30,6 +30,19 @@ pub const LOAD_LOCAL_CONFIG: bool = true;
 pub(crate) const MAX_CURSOR_SIZE: u32 = 512;
 const DEFAULT_CURSOR_SIZE: u32 = 24;
 
+/// Resolve the effective scene-linear render-path gate.
+///
+/// `scene_linear_compositing` is a dependent feature: without the per-surface
+/// color-management render path there is no reliable source transfer function
+/// to decode into the linear intermediate.
+#[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+pub(crate) const fn scene_linear_render_path_requested(
+    color_management_render_path: bool,
+    scene_linear_compositing: bool,
+) -> bool {
+    color_management_render_path && scene_linear_compositing
+}
+
 static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn resolve_cursor_size(configured: u32, environment: Option<&OsStr>) -> u32 {
@@ -674,29 +687,30 @@ pub struct BehaviorConfig {
     /// Apply per-surface wp-color-management transforms (decode →
     /// gamut-matrix → encode) in the window shader. Default off — the
     /// render-path math has unit-test coverage but no HW visual
-    /// verification yet. When this flag is off the gate-on path is
-    /// dead-stripped at runtime and pixels render identically to the
-    /// pre-color-management pipeline.
+    /// verification yet. When this flag is off, per-surface color transforms
+    /// are bypassed and undescribed content keeps the legacy sRGB assumption;
+    /// renderer-wide alpha and safety fixes still apply in both modes.
     #[serde(default)]
     pub color_management_render_path: bool,
 
-    /// SOTA #2: composite in scene-linear space (FP16 scene/blur FBOs,
-    /// window shader decode-only, final encode at output). When this flag
-    /// is off, compositing happens in display-encoded space (the historical
-    /// path; gamut-correct only for sRGB-on-sRGB). When on, blending and
-    /// blur become physically correct across mixed-gamut surfaces, at the
-    /// cost of doubled scene/blur FBO memory bandwidth. Requires
+    /// SOTA #2: route final window compositing through an FP16 scene-linear
+    /// intermediate (window decode-only, final encode at output). Wallpaper,
+    /// shadows and blur are still assembled by the historical encoded path
+    /// before that scene is decoded once, so this improves window blending
+    /// and per-surface transforms without claiming a physically linear blur.
+    /// Costs one FP16 scene target plus decode/encode passes. Requires
     /// `color_management_render_path` to also be on; ignored otherwise.
     /// Default off pending HW visual verification.
     #[serde(default)]
     pub scene_linear_compositing: bool,
 
-    /// Offload the final sRGB OETF encode to the CRTC's `GAMMA_LUT` hardware
-    /// pipeline. Active only when every connected, DPMS-on output exposes
-    /// `GAMMA_LUT` with size ≥ 256; otherwise the shader encode runs. The
-    /// offload is all-or-nothing per frame to keep multi-output sessions
-    /// consistent (never half-encoded across screens). Bit-identical to
-    /// gate-off when no output supports it. Default off pending HW visual A/B.
+    /// Offload the final output transfer/OETF encode to the CRTC's
+    /// `GAMMA_LUT` hardware pipeline. Active only when every connected,
+    /// DPMS-on output exposes `GAMMA_LUT` with size ≥ 256; otherwise the shader
+    /// encode runs. The offload is all-or-nothing per frame to keep
+    /// multi-output sessions consistent (never half-encoded across screens).
+    /// Bit-identical to gate-off when no output supports it. Default off
+    /// pending HW visual A/B.
     #[serde(default)]
     pub kms_color_pipeline_offload: bool,
 
@@ -3953,6 +3967,7 @@ mod tests {
         WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
         configured_terminal_execution_prefix, key_function_is_repeatable,
         migrate_legacy_terminal_argument, parse_terminal_override, resolve_cursor_size,
+        scene_linear_render_path_requested,
     };
 
     fn temporary_config_path(label: &str) -> std::path::PathBuf {
@@ -3967,6 +3982,14 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn scene_linear_render_path_requires_both_config_gates() {
+        assert!(!scene_linear_render_path_requested(false, false));
+        assert!(!scene_linear_render_path_requested(false, true));
+        assert!(!scene_linear_render_path_requested(true, false));
+        assert!(scene_linear_render_path_requested(true, true));
     }
 
     #[test]

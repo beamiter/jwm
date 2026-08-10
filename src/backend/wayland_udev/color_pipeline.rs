@@ -1,18 +1,19 @@
 //! Color-space conversion math for the wp-color-management render path.
 //!
 //! This module produces, for a given (surface description, output description)
-//! pair, the inputs the shader pipeline would need to:
+//! pair, the inputs consumed by the window and 3D-overview shaders:
 //!   1. Decode the surface's encoded RGB into scene-linear (inverse EOTF).
-//!   2. Convert RGB primaries via the chromaticity-adapted 3x3 matrix
-//!      `M_out_from_in = M_xyz_to_rgb(out) · CAT(in_white→out_white) · M_rgb_to_xyz(in)`.
-//!   3. Re-encode for the output (forward EOTF) — handled by the existing
-//!      postprocess stage; not produced here.
+//!   2. Convert RGB primaries via the 3x3 matrix
+//!      `M_out_from_in = M_xyz_to_rgb(out) · M_rgb_to_xyz(in)`. Non-D65 custom
+//!      white points currently use this direct approximation; a chromatic
+//!      adaptation transform remains future work.
+//!   3. Re-encode for the output (forward EOTF), or leave linear pixels for
+//!      the compositor's final shader/CRTC encode.
 //!
-//! It is intentionally *math only*: no GL state, no shader bindings. The render
-//! loop builds a `ColorTransform`, then a future slice will plumb it into the
-//! GLES surface element. Keeping the math here lets us unit-test gamut math
-//! without a display, which is the only kind of verification we can do
-//! without HDR HW.
+//! It intentionally owns math and render plans only: GL state and uniform
+//! bindings stay in the compositor adapters. Keeping the calculations here
+//! gives CPU coverage for gamut/transfer math while strict headless GLES tests
+//! verify the uploaded plans and shader pixels without HDR hardware.
 
 use crate::backend::wayland_udev::color_management::ParametricParams;
 
@@ -332,6 +333,39 @@ pub struct ColorTransform {
 }
 
 impl ColorTransform {
+    /// Return the gamut matrix in column-major memory order for
+    /// `glUniformMatrix3fv(..., transpose = GL_FALSE, ...)`.
+    ///
+    /// Keeping CPU color math row-major while normalizing every runtime upload
+    /// to column-major/`GL_FALSE` gives one testable layout and matches the
+    /// column-major values returned by uniform capture/restore.
+    pub fn matrix_column_major(self) -> [f32; 9] {
+        let m = self.matrix_row_major;
+        [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+    }
+
+    /// Build an explicit surface-description plan even when source and target
+    /// descriptions match.
+    ///
+    /// `build` intentionally collapses a mathematical identity to `None` for
+    /// older callers. A renderer writing a scene-linear intermediate cannot do
+    /// that: an explicitly described PQ/HLG surface still needs its inverse
+    /// EOTF, whereas `None` means an undescribed legacy-sRGB surface.
+    pub fn build_explicit(surface: &ParametricParams, output: &ParametricParams) -> Self {
+        let surface_prim = ColorSpacePrimaries::from_params(surface);
+        let output_prim = ColorSpacePrimaries::from_params(output);
+        let matrix = if primaries_match(&surface_prim, &output_prim) {
+            IDENTITY_3X3
+        } else {
+            rgb_to_rgb_matrix(&surface_prim, &output_prim)
+        };
+        Self {
+            inverse_eotf: TransferKind::from_params(surface),
+            matrix_row_major: matrix,
+            forward_eotf: TransferKind::from_params(output),
+        }
+    }
+
     /// Build the transform that maps surface-described colors into the output's
     /// linear color space. Returns `None` when the transform is functionally an
     /// identity (same primaries, same EOTF) — the renderer can skip the pass
@@ -348,16 +382,25 @@ impl ColorTransform {
             return None;
         }
 
-        let matrix = if same_primaries {
-            IDENTITY_3X3
+        Some(Self::build_explicit(surface, output))
+    }
+
+    /// Build the plan used by a compositor render path.
+    ///
+    /// Encoded-space compositing keeps the historical identity elision, which
+    /// preserves direct-scanout and effect fast paths. Scene-linear compositing
+    /// retains an explicitly described identity so PQ/HLG sources are decoded
+    /// instead of being mistaken for undescribed legacy-sRGB content.
+    pub fn build_for_render_path(
+        surface: &ParametricParams,
+        output: &ParametricParams,
+        scene_linear: bool,
+    ) -> Option<Self> {
+        if scene_linear {
+            Some(Self::build_explicit(surface, output))
         } else {
-            rgb_to_rgb_matrix(&surface_prim, &output_prim)
-        };
-        Some(Self {
-            inverse_eotf: in_tf,
-            matrix_row_major: matrix,
-            forward_eotf: out_tf,
-        })
+            Self::build(surface, output)
+        }
     }
 }
 
@@ -499,6 +542,23 @@ mod tests {
     }
 
     #[test]
+    fn explicit_same_space_hdr_plan_preserves_the_source_transfer() {
+        for (named, expected) in [(11, TransferKind::St2084Pq), (13, TransferKind::Hlg)] {
+            let params = ParametricParams {
+                primaries_named: Some(6),
+                tf_named: Some(named),
+                ..Default::default()
+            };
+            assert!(ColorTransform::build_for_render_path(&params, &params, false).is_none());
+            let transform = ColorTransform::build_for_render_path(&params, &params, true)
+                .expect("scene-linear paths retain explicit HDR identities");
+            assert_eq!(transform.inverse_eotf, expected);
+            assert_eq!(transform.forward_eotf, expected);
+            assert!(approx_mat(&transform.matrix_row_major, &IDENTITY_3X3, 1e-6));
+        }
+    }
+
+    #[test]
     fn primaries_difference_alone_produces_matrix() {
         let surface = ParametricParams {
             primaries_named: Some(6 /* Bt2020 */),
@@ -525,6 +585,19 @@ mod tests {
         assert!(
             approx_mat(&composed, &IDENTITY_3X3, 1e-3),
             "BT.2020→sRGB→BT.2020 should round-trip to identity, got {composed:?}"
+        );
+    }
+
+    #[test]
+    fn color_transform_matrix_upload_order_is_column_major() {
+        let transform = ColorTransform {
+            inverse_eotf: TransferKind::Linear,
+            matrix_row_major: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            forward_eotf: TransferKind::Linear,
+        };
+        assert_eq!(
+            transform.matrix_column_major(),
+            [1.0, 4.0, 7.0, 2.0, 5.0, 8.0, 3.0, 6.0, 9.0]
         );
     }
 

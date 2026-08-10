@@ -524,7 +524,7 @@ fn color_session_policy_json(
     let mixed_hdr_policy = if !mixed_hdr_outputs {
         "single_output_class"
     } else if render_path_enabled && scene_linear_enabled {
-        "scene_linear_per_output_encode"
+        "scene_linear_global_encode"
     } else if render_path_enabled {
         "per_surface_transform_without_scene_linear_blending"
     } else {
@@ -539,7 +539,10 @@ fn color_session_policy_json(
         blockers.push("color_management_render_path_disabled");
     }
     if mixed_hdr_outputs && !scene_linear_enabled {
-        blockers.push("scene_linear_compositing_disabled");
+        blockers.push("scene_linear_compositing_inactive");
+    }
+    if mixed_hdr_outputs && scene_linear_enabled {
+        blockers.push("per_output_encode_unavailable");
     }
 
     serde_json::json!({
@@ -1854,11 +1857,12 @@ impl Jwm {
 
         let color_surfaces = backend.compositor_color_managed_surfaces();
         let color_surface_summary = color_surface_summary_json(&color_surfaces);
+        let scene_linear_enabled = backend.compositor_scene_linear_active();
         let color_session_policy = color_session_policy_json(
             &outputs,
             cfg.behavior().hdr_enabled,
             color_render_path_enabled,
-            cfg.behavior().scene_linear_compositing,
+            scene_linear_enabled,
             color_advanced_enabled,
         );
         let color_surface_samples = color_surfaces
@@ -3072,8 +3076,11 @@ mod tests {
             full["sdr_on_hdr_policy"],
             "preserve_sdr_with_surface_color_transform"
         );
-        assert_eq!(full["mixed_hdr_policy"], "scene_linear_per_output_encode");
-        assert_eq!(full["blockers"].as_array().unwrap().len(), 0);
+        assert_eq!(full["mixed_hdr_policy"], "scene_linear_global_encode");
+        assert_eq!(
+            full["blockers"],
+            serde_json::json!(["per_output_encode_unavailable"])
+        );
 
         let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false);
         assert_eq!(
@@ -3086,8 +3093,20 @@ mod tests {
             serde_json::json!([
                 "advanced_color_management_disabled",
                 "color_management_render_path_disabled",
-                "scene_linear_compositing_disabled"
+                "scene_linear_compositing_inactive"
             ])
+        );
+
+        let configured_without_render_path = color_session_policy_json(
+            &[output(None), output(None)],
+            false,
+            false,
+            crate::config::scene_linear_render_path_requested(false, true),
+            false,
+        );
+        assert_eq!(
+            configured_without_render_path["scene_linear_enabled"],
+            false
         );
     }
 

@@ -210,9 +210,15 @@ mock implementing the complete backend surface. (First met by
   animated floor contact, while a dedicated monitor-clipped GLES skydome keeps
   the overview environment isolated from the vignette program shared by Expose
   and Peek. Both are deterministic once opacity and rotation settle, preserving
-  Wayland's damage-driven idle behavior. Legacy 3D workspace-transition output
-  is pixel-tested behind the shader's compatibility branch. Surfaceless EGL is
-  a required CI gate rather than a soft-skipped shader check.
+  Wayland's damage-driven idle behavior. Per-window color plans now follow each
+  live face into both solid and reflection passes, including explicit
+  scene-linear PQ/HLG identities and correct straight-color conversion for
+  premultiplied surfaces. Legacy 3D workspace-transition output is pixel-tested
+  behind the shader's compatibility branch. Surfaceless EGL is a required CI
+  gate rather than a soft-skipped shader check. A later output-pipeline slice
+  still needs to move generated overlays ahead of software PQ/HLG encode (or
+  add an overlay target-transfer pass); the current fallback writes those
+  historical UI values as sRGB after the global encode.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

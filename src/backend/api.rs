@@ -1449,6 +1449,12 @@ pub trait BackendDiagnostics: Send {
         Vec::new()
     }
 
+    /// Whether the compositor is currently rendering through its
+    /// scene-linear intermediate, after allocation/fallback handling.
+    fn compositor_scene_linear_active(&self) -> bool {
+        false
+    }
+
     fn compositor_blur_status(&self) -> Option<BlurStatus> {
         None
     }

@@ -36,7 +36,7 @@ const int TF_PQ = 4;
 const int TF_HLG = 5;
 const int TF_SRGB = 6;
 uniform int   u_color_managed;     // 0 = bypass (no transform), 1 = apply
-uniform mat3  u_color_matrix;      // linear surface→output RGB (row-major in Rust → already column-major here per GLSL convention; we transpose at bind time)
+uniform mat3  u_color_matrix;      // linear surface→output RGB (uploaded column-major)
 uniform int   u_decode_tf;
 uniform float u_decode_gamma;      // used only when u_decode_tf == TF_POWER
 uniform int   u_encode_tf;
@@ -162,33 +162,36 @@ void main() {
     }
 
     vec4 texel = texture(u_texture, uv);
+    // A positive opacity marks an RGB/force-opaque region, so its texture
+    // alpha is metadata rather than source coverage. A negative opacity marks
+    // premultiplied RGBA content and its magnitude remains the layer fade.
+    float source_alpha = u_opacity >= 0.0 ? 1.0 : clamp(texel.a, 0.0, 1.0);
+    vec3 straight = source_alpha > 1e-6 ? texel.rgb / source_alpha : vec3(0.0);
 
-    // wp-color-management transform: decode surface encoding → linearize,
-    // apply gamut matrix to output primaries, re-encode for output. Applied
-    // pre-AA / pre-dim because both are linear scalar ops in display space
-    // (existing approximation). For premultiplied-alpha surfaces this is
-    // technically wrong — we would need to un-premultiply, transform,
-    // re-premultiply — but the intended HDR-source use case (mpv, gamescope)
-    // is opaque. Documented out-of-scope for this slice.
+    // wp-color-management transform: unpremultiply encoded source color,
+    // decode to linear, apply the gamut matrix, optionally encode for an
+    // encoded target, then premultiply again. Rounded-corner coverage, dim and
+    // layer opacity remain later linear scalars over the converted source.
     if (u_color_managed == 1) {
-        vec3 lin = decode_eotf(texel.rgb, u_decode_tf, u_decode_gamma);
+        vec3 lin = decode_eotf(straight, u_decode_tf, u_decode_gamma);
         lin = u_color_matrix * lin;
         // Skip the final encode when writing to a linear-storage FBO so
         // GL blending mixes in linear space; the encode pass at the end
         // of the frame applies the output EOTF once over the composited
         // result. Phase 2.2.
         if (u_scene_linear == 1) {
-            texel.rgb = lin;
+            straight = lin;
         } else {
-            texel.rgb = encode_eotf(lin, u_encode_tf, u_encode_gamma);
+            straight = encode_eotf(lin, u_encode_tf, u_encode_gamma);
         }
     } else if (u_scene_linear == 1) {
         // Non-CM client under scene-linear: assume sRGB and linearize.
-        texel.rgb = srgb_inverse(texel.rgb);
+        straight = srgb_inverse(straight);
     }
+    texel.rgb = straight * source_alpha;
 
     float layer_opacity = clamp(abs(u_opacity), 0.0, 1.0);
-    float a = (u_opacity >= 0.0 ? 1.0 : texel.a) * layer_opacity;
+    float a = source_alpha * layer_opacity;
     texel.rgb *= layer_opacity;
 
     // Rounded corners – must mask both alpha AND rgb for premultiplied-alpha
@@ -860,6 +863,21 @@ uniform int u_has_alpha;    // source alpha is meaningful (not an opaque region)
 uniform int u_filler;       // empty/missing slot uses the built-in tinted material
 uniform int u_reflection;   // mirrored overview pass below the floor plane
 uniform float u_floor_y;    // world-space contact plane for reflection falloff
+// Per-window wp-color-management contract. Discriminants match
+// TransferKind::shader_id and the ordinary window program.
+const int TF_LINEAR = 0;
+const int TF_POWER = 1;
+const int TF_BT1886 = 2;
+const int TF_GAMMA22 = 3;
+const int TF_PQ = 4;
+const int TF_HLG = 5;
+const int TF_SRGB = 6;
+uniform int u_color_managed;
+uniform mat3 u_color_matrix;
+uniform int u_decode_tf;
+uniform float u_decode_gamma;
+uniform int u_encode_tf;
+uniform float u_encode_gamma;
 in vec2 v_uv;
 in vec3 v_world;
 in vec3 v_normal;
@@ -877,6 +895,77 @@ vec3 srgb_inverse(vec3 c) {
     vec3 lo = c / 12.92;
     vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
     return mix(lo, hi, step(0.04045, c));
+}
+
+vec3 srgb_forward(vec3 c) {
+    c = max(c, 0.0);
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hi, step(0.0031308, c));
+}
+
+vec3 pq_inverse(vec3 e) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 ep_m2 = pow(max(e, 0.0), vec3(1.0 / M2));
+    vec3 num = max(ep_m2 - C1, 0.0);
+    vec3 den = max(C2 - C3 * ep_m2, 1e-12);
+    return pow(num / den, vec3(1.0 / M1));
+}
+
+vec3 pq_forward(vec3 l) {
+    const float M1 = 0.1593017578125;
+    const float M2 = 78.84375;
+    const float C1 = 0.8359375;
+    const float C2 = 18.8515625;
+    const float C3 = 18.6875;
+    vec3 lm = pow(max(l, 0.0), vec3(M1));
+    return pow((C1 + C2 * lm) / (1.0 + C3 * lm), vec3(M2));
+}
+
+vec3 hlg_inverse(vec3 e) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = (e * e) / 3.0;
+    vec3 hi = (exp((e - C) / A) + B) / 12.0;
+    return mix(lo, hi, step(0.5, e));
+}
+
+vec3 hlg_forward(vec3 l) {
+    const float A = 0.17883277;
+    const float B = 0.28466892;
+    const float C = 0.5599107;
+    vec3 lo = sqrt(max(l * 3.0, 0.0));
+    vec3 hi = A * log(max(12.0 * l - B, 1e-12)) + C;
+    return mix(lo, hi, step(1.0 / 12.0, l));
+}
+
+vec3 decode_eotf(vec3 c, int kind, float gamma) {
+    c = clamp(c, 0.0, 1.0);
+    if (kind == TF_LINEAR)  return c;
+    if (kind == TF_POWER)   return pow(c, vec3(max(gamma, 1e-3)));
+    if (kind == TF_BT1886)  return pow(c, vec3(2.4));
+    if (kind == TF_GAMMA22) return pow(c, vec3(2.2));
+    if (kind == TF_PQ)      return pq_inverse(c);
+    if (kind == TF_HLG)     return hlg_inverse(c);
+    if (kind == TF_SRGB)    return srgb_inverse(c);
+    return c;
+}
+
+vec3 encode_eotf(vec3 c, int kind, float gamma) {
+    c = max(c, 0.0);
+    if (kind == TF_LINEAR)  return clamp(c, 0.0, 1.0);
+    if (kind == TF_POWER)   return clamp(pow(c, vec3(1.0 / max(gamma, 1e-3))), 0.0, 1.0);
+    if (kind == TF_BT1886)  return clamp(pow(c, vec3(1.0 / 2.4)), 0.0, 1.0);
+    if (kind == TF_GAMMA22) return clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
+    if (kind == TF_PQ)      return clamp(pq_forward(c), 0.0, 1.0);
+    if (kind == TF_HLG)     return clamp(hlg_forward(c), 0.0, 1.0);
+    if (kind == TF_SRGB)    return clamp(srgb_forward(c), 0.0, 1.0);
+    return clamp(c, 0.0, 1.0);
 }
 
 vec3 output_domain_color(vec3 encoded) {
@@ -899,18 +988,27 @@ void main() {
         return;
     }
 
-    // Window textures are premultiplied. Decode through straight color when
-    // the output is scene-linear, then premultiply again before compositing
-    // the dark backing. Opaque-region clients intentionally ignore raw alpha.
+    // Window textures are premultiplied. Convert through straight color, then
+    // premultiply again before compositing the dark backing. This preserves
+    // the overview material's alpha contract while consuming the same EOTF
+    // and gamut transform as the ordinary window draw.
     float raw_alpha = clamp(texel.a, 0.0, 1.0);
     float source_alpha = u_has_alpha != 0 ? raw_alpha : 1.0;
-    vec3 source_rgb = texel.rgb;
-    if (u_scene_linear != 0) {
-        vec3 straight = u_has_alpha != 0
-            ? (raw_alpha > 1.0e-6 ? texel.rgb / raw_alpha : vec3(0.0))
-            : texel.rgb;
-        source_rgb = srgb_inverse(straight) * source_alpha;
+    vec3 straight = u_has_alpha != 0
+        ? (raw_alpha > 1.0e-6 ? texel.rgb / raw_alpha : vec3(0.0))
+        : texel.rgb;
+    if (u_filler == 0 && u_color_managed != 0) {
+        vec3 linear = decode_eotf(straight, u_decode_tf, u_decode_gamma);
+        linear = u_color_matrix * linear;
+        straight = u_scene_linear != 0
+            ? linear
+            : encode_eotf(linear, u_encode_tf, u_encode_gamma);
+    } else if (u_scene_linear != 0) {
+        // A surface without an image description follows the compositor's
+        // ordinary legacy-sRGB assumption in scene-linear mode.
+        straight = srgb_inverse(straight);
     }
+    vec3 source_rgb = straight * source_alpha;
     vec3 accent = output_domain_color(u_accent.rgb);
     vec3 backing = output_domain_color(vec3(0.055, 0.065, 0.085));
     vec3 filler_encoded = mix(vec3(0.10, 0.13, 0.19),

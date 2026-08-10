@@ -214,7 +214,10 @@ impl WaylandCompositor {
         self.magnifier_radius = finite_clamp(b.magnifier_radius, 1.0, 4096.0, 200.0);
         self.hdr_enabled = b.hdr_enabled;
         self.hdr_peak_nits = b.hdr_peak_nits;
-        self.scene_linear_requested = b.scene_linear_compositing;
+        self.scene_linear_requested = crate::config::scene_linear_render_path_requested(
+            b.color_management_render_path,
+            b.scene_linear_compositing,
+        );
         self.tone_mapping_method = match b.tone_mapping_method.as_str() {
             "reinhard" => 1,
             "aces" => 2,
@@ -1895,6 +1898,21 @@ impl WaylandCompositor {
         if removed_active_transform {
             self.refresh_any_color_transform_active();
         }
+    }
+
+    /// Whether the next rendered frame is requested in the scene-linear color
+    /// domain. This is intentionally the requested state rather than merely
+    /// checking the current FBO: a hot-enable allocates the FBO at frame start,
+    /// after the backend has already planned per-surface transforms.
+    pub(crate) fn scene_linear_color_path_requested(&self) -> bool {
+        self.scene_linear_requested
+    }
+
+    /// Whether scene-linear rendering is backed by a live intermediate.
+    /// Allocation and resize failures clear the request and FBO together, so
+    /// diagnostics report the encoded fallback rather than configured intent.
+    pub(crate) fn scene_linear_color_path_active(&self) -> bool {
+        self.scene_linear_requested && self.linear_fbo != 0
     }
 
     /// Rebuild the fast-path flag after live WindowState retirement. Retained

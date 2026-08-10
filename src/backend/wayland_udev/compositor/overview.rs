@@ -6,6 +6,7 @@ use crate::backend::compositor_common::prism::{
     MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, PrismPiece, build_prism_pieces,
     mirror_matrix,
 };
+use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use smithay::backend::renderer::gles::ffi;
 
 /// Share of the owning monitor's height covered by the front face. Keep this
@@ -513,6 +514,7 @@ impl WaylandCompositor {
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         segments: &[OverviewStripSegment],
+        scene_linear_output: bool,
     ) {
         if segments.is_empty() {
             return;
@@ -532,6 +534,10 @@ impl WaylandCompositor {
             gl.Disable(ffi::SCISSOR_TEST);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             gl.UseProgram(self.border_program);
+            gl.Uniform1i(
+                self.border_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
             gl.UniformMatrix4fv(
                 self.border_uniforms.projection,
                 1,
@@ -618,6 +624,43 @@ impl WaylandCompositor {
             gl.Uniform1f(self.border_uniforms.radius_top, radius);
             gl.Uniform1f(self.border_uniforms.border_width, w.max(h));
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    pub(super) fn upload_overview_color_transform(
+        &self,
+        gl: &ffi::Gles2,
+        transform: Option<&ColorTransform>,
+    ) {
+        unsafe {
+            if let Some(transform) = transform {
+                let matrix = transform.matrix_column_major();
+                gl.Uniform1i(self.cube_uniforms.color_managed, 1);
+                gl.UniformMatrix3fv(
+                    self.cube_uniforms.color_matrix,
+                    1,
+                    ffi::FALSE,
+                    matrix.as_ptr(),
+                );
+                gl.Uniform1i(
+                    self.cube_uniforms.decode_tf,
+                    transform.inverse_eotf.shader_id(),
+                );
+                gl.Uniform1f(
+                    self.cube_uniforms.decode_gamma,
+                    transform.inverse_eotf.gamma_for_shader(),
+                );
+                gl.Uniform1i(
+                    self.cube_uniforms.encode_tf,
+                    transform.forward_eotf.shader_id(),
+                );
+                gl.Uniform1f(
+                    self.cube_uniforms.encode_gamma,
+                    transform.forward_eotf.gamma_for_shader(),
+                );
+            } else {
+                gl.Uniform1i(self.cube_uniforms.color_managed, 0);
+            }
         }
     }
 
@@ -764,6 +807,10 @@ impl WaylandCompositor {
                                     i32::from(win.has_alpha),
                                 );
                                 gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                                self.upload_overview_color_transform(
+                                    gl,
+                                    win.color_transform.as_ref(),
+                                );
                                 self.bind_window_texture(gl, texture);
                                 stats.live_faces += 1;
                             }
@@ -771,6 +818,7 @@ impl WaylandCompositor {
                                 gl.Uniform1i(self.cube_uniforms.filler, 1);
                                 gl.Uniform1i(self.cube_uniforms.has_alpha, 0);
                                 gl.Uniform4f(self.cube_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                                self.upload_overview_color_transform(gl, None);
                                 gl.BindTexture(ffi::TEXTURE_2D, 0);
                                 stats.filler_faces += 1;
                                 match reason {
@@ -1086,6 +1134,11 @@ impl WaylandCompositor {
                     let label_y = anchor_y.clamp(min_y, max_y);
 
                     gl.UseProgram(self.program);
+                    gl.Uniform1i(self.win_uniforms.color_managed, 0);
+                    gl.Uniform1i(
+                        self.win_uniforms.scene_linear,
+                        i32::from(scene_linear_output),
+                    );
                     gl.UniformMatrix4fv(
                         self.win_uniforms.projection,
                         1,
@@ -1123,7 +1176,7 @@ impl WaylandCompositor {
                 }
             }
 
-            self.render_overview_scroll_strip(gl, projection, &strip_segments);
+            self.render_overview_scroll_strip(gl, projection, &strip_segments, scene_linear_output);
         }
     }
 

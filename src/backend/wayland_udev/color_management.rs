@@ -1,10 +1,10 @@
-/// wp-color-management-v1 protocol implementation for JWM (Slice 1: skeleton).
+/// wp-color-management-v1 protocol implementation for JWM.
 ///
 /// The protocol lets clients describe surface colorimetry (HDR transfer curves,
 /// primaries, mastering metadata) and query per-output preferred image
-/// descriptions. This slice wires the full surface area so clients can bind and
-/// drive every interface without protocol errors; render-path integration and
-/// per-output EDID-derived image descriptions are deferred to later slices.
+/// descriptions. Surface snapshots feed the compositor's per-window transform
+/// plans, while output preferences come from EDID color/HDR capabilities with
+/// an sRGB fallback.
 ///
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).

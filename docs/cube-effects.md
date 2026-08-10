@@ -92,15 +92,39 @@ static parallax star field, camera-derived horizon and floor light pool without
 reusing `overview_bg_program`; Expose and Peek therefore retain their simpler
 vignette material and cannot inherit overview-only uniform state.
 
-All GLES scene materials preserve premultiplied alpha, honor opaque-region
-semantics for live textures, and emit either encoded or scene-linear
-legacy-sRGB pixels to match the output pipeline. Per-surface
-`wp_color_management` transforms inside the overview remain future work.
+All GLES scene materials preserve premultiplied alpha and honor opaque-region
+semantics for live textures. Live faces consume the same per-window
+`wp_color_management` plan as the ordinary window pass, in both the solid and
+mirrored draw. Encoded premultiplied RGB is unpremultiplied, decoded, gamut
+mapped, optionally re-encoded, then premultiplied again; alpha-zero samples are
+forced to zero and filler faces never inherit a live window's transform.
+Explicit same-space PQ and HLG descriptions remain explicit in scene-linear
+mode so they cannot fall through to the undescribed-sRGB fallback, while the
+encoded path still elides identity transforms and preserves direct-scanout and
+effect fast paths. Runtime matrices use one column-major/`GL_FALSE` upload
+contract shared with the ordinary window renderer.
+
+The skydome, caps, title and scroll strip bind their output color domain
+explicitly, so a static overview does not by itself disable safe CRTC
+OETF/CTM offload. Generated UI is still authored as sRGB: on a non-sRGB-primary
+output where only the OETF is offloaded and no CRTC CTM is active, it has no
+separate native-gamut mapping. That is an existing global output-pipeline
+limitation rather than an overview-specific exception. Conversely, JWM only
+arms a CRTC CTM after every participating output has accepted the hardware
+OETF, because applying that linear-light matrix to shader-encoded pixels would
+be invalid. Mixed transfer-function outputs still share one final shader
+encode; per-output encode passes remain future work. When that software encode
+targets a non-sRGB transfer, generated overview UI and undescribed legacy
+textures are still drawn afterward with historical sRGB-coded values. Moving
+those overlays before the encode (or adding an overlay target-transfer pass) is
+the remaining non-sRGB fallback boundary; the scene-linear hardware-OETF path
+covered here does not have that mismatch.
 
 Headless GLES pixel regressions cover selection lighting, fade premultiplication,
 opaque-region alpha, texture-independent filler faces, linked polygon caps,
 reflection contact falloff, deterministic skydome pixels, scene-linear
-materials and premultiplication. CI forces Mesa's
+materials, non-symmetric color matrices, PQ/HLG identity plans and transparent
+color-managed texels. CI forces Mesa's
 surfaceless EGL platform and treats a missing GL context as a failure, so these
 checks cannot silently downgrade to skipped tests. The legacy workspace-cube
 branch is also rendered with hostile lit/filler uniforms to lock its original

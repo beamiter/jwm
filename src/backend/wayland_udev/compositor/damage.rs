@@ -14,6 +14,16 @@ fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> boo
     attention_signal_active(enabled, has_urgent_window)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayColorDomain {
+    SceneLinearAware,
+    EncodedOnly,
+}
+
+fn visible_overlay_blocks_color_pipeline(visible: bool, domain: OverlayColorDomain) -> bool {
+    visible && domain == OverlayColorDomain::EncodedOnly
+}
+
 fn rect_animation_pending(current: [f32; 4], target: [f32; 4]) -> bool {
     current.into_iter().zip(target).any(|(current, target)| {
         !current.is_finite() || !target.is_finite() || (target - current).abs() > f32::EPSILON
@@ -69,12 +79,20 @@ impl WaylandCompositor {
         let encoded_overlay_active = self.transition_active
             || self.snap_preview.is_some()
             || self.snap_preview_opacity > 0.0
-            || self.overview_active
-            || self.overview_opacity > 0.0
-            || self.expose_active
-            || !self.expose_entries.is_empty()
-            || self.peek_active
-            || self.peek_opacity > 0.0
+            // Overview is intentionally absent: skydome, solid/reflection,
+            // title and strip all bind their output color domain explicitly.
+            || visible_overlay_blocks_color_pipeline(
+                self.overview_active || self.overview_opacity > 0.0,
+                OverlayColorDomain::SceneLinearAware,
+            )
+            || visible_overlay_blocks_color_pipeline(
+                self.expose_active || !self.expose_entries.is_empty(),
+                OverlayColorDomain::EncodedOnly,
+            )
+            || visible_overlay_blocks_color_pipeline(
+                self.peek_active || self.peek_opacity > 0.0,
+                OverlayColorDomain::EncodedOnly,
+            )
             || (self.window_tabs_enabled && !self.window_groups.is_empty())
             || !self.particle_systems.is_empty()
             || (self.edge_glow_enabled
@@ -424,10 +442,11 @@ fn minimized_dock_requires_composition(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositorRect, attention_requires_composition, border_requires_composition,
-        expose_animation_pending, inactive_window_styling_requires_composition,
-        minimized_dock_requires_composition, overview_animation_pending, peek_animation_pending,
-        rect_animation_pending,
+        CompositorRect, OverlayColorDomain, attention_requires_composition,
+        border_requires_composition, expose_animation_pending,
+        inactive_window_styling_requires_composition, minimized_dock_requires_composition,
+        overview_animation_pending, peek_animation_pending, rect_animation_pending,
+        visible_overlay_blocks_color_pipeline,
     };
 
     #[test]
@@ -541,6 +560,22 @@ mod tests {
         assert!(overview_animation_pending(true, 0.9, 0.0, 0.0));
         assert!(overview_animation_pending(true, 1.0, 0.0, 0.2));
         assert!(overview_animation_pending(false, 0.2, 0.0, 0.0));
+    }
+
+    #[test]
+    fn scene_linear_overview_does_not_block_hardware_color_pipeline() {
+        assert!(!visible_overlay_blocks_color_pipeline(
+            true,
+            OverlayColorDomain::SceneLinearAware,
+        ));
+        assert!(visible_overlay_blocks_color_pipeline(
+            true,
+            OverlayColorDomain::EncodedOnly,
+        ));
+        assert!(!visible_overlay_blocks_color_pipeline(
+            false,
+            OverlayColorDomain::EncodedOnly,
+        ));
     }
 
     #[test]

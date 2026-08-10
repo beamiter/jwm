@@ -183,7 +183,12 @@ src/backend/api.rs          platform boundary
   therefore sorted independently without a depth buffer. An overview-only
   static skydome program owns the horizon and floor-light environment, leaving
   the simpler Expose/Peek background program untouched and avoiding idle-frame
-  scheduling. All close paths go through
+  scheduling. Solid and reflected live faces share the ordinary window's
+  per-surface color-transform plan. The GLES adapters transform straight color
+  (unpremultiply, decode, gamut matrix, optional encode, repremultiply), retain
+  explicit same-space PQ/HLG plans for scene-linear rendering, and normalize
+  runtime 3x3 uploads to column-major data with `GL_FALSE`; filler and legacy
+  transition branches explicitly clear that state. All close paths go through
   `OverviewState::deactivate`, which also resets the slide offset the inline
   Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
