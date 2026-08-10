@@ -15,6 +15,54 @@ const PRISM_BASE_LINE: f32 = 0.84;
 const TITLE_SCALE: f32 = 2.0;
 const TITLE_MARGIN: f32 = 8.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrismEntryAvailability {
+    Live,
+    MissingWindow,
+    MissingTexture,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrismFillerReason {
+    Unoccupied,
+    MissingWindow,
+    MissingTexture,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrismFaceSource {
+    Live {
+        entry_index: usize,
+    },
+    Filler {
+        entry_index: Option<usize>,
+        reason: PrismFillerReason,
+    },
+}
+
+/// Resolve every geometric face slot to either live window content or an
+/// explicit filler. The returned vector is always exactly `sides` long, so a
+/// transiently missing surface can never turn the solid back into an open fan.
+fn prism_face_plan(sides: usize, availability: &[PrismEntryAvailability]) -> Vec<PrismFaceSource> {
+    (0..sides)
+        .map(|slot| match availability.get(slot).copied() {
+            Some(PrismEntryAvailability::Live) => PrismFaceSource::Live { entry_index: slot },
+            Some(PrismEntryAvailability::MissingWindow) => PrismFaceSource::Filler {
+                entry_index: Some(slot),
+                reason: PrismFillerReason::MissingWindow,
+            },
+            Some(PrismEntryAvailability::MissingTexture) => PrismFaceSource::Filler {
+                entry_index: Some(slot),
+                reason: PrismFillerReason::MissingTexture,
+            },
+            None => PrismFaceSource::Filler {
+                entry_index: None,
+                reason: PrismFillerReason::Unoccupied,
+            },
+        })
+        .collect()
+}
+
 fn max_title_texture_width(monitor_width: u32) -> u32 {
     let available = (monitor_width.saturating_sub((TITLE_MARGIN * 2.0) as u32) as f32 / TITLE_SCALE)
         .floor() as u32;
@@ -582,6 +630,10 @@ impl WaylandCompositor {
 
         unsafe {
             self.enable_premultiplied_blend(gl);
+            // The shared `PrismPiece` order is the depth contract. Keep the
+            // overlay independent of state left by a previous renderer pass.
+            gl.Disable(ffi::DEPTH_TEST);
+            gl.Disable(ffi::CULL_FACE);
 
             // ------------------------------------------------------------------
             // 1. Dark vignette backdrop
@@ -659,42 +711,22 @@ impl WaylandCompositor {
                 .unwrap_or(0);
 
             // ------------------------------------------------------------------
-            // 3. Build face data and sort back-to-front (painter's algorithm)
+            // 3. Resolve every slot and retain the shared painter order
             // ------------------------------------------------------------------
-            struct FaceData {
-                index: usize,
-                mvp: [f32; 16],
-                model: [f32; 16],
-                facing: f32,
-                brightness: f32,
-            }
-
-            // `build_prism_pieces` also returns the polygon caps. Wayland's
-            // GLES adapter does not draw them yet, but consuming the shared
-            // depth-sorted faces immediately fixes polygon closure, side-count
-            // drift and camera framing without duplicating either algorithm.
-            let faces: Vec<FaceData> = build_prism_pieces(&camera, &base_model)
-                .into_iter()
-                .filter_map(|piece| {
-                    let PrismKind::Face { slot } = piece.kind else {
-                        return None;
-                    };
-                    (slot < n).then(|| FaceData {
-                        index: slot,
-                        mvp: piece.mvp,
-                        model: piece.model,
-                        facing: piece.facing,
-                        brightness: if piece.facing > 0.0 {
-                            0.70 + 0.30 * piece.facing
-                        } else {
-                            0.42
-                        },
-                    })
+            let availability: Vec<PrismEntryAvailability> = self
+                .overview_entries
+                .iter()
+                .map(|entry| match self.windows.get(&entry.window_id) {
+                    Some(window) if window.gl_texture.is_some() => PrismEntryAvailability::Live,
+                    Some(_) => PrismEntryAvailability::MissingTexture,
+                    None => PrismEntryAvailability::MissingWindow,
                 })
                 .collect();
+            let face_plan = prism_face_plan(sides, &availability);
+            let pieces = build_prism_pieces(&camera, &base_model);
 
             // ------------------------------------------------------------------
-            // 4. Render each face using cube_program
+            // 4. Draw faces and caps in their original depth-sorted order
             // ------------------------------------------------------------------
             gl.UseProgram(self.cube_program);
             gl.Uniform1f(self.cube_uniforms.aspect, face_aspect);
@@ -711,86 +743,160 @@ impl WaylandCompositor {
                 self.cube_uniforms.scene_linear,
                 i32::from(scene_linear_output),
             );
+            gl.Uniform1i(self.cube_uniforms.texture, 0);
+
+            gl.UseProgram(self.overview_cap_program);
+            gl.Uniform1f(self.overview_cap_uniforms.radius, camera.circumradius);
+            gl.Uniform1f(self.overview_cap_uniforms.sides, sides as f32);
+            gl.Uniform3f(
+                self.overview_cap_uniforms.camera,
+                camera.eye[0],
+                camera.eye[1],
+                camera.eye[2],
+            );
+            gl.Uniform3f(self.overview_cap_uniforms.accent, 0.32, 0.62, 1.0);
+            gl.Uniform1i(
+                self.overview_cap_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
+
+            gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindVertexArray(self.quad_vao);
 
-            let mut drawn_faces = 0usize;
+            let mut drawn_live_faces = 0usize;
+            let mut drawn_filler_faces = 0usize;
+            let mut drawn_caps = 0usize;
             let mut missing_window_faces = 0usize;
             let mut missing_texture_faces = 0usize;
+            let mut unoccupied_faces = 0usize;
 
-            for face in &faces {
-                if face.brightness < 0.05 {
-                    continue;
+            for piece in &pieces {
+                match piece.kind {
+                    PrismKind::Face { slot } => {
+                        let source = face_plan[slot];
+                        let entry_index = match source {
+                            PrismFaceSource::Live { entry_index } => Some(entry_index),
+                            PrismFaceSource::Filler { entry_index, .. } => entry_index,
+                        };
+                        let selected = entry_index == Some(selected_idx);
+                        let brightness = if piece.facing > 0.0 {
+                            0.70 + 0.30 * piece.facing
+                        } else {
+                            0.42
+                        };
+
+                        gl.UseProgram(self.cube_program);
+                        gl.UniformMatrix4fv(
+                            self.cube_uniforms.mvp,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.mvp.as_ptr(),
+                        );
+                        gl.UniformMatrix4fv(
+                            self.cube_uniforms.model,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.model.as_ptr(),
+                        );
+                        gl.Uniform1f(self.cube_uniforms.brightness, brightness);
+                        gl.Uniform4f(
+                            self.cube_uniforms.accent,
+                            0.32,
+                            0.62,
+                            1.0,
+                            if selected { 1.0 } else { 0.15 },
+                        );
+                        gl.Uniform1f(
+                            self.cube_uniforms.desat,
+                            if selected {
+                                0.0
+                            } else if piece.facing > 0.0 {
+                                0.30
+                            } else {
+                                0.65
+                            },
+                        );
+
+                        match source {
+                            PrismFaceSource::Live { entry_index } => {
+                                let entry = &self.overview_entries[entry_index];
+                                let win = self
+                                    .windows
+                                    .get(&entry.window_id)
+                                    .expect("live overview face must retain its window");
+                                let texture = win
+                                    .gl_texture
+                                    .expect("live overview face must retain its texture");
+                                let [cu, cv, cw, ch] = win.content_uv;
+                                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                                    (cu, cv, cw, ch)
+                                } else {
+                                    (cu, cv + ch, cw, -ch)
+                                };
+                                gl.Uniform1i(self.cube_uniforms.filler, 0);
+                                gl.Uniform1i(
+                                    self.cube_uniforms.has_alpha,
+                                    i32::from(win.has_alpha),
+                                );
+                                gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                                self.bind_window_texture(gl, texture);
+                                drawn_live_faces += 1;
+                            }
+                            PrismFaceSource::Filler { reason, .. } => {
+                                gl.Uniform1i(self.cube_uniforms.filler, 1);
+                                gl.Uniform1i(self.cube_uniforms.has_alpha, 0);
+                                gl.Uniform4f(self.cube_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                                gl.BindTexture(ffi::TEXTURE_2D, 0);
+                                drawn_filler_faces += 1;
+                                match reason {
+                                    PrismFillerReason::Unoccupied => unoccupied_faces += 1,
+                                    PrismFillerReason::MissingWindow => missing_window_faces += 1,
+                                    PrismFillerReason::MissingTexture => missing_texture_faces += 1,
+                                }
+                            }
+                        }
+
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    }
+                    PrismKind::Cap { top } => {
+                        // Only the cap whose outward normal faces the camera is
+                        // visible on an opaque closed solid. Both shared pieces
+                        // remain in the painter sequence, so a camera below the
+                        // prism naturally selects the bottom one instead.
+                        if piece.facing <= 0.02 {
+                            continue;
+                        }
+                        gl.UseProgram(self.overview_cap_program);
+                        gl.UniformMatrix4fv(
+                            self.overview_cap_uniforms.mvp,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.mvp.as_ptr(),
+                        );
+                        gl.UniformMatrix4fv(
+                            self.overview_cap_uniforms.model,
+                            1,
+                            ffi::FALSE as u8,
+                            piece.model.as_ptr(),
+                        );
+                        gl.Uniform1f(self.overview_cap_uniforms.y, if top { 1.0 } else { -1.0 });
+                        let (r, g, b) = if top {
+                            (0.085, 0.105, 0.155)
+                        } else {
+                            (0.055, 0.065, 0.095)
+                        };
+                        gl.Uniform4f(self.overview_cap_uniforms.color, r, g, b, 0.90 * anim_scale);
+                        let vertices = i32::try_from(sides).unwrap_or(6) + 2;
+                        gl.DrawArrays(ffi::TRIANGLE_FAN, 0, vertices);
+                        drawn_caps += 1;
+                    }
                 }
-
-                let entry = &self.overview_entries[face.index];
-                let win = match self.windows.get(&entry.window_id) {
-                    Some(w) => w,
-                    None => {
-                        missing_window_faces += 1;
-                        continue;
-                    }
-                };
-                let texture = match win.gl_texture {
-                    Some(t) => t,
-                    None => {
-                        missing_texture_faces += 1;
-                        continue;
-                    }
-                };
-
-                let [cu, cv, cw, ch] = win.content_uv;
-                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
-                    (cu, cv, cw, ch)
-                } else {
-                    (cu, cv + ch, cw, -ch)
-                };
-
-                gl.UniformMatrix4fv(
-                    self.cube_uniforms.mvp,
-                    1,
-                    ffi::FALSE as u8,
-                    face.mvp.as_ptr(),
-                );
-                gl.UniformMatrix4fv(
-                    self.cube_uniforms.model,
-                    1,
-                    ffi::FALSE as u8,
-                    face.model.as_ptr(),
-                );
-                gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
-                gl.Uniform1f(self.cube_uniforms.brightness, face.brightness);
-                gl.Uniform1i(self.cube_uniforms.has_alpha, i32::from(win.has_alpha));
-                let selected = face.index == selected_idx;
-                gl.Uniform4f(
-                    self.cube_uniforms.accent,
-                    0.32,
-                    0.62,
-                    1.0,
-                    if selected { 1.0 } else { 0.15 },
-                );
-                gl.Uniform1f(
-                    self.cube_uniforms.desat,
-                    if selected {
-                        0.0
-                    } else if face.facing > 0.0 {
-                        0.30
-                    } else {
-                        0.65
-                    },
-                );
-
-                gl.ActiveTexture(ffi::TEXTURE0);
-                self.bind_window_texture(gl, texture);
-                gl.Uniform1i(self.cube_uniforms.texture, 0);
-
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
-                drawn_faces += 1;
             }
 
             gl.Disable(ffi::SCISSOR_TEST);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
 
-            if drawn_faces == 0 || missing_window_faces > 0 || missing_texture_faces > 0 {
+            if drawn_live_faces == 0 || missing_window_faces > 0 || missing_texture_faces > 0 {
                 static LAST_OVERVIEW_LOG: std::sync::atomic::AtomicU64 =
                     std::sync::atomic::AtomicU64::new(0);
                 let now = std::time::SystemTime::now()
@@ -801,10 +907,13 @@ impl WaylandCompositor {
                 if now > prev {
                     LAST_OVERVIEW_LOG.store(now, std::sync::atomic::Ordering::Relaxed);
                     log::info!(
-                        "[overview] entries={} faces={} drawn={} missing_window={} missing_texture={}",
+                        "[overview] entries={} sides={} live={} filler={} unoccupied={} caps={} missing_window={} missing_texture={}",
                         self.overview_entries.len(),
-                        faces.len(),
-                        drawn_faces,
+                        sides,
+                        drawn_live_faces,
+                        drawn_filler_faces,
+                        unoccupied_faces,
+                        drawn_caps,
                         missing_window_faces,
                         missing_texture_faces
                     );
@@ -820,12 +929,8 @@ impl WaylandCompositor {
             let vp_x = mon_x as f32;
             let vp_y = mon_y as f32;
             let mut selected_title_anchor = None;
-            for face in faces.iter().rev() {
-                if face.brightness < 0.05 {
-                    continue;
-                }
-
-                if face.index != selected_idx {
+            for piece in pieces.iter().rev() {
+                if piece.kind != (PrismKind::Face { slot: selected_idx }) {
                     continue;
                 }
 
@@ -841,7 +946,7 @@ impl WaylandCompositor {
                 let mut max_y = f32::MIN;
                 for corner in corners {
                     let Some((sx, sy)) =
-                        Self::project_overview_point(&face.mvp, corner, mw, mh, vp_x, vp_y)
+                        Self::project_overview_point(&piece.mvp, corner, mw, mh, vp_x, vp_y)
                     else {
                         continue;
                     };
@@ -1041,6 +1146,85 @@ mod tests {
         assert_eq!(prism_target_rotation(1, 0), 0.0);
         assert!((prism_target_rotation(4, 2) + std::f32::consts::PI).abs() < 1.0e-6);
         assert!((prism_target_rotation(6, 5) + 5.0 * std::f32::consts::TAU / 6.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn prism_face_plan_closes_one_and_two_entry_prisms_with_fillers() {
+        let one = prism_face_plan(3, &[PrismEntryAvailability::Live]);
+        assert_eq!(
+            one,
+            vec![
+                PrismFaceSource::Live { entry_index: 0 },
+                PrismFaceSource::Filler {
+                    entry_index: None,
+                    reason: PrismFillerReason::Unoccupied,
+                },
+                PrismFaceSource::Filler {
+                    entry_index: None,
+                    reason: PrismFillerReason::Unoccupied,
+                },
+            ]
+        );
+
+        let two = prism_face_plan(
+            3,
+            &[PrismEntryAvailability::Live, PrismEntryAvailability::Live],
+        );
+        assert_eq!(two.len(), 3);
+        assert_eq!(
+            two[2],
+            PrismFaceSource::Filler {
+                entry_index: None,
+                reason: PrismFillerReason::Unoccupied,
+            }
+        );
+    }
+
+    #[test]
+    fn prism_face_plan_degrades_missing_live_resources_without_losing_entries() {
+        let plan = prism_face_plan(
+            4,
+            &[
+                PrismEntryAvailability::Live,
+                PrismEntryAvailability::MissingWindow,
+                PrismEntryAvailability::MissingTexture,
+            ],
+        );
+
+        assert_eq!(plan.len(), 4);
+        assert_eq!(plan[0], PrismFaceSource::Live { entry_index: 0 });
+        assert_eq!(
+            plan[1],
+            PrismFaceSource::Filler {
+                entry_index: Some(1),
+                reason: PrismFillerReason::MissingWindow,
+            }
+        );
+        assert_eq!(
+            plan[2],
+            PrismFaceSource::Filler {
+                entry_index: Some(2),
+                reason: PrismFillerReason::MissingTexture,
+            }
+        );
+        assert_eq!(
+            plan[3],
+            PrismFaceSource::Filler {
+                entry_index: None,
+                reason: PrismFillerReason::Unoccupied,
+            }
+        );
+    }
+
+    #[test]
+    fn prism_face_plan_keeps_all_six_live_slots() {
+        let plan = prism_face_plan(6, &[PrismEntryAvailability::Live; 6]);
+        assert_eq!(plan.len(), 6);
+        assert!(
+            plan.iter()
+                .enumerate()
+                .all(|(entry_index, source)| { *source == PrismFaceSource::Live { entry_index } })
+        );
     }
 
     #[test]

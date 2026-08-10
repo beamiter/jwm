@@ -857,6 +857,7 @@ uniform float u_edge;       // lit-path rounded bevel strength, 0..1
 uniform float u_lit;        // 0 = byte-for-byte legacy shading, 1 = lit face
 uniform int u_scene_linear; // lit path writes into a linear output FBO
 uniform int u_has_alpha;    // source alpha is meaningful (not an opaque region)
+uniform int u_filler;       // empty/missing slot uses the built-in tinted material
 in vec2 v_uv;
 in vec3 v_world;
 in vec3 v_normal;
@@ -882,7 +883,11 @@ vec3 output_domain_color(vec3 encoded) {
 
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
-    vec4 texel = texture(u_texture, uv);
+    // A filler owns no texture. Keep the legacy transition on the real sample
+    // path while making lit empty slots independent of inherited GL bindings.
+    vec4 texel = (u_lit >= 0.5 && u_filler != 0)
+        ? vec4(0.0)
+        : texture(u_texture, uv);
 
     // Workspace transitions predate the lit prism face and intentionally keep
     // their exact brightness-only output. Keep this branch first so none of the
@@ -904,9 +909,14 @@ void main() {
             : texel.rgb;
         source_rgb = srgb_inverse(straight) * source_alpha;
     }
-    vec3 backing = output_domain_color(vec3(0.055, 0.065, 0.085));
     vec3 accent = output_domain_color(u_accent.rgb);
-    vec3 base = source_rgb + backing * (1.0 - source_alpha);
+    vec3 backing = output_domain_color(vec3(0.055, 0.065, 0.085));
+    vec3 filler_encoded = mix(vec3(0.10, 0.13, 0.19),
+                              vec3(0.04, 0.05, 0.08), v_uv.y)
+                        + u_accent.rgb * 0.08;
+    vec3 base = u_filler != 0
+        ? output_domain_color(clamp(filler_encoded, 0.0, 1.0))
+        : source_rgb + backing * (1.0 - source_alpha);
 
     vec3 normal = normalize(v_normal);
     vec3 view = normalize(u_camera - v_world);
@@ -939,6 +949,95 @@ void main() {
     float alpha = clamp(u_alpha, 0.0, 1.0) * mask;
     // This UI material is reflective, not emissive. Bound straight color
     // before premultiplication so highlights cannot leak through a fade.
+    frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
+}
+"#;
+
+// ---------------------------------------------------------------------------
+// Overview prism caps
+// ---------------------------------------------------------------------------
+
+/// Top/bottom polygon of the Wayland overview prism. The fan is generated from
+/// `gl_VertexID`, so it can share the compositor's already-bound VAO without a
+/// cap-specific buffer. Rim vertices are offset by half a side step, exactly
+/// matching the face seams produced by `compositor_common::prism`.
+pub const OVERVIEW_CAP_VERTEX_SHADER: &str = r#"#version 300 es
+
+uniform mat4 u_mvp;
+uniform mat4 u_model;
+uniform float u_radius;
+uniform float u_y;
+uniform float u_sides;
+
+out vec2 v_local;
+out float v_edge;
+out vec3 v_world;
+out vec3 v_normal;
+
+void main() {
+    float sides = max(u_sides, 3.0);
+    vec2 offset = vec2(0.0);
+    v_edge = 0.0;
+    if (gl_VertexID > 0) {
+        float step_angle = 6.28318530718 / sides;
+        float angle = (float(gl_VertexID - 1) + 0.5) * step_angle;
+        offset = vec2(sin(angle), cos(angle));
+        v_edge = 1.0;
+    }
+
+    vec3 vert = vec3(offset.x * u_radius, u_y, offset.y * u_radius);
+    vec3 local_normal = vec3(0.0, u_y < 0.0 ? -1.0 : 1.0, 0.0);
+    v_local = offset;
+    v_world = (u_model * vec4(vert, 1.0)).xyz;
+    v_normal = normalize(mat3(u_model) * local_normal);
+    gl_Position = u_mvp * vec4(vert, 1.0);
+}
+"#;
+
+pub const OVERVIEW_CAP_FRAGMENT_SHADER: &str = r#"#version 300 es
+precision highp float;
+
+uniform vec4 u_color;       // encoded base color; a = global prism fade
+uniform vec3 u_accent;      // encoded UI accent
+uniform vec3 u_camera;      // camera position in world space
+uniform int u_scene_linear; // output FBO remains linear for KMS encode
+
+in vec2 v_local;
+in float v_edge;
+in vec3 v_world;
+in vec3 v_normal;
+out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+vec3 output_domain_color(vec3 encoded) {
+    return u_scene_linear != 0 ? srgb_inverse(encoded) : encoded;
+}
+
+void main() {
+    vec3 normal = normalize(v_normal);
+    vec3 view = normalize(u_camera - v_world);
+    normal *= sign(dot(normal, view) + 1.0e-4);
+    vec3 light = normalize(vec3(-0.35, 0.85, 0.55));
+    float diffuse = 0.74 + 0.26 * clamp(dot(normal, light), 0.0, 1.0);
+    vec3 half_vec = normalize(light + view);
+    float specular = pow(clamp(dot(normal, half_vec), 0.0, 1.0), 36.0) * 0.34;
+
+    float edge = clamp(v_edge, 0.0, 1.0);
+    float radial_shade = mix(1.12, 0.72, smoothstep(0.0, 1.0, edge));
+    float rim = smoothstep(0.78, 1.0, edge);
+    vec3 base = output_domain_color(u_color.rgb);
+    vec3 accent = output_domain_color(u_accent);
+    vec3 color = base * diffuse * radial_shade;
+    color += accent * (0.035 + rim * 0.24);
+    color += vec3(1.0) * specular;
+
+    float alpha = clamp(u_color.a, 0.0, 1.0);
     frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
 }
 "#;

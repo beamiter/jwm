@@ -285,6 +285,31 @@ fn render_quad_frame(
     h: i32,
     uniforms: impl FnOnce(&glow::Context),
 ) -> Vec<u8> {
+    render_program_frame(
+        gl,
+        prog,
+        input,
+        w,
+        h,
+        [0.0, 0.0, 0.0, 1.0],
+        uniforms,
+        |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4) },
+    )
+}
+
+/// Render an arbitrary generated primitive with `prog`. This keeps the real
+/// headless FBO/VAO path shared with fullscreen tests while allowing shaders
+/// driven by `gl_VertexID`, such as overview caps, to choose their draw call.
+fn render_program_frame(
+    gl: &glow::Context,
+    prog: glow::Program,
+    input: [u8; 4],
+    w: i32,
+    h: i32,
+    clear: [f32; 4],
+    uniforms: impl FnOnce(&glow::Context),
+    draw: impl FnOnce(&glow::Context),
+) -> Vec<u8> {
     unsafe {
         let input_pixels: Vec<u8> = input.iter().copied().cycle().take(4 * 4).collect();
         let input_tex = gl.create_texture().unwrap();
@@ -368,9 +393,9 @@ fn render_quad_frame(
 
         let (vao, vbo) = create_quad_vao(gl);
         gl.bind_vertex_array(Some(vao));
-        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear_color(clear[0], clear[1], clear[2], clear[3]);
         gl.clear(glow::COLOR_BUFFER_BIT);
-        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        draw(gl);
         gl.finish();
         let mut frame = vec![0u8; (w * h * 4) as usize];
         gl.read_pixels(
@@ -811,6 +836,16 @@ fn wayland_shaders() -> Vec<(&'static str, Stage, &'static str)> {
         ("HUD_TEXT_FRAGMENT_SHADER", F, s::HUD_TEXT_FRAGMENT_SHADER),
         ("CUBE_VERTEX_SHADER", V, s::CUBE_VERTEX_SHADER),
         ("CUBE_FRAGMENT_SHADER", F, s::CUBE_FRAGMENT_SHADER),
+        (
+            "OVERVIEW_CAP_VERTEX_SHADER",
+            V,
+            s::OVERVIEW_CAP_VERTEX_SHADER,
+        ),
+        (
+            "OVERVIEW_CAP_FRAGMENT_SHADER",
+            F,
+            s::OVERVIEW_CAP_FRAGMENT_SHADER,
+        ),
         ("PORTAL_FRAGMENT_SHADER", F, s::PORTAL_FRAGMENT_SHADER),
         (
             "TRANSITION_FRAGMENT_SHADER",
@@ -996,6 +1031,7 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         "u_lit",
         "u_scene_linear",
         "u_has_alpha",
+        "u_filler",
     ] {
         assert!(
             unsafe { gl.get_uniform_location(program, name) }.is_some(),
@@ -1027,6 +1063,7 @@ fn wayland_cube_shader_legacy_mode_is_brightness_only() {
         gl.uniform_1_f32(u("u_lit").as_ref(), 0.0);
         gl.uniform_1_i32(u("u_scene_linear").as_ref(), 1);
         gl.uniform_1_i32(u("u_has_alpha").as_ref(), 0);
+        gl.uniform_1_i32(u("u_filler").as_ref(), 1);
     });
 
     assert_pixel(pixel, [60, 40, 20, 100], 1, "cube legacy mode");
@@ -1069,6 +1106,7 @@ fn wayland_cube_shader_lit_mode_embeds_selection_in_the_face() {
             gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
             gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
             gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 0);
         })
     };
 
@@ -1145,6 +1183,7 @@ fn wayland_cube_shader_lit_mode_respects_output_domain_and_opaque_regions() {
             gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
             gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
             gl.uniform_1_i32(u("u_has_alpha").as_ref(), has_alpha);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 0);
         })
     };
 
@@ -1178,6 +1217,172 @@ fn wayland_cube_shader_lit_mode_respects_output_domain_and_opaque_regions() {
         opaque_region,
         0,
         "opaque-region semantics ignore texture alpha",
+    );
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_cube_shader_filler_is_texture_independent_and_premultiplied() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube filler test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let render = |input: [u8; 4], scene_linear: i32| {
+        render_quad(gl, program, input, 16, 16, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 0.0, 4.0);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 0.65);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            // These values are intentionally hostile: filler material must
+            // neither sample the texture nor inherit its alpha contract.
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
+            gl.uniform_1_i32(u("u_filler").as_ref(), 1);
+        })
+    };
+
+    let encoded = render([255, 0, 255, 0], 0);
+    assert_eq!(
+        encoded,
+        render([1, 240, 17, 255], 0),
+        "filler output must not depend on the bound texture"
+    );
+    let linear = render([255, 0, 255, 0], 1);
+    assert_ne!(
+        &encoded[..3],
+        &linear[..3],
+        "scene-linear filler must decode encoded material constants"
+    );
+    for (label, pixel) in [("encoded", encoded), ("linear", linear)] {
+        assert!(
+            (164..=167).contains(&pixel[3]),
+            "{label} filler must preserve global fade alpha: {pixel:?}"
+        );
+        assert!(
+            pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+            "{label} filler must be premultiplied: {pixel:?}"
+        );
+    }
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_overview_cap_shader_links_and_renders_scene_linear_premultiplied_pixels() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping overview cap test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::OVERVIEW_CAP_VERTEX_SHADER,
+        super::shaders::OVERVIEW_CAP_FRAGMENT_SHADER,
+    )
+    .expect("overview cap shaders must link");
+    for name in [
+        "u_mvp",
+        "u_model",
+        "u_radius",
+        "u_y",
+        "u_sides",
+        "u_color",
+        "u_accent",
+        "u_camera",
+        "u_scene_linear",
+    ] {
+        assert!(
+            unsafe { gl.get_uniform_location(program, name) }.is_some(),
+            "overview cap program optimized out required uniform {name}"
+        );
+    }
+
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    // Project model x/z onto clip x/y so the horizontal cap faces the
+    // headless framebuffer instead of degenerating to a line.
+    let cap_projection = [
+        1.0, 0.0, 0.0, 0.0, // clip x = model x
+        0.0, 0.0, 0.0, 0.0, // model y is intentionally projected out
+        0.0, 1.0, 0.0, 0.0, // clip y = model z
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let render = |scene_linear: i32| {
+        render_program_frame(
+            gl,
+            program,
+            [255, 0, 255, 0],
+            64,
+            64,
+            [0.0, 0.0, 0.0, 0.0],
+            |gl| unsafe {
+                let u = |name: &str| gl.get_uniform_location(program, name);
+                gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &cap_projection);
+                gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+                gl.uniform_1_f32(u("u_radius").as_ref(), 0.72);
+                gl.uniform_1_f32(u("u_y").as_ref(), 1.0);
+                gl.uniform_1_f32(u("u_sides").as_ref(), 4.0);
+                gl.uniform_4_f32(u("u_color").as_ref(), 0.25, 0.32, 0.45, 0.60);
+                gl.uniform_3_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0);
+                gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 4.0, 0.0);
+                gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            },
+            |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_FAN, 0, 6) },
+        )
+    };
+
+    let encoded = render(0);
+    let linear = render(1);
+    let centre = (32 * 64 + 32) * 4;
+    let encoded_centre = &encoded[centre..centre + 4];
+    let linear_centre = &linear[centre..centre + 4];
+    assert!(
+        (152..=154).contains(&encoded_centre[3]),
+        "cap must preserve material alpha: {encoded_centre:?}"
+    );
+    assert_eq!(encoded_centre[3], linear_centre[3]);
+    assert_ne!(
+        &encoded_centre[..3],
+        &linear_centre[..3],
+        "scene-linear cap must decode its encoded material"
+    );
+    for (label, pixel) in [("encoded", encoded_centre), ("linear", linear_centre)] {
+        assert!(
+            pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+            "{label} cap must be premultiplied: {pixel:?}"
+        );
+    }
+    assert_eq!(
+        &encoded[..4],
+        &[0, 0, 0, 0],
+        "pixels outside the generated polygon must remain uncovered"
     );
 
     unsafe { gl.delete_program(program) };
@@ -1360,7 +1565,7 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
             "injected framebuffer construction failure must propagate",
         );
         assert!(error.contains("framebuffer"));
-        assert_eq!(framebuffer_failure.programs.len(), 24);
+        assert_eq!(framebuffer_failure.programs.len(), 25);
         assert_eq!(framebuffer_failure.vertex_arrays.len(), 1);
         assert_eq!(framebuffer_failure.buffers.len(), 1);
         assert_eq!(framebuffer_failure.framebuffers.len(), 4);
@@ -1380,7 +1585,7 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
             "injected pre-commit failure must propagate",
         );
         assert!(error.contains("before commit"));
-        assert_eq!(commit_failure.programs.len(), 24);
+        assert_eq!(commit_failure.programs.len(), 25);
         assert_eq!(commit_failure.vertex_arrays.len(), 2);
         assert_eq!(commit_failure.buffers.len(), 2);
         assert!(commit_failure.framebuffers.len() >= 10);

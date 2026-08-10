@@ -5,7 +5,7 @@ the Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition. Both are
 a lit prism standing on a mirrored floor inside a procedural skydome, so they
 read as the same cube seen twice rather than two separate effects. The Wayland
 overview now uses the same protocol-free prism camera and regular-polygon
-geometry, plus its own GLES implementation of the lit face material.
+geometry, plus its own GLES implementations of the lit face and cap materials.
 
 ```toml
 [behavior]
@@ -72,16 +72,25 @@ Wayland currently shares the solid's geometry, pitched framing and
 world-space face lighting. Selection is a bevel and inner accent rendered in
 the face plane, so it stays attached while that face turns; the title is
 anchored below the projected selected face and remains inside its owning
-monitor. The GLES material preserves premultiplied alpha, honors opaque-region
-semantics, and emits either encoded or scene-linear legacy-sRGB pixels to match
-the output pipeline. Per-surface `wp_color_management` transforms inside the
-overview remain future work. The polygon caps, mirrored floor and procedural
-skydome are still X11 scene layers rather than shared renderer code.
+monitor. Every geometric side is drawn: unused slots in a one- or two-window
+triangular prism, and live entries whose surface or texture is temporarily
+unavailable, become dark tinted filler faces rather than holes. A separate lit
+triangle-fan material closes the visible polygon cap. Faces and caps retain the
+shared back-to-front `PrismPiece` order because the overlay has no depth buffer.
+
+The GLES materials preserve premultiplied alpha, honor opaque-region semantics
+for live textures, and emit either encoded or scene-linear legacy-sRGB pixels
+to match the output pipeline. Per-surface `wp_color_management` transforms
+inside the overview remain future work. The mirrored floor and procedural
+skydome are still X11-only scene layers.
 
 Headless GLES pixel regressions cover selection lighting, fade premultiplication,
-opaque-region alpha, scene-linear faces and the scene-linear backdrop. CI forces
-Mesa's surfaceless EGL platform and treats a missing GL context as a failure, so
-these checks cannot silently downgrade to skipped tests.
+opaque-region alpha, texture-independent filler faces, linked polygon caps,
+scene-linear materials and the scene-linear backdrop. CI forces Mesa's
+surfaceless EGL platform and treats a missing GL context as a failure, so these
+checks cannot silently downgrade to skipped tests. The legacy workspace-cube
+branch is also rendered with hostile lit/filler uniforms to lock its original
+brightness-only pixels.
 
 ## Tag-switch transition
 

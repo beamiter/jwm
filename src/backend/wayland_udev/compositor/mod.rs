@@ -371,6 +371,19 @@ pub(crate) struct CubeUniforms {
     pub lit: i32,
     pub scene_linear: i32,
     pub has_alpha: i32,
+    pub filler: i32,
+}
+
+pub(crate) struct OverviewCapUniforms {
+    pub mvp: i32,
+    pub model: i32,
+    pub radius: i32,
+    pub y: i32,
+    pub sides: i32,
+    pub color: i32,
+    pub accent: i32,
+    pub camera: i32,
+    pub scene_linear: i32,
 }
 
 #[allow(dead_code)]
@@ -789,6 +802,7 @@ pub(crate) struct WaylandCompositor {
     scene_linear_decode_uniforms: SceneLinearDecodeUniforms,
     transition_program: u32,
     cube_program: u32,
+    overview_cap_program: u32,
     portal_program: u32,
     edge_glow_program: u32,
     tilt_program: u32,
@@ -816,6 +830,7 @@ pub(crate) struct WaylandCompositor {
     postprocess_uniforms: PostprocessUniforms,
     transition_uniforms: TransitionUniforms,
     cube_uniforms: CubeUniforms,
+    overview_cap_uniforms: OverviewCapUniforms,
     portal_uniforms: PortalUniforms,
     tilt_uniforms: TiltUniforms,
     wobbly_uniforms: WobblyUniforms,
@@ -1423,7 +1438,7 @@ impl<'gl, 'probe> CompositorConstructionGuard<'gl, 'probe> {
         Self {
             gl,
             probe,
-            programs: Vec::with_capacity(24),
+            programs: Vec::with_capacity(25),
             vertex_arrays: Vec::with_capacity(2),
             buffers: Vec::with_capacity(2),
             framebuffers: Vec::with_capacity(11),
@@ -1648,6 +1663,10 @@ impl WaylandCompositor {
                 .compile_program(shaders::VERTEX_SHADER, shaders::TRANSITION_FRAGMENT_SHADER)?;
             let cube_program = construction
                 .compile_program(shaders::CUBE_VERTEX_SHADER, shaders::CUBE_FRAGMENT_SHADER)?;
+            let overview_cap_program = construction.compile_program(
+                shaders::OVERVIEW_CAP_VERTEX_SHADER,
+                shaders::OVERVIEW_CAP_FRAGMENT_SHADER,
+            )?;
             let portal_program = construction
                 .compile_program(shaders::VERTEX_SHADER, shaders::PORTAL_FRAGMENT_SHADER)?;
             let edge_glow_program = construction
@@ -1834,6 +1853,19 @@ impl WaylandCompositor {
                 lit: get_uniform_loc(gl, cube_program, "u_lit"),
                 scene_linear: get_uniform_loc(gl, cube_program, "u_scene_linear"),
                 has_alpha: get_uniform_loc(gl, cube_program, "u_has_alpha"),
+                filler: get_uniform_loc(gl, cube_program, "u_filler"),
+            };
+
+            let overview_cap_uniforms = OverviewCapUniforms {
+                mvp: get_uniform_loc(gl, overview_cap_program, "u_mvp"),
+                model: get_uniform_loc(gl, overview_cap_program, "u_model"),
+                radius: get_uniform_loc(gl, overview_cap_program, "u_radius"),
+                y: get_uniform_loc(gl, overview_cap_program, "u_y"),
+                sides: get_uniform_loc(gl, overview_cap_program, "u_sides"),
+                color: get_uniform_loc(gl, overview_cap_program, "u_color"),
+                accent: get_uniform_loc(gl, overview_cap_program, "u_accent"),
+                camera: get_uniform_loc(gl, overview_cap_program, "u_camera"),
+                scene_linear: get_uniform_loc(gl, overview_cap_program, "u_scene_linear"),
             };
 
             let portal_uniforms = PortalUniforms {
@@ -2048,6 +2080,7 @@ impl WaylandCompositor {
                 scene_linear_decode_uniforms,
                 transition_program,
                 cube_program,
+                overview_cap_program,
                 portal_program,
                 edge_glow_program,
                 tilt_program,
@@ -2071,6 +2104,7 @@ impl WaylandCompositor {
                 postprocess_uniforms,
                 transition_uniforms,
                 cube_uniforms,
+                overview_cap_uniforms,
                 portal_uniforms,
                 tilt_uniforms,
                 wobbly_uniforms,
@@ -2657,6 +2691,7 @@ impl WaylandCompositor {
                 &mut self.scene_linear_decode_program,
                 &mut self.transition_program,
                 &mut self.cube_program,
+                &mut self.overview_cap_program,
                 &mut self.portal_program,
                 &mut self.edge_glow_program,
                 &mut self.tilt_program,
@@ -2710,6 +2745,7 @@ mod gpu_release_contract_tests {
         "scene_linear_decode_program",
         "transition_program",
         "cube_program",
+        "overview_cap_program",
         "portal_program",
         "edge_glow_program",
         "tilt_program",
@@ -2853,8 +2889,8 @@ mod gpu_release_contract_tests {
 
         assert_eq!(
             compact.matches("construction.compile_program(").count(),
-            24,
-            "all 23 compositor programs plus thumbnail must be guard-owned"
+            25,
+            "all 24 compositor programs plus thumbnail must be guard-owned"
         );
         assert!(compact.contains("MinimizedThumbnailState::from_program(gl,thumbnail_program)"));
         assert_eq!(

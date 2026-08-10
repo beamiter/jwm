@@ -203,9 +203,12 @@ mock implementing the complete backend surface. (First met by
   `compositor_common::prism`. Wayland consumes that geometry instead of its
   drifted hexagon-only formula and adds an opt-in GLES lit-face material with
   in-plane selection bevels, premultiplied-alpha/opaque-region handling and
-  scene-linear output, while legacy 3D workspace-transition output is
-  pixel-tested behind the shader's compatibility branch. Surfaceless EGL is a
-  required CI gate rather than a soft-skipped shader check.
+  scene-linear output. Its adapter now consumes the complete painter-sorted
+  piece stream: unavailable or unused face slots receive texture-independent
+  filler material, and generated lit triangle fans close the caps. Legacy 3D
+  workspace-transition output is pixel-tested behind the shader's compatibility
+  branch. Surfaceless EGL is a required CI gate rather than a soft-skipped
+  shader check.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

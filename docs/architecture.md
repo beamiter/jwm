@@ -175,8 +175,12 @@ src/backend/api.rs          platform boundary
   must refresh it with a new subset. The matching protocol-free camera,
   regular-polygon construction and painter ordering live in
   `backend::compositor_common::prism` and are consumed by both render
-  backends. All close paths go through `OverviewState::deactivate`, which also
-  resets the slide offset the inline Escape path used to leave stale.
+  backends. The Wayland GLES adapter preserves that ordering across live and
+  filler faces plus generated polygon caps, so missing textures and the spare
+  slots of one- or two-window prisms remain closed without adding renderer
+  state to the shared geometry. All close paths go through
+  `OverviewState::deactivate`, which also resets the slide offset the inline
+  Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than
