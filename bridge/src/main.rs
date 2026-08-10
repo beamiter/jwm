@@ -17,6 +17,10 @@ mod notifications;
 
 use jwm_ipc::JwmIpc;
 
+/// Each subscription has its own bounded queue. Once full, the blocking IPC
+/// worker stops reading its Unix socket until the async consumer catches up.
+const EVENT_QUEUE_CAPACITY: usize = 256;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -37,9 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // One subscription per consumer keeps the two features independent: a
     // stalled MPRIS call cannot delay a notification signal.
-    let (notify_tx, notify_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (notify_tx, notify_rx) = tokio::sync::mpsc::channel(EVENT_QUEUE_CAPACITY);
     jwm_ipc::subscribe(ipc.clone(), &["notification"], notify_tx);
-    let (media_tx, media_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (media_tx, media_rx) = tokio::sync::mpsc::channel(EVENT_QUEUE_CAPACITY);
     jwm_ipc::subscribe(ipc.clone(), &["media"], media_tx);
 
     let connection = zbus::connection::Builder::session()?

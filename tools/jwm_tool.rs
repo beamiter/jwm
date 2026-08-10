@@ -5,22 +5,22 @@ use glob::glob;
 mod nested_smoke;
 mod perf;
 mod perf_contract;
-use nix::fcntl::{OFlag, open};
+use nix::fcntl::{Flock, FlockArg, OFlag, open};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::stat::Mode;
 use nix::sys::wait::WaitStatus;
 use nix::sys::wait::{WaitPidFlag, waitpid};
-use nix::unistd::{Pid, mkfifo, read};
+use nix::unistd::{Pid, mkfifo, read, write as nix_write};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::{HashSet, VecDeque};
 use std::env;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -31,7 +31,10 @@ use std::time::{Duration, Instant};
 
 const DAEMON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_LOCK_TIMEOUT: Duration = Duration::from_secs(12);
-const RESPONSE_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+/// Linux guarantees atomic FIFO writes up to at least 4096 bytes. Keeping one
+/// control command inside that bound lets the nonblocking client use one write
+/// without risking a duplicated partial command on retry.
+const MAX_CONTROL_COMMAND_BYTES: usize = 4096;
 
 // --- Runtime directory (XDG_RUNTIME_DIR) ---
 
@@ -55,6 +58,116 @@ fn pidfile_path() -> PathBuf {
     runtime_dir().join("jwm_daemon.pid")
 }
 
+fn daemon_lock_path() -> PathBuf {
+    runtime_dir().join("jwm_daemon.lock")
+}
+
+fn daemon_operation_lock_path() -> PathBuf {
+    runtime_dir().join("jwm_daemon.operation.lock")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: i32,
+    start_time: u64,
+    boot_id: [u8; 16],
+}
+
+fn parse_boot_id(value: &str) -> Option<[u8; 16]> {
+    let compact: Vec<_> = value.trim().bytes().filter(|byte| *byte != b'-').collect();
+    if compact.len() != 32 {
+        return None;
+    }
+    let mut boot_id = [0u8; 16];
+    for (index, pair) in compact.chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16)? as u8;
+        let low = (pair[1] as char).to_digit(16)? as u8;
+        boot_id[index] = (high << 4) | low;
+    }
+    Some(boot_id)
+}
+
+fn format_boot_id(boot_id: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(32);
+    for byte in boot_id {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn current_boot_id() -> Option<[u8; 16]> {
+    let value = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    parse_boot_id(&value)
+}
+
+fn parse_linux_proc_stat_identity(stat: &str) -> Option<(char, u64)> {
+    let fields = stat.rsplit_once(") ")?.1;
+    let mut fields = fields.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let start_time = fields.nth(18)?.parse().ok()?;
+    Some((state, start_time))
+}
+
+fn process_identity(pid: i32) -> Option<ProcessIdentity> {
+    if pid <= 0 {
+        return None;
+    }
+    let (state, start_time) = fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_linux_proc_stat_identity(&stat))?;
+    if matches!(state, 'Z' | 'X' | 'x') || start_time == 0 {
+        return None;
+    }
+    Some(ProcessIdentity {
+        pid,
+        start_time,
+        boot_id: current_boot_id()?,
+    })
+}
+
+fn parse_daemon_pidfile(content: &str) -> Option<ProcessIdentity> {
+    let mut fields = content.split_whitespace();
+    if fields.next()? != "v2" {
+        return None;
+    }
+    let pid = fields.next()?.parse().ok()?;
+    let start_time = fields.next()?.parse().ok()?;
+    let boot_id = parse_boot_id(fields.next()?)?;
+    if fields.next().is_some() || pid <= 0 || start_time == 0 {
+        return None;
+    }
+    Some(ProcessIdentity {
+        pid,
+        start_time,
+        boot_id,
+    })
+}
+
+fn parse_v1_daemon_pidfile(content: &str) -> Option<(i32, u64)> {
+    let mut fields = content.split_whitespace();
+    if fields.next()? != "v1" {
+        return None;
+    }
+    let pid = fields.next()?.parse().ok()?;
+    let start_time = fields.next()?.parse().ok()?;
+    (fields.next().is_none() && pid > 0 && start_time > 0).then_some((pid, start_time))
+}
+
+/// Read the pid-only format written by jwm-tool releases before process
+/// start-time binding was introduced. Callers must authenticate the live
+/// process before trusting the returned PID.
+fn parse_legacy_daemon_pidfile(content: &str) -> Option<i32> {
+    let mut fields = content.split_whitespace();
+    let pid = fields.next()?.parse().ok()?;
+    (fields.next().is_none() && pid > 0).then_some(pid)
+}
+
+fn process_identity_matches(expected: ProcessIdentity) -> bool {
+    process_identity(expected.pid) == Some(expected)
+}
+
 fn control_pipe_path(daemon_pid: i32) -> PathBuf {
     runtime_dir().join(format!("jwm_control_{}", daemon_pid))
 }
@@ -64,17 +177,26 @@ fn response_path(control_pipe: &Path) -> PathBuf {
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
-    runtime_dir().join(format!("{}_response", name))
+    control_pipe
+        .parent()
+        .filter(|parent| parent.is_absolute())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(runtime_dir)
+        .join(format!("{}_response", name))
 }
 
 #[derive(Debug)]
 struct ResponseLock {
-    path: PathBuf,
+    _flock: Flock<File>,
+    legacy_path: PathBuf,
 }
 
 impl Drop for ResponseLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // The legacy create_new protocol needs the sentinel removed to admit
+        // its next owner. `_flock` is released only after this Drop body, so
+        // new clients cannot race each other while handing the path over.
+        let _ = fs::remove_file(&self.legacy_path);
     }
 }
 
@@ -82,35 +204,128 @@ fn response_lock_path(control_pipe: &Path) -> PathBuf {
     response_path(control_pipe).with_extension("lock")
 }
 
+fn response_flock_path(control_pipe: &Path) -> PathBuf {
+    response_path(control_pipe).with_extension("flock")
+}
+
+fn read_legacy_response_lock_owner(path: &Path) -> Option<i32> {
+    let mut file = File::open(path).ok()?;
+    let mut record = String::new();
+    Read::take(&mut file, 128)
+        .read_to_string(&mut record)
+        .ok()?;
+    parse_legacy_daemon_pidfile(&record)
+}
+
 fn acquire_response_lock(control_pipe: &Path, timeout: Duration) -> io::Result<ResponseLock> {
-    let path = response_lock_path(control_pipe);
+    let legacy_path = response_lock_path(control_pipe);
+    let flock_path = response_flock_path(control_pipe);
     let deadline = Instant::now() + timeout;
 
     loop {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                writeln!(file, "{}", std::process::id())?;
-                file.flush()?;
-                return Ok(ResponseLock { path });
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                let owner_gone = fs::read_to_string(&path)
-                    .ok()
-                    .and_then(|value| value.trim().parse::<i32>().ok())
-                    .is_some_and(|pid| !process_exists(pid));
-                let stale = fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age >= RESPONSE_LOCK_STALE_AFTER);
-                if owner_gone || stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&flock_path)?;
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(flock) => {
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&legacy_path)
+                {
+                    Ok(mut sentinel) => {
+                        writeln!(sentinel, "{}", std::process::id())?;
+                        sentinel.flush()?;
+                        return Ok(ResponseLock {
+                            _flock: flock,
+                            legacy_path,
+                        });
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let owner_live = read_legacy_response_lock_owner(&legacy_path)
+                            .is_some_and(|pid| process_identity(pid).is_some());
+                        let old_enough_to_be_stale = fs::metadata(&legacy_path)
+                            .and_then(|metadata| metadata.modified())
+                            .ok()
+                            .and_then(|modified| modified.elapsed().ok())
+                            .is_some_and(|age| age >= Duration::from_secs(1));
+                        if !owner_live && old_enough_to_be_stale {
+                            let _ = fs::remove_file(&legacy_path);
+                            drop(flock);
+                            continue;
+                        }
+                        drop(flock);
+                    }
+                    Err(error) => return Err(error),
                 }
+
                 if Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "another jwm-tool command is still waiting for the daemon response",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err((_file, error))
+                if error == nix::errno::Errno::EWOULDBLOCK
+                    || error == nix::errno::Errno::EAGAIN =>
+            {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another jwm-tool command is still waiting for the daemon response",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err((_file, error)) => return Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+}
+
+fn acquire_daemon_lock_at(path: &Path) -> io::Result<Flock<File>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(mut file) => {
+            file.set_len(0)?;
+            writeln!(file, "{}", std::process::id())?;
+            file.flush()?;
+            Ok(file)
+        }
+        Err((_file, error))
+            if error == nix::errno::Errno::EWOULDBLOCK || error == nix::errno::Errno::EAGAIN =>
+        {
+            Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "another jwm-tool daemon owns the runtime lock",
+            ))
+        }
+        Err((_file, error)) => Err(io::Error::from_raw_os_error(error as i32)),
+    }
+}
+
+fn acquire_daemon_operation_lock(timeout: Duration) -> io::Result<Flock<File>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match acquire_daemon_lock_at(&daemon_operation_lock_path()) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "another jwm-tool daemon lifecycle operation is still running",
                     ));
                 }
                 thread::sleep(Duration::from_millis(25));
@@ -610,12 +825,87 @@ fn validate_daemon_response(response: &str) -> io::Result<()> {
 
 fn write_pidfile(pid: i32) -> io::Result<()> {
     let _ = fs::create_dir_all(runtime_dir());
-    fs::write(pidfile_path(), pid.to_string())
+    let identity = process_identity(pid).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("cannot read process identity for daemon PID {pid}"),
+        )
+    })?;
+    fs::write(
+        pidfile_path(),
+        format!(
+            "v2 {} {} {}\n",
+            identity.pid,
+            identity.start_time,
+            format_boot_id(identity.boot_id)
+        ),
+    )
 }
 
-fn read_existing_pid() -> Option<i32> {
+fn path_without_deleted_suffix(path: &Path) -> PathBuf {
+    let display = path.as_os_str().to_string_lossy();
+    PathBuf::from(display.strip_suffix(" (deleted)").unwrap_or(&display))
+}
+
+fn legacy_daemon_metadata_matches(
+    cmdline: &[u8],
+    executable: &Path,
+    current_executable: Option<&Path>,
+) -> bool {
+    let mut arguments = cmdline
+        .split(|byte| *byte == 0)
+        .filter(|arg| !arg.is_empty());
+    let Some(_invoked_as) = arguments.next() else {
+        return false;
+    };
+    if arguments.next() != Some(b"daemon".as_slice()) {
+        return false;
+    }
+
+    let executable = path_without_deleted_suffix(executable);
+    let same_executable = current_executable
+        .map(path_without_deleted_suffix)
+        .is_some_and(|current| current == executable);
+    let conventional_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "jwm-tool" | "jwm_tool"));
+    same_executable || conventional_name
+}
+
+/// Bind a legacy pid-only record to the process start time, but only after
+/// proving that the live process is actually a jwm-tool daemon. Reading the
+/// identity again after `/proc` metadata closes the PID-reuse window during
+/// verification. New daemons always replace the legacy record with v1.
+fn legacy_daemon_identity(pid: i32) -> Option<ProcessIdentity> {
+    let before = process_identity(pid)?;
+    let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let executable = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let current_executable = env::current_exe().ok();
+    if !legacy_daemon_metadata_matches(&cmdline, &executable, current_executable.as_deref()) {
+        return None;
+    }
+    (process_identity(pid) == Some(before)).then_some(before)
+}
+
+fn read_daemon_identity() -> Option<ProcessIdentity> {
     let content = fs::read_to_string(pidfile_path()).ok()?;
-    content.trim().parse::<i32>().ok()
+    if let Some(identity) = parse_daemon_pidfile(&content) {
+        return Some(identity);
+    }
+    if let Some((pid, recorded_start_time)) = parse_v1_daemon_pidfile(&content) {
+        let identity = legacy_daemon_identity(pid)?;
+        return (identity.start_time == recorded_start_time).then_some(identity);
+    }
+    let pid = parse_legacy_daemon_pidfile(&content)?;
+    legacy_daemon_identity(pid)
+}
+
+fn remove_owned_pidfile() {
+    let current = process_identity(std::process::id() as i32);
+    if current.is_some() && read_daemon_identity() == current {
+        let _ = fs::remove_file(pidfile_path());
+    }
 }
 
 fn cleanup_resources(control_pipe: &Path) {
@@ -624,8 +914,7 @@ fn cleanup_resources(control_pipe: &Path) {
     let _ = fs::remove_file(control_pipe);
     let _ = fs::remove_file(&resp);
     let _ = fs::remove_file(resp.with_extension("tmp"));
-    let _ = fs::remove_file(response_lock_path(control_pipe));
-    let _ = fs::remove_file(pidfile_path());
+    remove_owned_pidfile();
     log_line("清理完成，守护进程退出");
 }
 
@@ -638,6 +927,36 @@ fn mkfifo_safe(p: &Path) -> io::Result<()> {
 fn open_fifo_rdwr_nonblock(p: &Path) -> io::Result<OwnedFd> {
     open(p, OFlag::O_RDWR | OFlag::O_NONBLOCK, Mode::empty())
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("打开FIFO失败: {e}")))
+}
+
+fn write_fifo_nonblock(path: &Path, data: &[u8]) -> io::Result<()> {
+    if data.len() > MAX_CONTROL_COMMAND_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "control command is {} bytes; maximum is {MAX_CONTROL_COMMAND_BYTES}",
+                data.len()
+            ),
+        ));
+    }
+    let fd = open(path, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty())
+        .map_err(|error| io::Error::from_raw_os_error(error as i32))?;
+    loop {
+        match nix_write(&fd, data) {
+            Ok(written) if written == data.len() => return Ok(()),
+            Ok(written) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    format!(
+                        "control FIFO accepted only {written} of {} bytes",
+                        data.len()
+                    ),
+                ));
+            }
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
 }
 
 fn read_commands_from_fd<F: AsFd>(fd: F, buf: &mut String) -> io::Result<Vec<String>> {
@@ -671,14 +990,19 @@ fn read_commands_from_fd<F: AsFd>(fd: F, buf: &mut String) -> io::Result<Vec<Str
 // --- Daemon main loop ---
 
 fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
+    let startup_lock = acquire_daemon_operation_lock(RESPONSE_LOCK_TIMEOUT)?;
+    // The lock spans the daemon's whole lifetime. Unlike a check-then-write
+    // pidfile protocol, the kernel makes concurrent startup arbitration
+    // atomic and releases ownership even after a crash or SIGKILL.
+    let _daemon_lock = acquire_daemon_lock_at(&daemon_lock_path())?;
     let term_flag = Arc::new(AtomicBool::new(false));
     flag::register(SIGTERM, Arc::clone(&term_flag)).expect("注册SIGTERM失败");
     flag::register(SIGINT, Arc::clone(&term_flag)).expect("注册SIGINT失败");
 
     // Check for existing daemon
-    if let Some(old_pid) = read_existing_pid() {
-        if kill(Pid::from_raw(old_pid), None).is_ok() {
-            eprintln!("守护进程已在运行，PID: {old_pid}");
+    if let Some(old_identity) = read_daemon_identity() {
+        if process_identity_matches(old_identity) {
+            eprintln!("守护进程已在运行，PID: {}", old_identity.pid);
             std::process::exit(1);
         } else {
             let _ = fs::remove_file(pidfile_path());
@@ -716,6 +1040,10 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
     }
 
     log_line("开始主循环，监听命令...");
+    // Resource creation is now complete. A force-restart may proceed, while
+    // `_daemon_lock` continues to enforce singleton ownership for this whole
+    // process lifetime.
+    drop(startup_lock);
 
     let mut line_buf = String::new();
 
@@ -798,12 +1126,8 @@ fn run_daemon(jwm_binary: PathBuf, backend: Option<String>) -> io::Result<()> {
 // --- Control client helpers ---
 
 fn read_daemon_pid() -> Option<i32> {
-    let content = fs::read_to_string(pidfile_path()).ok()?;
-    content.trim().parse::<i32>().ok()
-}
-
-fn process_exists(pid: i32) -> bool {
-    kill(Pid::from_raw(pid), None).is_ok()
+    let identity = read_daemon_identity()?;
+    process_identity_matches(identity).then_some(identity.pid)
 }
 
 fn control_pipe_for(pid: i32) -> PathBuf {
@@ -818,9 +1142,6 @@ fn is_fifo(p: &Path) -> bool {
 
 fn find_control_pipe() -> Option<PathBuf> {
     let pid = read_daemon_pid()?;
-    if !process_exists(pid) {
-        return None;
-    }
     let pipe = control_pipe_for(pid);
     if is_fifo(&pipe) { Some(pipe) } else { None }
 }
@@ -842,14 +1163,21 @@ fn send_command(cmd: &str) -> io::Result<()> {
     let data = format!("{cmd}\n");
     let mut last_error: Option<io::Error> = None;
     for _ in 0..10 {
-        match fs::write(&pipe, &data) {
+        match write_fifo_nonblock(&pipe, data.as_bytes()) {
             Ok(_) => {
                 last_error = None;
                 break;
             }
             Err(error)
                 if error.kind() == io::ErrorKind::BrokenPipe
-                    || error.raw_os_error() == Some(32) =>
+                    || error.kind() == io::ErrorKind::WouldBlock
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(code)
+                            if code == nix::libc::EPIPE
+                                || code == nix::libc::ENXIO
+                                || code == nix::libc::EAGAIN
+                    ) =>
             {
                 last_error = Some(error);
                 thread::sleep(Duration::from_millis(50));
@@ -899,14 +1227,14 @@ fn check_daemon() -> bool {
 }
 
 fn kill_daemon_by_pidfile() {
-    if let Some(old_pid) = read_daemon_pid() {
-        if process_exists(old_pid) {
-            println!("终止旧的守护进程: {}", old_pid);
-            let _ = kill(Pid::from_raw(old_pid), Signal::SIGTERM);
-            thread::sleep(Duration::from_secs(1));
-            if process_exists(old_pid) {
-                let _ = kill(Pid::from_raw(old_pid), Signal::SIGKILL);
-            }
+    if let Some(identity) = read_daemon_identity()
+        && process_identity_matches(identity)
+    {
+        println!("终止旧的守护进程: {}", identity.pid);
+        let _ = kill(Pid::from_raw(identity.pid), Signal::SIGTERM);
+        thread::sleep(Duration::from_secs(1));
+        if process_identity_matches(identity) {
+            let _ = kill(Pid::from_raw(identity.pid), Signal::SIGKILL);
         }
     }
 }
@@ -914,6 +1242,15 @@ fn kill_daemon_by_pidfile() {
 fn cleanup_old_pipes_and_pidfile() {
     if let Ok(entries) = glob(&control_pipe_glob_pattern()) {
         for entry in entries.flatten() {
+            // Advisory locks are tied to the opened inode. Unlinking a live
+            // lock would let another client create a new inode and enter the
+            // response protocol concurrently with its current owner.
+            if entry
+                .extension()
+                .is_some_and(|extension| extension == "lock" || extension == "flock")
+            {
+                continue;
+            }
             let _ = fs::remove_file(entry);
         }
     }
@@ -921,6 +1258,7 @@ fn cleanup_old_pipes_and_pidfile() {
 }
 
 fn force_restart_daemon() -> io::Result<()> {
+    let operation_lock = acquire_daemon_operation_lock(RESPONSE_LOCK_TIMEOUT)?;
     println!("强制重启守护进程...");
     kill_daemon_by_pidfile();
     cleanup_old_pipes_and_pidfile();
@@ -934,6 +1272,9 @@ fn force_restart_daemon() -> io::Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
     let _ = child.id();
+    // The replacement daemon starts by taking this same operation lock, so it
+    // cannot publish a pidfile/FIFO until cleanup above is irrevocably done.
+    drop(operation_lock);
 
     thread::sleep(Duration::from_secs(1));
     if check_daemon() {
@@ -2520,13 +2861,16 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        Cli, Commands, InstallPlanEntry, SmokeTarget, acquire_response_lock,
-        append_log_with_rotation, capabilities_output_lines, daemon_command_response,
-        ensure_ipc_response_succeeded, health_output_lines, ipc_request, jwm_install_plan,
-        parse_msg_args, parse_subscription_topics, response_lock_path, rotated_log_path,
+        Cli, Commands, InstallPlanEntry, SmokeTarget, acquire_daemon_lock_at,
+        acquire_response_lock, append_log_with_rotation, capabilities_output_lines,
+        daemon_command_response, ensure_ipc_response_succeeded, health_output_lines, ipc_request,
+        jwm_install_plan, legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id,
+        parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
+        parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
+        process_identity_matches, response_flock_path, response_lock_path, rotated_log_path,
         session_install_targets, smoke_artifacts_json, smoke_ci_profile_json,
         smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
-        validate_daemon_response, validate_ipc_response,
+        validate_daemon_response, validate_ipc_response, write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
@@ -2907,7 +3251,9 @@ mod tests {
     fn response_lock_serializes_control_clients() {
         let pipe = std::env::temp_dir().join(format!("jwm-tool-lock-test-{}", std::process::id()));
         let lock_path = response_lock_path(&pipe);
+        let flock_path = response_flock_path(&pipe);
         let _ = std::fs::remove_file(&lock_path);
+        let _ = std::fs::remove_file(&flock_path);
 
         let first = acquire_response_lock(&pipe, std::time::Duration::from_millis(50)).unwrap();
         assert!(acquire_response_lock(&pipe, std::time::Duration::from_millis(20)).is_err());
@@ -2915,6 +3261,113 @@ mod tests {
         let second = acquire_response_lock(&pipe, std::time::Duration::from_millis(50)).unwrap();
         drop(second);
         assert!(!lock_path.exists());
+        assert!(flock_path.exists());
+        std::fs::remove_file(flock_path).unwrap();
+    }
+
+    #[test]
+    fn response_lock_waits_for_a_live_legacy_create_new_owner() {
+        let pipe =
+            std::env::temp_dir().join(format!("jwm-tool-legacy-lock-test-{}", std::process::id()));
+        let lock_path = response_lock_path(&pipe);
+        let flock_path = response_flock_path(&pipe);
+        let _ = std::fs::remove_file(&lock_path);
+        let _ = std::fs::remove_file(&flock_path);
+        std::fs::write(&lock_path, format!("{}\n", std::process::id())).unwrap();
+
+        let error = acquire_response_lock(&pipe, std::time::Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+
+        std::fs::remove_file(lock_path).unwrap();
+        if flock_path.exists() {
+            std::fs::remove_file(flock_path).unwrap();
+        }
+    }
+
+    #[test]
+    fn daemon_runtime_lock_allows_only_one_owner() {
+        let lock_path =
+            std::env::temp_dir().join(format!("jwm-tool-daemon-lock-{}", std::process::id()));
+        let _ = std::fs::remove_file(&lock_path);
+
+        let first = acquire_daemon_lock_at(&lock_path).unwrap();
+        let error = acquire_daemon_lock_at(&lock_path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        drop(first);
+        drop(acquire_daemon_lock_at(&lock_path).unwrap());
+
+        std::fs::remove_file(lock_path).unwrap();
+    }
+
+    #[test]
+    fn daemon_pidfile_binds_pid_to_linux_process_start_time() {
+        let stat = "123 (odd ) process) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 424242 20";
+        assert_eq!(parse_linux_proc_stat_identity(stat), Some(('S', 424242)));
+        assert!(parse_linux_proc_stat_identity("malformed").is_none());
+        assert!(parse_daemon_pidfile("123").is_none());
+        assert_eq!(
+            parse_v1_daemon_pidfile("v1 123 424242\n"),
+            Some((123, 424242))
+        );
+        assert_eq!(parse_legacy_daemon_pidfile("123\n"), Some(123));
+        assert!(parse_legacy_daemon_pidfile("123 456").is_none());
+
+        let identity = process_identity(std::process::id() as i32).expect("current identity");
+        let encoded = format!(
+            "v2 {} {} {}\n",
+            identity.pid,
+            identity.start_time,
+            super::format_boot_id(identity.boot_id)
+        );
+        assert_eq!(parse_daemon_pidfile(&encoded), Some(identity));
+        assert_eq!(
+            parse_boot_id("00112233-4455-6677-8899-aabbccddeeff"),
+            Some([
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ])
+        );
+        assert!(process_identity_matches(identity));
+        assert!(!process_identity_matches(super::ProcessIdentity {
+            start_time: identity.start_time + 1,
+            ..identity
+        }));
+    }
+
+    #[test]
+    fn legacy_daemon_metadata_accepts_a_replaced_tool_binary_only_for_daemon_mode() {
+        let old_executable = Path::new("/usr/local/bin/jwm-tool (deleted)");
+        let current_executable = Path::new("/usr/local/bin/jwm-tool");
+        assert!(legacy_daemon_metadata_matches(
+            b"/usr/local/bin/jwm-tool\0daemon\0--backend\0xcb\0",
+            old_executable,
+            Some(current_executable),
+        ));
+        assert!(!legacy_daemon_metadata_matches(
+            b"/usr/local/bin/jwm-tool\0status\0",
+            old_executable,
+            Some(current_executable),
+        ));
+        assert!(!legacy_daemon_metadata_matches(
+            b"/usr/bin/sleep\0daemon\0",
+            Path::new("/usr/bin/sleep"),
+            Some(current_executable),
+        ));
+    }
+
+    #[test]
+    fn fifo_control_write_returns_promptly_without_a_reader() {
+        let fifo =
+            std::env::temp_dir().join(format!("jwm-tool-fifo-no-reader-{}", std::process::id()));
+        let _ = std::fs::remove_file(&fifo);
+        mkfifo_safe(&fifo).unwrap();
+
+        let started = std::time::Instant::now();
+        let error = write_fifo_nonblock(&fifo, b"status\n").unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(nix::libc::ENXIO));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        std::fs::remove_file(fifo).unwrap();
     }
 
     #[test]

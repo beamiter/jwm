@@ -5,7 +5,7 @@
 //! values.  Keeping those checks here gives startup, `--check-config`, and live
 //! reload one source of truth.
 
-use super::{ArgumentConfig, Config, KeyConfig};
+use super::{ArgumentConfig, Config, KeyConfig, RuleConfig};
 use crate::core::layout::LayoutEnum;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -416,6 +416,33 @@ fn validate_time(diagnostics: &mut ConfigDiagnostics, path: &str, value: &str) {
             Some("use 24-hour HH:MM format".into()),
         );
     }
+}
+
+fn window_rule_has_matcher(rule: &RuleConfig) -> bool {
+    !rule.class.is_empty() || !rule.instance.is_empty() || !rule.name.is_empty()
+}
+
+/// Whether every value admitted by `later` is also admitted by `earlier` for
+/// one of the runtime rule matcher's substring-constrained fields.
+///
+/// An empty earlier pattern is a wildcard. Otherwise the later pattern must
+/// contain it: any attribute containing the later pattern then necessarily
+/// contains the earlier one as well. A non-empty earlier pattern cannot cover
+/// a later wildcard because the later rule also admits attributes without it.
+fn window_rule_field_covers(earlier: &str, later: &str) -> bool {
+    earlier.is_empty() || (!later.is_empty() && later.contains(earlier))
+}
+
+/// Prove that the first-match runtime semantics make `later` unreachable.
+/// All three fields are conjunctive, so coverage must hold independently for
+/// class, instance, and name. All-empty rules are excluded because the runtime
+/// matcher explicitly rejects them instead of treating them as match-all.
+fn window_rule_covers(earlier: &RuleConfig, later: &RuleConfig) -> bool {
+    window_rule_has_matcher(earlier)
+        && window_rule_has_matcher(later)
+        && window_rule_field_covers(&earlier.class, &later.class)
+        && window_rule_field_covers(&earlier.instance, &later.instance)
+        && window_rule_field_covers(&earlier.name, &later.name)
 }
 
 impl Config {
@@ -1266,6 +1293,13 @@ impl Config {
             .contains(&tag_count)
             .then(|| (1usize << tag_count) - 1);
         for (index, rule) in self.inner.rules.iter().enumerate() {
+            if !window_rule_has_matcher(rule) {
+                diagnostics.warning(
+                    format!("rules[{index}]"),
+                    "class, instance, and name are all empty, so this rule can never match",
+                    Some("set at least one of class, instance, or name".into()),
+                );
+            }
             if tag_mask.is_some_and(|mask| rule.tags & !mask != 0) {
                 diagnostics.warning(
                     format!("rules[{index}].tags"),
@@ -1281,6 +1315,31 @@ impl Config {
                     format!("rules[{index}].monitor"),
                     format!("{} must be -1 or a non-negative index", rule.monitor),
                     None,
+                );
+            }
+        }
+
+        // Runtime applies the first matching window rule and stops. Report a
+        // later rule only when substring-constraint containment proves that an
+        // earlier rule accepts every window the later rule could accept.
+        for (later_index, later) in self.inner.rules.iter().enumerate() {
+            if !window_rule_has_matcher(later) {
+                continue;
+            }
+            if let Some((earlier_index, _)) = self.inner.rules[..later_index]
+                .iter()
+                .enumerate()
+                .find(|(_, earlier)| window_rule_covers(earlier, later))
+            {
+                diagnostics.warning(
+                    format!("rules[{later_index}]"),
+                    format!(
+                        "rule is unreachable because rules[{earlier_index}] matches every window this rule can match and is evaluated first"
+                    ),
+                    Some(
+                        "remove the duplicate, move this rule earlier, or narrow the earlier rule"
+                            .into(),
+                    ),
                 );
             }
         }
@@ -1397,6 +1456,89 @@ mod tests {
             function: function.to_string(),
             argument: ArgumentConfig::Int(0),
         }
+    }
+
+    fn window_rule(class: &str, instance: &str, name: &str) -> RuleConfig {
+        RuleConfig {
+            class: class.into(),
+            instance: instance.into(),
+            name: name.into(),
+            tags: 1,
+            is_floating: false,
+            monitor: -1,
+        }
+    }
+
+    fn has_unreachable_rule_diagnostic(diagnostics: &ConfigDiagnostics, index: usize) -> bool {
+        diagnostics.issues().iter().any(|issue| {
+            issue.path == format!("rules[{index}]") && issue.message.contains("unreachable")
+        })
+    }
+
+    #[test]
+    fn all_empty_window_rule_reports_that_runtime_will_never_match_it() {
+        let mut config = Config::default();
+        config.inner.rules = vec![window_rule("", "", "")];
+
+        let diagnostics = config.diagnostics();
+        let issue = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.path == "rules[0]")
+            .expect("missing all-empty window rule diagnostic");
+        assert_eq!(issue.level, ConfigDiagnosticLevel::Warning);
+        assert!(issue.message.contains("class, instance, and name"));
+        assert!(issue.message.contains("never match"));
+        assert!(!has_unreachable_rule_diagnostic(&diagnostics, 0));
+    }
+
+    #[test]
+    fn duplicate_window_rule_is_unreachable_after_the_first_match() {
+        let mut config = Config::default();
+        config.inner.rules = vec![
+            window_rule("Firefox", "Navigator", "Private"),
+            window_rule("Firefox", "Navigator", "Private"),
+        ];
+
+        let diagnostics = config.diagnostics();
+        let issue = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.path == "rules[1]" && issue.message.contains("rules[0]"))
+            .expect("missing duplicate rule shadow diagnostic");
+        assert!(issue.message.contains("unreachable"));
+        assert!(issue.message.contains("every window"));
+    }
+
+    #[test]
+    fn broader_window_rule_provably_shadows_a_later_narrower_rule() {
+        let mut config = Config::default();
+        config.inner.rules = vec![
+            window_rule("Fire", "", ""),
+            window_rule("Firefox", "Navigator", "Private Browsing"),
+        ];
+
+        let diagnostics = config.diagnostics();
+        assert!(has_unreachable_rule_diagnostic(&diagnostics, 1));
+    }
+
+    #[test]
+    fn narrower_or_orthogonal_earlier_rule_does_not_report_shadowing() {
+        let mut config = Config::default();
+        config.inner.rules = vec![
+            // Narrow before broad: windows matching "Fire" need not contain
+            // "Firefox", so the later rule remains reachable.
+            window_rule("Firefox", "", ""),
+            window_rule("Fire", "", ""),
+            // A required earlier name cannot cover a later name wildcard even
+            // though the class constraint is broader.
+            window_rule("Chrom", "", "Dialog"),
+            window_rule("Chrome", "", ""),
+        ];
+
+        let diagnostics = config.diagnostics();
+        assert!(!has_unreachable_rule_diagnostic(&diagnostics, 1));
+        assert!(!has_unreachable_rule_diagnostic(&diagnostics, 3));
     }
 
     #[test]

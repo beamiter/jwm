@@ -174,15 +174,12 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_child_process_exited(&mut self, backend: &mut dyn Backend) {
-        debug!("Received SIGCHLD, reaping zombies...");
-        let now = std::time::Instant::now();
-        for (monitor_id, reason) in self.reap_zombies() {
-            // `reap_zombies` must consume the process through its owning Child
-            // handle, but SIGCHLD still needs the same visual cleanup and
-            // bounded restart policy as the periodic bar supervisor.
-            self.handle_secondary_bar_failure(backend, monitor_id, now, &reason);
-        }
+    fn on_child_process_exited(&mut self, _backend: &mut dyn Backend) {
+        debug!("Received SIGCHLD, polling JWM-owned transient children...");
+        // SIGCHLD is only a latency optimization on backends that expose it.
+        // Every child is reaped by its owner; the common update path below is
+        // authoritative and covers backends without a signal source.
+        self.reap_transient_children();
     }
 
     // === 窗口生命周期 ===
@@ -1706,6 +1703,7 @@ mod tests {
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),
             secondary_bar_retry_after: HashMap::new(),
+            transient_children: crate::jwm::process::TransientChildSupervisor::default(),
             last_key_grab_refresh_at: None,
             pending_bar_updates: HashSet::new(),
             minimized_projection_epochs: HashMap::new(),
@@ -1755,6 +1753,28 @@ mod tests {
             last_ping_time: None,
             last_user_activity_time: 0,
         }
+    }
+
+    #[test]
+    fn common_update_reaps_spawned_transient_without_sigchld() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.spawn(
+            &mut backend,
+            &WMArgEnum::StringVec(vec!["/bin/true".into()]),
+        )
+        .unwrap();
+        assert!(!jwm.transient_children.is_empty());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !jwm.transient_children.is_empty() && std::time::Instant::now() < deadline {
+            EventHandler::update(&mut jwm, &mut backend).unwrap();
+            if !jwm.transient_children.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        assert!(jwm.transient_children.is_empty());
     }
 
     #[test]
@@ -3121,6 +3141,11 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
+        // Reap explicitly owned fire-and-forget processes on every backend.
+        // Do this before other lifecycle polling so a failed scratchpad spawn
+        // releases its pending-name gate in the same update.
+        self.reap_transient_children();
+
         // Ensure all monitor bars are running (sequential creation)
         let now = std::time::Instant::now();
         self.expire_pending_scratchpads(now);

@@ -11,8 +11,6 @@ use crate::jwm::statusbar::StatusBarBuilder;
 use crate::jwm::visibility::restore_hidden_geometry;
 use crate::jwm::window_state::x11_geometry_fully_left_of_desktop;
 use log::{info, warn};
-use nix::sys::signal::{self, Signal};
-use nix::unistd::Pid;
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::Ordering;
@@ -1189,57 +1187,15 @@ impl Jwm {
 
     pub(crate) fn cleanup_secondary_bars(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         for (mon_id, mut bar) in self.secondary_bars.drain() {
-            // The child may already have exited (and been reaped via its Child
-            // handle in reap_zombies, which caches the status). Once reaped, the
-            // PID can be recycled by the kernel, so signalling it would hit an
-            // unrelated process. Consult the handle before touching the PID.
-            match bar.child.try_wait() {
-                Ok(Some(status)) => {
-                    info!("Secondary bar {} already exited: {:?}", mon_id, status);
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        "Secondary bar {} status unknown ({}); not signalling PID",
-                        mon_id, e
-                    );
-                    continue;
-                }
-                Ok(None) => {}
-            }
-
-            let pid = bar.child.id();
-            let nix_pid = Pid::from_raw(pid as i32);
-
-            match signal::kill(nix_pid, None) {
-                Err(_) => {
-                    info!("Secondary bar for monitor {} already terminated", mon_id);
-                    continue;
-                }
-                Ok(_) => {}
-            }
-
-            if let Ok(_) = signal::kill(nix_pid, Signal::SIGTERM) {
-                let timeout = Duration::from_secs(3);
-                let start = Instant::now();
-                while start.elapsed() < timeout {
-                    match bar.child.try_wait() {
-                        Ok(Some(status)) => {
-                            info!("Secondary bar {} exited gracefully: {:?}", mon_id, status);
-                            break;
-                        }
-                        Ok(None) => {
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                        Err(_) => {
-                            break;
-                        }
-                    }
-                }
-                if bar.child.try_wait().ok().flatten().is_none() {
-                    warn!("Secondary bar {} timeout, forcing kill", mon_id);
-                    let _ = signal::kill(nix_pid, Signal::SIGKILL);
-                }
+            match super::monitor_management::terminate_secondary_bar_child(
+                &mut bar.child,
+                Duration::from_secs(3),
+            ) {
+                Ok(status) => info!("Secondary bar {} exited: {:?}", mon_id, status),
+                Err(error) => warn!(
+                    "Could not stop and reap secondary bar {}: {}",
+                    mon_id, error
+                ),
             }
         }
         Ok(())
@@ -1249,7 +1205,16 @@ impl Jwm {
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Clean up all monitor bars shared memory
-        for (mon_id, bar) in self.secondary_bars.drain() {
+        for (mon_id, mut bar) in self.secondary_bars.drain() {
+            if let Err(error) = super::monitor_management::terminate_secondary_bar_child(
+                &mut bar.child,
+                Duration::from_secs(3),
+            ) {
+                warn!(
+                    "Could not stop and reap secondary bar {} before shared-memory cleanup: {}",
+                    mon_id, error
+                );
+            }
             drop(bar.shmem);
             #[cfg(unix)]
             {

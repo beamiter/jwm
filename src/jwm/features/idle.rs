@@ -304,7 +304,9 @@ impl crate::jwm::Jwm {
                     .behavior()
                     .idle_screen_off_command
                     .clone();
-                run_idle_command("screen off", &command);
+                if let Some(child) = run_idle_command("screen off", &command) {
+                    self.supervise_transient_child(child);
+                }
                 self.broadcast_idle_state();
             }
             IdleAction::ScreenOn => {
@@ -314,7 +316,9 @@ impl crate::jwm::Jwm {
                     .idle_screen_on_command
                     .clone();
                 if !command.trim().is_empty() {
-                    run_idle_command("screen on", &command);
+                    if let Some(child) = run_idle_command("screen on", &command) {
+                        self.supervise_transient_child(child);
+                    }
                 }
                 self.broadcast_idle_state();
             }
@@ -366,14 +370,18 @@ fn configured_brightness() -> f32 {
     crate::config::CONFIG.load().behavior().brightness
 }
 
-fn run_idle_command(what: &str, command: &str) {
+fn run_idle_command(what: &str, command: &str) -> Option<std::process::Child> {
     let Some((program, args)) = crate::jwm::features::session::split_command(command) else {
         log::warn!("Idle: no {what} command configured");
-        return;
+        return None;
     };
     log::info!("Idle: {what} \u{2192} {command}");
-    if let Err(error) = std::process::Command::new(&program).args(&args).spawn() {
-        log::warn!("Idle: could not run {command:?}: {error}");
+    match std::process::Command::new(&program).args(&args).spawn() {
+        Ok(child) => Some(child),
+        Err(error) => {
+            log::warn!("Idle: could not run {command:?}: {error}");
+            None
+        }
     }
 }
 

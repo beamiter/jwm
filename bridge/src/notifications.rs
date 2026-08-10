@@ -198,10 +198,7 @@ fn notify_args(
 /// jwm is the source of truth for closes: a toast that expired, a row the user
 /// dismissed in the notification center, and a `CloseNotification` call all
 /// arrive here the same way.
-pub async fn pump_signals(
-    connection: Connection,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<Value>,
-) {
+pub async fn pump_signals(connection: Connection, mut events: tokio::sync::mpsc::Receiver<Value>) {
     while let Some(event) = events.recv().await {
         let kind = event.get("event").and_then(Value::as_str).unwrap_or("");
         let payload = event.get("payload").cloned().unwrap_or(Value::Null);

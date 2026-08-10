@@ -216,7 +216,7 @@ async fn call_active(connection: &Connection, player: &str, method: &'static str
 pub async fn run(
     connection: Connection,
     ipc: JwmIpc,
-    mut events: tokio::sync::mpsc::UnboundedReceiver<Value>,
+    mut events: tokio::sync::mpsc::Receiver<Value>,
 ) {
     publish(&connection, &ipc).await;
 

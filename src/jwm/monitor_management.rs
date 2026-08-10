@@ -3,16 +3,62 @@ use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{MonitorKey, Pertag, WMMonitor};
 use log::{error, info, warn};
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
 use std::collections::HashSet;
-use std::process::{Command, Stdio};
+use std::io;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use xbar_core::shared_structures::SharedRingBufferOptions;
 
 use super::Jwm;
 
 const BAR_MAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const BAR_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const BAR_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Stop and reap a secondary bar through its owning `Child` handle.
+///
+/// `Child::kill` only sends SIGKILL; dropping the handle immediately afterwards
+/// can therefore leave a zombie. Give the bar a bounded opportunity to handle
+/// SIGTERM, then force it down and synchronously collect the exit status.
+pub(super) fn terminate_secondary_bar_child(
+    child: &mut Child,
+    terminate_timeout: Duration,
+) -> io::Result<ExitStatus> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+
+    let pid = Pid::from_raw(child.id() as i32);
+    let _ = signal::kill(pid, Signal::SIGTERM);
+    let deadline = Instant::now() + terminate_timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(BAR_EXIT_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    }
+
+    match child.kill() {
+        Ok(()) => loop {
+            match child.wait() {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        },
+        Err(kill_error) => match child.try_wait()? {
+            Some(status) => Ok(status),
+            None => Err(kill_error),
+        },
+    }
+}
 
 impl Jwm {
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
@@ -105,7 +151,6 @@ impl Jwm {
                 // Check if process is still alive
                 if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
                     if lost_managed_window {
-                        let _ = bar.child.kill();
                         remove_reason = Some("managed bar window disappeared".to_owned());
                     } else {
                         match bar.child.try_wait() {
@@ -119,7 +164,6 @@ impl Jwm {
                                     if now.saturating_duration_since(bar.last_spawn)
                                         > BAR_MAP_TIMEOUT
                                     {
-                                        let _ = bar.child.kill();
                                         remove_reason = Some(format!(
                                             "did not map a window within {}s",
                                             BAR_MAP_TIMEOUT.as_secs()
@@ -175,7 +219,8 @@ impl Jwm {
     }
 
     /// Apply the common cleanup/backoff policy after a managed bar fails.
-    /// Safe to call after the process has already been removed by SIGCHLD.
+    /// Whether failure was an observed exit, lost window, or map timeout, the
+    /// owning `Child` is terminated and reaped before its bar entry is dropped.
     pub(super) fn handle_secondary_bar_failure(
         &mut self,
         backend: &mut dyn Backend,
@@ -183,7 +228,14 @@ impl Jwm {
         now: Instant,
         reason: &str,
     ) {
-        self.secondary_bars.remove(&monitor_id);
+        if let Some(mut bar) = self.secondary_bars.remove(&monitor_id)
+            && let Err(error) = terminate_secondary_bar_child(&mut bar.child, Duration::ZERO)
+        {
+            warn!(
+                "Could not stop and reap failed bar on monitor {}: {}",
+                monitor_id, error
+            );
+        }
         self.clear_minimized_dock_for_monitor(backend, monitor_id);
         self.note_secondary_bar_failure(monitor_id, now, reason);
     }
@@ -222,29 +274,11 @@ impl Jwm {
             );
         }
 
-        // Consult the owning Child handle before signalling. A previously
-        // reaped PID may already belong to an unrelated process.
-        match bar.child.try_wait() {
-            Ok(None) => {
-                if let Err(error) = bar.child.kill() {
-                    warn!(
-                        "Could not terminate retired bar on monitor {}: {}",
-                        monitor_id, error
-                    );
-                }
-            }
-            Ok(Some(status)) => {
-                info!(
-                    "Retired bar on monitor {} had already exited: {}",
-                    monitor_id, status
-                );
-            }
-            Err(error) => {
-                warn!(
-                    "Retired bar on monitor {} has unknown status ({}); not signalling PID",
-                    monitor_id, error
-                );
-            }
+        if let Err(error) = terminate_secondary_bar_child(&mut bar.child, Duration::ZERO) {
+            warn!(
+                "Could not stop and reap retired bar on monitor {}: {}",
+                monitor_id, error
+            );
         }
 
         retired_client
@@ -435,5 +469,35 @@ impl Jwm {
         target_monitor_key: MonitorKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.handle_monitor_switch_by_key(backend, Some(target_monitor_key))
+    }
+}
+
+#[cfg(test)]
+mod secondary_bar_child_tests {
+    use super::*;
+
+    #[test]
+    fn terminate_secondary_bar_child_reaps_forced_exit() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do :; done"])
+            .spawn()
+            .expect("spawn stubborn child");
+
+        let status = terminate_secondary_bar_child(&mut child, Duration::from_millis(20))
+            .expect("terminate and reap child");
+
+        assert!(!status.success());
+        assert_eq!(child.try_wait().expect("query cached status"), Some(status));
+    }
+
+    #[test]
+    fn terminate_secondary_bar_child_accepts_already_reaped_child() {
+        let mut child = Command::new("/bin/true").spawn().expect("spawn child");
+        let original = child.wait().expect("reap child");
+
+        let status = terminate_secondary_bar_child(&mut child, Duration::ZERO)
+            .expect("return cached status");
+
+        assert_eq!(status, original);
     }
 }

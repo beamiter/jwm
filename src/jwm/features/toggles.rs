@@ -408,7 +408,10 @@ impl Jwm {
         self.close_system_ui(backend);
         info!("Session menu: {} -> {command}", action.as_str());
         match Command::new(&program).args(&args).spawn() {
-            Ok(_) => Ok(()),
+            Ok(child) => {
+                self.supervise_transient_child(child);
+                Ok(())
+            }
             Err(error) => Err(format!("could not run {command:?}: {error}").into()),
         }
     }
@@ -2394,6 +2397,7 @@ impl Jwm {
                                 name, pid, error
                             ),
                         }
+                        self.supervise_transient_child(child);
                     }
                     Err(e) => {
                         error!("[togglescratchpad] failed to spawn '{}': {}", name, e);

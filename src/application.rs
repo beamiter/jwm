@@ -20,6 +20,7 @@ use crate::backend::xcb::backend::XcbBackend;
 use crate::config::{
     BackendFamily, CONFIG, Config, ConfigDiagnostics, ConfigError, set_backend_family,
 };
+use crate::jwm::process::{TRANSIENT_CHILD_HANDOFF_ENV, TransientChildRestartHandoff};
 use crate::jwm::scratchpad_handoff::{
     LEGACY_SCRATCHPAD_HANDOFF_ENV, SCRATCHPAD_HANDOFF_ENV, ScratchpadRestartHandoff,
 };
@@ -392,6 +393,7 @@ fn create_backend_for_startup(
 fn bootstrap_jwm_instance(
     options: ApplicationOptions,
     scratchpad_handoff: Option<&ScratchpadRestartHandoff>,
+    transient_child_handoff: Option<&TransientChildRestartHandoff>,
     restart_intent: bool,
 ) -> Result<(Box<dyn Backend>, Jwm), Box<dyn std::error::Error>> {
     if restart_intent {
@@ -417,6 +419,9 @@ fn bootstrap_jwm_instance(
         // Borrow the immutable handoff for every bounded attempt. Ownership is
         // consumed only after a complete setup succeeds.
         jwm.install_pending_scratchpad_restart_handoff(handoff);
+    }
+    if let Some(handoff) = transient_child_handoff {
+        jwm.install_transient_child_restart_handoff(handoff.clone())?;
     }
     jwm.setup(&mut *backend)?;
     Ok((backend, jwm))
@@ -466,7 +471,11 @@ impl RestartCommand {
         }
     }
 
-    fn command(&self, scratchpad_handoff: Option<&str>) -> Command {
+    fn command(
+        &self,
+        scratchpad_handoff: Option<&str>,
+        transient_child_handoff: Option<&str>,
+    ) -> Command {
         let mut command = Command::new(&self.executable);
         command
             .args(&self.arguments)
@@ -475,15 +484,24 @@ impl RestartCommand {
             // process. Only the snapshot captured for this exact exec may be
             // installed below.
             .env_remove(SCRATCHPAD_HANDOFF_ENV)
-            .env_remove(LEGACY_SCRATCHPAD_HANDOFF_ENV);
+            .env_remove(LEGACY_SCRATCHPAD_HANDOFF_ENV)
+            .env_remove(TRANSIENT_CHILD_HANDOFF_ENV);
         if let Some(payload) = scratchpad_handoff {
             command.env(SCRATCHPAD_HANDOFF_ENV, payload);
+        }
+        if let Some(payload) = transient_child_handoff {
+            command.env(TRANSIENT_CHILD_HANDOFF_ENV, payload);
         }
         command
     }
 
-    fn exec(&self, scratchpad_handoff: Option<&str>) -> std::io::Error {
-        self.command(scratchpad_handoff).exec()
+    fn exec(
+        &self,
+        scratchpad_handoff: Option<&str>,
+        transient_child_handoff: Option<&str>,
+    ) -> std::io::Error {
+        self.command(scratchpad_handoff, transient_child_handoff)
+            .exec()
     }
 }
 
@@ -492,13 +510,15 @@ enum RestartPreparationStage {
     FlushLayout,
     ValidateConfig,
     CaptureScratchpads,
+    CaptureTransientChildren,
     PrepareClients,
 }
 
 impl RestartPreparationStage {
-    const ORDER: [Self; 4] = [
+    const ORDER: [Self; 5] = [
         Self::FlushLayout,
         Self::ValidateConfig,
+        Self::CaptureTransientChildren,
         Self::CaptureScratchpads,
         Self::PrepareClients,
     ];
@@ -508,6 +528,7 @@ impl RestartPreparationStage {
             Self::FlushLayout => "layout persistence",
             Self::ValidateConfig => "configuration validation",
             Self::CaptureScratchpads => "scratchpad identity handoff",
+            Self::CaptureTransientChildren => "transient-child ownership handoff",
             Self::PrepareClients => "X11 client discovery handoff",
         }
     }
@@ -581,6 +602,44 @@ fn take_restart_handoff_from_environment(restarting: bool) -> Option<ScratchpadR
     }
 }
 
+fn decode_transient_child_restart_handoff(
+    restarting: bool,
+    payload: Option<&OsStr>,
+    current_pid: u32,
+) -> Result<Option<TransientChildRestartHandoff>, String> {
+    // Exact child PIDs are authoritative only for the same process after JWM's
+    // own exec marker. Ordinary inherited environment residue is ignored.
+    if !restarting {
+        return Ok(None);
+    }
+    let Some(payload) = payload else {
+        return Ok(None);
+    };
+    let payload = payload
+        .to_str()
+        .ok_or_else(|| format!("{TRANSIENT_CHILD_HANDOFF_ENV} is not valid UTF-8"))?;
+    TransientChildRestartHandoff::decode_for_parent_pid(payload, current_pid)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn take_transient_child_handoff_from_environment(
+    restarting: bool,
+) -> Option<TransientChildRestartHandoff> {
+    let payload = env::var_os(TRANSIENT_CHILD_HANDOFF_ENV);
+    // Consume the one-shot capability before backend construction can spawn
+    // workers or helper processes that might otherwise inherit it.
+    unsafe { env::remove_var(TRANSIENT_CHILD_HANDOFF_ENV) };
+    match decode_transient_child_restart_handoff(restarting, payload.as_deref(), std::process::id())
+    {
+        Ok(handoff) => handoff,
+        Err(error) => {
+            error!("[application] rejecting transient-child restart handoff: {error}");
+            None
+        }
+    }
+}
+
 /// Run JWM using environment-based compatibility options.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     run_with_options(ApplicationOptions::from_env()?)
@@ -592,6 +651,8 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
     let inherited_restart_intent = take_restart_intent_from_environment();
     let mut pending_scratchpad_handoff =
         take_restart_handoff_from_environment(inherited_restart_intent);
+    let mut pending_transient_child_handoff =
+        take_transient_child_handoff_from_environment(inherited_restart_intent);
     let mut restart_bootstrap = inherited_restart_intent;
 
     loop {
@@ -599,6 +660,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
             bootstrap_jwm_instance(
                 options,
                 pending_scratchpad_handoff.as_ref(),
+                pending_transient_child_handoff.as_ref(),
                 restart_bootstrap,
             )
         };
@@ -615,17 +677,27 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
         if let Some(handoff) = pending_scratchpad_handoff.take() {
             jwm.adopt_scratchpad_restart_handoff(&*backend, handoff);
         }
+        // The immutable PID handoff was cloned into this successful JWM
+        // during bootstrap. Failed bootstrap attempts leave it available for
+        // retry; a successful one consumes the one-shot application copy.
+        pending_transient_child_handoff.take();
         configure_benchmark(&mut *backend, options.benchmark);
 
         // Exit preparation is fail-closed. Keep this JWM and its ClientKeys
         // alive when either restart identity encoding or the bounded
         // swallowed-parent remap cannot be completed. In particular, cleanup
         // must not drop the only registry that knows an unmapped parent.
-        let (prepared_scratchpad_handoff, prepared_restart_clients, prepared_normal_exit_handoff) = loop {
+        let (
+            prepared_scratchpad_handoff,
+            prepared_transient_child_handoff,
+            prepared_restart_clients,
+            prepared_normal_exit_handoff,
+        ) = loop {
             jwm.run(&mut *backend)?;
             let restarting = jwm.is_restarting.load(Ordering::SeqCst);
             if restarting {
                 let mut prepared = None;
+                let mut transient_children = None;
                 let mut restart_clients = None;
                 let preparation = run_restart_preparation_steps(
                     |stage| -> Result<(), Box<dyn std::error::Error>> {
@@ -640,6 +712,11 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
                                 let handoff = jwm.capture_scratchpad_restart_handoff(&*backend)?;
                                 let payload = handoff.encode()?;
                                 prepared = Some((handoff, payload));
+                            }
+                            RestartPreparationStage::CaptureTransientChildren => {
+                                let handoff = jwm.capture_transient_child_restart_handoff()?;
+                                let payload = handoff.encode()?;
+                                transient_children = Some((handoff, payload));
                             }
                             RestartPreparationStage::PrepareClients => {
                                 restart_clients = Some(jwm.prepare_restart_clients(&mut *backend)?);
@@ -657,11 +734,11 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
                     jwm.running.store(true, Ordering::SeqCst);
                     continue;
                 }
-                break (prepared, restart_clients, None);
+                break (prepared, transient_children, restart_clients, None);
             }
 
             match jwm.prepare_normal_exit_handoff(&mut *backend) {
-                Ok(handoff) => break (None, None, Some(handoff)),
+                Ok(handoff) => break (None, None, None, Some(handoff)),
                 Err(error) => {
                     if error.resume_safe() {
                         // Phase A restored every touched client in reverse
@@ -704,11 +781,14 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
             info!("[application] restarting via exec");
             let (handoff, payload) = prepared_scratchpad_handoff
                 .expect("a restart cannot pass the handoff preparation guard without a payload");
+            let (transient_child_handoff, transient_child_payload) =
+                prepared_transient_child_handoff
+                    .expect("a restart cannot drop JWM-owned child handles without a PID handoff");
             drop(jwm);
             drop(backend);
 
             let error = execute_restart_after_cleanup(cleanup_result, || {
-                restart_command.exec(Some(&payload))
+                restart_command.exec(Some(&payload), Some(&transient_child_payload))
             });
             error!("[application] exec failed: {error}; falling back to in-process restart");
             // `exec` failure leaves us in the original process. The old JWM
@@ -718,6 +798,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
             // already made that bounded set viewable, so the new backend's
             // ordinary startup scan will find them too.
             pending_scratchpad_handoff = Some(handoff);
+            pending_transient_child_handoff = Some(transient_child_handoff);
             restart_bootstrap = true;
             continue;
         }
@@ -789,12 +870,14 @@ mod tests {
     use super::{
         ApplicationOptions, BackendChoice, BenchmarkRequest, RESTART_BOOTSTRAP_BACKOFFS,
         RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage, config_path,
-        configure_benchmark, decode_restart_handoff, execute_restart_after_cleanup,
-        parse_benchmark, run_restart_bootstrap_with_retry, run_restart_preparation_steps,
+        configure_benchmark, decode_restart_handoff, decode_transient_child_restart_handoff,
+        execute_restart_after_cleanup, parse_benchmark, run_restart_bootstrap_with_retry,
+        run_restart_preparation_steps,
     };
     use crate::backend::api::CompositorBenchmark;
     use crate::config::BackendFamily;
     use crate::core::state::WMState;
+    use crate::jwm::process::TRANSIENT_CHILD_HANDOFF_ENV;
     use crate::jwm::scratchpad_handoff::{
         LEGACY_SCRATCHPAD_HANDOFF_ENV, SCRATCHPAD_HANDOFF_ENV, ScratchpadRestartHandoff,
     };
@@ -1100,13 +1183,42 @@ mod tests {
     }
 
     #[test]
+    fn transient_child_handoff_requires_marker_and_same_parent_pid() {
+        let payload = serde_json::json!({
+            "version": 1,
+            "parent_pid": 8123,
+            "pids": [9001, 9002]
+        })
+        .to_string();
+
+        assert!(
+            decode_transient_child_restart_handoff(false, Some(OsStr::new(&payload)), 8123,)
+                .unwrap()
+                .is_none(),
+            "ordinary startup must ignore inherited PID residue"
+        );
+        assert!(
+            decode_transient_child_restart_handoff(true, Some(OsStr::new(&payload)), 8124).is_err()
+        );
+        assert!(
+            decode_transient_child_restart_handoff(true, Some(OsStr::new(&payload)), 8123)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            decode_transient_child_restart_handoff(true, Some(OsStr::new("malformed")), 8123,)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn restart_command_replaces_inherited_handoff_instead_of_forwarding_it() {
         let restart = RestartCommand {
             executable: OsString::from("jwm"),
             arguments: vec![OsString::from("--example")],
         };
 
-        let without_payload = restart.command(None);
+        let without_payload = restart.command(None, None);
         let removed = without_payload
             .get_envs()
             .find(|(name, _)| *name == OsStr::new(SCRATCHPAD_HANDOFF_ENV));
@@ -1120,6 +1232,11 @@ mod tests {
             .find(|(name, _)| *name == OsStr::new(LEGACY_SCRATCHPAD_HANDOFF_ENV));
         assert!(legacy_removed.is_some());
         assert_eq!(legacy_removed.unwrap().1, None);
+        let transient_removed = without_payload
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(TRANSIENT_CHILD_HANDOFF_ENV));
+        assert!(transient_removed.is_some());
+        assert_eq!(transient_removed.unwrap().1, None);
         assert_eq!(
             without_payload
                 .get_envs()
@@ -1128,7 +1245,8 @@ mod tests {
             Some(OsStr::new("1"))
         );
 
-        let with_payload = restart.command(Some("bounded-payload"));
+        let with_payload =
+            restart.command(Some("bounded-payload"), Some("bounded-transient-payload"));
         assert_eq!(
             with_payload
                 .get_envs()
@@ -1136,6 +1254,35 @@ mod tests {
                 .and_then(|(_, value)| value),
             Some(OsStr::new("bounded-payload"))
         );
+        assert_eq!(
+            with_payload
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(TRANSIENT_CHILD_HANDOFF_ENV))
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("bounded-transient-payload"))
+        );
+    }
+
+    #[test]
+    fn exec_failure_fallback_reinstalls_the_captured_transient_handoff() {
+        let application = function_body_after(APPLICATION_SRC, "pub fn run_with_options");
+        let capture = application
+            .find("let (transient_child_handoff, transient_child_payload)")
+            .expect("restart must retain the validated handoff beside its payload");
+        let drop_old_jwm = application[capture..]
+            .find("drop(jwm);")
+            .map(|offset| capture + offset)
+            .expect("old Child handles must be dropped before exec");
+        let exec = application[drop_old_jwm..]
+            .find("restart_command.exec(")
+            .map(|offset| drop_old_jwm + offset)
+            .expect("restart must attempt exec");
+        let fallback = application[exec..]
+            .find("pending_transient_child_handoff = Some(transient_child_handoff);")
+            .map(|offset| exec + offset)
+            .expect("exec failure must install the exact same handoff for in-process retry");
+
+        assert!(capture < drop_old_jwm && drop_old_jwm < exec && exec < fallback);
     }
 
     #[test]

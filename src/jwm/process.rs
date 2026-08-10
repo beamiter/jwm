@@ -1,11 +1,283 @@
 use crate::backend::api::Backend;
 use crate::jwm::WMArgEnum;
 use libc::{SIG_DFL, SIGCHLD, setsid, sigaction, sigemptyset};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use nix::errno::Errno;
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use std::process::Command;
+use nix::unistd::Pid;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fmt;
+use std::process::{Child, Command};
 
 use super::Jwm;
+
+pub(crate) const TRANSIENT_CHILD_HANDOFF_ENV: &str = "JWM_TRANSIENT_CHILD_HANDOFF_V1";
+const TRANSIENT_CHILD_HANDOFF_VERSION: u32 = 1;
+const MAX_TRANSIENT_CHILD_HANDOFF_BYTES: usize = 16 * 1024;
+const MAX_TRANSIENT_CHILDREN: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireTransientChildHandoff {
+    version: u32,
+    parent_pid: u32,
+    pids: Vec<u32>,
+}
+
+/// Validated exact-PID ownership transferred across one same-process exec.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TransientChildRestartHandoff {
+    parent_pid: u32,
+    pids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TransientChildHandoffError {
+    PayloadTooLarge { bytes: usize },
+    InvalidJson(String),
+    UnsupportedVersion(u32),
+    InvalidParentPid(u32),
+    ParentPidMismatch { expected: u32, actual: u32 },
+    TooManyChildren { children: usize },
+    InvalidChildPid { index: usize, pid: u32 },
+    DuplicateChildPid(u32),
+}
+
+impl fmt::Display for TransientChildHandoffError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PayloadTooLarge { bytes } => write!(
+                f,
+                "transient-child restart handoff is {bytes} bytes (maximum {MAX_TRANSIENT_CHILD_HANDOFF_BYTES})"
+            ),
+            Self::InvalidJson(error) => {
+                write!(f, "malformed transient-child restart handoff: {error}")
+            }
+            Self::UnsupportedVersion(version) => {
+                write!(f, "unsupported transient-child handoff version {version}")
+            }
+            Self::InvalidParentPid(pid) => {
+                write!(f, "invalid transient-child parent PID {pid}")
+            }
+            Self::ParentPidMismatch { expected, actual } => write!(
+                f,
+                "transient-child parent PID {actual} does not match this process {expected}"
+            ),
+            Self::TooManyChildren { children } => write!(
+                f,
+                "transient-child handoff has {children} PIDs (maximum {MAX_TRANSIENT_CHILDREN})"
+            ),
+            Self::InvalidChildPid { index, pid } => {
+                write!(
+                    f,
+                    "invalid transient child PID {pid} at handoff entry {index}"
+                )
+            }
+            Self::DuplicateChildPid(pid) => {
+                write!(f, "duplicate transient child PID {pid} in restart handoff")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TransientChildHandoffError {}
+
+impl TransientChildRestartHandoff {
+    fn new(parent_pid: u32, pids: Vec<u32>) -> Result<Self, TransientChildHandoffError> {
+        let wire = WireTransientChildHandoff {
+            version: TRANSIENT_CHILD_HANDOFF_VERSION,
+            parent_pid,
+            pids,
+        };
+        validate_transient_child_handoff(&wire)?;
+        Ok(Self {
+            parent_pid: wire.parent_pid,
+            pids: wire.pids,
+        })
+    }
+
+    pub(crate) fn encode(&self) -> Result<String, TransientChildHandoffError> {
+        let payload = serde_json::to_string(&WireTransientChildHandoff {
+            version: TRANSIENT_CHILD_HANDOFF_VERSION,
+            parent_pid: self.parent_pid,
+            pids: self.pids.clone(),
+        })
+        .map_err(|error| TransientChildHandoffError::InvalidJson(error.to_string()))?;
+        if payload.len() > MAX_TRANSIENT_CHILD_HANDOFF_BYTES {
+            return Err(TransientChildHandoffError::PayloadTooLarge {
+                bytes: payload.len(),
+            });
+        }
+        Ok(payload)
+    }
+
+    pub(crate) fn decode_for_parent_pid(
+        payload: &str,
+        expected_parent_pid: u32,
+    ) -> Result<Self, TransientChildHandoffError> {
+        if payload.len() > MAX_TRANSIENT_CHILD_HANDOFF_BYTES {
+            return Err(TransientChildHandoffError::PayloadTooLarge {
+                bytes: payload.len(),
+            });
+        }
+        let wire: WireTransientChildHandoff = serde_json::from_str(payload)
+            .map_err(|error| TransientChildHandoffError::InvalidJson(error.to_string()))?;
+        validate_transient_child_handoff(&wire)?;
+        if wire.parent_pid != expected_parent_pid {
+            return Err(TransientChildHandoffError::ParentPidMismatch {
+                expected: expected_parent_pid,
+                actual: wire.parent_pid,
+            });
+        }
+        Ok(Self {
+            parent_pid: wire.parent_pid,
+            pids: wire.pids,
+        })
+    }
+}
+
+fn validate_transient_child_handoff(
+    wire: &WireTransientChildHandoff,
+) -> Result<(), TransientChildHandoffError> {
+    if wire.version != TRANSIENT_CHILD_HANDOFF_VERSION {
+        return Err(TransientChildHandoffError::UnsupportedVersion(wire.version));
+    }
+    if wire.parent_pid == 0 || wire.parent_pid > i32::MAX as u32 {
+        return Err(TransientChildHandoffError::InvalidParentPid(
+            wire.parent_pid,
+        ));
+    }
+    if wire.pids.len() > MAX_TRANSIENT_CHILDREN {
+        return Err(TransientChildHandoffError::TooManyChildren {
+            children: wire.pids.len(),
+        });
+    }
+
+    let mut seen = HashSet::with_capacity(wire.pids.len());
+    for (index, &pid) in wire.pids.iter().enumerate() {
+        if pid == 0 || pid > i32::MAX as u32 || pid == wire.parent_pid {
+            return Err(TransientChildHandoffError::InvalidChildPid { index, pid });
+        }
+        if !seen.insert(pid) {
+            return Err(TransientChildHandoffError::DuplicateChildPid(pid));
+        }
+    }
+    Ok(())
+}
+
+/// Owns only fire-and-forget children explicitly launched by JWM.
+///
+/// Keeping the `Child` handles makes reaping backend-neutral and prevents a
+/// broad `waitpid(-1, ...)` from consuming exit status owned by bars, ffmpeg,
+/// or another subsystem.
+#[derive(Debug, Default)]
+pub(crate) struct TransientChildSupervisor {
+    children: Vec<Child>,
+    /// Children inherited across `exec`. They remain exact children of the
+    /// unchanged JWM process PID, but stable Rust cannot reconstruct `Child`.
+    inherited_pids: Vec<u32>,
+}
+
+impl TransientChildSupervisor {
+    fn supervise(&mut self, child: Child) {
+        self.children.push(child);
+    }
+
+    fn restart_handoff(
+        &self,
+        parent_pid: u32,
+    ) -> Result<TransientChildRestartHandoff, TransientChildHandoffError> {
+        let pids = self
+            .children
+            .iter()
+            .map(Child::id)
+            .chain(self.inherited_pids.iter().copied())
+            .collect();
+        TransientChildRestartHandoff::new(parent_pid, pids)
+    }
+
+    fn install_restart_handoff(
+        &mut self,
+        handoff: TransientChildRestartHandoff,
+        current_pid: u32,
+    ) -> Result<(), TransientChildHandoffError> {
+        if handoff.parent_pid != current_pid {
+            return Err(TransientChildHandoffError::ParentPidMismatch {
+                expected: current_pid,
+                actual: handoff.parent_pid,
+            });
+        }
+
+        let owned: HashSet<_> = self.children.iter().map(Child::id).collect();
+        for pid in handoff.pids {
+            if !owned.contains(&pid) && !self.inherited_pids.contains(&pid) {
+                self.inherited_pids.push(pid);
+            }
+        }
+        Ok(())
+    }
+
+    /// Reap exited children through their owning handles and return every PID
+    /// whose handle was retired. A status-query error also retires the handle:
+    /// without a usable owner handle, retrying forever would retain stale PIDs.
+    fn reap_exited(&mut self) -> Vec<u32> {
+        let mut retired = Vec::new();
+        self.children.retain_mut(|child| {
+            let pid = child.id();
+            match child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(status)) => {
+                    info!("Transient child {pid} exited with status {status}");
+                    retired.push(pid);
+                    false
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => true,
+                Err(error) => {
+                    warn!("Could not query transient child {pid}: {error}; retiring its handle");
+                    retired.push(pid);
+                    false
+                }
+            }
+        });
+
+        self.inherited_pids.retain(|&raw_pid| {
+            let pid = Pid::from_raw(raw_pid as i32);
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) => true,
+                Ok(WaitStatus::Exited(_, status)) => {
+                    info!("Inherited transient child {raw_pid} exited with status {status}");
+                    retired.push(raw_pid);
+                    false
+                }
+                Ok(WaitStatus::Signaled(_, signal, _)) => {
+                    info!("Inherited transient child {raw_pid} exited on signal {signal}");
+                    retired.push(raw_pid);
+                    false
+                }
+                Ok(_) => true,
+                Err(Errno::EINTR) => true,
+                Err(Errno::ECHILD) => {
+                    warn!(
+                        "Inherited transient PID {raw_pid} is no longer a child; retiring exact-PID ownership"
+                    );
+                    retired.push(raw_pid);
+                    false
+                }
+                Err(error) => {
+                    warn!("Could not reap inherited transient child {raw_pid}: {error}");
+                    true
+                }
+            }
+        });
+        retired
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.children.is_empty() && self.inherited_pids.is_empty()
+    }
+}
 
 impl Jwm {
     fn is_smithay_backend(backend: &dyn Backend) -> bool {
@@ -183,10 +455,9 @@ impl Jwm {
 
             match command.spawn() {
                 Ok(child) => {
-                    debug!(
-                        "[spawn] successfully spawned process with PID: {}",
-                        child.id()
-                    );
+                    let pid = child.id();
+                    debug!("[spawn] successfully spawned process with PID: {}", pid);
+                    self.supervise_transient_child(child);
                 }
                 Err(e) => {
                     error!("[spawn] failed to spawn command {:?}: {}", v, e);
@@ -198,79 +469,203 @@ impl Jwm {
         Ok(())
     }
 
-    /// Reap exited children without racing the `Child` handles owned by bars.
-    ///
-    /// Managed bars are removed here, but their compositor cleanup and retry
-    /// policy need a backend. Return those failures to the event dispatcher so
-    /// SIGCHLD follows the same teardown path as the periodic supervisor.
-    pub(super) fn reap_zombies(&mut self) -> Vec<(i32, String)> {
-        let mut failed_bars = Vec::new();
-        // 回收已退出的子进程。
-        //
-        // 关键:状态栏(secondary_bars)进程由 `std::process::Child` 句柄拥有,关闭路径
-        // 会用 `child.try_wait()` 等待并按 PID 发送 SIGTERM/SIGKILL。若这里用裸
-        // `waitpid(None)` 抢先把 bar 进程回收掉,Rust 的 Child 句柄并不知情,后续
-        // `try_wait()` 会得到 ECHILD,而那个 PID 可能已被内核复用给无关进程 —— 此时
-        // 按 PID 发 SIGKILL 会误杀别人。
-        //
-        // 因此先用 WNOWAIT 窥探待回收子进程的 PID(不消费):若属于受管的 bar,改为通过
-        // 它自己的 Child 句柄回收(保持 Rust 端状态一致);其余瞬时子进程才真正 reap。
-        loop {
-            let peek = waitpid(None, Some(WaitPidFlag::WNOHANG | WaitPidFlag::WNOWAIT));
-            let pid = match peek {
-                Ok(WaitStatus::Exited(pid, _)) | Ok(WaitStatus::Signaled(pid, _, _)) => pid,
-                // StillAlive(尚有运行中的子进程但无可回收) / ECHILD(无子进程) / 其它 → 结束
-                _ => break,
-            };
+    /// Register a JWM-owned fire-and-forget child for backend-neutral reaping.
+    pub(crate) fn supervise_transient_child(&mut self, child: Child) {
+        self.transient_children.supervise(child);
+    }
 
-            let raw = pid.as_raw() as u32;
-            let bar_key = self
-                .secondary_bars
-                .iter()
-                .find(|(_, b)| b.child.id() == raw)
-                .map(|(k, _)| *k);
-            if let Some(key) = bar_key {
-                // 通过 Child 句柄回收(内部 waitpid(pid)),Rust 会缓存退出状态,
-                // 使关闭路径的 try_wait() 拿到正确结果而非 ECHILD。
-                let reason = if let Some(bar) = self.secondary_bars.get_mut(&key) {
-                    match bar.child.try_wait() {
-                        Ok(Some(status)) => {
-                            info!("Status bar child {} reaped: {:?}", raw, status);
-                            format!("exited: {status}")
-                        }
-                        Ok(None) => {
-                            // 兜底:句柄回收异常时仍消费掉该僵尸,避免死循环。
-                            let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
-                            "SIGCHLD reported an exited bar but Child still appeared live"
-                                .to_owned()
-                        }
-                        Err(error) => {
-                            let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
-                            format!("try_wait after SIGCHLD failed: {error}")
-                        }
-                    }
-                } else {
-                    let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
-                    "SIGCHLD bar bookkeeping disappeared before reap".to_owned()
-                };
-                // 该 bar 已退出,从表中移除:既避免向已死进程的 shm 写状态,
-                // 也防止关闭路径按已被内核复用的 PID 误发信号。
-                self.secondary_bars.remove(&key);
-                failed_bars.push((key, reason));
-            } else {
-                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                    Ok(WaitStatus::Exited(p, status)) => {
-                        self.remove_exited_pending_scratchpad(raw);
-                        info!("Child process {} exited with status {}", p, status);
-                    }
-                    Ok(WaitStatus::Signaled(p, sig, _)) => {
-                        self.remove_exited_pending_scratchpad(raw);
-                        info!("Child process {} killed by signal {:?}", p, sig);
-                    }
-                    _ => {}
-                }
+    /// Capture every still-owned transient PID before dropping this `Jwm` for
+    /// an exec restart. `exec` preserves the process PID and child relation,
+    /// allowing the replacement supervisor to reap each PID exactly.
+    pub(crate) fn capture_transient_child_restart_handoff(
+        &mut self,
+    ) -> Result<TransientChildRestartHandoff, TransientChildHandoffError> {
+        self.reap_transient_children();
+        self.transient_children.restart_handoff(std::process::id())
+    }
+
+    /// Install a validated same-process restart handoff. This is also used by
+    /// the in-process fallback after `exec` fails and the old `Jwm` is gone.
+    pub(crate) fn install_transient_child_restart_handoff(
+        &mut self,
+        handoff: TransientChildRestartHandoff,
+    ) -> Result<(), TransientChildHandoffError> {
+        self.transient_children
+            .install_restart_handoff(handoff, std::process::id())
+    }
+
+    /// Poll only JWM-owned transient children. This is safe to call both from
+    /// the common update loop and as an optional SIGCHLD fast path.
+    pub(super) fn reap_transient_children(&mut self) {
+        for pid in self.transient_children.reap_exited() {
+            // Scratchpad spawns share this supervisor. If one dies before its
+            // window maps, release the pending-name gate immediately.
+            self.remove_exited_pending_scratchpad(pid);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    fn wait_until_reaped(supervisor: &mut TransientChildSupervisor) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !supervisor.is_empty() && Instant::now() < deadline {
+            supervisor.reap_exited();
+            if !supervisor.is_empty() {
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
-        failed_bars
+    }
+
+    fn wait_until_zombie(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    stat.rsplit_once(") ")
+                        .and_then(|(_, suffix)| suffix.chars().next())
+                });
+            if state == Some('Z') {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("child {pid} did not become a zombie before the deadline");
+    }
+
+    #[test]
+    fn transient_true_is_removed_and_reaped_via_its_child_handle() {
+        let child = Command::new("/bin/true").spawn().unwrap();
+        let pid = child.id();
+        let mut supervisor = TransientChildSupervisor::default();
+        supervisor.supervise(child);
+
+        wait_until_reaped(&mut supervisor);
+
+        assert!(supervisor.is_empty());
+        assert_eq!(
+            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    #[test]
+    fn long_lived_child_handoff_reaps_after_old_supervisor_is_dropped() {
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child_stdin = child.stdin.take().unwrap();
+        let mut old = TransientChildSupervisor::default();
+        old.supervise(child);
+
+        let handoff = old.restart_handoff(std::process::id()).unwrap();
+        let payload = handoff.encode().unwrap();
+        let decoded =
+            TransientChildRestartHandoff::decode_for_parent_pid(&payload, std::process::id())
+                .unwrap();
+        drop(old);
+
+        let mut replacement = TransientChildSupervisor::default();
+        replacement
+            .install_restart_handoff(decoded, std::process::id())
+            .unwrap();
+        drop(child_stdin);
+        wait_until_reaped(&mut replacement);
+
+        assert!(replacement.is_empty());
+        assert_eq!(
+            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
+    }
+
+    #[test]
+    fn transient_handoff_payload_is_versioned_bounded_and_pid_scoped() {
+        let handoff = TransientChildRestartHandoff::new(8123, vec![9001, 9002]).unwrap();
+        let payload = handoff.encode().unwrap();
+
+        assert_eq!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&payload, 8123).unwrap(),
+            handoff
+        );
+        assert!(matches!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&payload, 8124),
+            Err(TransientChildHandoffError::ParentPidMismatch { .. })
+        ));
+
+        let wrong_version = serde_json::json!({
+            "version": TRANSIENT_CHILD_HANDOFF_VERSION + 1,
+            "parent_pid": 8123,
+            "pids": [9001]
+        })
+        .to_string();
+        assert!(matches!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&wrong_version, 8123),
+            Err(TransientChildHandoffError::UnsupportedVersion(_))
+        ));
+
+        let duplicate = serde_json::json!({
+            "version": TRANSIENT_CHILD_HANDOFF_VERSION,
+            "parent_pid": 8123,
+            "pids": [9001, 9001]
+        })
+        .to_string();
+        assert!(matches!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&duplicate, 8123),
+            Err(TransientChildHandoffError::DuplicateChildPid(9001))
+        ));
+
+        let too_many = serde_json::json!({
+            "version": TRANSIENT_CHILD_HANDOFF_VERSION,
+            "parent_pid": 8123,
+            "pids": (1..=MAX_TRANSIENT_CHILDREN + 1).collect::<Vec<_>>()
+        })
+        .to_string();
+        assert!(matches!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&too_many, 8123),
+            Err(TransientChildHandoffError::TooManyChildren { .. })
+        ));
+
+        let oversized = "x".repeat(MAX_TRANSIENT_CHILD_HANDOFF_BYTES + 1);
+        assert!(matches!(
+            TransientChildRestartHandoff::decode_for_parent_pid(&oversized, 8123),
+            Err(TransientChildHandoffError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn external_child_owner_keeps_its_exit_status() {
+        let mut external = Command::new("/bin/true").spawn().unwrap();
+        let external_pid = external.id();
+        let mut tracked = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let tracked_stdin = tracked.stdin.take().unwrap();
+        let mut supervisor = TransientChildSupervisor::default();
+        supervisor.supervise(tracked);
+
+        // Keep the tracked child alive while the external child is definitely
+        // waitable. A process-wide waitpid(-1) would steal the external status.
+        wait_until_zombie(external_pid);
+        supervisor.reap_exited();
+
+        assert!(!supervisor.is_empty());
+        assert!(external.wait().unwrap().success());
+
+        drop(tracked_stdin);
+        wait_until_reaped(&mut supervisor);
+        assert!(supervisor.is_empty());
     }
 }
