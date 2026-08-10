@@ -18,6 +18,7 @@ pub mod media;
 pub(crate) mod minimized_thumbnail;
 pub(crate) mod osd;
 pub mod page_curl;
+pub(crate) mod prism;
 pub mod rules;
 pub mod screenshot;
 pub mod screenshot_toolbar;

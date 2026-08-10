@@ -103,6 +103,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --lib --bins --tests
+        env:
+          EGL_PLATFORM: surfaceless
+          JWM_REQUIRE_HEADLESS_GL: 1
 
   feature-profiles:
     name: Backend feature profile (${{ matrix.profile.name }})

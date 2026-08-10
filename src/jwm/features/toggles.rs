@@ -1496,6 +1496,13 @@ impl Jwm {
                 return Ok(());
             }
 
+            let focused_index = self
+                .state
+                .monitors
+                .get(sel_mon_key)
+                .and_then(|monitor| monitor.sel)
+                .and_then(|focused| visible.iter().position(|&client| client == focused));
+
             // Tell compositor which monitor to render the prism on.
             if let Some(mon) = self.state.monitors.get(sel_mon_key) {
                 backend.compositor_set_overview_monitor(
@@ -1506,10 +1513,18 @@ impl Jwm {
                 );
             }
 
-            // Build simple client list; the compositor handles all 3D positioning.
-            let layout = self.build_overview_layout(&visible);
-
-            self.features.overview.activate(visible);
+            // Activation chooses the focused item and the first bounded prism
+            // subset together, so compositor selection and navigation state
+            // cannot begin on different windows.
+            let Some(plan) = self.features.overview.activate(visible, focused_index) else {
+                return Ok(());
+            };
+            let subset =
+                self.features.overview.clients[plan.window_start..plan.window_end].to_vec();
+            let mut layout = self.build_overview_layout(&subset);
+            for (index, entry) in layout.iter_mut().enumerate() {
+                entry.5 = index == plan.selected_in_window;
+            }
             backend.compositor_set_overview_mode(true, &layout);
             if let Some(root) = backend.root_window() {
                 let _ = backend.key_ops().grab_keyboard(root);

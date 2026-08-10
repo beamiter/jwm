@@ -358,10 +358,19 @@ pub(crate) struct TransitionUniforms {
 #[allow(dead_code)]
 pub(crate) struct CubeUniforms {
     pub mvp: i32,
+    pub model: i32,
     pub texture: i32,
     pub brightness: i32,
     pub uv_rect: i32,
     pub aspect: i32,
+    pub camera: i32,
+    pub accent: i32,
+    pub alpha: i32,
+    pub desat: i32,
+    pub edge: i32,
+    pub lit: i32,
+    pub scene_linear: i32,
+    pub has_alpha: i32,
 }
 
 #[allow(dead_code)]
@@ -917,6 +926,9 @@ pub(crate) struct WaylandCompositor {
     overview_rotation: f32,
     overview_target_rotation: f32,
     overview_title_textures: Vec<u32>,
+    /// Entry/title changes are recorded without touching GL; the next render
+    /// rebuilds the textures while the compositor context is current.
+    overview_titles_dirty: bool,
 
     // Expose
     expose_enabled: bool,
@@ -1809,10 +1821,19 @@ impl WaylandCompositor {
 
             let cube_uniforms = CubeUniforms {
                 mvp: get_uniform_loc(gl, cube_program, "u_mvp"),
+                model: get_uniform_loc(gl, cube_program, "u_model"),
                 texture: get_uniform_loc(gl, cube_program, "u_texture"),
                 brightness: get_uniform_loc(gl, cube_program, "u_brightness"),
                 uv_rect: get_uniform_loc(gl, cube_program, "u_uv_rect"),
                 aspect: get_uniform_loc(gl, cube_program, "u_aspect"),
+                camera: get_uniform_loc(gl, cube_program, "u_camera"),
+                accent: get_uniform_loc(gl, cube_program, "u_accent"),
+                alpha: get_uniform_loc(gl, cube_program, "u_alpha"),
+                desat: get_uniform_loc(gl, cube_program, "u_desat"),
+                edge: get_uniform_loc(gl, cube_program, "u_edge"),
+                lit: get_uniform_loc(gl, cube_program, "u_lit"),
+                scene_linear: get_uniform_loc(gl, cube_program, "u_scene_linear"),
+                has_alpha: get_uniform_loc(gl, cube_program, "u_has_alpha"),
             };
 
             let portal_uniforms = PortalUniforms {
@@ -2139,6 +2160,7 @@ impl WaylandCompositor {
                 overview_rotation: 0.0,
                 overview_target_rotation: 0.0,
                 overview_title_textures: Vec::new(),
+                overview_titles_dirty: false,
 
                 // Expose
                 expose_enabled: false,
@@ -3742,6 +3764,7 @@ impl WaylandCompositor {
         }
 
         self.needs_render = true;
+        self.overview_titles_dirty = true;
         self.overview_monitor = (0, 0, w, h);
     }
 }

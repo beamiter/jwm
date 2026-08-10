@@ -646,6 +646,7 @@ impl WaylandCompositor {
         self.overview_selection = None;
         self.overview_rotation = 0.0;
         self.overview_target_rotation = 0.0;
+        self.overview_titles_dirty = false;
         self.force_full_damage_next = true;
     }
 
@@ -676,6 +677,7 @@ impl WaylandCompositor {
         active: bool,
         windows: &[(u64, f32, f32, f32, f32, bool, String)],
     ) {
+        let was_active = self.overview_active;
         if !self.overview_enabled {
             self.clear_overview_state_immediate();
             self.needs_render = true;
@@ -688,7 +690,13 @@ impl WaylandCompositor {
                 self.needs_render = true;
                 return;
             }
-            self.overview_entries = windows
+            let source_selected_index = windows
+                .iter()
+                .position(|(_, _, _, _, _, focused, _)| *focused)
+                .unwrap_or(0);
+            let source_range =
+                super::overview::prism_entry_range(windows.len(), source_selected_index);
+            self.overview_entries = windows[source_range]
                 .iter()
                 .map(|(id, x, y, w, h, focused, title)| OverviewEntry {
                     window_id: *id,
@@ -700,12 +708,29 @@ impl WaylandCompositor {
                     title: title.clone(),
                 })
                 .collect();
+            self.overview_titles_dirty = true;
             self.overview_selection = self
                 .overview_entries
                 .iter()
                 .find(|entry| entry.focused)
                 .or_else(|| self.overview_entries.first())
                 .map(|entry| entry.window_id);
+            let selected_index = self
+                .overview_selection
+                .and_then(|selected| {
+                    self.overview_entries
+                        .iter()
+                        .position(|entry| entry.window_id == selected)
+                })
+                .unwrap_or(0);
+            let target =
+                super::overview::prism_target_rotation(self.overview_entries.len(), selected_index);
+            self.overview_target_rotation = target;
+            if !was_active {
+                // The activation fade must start on the focused face. Selection
+                // changes while active still animate through tick_overview_prism.
+                self.overview_rotation = target;
+            }
             self.overview_active = true;
         } else {
             // Keep the entries and selection alive until tick_overview reaches
@@ -724,6 +749,9 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_overview_monitor(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        if self.overview_monitor.2 != w {
+            self.overview_titles_dirty = true;
+        }
         self.overview_monitor = (x, y, w, h);
     }
 

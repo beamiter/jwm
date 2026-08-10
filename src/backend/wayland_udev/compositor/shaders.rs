@@ -825,14 +825,19 @@ void main() {
 pub const CUBE_VERTEX_SHADER: &str = r#"#version 300 es
 
 uniform mat4 u_mvp;
+uniform mat4 u_model;
 uniform float u_aspect; // screen_w / workspace_h
 layout(location = 0) in vec2 a_position;
 out vec2 v_uv;
+out vec3 v_world;
+out vec3 v_normal;
 
 void main() {
     v_uv = a_position;
     // Face quad spans [-aspect, -1] to [+aspect, +1] in model space
     vec3 vert = vec3((a_position.x * 2.0 - 1.0) * u_aspect, a_position.y * 2.0 - 1.0, 0.0);
+    v_world = (u_model * vec4(vert, 1.0)).xyz;
+    v_normal = normalize(mat3(u_model) * vec3(0.0, 0.0, 1.0));
     gl_Position = u_mvp * vec4(vert, 1.0);
 }
 "#;
@@ -843,13 +848,98 @@ precision highp float;
 uniform sampler2D u_texture;
 uniform float u_brightness; // face lighting (1.0 = fully lit)
 uniform vec4 u_uv_rect;     // x, y, w, h in texture UV space
+uniform float u_aspect;     // face half-width; half-height is 1.0
+uniform vec3 u_camera;      // camera position in world space
+uniform vec4 u_accent;      // rgb accent; a = selection strength
+uniform float u_alpha;      // lit-path opacity
+uniform float u_desat;      // lit-path desaturation, 0..1
+uniform float u_edge;       // lit-path rounded bevel strength, 0..1
+uniform float u_lit;        // 0 = byte-for-byte legacy shading, 1 = lit face
+uniform int u_scene_linear; // lit path writes into a linear output FBO
+uniform int u_has_alpha;    // source alpha is meaningful (not an opaque region)
 in vec2 v_uv;
+in vec3 v_world;
+in vec3 v_normal;
 out vec4 frag_color;
+
+const float CORNER_RADIUS = 0.06;
+
+float rounded_box(vec2 p, vec2 half_size, float radius) {
+    vec2 d = abs(p) - half_size + vec2(radius);
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+}
+
+vec3 srgb_inverse(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
+
+vec3 output_domain_color(vec3 encoded) {
+    return u_scene_linear != 0 ? srgb_inverse(encoded) : encoded;
+}
 
 void main() {
     vec2 uv = u_uv_rect.xy + v_uv * u_uv_rect.zw;
     vec4 texel = texture(u_texture, uv);
-    frag_color = vec4(texel.rgb * u_brightness, texel.a * u_brightness);
+
+    // Workspace transitions predate the lit prism face and intentionally keep
+    // their exact brightness-only output. Keep this branch first so none of the
+    // new material controls can alter a legacy draw.
+    if (u_lit < 0.5) {
+        frag_color = vec4(texel.rgb * u_brightness, texel.a * u_brightness);
+        return;
+    }
+
+    // Window textures are premultiplied. Decode through straight color when
+    // the output is scene-linear, then premultiply again before compositing
+    // the dark backing. Opaque-region clients intentionally ignore raw alpha.
+    float raw_alpha = clamp(texel.a, 0.0, 1.0);
+    float source_alpha = u_has_alpha != 0 ? raw_alpha : 1.0;
+    vec3 source_rgb = texel.rgb;
+    if (u_scene_linear != 0) {
+        vec3 straight = u_has_alpha != 0
+            ? (raw_alpha > 1.0e-6 ? texel.rgb / raw_alpha : vec3(0.0))
+            : texel.rgb;
+        source_rgb = srgb_inverse(straight) * source_alpha;
+    }
+    vec3 backing = output_domain_color(vec3(0.055, 0.065, 0.085));
+    vec3 accent = output_domain_color(u_accent.rgb);
+    vec3 base = source_rgb + backing * (1.0 - source_alpha);
+
+    vec3 normal = normalize(v_normal);
+    vec3 view = normalize(u_camera - v_world);
+    normal *= sign(dot(normal, view) + 1e-4);
+    vec3 light = normalize(vec3(-0.35, 0.85, 0.55));
+    float diffuse = 0.78 + 0.22 * clamp(dot(normal, light), 0.0, 1.0);
+    vec3 half_vec = normalize(light + view);
+    float specular = pow(clamp(dot(normal, half_vec), 0.0, 1.0), 40.0) * 0.55;
+    float fresnel = pow(1.0 - clamp(dot(normal, view), 0.0, 1.0), 3.5);
+
+    vec3 color = base * u_brightness * diffuse;
+    float desat = clamp(u_desat, 0.0, 1.0);
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(color, vec3(luma), desat);
+    color += vec3(1.0) * specular * (1.0 - desat * 0.5);
+    color += mix(accent, vec3(1.0), 0.4) * fresnel * 0.17;
+
+    float edge = clamp(u_edge, 0.0, 1.0);
+    vec2 half_size = vec2(u_aspect, 1.0);
+    vec2 local = (v_uv * 2.0 - 1.0) * half_size;
+    float dist = rounded_box(local, half_size, CORNER_RADIUS * edge);
+    float aa = max(fwidth(dist), 1.0e-4);
+    float mask = 1.0 - smoothstep(-aa, aa, dist);
+    float bevel = 1.0 - smoothstep(0.0, 0.014, -dist);
+    float halo = 1.0 - smoothstep(0.0, 0.10, -dist);
+    color += (accent * 0.45 + output_domain_color(vec3(0.16)))
+           * bevel * (0.35 + 0.65 * u_accent.a) * edge;
+    color += accent * halo * u_accent.a * 0.20 * edge;
+
+    float alpha = clamp(u_alpha, 0.0, 1.0) * mask;
+    // This UI material is reflective, not emissive. Bound straight color
+    // before premultiplication so highlights cannot leak through a fade.
+    frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
 }
 "#;
 
@@ -1344,8 +1434,15 @@ pub const OVERVIEW_BG_FRAGMENT_SHADER: &str = r#"#version 300 es
 precision highp float;
 
 uniform float u_opacity;
+uniform int u_scene_linear;
 in vec2 v_uv;
 out vec4 frag_color;
+
+vec3 srgb_inverse(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow(max((c + 0.055) / 1.055, 0.0), vec3(2.4));
+    return mix(lo, hi, step(0.04045, c));
+}
 
 void main() {
     vec2 centered = v_uv - vec2(0.5);
@@ -1353,6 +1450,10 @@ void main() {
     float vignette = smoothstep(0.1, 0.85, dist);
     vec3 top_tint = vec3(0.10, 0.12, 0.16);
     vec3 bottom_tint = vec3(0.03, 0.04, 0.06);
+    if (u_scene_linear != 0) {
+        top_tint = srgb_inverse(top_tint);
+        bottom_tint = srgb_inverse(bottom_tint);
+    }
     vec3 color = mix(top_tint, bottom_tint, clamp(v_uv.y * 1.15, 0.0, 1.0));
     // Semi-transparent dark tint so the wallpaper is visible underneath.
     // Windows on this monitor are already skipped during overview, so we

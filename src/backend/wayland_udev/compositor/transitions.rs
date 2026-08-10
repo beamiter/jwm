@@ -6,6 +6,13 @@ use crate::backend::compositor_common::page_curl::{PAGE_CURL_STRIPS, page_curl_s
 use crate::backend::compositor_common::transitions::normalized_transition_progress;
 use smithay::backend::renderer::gles::ffi;
 
+const IDENTITY_MODEL: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, //
+    0.0, 1.0, 0.0, 0.0, //
+    0.0, 0.0, 1.0, 0.0, //
+    0.0, 0.0, 0.0, 1.0,
+];
+
 /// Geometry shared by every workspace-transition mode.
 ///
 /// Draw coordinates use the compositor's top-left origin, while `scissor`
@@ -185,6 +192,23 @@ impl WaylandCompositor {
             );
             gl.UseProgram(self.cube_program);
             gl.UniformMatrix4fv(self.cube_uniforms.mvp, 1, ffi::FALSE as u8, mvp.as_ptr());
+            // The cube program also serves the opt-in lit overview path. A
+            // transition must reset every material uniform because the overview
+            // may have left the shared program in lit mode on the previous frame.
+            gl.UniformMatrix4fv(
+                self.cube_uniforms.model,
+                1,
+                ffi::FALSE as u8,
+                IDENTITY_MODEL.as_ptr(),
+            );
+            gl.Uniform3f(self.cube_uniforms.camera, 0.0, 0.0, 1.0);
+            gl.Uniform4f(self.cube_uniforms.accent, 0.0, 0.0, 0.0, 0.0);
+            gl.Uniform1f(self.cube_uniforms.alpha, 1.0);
+            gl.Uniform1f(self.cube_uniforms.desat, 0.0);
+            gl.Uniform1f(self.cube_uniforms.edge, 0.0);
+            gl.Uniform1f(self.cube_uniforms.lit, 0.0);
+            gl.Uniform1i(self.cube_uniforms.scene_linear, 0);
+            gl.Uniform1i(self.cube_uniforms.has_alpha, 1);
             gl.Uniform1f(
                 self.cube_uniforms.aspect,
                 layout.draw_rect[2] / layout.draw_rect[3],

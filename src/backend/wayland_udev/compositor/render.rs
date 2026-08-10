@@ -2632,7 +2632,7 @@ impl WaylandCompositor {
                 self.clear_overview_textures(gl);
             }
         } else if self.overview_opacity > 0.0 {
-            self.render_overview(gl, &projection);
+            self.render_overview(gl, &projection, overlay_scene_linear);
         }
 
         // =================================================================

@@ -1,8 +1,55 @@
 use super::*;
 use crate::backend::compositor_common::math::{
-    mat4_mul, perspective_matrix, rotate_y_matrix, scale_matrix, translate_matrix,
+    mat4_mul, rotate_y_matrix, scale_matrix, translate_matrix,
+};
+use crate::backend::compositor_common::prism::{
+    MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, build_prism_pieces,
 };
 use smithay::backend::renderer::gles::ffi;
+
+/// Share of the owning monitor's height covered by the front face. Keep this
+/// identical to X11: both backends now frame the same prism geometry.
+const PRISM_FACE_FILL: f32 = 0.56;
+/// Screen-space baseline of the front face, leaving room for its title.
+const PRISM_BASE_LINE: f32 = 0.84;
+const TITLE_SCALE: f32 = 2.0;
+const TITLE_MARGIN: f32 = 8.0;
+
+fn max_title_texture_width(monitor_width: u32) -> u32 {
+    let available = (monitor_width.saturating_sub((TITLE_MARGIN * 2.0) as u32) as f32 / TITLE_SCALE)
+        .floor() as u32;
+    (monitor_width / 3).max(120).min(available.max(1))
+}
+
+/// Rotation that brings the selected prism face squarely toward the camera.
+///
+/// One- and two-window overviews deliberately reuse the first faces of a
+/// triangle, matching the shared prism geometry.
+pub(super) fn prism_target_rotation(entry_count: usize, selected_index: usize) -> f32 {
+    if entry_count == 0 {
+        return 0.0;
+    }
+
+    let sides = entry_count.clamp(MIN_PRISM_SIDES, MAX_PRISM_SIDES);
+    -((selected_index % sides) as f32) * std::f32::consts::TAU / sides as f32
+}
+
+/// Defensive renderer-side bound for callers that have not already applied
+/// the overview policy's six-window sliding subset.
+pub(super) fn prism_entry_range(
+    entry_count: usize,
+    selected_index: usize,
+) -> std::ops::Range<usize> {
+    if entry_count <= MAX_PRISM_SIDES {
+        return 0..entry_count;
+    }
+
+    let selected_index = selected_index.min(entry_count - 1);
+    let start = selected_index
+        .saturating_sub(MAX_PRISM_SIDES / 2)
+        .min(entry_count - MAX_PRISM_SIDES);
+    start..start + MAX_PRISM_SIDES
+}
 
 // ---------------------------------------------------------------------------
 // Minimal 6x10 bitmap font (ASCII 32-126, 95 chars x 10 bytes = 950 bytes)
@@ -348,11 +395,10 @@ impl WaylandCompositor {
 
     /// Create GL textures for overview entry titles.
     /// Stores texture IDs in `self.overview_title_textures`.
-    #[allow(dead_code)]
     pub(crate) fn create_overview_title_textures(&mut self, gl: &ffi::Gles2) {
         self.clear_overview_textures(gl);
 
-        let max_label_width = (self.screen_w / 3).max(120);
+        let max_label_width = max_title_texture_width(self.overview_monitor.2.max(1));
         let mut textures = Vec::with_capacity(self.overview_entries.len());
 
         for entry in &self.overview_entries {
@@ -394,6 +440,7 @@ impl WaylandCompositor {
         }
 
         self.overview_title_textures = textures;
+        self.overview_titles_dirty = false;
     }
 
     fn render_overview_scroll_strip(
@@ -509,9 +556,17 @@ impl WaylandCompositor {
         }
     }
 
-    /// Render the 3D hexagonal prism carousel overview.
-    /// Each window becomes a face on a rotating prism; the selected face rotates to front.
-    pub(crate) fn render_overview(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    /// Render the 3D prism carousel overview.
+    ///
+    /// Three through six windows form the matching regular solid (four is a
+    /// real cube); one or two windows occupy the readable faces of a triangle.
+    /// The selected face rotates to the front.
+    pub(crate) fn render_overview(
+        &mut self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        scene_linear_output: bool,
+    ) {
         if self.overview_opacity <= 0.0 {
             return;
         }
@@ -519,6 +574,9 @@ impl WaylandCompositor {
         let n = self.overview_entries.len();
         if n == 0 {
             return;
+        }
+        if self.overview_titles_dirty || self.overview_title_textures.len() != n {
+            self.create_overview_title_textures(gl);
         }
         let strip_segments = overview_strip_segments(&self.overview_entries);
 
@@ -539,6 +597,10 @@ impl WaylandCompositor {
                 self.overview_bg_program,
                 b"u_opacity\0".as_ptr() as *const _,
             );
+            let scene_linear_loc = gl.GetUniformLocation(
+                self.overview_bg_program,
+                b"u_scene_linear\0".as_ptr() as *const _,
+            );
 
             let (mon_x, mon_y, mon_w, mon_h) = self.overview_monitor;
             let mw = mon_w.max(1) as f32;
@@ -553,6 +615,9 @@ impl WaylandCompositor {
             if opacity_loc >= 0 {
                 gl.Uniform1f(opacity_loc, self.overview_opacity);
             }
+            if scene_linear_loc >= 0 {
+                gl.Uniform1i(scene_linear_loc, i32::from(scene_linear_output));
+            }
 
             gl.BindVertexArray(self.quad_vao);
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -565,20 +630,23 @@ impl WaylandCompositor {
             // ------------------------------------------------------------------
             // 2. Compute prism geometry
             // ------------------------------------------------------------------
-            let face_w = mw * 0.8;
-            let face_h = mh * 0.8;
-            let face_aspect = face_w / face_h;
-            let apothem = face_aspect * 3.0_f32.sqrt();
-
-            let fov_y = std::f32::consts::FRAC_PI_4;
-            let camera_z = (apothem + 1.0 / (fov_y * 0.5).tan()) * 1.2;
-            let monitor_aspect = mw / mh;
-            let persp = perspective_matrix(fov_y, monitor_aspect, 0.1, camera_z * 4.0);
-            let view = translate_matrix(0.0, 0.0, -camera_z);
-            let global_rot = rotate_y_matrix(self.overview_rotation);
+            // A regular n-gon needs apothem = half_width / tan(PI / n).
+            // This used to be hard-coded to `sqrt(3) * half_width`, which is
+            // only valid for a hexagon: four windows consequently formed four
+            // disconnected panels instead of a cube. The shared camera owns
+            // the canonical 3..=6-side geometry and framing for both backends.
+            let sides = n.clamp(MIN_PRISM_SIDES, MAX_PRISM_SIDES);
+            let face_aspect = mw / mh;
+            let camera = PrismCamera::frame(face_aspect, sides, PRISM_FACE_FILL, 0.27, 0.0);
             let anim_scale = self.overview_opacity.clamp(0.0, 1.0);
-            let scale_mat = scale_matrix(anim_scale, anim_scale, anim_scale);
-            let face_angle = std::f32::consts::TAU / (n as f32);
+            let lift = camera.lift_for_base_line(PRISM_BASE_LINE) * anim_scale;
+            let base_model = mat4_mul(
+                &translate_matrix(0.0, lift, 0.0),
+                &mat4_mul(
+                    &rotate_y_matrix(self.overview_rotation),
+                    &scale_matrix(anim_scale, anim_scale, anim_scale),
+                ),
+            );
 
             // Determine selected index for rotation target
             let selected_idx = self
@@ -590,55 +658,60 @@ impl WaylandCompositor {
                 })
                 .unwrap_or(0);
 
-            // Current rotation (animated in tick_overview_prism)
-            let rotation = self.overview_rotation;
-
             // ------------------------------------------------------------------
             // 3. Build face data and sort back-to-front (painter's algorithm)
             // ------------------------------------------------------------------
             struct FaceData {
                 index: usize,
-                z: f32,
                 mvp: [f32; 16],
+                model: [f32; 16],
+                facing: f32,
                 brightness: f32,
             }
 
-            let mut faces: Vec<FaceData> = Vec::with_capacity(n);
-
-            for i in 0..n {
-                let angle = face_angle * (i as f32);
-                let face_rot = rotate_y_matrix(angle);
-                let face_translate = translate_matrix(0.0, 0.0, apothem);
-                let face_model = mat4_mul(&face_rot, &face_translate);
-                let model = mat4_mul(&scale_mat, &face_model);
-                let model = mat4_mul(&global_rot, &model);
-                let mv = mat4_mul(&view, &model);
-                let mvp = mat4_mul(&persp, &mv);
-
-                let total_angle = angle + rotation;
-                let cos_facing = total_angle.cos();
-                let brightness = (0.25 + 0.65 * cos_facing.max(0.0)) * anim_scale;
-
-                faces.push(FaceData {
-                    index: i,
-                    z: mv[14],
-                    mvp,
-                    brightness,
-                });
-            }
-
-            // Sort back-to-front: smaller z (further) drawn first
-            faces.sort_by(|a, b| a.z.partial_cmp(&b.z).unwrap_or(std::cmp::Ordering::Equal));
+            // `build_prism_pieces` also returns the polygon caps. Wayland's
+            // GLES adapter does not draw them yet, but consuming the shared
+            // depth-sorted faces immediately fixes polygon closure, side-count
+            // drift and camera framing without duplicating either algorithm.
+            let faces: Vec<FaceData> = build_prism_pieces(&camera, &base_model)
+                .into_iter()
+                .filter_map(|piece| {
+                    let PrismKind::Face { slot } = piece.kind else {
+                        return None;
+                    };
+                    (slot < n).then(|| FaceData {
+                        index: slot,
+                        mvp: piece.mvp,
+                        model: piece.model,
+                        facing: piece.facing,
+                        brightness: if piece.facing > 0.0 {
+                            0.70 + 0.30 * piece.facing
+                        } else {
+                            0.42
+                        },
+                    })
+                })
+                .collect();
 
             // ------------------------------------------------------------------
             // 4. Render each face using cube_program
             // ------------------------------------------------------------------
             gl.UseProgram(self.cube_program);
             gl.Uniform1f(self.cube_uniforms.aspect, face_aspect);
+            gl.Uniform3f(
+                self.cube_uniforms.camera,
+                camera.eye[0],
+                camera.eye[1],
+                camera.eye[2],
+            );
+            gl.Uniform1f(self.cube_uniforms.alpha, anim_scale);
+            gl.Uniform1f(self.cube_uniforms.edge, 1.0);
+            gl.Uniform1f(self.cube_uniforms.lit, 1.0);
+            gl.Uniform1i(
+                self.cube_uniforms.scene_linear,
+                i32::from(scene_linear_output),
+            );
             gl.BindVertexArray(self.quad_vao);
-
-            let tex_loc =
-                gl.GetUniformLocation(self.cube_program, b"u_texture\0".as_ptr() as *const _);
 
             let mut drawn_faces = 0usize;
             let mut missing_window_faces = 0usize;
@@ -678,14 +751,37 @@ impl WaylandCompositor {
                     ffi::FALSE as u8,
                     face.mvp.as_ptr(),
                 );
+                gl.UniformMatrix4fv(
+                    self.cube_uniforms.model,
+                    1,
+                    ffi::FALSE as u8,
+                    face.model.as_ptr(),
+                );
                 gl.Uniform4f(self.cube_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
                 gl.Uniform1f(self.cube_uniforms.brightness, face.brightness);
+                gl.Uniform1i(self.cube_uniforms.has_alpha, i32::from(win.has_alpha));
+                let selected = face.index == selected_idx;
+                gl.Uniform4f(
+                    self.cube_uniforms.accent,
+                    0.32,
+                    0.62,
+                    1.0,
+                    if selected { 1.0 } else { 0.15 },
+                );
+                gl.Uniform1f(
+                    self.cube_uniforms.desat,
+                    if selected {
+                        0.0
+                    } else if face.facing > 0.0 {
+                        0.30
+                    } else {
+                        0.65
+                    },
+                );
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, texture);
-                if tex_loc >= 0 {
-                    gl.Uniform1i(tex_loc, 0);
-                }
+                gl.Uniform1i(self.cube_uniforms.texture, 0);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                 drawn_faces += 1;
@@ -716,20 +812,20 @@ impl WaylandCompositor {
             }
 
             // ------------------------------------------------------------------
-            // 5. Selection highlight border on the projected selected face
+            // 5. Locate the selected face for its flat title overlay
             // ------------------------------------------------------------------
+            // Selection itself is now drawn by the face shader as a bevel in
+            // the face plane. The former axis-aligned screen-space rectangle
+            // visibly detached from a face as the prism turned.
             let vp_x = mon_x as f32;
             let vp_y = mon_y as f32;
+            let mut selected_title_anchor = None;
             for face in faces.iter().rev() {
                 if face.brightness < 0.05 {
                     continue;
                 }
 
-                let entry = &self.overview_entries[face.index];
-                let is_selected = self.overview_selection == Some(entry.window_id)
-                    || entry.focused
-                    || face.index == selected_idx;
-                if !is_selected {
+                if face.index != selected_idx {
                     continue;
                 }
 
@@ -757,38 +853,7 @@ impl WaylandCompositor {
                 if min_x == f32::MAX || min_y == f32::MAX {
                     break;
                 }
-
-                let bw = 3.0;
-                let pad = bw + 2.0;
-                let bx = min_x - pad;
-                let by = min_y - pad;
-                let rect_w = max_x - min_x + pad * 2.0;
-                let rect_h = max_y - min_y + pad * 2.0;
-                if rect_w <= 1.0 || rect_h <= 1.0 {
-                    break;
-                }
-
-                gl.UseProgram(self.border_program);
-                gl.UniformMatrix4fv(
-                    self.border_uniforms.projection,
-                    1,
-                    ffi::FALSE as u8,
-                    projection.as_ptr(),
-                );
-                gl.Uniform4f(self.border_uniforms.rect, bx, by, rect_w, rect_h);
-                gl.Uniform4f(
-                    self.border_uniforms.border_color,
-                    0.4,
-                    0.7,
-                    1.0,
-                    self.overview_opacity * 0.9,
-                );
-                gl.Uniform2f(self.border_uniforms.size, rect_w, rect_h);
-                gl.Uniform1f(self.border_uniforms.radius, 8.0);
-                gl.Uniform1f(self.border_uniforms.radius_top, 8.0);
-                gl.Uniform1f(self.border_uniforms.border_width, bw);
-
-                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                selected_title_anchor = Some(((min_x + max_x) * 0.5, max_y + 10.0));
                 break;
             }
 
@@ -805,16 +870,23 @@ impl WaylandCompositor {
                     let char_w = 6u32;
                     let char_h = 10u32;
                     let padding = 2u32;
-                    let max_label_width = (self.screen_w / 3).max(120);
+                    let max_label_width = max_title_texture_width(mon_w);
                     let text_w = ((title.len() as u32) * char_w).min(max_label_width);
                     let text_h = char_h + padding * 2;
 
-                    // Scale up for readability (2x)
-                    let scale = 2.0f32;
+                    // Scale up for readability. The atlas width helper already
+                    // reserves both monitor margins at this display scale.
+                    let scale = TITLE_SCALE;
                     let label_w = text_w as f32 * scale;
                     let label_h = text_h as f32 * scale;
-                    let label_x = (self.screen_w as f32 - label_w) * 0.5;
-                    let label_y = self.screen_h as f32 * 0.82;
+                    let (anchor_x, anchor_y) = selected_title_anchor
+                        .unwrap_or((mon_x as f32 + mw * 0.5, mon_y as f32 + mh * PRISM_BASE_LINE));
+                    let min_x = mon_x as f32 + TITLE_MARGIN;
+                    let max_x = (mon_x as f32 + mw - label_w - TITLE_MARGIN).max(min_x);
+                    let min_y = mon_y as f32 + TITLE_MARGIN;
+                    let max_y = (mon_y as f32 + mh - label_h - TITLE_MARGIN).max(min_y);
+                    let label_x = (anchor_x - label_w * 0.5).clamp(min_x, max_x);
+                    let label_y = anchor_y.clamp(min_y, max_y);
 
                     gl.UseProgram(self.program);
                     gl.UniformMatrix4fv(
@@ -824,7 +896,11 @@ impl WaylandCompositor {
                         projection.as_ptr(),
                     );
                     gl.Uniform4f(self.win_uniforms.rect, label_x, label_y, label_w, label_h);
-                    gl.Uniform1f(self.win_uniforms.opacity, self.overview_opacity * 0.95);
+                    // Title atlases contain transparent background pixels. The
+                    // window shader uses a negative opacity to preserve source
+                    // alpha; a positive value intentionally forces RGB clients
+                    // opaque and would turn the entire label quad black.
+                    gl.Uniform1f(self.win_uniforms.opacity, -self.overview_opacity * 0.95);
                     gl.Uniform1f(self.win_uniforms.radius, 4.0);
                     gl.Uniform2f(self.win_uniforms.size, label_w, label_h);
                     gl.Uniform1f(self.win_uniforms.dim, 1.0);
@@ -868,8 +944,6 @@ impl WaylandCompositor {
             return;
         }
 
-        let face_angle = std::f32::consts::TAU / (n as f32);
-
         let selected_idx = self
             .overview_selection
             .and_then(|sel_id| {
@@ -879,12 +953,7 @@ impl WaylandCompositor {
             })
             .unwrap_or(0);
 
-        // Target: rotate so that the selected face ends up at angle=0 (facing camera)
-        // Since face i is at angle face_angle*i + rotation, we want face_angle*selected_idx + rotation = 0
-        // => target_rotation = -face_angle * selected_idx
-        // Normalize to keep shortest path
-        let raw_target = -face_angle * (selected_idx as f32);
-        self.overview_target_rotation = raw_target;
+        self.overview_target_rotation = prism_target_rotation(n, selected_idx);
 
         // Ensure shortest rotation path (wrap around)
         let mut diff = self.overview_target_rotation - self.overview_rotation;
@@ -964,5 +1033,33 @@ mod tests {
         assert_eq!(segments[1].windows.len(), 1);
         assert!(segments[1].focused);
         assert!(segments[1].windows[0].focused);
+    }
+
+    #[test]
+    fn prism_target_rotation_faces_the_selected_slot() {
+        assert_eq!(prism_target_rotation(0, 4), 0.0);
+        assert_eq!(prism_target_rotation(1, 0), 0.0);
+        assert!((prism_target_rotation(4, 2) + std::f32::consts::PI).abs() < 1.0e-6);
+        assert!((prism_target_rotation(6, 5) + 5.0 * std::f32::consts::TAU / 6.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn prism_entry_range_bounds_rogue_backend_payloads_around_focus() {
+        assert_eq!(prism_entry_range(0, 0), 0..0);
+        assert_eq!(prism_entry_range(4, 2), 0..4);
+        assert_eq!(prism_entry_range(10, 0), 0..6);
+        assert_eq!(prism_entry_range(10, 7), 4..10);
+        assert_eq!(prism_entry_range(10, 99), 4..10);
+    }
+
+    #[test]
+    fn title_atlas_cap_reserves_scaled_monitor_margins() {
+        for width in [200, 256, 1920, 7680] {
+            let atlas_width = max_title_texture_width(width);
+            assert!(
+                atlas_width as f32 * TITLE_SCALE + TITLE_MARGIN * 2.0 <= width as f32,
+                "{width}px monitor produced a {atlas_width}px atlas"
+            );
+        }
     }
 }

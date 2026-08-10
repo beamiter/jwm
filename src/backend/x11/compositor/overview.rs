@@ -517,7 +517,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
             // === 5. Mirrored prism, fading into the floor ===
             let mirrored = mat4_mul(&mirror_matrix(floor_y), &base_model);
-            let reflection = build_prism_pieces(&camera, &mirrored, sides);
+            let reflection = build_prism_pieces(&camera, &mirrored);
             self.draw_prism_pass(
                 &camera,
                 &reflection,
@@ -532,7 +532,7 @@ impl<C: CompositorConnection> Compositor<C> {
             );
 
             // === 6. The prism itself ===
-            let solid = build_prism_pieces(&camera, &base_model, sides);
+            let solid = build_prism_pieces(&camera, &base_model);
             self.draw_prism_pass(
                 &camera,
                 &solid,

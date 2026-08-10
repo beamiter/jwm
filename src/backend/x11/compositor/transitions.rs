@@ -378,14 +378,14 @@ impl<C: CompositorConnection> Compositor<C> {
         let mirrored = mat4_mul(&mirror_matrix(floor_y), &base_model);
         self.draw_prism_pass(
             &camera,
-            &build_prism_pieces(&camera, &mirrored, CUBE_SIDES),
+            &build_prism_pieces(&camera, &mirrored),
             &faces,
             filler,
             &pass(true),
         );
         self.draw_prism_pass(
             &camera,
-            &build_prism_pieces(&camera, &base_model, CUBE_SIDES),
+            &build_prism_pieces(&camera, &base_model),
             &faces,
             filler,
             &pass(false),

@@ -1,6 +1,7 @@
 //! Overview 模式 - Alt+Ctrl+Tab 3D 棱镜轮播视图
 
 use crate::core::models::ClientKey;
+use crate::jwm::features::overview_plan::{ActivationPlan, plan_activation};
 
 /// Overview 模式状态（3D 窗口切换器）
 #[derive(Debug, Default, Clone)]
@@ -20,12 +21,21 @@ impl OverviewState {
         Self::default()
     }
 
-    /// 激活 overview 模式
-    pub fn activate(&mut self, clients: Vec<ClientKey>) {
+    /// 激活 overview 模式，并返回首帧合成器子集计划。
+    pub fn activate(
+        &mut self,
+        clients: Vec<ClientKey>,
+        focused_index: Option<usize>,
+    ) -> Option<ActivationPlan> {
+        let Some(plan) = plan_activation(clients.len(), focused_index) else {
+            self.deactivate();
+            return None;
+        };
         self.active = true;
         self.clients = clients;
-        self.index = 0;
-        self.slide_offset = 0;
+        self.index = plan.index;
+        self.slide_offset = plan.window_start;
+        Some(plan)
     }
 
     /// 退出 overview 模式
@@ -125,7 +135,7 @@ mod tests {
         let mut state = OverviewState::new();
         let clients = create_test_keys(5);
 
-        state.activate(clients.clone());
+        state.activate(clients.clone(), None).unwrap();
         assert!(state.active);
         assert_eq!(state.client_count(), 5);
         assert_eq!(state.index, 0);
@@ -152,7 +162,7 @@ mod tests {
         let mut state = OverviewState::new();
         let clients = create_test_keys(4);
 
-        state.activate(clients);
+        state.activate(clients, None).unwrap();
         let (start, end) = state.get_visible_range();
         assert_eq!(start, 0);
         assert_eq!(end, 4);
@@ -163,7 +173,7 @@ mod tests {
         let mut state = OverviewState::new();
         let clients = create_test_keys(10);
 
-        state.activate(clients);
+        state.activate(clients, None).unwrap();
 
         // 初始位置
         let (start, end) = state.get_visible_range();
@@ -181,12 +191,38 @@ mod tests {
         let mut state = OverviewState::new();
         let clients = create_test_keys(3);
 
-        state.activate(clients);
+        state.activate(clients, None).unwrap();
         state.next();
 
         state.deactivate();
         assert!(!state.active);
         assert_eq!(state.client_count(), 0);
         assert_eq!(state.index, 0);
+    }
+
+    #[test]
+    fn activation_keeps_state_and_first_prism_on_the_focused_window() {
+        let mut state = OverviewState::new();
+        let clients = create_test_keys(10);
+
+        let plan = state.activate(clients.clone(), Some(7)).unwrap();
+
+        assert_eq!(state.index, 7);
+        assert_eq!(state.slide_offset, plan.window_start);
+        assert_eq!(state.get_selected_client(), Some(clients[7]));
+        assert_eq!((plan.window_start, plan.window_end), (4, 10));
+        assert_eq!(plan.selected_in_window, 3);
+    }
+
+    #[test]
+    fn activating_an_empty_list_clears_previous_state() {
+        let mut state = OverviewState::new();
+        state.activate(create_test_keys(3), Some(1)).unwrap();
+
+        assert_eq!(state.activate(Vec::new(), None), None);
+        assert!(!state.active);
+        assert!(state.clients.is_empty());
+        assert_eq!(state.index, 0);
+        assert_eq!(state.slide_offset, 0);
     }
 }

@@ -5,11 +5,12 @@
 //! `#version 330 core` shaders) so the real shaders in both backends'
 //! `compositor::shaders` modules can be compiled and exercised under
 //! `cargo test`, without a display server or window. On a machine with no usable
-//! EGL/GL the harness returns `None` and the tests skip, so this never breaks CI
-//! on boxes that lack Mesa. Where Mesa is present (including the llvmpipe
-//! software rasteriser) the tests run for real and catch shader-compile
-//! regressions and pixel-math bugs that previously could only be found by
-//! eyeballing a live compositor.
+//! EGL/GL the harness normally returns `None` and the tests skip. CI sets
+//! `JWM_REQUIRE_HEADLESS_GL=1`, turning that soft skip into a failure so a
+//! missing surfaceless setup cannot silently pass the shader gate. Where Mesa
+//! is present (including the llvmpipe software rasteriser) the tests run for
+//! real and catch shader-compile regressions and pixel-math bugs that previously
+//! could only be found by eyeballing a live compositor.
 
 use glow::HasContext as _;
 use std::os::raw::c_void;
@@ -31,6 +32,18 @@ struct HeadlessGl {
 
 impl HeadlessGl {
     fn new(api: GlApi) -> Option<Self> {
+        let result = Self::try_new(api);
+        if result.is_none()
+            && std::env::var_os("JWM_REQUIRE_HEADLESS_GL").is_some_and(|value| value != "0")
+        {
+            panic!(
+                "headless EGL/GL is required but unavailable; configure a surfaceless Mesa platform"
+            );
+        }
+        result
+    }
+
+    fn try_new(api: GlApi) -> Option<Self> {
         // EGL enums not surfaced by the egl 0.2.7 crate.
         const EGL_OPENGL_BIT: egl::EGLint = 0x0008;
         const EGL_CONTEXT_MINOR_VERSION: egl::EGLint = 0x30FB;
@@ -958,6 +971,248 @@ fn assert_all_compile<N: AsRef<str>, S: AsRef<str>>(
 #[test]
 fn wayland_shaders_compile() {
     assert_all_compile(GlApi::Gles3, "wayland_shaders_compile", wayland_shaders());
+}
+
+#[test]
+fn wayland_cube_shader_legacy_mode_is_brightness_only() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube legacy-mode test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    for name in [
+        "u_model",
+        "u_camera",
+        "u_accent",
+        "u_alpha",
+        "u_desat",
+        "u_edge",
+        "u_lit",
+        "u_scene_linear",
+        "u_has_alpha",
+    ] {
+        assert!(
+            unsafe { gl.get_uniform_location(program, name) }.is_some(),
+            "cube program optimized out required uniform {name}"
+        );
+    }
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+
+    let pixel = render_quad(gl, program, [120, 80, 40, 200], 8, 8, |gl| unsafe {
+        let u = |name: &str| gl.get_uniform_location(program, name);
+        gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+        gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+        gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+        gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+        gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+        gl.uniform_1_f32(u("u_brightness").as_ref(), 0.5);
+
+        // Hostile lit-material values must be irrelevant while u_lit is zero.
+        gl.uniform_3_f32(u("u_camera").as_ref(), -4.0, 3.0, 0.25);
+        gl.uniform_4_f32(u("u_accent").as_ref(), 1.0, 0.0, 1.0, 1.0);
+        gl.uniform_1_f32(u("u_alpha").as_ref(), 0.1);
+        gl.uniform_1_f32(u("u_desat").as_ref(), 1.0);
+        gl.uniform_1_f32(u("u_edge").as_ref(), 1.0);
+        gl.uniform_1_f32(u("u_lit").as_ref(), 0.0);
+        gl.uniform_1_i32(u("u_scene_linear").as_ref(), 1);
+        gl.uniform_1_i32(u("u_has_alpha").as_ref(), 0);
+    });
+
+    assert_pixel(pixel, [60, 40, 20, 100], 1, "cube legacy mode");
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_cube_shader_lit_mode_embeds_selection_in_the_face() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube lit-mode test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let render = |accent_strength: f32| {
+        render_quad_frame(gl, program, [72, 96, 128, 255], 64, 64, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 0.85);
+            gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 0.0, 4.0);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 0.32, 0.62, 1.0, accent_strength);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 0.8);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.2);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), 0);
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), 1);
+        })
+    };
+
+    let ordinary = render(0.15);
+    let selected = render(1.0);
+    let border_blue = |frame: &[u8]| -> u64 {
+        let mut sum = 0_u64;
+        for y in 0..64_usize {
+            for x in 0..64_usize {
+                if x < 6 || x >= 58 || y < 6 || y >= 58 {
+                    sum += u64::from(frame[(y * 64 + x) * 4 + 2]);
+                }
+            }
+        }
+        sum
+    };
+    assert!(
+        border_blue(&selected) > border_blue(&ordinary) + 2_000,
+        "selection strength must brighten the in-plane accent bevel"
+    );
+    let centre = (32 * 64 + 32) * 4;
+    assert!(
+        (195..=210).contains(&selected[centre + 3]),
+        "lit face must preserve the requested premultiplied alpha"
+    );
+    assert!(
+        selected[centre..centre + 3]
+            .iter()
+            .any(|&channel| channel > 0)
+    );
+    for pixel in selected.chunks_exact(4) {
+        assert!(
+            pixel[..3].iter().all(|&channel| channel <= pixel[3]),
+            "lit face must remain premultiplied at highlights and rounded edges: {pixel:?}"
+        );
+    }
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_cube_shader_lit_mode_respects_output_domain_and_opaque_regions() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping cube color-domain test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::CUBE_VERTEX_SHADER,
+        super::shaders::CUBE_FRAGMENT_SHADER,
+    )
+    .expect("cube shaders must link");
+    let identity = [
+        1.0, 0.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0, //
+        0.0, 0.0, 0.0, 1.0,
+    ];
+    let render = |input: [u8; 4], scene_linear: i32, has_alpha: i32| {
+        render_quad(gl, program, input, 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_matrix_4_f32_slice(u("u_mvp").as_ref(), false, &identity);
+            gl.uniform_matrix_4_f32_slice(u("u_model").as_ref(), false, &identity);
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_4_f32(u("u_uv_rect").as_ref(), 0.0, 0.0, 1.0, 1.0);
+            gl.uniform_1_f32(u("u_aspect").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_brightness").as_ref(), 1.0);
+            gl.uniform_3_f32(u("u_camera").as_ref(), 0.0, 0.0, -4.0);
+            gl.uniform_4_f32(u("u_accent").as_ref(), 0.0, 0.0, 0.0, 0.0);
+            gl.uniform_1_f32(u("u_alpha").as_ref(), 1.0);
+            gl.uniform_1_f32(u("u_desat").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_edge").as_ref(), 0.0);
+            gl.uniform_1_f32(u("u_lit").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+            gl.uniform_1_i32(u("u_has_alpha").as_ref(), has_alpha);
+        })
+    };
+
+    assert_pixel(
+        render([128, 128, 128, 255], 0, 1),
+        [100, 100, 100, 255],
+        2,
+        "cube encoded output",
+    );
+    assert_pixel(
+        render([128, 128, 128, 255], 1, 1),
+        [43, 43, 43, 255],
+        2,
+        "cube scene-linear output",
+    );
+    assert_pixel(
+        render([128, 64, 32, 128], 1, 1),
+        [100, 22, 6, 255],
+        2,
+        "cube scene-linear premultiplied source",
+    );
+    let opaque_region = render([128, 64, 32, 128], 1, 0);
+    assert_pixel(
+        opaque_region,
+        [43, 10, 3, 255],
+        2,
+        "cube scene-linear opaque region",
+    );
+    assert_pixel(
+        render([128, 64, 32, 255], 1, 0),
+        opaque_region,
+        0,
+        "opaque-region semantics ignore texture alpha",
+    );
+
+    unsafe { gl.delete_program(program) };
+}
+
+#[test]
+fn wayland_overview_backdrop_respects_the_output_color_domain() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping overview backdrop domain test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::VERTEX_SHADER,
+        super::shaders::OVERVIEW_BG_FRAGMENT_SHADER,
+    )
+    .expect("overview backdrop shaders must link");
+    let projection = ortho(8.0, 8.0);
+    let render = |scene_linear: i32| {
+        render_quad(gl, program, [0, 0, 0, 0], 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &projection);
+            gl.uniform_1_f32(u("u_opacity").as_ref(), 1.0);
+            gl.uniform_1_i32(u("u_scene_linear").as_ref(), scene_linear);
+        })
+    };
+
+    let encoded = render(0);
+    let linear = render(1);
+    assert_pixel(encoded, [11, 14, 19, 199], 1, "encoded overview backdrop");
+    assert_pixel(linear, [1, 1, 2, 199], 1, "linear overview backdrop");
+
+    unsafe { gl.delete_program(program) };
 }
 
 #[test]

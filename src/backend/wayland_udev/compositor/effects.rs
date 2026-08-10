@@ -865,6 +865,7 @@ impl WaylandCompositor {
             self.overview_selection = None;
             self.overview_rotation = 0.0;
             self.overview_target_rotation = 0.0;
+            self.overview_titles_dirty = false;
             self.force_full_damage_next = true;
         }
         if animating {

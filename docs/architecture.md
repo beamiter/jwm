@@ -168,11 +168,15 @@ src/backend/api.rs          platform boundary
   tree, and no `backend::x11::` imports from the policy layer at all).
 - Overview navigation policy lives in `jwm::features::overview_plan`. The
   prism sliding-window rule (`window_start`) is the single canonical
-  implementation used by `OverviewState` and by cycling, replacing three
-  divergent copies; `plan_cycle` decides whether a navigation step only
-  rotates the prism or must refresh it with a new client subset. All close
-  paths now go through `OverviewState::deactivate`, which also resets the
-  slide offset the inline Escape path used to leave stale.
+  implementation used by `OverviewState`, initial activation and cycling,
+  replacing three divergent copies. `plan_activation` aligns the focused
+  client, state index and first bounded six-window GPU subset;
+  `plan_cycle` decides whether a navigation step only rotates the prism or
+  must refresh it with a new subset. The matching protocol-free camera,
+  regular-polygon construction and painter ordering live in
+  `backend::compositor_common::prism` and are consumed by both render
+  backends. All close paths go through `OverviewState::deactivate`, which also
+  resets the slide offset the inline Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than
