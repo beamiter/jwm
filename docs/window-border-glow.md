@@ -16,7 +16,7 @@ border_glow_focused_only = true
 border_glow_radius = 28.0
 border_glow_intensity = 1.0
 border_glow_color = [0.00, 0.55, 1.00, 0.38]
-border_glow_include = ["JTerm4"]
+border_glow_include = ["Frost"]
 border_glow_exclude = []
 ```
 

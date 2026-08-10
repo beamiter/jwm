@@ -60,7 +60,7 @@ class StageTwoManifestTests(unittest.TestCase):
     def test_global_floating_bar_does_not_occupy_every_tag(self):
         windows = [
             {"class": "gtk_bar", "tags": 511, "is_floating": True},
-            {"class": "jterm1", "tags": 1, "is_floating": False},
+            {"class": "forge", "tags": 1, "is_floating": False},
         ]
         self.assertEqual(occupied_user_tags(windows, 9), 1)
 

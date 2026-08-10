@@ -2822,8 +2822,8 @@ impl Config {
             .get_available_terminal()
             .map_or_else(
                 || {
-                    log::warn!("no supported terminal found; falling back to jterm4");
-                    vec!["jterm4".to_string()]
+                    log::warn!("no supported terminal found; falling back to frost");
+                    vec!["frost".to_string()]
                 },
                 |config| vec![config.command.clone()],
             )
@@ -2837,13 +2837,13 @@ impl Config {
                 return vec![cmd.to_string()];
             }
         }
-        // Prefer jterm4 for scratchpad
+        // Prefer frost for scratchpad
         ADVANCED_TERMINAL_PROBER
-            .get_available_terminal_with_priority(Some("jterm4"))
+            .get_available_terminal_with_priority(Some("frost"))
             .map_or_else(
                 || {
-                    log::warn!("no supported scratchpad terminal found; falling back to jterm4");
-                    vec!["jterm4".to_string()]
+                    log::warn!("no supported scratchpad terminal found; falling back to frost");
+                    vec!["frost".to_string()]
                 },
                 |config| vec![config.command.clone()],
             )

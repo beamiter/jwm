@@ -675,7 +675,7 @@ impl JwmWaylandState {
 
     fn should_honor_dialog_hint(has_parent: bool) -> bool {
         // Some toolkits mark independent first windows as xdg-dialog-v1 dialogs.
-        // Without an explicit parent, the hint is too weak: jterm1/jterm4 expose
+        // Without an explicit parent, the hint is too weak: forge/frost expose
         // it on normal independent terminals, so repeated launches must tile.
         has_parent
     }

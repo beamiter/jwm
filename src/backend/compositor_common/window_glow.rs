@@ -174,34 +174,34 @@ mod tests {
     #[test]
     fn focus_and_surface_policy_suppresses_unsafe_targets() {
         let settings = make_settings(&[], &[]);
-        assert!(settings.style_for(target("JTerm4")).is_some());
+        assert!(settings.style_for(target("Frost")).is_some());
 
-        let mut unfocused = target("JTerm4");
+        let mut unfocused = target("Frost");
         unfocused.focused = false;
         assert!(settings.style_for(unfocused).is_none());
 
-        let mut fullscreen = target("JTerm4");
+        let mut fullscreen = target("Frost");
         fullscreen.fullscreen = true;
         assert!(settings.style_for(fullscreen).is_none());
 
-        let mut popup = target("JTerm4");
+        let mut popup = target("Frost");
         popup.override_redirect = true;
         assert!(settings.style_for(popup).is_none());
 
-        let mut shaped = target("JTerm4");
+        let mut shaped = target("Frost");
         shaped.shaped = true;
         assert!(settings.style_for(shaped).is_none());
     }
 
     #[test]
     fn include_is_optional_and_exclude_takes_precedence() {
-        let include = vec!["term".to_string()];
+        let include = vec!["frost".to_string()];
         let exclude = vec!["scratch".to_string()];
         let settings = make_settings(&include, &exclude);
 
-        assert!(settings.style_for(target("JTerm4")).is_some());
+        assert!(settings.style_for(target("Frost")).is_some());
         assert!(settings.style_for(target("Firefox")).is_none());
-        assert!(settings.style_for(target("JTerm4 Scratch")).is_none());
+        assert!(settings.style_for(target("Frost Scratch")).is_none());
 
         let empty: Vec<String> = Vec::new();
         assert!(
@@ -218,7 +218,7 @@ mod tests {
         settings.intensity = 8.0;
         settings.color = [-1.0, 0.5, 2.0, 0.5];
 
-        let style = settings.style_for(target("JTerm4")).unwrap();
+        let style = settings.style_for(target("Frost")).unwrap();
         assert_eq!(style.radius, MAX_WINDOW_GLOW_RADIUS);
         assert_eq!(style.color, [0.0, 0.5, 1.0, 1.0]);
         assert_eq!(
@@ -231,20 +231,20 @@ mod tests {
     fn invalid_or_invisible_settings_do_not_draw() {
         let mut settings = make_settings(&[], &[]);
         settings.radius = f32::NAN;
-        assert!(settings.style_for(target("JTerm4")).is_none());
+        assert!(settings.style_for(target("Frost")).is_none());
         assert_eq!(settings.damage_margin(), 0);
 
         settings.radius = 28.0;
         settings.color[3] = 0.0;
-        assert!(settings.style_for(target("JTerm4")).is_none());
+        assert!(settings.style_for(target("Frost")).is_none());
         assert_eq!(settings.damage_margin(), 0);
     }
 
     #[test]
     fn hash_words_change_with_visible_style() {
         let settings = make_settings(&[], &[]);
-        let first = settings.style_for(target("JTerm4")).unwrap();
-        let mut faded = target("JTerm4");
+        let first = settings.style_for(target("Frost")).unwrap();
+        let mut faded = target("Frost");
         faded.fade = 0.5;
         let second = settings.style_for(faded).unwrap();
         assert_ne!(first.hash_words(), second.hash_words());

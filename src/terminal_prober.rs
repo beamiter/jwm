@@ -81,32 +81,32 @@ impl TerminalDefinition {
 
 const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
     TerminalDefinition {
-        name: "jterm1",
-        command: "jterm1",
+        name: "forge",
+        command: "forge",
         execute_flag: "-e",
         title_flag: Some("--title"),
         geometry_flag: None,
         working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
-        name: "jterm2",
-        command: "jterm2",
+        name: "anvil",
+        command: "anvil",
         execute_flag: "-e",
         title_flag: Some("--title"),
         geometry_flag: None,
         working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
-        name: "jterm3",
-        command: "jterm3",
+        name: "ember",
+        command: "ember",
         execute_flag: "-e",
         title_flag: Some("--title"),
         geometry_flag: None,
         working_dir_flag: Some("--workdir"),
     },
     TerminalDefinition {
-        name: "jterm4",
-        command: "jterm4",
+        name: "frost",
+        command: "frost",
         execute_flag: "-e",
         title_flag: Some("--title"),
         geometry_flag: None,
@@ -147,10 +147,10 @@ const TERMINAL_DEFINITIONS: &[TerminalDefinition] = &[
 ];
 
 const WAYLAND_TERMINAL_PRIORITY: &[&str] = &[
-    "jterm4",
-    "jterm3",
-    "jterm2",
-    "jterm1",
+    "frost",
+    "ember",
+    "anvil",
+    "forge",
     "alacritty",
     "terminator",
     "gnome-terminal",
@@ -159,10 +159,10 @@ const WAYLAND_TERMINAL_PRIORITY: &[&str] = &[
 ];
 
 const X11_TERMINAL_PRIORITY: &[&str] = &[
-    "jterm4",
-    "jterm3",
-    "jterm2",
-    "jterm1",
+    "frost",
+    "ember",
+    "anvil",
+    "forge",
     "warp-terminal",
     "terminator",
     "gnome-terminal",
@@ -276,10 +276,10 @@ mod tests {
     use std::collections::HashSet;
 
     const SUPPORTED: &[&str] = &[
-        "jterm1",
-        "jterm2",
-        "jterm3",
-        "jterm4",
+        "forge",
+        "anvil",
+        "ember",
+        "frost",
         "alacritty",
         "terminator",
         "gnome-terminal",
