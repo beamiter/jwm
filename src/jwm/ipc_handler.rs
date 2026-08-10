@@ -138,10 +138,26 @@ fn optional_protocol_enabled_from_flags(
     config_enabled || env_enable_all || env_flag_enabled
 }
 
+/// Keep one atomic config transaction bounded before cloning or validating any
+/// of its entries. This is deliberately higher than the command limit because
+/// applying a config batch performs one final reconciliation, not one dispatch
+/// per change.
+const MAX_CONFIG_BATCH_CHANGES: usize = 256;
+/// Commands execute synchronously on the compositor event loop, so a single
+/// client must not turn one IPC frame into unbounded dispatch work.
+const MAX_COMMAND_BATCH_ENTRIES: usize = 128;
+
 fn parse_config_batch_changes(
     args: &serde_json::Value,
 ) -> Result<Vec<(String, serde_json::Value)>, String> {
     if let Some(values) = args.get("values").and_then(|value| value.as_object()) {
+        if values.len() > MAX_CONFIG_BATCH_CHANGES {
+            return Err(format!(
+                "set_config_batch: too many changes ({}; maximum {})",
+                values.len(),
+                MAX_CONFIG_BATCH_CHANGES
+            ));
+        }
         let changes = values
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
@@ -153,9 +169,17 @@ fn parse_config_batch_changes(
     }
 
     let raw_changes = args.get("changes").unwrap_or(args);
+    let raw_changes = raw_changes.as_array().ok_or_else(|| {
+        "set_config_batch: expected 'changes' array or 'values' object".to_string()
+    })?;
+    if raw_changes.len() > MAX_CONFIG_BATCH_CHANGES {
+        return Err(format!(
+            "set_config_batch: too many changes ({}; maximum {})",
+            raw_changes.len(),
+            MAX_CONFIG_BATCH_CHANGES
+        ));
+    }
     let changes = raw_changes
-        .as_array()
-        .ok_or_else(|| "set_config_batch: expected 'changes' array or 'values' object".to_string())?
         .iter()
         .enumerate()
         .map(|(idx, item)| {
@@ -182,9 +206,17 @@ fn parse_command_batch_entries(
     args: &serde_json::Value,
 ) -> Result<Vec<(String, serde_json::Value)>, String> {
     let raw_commands = args.get("commands").unwrap_or(args);
-    let commands = raw_commands
+    let raw_commands = raw_commands
         .as_array()
-        .ok_or_else(|| "command_batch: expected 'commands' array".to_string())?
+        .ok_or_else(|| "command_batch: expected 'commands' array".to_string())?;
+    if raw_commands.len() > MAX_COMMAND_BATCH_ENTRIES {
+        return Err(format!(
+            "command_batch: too many commands ({}; maximum {})",
+            raw_commands.len(),
+            MAX_COMMAND_BATCH_ENTRIES
+        ));
+    }
+    let commands = raw_commands
         .iter()
         .enumerate()
         .map(|(idx, item)| {
@@ -2647,11 +2679,12 @@ impl Jwm {
 #[cfg(test)]
 mod tests {
     use super::{
-        client_window_info, color_managed_surface_json, color_session_policy_json,
-        color_surface_summary_json, optional_protocol_enabled_from_flags, output_color_policy_json,
-        parse_benchmark_request, parse_command_batch_entries, parse_config_batch_changes,
-        parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg, render_decisions_json,
-        resolved_client_monitor_num, runtime_health, tagged_client_count, workspace_layout_state,
+        MAX_COMMAND_BATCH_ENTRIES, MAX_CONFIG_BATCH_CHANGES, client_window_info,
+        color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
+        optional_protocol_enabled_from_flags, output_color_policy_json, parse_benchmark_request,
+        parse_command_batch_entries, parse_config_batch_changes, parse_optional_u32_ipc_arg,
+        parse_required_i32_ipc_arg, render_decisions_json, resolved_client_monitor_num,
+        runtime_health, tagged_client_count, workspace_layout_state,
     };
     use crate::application::BenchmarkRequest;
     use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
@@ -3103,6 +3136,62 @@ mod tests {
     }
 
     #[test]
+    fn config_batch_parser_allows_the_limit_and_rejects_before_entry_validation() {
+        let allowed = (0..MAX_CONFIG_BATCH_CHANGES)
+            .map(|index| {
+                serde_json::json!({
+                    "key": format!("test.key.{index}"),
+                    "value": index,
+                })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_config_batch_changes(&serde_json::json!({ "changes": allowed }))
+                .unwrap()
+                .len(),
+            MAX_CONFIG_BATCH_CHANGES
+        );
+
+        // The first entry is intentionally malformed. The size error must win,
+        // proving an oversized atomic transaction is rejected before any entry
+        // is parsed (and therefore before the handler can apply any of it).
+        let oversized = (0..=MAX_CONFIG_BATCH_CHANGES)
+            .map(|index| {
+                if index == 0 {
+                    serde_json::json!({ "value": "must not be parsed" })
+                } else {
+                    serde_json::json!({
+                        "key": format!("test.key.{index}"),
+                        "value": index,
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let error =
+            parse_config_batch_changes(&serde_json::json!({ "changes": oversized })).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "set_config_batch: too many changes ({}; maximum {})",
+                MAX_CONFIG_BATCH_CHANGES + 1,
+                MAX_CONFIG_BATCH_CHANGES
+            )
+        );
+    }
+
+    #[test]
+    fn config_batch_values_object_cannot_bypass_the_limit() {
+        let values = (0..=MAX_CONFIG_BATCH_CHANGES)
+            .map(|index| (format!("test.key.{index}"), serde_json::json!(index)))
+            .collect::<serde_json::Map<_, _>>();
+
+        let error =
+            parse_config_batch_changes(&serde_json::json!({ "values": values })).unwrap_err();
+        assert!(error.contains("too many changes"));
+        assert!(error.contains(&MAX_CONFIG_BATCH_CHANGES.to_string()));
+    }
+
+    #[test]
     fn command_batch_parser_accepts_commands_array() {
         let commands = parse_command_batch_entries(&serde_json::json!({
             "commands": [
@@ -3117,6 +3206,42 @@ mod tests {
         assert_eq!(commands[0].1, serde_json::json!({"tag": 1}));
         assert_eq!(commands[1].0, "focusstack");
         assert_eq!(commands[1].1, serde_json::json!({"value": -1}));
+    }
+
+    #[test]
+    fn command_batch_parser_allows_the_limit_and_rejects_atomically_above_it() {
+        let allowed = (0..MAX_COMMAND_BATCH_ENTRIES)
+            .map(|index| serde_json::json!({ "command": "view", "args": { "tag": index } }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse_command_batch_entries(&serde_json::json!({ "commands": allowed }))
+                .unwrap()
+                .len(),
+            MAX_COMMAND_BATCH_ENTRIES
+        );
+
+        // A malformed first entry would normally fail entry validation. The
+        // batch-size error winning here proves no prefix is parsed or returned
+        // for execution.
+        let oversized = (0..=MAX_COMMAND_BATCH_ENTRIES)
+            .map(|index| {
+                if index == 0 {
+                    serde_json::json!({ "args": { "must_not_execute": true } })
+                } else {
+                    serde_json::json!({ "command": "view", "args": { "tag": index } })
+                }
+            })
+            .collect::<Vec<_>>();
+        let error =
+            parse_command_batch_entries(&serde_json::json!({ "commands": oversized })).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "command_batch: too many commands ({}; maximum {})",
+                MAX_COMMAND_BATCH_ENTRIES + 1,
+                MAX_COMMAND_BATCH_ENTRIES
+            )
+        );
     }
 
     #[test]

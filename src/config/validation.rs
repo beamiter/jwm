@@ -270,6 +270,10 @@ fn canonical_chord(modifiers: &[String], key: &str) -> String {
     let mut canonical = modifiers
         .iter()
         .filter_map(|modifier| canonical_modifier(modifier))
+        // `Jwm::clean_mask` deliberately removes lock state before shortcut
+        // dispatch.  Treating CapsLock as part of the diagnostic identity
+        // would therefore miss collisions that are identical at runtime.
+        .filter(|modifier| *modifier != "CapsLock")
         .collect::<Vec<_>>();
     canonical.sort_unstable();
     canonical.dedup();
@@ -291,6 +295,14 @@ fn validate_modifiers(diagnostics: &mut ConfigDiagnostics, path: &str, modifiers
             );
             continue;
         };
+        if canonical == "CapsLock" {
+            diagnostics.warning(
+                format!("{path}[{index}]"),
+                format!("modifier {modifier:?} is ignored when matching shortcuts"),
+                Some("lock state is normalized away; remove this modifier".into()),
+            );
+            continue;
+        }
         if seen.contains(&canonical) {
             diagnostics.warning(
                 format!("{path}[{index}]"),
@@ -303,14 +315,64 @@ fn validate_modifiers(diagnostics: &mut ConfigDiagnostics, path: &str, modifiers
     }
 }
 
+fn validate_spawn_argument(
+    diagnostics: &mut ConfigDiagnostics,
+    path: &str,
+    argument: &ArgumentConfig,
+) -> bool {
+    match argument {
+        ArgumentConfig::String(command) => match crate::command_line::split_command_line(command) {
+            Ok(command)
+                if command
+                    .first()
+                    .is_some_and(|program| !program.trim().is_empty()) =>
+            {
+                true
+            }
+            Ok(_) => {
+                diagnostics.error(
+                    path,
+                    "spawn requires a non-empty command program",
+                    Some("example: \"alacritty --title 'work shell'\"".into()),
+                );
+                false
+            }
+            Err(error) => {
+                diagnostics.error(
+                    path,
+                    format!("spawn command cannot be parsed: {error}"),
+                    Some("balance quotes and escapes; no shell is involved".into()),
+                );
+                false
+            }
+        },
+        ArgumentConfig::StringVec(command)
+            if command
+                .first()
+                .is_some_and(|program| !program.trim().is_empty()) =>
+        {
+            true
+        }
+        _ => {
+            diagnostics.error(
+                path,
+                "spawn requires a non-empty command string or array",
+                Some("examples: \"alacritty\" or [\"alacritty\", \"--option\"]".into()),
+            );
+            false
+        }
+    }
+}
+
 fn validate_binding(
     config: &Config,
     diagnostics: &mut ConfigDiagnostics,
     path: &str,
     binding: &KeyConfig,
-) {
+) -> bool {
     validate_modifiers(diagnostics, &format!("{path}.modifier"), &binding.modifier);
-    if config.parse_keysym(&binding.key).is_none() {
+    let key_is_known = config.parse_keysym(&binding.key).is_some();
+    if !key_is_known {
         diagnostics.warning(
             format!("{path}.key"),
             format!(
@@ -320,7 +382,8 @@ fn validate_binding(
             None,
         );
     }
-    if config.parse_function(&binding.function).is_none() {
+    let function_is_known = config.parse_function(&binding.function).is_some();
+    if !function_is_known {
         diagnostics.warning(
             format!("{path}.function"),
             format!(
@@ -330,20 +393,13 @@ fn validate_binding(
             None,
         );
     }
-    if binding.function == "spawn" {
-        match &binding.argument {
-            ArgumentConfig::String(command) if !command.trim().is_empty() => {}
-            ArgumentConfig::StringVec(command)
-                if command
-                    .first()
-                    .is_some_and(|program| !program.trim().is_empty()) => {}
-            _ => diagnostics.error(
-                format!("{path}.argument"),
-                "spawn requires a non-empty command string or array",
-                Some("examples: \"alacritty\" or [\"alacritty\", \"--option\"]".into()),
-            ),
-        }
-    }
+    let argument_is_valid = binding.function != "spawn"
+        || validate_spawn_argument(diagnostics, &format!("{path}.argument"), &binding.argument);
+
+    // These are the same gates used by `Config::convert_key_config`.
+    // Invalid entries never reach the runtime binding list and therefore
+    // cannot shadow a generated tag shortcut.
+    key_is_known && function_is_known && argument_is_valid
 }
 
 fn validate_time(diagnostics: &mut ConfigDiagnostics, path: &str, value: &str) {
@@ -455,13 +511,13 @@ impl Config {
                 None,
             );
         }
-        if self.inner.appearance.cursor_size > 512 {
+        if self.inner.appearance.cursor_size > super::MAX_CURSOR_SIZE {
             diagnostics.warning(
                 "appearance.cursor_size",
                 format!(
-                    "{}px is far larger than any Xcursor theme provides and will \
-                     be scaled from the nearest available image",
-                    self.inner.appearance.cursor_size
+                    "{}px exceeds the safe backend limit and will be clamped to {}px",
+                    self.inner.appearance.cursor_size,
+                    super::MAX_CURSOR_SIZE
                 ),
                 Some("use a value in the 24-128 range (0 = follow the environment)".into()),
             );
@@ -1005,6 +1061,34 @@ impl Config {
             "behavior.night_light_end",
             &behavior.night_light_end,
         );
+        for (field, command) in [
+            ("suspend_command", &behavior.suspend_command),
+            ("hibernate_command", &behavior.hibernate_command),
+            ("reboot_command", &behavior.reboot_command),
+            ("shutdown_command", &behavior.shutdown_command),
+        ] {
+            let path = format!("behavior.{field}");
+            match crate::command_line::split_command_line(command) {
+                Ok(argv) if argv.first().is_none_or(|program| program.trim().is_empty()) => {
+                    diagnostics.warning(
+                        path,
+                        "session action has no command program and cannot run",
+                        Some(
+                            "configure a direct argv command; shell operators are not evaluated"
+                                .into(),
+                        ),
+                    );
+                }
+                Err(error) => diagnostics.warning(
+                    path,
+                    format!("session command cannot be parsed: {error}"),
+                    Some(
+                        "balance quotes and escapes; the command is parsed without a shell".into(),
+                    ),
+                ),
+                Ok(_) => {}
+            }
+        }
 
         if self.inner.status_bar.show_bar && self.inner.status_bar.name.trim().is_empty() {
             diagnostics.warning(
@@ -1019,22 +1103,61 @@ impl Config {
             "keybindings.modkey",
             std::slice::from_ref(&self.inner.keybindings.modkey),
         );
-        let mut chords: HashMap<String, (usize, &str)> = HashMap::new();
+        let mut runtime_chords: HashMap<String, (usize, &str)> = HashMap::new();
         for (index, binding) in self.inner.keybindings.keys.iter().enumerate() {
             let path = format!("keybindings.keys[{index}]");
-            validate_binding(self, &mut diagnostics, &path, binding);
+            let reaches_runtime = validate_binding(self, &mut diagnostics, &path, binding);
             let chord = canonical_chord(&binding.modifier, &binding.key);
-            if let Some((previous_index, previous_function)) =
-                chords.insert(chord.clone(), (index, &binding.function))
-            {
-                diagnostics.warning(
-                    path,
-                    format!(
-                        "shortcut {chord} is already assigned to {previous_function:?} at keybindings.keys[{previous_index}]; {:?} is unreachable",
-                        binding.function
-                    ),
-                    Some("assign a unique modifier/key combination".into()),
+            if reaches_runtime {
+                if let Some((previous_index, previous_function)) = runtime_chords.get(&chord) {
+                    diagnostics.warning(
+                        path,
+                        format!(
+                            "shortcut {chord} is already assigned to {previous_function:?} at keybindings.keys[{previous_index}]; {:?} is unreachable",
+                            binding.function
+                        ),
+                        Some("assign a unique modifier/key combination".into()),
+                    );
+                } else {
+                    runtime_chords.insert(chord, (index, &binding.function));
+                }
+            }
+        }
+
+        // `Config::get_keys` appends four bindings for each of keys 1..9
+        // after the configured bindings. Dispatch selects the first match, so
+        // a configured collision silently makes the generated tag action
+        // unreachable. Compare using the same lock-free modifier identity as
+        // runtime dispatch, including aliases such as Mod1/Alt.
+        let generated_tag_variants: &[(&[&str], &str)] = &[
+            (&[], "view"),
+            (&["Control"], "toggleview"),
+            (&["Shift"], "tag"),
+            (&["Control", "Shift"], "toggletag"),
+        ];
+        for tag_index in 0..self.tags_length().min(9) {
+            let key = (tag_index + 1).to_string();
+            for (extra_modifiers, generated_function) in generated_tag_variants {
+                let mut modifiers = vec![self.inner.keybindings.modkey.clone()];
+                modifiers.extend(
+                    extra_modifiers
+                        .iter()
+                        .map(|modifier| (*modifier).to_string()),
                 );
+                let chord = canonical_chord(&modifiers, &key);
+                if let Some((index, configured_function)) = runtime_chords.get(&chord) {
+                    diagnostics.warning(
+                        format!("keybindings.keys[{index}]"),
+                        format!(
+                            "shortcut {chord} assigned to {configured_function:?} shadows JWM's generated {generated_function:?} shortcut for tag {}; the generated action is unreachable",
+                            tag_index + 1
+                        ),
+                        Some(
+                            "move this binding or change keybindings.modkey so tag shortcuts remain reachable"
+                                .into(),
+                        ),
+                    );
+                }
             }
         }
 
@@ -1063,7 +1186,15 @@ impl Config {
                 );
             }
             let leader = canonical_chord(&chord_config.leader_modifier, &chord_config.leader_key);
-            if let Some((index, function)) = chords.get(&leader) {
+            let leader_uses_lock = chord_config
+                .leader_modifier
+                .iter()
+                .any(|modifier| canonical_modifier(modifier) == Some("CapsLock"));
+            // Unlike normal/sequence bindings, the compiled leader mask is
+            // compared directly with the cleaned event mask. A leader that
+            // names lock state can never arm, so it cannot shadow the
+            // lock-free configured shortcut either.
+            if !leader_uses_lock && let Some((index, function)) = runtime_chords.get(&leader) {
                 diagnostics.warning(
                     "keybindings.chord.leader_key",
                     format!(
@@ -1075,16 +1206,20 @@ impl Config {
             let mut sequence_keys: HashMap<String, usize> = HashMap::new();
             for (index, binding) in chord_config.bindings.iter().enumerate() {
                 let path = format!("keybindings.chord.bindings[{index}]");
-                validate_binding(self, &mut diagnostics, &path, binding);
+                let reaches_runtime = validate_binding(self, &mut diagnostics, &path, binding);
                 let chord = canonical_chord(&binding.modifier, &binding.key);
-                if let Some(previous) = sequence_keys.insert(chord.clone(), index) {
-                    diagnostics.warning(
-                        path,
-                        format!(
-                            "sequence key {chord} duplicates keybindings.chord.bindings[{previous}]"
-                        ),
-                        None,
-                    );
+                if reaches_runtime {
+                    if let Some(previous) = sequence_keys.get(&chord) {
+                        diagnostics.warning(
+                            path,
+                            format!(
+                                "sequence key {chord} duplicates keybindings.chord.bindings[{previous}]"
+                            ),
+                            None,
+                        );
+                    } else {
+                        sequence_keys.insert(chord, index);
+                    }
                 }
             }
         }
@@ -1115,6 +1250,13 @@ impl Config {
                     format!("{path}.function"),
                     format!("unknown function {:?}", button.function),
                     None,
+                );
+            }
+            if button.function == "spawn" {
+                validate_spawn_argument(
+                    &mut diagnostics,
+                    &format!("{path}.argument"),
+                    &button.argument,
                 );
             }
         }
@@ -1238,5 +1380,121 @@ impl Config {
         }
 
         diagnostics
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(modifiers: &[&str], key: &str, function: &str) -> KeyConfig {
+        KeyConfig {
+            modifier: modifiers
+                .iter()
+                .map(|modifier| (*modifier).to_string())
+                .collect(),
+            key: key.to_string(),
+            function: function.to_string(),
+            argument: ArgumentConfig::Int(0),
+        }
+    }
+
+    #[test]
+    fn lock_modifiers_are_reported_as_ignored_and_collide_with_the_lock_free_chord() {
+        for lock_modifier in ["CapsLock", "Lock"] {
+            let mut config = Config::default();
+            config.inner.keybindings.keys = vec![
+                binding(&[], "x", "quit"),
+                binding(&[lock_modifier], "x", "restart"),
+            ];
+
+            let diagnostics = config.diagnostics();
+            assert!(diagnostics.issues().iter().any(|issue| {
+                issue.path == "keybindings.keys[1].modifier[0]"
+                    && issue.message.contains("ignored when matching shortcuts")
+            }));
+            assert!(diagnostics.issues().iter().any(|issue| {
+                issue.path == "keybindings.keys[1]" && issue.message.contains("unreachable")
+            }));
+        }
+    }
+
+    #[test]
+    fn configured_binding_reports_generated_tag_shortcut_it_shadows() {
+        let mut config = Config::default();
+        config.inner.keybindings.keys = vec![binding(&["Alt"], "1", "quit")];
+
+        let diagnostics = config.diagnostics();
+        let collision = diagnostics
+            .issues()
+            .iter()
+            .find(|issue| issue.message.contains("generated \"view\" shortcut"))
+            .expect("missing generated tag shortcut collision");
+        assert_eq!(collision.path, "keybindings.keys[0]");
+        assert!(collision.message.contains("Alt+1"));
+        assert!(collision.message.contains("tag 1"));
+        assert!(collision.message.contains("unreachable"));
+    }
+
+    #[test]
+    fn invalid_bindings_do_not_participate_in_runtime_shadow_diagnostics() {
+        let malformed = |key: &str| KeyConfig {
+            modifier: vec!["Alt".into()],
+            key: key.into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::String("terminal 'unfinished".into()),
+        };
+        let mut config = Config::default();
+        config.inner.keybindings.keys = vec![
+            malformed("F8"),
+            binding(&["Alt"], "F8", "quit"),
+            malformed("F9"),
+        ];
+        config.inner.keybindings.chord.leader_modifier = vec!["Alt".into()];
+        config.inner.keybindings.chord.leader_key = "F9".into();
+        config.inner.keybindings.chord.bindings =
+            vec![malformed("b"), binding(&["Alt"], "b", "restart")];
+
+        let diagnostics = config.diagnostics();
+        assert_eq!(diagnostics.error_count(), 3);
+        assert!(!diagnostics.issues().iter().any(|issue| {
+            issue.path == "keybindings.keys[1]" && issue.message.contains("unreachable")
+        }));
+        assert!(!diagnostics.issues().iter().any(|issue| {
+            issue.path == "keybindings.chord.leader_key" && issue.message.contains("shadows")
+        }));
+        assert!(
+            !diagnostics
+                .issues()
+                .iter()
+                .any(|issue| issue.message.contains("sequence key")
+                    && issue.message.contains("duplicates"))
+        );
+    }
+
+    #[test]
+    fn malformed_session_commands_are_reported_before_the_menu_uses_them() {
+        let mut config = Config::default();
+        config.inner.behavior.suspend_command = "locker --message 'unfinished".into();
+        config.inner.behavior.reboot_command = "   ".into();
+        config.inner.behavior.hibernate_command = "\"\" --argument".into();
+        config.inner.behavior.shutdown_command = "locker --message 'safe words'".into();
+
+        let diagnostics = config.diagnostics();
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.path == "behavior.suspend_command" && issue.message.contains("cannot be parsed")
+        }));
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.path == "behavior.reboot_command" && issue.message.contains("no command")
+        }));
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.path == "behavior.hibernate_command" && issue.message.contains("no command")
+        }));
+        assert!(
+            !diagnostics
+                .issues()
+                .iter()
+                .any(|issue| issue.path == "behavior.shutdown_command")
+        );
     }
 }

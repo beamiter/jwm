@@ -114,10 +114,28 @@ manager front end — draws no window of its own. Launched directly it would exi
 instantly and look like a launcher that did nothing, so JWM hands it a terminal:
 
 ```
-<your terminal> -e htop
+forge -e htop
+# or, for a terminal with a different protocol:
+gnome-terminal -- htop
 ```
 
-Those rows are marked with a `` glyph in the list. The terminal is the one
-`JWM_TERMINAL` names, or the first one JWM's terminal prober finds. An
-executable found on `PATH` rather than in a desktop entry declares nothing about
-this, so it is launched as-is rather than guessed at.
+Those rows are marked with a `` glyph in the list. `JWM_TERMINAL` may name a
+terminal plus quoted launch options (for example
+`JWM_TERMINAL='alacritty --class tools'`); JWM parses that value directly into
+argv and never sends it through a shell. Otherwise the terminal prober chooses
+one from `PATH`.
+
+Selection is capability-aware. Opening an interactive terminal and asking one
+to execute another program are different operations: forge and anvil accept
+`-e`, Terminator consumes argv after `-x`, and gnome-terminal uses `--`; frost
+and ember currently open interactive shells only. If `JWM_TERMINAL` names an interactive-only terminal, ordinary
+terminal shortcuts still use it but `Terminal=true` launcher rows fall back to
+the first execution-capable terminal. `jwm --doctor` reports all three terminal
+paths separately, including the PID-stable terminal needed by scratchpads.
+Likewise, a known `JWM_SCRATCHPAD_TERMINAL` whose launcher PID does not own its
+window (such as gnome-terminal) is replaced by a PID-stable fallback; custom
+terminal commands remain allowed because JWM cannot infer their process model.
+
+An executable found on `PATH` rather than in a desktop entry declares nothing
+about whether it needs a terminal, so it is launched as-is rather than guessed
+at.

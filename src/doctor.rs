@@ -124,8 +124,11 @@ struct DoctorInputs {
     xdg_runtime_dir: Option<PathBuf>,
     display: Option<OsString>,
     wayland_display: Option<OsString>,
+    xdg_session_type: Option<OsString>,
     dbus_session_bus_address: Option<OsString>,
     path: Option<OsString>,
+    terminal: Option<OsString>,
+    scratchpad_terminal: Option<OsString>,
     dri_dir: PathBuf,
     effective_uid: u32,
 }
@@ -137,8 +140,11 @@ impl DoctorInputs {
             xdg_runtime_dir: env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
             display: env::var_os("DISPLAY"),
             wayland_display: env::var_os("WAYLAND_DISPLAY"),
+            xdg_session_type: env::var_os("XDG_SESSION_TYPE"),
             dbus_session_bus_address: env::var_os("DBUS_SESSION_BUS_ADDRESS"),
             path: env::var_os("PATH"),
+            terminal: env::var_os("JWM_TERMINAL"),
+            scratchpad_terminal: env::var_os("JWM_SCRATCHPAD_TERMINAL"),
             dri_dir: PathBuf::from("/dev/dri"),
             effective_uid: current_effective_uid(),
         }
@@ -168,6 +174,7 @@ fn diagnose_with_inputs(choice: BackendChoice, inputs: &DoctorInputs) -> DoctorR
         &inputs.config_path,
         inputs.path.as_deref(),
     ));
+    checks.extend(check_terminals(inputs));
     checks.push(check_runtime_dir(
         inputs.xdg_runtime_dir.as_deref(),
         inputs.effective_uid,
@@ -578,6 +585,137 @@ fn check_jwm_tool(path: Option<&OsStr>) -> DoctorCheck {
     }
 }
 
+fn check_terminals(inputs: &DoctorInputs) -> Vec<DoctorCheck> {
+    use crate::terminal_prober::TerminalPurpose;
+
+    let wayland = crate::terminal_prober::is_wayland_session_from(
+        inputs.wayland_display.as_deref(),
+        inputs.xdg_session_type.as_deref(),
+        inputs.display.as_deref(),
+    );
+    vec![
+        check_terminal_for_purpose(
+            "command.terminal",
+            "interactive terminal",
+            inputs.terminal.as_deref(),
+            inputs.path.as_deref(),
+            wayland,
+            TerminalPurpose::Interactive,
+        ),
+        check_terminal_for_purpose(
+            "command.terminal_exec",
+            "terminal command execution",
+            inputs.terminal.as_deref(),
+            inputs.path.as_deref(),
+            wayland,
+            TerminalPurpose::Execute,
+        ),
+        check_terminal_for_purpose(
+            "command.scratchpad_terminal",
+            "scratchpad terminal",
+            inputs.scratchpad_terminal.as_deref(),
+            inputs.path.as_deref(),
+            wayland,
+            TerminalPurpose::Scratchpad,
+        ),
+    ]
+}
+
+fn check_terminal_for_purpose(
+    id: &str,
+    label: &str,
+    override_value: Option<&OsStr>,
+    path: Option<&OsStr>,
+    wayland: bool,
+    purpose: crate::terminal_prober::TerminalPurpose,
+) -> DoctorCheck {
+    use crate::terminal_prober::{
+        ADVANCED_TERMINAL_PROBER, TerminalPurpose, available_terminal_in_path,
+        command_exists_in_path,
+    };
+
+    let configured = match crate::config::parse_terminal_override(override_value) {
+        Ok(configured) => configured,
+        Err(error) => {
+            return DoctorCheck::new(
+                DoctorStatus::Warning,
+                id,
+                format!("The configured {label} command is invalid"),
+                Some(error),
+                Some("Fix or unset the corresponding JWM terminal environment variable".into()),
+            );
+        }
+    };
+
+    if let Some(command) = configured {
+        let program = &command[0];
+        if !command_exists_in_path(program, path) {
+            return DoctorCheck::new(
+                DoctorStatus::Warning,
+                id,
+                format!("The configured {label} is not executable"),
+                Some(program.clone()),
+                Some(
+                    "Install it or update the corresponding JWM terminal environment variable"
+                        .into(),
+                ),
+            );
+        }
+
+        if let Some(config) = ADVANCED_TERMINAL_PROBER.config_for_command(program) {
+            let supported = match purpose {
+                TerminalPurpose::Interactive => true,
+                TerminalPurpose::Execute => config.execute_flag.is_some(),
+                TerminalPurpose::Scratchpad => config.scratchpad_pid_stable,
+            };
+            if !supported {
+                let fallback = available_terminal_in_path(path, wayland, purpose)
+                    .map_or_else(|| "none available".to_string(), |terminal| terminal.command);
+                return DoctorCheck::new(
+                    DoctorStatus::Warning,
+                    id,
+                    format!("The configured {label} lacks the required capability"),
+                    Some(format!("{program}; automatic fallback: {fallback}")),
+                    Some(match purpose {
+                        TerminalPurpose::Execute => {
+                            "Choose forge, anvil, alacritty, or another terminal that can execute argv".into()
+                        }
+                        TerminalPurpose::Scratchpad => {
+                            "Choose a terminal whose launched process owns its window PID".into()
+                        }
+                        TerminalPurpose::Interactive => unreachable!(),
+                    }),
+                );
+            }
+        }
+
+        return DoctorCheck::new(
+            DoctorStatus::Pass,
+            id,
+            format!("The configured {label} is executable"),
+            Some(program.clone()),
+            None,
+        );
+    }
+
+    match available_terminal_in_path(path, wayland, purpose) {
+        Some(terminal) => DoctorCheck::new(
+            DoctorStatus::Pass,
+            id,
+            format!("An automatic {label} is available"),
+            Some(terminal.command),
+            None,
+        ),
+        None => DoctorCheck::new(
+            DoctorStatus::Warning,
+            id,
+            format!("No compatible {label} was found"),
+            None,
+            Some("Install a supported terminal or configure the corresponding JWM terminal environment variable".into()),
+        ),
+    }
+}
+
 fn check_status_bar(config_path: &Path, path: Option<&OsStr>) -> DoctorCheck {
     let config = if config_path.exists() {
         match Config::load_from_file(config_path) {
@@ -690,8 +828,11 @@ mod tests {
             xdg_runtime_dir: Some(root.join("runtime")),
             display: Some(OsString::from(":99")),
             wayland_display: None,
+            xdg_session_type: Some(OsString::from("x11")),
             dbus_session_bus_address: Some(OsString::from("unix:path=/tmp/test-bus")),
             path: None,
+            terminal: None,
+            scratchpad_terminal: None,
             dri_dir: root.join("dri"),
             effective_uid: current_effective_uid(),
         }
@@ -829,6 +970,46 @@ mod tests {
     }
 
     #[test]
+    fn terminal_checks_distinguish_interactive_execute_and_pid_stable_uses() {
+        let root = TestDir::new();
+        let mut inputs = test_inputs(root.path());
+        for terminal in ["frost", "forge", "gnome-terminal"] {
+            let executable = root.path().join(terminal);
+            fs::write(&executable, b"test").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        inputs.path = Some(root.path().as_os_str().to_owned());
+        inputs.terminal = Some(OsString::from("frost"));
+        inputs.scratchpad_terminal = Some(OsString::from("gnome-terminal"));
+
+        let checks = check_terminals(&inputs);
+        assert_eq!(checks[0].status, DoctorStatus::Pass);
+        assert_eq!(checks[1].status, DoctorStatus::Warning);
+        assert!(
+            checks[1]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("fallback: forge"))
+        );
+        assert_eq!(checks[2].status, DoctorStatus::Warning);
+        assert!(
+            checks[2]
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("fallback: frost"))
+        );
+
+        inputs.terminal = Some(OsString::from("terminal 'unfinished"));
+        let malformed = check_terminals(&inputs);
+        assert_eq!(malformed[0].status, DoctorStatus::Warning);
+        assert!(
+            malformed[0]
+                .summary
+                .contains("configured interactive terminal command is invalid")
+        );
+    }
+
+    #[test]
     fn config_check_preserves_structured_semantic_diagnostics() {
         let root = TestDir::new();
         let config_path = root.path().join("config.toml");
@@ -866,6 +1047,11 @@ mod tests {
         let bar = root.path().join(Config::default().status_bar_name());
         fs::write(&bar, b"test").unwrap();
         fs::set_permissions(&bar, fs::Permissions::from_mode(0o700)).unwrap();
+        for terminal in ["frost", "forge"] {
+            let executable = root.path().join(terminal);
+            fs::write(&executable, b"test").unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         inputs.path = Some(root.path().as_os_str().to_owned());
 
         let report = diagnose_with_inputs(BackendChoice::X11rb, &inputs);
@@ -883,6 +1069,9 @@ mod tests {
                 "config.file",
                 "config.validation",
                 "command.status_bar",
+                "command.terminal",
+                "command.terminal_exec",
+                "command.scratchpad_terminal",
                 "runtime.xdg_runtime_dir",
                 "backend.display",
                 "session.dbus",

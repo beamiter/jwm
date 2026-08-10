@@ -15,6 +15,9 @@ const MAX_CLIENT_BUF: usize = 1024 * 1024;
 /// Per-client input work allowed in one compositor update tick.
 const MAX_READ_BYTES_PER_POLL: usize = 64 * 1024;
 const MAX_MESSAGES_PER_POLL: usize = 64;
+/// Bound aggregate IPC input work in one compositor update tick.
+const MAX_TOTAL_READ_BYTES_PER_POLL: usize = 256 * 1024;
+const MAX_TOTAL_MESSAGES_PER_POLL: usize = 256;
 /// Bound the amount of per-client state retained by the WM process.
 const MAX_CLIENTS: usize = 128;
 /// Do not let a connection storm monopolize one compositor update tick.
@@ -333,18 +336,30 @@ impl IpcClient {
         }
     }
 
-    /// Try to read available data. Returns complete newline-delimited messages.
-    fn read_messages(&mut self) -> io::Result<Vec<String>> {
+    /// Try to read available data. Returns complete newline-delimited messages
+    /// together with the number of bytes read from the socket. The caller's
+    /// limits are clamped to the existing per-client limits.
+    fn read_messages(
+        &mut self,
+        message_budget: usize,
+        read_byte_budget: usize,
+    ) -> (io::Result<Vec<String>>, usize) {
+        let message_limit = message_budget.min(MAX_MESSAGES_PER_POLL);
+        let read_byte_limit = read_byte_budget.min(MAX_READ_BYTES_PER_POLL);
+        if message_limit == 0 {
+            return (Ok(Vec::new()), 0);
+        }
+
         // Drain already-buffered complete frames first. This is important when
         // the previous tick stopped at the message fairness limit.
-        let mut messages = self.take_complete_messages(MAX_MESSAGES_PER_POLL);
+        let mut messages = self.take_complete_messages(message_limit);
         self.compact_input_buffer();
-        if messages.len() == MAX_MESSAGES_PER_POLL {
-            return Ok(messages);
+        if messages.len() == message_limit {
+            return (Ok(messages), 0);
         }
 
         if self.read_closed {
-            return if messages.is_empty() {
+            let result = if messages.is_empty() {
                 Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "client disconnected",
@@ -352,12 +367,13 @@ impl IpcClient {
             } else {
                 Ok(messages)
             };
+            return (result, 0);
         }
 
         let mut tmp = [0u8; 4096];
         let mut bytes_read = 0;
-        while bytes_read < MAX_READ_BYTES_PER_POLL {
-            let remaining = MAX_READ_BYTES_PER_POLL - bytes_read;
+        while bytes_read < read_byte_limit {
+            let remaining = read_byte_limit - bytes_read;
             let chunk_len = remaining.min(tmp.len());
             match self.stream.read(&mut tmp[..chunk_len]) {
                 Ok(0) => {
@@ -370,29 +386,33 @@ impl IpcClient {
                     // 防止恶意/异常客户端发送无换行字节导致 buf 无界增长耗尽内存，
                     // 拖垮整个 WM。超过上限直接断开该客户端。
                     if self.buf.len() - self.buf_start > MAX_CLIENT_BUF {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "client message buffer exceeded limit",
-                        ));
+                        return (
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "client message buffer exceeded limit",
+                            )),
+                            bytes_read,
+                        );
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return (Err(e), bytes_read),
             }
         }
 
-        let remaining_messages = MAX_MESSAGES_PER_POLL - messages.len();
+        let remaining_messages = message_limit - messages.len();
         messages.extend(self.take_complete_messages(remaining_messages));
         self.compact_input_buffer();
-        if messages.is_empty() && self.read_closed {
+        let result = if messages.is_empty() && self.read_closed {
             Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "client disconnected",
             ))
         } else {
             Ok(messages)
-        }
+        };
+        (result, bytes_read)
     }
 
     fn queue(&mut self, mut json: String) {
@@ -413,7 +433,7 @@ impl IpcClient {
                     self.out_buf.drain(..n);
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }
@@ -475,6 +495,9 @@ pub struct IpcServer {
     socket_identity: Option<SocketIdentity>,
     clients: HashMap<u64, IpcClient>,
     next_id: u64,
+    /// Client id at which the next poll should begin. Client ids are sorted
+    /// before polling so fairness does not depend on `HashMap` iteration order.
+    next_poll_client: u64,
 }
 
 /// Parsed & validated message from a client, ready to process.
@@ -513,6 +536,7 @@ impl IpcServer {
             socket_identity: Some(identity),
             clients: HashMap::new(),
             next_id: 1,
+            next_poll_client: 1,
         })
     }
 
@@ -554,15 +578,51 @@ impl IpcServer {
     pub fn poll_clients(&mut self) -> Vec<IncomingIpc> {
         let mut incoming = Vec::new();
         let mut dead = Vec::new();
+        let mut client_ids: Vec<_> = self.clients.keys().copied().collect();
+        client_ids.sort_unstable();
+        if client_ids.is_empty() {
+            return incoming;
+        }
 
-        for (&id, client) in self.clients.iter_mut() {
+        let start = client_ids.partition_point(|id| *id < self.next_poll_client);
+        let start = if start == client_ids.len() { 0 } else { start };
+        client_ids.rotate_left(start);
+
+        let mut messages_seen = 0;
+        let mut bytes_read = 0;
+
+        for (index, &id) in client_ids.iter().enumerate() {
+            if messages_seen == MAX_TOTAL_MESSAGES_PER_POLL
+                || bytes_read == MAX_TOTAL_READ_BYTES_PER_POLL
+            {
+                break;
+            }
+
+            // Advance before doing I/O so a disconnect or parse failure cannot
+            // pin the round-robin cursor to this client.
+            self.next_poll_client = client_ids[(index + 1) % client_ids.len()];
+            let Some(client) = self.clients.get_mut(&id) else {
+                continue;
+            };
+
             // 先尝试把上次因 WouldBlock 滞留的出站字节冲刷出去。
             if client.flush_out().is_err() {
                 dead.push(id);
                 continue;
             }
-            match client.read_messages() {
+            let remaining_messages = MAX_TOTAL_MESSAGES_PER_POLL - messages_seen;
+            let remaining_bytes = MAX_TOTAL_READ_BYTES_PER_POLL - bytes_read;
+            let (result, client_bytes_read) =
+                client.read_messages(remaining_messages, remaining_bytes);
+            bytes_read += client_bytes_read;
+            debug_assert!(bytes_read <= MAX_TOTAL_READ_BYTES_PER_POLL);
+
+            match result {
                 Ok(lines) => {
+                    // Count every non-empty frame, including invalid JSON, so
+                    // malformed input cannot bypass the global work budget.
+                    messages_seen += lines.len();
+                    debug_assert!(messages_seen <= MAX_TOTAL_MESSAGES_PER_POLL);
                     for line in lines {
                         match serde_json::from_str::<IpcMessage>(&line) {
                             Ok(IpcMessage::Command(cmd)) => {
@@ -687,7 +747,20 @@ mod tests {
             socket_identity: Some(identity),
             clients: HashMap::new(),
             next_id: 1,
+            next_poll_client: 1,
         }
+    }
+
+    fn attach_test_client(server: &mut IpcServer, id: u64) -> UnixStream {
+        let (server_stream, peer) = UnixStream::pair().unwrap();
+        server
+            .clients
+            .insert(id, IpcClient::new(server_stream).unwrap());
+        peer
+    }
+
+    fn query_payload(count: usize) -> Vec<u8> {
+        "{\"query\":\"get_version\"}\n".repeat(count).into_bytes()
     }
 
     #[test]
@@ -814,8 +887,14 @@ mod tests {
         }
         writer.write_all(payload.as_bytes()).unwrap();
 
-        let first = client.read_messages().unwrap();
-        let second = client.read_messages().unwrap();
+        let first = client
+            .read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL)
+            .0
+            .unwrap();
+        let second = client
+            .read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL)
+            .0
+            .unwrap();
 
         assert_eq!(first.len(), MAX_MESSAGES_PER_POLL);
         assert_eq!(first.first().unwrap(), "message-0");
@@ -838,10 +917,16 @@ mod tests {
         let payload = vec![b'x'; MAX_READ_BYTES_PER_POLL + 17];
         writer.write_all(&payload).unwrap();
 
-        assert!(client.read_messages().unwrap().is_empty());
+        let (first, first_bytes_read) =
+            client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
+        assert!(first.unwrap().is_empty());
+        assert_eq!(first_bytes_read, MAX_READ_BYTES_PER_POLL);
         assert_eq!(client.buf.len(), MAX_READ_BYTES_PER_POLL);
 
-        assert!(client.read_messages().unwrap().is_empty());
+        let (second, second_bytes_read) =
+            client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
+        assert!(second.unwrap().is_empty());
+        assert_eq!(second_bytes_read, 17);
         assert_eq!(client.buf.len(), payload.len());
     }
 
@@ -852,11 +937,83 @@ mod tests {
         writer.write_all(b"final-message\n").unwrap();
         drop(writer);
 
-        assert_eq!(client.read_messages().unwrap(), ["final-message"]);
-        assert_eq!(
-            client.read_messages().unwrap_err().kind(),
-            io::ErrorKind::UnexpectedEof
-        );
+        let (final_frame, bytes_read) =
+            client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
+        assert_eq!(final_frame.unwrap(), ["final-message"]);
+        assert_eq!(bytes_read, b"final-message\n".len());
+        let (disconnect, bytes_read) =
+            client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
+        assert_eq!(bytes_read, 0);
+        assert_eq!(disconnect.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn poll_clients_respects_global_message_budget() {
+        let mut server = make_test_server();
+        let payload = query_payload(MAX_MESSAGES_PER_POLL);
+        let mut peers = Vec::new();
+        for id in 1..=5 {
+            let mut peer = attach_test_client(&mut server, id);
+            peer.write_all(&payload).unwrap();
+            peers.push(peer);
+        }
+
+        let messages = server.poll_clients();
+
+        assert_eq!(messages.len(), MAX_TOTAL_MESSAGES_PER_POLL);
+        assert!(messages.len() <= MAX_TOTAL_MESSAGES_PER_POLL);
+        assert_eq!(server.next_poll_client, 5);
+    }
+
+    #[test]
+    fn poll_clients_respects_global_read_byte_budget() {
+        let mut server = make_test_server();
+        let payload = vec![b'x'; MAX_READ_BYTES_PER_POLL];
+        let mut peers = Vec::new();
+        for id in 1..=5 {
+            let mut peer = attach_test_client(&mut server, id);
+            peer.write_all(&payload).unwrap();
+            peers.push(peer);
+        }
+
+        assert!(server.poll_clients().is_empty());
+        let buffered_bytes: usize = server
+            .clients
+            .values()
+            .map(|client| client.buf.len() - client.buf_start)
+            .sum();
+
+        assert_eq!(buffered_bytes, MAX_TOTAL_READ_BYTES_PER_POLL);
+        assert!(buffered_bytes <= MAX_TOTAL_READ_BYTES_PER_POLL);
+        assert_eq!(server.next_poll_client, 5);
+    }
+
+    #[test]
+    fn round_robin_poll_eventually_services_all_flooding_clients() {
+        let mut server = make_test_server();
+        let payload = query_payload(MAX_MESSAGES_PER_POLL * 2);
+        let mut peers = Vec::new();
+        for id in 1..=8 {
+            let mut peer = attach_test_client(&mut server, id);
+            peer.write_all(&payload).unwrap();
+            peers.push(peer);
+        }
+
+        let mut served = std::collections::HashSet::new();
+        for _ in 0..2 {
+            let messages = server.poll_clients();
+            assert_eq!(messages.len(), MAX_TOTAL_MESSAGES_PER_POLL);
+            for message in messages {
+                let client_id = match message {
+                    IncomingIpc::Command { client_id, .. }
+                    | IncomingIpc::Query { client_id, .. }
+                    | IncomingIpc::Subscribe { client_id, .. } => client_id,
+                };
+                served.insert(client_id);
+            }
+        }
+
+        assert_eq!(served, (1..=8).collect());
     }
 
     #[test]

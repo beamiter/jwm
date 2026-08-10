@@ -488,15 +488,20 @@ pub fn fuzzy_score(haystack: &str, needle: &str) -> Option<usize> {
 /// A desktop entry with `Terminal=true` — an editor, a system monitor, a
 /// package manager front end — draws no window of its own. Spawned directly
 /// it exits instantly and looks like a launcher that did nothing, so it is
-/// handed a terminal. `-e` is the option every terminal in the prober's list
-/// understands.
+/// handed an execution-capable terminal prefix selected by the prober. The
+/// prefix already carries that terminal's execution delimiter (`-e`, `--`,
+/// or another declared protocol), so this function only preserves argv
+/// boundaries while joining it to the desktop-entry command.
 #[must_use]
-pub fn launch_command(termcmd: &[String], command: &[String], terminal: bool) -> Vec<String> {
-    if !terminal || command.is_empty() || termcmd.is_empty() {
+pub fn launch_command(
+    terminal_prefix: &[String],
+    command: &[String],
+    terminal: bool,
+) -> Vec<String> {
+    if !terminal || command.is_empty() || terminal_prefix.is_empty() {
         return command.to_vec();
     }
-    let mut argv = termcmd.to_vec();
-    argv.push("-e".to_string());
+    let mut argv = terminal_prefix.to_vec();
     argv.extend_from_slice(command);
     argv
 }
@@ -1029,11 +1034,21 @@ mod tests {
 
     #[test]
     fn a_terminal_application_is_given_a_terminal() {
-        let term = vec!["alacritty".to_string()];
+        let term = vec!["alacritty".to_string(), "-e".to_string()];
         let htop = vec!["htop".to_string()];
         assert_eq!(
             launch_command(&term, &htop, true),
             ["alacritty", "-e", "htop"]
+        );
+        let terminator = vec!["terminator".to_string(), "-x".to_string()];
+        let command_with_args = vec![
+            "monitor".to_string(),
+            "--interval".to_string(),
+            "2".to_string(),
+        ];
+        assert_eq!(
+            launch_command(&terminator, &command_with_args, true),
+            ["terminator", "-x", "monitor", "--interval", "2"]
         );
         // A graphical application is spawned exactly as the desktop entry
         // asked, arguments and all.

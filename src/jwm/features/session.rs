@@ -126,13 +126,18 @@ pub fn menu_row(action: SessionAction, armed: bool) -> String {
 
 /// Split a configured command line into program and arguments.
 ///
-/// Deliberately not a shell: the configured commands are argv, so a stray
-/// quote cannot become a second command.
+/// Deliberately not a shell: quotes only preserve argument boundaries and
+/// operators such as `|` and `;` stay literal argv entries.
 #[must_use]
 pub fn split_command(command: &str) -> Option<(String, Vec<String>)> {
-    let mut parts = command.split_whitespace().map(str::to_string);
-    let program = parts.next()?;
-    Some((program, parts.collect()))
+    let mut argv = crate::command_line::split_command_line(command).ok()?;
+    let program = argv.first()?;
+    if program.trim().is_empty() {
+        return None;
+    }
+    let program = program.clone();
+    argv.remove(0);
+    Some((program, argv))
 }
 
 #[cfg(test)]
@@ -199,7 +204,15 @@ mod tests {
         assert_eq!(program, "loginctl");
         assert_eq!(args, vec!["lock-session"]);
 
+        let (program, args) =
+            split_command("locker --message 'Back in five minutes'").expect("a command");
+        assert_eq!(program, "locker");
+        assert_eq!(args, vec!["--message", "Back in five minutes"]);
+
         assert!(split_command("   ").is_none());
+        assert!(split_command("\"\" --argument").is_none());
+        assert!(split_command("'   ' --argument").is_none());
+        assert!(split_command("locker 'unfinished").is_none());
     }
 
     #[test]

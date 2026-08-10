@@ -51,69 +51,6 @@ fn counter_ink(color: [u8; 4]) -> [f32; 4] {
     }
 }
 
-/// Split one launcher command line into argv without involving a shell.
-///
-/// Quotes and backslash escapes are handled so arguments can contain spaces,
-/// but operators such as `|`, `>`, `;` and `$()` remain ordinary characters.
-fn split_launcher_command_line(input: &str) -> Option<Vec<String>> {
-    let mut args = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut token_started = false;
-
-    for ch in input.chars() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
-            token_started = true;
-            continue;
-        }
-
-        if let Some(active_quote) = quote {
-            if ch == active_quote {
-                quote = None;
-                token_started = true;
-            } else if ch == '\\' && active_quote == '"' {
-                escaped = true;
-            } else {
-                current.push(ch);
-                token_started = true;
-            }
-            continue;
-        }
-
-        match ch {
-            '\'' | '"' => {
-                quote = Some(ch);
-                token_started = true;
-            }
-            '\\' => {
-                escaped = true;
-                token_started = true;
-            }
-            ch if ch.is_whitespace() => {
-                if token_started {
-                    args.push(std::mem::take(&mut current));
-                    token_started = false;
-                }
-            }
-            _ => {
-                current.push(ch);
-                token_started = true;
-            }
-        }
-    }
-
-    if escaped || quote.is_some() {
-        return None;
-    }
-    if token_started {
-        args.push(current);
-    }
-    Some(args)
-}
-
 /// Parse direct launcher input when it is unambiguously a command.
 ///
 /// Normal input requires both a known executable and at least one argument,
@@ -135,7 +72,7 @@ fn parse_direct_launcher_command(
         return None;
     }
 
-    let command = split_launcher_command_line(command_line)?;
+    let command = crate::command_line::split_command_line(command_line).ok()?;
     if command.is_empty() || (!explicit && command.len() < 2) {
         return None;
     }
@@ -1350,7 +1287,7 @@ impl Jwm {
                 } else if let Some(choice) = self.features.system_ui.selected_launch() {
                     self.features.system_ui.note_launch(&choice.id);
                     let command = crate::jwm::features::launcher::launch_command(
-                        &crate::config::Config::get_termcmd(),
+                        &crate::config::Config::get_terminal_exec_prefix(),
                         &choice.command,
                         choice.terminal,
                     );
@@ -2377,7 +2314,7 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_direct_launcher_command, split_launcher_command_line};
+    use super::parse_direct_launcher_command;
     use crate::Jwm;
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, CloseResult, ColorAllocator,
@@ -2716,8 +2653,8 @@ mod tests {
     #[test]
     fn launcher_does_not_interpret_shell_operators() {
         assert_eq!(
-            split_launcher_command_line("flameshot gui | sh -c 'echo unsafe'"),
-            Some(vec![
+            crate::command_line::split_command_line("flameshot gui | sh -c 'echo unsafe'"),
+            Ok(vec![
                 "flameshot".into(),
                 "gui".into(),
                 "|".into(),

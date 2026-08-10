@@ -1,5 +1,6 @@
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsStr;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -15,7 +16,7 @@ use crate::core::animation::{AnimationSpeed, Easing};
 use crate::core::layout::LayoutEnum;
 use crate::jwm::WMFuncType;
 use crate::jwm::{self, Jwm, WMButton, WMClickType, WMKey, WMRule};
-use crate::terminal_prober::ADVANCED_TERMINAL_PROBER;
+use crate::terminal_prober::{ADVANCED_TERMINAL_PROBER, TerminalPurpose};
 use std::time::Duration;
 
 use crate::backend::common_define::keys as k;
@@ -26,8 +27,108 @@ mod validation;
 pub use validation::{ConfigDiagnostic, ConfigDiagnosticLevel, ConfigDiagnostics};
 
 pub const LOAD_LOCAL_CONFIG: bool = true;
+pub(crate) const MAX_CURSOR_SIZE: u32 = 512;
+const DEFAULT_CURSOR_SIZE: u32 = 24;
 
 static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn resolve_cursor_size(configured: u32, environment: Option<&OsStr>) -> u32 {
+    if configured != 0 {
+        return configured.min(MAX_CURSOR_SIZE);
+    }
+    environment
+        .and_then(OsStr::to_str)
+        .map(str::trim)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|size| (1..=MAX_CURSOR_SIZE).contains(size))
+        .unwrap_or(DEFAULT_CURSOR_SIZE)
+}
+
+pub(crate) fn parse_terminal_override(
+    value: Option<&OsStr>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = value
+        .to_str()
+        .ok_or_else(|| "value is not valid UTF-8".to_string())?;
+    let argv = crate::command_line::split_command_line(value).map_err(|error| error.to_string())?;
+    if argv.is_empty() {
+        return Ok(None);
+    }
+    if argv.first().is_none_or(|program| program.trim().is_empty()) {
+        return Err("command program is empty".into());
+    }
+    Ok(Some(argv))
+}
+
+fn terminal_override_from_env(name: &str) -> Option<Vec<String>> {
+    match parse_terminal_override(std::env::var_os(name).as_deref()) {
+        Ok(command) => command,
+        Err(error) => {
+            log::warn!("[config] ignoring invalid {name}: {error}");
+            None
+        }
+    }
+}
+
+fn configured_terminal_execution_prefix(mut command: Vec<String>) -> Option<Vec<String>> {
+    let program = command.first()?;
+    if let Some(config) = ADVANCED_TERMINAL_PROBER.config_for_command(program) {
+        command.push(config.execute_flag.clone()?);
+        Some(command)
+    } else {
+        // Preserve the historical contract for explicitly configured,
+        // third-party terminals. Known terminals use their declared flag.
+        command.push("-e".to_string());
+        Some(command)
+    }
+}
+
+fn configured_scratchpad_terminal(command: Vec<String>) -> Option<Vec<String>> {
+    let program = command.first()?;
+    match ADVANCED_TERMINAL_PROBER.config_for_command(program) {
+        Some(config) if !config.scratchpad_pid_stable => None,
+        // Unknown explicit commands retain their historical behavior because
+        // JWM cannot infer whether their child PID owns the resulting window.
+        Some(_) | None => Some(command),
+    }
+}
+
+fn renamed_legacy_terminal(program: &str) -> Option<&'static str> {
+    match program {
+        "jterm1" => Some("forge"),
+        "jterm2" => Some("anvil"),
+        "jterm3" => Some("ember"),
+        "jterm4" => Some("frost"),
+        _ => None,
+    }
+}
+
+fn migrate_legacy_terminal_argument(function: &str, mut arg: jwm::WMArgEnum) -> jwm::WMArgEnum {
+    let jwm::WMArgEnum::StringVec(argv) = &mut arg else {
+        return arg;
+    };
+    let program_index = match function {
+        "spawn" => 0,
+        "togglescratchpad" if argv.len() > 1 => 1,
+        _ => return arg,
+    };
+    let Some(program) = argv.get_mut(program_index) else {
+        return arg;
+    };
+    if let Some(replacement) = renamed_legacy_terminal(program) {
+        log::warn!(
+            "[config] migrated legacy terminal command {program:?} to {replacement:?} in memory"
+        );
+        *program = replacement.to_string();
+    }
+    arg
+}
 
 fn resolve_write_destination(path: &Path) -> std::io::Result<std::path::PathBuf> {
     const MAX_SYMLINK_DEPTH: usize = 40;
@@ -681,9 +782,9 @@ pub struct BehaviorConfig {
     pub night_light_transition_mins: u32,
 
     // --- Session menu ---
-    // Commands the session menu runs. Each is argv, not a shell line: it is
-    // split on whitespace and executed directly. Logout is handled inside
-    // JWM (it quits the window manager) and has no command.
+    // Commands the session menu runs. Each is parsed into argv without a
+    // shell; quotes preserve spaces, while operators remain literal. Logout
+    // is handled inside JWM (it quits the window manager) and has no command.
     #[serde(default = "default_suspend_command")]
     pub suspend_command: String,
     #[serde(default = "default_hibernate_command")]
@@ -1494,6 +1595,7 @@ pub struct KeyConfig {
     pub modifier: Vec<String>, // ["Mod1", "Shift"]
     pub key: String,           // "Return", "j", "k", etc.
     pub function: String,      // "spawn", "focusstack", etc.
+    #[serde(default)]
     pub argument: ArgumentConfig,
 }
 
@@ -1547,6 +1649,7 @@ pub struct ButtonConfig {
     pub modifier: Vec<String>,
     pub button: u8, // 1, 2, 3
     pub function: String,
+    #[serde(default)]
     pub argument: ArgumentConfig,
 }
 
@@ -2508,7 +2611,9 @@ impl Config {
     /// Precedence: the `[appearance]` config values win when set; otherwise the
     /// `XCURSOR_THEME` / `XCURSOR_SIZE` environment variables are honored (for
     /// compatibility with existing sessions); otherwise the built-in defaults
-    /// ("default", 24px) apply.
+    /// ("default", 24px) apply. Sizes outside 1..=512 are rejected for the
+    /// environment and clamped for already-loaded configuration so backends
+    /// that use signed dimensions can never observe an overflowed value.
     pub fn resolved_cursor(&self) -> (String, u32) {
         let theme = {
             let configured = &self.inner.appearance.cursor_theme;
@@ -2518,18 +2623,10 @@ impl Config {
                 configured.clone()
             }
         };
-        let size = {
-            let configured = self.inner.appearance.cursor_size;
-            if configured == 0 {
-                std::env::var("XCURSOR_SIZE")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .filter(|&s| s != 0)
-                    .unwrap_or(24)
-            } else {
-                configured
-            }
-        };
+        let size = resolve_cursor_size(
+            self.inner.appearance.cursor_size,
+            std::env::var_os("XCURSOR_SIZE").as_deref(),
+        );
         (theme, size)
     }
 
@@ -2812,11 +2909,8 @@ impl Config {
     }
 
     pub fn get_termcmd() -> Vec<String> {
-        if let Ok(cmd) = std::env::var("JWM_TERMINAL") {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                return vec![cmd.to_string()];
-            }
+        if let Some(command) = terminal_override_from_env("JWM_TERMINAL") {
+            return command;
         }
         ADVANCED_TERMINAL_PROBER
             .get_available_terminal()
@@ -2829,17 +2923,49 @@ impl Config {
             )
     }
 
-    pub fn get_scratchpad_termcmd() -> Vec<String> {
-        // Check for scratchpad-specific terminal environment variable
-        if let Ok(cmd) = std::env::var("JWM_SCRATCHPAD_TERMINAL") {
-            let cmd = cmd.trim();
-            if !cmd.is_empty() {
-                return vec![cmd.to_string()];
+    /// Terminal argv prefix for running a child command from a
+    /// `Terminal=true` desktop entry.
+    ///
+    /// Unlike [`Self::get_termcmd`], this includes the selected terminal's
+    /// execution delimiter and skips interactive-only terminals such as frost
+    /// and ember.
+    pub fn get_terminal_exec_prefix() -> Vec<String> {
+        if let Some(command) = terminal_override_from_env("JWM_TERMINAL") {
+            if let Some(prefix) = configured_terminal_execution_prefix(command) {
+                return prefix;
             }
+            log::warn!(
+                "[config] JWM_TERMINAL names an interactive-only terminal; selecting an execution-capable fallback"
+            );
+        }
+        ADVANCED_TERMINAL_PROBER
+            .get_available_terminal_for(TerminalPurpose::Execute)
+            .and_then(|config| {
+                Some(vec![
+                    config.command.clone(),
+                    config.execute_flag.clone()?,
+                ])
+            })
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "no execution-capable terminal found; Terminal=true applications will run directly"
+                );
+                Vec::new()
+            })
+    }
+
+    pub fn get_scratchpad_termcmd() -> Vec<String> {
+        if let Some(command) = terminal_override_from_env("JWM_SCRATCHPAD_TERMINAL") {
+            if let Some(command) = configured_scratchpad_terminal(command) {
+                return command;
+            }
+            log::warn!(
+                "[config] JWM_SCRATCHPAD_TERMINAL names a terminal without stable window PID ownership; selecting a compatible fallback"
+            );
         }
         // Prefer frost for scratchpad
         ADVANCED_TERMINAL_PROBER
-            .get_available_terminal_with_priority(Some("frost"))
+            .get_available_terminal_for_with_priority(TerminalPurpose::Scratchpad, Some("frost"))
             .map_or_else(
                 || {
                     log::warn!("no supported scratchpad terminal found; falling back to frost");
@@ -2854,7 +2980,7 @@ impl Config {
         let modifiers = self.parse_modifiers(&btn_config.modifier);
         let button = MouseButton::from_u8(btn_config.button as u8);
         let function = self.parse_function(&btn_config.function)?;
-        let arg = self.convert_argument(&btn_config.argument);
+        let arg = self.convert_binding_argument(&btn_config.function, &btn_config.argument)?;
 
         Some(WMButton::new(
             click_type,
@@ -3101,6 +3227,33 @@ impl Config {
         }
     }
 
+    fn convert_binding_argument(
+        &self,
+        function_name: &str,
+        argument: &ArgumentConfig,
+    ) -> Option<jwm::WMArgEnum> {
+        let argument = if function_name == "spawn" {
+            let command = match argument {
+                ArgumentConfig::String(command) => {
+                    crate::command_line::split_command_line(command).ok()?
+                }
+                ArgumentConfig::StringVec(command) => command.clone(),
+                _ => return None,
+            };
+            if command
+                .first()
+                .is_none_or(|program| program.trim().is_empty())
+            {
+                return None;
+            }
+            jwm::WMArgEnum::StringVec(command)
+        } else {
+            self.convert_argument(argument)
+        };
+
+        Some(migrate_legacy_terminal_argument(function_name, argument))
+    }
+
     pub fn get_buttons(&self) -> Vec<WMButton> {
         let button_configs = if self.inner.mouse_bindings.buttons.is_empty() {
             Self::get_default_button_configs()
@@ -3118,7 +3271,7 @@ impl Config {
         let modifiers = self.parse_modifiers(&key_config.modifier);
         let keysym = self.parse_keysym(&key_config.key)?;
         let function = self.parse_function(&key_config.function)?;
-        let arg = self.convert_argument(&key_config.argument);
+        let arg = self.convert_binding_argument(&key_config.function, &key_config.argument)?;
 
         Some(
             WMKey::new(modifiers, keysym, Some(function), arg)
@@ -3489,8 +3642,10 @@ impl Config {
             "appearance.cursor_theme" => self.inner.appearance.cursor_theme = as_string()?,
             "appearance.cursor_size" => {
                 let v = as_u32()?;
-                if v > 512 {
-                    return Err(format!("appearance.cursor_size={v} out of [0, 512]"));
+                if v > MAX_CURSOR_SIZE {
+                    return Err(format!(
+                        "appearance.cursor_size={v} out of [0, {MAX_CURSOR_SIZE}]"
+                    ));
                 }
                 self.inner.appearance.cursor_size = v;
             }
@@ -3792,10 +3947,12 @@ pub fn reload_global() -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArgumentConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config, ConfigDiagnosticLevel,
-        ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig, Mods, NewClientPosition,
-        Ordering, STATUS_BAR_NAME, TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig,
-        key_function_is_repeatable,
+        ArgumentConfig, ButtonConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config,
+        ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
+        MAX_CURSOR_SIZE, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME, TomlConfig,
+        WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
+        configured_terminal_execution_prefix, key_function_is_repeatable,
+        migrate_legacy_terminal_argument, parse_terminal_override, resolve_cursor_size,
     };
 
     fn temporary_config_path(label: &str) -> std::path::PathBuf {
@@ -3810,6 +3967,178 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn no_argument_bindings_may_omit_the_placeholder_argument() {
+        let key: KeyConfig = toml::from_str(
+            r#"
+                modifier = ["Mod1"]
+                key = "q"
+                function = "quit"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(key.argument, ArgumentConfig::Int(0)));
+
+        let button: ButtonConfig = toml::from_str(
+            r#"
+                click_type = "ClkClientWin"
+                modifier = []
+                button = 1
+                function = "movemouse"
+            "#,
+        )
+        .unwrap();
+        assert!(matches!(button.argument, ArgumentConfig::Int(0)));
+    }
+
+    #[test]
+    fn generated_legacy_terminal_commands_migrate_without_rewriting_other_arguments() {
+        let migrated = migrate_legacy_terminal_argument(
+            "spawn",
+            crate::jwm::WMArgEnum::StringVec(vec!["jterm4".into(), "--profile".into()]),
+        );
+        assert_eq!(
+            migrated,
+            crate::jwm::WMArgEnum::StringVec(vec!["frost".into(), "--profile".into()])
+        );
+
+        let scratchpad = migrate_legacy_terminal_argument(
+            "togglescratchpad",
+            crate::jwm::WMArgEnum::StringVec(vec![
+                "term".into(),
+                "jterm1".into(),
+                "--safe-mode".into(),
+            ]),
+        );
+        assert_eq!(
+            scratchpad,
+            crate::jwm::WMArgEnum::StringVec(vec![
+                "term".into(),
+                "forge".into(),
+                "--safe-mode".into(),
+            ])
+        );
+
+        let explicit_path = crate::jwm::WMArgEnum::StringVec(vec!["/opt/jterm4".into()]);
+        assert_eq!(
+            migrate_legacy_terminal_argument("spawn", explicit_path.clone()),
+            explicit_path
+        );
+    }
+
+    #[test]
+    fn terminal_override_parsing_preserves_safe_argv_boundaries() {
+        use std::ffi::OsStr;
+
+        assert_eq!(parse_terminal_override(None), Ok(None));
+        assert_eq!(parse_terminal_override(Some(OsStr::new("   "))), Ok(None));
+        assert_eq!(
+            parse_terminal_override(Some(OsStr::new("\"\" --profile tools"))),
+            Err("command program is empty".into())
+        );
+        assert!(parse_terminal_override(Some(OsStr::new("'   '"))).is_err());
+        assert_eq!(
+            parse_terminal_override(Some(OsStr::new("custom-terminal --profile 'Focused work'"))),
+            Ok(Some(vec![
+                "custom-terminal".into(),
+                "--profile".into(),
+                "Focused work".into(),
+            ]))
+        );
+        assert!(parse_terminal_override(Some(OsStr::new("terminal 'unfinished"))).is_err());
+    }
+
+    #[test]
+    fn terminal_execution_prefix_uses_declared_capabilities() {
+        assert_eq!(
+            configured_terminal_execution_prefix(vec!["gnome-terminal".into()]),
+            Some(vec!["gnome-terminal".into(), "--".into()])
+        );
+        assert_eq!(
+            configured_terminal_execution_prefix(vec!["terminator".into()]),
+            Some(vec!["terminator".into(), "-x".into()])
+        );
+        assert_eq!(
+            configured_terminal_execution_prefix(vec!["frost".into()]),
+            None
+        );
+        assert_eq!(
+            configured_terminal_execution_prefix(vec![
+                "custom-terminal".into(),
+                "--profile".into(),
+                "work".into(),
+            ]),
+            Some(vec![
+                "custom-terminal".into(),
+                "--profile".into(),
+                "work".into(),
+                "-e".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn scratchpad_override_rejects_known_pid_unstable_terminals() {
+        assert_eq!(
+            configured_scratchpad_terminal(vec!["gnome-terminal".into()]),
+            None
+        );
+        assert_eq!(
+            configured_scratchpad_terminal(vec!["frost".into(), "--profile".into()]),
+            Some(vec!["frost".into(), "--profile".into()])
+        );
+        assert_eq!(
+            configured_scratchpad_terminal(vec!["custom-terminal".into(), "--safe".into()]),
+            Some(vec!["custom-terminal".into(), "--safe".into()])
+        );
+    }
+
+    #[test]
+    fn string_spawn_bindings_are_parsed_as_argv_instead_of_one_program_name() {
+        let config = Config::default();
+        let binding = KeyConfig {
+            modifier: vec!["Mod1".into()],
+            key: "F8".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::String("custom-terminal --profile 'Focused work'".into()),
+        };
+        let runtime = config.convert_key_config(&binding).expect("valid binding");
+        assert_eq!(
+            runtime.arg,
+            crate::jwm::WMArgEnum::StringVec(vec![
+                "custom-terminal".into(),
+                "--profile".into(),
+                "Focused work".into(),
+            ])
+        );
+
+        let button = ButtonConfig {
+            click_type: "ClkRootWin".into(),
+            modifier: vec![],
+            button: 3,
+            function: "spawn".into(),
+            argument: ArgumentConfig::String("launcher --label 'Mouse menu'".into()),
+        };
+        let runtime = config
+            .convert_button_config(&button)
+            .expect("valid button binding");
+        assert_eq!(
+            runtime.arg,
+            crate::jwm::WMArgEnum::StringVec(vec![
+                "launcher".into(),
+                "--label".into(),
+                "Mouse menu".into(),
+            ])
+        );
+
+        let mut malformed = binding;
+        malformed.argument = ArgumentConfig::String("terminal 'unfinished".into());
+        assert!(config.convert_key_config(&malformed).is_none());
+        let mut malformed_config = Config::default();
+        malformed_config.inner.keybindings.keys = vec![malformed];
+        assert!(malformed_config.diagnostics().has_errors());
     }
 
     #[test]
@@ -4616,6 +4945,17 @@ border_px = 3
         let (theme, size) = cfg.resolved_cursor();
         assert_eq!(theme, "Bibata-Modern-Ice");
         assert_eq!(size, 48);
+    }
+
+    #[test]
+    fn cursor_size_resolution_never_overflows_signed_backend_dimensions() {
+        use std::ffi::OsStr;
+
+        assert_eq!(resolve_cursor_size(0, None), 24);
+        assert_eq!(resolve_cursor_size(0, Some(OsStr::new(" 48 "))), 48);
+        assert_eq!(resolve_cursor_size(0, Some(OsStr::new("0"))), 24);
+        assert_eq!(resolve_cursor_size(0, Some(OsStr::new("4294967295"))), 24);
+        assert_eq!(resolve_cursor_size(u32::MAX, None), MAX_CURSOR_SIZE);
     }
 
     #[test]
