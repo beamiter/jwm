@@ -268,6 +268,31 @@ fn transfer_pixel_oracle(
     expected
 }
 
+fn output_transform_pixel_oracle(
+    input_linear: [f32; 4],
+    matrix_row_major: [f32; 9],
+    transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+) -> [u8; 4] {
+    let mapped = [
+        matrix_row_major[0] * input_linear[0]
+            + matrix_row_major[1] * input_linear[1]
+            + matrix_row_major[2] * input_linear[2],
+        matrix_row_major[3] * input_linear[0]
+            + matrix_row_major[4] * input_linear[1]
+            + matrix_row_major[5] * input_linear[2],
+        matrix_row_major[6] * input_linear[0]
+            + matrix_row_major[7] * input_linear[1]
+            + matrix_row_major[8] * input_linear[2],
+    ];
+    let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        quantize(transfer.forward(mapped[0])),
+        quantize(transfer.forward(mapped[1])),
+        quantize(transfer.forward(mapped[2])),
+        quantize(input_linear[3]),
+    ]
+}
+
 /// Render a fullscreen quad with `prog` over a solid `input` texel into a WxH
 /// RGBA8 FBO and return the center pixel. The input is a 2x2 solid texture with
 /// NEAREST/CLAMP_TO_EDGE, so every neighbour fetch returns the same texel —
@@ -1067,24 +1092,25 @@ fn wayland_scene_transfer_shaders_match_cpu_oracle() {
         (
             decode_program,
             "decode",
-            [
+            &[
                 "u_rect",
                 "u_projection",
                 "u_texture",
                 "u_decode_tf",
                 "u_decode_gamma",
-            ],
+            ][..],
         ),
         (
             encode_program,
             "encode",
-            [
+            &[
                 "u_rect",
                 "u_projection",
                 "u_texture",
                 "u_encode_tf",
                 "u_encode_gamma",
-            ],
+                "u_color_matrix",
+            ][..],
         ),
     ] {
         for name in uniforms {
@@ -1108,6 +1134,11 @@ fn wayland_scene_transfer_shaders_match_cpu_oracle() {
                 } else {
                     gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer_id);
                     gl.uniform_1_f32(u("u_encode_gamma").as_ref(), gamma);
+                    gl.uniform_matrix_3_f32_slice(
+                        u("u_color_matrix").as_ref(),
+                        false,
+                        &crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+                    );
                 }
             })
         };
@@ -1226,6 +1257,11 @@ fn wayland_scene_transfer_shaders_match_cpu_oracle() {
                 } else {
                     gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer.shader_id());
                     gl.uniform_1_f32(u("u_encode_gamma").as_ref(), transfer.gamma_for_shader());
+                    gl.uniform_matrix_3_f32_slice(
+                        u("u_color_matrix").as_ref(),
+                        false,
+                        &crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+                    );
                 }
             },
             |gl| unsafe {
@@ -1266,7 +1302,372 @@ fn wayland_scene_transfer_shaders_match_cpu_oracle() {
 }
 
 #[test]
-fn wayland_scissored_overview_reentry_composites_before_hlg_encode() {
+fn wayland_output_transform_shader_matches_cpu_oracle() {
+    use crate::backend::wayland_udev::color_pipeline::{TransferKind, matrix_to_column_major};
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping output transform shader test");
+        return;
+    };
+    let gl = &h.gl;
+    let program = link(
+        gl,
+        super::shaders::BLUR_DOWN_VERTEX,
+        super::shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+    )
+    .expect("per-output transform shaders must link");
+
+    for name in [
+        "u_rect",
+        "u_projection",
+        "u_texture",
+        "u_encode_tf",
+        "u_encode_gamma",
+        "u_color_matrix",
+    ] {
+        assert!(
+            unsafe { gl.get_uniform_location(program, name) }.is_some(),
+            "per-output transform optimized out required uniform {name}"
+        );
+    }
+
+    // A cyclic channel permutation is deliberately non-symmetric. Uploading
+    // this row-major matrix without the production column-major conversion
+    // yields the inverse permutation and therefore visibly different bytes.
+    const MATRIX: [f32; 9] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+    let matrix_column_major = matrix_to_column_major(MATRIX);
+    let input = [51_u8, 127, 204, 137];
+    let input_linear = [
+        f32::from(input[0]) / 255.0,
+        f32::from(input[1]) / 255.0,
+        f32::from(input[2]) / 255.0,
+        f32::from(input[3]) / 255.0,
+    ];
+    let transfers = [
+        ("Linear", TransferKind::Linear),
+        (
+            "Power-1.8",
+            TransferKind::Power {
+                gamma_x10000: 18_000,
+            },
+        ),
+        ("PQ", TransferKind::St2084Pq),
+        ("HLG", TransferKind::Hlg),
+    ];
+
+    let dither_was_enabled = unsafe { gl.is_enabled(glow::DITHER) };
+    unsafe {
+        gl.disable(glow::DITHER);
+    }
+    let mut linear_pixel = [0_u8; 4];
+    for (label, transfer) in transfers {
+        let got = render_quad(gl, program, input, 8, 8, |gl| unsafe {
+            let u = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+            gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+            gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+            gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer.shader_id());
+            gl.uniform_1_f32(u("u_encode_gamma").as_ref(), transfer.gamma_for_shader());
+            gl.uniform_matrix_3_f32_slice(
+                u("u_color_matrix").as_ref(),
+                false,
+                &matrix_column_major,
+            );
+        });
+        assert_pixel(
+            got,
+            output_transform_pixel_oracle(input_linear, MATRIX, transfer),
+            1,
+            &format!("{label} non-symmetric output transform"),
+        );
+        assert_eq!(got[3], input[3], "{label} output transform changed alpha");
+        if transfer == TransferKind::Linear {
+            linear_pixel = got;
+        }
+    }
+
+    let transposed_oracle =
+        output_transform_pixel_oracle(input_linear, matrix_column_major, TransferKind::Linear);
+    assert!(
+        linear_pixel[..3]
+            .iter()
+            .zip(&transposed_oracle[..3])
+            .any(|(got, wrong)| (i32::from(*got) - i32::from(*wrong)).abs() > 40),
+        "non-symmetric matrix did not distinguish column-major upload: got={linear_pixel:?}, transposed={transposed_oracle:?}"
+    );
+
+    // Wide-gamut conversion can legitimately produce extended negative
+    // components before the final output-gamut boundary. Fractional power
+    // curves must clip those values instead of evaluating pow(negative),
+    // which is NaN/implementation-defined in GLSL.
+    const NEGATIVE_MATRIX: [f32; 9] = [1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let negative_column_major = matrix_to_column_major(NEGATIVE_MATRIX);
+    let transfer = TransferKind::Power {
+        gamma_x10000: 18_000,
+    };
+    let got = render_quad(gl, program, input, 8, 8, |gl| unsafe {
+        let u = |name: &str| gl.get_uniform_location(program, name);
+        gl.uniform_4_f32(u("u_rect").as_ref(), 0.0, 0.0, 8.0, 8.0);
+        gl.uniform_matrix_4_f32_slice(u("u_projection").as_ref(), false, &ortho(8.0, 8.0));
+        gl.uniform_1_i32(u("u_texture").as_ref(), 0);
+        gl.uniform_1_i32(u("u_encode_tf").as_ref(), transfer.shader_id());
+        gl.uniform_1_f32(u("u_encode_gamma").as_ref(), transfer.gamma_for_shader());
+        gl.uniform_matrix_3_f32_slice(u("u_color_matrix").as_ref(), false, &negative_column_major);
+    });
+    assert_pixel(
+        got,
+        output_transform_pixel_oracle(input_linear, NEGATIVE_MATRIX, transfer),
+        1,
+        "negative extended gamut clips before Power OETF",
+    );
+    assert_eq!(got[0], 0);
+    assert_eq!(unsafe { gl.get_error() }, glow::NO_ERROR);
+
+    unsafe {
+        gl.delete_program(program);
+        if dither_was_enabled {
+            gl.enable(glow::DITHER);
+        }
+    }
+}
+
+#[test]
+fn wayland_per_output_transform_regions_are_pixel_isolated() {
+    use crate::backend::wayland_udev::color_pipeline::{
+        IDENTITY_CTM, OutputColorRegion, TransferKind, matrix_to_column_major,
+    };
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping per-output region isolation test");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 12;
+    const H: i32 = 8;
+    const COMMON_LINEAR: [f32; 4] = [0.25, 0.5, 0.75, 0.625];
+    const SENTINEL: [u8; 4] = [11, 29, 47, 193];
+    const ROTATE: [f32; 9] = [0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0];
+    const MIX: [f32; 9] = [0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0, 0.5];
+    let regions = [
+        OutputColorRegion {
+            // Top-left-origin physical framebuffer coordinates.
+            rect: [1, 1, 3, 3],
+            output_tf: TransferKind::Linear,
+            working_to_output_row_major: IDENTITY_CTM,
+        },
+        OutputColorRegion {
+            rect: [6, 0, 5, 4],
+            output_tf: TransferKind::St2084Pq,
+            working_to_output_row_major: ROTATE,
+        },
+        OutputColorRegion {
+            rect: [2, 6, 6, 2],
+            output_tf: TransferKind::Hlg,
+            working_to_output_row_major: MIX,
+        },
+    ];
+    let sentinel_pixels: Vec<u8> = SENTINEL
+        .iter()
+        .copied()
+        .cycle()
+        .take((W * H * 4) as usize)
+        .collect();
+
+    unsafe {
+        let program = link(
+            gl,
+            super::shaders::BLUR_DOWN_VERTEX,
+            super::shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+        )
+        .expect("per-output transform shaders must link");
+        let (vao, vbo) = create_quad_vao(gl);
+
+        let create_target =
+            |internal_format: i32, pixel_type: u32, pixels: Option<&[u8]>, label: &str| {
+                let texture = gl.create_texture().unwrap();
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D,
+                    0,
+                    internal_format,
+                    W,
+                    H,
+                    0,
+                    glow::RGBA,
+                    pixel_type,
+                    glow::PixelUnpackData::Slice(pixels),
+                );
+                for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+                }
+                for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+                }
+                let framebuffer = gl.create_framebuffer().unwrap();
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER,
+                    glow::COLOR_ATTACHMENT0,
+                    glow::TEXTURE_2D,
+                    Some(texture),
+                    0,
+                );
+                assert_eq!(
+                    gl.check_framebuffer_status(glow::FRAMEBUFFER),
+                    glow::FRAMEBUFFER_COMPLETE,
+                    "{label} framebuffer is incomplete"
+                );
+                (framebuffer, texture)
+            };
+        let (output_fbo, output_texture) = create_target(
+            glow::RGBA8 as i32,
+            glow::UNSIGNED_BYTE,
+            Some(&sentinel_pixels),
+            "partitioned encoded output",
+        );
+        let (linear_fbo, linear_texture) = create_target(
+            glow::RGBA16F as i32,
+            glow::HALF_FLOAT,
+            None,
+            "common linear-sRGB input",
+        );
+
+        let dither_was_enabled = gl.is_enabled(glow::DITHER);
+        let blend_was_enabled = gl.is_enabled(glow::BLEND);
+        let scissor_was_enabled = gl.is_enabled(glow::SCISSOR_TEST);
+        gl.disable(glow::DITHER);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::SCISSOR_TEST);
+
+        // Binary fractions survive RGBA16F storage exactly, keeping the CPU
+        // oracle independent of implementation-specific half conversion.
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(linear_fbo));
+        gl.viewport(0, 0, W, H);
+        gl.clear_color(
+            COMMON_LINEAR[0],
+            COMMON_LINEAR[1],
+            COMMON_LINEAR[2],
+            COMMON_LINEAR[3],
+        );
+        gl.clear(glow::COLOR_BUFFER_BIT);
+
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+        gl.viewport(0, 0, W, H);
+        gl.use_program(Some(program));
+        let uniform = |name: &str| gl.get_uniform_location(program, name);
+        gl.uniform_4_f32(uniform("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+        gl.uniform_matrix_4_f32_slice(
+            uniform("u_projection").as_ref(),
+            false,
+            &ortho(W as f32, H as f32),
+        );
+        gl.uniform_1_i32(uniform("u_texture").as_ref(), 0);
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(linear_texture));
+        gl.bind_vertex_array(Some(vao));
+        gl.enable(glow::SCISSOR_TEST);
+
+        for region in &regions {
+            let [x, top, width, height] = region.rect;
+            let gl_y = H - top - height;
+            assert!(x >= 0 && gl_y >= 0 && width > 0 && height > 0);
+            assert!(x + width <= W && gl_y + height <= H);
+            gl.scissor(x, gl_y, width, height);
+            gl.uniform_1_i32(
+                uniform("u_encode_tf").as_ref(),
+                region.output_tf.shader_id(),
+            );
+            gl.uniform_1_f32(
+                uniform("u_encode_gamma").as_ref(),
+                region.output_tf.gamma_for_shader(),
+            );
+            let matrix = matrix_to_column_major(region.working_to_output_row_major);
+            gl.uniform_matrix_3_f32_slice(uniform("u_color_matrix").as_ref(), false, &matrix);
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+        gl.disable(glow::SCISSOR_TEST);
+        gl.finish();
+
+        let mut frame = vec![0_u8; (W * H * 4) as usize];
+        gl.read_pixels(
+            0,
+            0,
+            W,
+            H,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut frame)),
+        );
+
+        for y in 0..H {
+            for x in 0..W {
+                let owners = regions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, region)| {
+                        let [left, top, width, height] = region.rect;
+                        let bottom = H - top - height;
+                        (x >= left && x < left + width && y >= bottom && y < bottom + height)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                assert!(owners.len() <= 1, "test regions overlap at ({x}, {y})");
+                let offset = ((y * W + x) * 4) as usize;
+                let got = [
+                    frame[offset],
+                    frame[offset + 1],
+                    frame[offset + 2],
+                    frame[offset + 3],
+                ];
+                if let Some(&owner) = owners.first() {
+                    let region = &regions[owner];
+                    let expected = output_transform_pixel_oracle(
+                        COMMON_LINEAR,
+                        region.working_to_output_row_major,
+                        region.output_tf,
+                    );
+                    assert_pixel(
+                        got,
+                        expected,
+                        1,
+                        &format!("output region {owner} pixel ({x}, {y})"),
+                    );
+                } else {
+                    assert_pixel(
+                        got,
+                        SENTINEL,
+                        0,
+                        &format!("output gap sentinel pixel ({x}, {y})"),
+                    );
+                }
+            }
+        }
+
+        gl.use_program(None);
+        gl.bind_vertex_array(None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(linear_fbo);
+        gl.delete_framebuffer(output_fbo);
+        gl.delete_texture(linear_texture);
+        gl.delete_texture(output_texture);
+        gl.delete_program(program);
+        if dither_was_enabled {
+            gl.enable(glow::DITHER);
+        }
+        if blend_was_enabled {
+            gl.enable(glow::BLEND);
+        }
+        if scissor_was_enabled {
+            gl.enable(glow::SCISSOR_TEST);
+        }
+    }
+}
+
+#[test]
+fn wayland_scissored_linear_reentry_primitive_composites_before_hlg_encode() {
     use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
     let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
@@ -1460,6 +1861,11 @@ fn wayland_scissored_overview_reentry_composites_before_hlg_encode() {
         gl.uniform_1_f32(
             encode_uniform("u_encode_gamma").as_ref(),
             transfer.gamma_for_shader(),
+        );
+        gl.uniform_matrix_3_f32_slice(
+            encode_uniform("u_color_matrix").as_ref(),
+            false,
+            &crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
         );
         gl.active_texture(glow::TEXTURE0);
         gl.bind_texture(glow::TEXTURE_2D, Some(linear_texture));
@@ -2642,6 +3048,154 @@ fn wayland_constructor_rolls_back_every_raw_gpu_name_on_failure() {
             commit_failure.textures.len()
         );
         assert_constructor_probe_names_are_deleted(&gl, &commit_failure);
+    }
+}
+
+#[test]
+fn wayland_resize_failure_keeps_the_complete_old_target_chain() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping transactional resize test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 64, 48, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(
+            compositor.linear_fbo, 0,
+            "headless GLES3 must provide the requested FP16 scene target"
+        );
+
+        let old_size = compositor.screen_size();
+        let old_generation = compositor.output_texture_generation();
+        let old_framebuffers = std::iter::once(compositor.output_fbo)
+            .chain(std::iter::once(compositor.linear_fbo))
+            .chain(std::iter::once(compositor.scene_fbo))
+            .chain(compositor.blur_fbos.iter().map(|level| level.fbo))
+            .chain(std::iter::once(compositor.postprocess_fbo))
+            .chain(std::iter::once(compositor.transition_fbo))
+            .collect::<Vec<_>>();
+        let old_textures = std::iter::once(compositor.output_texture)
+            .chain(std::iter::once(compositor.linear_texture))
+            .chain(std::iter::once(compositor.scene_texture))
+            .chain(compositor.blur_fbos.iter().map(|level| level.texture))
+            .chain(std::iter::once(compositor.postprocess_texture))
+            .chain(std::iter::once(compositor.transition_texture))
+            .collect::<Vec<_>>();
+
+        // Fail only after several replacement pairs exist. The allocation
+        // guard must delete those new names without changing any live field.
+        let mut resize_failure = super::CompositorConstructionProbe {
+            fail_before_framebuffer_count: Some(4),
+            ..Default::default()
+        };
+        let error = compositor
+            .resize_inner(&gl, 96, 72, Some(&mut resize_failure))
+            .expect_err("injected resize allocation failure must propagate");
+        assert!(error.contains("framebuffer"));
+        assert_eq!(resize_failure.framebuffers.len(), 4);
+        assert_eq!(resize_failure.textures.len(), 4);
+        assert_eq!(compositor.screen_size(), old_size);
+        assert_eq!(compositor.output_texture_generation(), old_generation);
+        assert_eq!(
+            old_framebuffers,
+            std::iter::once(compositor.output_fbo)
+                .chain(std::iter::once(compositor.linear_fbo))
+                .chain(std::iter::once(compositor.scene_fbo))
+                .chain(compositor.blur_fbos.iter().map(|level| level.fbo))
+                .chain(std::iter::once(compositor.postprocess_fbo))
+                .chain(std::iter::once(compositor.transition_fbo))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            old_textures,
+            std::iter::once(compositor.output_texture)
+                .chain(std::iter::once(compositor.linear_texture))
+                .chain(std::iter::once(compositor.scene_texture))
+                .chain(compositor.blur_fbos.iter().map(|level| level.texture))
+                .chain(std::iter::once(compositor.postprocess_texture))
+                .chain(std::iter::once(compositor.transition_texture))
+                .collect::<Vec<_>>()
+        );
+        for &framebuffer in &old_framebuffers {
+            assert_eq!(gl.IsFramebuffer(framebuffer), 1);
+        }
+        for &texture in &old_textures {
+            assert_eq!(gl.IsTexture(texture), 1);
+        }
+        assert_constructor_probe_names_are_deleted(&gl, &resize_failure);
+
+        let mut max_texture_size = 0;
+        gl.GetIntegerv(super::GL_MAX_TEXTURE_SIZE, &mut max_texture_size);
+        let error = compositor
+            .resize(&gl, max_texture_size as u32 + 1, 48)
+            .expect_err("oversized compositor targets must be rejected");
+        assert!(error.contains("GL_MAX_TEXTURE_SIZE"));
+        assert_eq!(compositor.screen_size(), old_size);
+
+        compositor
+            .resize(&gl, 80, 60)
+            .expect("complete replacement chain should resize transactionally");
+        assert_eq!(compositor.screen_size(), (80, 60));
+        assert_ne!(compositor.output_texture_generation(), old_generation);
+        assert_ne!(compositor.linear_fbo, 0);
+        for &framebuffer in &old_framebuffers {
+            assert_eq!(gl.IsFramebuffer(framebuffer), 0);
+        }
+        for &texture in &old_textures {
+            assert_eq!(gl.IsTexture(texture), 0);
+        }
+
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
+fn wayland_scene_linear_delivery_blocks_scanout_and_annotation_only_tail() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping scene-linear safety test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, 32, 24, false)
+            .expect("headless Wayland compositor must initialize");
+        let saved_requested = compositor.scene_linear_requested;
+        let saved_linear_fbo = compositor.linear_fbo;
+        compositor.scene_linear_requested = true;
+        // The policy only needs a live non-zero target. Borrow an existing GL
+        // name for the assertion and restore it before resource teardown.
+        compositor.linear_fbo = compositor.output_fbo;
+
+        assert_eq!(
+            compositor.direct_scanout_block_reason(crate::backend::api::CompositorRect::new(
+                0.0, 0.0, 32.0, 24.0
+            )),
+            Some("scene-linear output conversion requires composition")
+        );
+
+        compositor.annotation_active = true;
+        compositor.annotation_strokes.clear();
+        compositor.annotation_quads.clear();
+        compositor.annotation_labels.clear();
+        assert!(
+            !compositor.compositor_linear_tail_safe(),
+            "an annotation-only late pass must select the encoded fallback"
+        );
+
+        compositor.scene_linear_requested = saved_requested;
+        compositor.linear_fbo = saved_linear_fbo;
     }
 }
 

@@ -546,8 +546,11 @@ pub struct BehaviorConfig {
     /// real DRM modeset on Apply.
     /// Default false: jwm advertises mode information but rejects mode changes
     /// at the Apply step until explicitly enabled. Position/scale/transform
-    /// changes are always honored — only the modeset is gated, because a bad
-    /// mode can leave the output black with no in-protocol confirmation path.
+    /// changes are honored when the resulting physical framebuffer envelope
+    /// stays the same. Runtime envelope growth/shrink is rejected even with
+    /// this flag enabled until KMS configuration and transactional GLES target
+    /// preparation can be committed as one operation; a failed modeset or GPU
+    /// allocation must never leave the output and compositor at different sizes.
     #[serde(default)]
     pub wlr_output_mgmt_allow_modeset: bool,
 
@@ -675,7 +678,9 @@ pub struct BehaviorConfig {
     pub grayscale: bool,
 
     // --- P3: HDR / 10-bit output ---
-    /// Enable HDR (High Dynamic Range) output with tone mapping.
+    /// Enable JWM's HDR post-processing policy. This does not currently enable
+    /// DRM HDR signalling; the Udev backend keeps `HDR_OUTPUT_METADATA`
+    /// fail-closed until KMS-external elements join the color pipeline.
     #[serde(default)]
     pub hdr_enabled: bool,
     /// Target display peak luminance in nits (400=HDR400, 600=HDR600, 1000=HDR1000).
@@ -684,33 +689,38 @@ pub struct BehaviorConfig {
     /// Tone mapping method: "none", "reinhard", "aces".
     #[serde(default = "default_tone_mapping_method")]
     pub tone_mapping_method: String,
-    /// Apply per-surface wp-color-management transforms (decode →
-    /// gamut-matrix → encode) in the window shader. Default off — the
-    /// render-path math has unit-test coverage but no HW visual
-    /// verification yet. When this flag is off, per-surface color transforms
-    /// are bypassed and undescribed content keeps the legacy sRGB assumption;
-    /// renderer-wide alpha and safety fixes still apply in both modes.
+    /// Apply per-surface wp-color-management transforms in the window shader.
+    /// With `scene_linear_compositing`, described surfaces are decoded and
+    /// mapped into the normalized linear-sRGB common workspace; the output
+    /// gamut/transfer step is deferred. Without that workspace, the historical
+    /// encoded path still targets the window's largest-overlap output. Default
+    /// off — the math is pixel-tested but still awaits broad HW visual checks.
+    /// When off, described and undescribed content retain the legacy sRGB
+    /// assumption; renderer-wide alpha and safety fixes still apply.
     #[serde(default)]
     pub color_management_render_path: bool,
 
-    /// SOTA #2: route final window compositing through an FP16 scene-linear
-    /// intermediate (window decode-only, final encode at output). Wallpaper,
-    /// shadows and blur are still assembled by the historical encoded path
-    /// before that scene is decoded once, so this improves window blending
-    /// and per-surface transforms without claiming a physically linear blur.
-    /// Costs one FP16 scene target plus decode/encode passes. Requires
-    /// `color_management_render_path` to also be on; ignored otherwise.
-    /// Default off pending HW visual verification.
+    /// SOTA #2: composite windows and scene-linear-aware overlays in an FP16,
+    /// normalized linear-sRGB common workspace. On a safe frame tail, supported
+    /// physical output regions receive their own gamut/transfer encode, or all
+    /// participating CRTCs coherently own the matching CTM+LUT pair. Encoded
+    /// late overlays, KMS-external elements/capture, unsupported topology or a
+    /// missing FP16 target select the conservative global-sRGB route. Because
+    /// the normal desktop cursor is currently KMS-external, that fallback is
+    /// expected for most interactive frames. Wallpaper, shadows and blur are
+    /// still assembled encoded then decoded once, so this does not claim a
+    /// physically linear blur. Requires `color_management_render_path`; costs
+    /// one FP16 target plus decode/finalization passes. Default off.
     #[serde(default)]
     pub scene_linear_compositing: bool,
 
-    /// Offload the final output transfer/OETF encode to the CRTC's
-    /// `GAMMA_LUT` hardware pipeline. Active only when every connected,
-    /// DPMS-on output exposes `GAMMA_LUT` with size ≥ 256; otherwise the shader
-    /// encode runs. The offload is all-or-nothing per frame to keep
-    /// multi-output sessions consistent (never half-encoded across screens).
-    /// Bit-identical to gate-off when no output supports it. Default off
-    /// pending HW visual A/B.
+    /// Offload final linear-sRGB→output gamut and transfer work as one CRTC
+    /// `CTM` + `GAMMA_LUT` pair. It is active only when every participating,
+    /// DPMS-on output supports and accepts both properties and the frame tail
+    /// is linear-safe; a LUT without its CTM is rolled back. Delivery ownership
+    /// is all-or-nothing across outputs. Otherwise the renderer uses eligible
+    /// software output regions or the global-sRGB fallback. Default off pending
+    /// HW visual A/B.
     #[serde(default)]
     pub kms_color_pipeline_offload: bool,
 

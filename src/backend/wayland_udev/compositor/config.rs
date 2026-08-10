@@ -48,6 +48,18 @@ fn collect_absent_auxiliary_window_ids(
         .extend(known_ids.filter(|id| is_auxiliary_window_id(*id) && !live_ids.contains(id)));
 }
 
+fn retained_color_plan_geometry(
+    rect: crate::backend::api::CompositorRect,
+) -> Option<(i32, i32, u32, u32)> {
+    let rect = rect.normalized()?;
+    Some((
+        rect.x.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+        rect.y.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32,
+        rect.width.round().clamp(1.0, u32::MAX as f32) as u32,
+        rect.height.round().clamp(1.0, u32::MAX as f32) as u32,
+    ))
+}
+
 fn apply_expose_terminal_cleanup<Id>(
     entries: &mut Vec<crate::backend::compositor_common::expose::ExposeEntry<Id>>,
     clear_entries: bool,
@@ -86,6 +98,95 @@ enum WindowRetirement {
 enum DisabledGenieAction {
     CacheMinimized,
     CompleteRestore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetainedColorGenerationAction {
+    RecaptureMinimized,
+    CompleteRestore,
+}
+
+const fn retained_color_generation_action(
+    direction: crate::backend::compositor_common::genie::GenieDirection,
+) -> RetainedColorGenerationAction {
+    match direction {
+        crate::backend::compositor_common::genie::GenieDirection::Minimize => {
+            RetainedColorGenerationAction::RecaptureMinimized
+        }
+        crate::backend::compositor_common::genie::GenieDirection::Restore => {
+            RetainedColorGenerationAction::CompleteRestore
+        }
+    }
+}
+
+fn legacy_retained_placement_changed(
+    render_path_enabled: bool,
+    scene_linear_active: bool,
+    previous: Option<crate::backend::api::CompositorRect>,
+    next: Option<crate::backend::api::CompositorRect>,
+) -> bool {
+    render_path_enabled && !scene_linear_active && previous != next
+}
+
+fn legacy_retained_preview_placement_changed(
+    render_path_enabled: bool,
+    scene_linear_active: bool,
+    stable_dock_target: Option<crate::backend::api::CompositorRect>,
+    previous_preview: Option<crate::backend::api::CompositorRect>,
+    next_preview: Option<crate::backend::api::CompositorRect>,
+) -> bool {
+    stable_dock_target.is_none()
+        && legacy_retained_placement_changed(
+            render_path_enabled,
+            scene_linear_active,
+            previous_preview,
+            next_preview,
+        )
+}
+
+fn retained_output_profile_at<'a>(
+    outputs: &'a [RetainedOutputColorContext],
+    placement: crate::backend::api::CompositorRect,
+) -> Option<&'a RetainedOutputColorContext> {
+    let (x, y, width, height) = retained_color_plan_geometry(placement)?;
+    let left = i64::from(x);
+    let top = i64::from(y);
+    let right = left + i64::from(width);
+    let bottom = top + i64::from(height);
+
+    outputs
+        .iter()
+        .filter_map(|output| {
+            let [output_x, output_y, output_width, output_height] = output.rect;
+            if output_width <= 0 || output_height <= 0 {
+                return None;
+            }
+            let output_left = i64::from(output_x);
+            let output_top = i64::from(output_y);
+            let output_right = output_left + i64::from(output_width);
+            let output_bottom = output_top + i64::from(output_height);
+            let overlap_width = right.min(output_right) - left.max(output_left);
+            let overlap_height = bottom.min(output_bottom) - top.max(output_top);
+            (overlap_width > 0 && overlap_height > 0)
+                .then_some((overlap_width * overlap_height, output))
+        })
+        .max_by_key(|(area, _)| *area)
+        .map(|(_, output)| output)
+}
+
+fn retained_output_profiles_compatible(
+    outputs: &[RetainedOutputColorContext],
+    dock_target: crate::backend::api::CompositorRect,
+    preview_anchor: crate::backend::api::CompositorRect,
+) -> bool {
+    let Some(dock_profile) = retained_output_profile_at(outputs, dock_target) else {
+        return false;
+    };
+    let Some(preview_profile) = retained_output_profile_at(outputs, preview_anchor) else {
+        return false;
+    };
+    dock_profile.output_tf == preview_profile.output_tf
+        && dock_profile.working_to_output_row_major == preview_profile.working_to_output_row_major
 }
 
 /// Resolve in-flight state when Genie is disabled at runtime. A queued
@@ -838,12 +939,88 @@ impl WaylandCompositor {
         self.dock_y = y;
     }
 
+    fn retained_color_plan_mode(&self) -> (bool, bool) {
+        self.retained_color_plan_context
+            .as_ref()
+            .map(|context| (context.render_path_enabled, context.scene_linear_active))
+            .unwrap_or((false, false))
+    }
+
+    /// Invalidate one retained owner whose legacy transform was selected from
+    /// a window-specific Dock/preview placement. Returns true when a restore
+    /// was completed and the caller must not recreate minimized UI state.
+    fn invalidate_retained_color_plan_for_window(&mut self, window_id: u64) -> bool {
+        use crate::backend::compositor_common::genie::GenieDirection;
+
+        let active_direction = self
+            .genie_active
+            .iter()
+            .find(|animation| animation.window_id == window_id)
+            .map(|animation| animation.direction);
+        if self.pending_genie_restores.contains(&window_id)
+            || active_direction == Some(GenieDirection::Restore)
+        {
+            self.complete_genie_restore_immediately(window_id);
+            self.force_full_damage_next = true;
+            self.needs_render = true;
+            return true;
+        }
+
+        // A minimizing mesh, full-resolution cache, low-resolution snapshot,
+        // or in-progress hidden import may all own the old output-bound plan.
+        // Drop every tier before the new placement is allowed to rearm it.
+        self.genie_active
+            .retain(|animation| animation.window_id != window_id);
+        self.minimized_visuals.remove(&window_id);
+        self.pending_minimized_visuals.remove(&window_id);
+        self.discard_minimized_snapshot(window_id);
+        let removed_live = self.minimized_windows.contains(&window_id)
+            && self
+                .take_live_window_preserving_metadata(window_id)
+                .is_some();
+
+        if self.minimized_windows.contains(&window_id)
+            && self.minimized_color_plan_geometry(window_id).is_some()
+        {
+            self.arm_minimized_snapshot_capture(window_id);
+            self.arm_static_minimized_capture(window_id);
+        }
+
+        if let Some(preview) = self
+            .dock_preview
+            .as_mut()
+            .filter(|preview| preview.window_id == window_id)
+        {
+            let now = Instant::now();
+            preview.started = now;
+            preview.start_opacity = 0.0;
+            preview.start_scale = 0.86;
+            preview.opacity = 0.0;
+            preview.scale = 0.86;
+            preview.awaiting_source = true;
+        }
+        if removed_live {
+            self.refresh_any_color_transform_active();
+        }
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+        false
+    }
+
     pub(crate) fn set_window_dock_geometry(
         &mut self,
         window_id: u64,
         target: Option<crate::backend::api::CompositorRect>,
     ) {
         let target = target.and_then(crate::backend::api::CompositorRect::normalized);
+        let previous_target = self.genie_targets.get(&window_id).copied();
+        let (render_path_enabled, scene_linear_active) = self.retained_color_plan_mode();
+        let invalidate_legacy_plan = legacy_retained_placement_changed(
+            render_path_enabled,
+            scene_linear_active,
+            previous_target,
+            target,
+        );
         match target {
             Some(target) => {
                 self.genie_targets.insert(window_id, target);
@@ -895,7 +1072,12 @@ impl WaylandCompositor {
                 }
             }
         }
-        if self.minimized_windows.contains(&window_id) {
+        if invalidate_legacy_plan && self.invalidate_retained_color_plan_for_window(window_id) {
+            return;
+        }
+        if self.minimized_windows.contains(&window_id)
+            && self.minimized_color_plan_geometry(window_id).is_some()
+        {
             self.arm_minimized_snapshot_capture(window_id);
         }
         self.arm_static_minimized_capture(window_id);
@@ -978,6 +1160,41 @@ impl WaylandCompositor {
         let now = Instant::now();
         match request {
             Some((window_id, anchor)) => {
+                let stable_dock_target = self.genie_targets.get(&window_id).copied();
+                let preview_profile_compatible = self
+                    .retained_color_plan_context
+                    .as_ref()
+                    .is_none_or(|context| match stable_dock_target {
+                        Some(target)
+                            if context.render_path_enabled && !context.scene_linear_active =>
+                        {
+                            retained_output_profiles_compatible(&context.outputs, target, anchor)
+                        }
+                        _ => true,
+                    });
+                if !preview_profile_compatible {
+                    // The retained Dock pixels are still valid at their stable
+                    // target. Refuse only the incompatible preview projection;
+                    // never mutate or recapture the Dock owner's transform.
+                    if self.dock_preview.take().is_some() {
+                        self.force_full_damage_next = true;
+                        self.needs_render = true;
+                    }
+                    return;
+                }
+                let previous_preview_anchor = self
+                    .dock_preview
+                    .as_ref()
+                    .filter(|preview| preview.window_id == window_id)
+                    .map(|preview| preview.anchor);
+                let (render_path_enabled, scene_linear_active) = self.retained_color_plan_mode();
+                let invalidate_legacy_plan = legacy_retained_preview_placement_changed(
+                    render_path_enabled,
+                    scene_linear_active,
+                    stable_dock_target,
+                    previous_preview_anchor,
+                    Some(anchor),
+                );
                 self.touch_minimized_visual(window_id, now);
                 self.touch_minimized_snapshot(window_id);
                 if self.dock_preview.as_ref().is_some_and(|preview| {
@@ -996,16 +1213,30 @@ impl WaylandCompositor {
                         preview.lease_deadline = now + std::time::Duration::from_secs(4);
                         (preview.awaiting_source, anchor_changed)
                     };
+                    if invalidate_legacy_plan
+                        && self.invalidate_retained_color_plan_for_window(window_id)
+                    {
+                        return;
+                    }
                     if anchor_changed {
                         // Preserve the in-flight show animation; moving an
-                        // existing preview must not fade it in again at every
-                        // throttled Dock anchor update.
+                        // existing common-linear preview need not fade it in
+                        // again at every throttled Dock anchor update. Legacy
+                        // output-bound pixels were concealed above instead.
                         self.force_full_damage_next = true;
                         self.needs_render = true;
                     }
-                    if awaiting_source || !self.minimized_full_source_available(window_id) {
+                    if awaiting_source
+                        || invalidate_legacy_plan
+                        || !self.minimized_full_source_available(window_id)
+                    {
                         self.arm_static_minimized_capture(window_id);
                     }
+                    return;
+                }
+                if invalidate_legacy_plan
+                    && self.invalidate_retained_color_plan_for_window(window_id)
+                {
                     return;
                 }
                 let awaiting_source = !self.minimized_preview_source_available(window_id);
@@ -1519,6 +1750,26 @@ impl WaylandCompositor {
         self.pending_minimized_visuals.contains(&window_id)
     }
 
+    /// Logical placement used to plan a hidden minimized import. Its parked
+    /// client geometry is deliberately off-screen and cannot select a legacy
+    /// output profile; the Dock target (or active preview anchor) is the first
+    /// reliable place where the retained pixels will actually be drawn.
+    pub(crate) fn minimized_color_plan_geometry(
+        &self,
+        window_id: u64,
+    ) -> Option<(i32, i32, u32, u32)> {
+        self.genie_targets
+            .get(&window_id)
+            .copied()
+            .or_else(|| {
+                self.dock_preview
+                    .as_ref()
+                    .filter(|preview| preview.window_id == window_id)
+                    .map(|preview| preview.anchor)
+            })
+            .and_then(retained_color_plan_geometry)
+    }
+
     pub(crate) fn needs_minimized_window_texture(&self, window_id: u64) -> bool {
         self.pending_minimized_visuals.contains(&window_id)
             && !self
@@ -1880,8 +2131,9 @@ impl WaylandCompositor {
         }
     }
 
-    /// Set the per-window surface→output color transform, used by the window
-    /// fragment shader when `behavior.color_management_render_path` is enabled.
+    /// Set the per-window surface transform used by the window fragment
+    /// shader. Scene-linear frames target common linear sRGB; the legacy
+    /// encoded path may still target one overlapping output directly.
     pub(crate) fn set_window_color_transform(
         &mut self,
         window_id: u64,
@@ -1900,12 +2152,113 @@ impl WaylandCompositor {
         }
     }
 
-    /// Whether the next rendered frame is requested in the scene-linear color
-    /// domain. This is intentionally the requested state rather than merely
-    /// checking the current FBO: a hot-enable allocates the FBO at frame start,
-    /// after the backend has already planned per-surface transforms.
-    pub(crate) fn scene_linear_color_path_requested(&self) -> bool {
-        self.scene_linear_requested
+    /// Advance the generation used by color plans copied into retained raw
+    /// textures. Raw client pixels remain reusable, but an output-bound plan
+    /// cannot cross a scene-linear/legacy or output-profile boundary.
+    ///
+    /// Fail closed: close fades disappear, restores complete onto their live
+    /// surface, and minimized Genie/Dock owners are dropped until the existing
+    /// hidden-import path captures them again with a freshly planned source.
+    pub(crate) fn reconcile_retained_color_plan_context(
+        &mut self,
+        render_path_enabled: bool,
+        scene_linear_active: bool,
+        surface_description_generation: u64,
+        outputs: Vec<RetainedOutputColorContext>,
+    ) -> bool {
+        let next = RetainedColorPlanContext {
+            render_path_enabled,
+            scene_linear_active,
+            surface_description_generation,
+            outputs,
+        };
+        let changed =
+            retained_color_plan_context_changed(self.retained_color_plan_context.as_ref(), &next);
+        self.retained_color_plan_context = Some(next);
+        if !changed {
+            return false;
+        }
+
+        // Never draw an old common/output-bound plan as identity in the new
+        // domain. Surfaces which no longer exist cannot be replanned, so close
+        // fades end immediately instead of turning HDR pixels into sRGB.
+        self.windows.retain(|_, window| !window.fading_out);
+
+        // Retargeting a retained mesh without its source description would be
+        // equally unsafe. A minimize is re-captured from the still-mapped
+        // hidden surface; a restore is already live and can complete now.
+        let animations = std::mem::take(&mut self.genie_active);
+        let mut minimizing = Vec::new();
+        let mut restoring = self
+            .pending_genie_restores
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for animation in animations {
+            match retained_color_generation_action(animation.direction) {
+                RetainedColorGenerationAction::RecaptureMinimized => {
+                    minimizing.push(animation.window_id);
+                }
+                RetainedColorGenerationAction::CompleteRestore => {
+                    restoring.push(animation.window_id);
+                }
+            }
+        }
+        restoring.sort_unstable();
+        restoring.dedup();
+        minimizing.retain(|window_id| restoring.binary_search(window_id).is_err());
+        for window_id in restoring {
+            self.complete_genie_restore_immediately(window_id);
+        }
+        for window_id in minimizing {
+            self.minimized_windows.insert(window_id);
+        }
+
+        // Full-resolution and bounded tiers both carry the old copied plan.
+        // Drop them before arming the ordinary one-shot hidden import and
+        // low-resolution snapshot generation.
+        self.minimized_visuals.clear();
+        self.pending_minimized_visuals.clear();
+        let minimized = self.minimized_windows.iter().copied().collect::<Vec<_>>();
+        let mut removed_live_window = false;
+        for window_id in minimized.iter().copied() {
+            self.discard_minimized_snapshot(window_id);
+            removed_live_window |= self
+                .take_live_window_preserving_metadata(window_id)
+                .is_some();
+            // A parked hidden-client rectangle is not a placement. Leave the
+            // visual absent until a normalized Dock/preview target exists.
+            if render_path_enabled && self.minimized_color_plan_geometry(window_id).is_some() {
+                self.arm_minimized_snapshot_capture(window_id);
+                self.arm_static_minimized_capture(window_id);
+            }
+        }
+        if removed_live_window {
+            self.refresh_any_color_transform_active();
+        }
+
+        if let Some(preview) = self.dock_preview.as_mut()
+            && self.minimized_windows.contains(&preview.window_id)
+        {
+            let now = Instant::now();
+            preview.started = now;
+            preview.start_opacity = 0.0;
+            preview.start_scale = 0.86;
+            preview.opacity = 0.0;
+            preview.scale = 0.86;
+            preview.awaiting_source = true;
+        }
+
+        // Live windows are rebuilt immediately by the backend's current-frame
+        // planner. Clearing here makes the method safe even if a caller aborts
+        // before that rebuild.
+        for window in self.windows.values_mut() {
+            window.color_transform = None;
+        }
+        self.any_color_transform_active = false;
+        self.force_full_damage_next = true;
+        self.needs_render = true;
+        true
     }
 
     /// Whether scene-linear rendering is backed by a live intermediate.
@@ -2014,14 +2367,208 @@ impl WaylandCompositor {
 #[cfg(test)]
 mod tests {
     use super::{
-        DisabledGenieAction, IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency, WindowRetirement,
-        XDG_POPUP_WINDOW_ID_PREFIX, apply_expose_terminal_cleanup,
+        DisabledGenieAction, IME_POPUP_WINDOW_ID_PREFIX, PendingWindowUrgency,
+        RetainedColorGenerationAction, RetainedColorPlanContext, RetainedOutputColorContext,
+        WindowRetirement, XDG_POPUP_WINDOW_ID_PREFIX, apply_expose_terminal_cleanup,
         clear_immediate_restore_collections, collect_absent_auxiliary_window_ids,
-        disabled_genie_action, is_auxiliary_window_id, mouse_position_requires_render,
-        postprocess_is_active, retirement_uses_genie, should_request_static_minimized_capture,
+        disabled_genie_action, is_auxiliary_window_id, legacy_retained_placement_changed,
+        legacy_retained_preview_placement_changed, mouse_position_requires_render,
+        postprocess_is_active, retained_color_generation_action,
+        retained_color_plan_context_changed, retained_color_plan_geometry,
+        retained_output_profiles_compatible, retirement_uses_genie,
+        should_request_static_minimized_capture,
     };
     use crate::backend::compositor_common::genie::GenieDirection;
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
     use std::collections::{HashMap, HashSet};
+
+    fn retained_context(
+        render_path_enabled: bool,
+        scene_linear_active: bool,
+        surface_description_generation: u64,
+        rect: [i32; 4],
+        output_tf: TransferKind,
+    ) -> RetainedColorPlanContext {
+        RetainedColorPlanContext {
+            render_path_enabled,
+            scene_linear_active,
+            surface_description_generation,
+            outputs: vec![RetainedOutputColorContext {
+                rect,
+                output_tf,
+                working_to_output_row_major: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            }],
+        }
+    }
+
+    #[test]
+    fn retained_color_generation_changes_only_after_an_established_context_moves() {
+        let encoded = retained_context(true, false, 7, [0, 0, 1920, 1080], TransferKind::Srgb);
+        assert!(!retained_color_plan_context_changed(None, &encoded));
+        assert!(!retained_color_plan_context_changed(
+            Some(&encoded),
+            &encoded
+        ));
+
+        let linear = retained_context(true, true, 7, [0, 0, 1920, 1080], TransferKind::Srgb);
+        assert!(retained_color_plan_context_changed(Some(&encoded), &linear));
+
+        let pq = retained_context(true, true, 7, [0, 0, 1920, 1080], TransferKind::St2084Pq);
+        assert!(retained_color_plan_context_changed(Some(&linear), &pq));
+
+        let moved = retained_context(true, true, 7, [1920, 0, 1920, 1080], TransferKind::Srgb);
+        assert!(retained_color_plan_context_changed(Some(&linear), &moved));
+
+        let disabled = retained_context(false, true, 7, [0, 0, 1920, 1080], TransferKind::Srgb);
+        assert!(retained_color_plan_context_changed(
+            Some(&linear),
+            &disabled
+        ));
+
+        let new_surface_description =
+            retained_context(true, true, 8, [0, 0, 1920, 1080], TransferKind::Srgb);
+        assert!(retained_color_plan_context_changed(
+            Some(&linear),
+            &new_surface_description
+        ));
+    }
+
+    #[test]
+    fn retained_color_generation_fails_closed_for_both_genie_directions() {
+        assert_eq!(
+            retained_color_generation_action(GenieDirection::Minimize),
+            RetainedColorGenerationAction::RecaptureMinimized
+        );
+        assert_eq!(
+            retained_color_generation_action(GenieDirection::Restore),
+            RetainedColorGenerationAction::CompleteRestore
+        );
+    }
+
+    #[test]
+    fn retained_color_geometry_rejects_invalid_placement_and_normalizes_rounding() {
+        assert_eq!(
+            retained_color_plan_geometry(crate::backend::api::CompositorRect::new(
+                10.4, 20.6, 199.6, 100.2,
+            )),
+            Some((10, 21, 200, 100))
+        );
+        assert_eq!(
+            retained_color_plan_geometry(crate::backend::api::CompositorRect::new(
+                f32::NAN,
+                0.0,
+                10.0,
+                10.0,
+            )),
+            None
+        );
+        assert_eq!(
+            retained_color_plan_geometry(crate::backend::api::CompositorRect::new(
+                0.0, 0.0, 0.0, 10.0,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_retained_target_move_invalidates_only_output_bound_plans() {
+        let output_a = crate::backend::api::CompositorRect::new(100.0, 900.0, 80.0, 50.0);
+        let output_b = crate::backend::api::CompositorRect::new(2100.0, 900.0, 80.0, 50.0);
+
+        assert!(legacy_retained_placement_changed(
+            true,
+            false,
+            Some(output_a),
+            Some(output_b),
+        ));
+        assert!(!legacy_retained_placement_changed(
+            true,
+            true,
+            Some(output_a),
+            Some(output_b),
+        ));
+        assert!(!legacy_retained_placement_changed(
+            false,
+            false,
+            Some(output_a),
+            Some(output_b),
+        ));
+        assert!(!legacy_retained_placement_changed(
+            true,
+            false,
+            Some(output_a),
+            Some(output_a),
+        ));
+    }
+
+    #[test]
+    fn legacy_preview_move_uses_anchor_only_without_a_stable_dock_target() {
+        let output_a = crate::backend::api::CompositorRect::new(100.0, 900.0, 80.0, 50.0);
+        let output_b = crate::backend::api::CompositorRect::new(2100.0, 900.0, 80.0, 50.0);
+
+        assert!(legacy_retained_preview_placement_changed(
+            true,
+            false,
+            None,
+            Some(output_a),
+            Some(output_b),
+        ));
+        assert!(!legacy_retained_preview_placement_changed(
+            true,
+            false,
+            Some(output_a),
+            Some(output_a),
+            Some(output_b),
+        ));
+    }
+
+    #[test]
+    fn retained_preview_reuses_a_stable_dock_plan_only_for_compatible_profiles() {
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let shifted = [0.9, 0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.1, 0.9];
+        let dock = crate::backend::api::CompositorRect::new(100.0, 100.0, 80.0, 50.0);
+        let preview = crate::backend::api::CompositorRect::new(1100.0, 100.0, 80.0, 50.0);
+        let outside = crate::backend::api::CompositorRect::new(2500.0, 100.0, 80.0, 50.0);
+        let left = RetainedOutputColorContext {
+            rect: [0, 0, 1000, 1000],
+            output_tf: TransferKind::Srgb,
+            working_to_output_row_major: identity,
+        };
+        let compatible_right = RetainedOutputColorContext {
+            rect: [1000, 0, 1000, 1000],
+            output_tf: TransferKind::Srgb,
+            working_to_output_row_major: identity,
+        };
+
+        assert!(retained_output_profiles_compatible(
+            &[left.clone(), compatible_right],
+            dock,
+            preview,
+        ));
+
+        let different_tf = RetainedOutputColorContext {
+            rect: [1000, 0, 1000, 1000],
+            output_tf: TransferKind::St2084Pq,
+            working_to_output_row_major: identity,
+        };
+        assert!(!retained_output_profiles_compatible(
+            &[left.clone(), different_tf],
+            dock,
+            preview,
+        ));
+
+        let different_matrix = RetainedOutputColorContext {
+            rect: [1000, 0, 1000, 1000],
+            output_tf: TransferKind::Srgb,
+            working_to_output_row_major: shifted,
+        };
+        assert!(!retained_output_profiles_compatible(
+            &[left.clone(), different_matrix],
+            dock,
+            preview,
+        ));
+        assert!(!retained_output_profiles_compatible(&[left], dock, outside,));
+    }
 
     #[test]
     fn expose_terminal_cleanup_requests_one_full_repair() {

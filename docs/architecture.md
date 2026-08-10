@@ -184,17 +184,35 @@ src/backend/api.rs          platform boundary
   static skydome program owns the horizon and floor-light environment, leaving
   the simpler Expose/Peek background program untouched and avoiding idle-frame
   scheduling. Solid and reflected live faces share the ordinary window's
-  per-surface color-transform plan. A software-encoded non-sRGB frame re-enters
-  the FP16 target only over the overview monitor, draws the complete prism in
-  linear light at its original layer, then target-encodes that same scissored
-  region; hardware-OETF and legacy encoded routes remain direct. The GLES
-  adapters transform straight color
+  per-surface color-transform plan. With a live FP16 target, described surfaces
+  map into one normalized linear-sRGB workspace independently of output
+  overlap. The overview therefore stays in common linear light as it crosses
+  outputs; output gamut and transfer are applied only after its complete
+  painter-sorted stream. Linear-tail-safe frames use either per-output software
+  regions (nonnegative physical origin, unit scale, normal transform and no
+  conflicting overlap) or one coherent all-output CRTC CTM+GAMMA_LUT pair.
+  Encoded-only late overlays, capture, KMS-external cursor/drag/lock/top/overlay
+  elements, unsupported topology or a missing FP16 target select the global
+  sRGB fallback for the whole frame. A normal pointer usually intersects an
+  active output, so current interactive desktop frames mostly take that
+  fallback; per-output live delivery remains infrastructure until external
+  elements gain color adapters. DRM HDR signalling is therefore fail-closed:
+  enabling `HDR_OUTPUT_METADATA` is rejected for now, inherited metadata is
+  cleared at KMS ownership boundaries, and the runtime target remains exact
+  sRGB. Status IPC reports EDID profiles as capabilities rather than active
+  output signals and has no last-frame delivery-route snapshot. The GLES adapters
+  transform straight color
   (unpremultiply, decode, gamut matrix, optional encode, repremultiply), retain
-  explicit same-space PQ/HLG plans for scene-linear rendering, and normalize
+  explicit PQ/HLG decode plans when entering the common workspace, and normalize
   runtime 3x3 uploads to column-major data with `GL_FALSE`; filler and legacy
-  transition branches explicitly clear that state. All close paths go through
-  `OverviewState::deactivate`, which also resets the slide offset the inline
-  Escape path used to leave stale.
+  transition branches explicitly clear that state. The workspace is relative,
+  not absolute-luminance-normalized; non-D65 descriptions have no chromatic
+  adaptation, dynamic surface-description changes are not yet latched to the
+  corresponding `wl_surface.commit`, KMS-external elements are not adapted,
+  and color properties plus framebuffer are not committed as one atomic
+  transaction. All close paths go
+  through `OverviewState::deactivate`, which also resets the slide offset the
+  inline Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than

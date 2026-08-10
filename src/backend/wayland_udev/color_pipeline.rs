@@ -1,14 +1,16 @@
 //! Color-space conversion math for the wp-color-management render path.
 //!
-//! This module produces, for a given (surface description, output description)
-//! pair, the inputs consumed by the window and 3D-overview shaders:
-//!   1. Decode the surface's encoded RGB into scene-linear (inverse EOTF).
-//!   2. Convert RGB primaries via the 3x3 matrix
-//!      `M_out_from_in = M_xyz_to_rgb(out) · M_rgb_to_xyz(in)`. Non-D65 custom
-//!      white points currently use this direct approximation; a chromatic
-//!      adaptation transform remains future work.
-//!   3. Re-encode for the output (forward EOTF), or leave linear pixels for
-//!      the compositor's final shader/CRTC encode.
+//! The scene-linear path is explicitly two-stage:
+//!   1. Decode each described surface and map its primaries into the
+//!      compositor's normalized linear-sRGB working space.
+//!   2. At delivery, map that common scene into each physical output's
+//!      primaries and apply its transfer function in a shader or paired CRTC
+//!      CTM/GAMMA_LUT.
+//!
+//! The legacy encoded path can still build a direct surface→output plan. Both
+//! stages use `M_out_from_in = M_xyz_to_rgb(out) · M_rgb_to_xyz(in)`. Non-D65
+//! custom white points currently use this direct approximation; a chromatic
+//! adaptation transform remains future work.
 //!
 //! It intentionally owns math and render plans only: GL state and uniform
 //! bindings stay in the compositor adapters. Keeping the calculations here
@@ -115,7 +117,7 @@ pub enum TransferKind {
 
 impl TransferKind {
     /// Map a wp-color-management ParametricParams to a single TransferKind.
-    /// Prefers named TF; falls back to tf_power; defaults to Gamma22 when
+    /// Prefers named TF; falls back to tf_power; defaults to exact sRGB when
     /// neither is present (matches our srgb_params() fallback).
     pub fn from_params(p: &ParametricParams) -> Self {
         if let Some(tf) = p.tf_named {
@@ -124,15 +126,16 @@ impl TransferKind {
                 1 => Self::Bt1886,
                 2 => Self::Gamma22,
                 5 => Self::Linear,
+                9 => Self::Srgb,
                 11 => Self::St2084Pq,
                 13 => Self::Hlg,
-                _ => Self::Gamma22,
+                _ => Self::Srgb,
             };
         }
         if let Some(g) = p.tf_power {
             return Self::Power { gamma_x10000: g };
         }
-        Self::Gamma22
+        Self::Srgb
     }
 
     /// Shader-side discriminant. The numeric assignment is part of the public
@@ -321,15 +324,40 @@ fn hlg_forward(l: f32) -> f32 {
     }
 }
 
-/// Result of building a surface→output color transform: the inverse EOTF the
-/// renderer should apply to surface samples, the 3x3 matrix that takes linear
-/// surface RGB into linear output RGB, and the forward EOTF kind for the
-/// output. Stored row-major; intended to be uploaded as a `mat3` to GLSL.
+/// A surface color transform: inverse source EOTF, linear-light 3×3 gamut map,
+/// and optional target EOTF. The target may be the common linear-sRGB working
+/// space (`forward_eotf = Linear`) or a legacy encoded output. Stored
+/// row-major; intended to be uploaded as a `mat3` to GLSL.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ColorTransform {
     pub inverse_eotf: TransferKind,
     pub matrix_row_major: [f32; 9],
     pub forward_eotf: TransferKind,
+}
+
+/// One physical, top-left-origin region of the compositor's global framebuffer
+/// and the final color conversion required by the output that consumes it.
+///
+/// The scene entering this pass is always common linear sRGB. `rect` is
+/// `[x, y, width, height]` in physical framebuffer pixels; widths and heights
+/// are stored as `i32` so validation can reject malformed/non-positive KMS
+/// geometry before any GLES unsigned conversion occurs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputColorRegion {
+    pub rect: [i32; 4],
+    pub output_tf: TransferKind,
+    pub working_to_output_row_major: [f32; 9],
+}
+
+/// Convert a row-major 3×3 matrix into the column-major memory order expected
+/// by `glUniformMatrix3fv(..., transpose = GL_FALSE, ...)`.
+///
+/// Both per-surface transforms and the final per-output encode pass use this
+/// contract. Keeping the conversion in the color-math module prevents the two
+/// shader adapters from developing subtly different upload orders.
+pub fn matrix_to_column_major(matrix_row_major: [f32; 9]) -> [f32; 9] {
+    let m = matrix_row_major;
+    [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
 }
 
 impl ColorTransform {
@@ -340,8 +368,29 @@ impl ColorTransform {
     /// to column-major/`GL_FALSE` gives one testable layout and matches the
     /// column-major values returned by uniform capture/restore.
     pub fn matrix_column_major(self) -> [f32; 9] {
-        let m = self.matrix_row_major;
-        [m[0], m[3], m[6], m[1], m[4], m[7], m[2], m[5], m[8]]
+        matrix_to_column_major(self.matrix_row_major)
+    }
+
+    /// Build a source-owned transform into the compositor's canonical
+    /// linear-sRGB working space.
+    ///
+    /// Unlike [`Self::build`], this never elides an identity: an explicitly
+    /// described PQ/HLG surface still needs its inverse transfer function even
+    /// when its primaries are already sRGB. `forward_eotf` is deliberately
+    /// `Linear`, documenting that the result is not output-encoded; the final
+    /// per-output pass owns both the sRGB→output gamut map and output OETF.
+    pub fn build_to_linear_srgb(surface: &ParametricParams) -> Self {
+        let surface_prim = ColorSpacePrimaries::from_params(surface);
+        let matrix = if primaries_match(&surface_prim, &ColorSpacePrimaries::SRGB_D65) {
+            IDENTITY_3X3
+        } else {
+            rgb_to_rgb_matrix(&surface_prim, &ColorSpacePrimaries::SRGB_D65)
+        };
+        Self {
+            inverse_eotf: TransferKind::from_params(surface),
+            matrix_row_major: matrix,
+            forward_eotf: TransferKind::Linear,
+        }
     }
 
     /// Build an explicit surface-description plan even when source and target
@@ -389,15 +438,15 @@ impl ColorTransform {
     ///
     /// Encoded-space compositing keeps the historical identity elision, which
     /// preserves direct-scanout and effect fast paths. Scene-linear compositing
-    /// retains an explicitly described identity so PQ/HLG sources are decoded
-    /// instead of being mistaken for undescribed legacy-sRGB content.
+    /// maps every described source into the canonical linear-sRGB working
+    /// space so geometry/output assignment cannot change its meaning.
     pub fn build_for_render_path(
         surface: &ParametricParams,
         output: &ParametricParams,
         scene_linear: bool,
     ) -> Option<Self> {
         if scene_linear {
-            Some(Self::build_explicit(surface, output))
+            Some(Self::build_to_linear_srgb(surface))
         } else {
             Self::build(surface, output)
         }
@@ -542,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_same_space_hdr_plan_preserves_the_source_transfer() {
+    fn scene_linear_hdr_plan_preserves_decode_and_targets_common_srgb() {
         for (named, expected) in [(11, TransferKind::St2084Pq), (13, TransferKind::Hlg)] {
             let params = ParametricParams {
                 primaries_named: Some(6),
@@ -551,10 +600,14 @@ mod tests {
             };
             assert!(ColorTransform::build_for_render_path(&params, &params, false).is_none());
             let transform = ColorTransform::build_for_render_path(&params, &params, true)
-                .expect("scene-linear paths retain explicit HDR identities");
+                .expect("scene-linear paths retain explicit HDR decode");
             assert_eq!(transform.inverse_eotf, expected);
-            assert_eq!(transform.forward_eotf, expected);
-            assert!(approx_mat(&transform.matrix_row_major, &IDENTITY_3X3, 1e-6));
+            assert_eq!(transform.forward_eotf, TransferKind::Linear);
+            assert!(!approx_mat(
+                &transform.matrix_row_major,
+                &IDENTITY_3X3,
+                1e-6
+            ));
         }
     }
 
@@ -599,6 +652,37 @@ mod tests {
             transform.matrix_column_major(),
             [1.0, 4.0, 7.0, 2.0, 5.0, 8.0, 3.0, 6.0, 9.0]
         );
+        assert_eq!(
+            matrix_to_column_major(transform.matrix_row_major),
+            transform.matrix_column_major()
+        );
+    }
+
+    #[test]
+    fn linear_srgb_plan_is_output_independent_and_keeps_explicit_decode() {
+        let pq_bt2020 = ParametricParams {
+            primaries_named: Some(6),
+            tf_named: Some(11),
+            ..Default::default()
+        };
+        let transform = ColorTransform::build_to_linear_srgb(&pq_bt2020);
+        assert_eq!(transform.inverse_eotf, TransferKind::St2084Pq);
+        assert_eq!(transform.forward_eotf, TransferKind::Linear);
+        assert!(!approx_mat(
+            &transform.matrix_row_major,
+            &IDENTITY_3X3,
+            1e-4
+        ));
+
+        let srgb_hlg = ParametricParams {
+            primaries_named: Some(1),
+            tf_named: Some(13),
+            ..Default::default()
+        };
+        let identity = ColorTransform::build_to_linear_srgb(&srgb_hlg);
+        assert_eq!(identity.inverse_eotf, TransferKind::Hlg);
+        assert_eq!(identity.forward_eotf, TransferKind::Linear);
+        assert!(approx_mat(&identity.matrix_row_major, &IDENTITY_3X3, 1e-6));
     }
 
     #[test]
@@ -657,6 +741,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(TransferKind::from_params(&p), TransferKind::Hlg);
+        let p = ParametricParams {
+            tf_named: Some(9 /* sRGB */),
+            ..Default::default()
+        };
+        assert_eq!(TransferKind::from_params(&p), TransferKind::Srgb);
         let p = ParametricParams {
             tf_power: Some(18_000),
             ..Default::default()

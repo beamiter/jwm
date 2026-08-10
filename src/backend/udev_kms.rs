@@ -100,6 +100,11 @@ struct KmsOutputState {
     connector: connector::Handle,
     mode_size: (i32, i32),
     origin: (i32, i32),
+    /// Set when a failed `use_mode` could not restore the previously active
+    /// DRM mode. wl_output still advertises the old mode in that case, so the
+    /// transaction rollback must not mistake the userspace cache for proof
+    /// that hardware was restored.
+    drm_mode_uncertain: bool,
 
     output: Output,
     drm_output:
@@ -141,35 +146,221 @@ struct KmsOutputState {
     )>,
     /// Tracked CTM blob id. The installed payload is always
     /// `rgb_to_rgb_matrix(SRGB_D65, output_primaries)` (or identity when the
-    /// monitor is sRGB-primaries), derived from EDID at init — constant for
-    /// the life of the `KmsOutputState`, so we only ever install once per
-    /// output and skip reinstall when `installed_ctm.is_some()`.
+    /// monitor is sRGB-primaries). EDID is attached after KMS construction, so
+    /// `refresh_output_color_targets` replaces this target and drops any stale
+    /// blob whenever the advertised output description changes.
     installed_ctm: Option<u64>,
-    /// Per-output target transfer function, derived from EDID HDR caps at
-    /// output init.
+    /// Per-output target transfer function, refreshed after EDID attachment.
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
-    /// Per-output sRGB→output-primaries 3x3 matrix, cached at init. Pushed
-    /// via `install_ctm` once `kms_color_pipeline_offload + scene_linear` are
-    /// both on, so the FBO can stay uniform-sRGB while each CRTC converts to
-    /// its native primaries at scanout (the trick that lets the single global
-    /// FBO drive a mixed-primaries multi-output session without per-output
-    /// passes).
+    /// Per-output sRGB→output-primaries 3x3 matrix, cached from the current
+    /// output description. Pushed via `install_ctm` together with the output
+    /// OETF LUT when hardware owns delivery; otherwise the same matrix is
+    /// consumed by that output's software region pass.
     output_ctm: [f32; 9],
+    /// A live zwlr-gamma-control client owns the legacy CRTC ramp. While set,
+    /// compositor OETF offload stays disabled and software output delivery
+    /// feeds encoded pixels through the user ramp instead of competing for the
+    /// same GAMMA_LUT state.
+    legacy_gamma_override: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
 }
 
-/// Outcome of `refresh_color_pipeline_offload`, threaded to the renderer so the
-/// shader path can disable the fragment-shader encode when the CRTC GAMMA_LUT
-/// took over. `hw_ctm_active` tells the per-surface transform planner to target
-/// uniform linear sRGB; the installed per-output CTM then maps that scene into
-/// each output's native primaries before its hardware OETF.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OutputConfigurationState {
+    mode: (i32, i32, i32),
+    position: (i32, i32),
+    scale: f64,
+    wl_transform: i32,
+    dpms_on: bool,
+}
+
+#[derive(Clone, Debug)]
+struct OutputConfigurationSnapshotEntry {
+    name: String,
+    state: OutputConfigurationState,
+}
+
+/// Pre-mutation state for one wlr-output-management transaction. Keeping the
+/// snapshot inside KMS ensures the DRM mode/refresh and the internal DPMS
+/// tracker are captured from the same owner which will perform rollback.
+#[derive(Clone, Debug)]
+pub(super) struct OutputConfigurationSnapshot {
+    entries: Vec<OutputConfigurationSnapshotEntry>,
+}
+
+/// Produce a reverse, de-duplicated rollback plan. A repeated output is
+/// restored once at its last mutation point; every touched output must have
+/// been captured before the transaction started.
+fn plan_output_configuration_rollback(
+    snapshot_names: &[String],
+    touched_outputs: &[String],
+) -> Result<Vec<usize>, String> {
+    let mut seen = HashSet::new();
+    let mut plan = Vec::new();
+    for name in touched_outputs.iter().rev() {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        let index = snapshot_names
+            .iter()
+            .position(|snapshot_name| snapshot_name == name)
+            .ok_or_else(|| format!("touched output '{name}' is missing from the snapshot"))?;
+        plan.push(index);
+    }
+    Ok(plan)
+}
+
+fn rollback_mode_requires_restore(
+    current: Option<(i32, i32, i32)>,
+    expected: (i32, i32, i32),
+    drm_mode_uncertain: bool,
+) -> bool {
+    drm_mode_uncertain || current != Some(expected)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OutputColorRegionCandidate {
+    participating: bool,
+    origin: (i32, i32),
+    mode_size: (i32, i32),
+    scale: f64,
+    transform: Transform,
+    output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    working_to_output_row_major: [f32; 9],
+}
+
+fn physical_rects_overlap(a: [i32; 4], b: [i32; 4]) -> bool {
+    let ax1 = i64::from(a[0]) + i64::from(a[2]);
+    let ay1 = i64::from(a[1]) + i64::from(a[3]);
+    let bx1 = i64::from(b[0]) + i64::from(b[2]);
+    let by1 = i64::from(b[1]) + i64::from(b[3]);
+    i64::from(a[0]) < bx1 && i64::from(b[0]) < ax1 && i64::from(a[1]) < by1 && i64::from(b[1]) < ay1
+}
+
+/// Build the software delivery partitions supported by the current single
+/// global framebuffer. Any unsupported topology rejects the entire plan:
+/// partially applying output transforms would leave the texture in mixed or
+/// ambiguous color domains.
+fn plan_software_color_regions(
+    candidates: &[OutputColorRegionCandidate],
+) -> Option<Vec<crate::backend::wayland_udev::color_pipeline::OutputColorRegion>> {
+    use crate::backend::wayland_udev::color_pipeline::OutputColorRegion;
+
+    let mut regions: Vec<OutputColorRegion> = Vec::new();
+    for candidate in candidates
+        .iter()
+        .filter(|candidate| candidate.participating)
+    {
+        let (x, y) = candidate.origin;
+        let (width, height) = candidate.mode_size;
+        if x < 0
+            || y < 0
+            || width <= 0
+            || height <= 0
+            || candidate.scale != 1.0
+            || candidate.transform != Transform::Normal
+            || x.checked_add(width).is_none()
+            || y.checked_add(height).is_none()
+        {
+            return None;
+        }
+
+        let region = OutputColorRegion {
+            rect: [x, y, width, height],
+            output_tf: candidate.output_tf,
+            working_to_output_row_major: candidate.working_to_output_row_major,
+        };
+        for previous in &regions {
+            let same_profile = previous.output_tf == region.output_tf
+                && previous.working_to_output_row_major == region.working_to_output_row_major;
+            if !same_profile && physical_rects_overlap(previous.rect, region.rect) {
+                return None;
+            }
+        }
+        regions.push(region);
+    }
+    Some(regions)
+}
+
+fn output_color_target(
+    params: &crate::backend::wayland_udev::color_management::ParametricParams,
+) -> (
+    crate::backend::wayland_udev::color_pipeline::TransferKind,
+    [f32; 9],
+) {
+    use crate::backend::wayland_udev::color_pipeline::{
+        ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
+    };
+
+    let output_tf = TransferKind::from_params(params);
+    let output_primaries = ColorSpacePrimaries::from_params(params);
+    let working_to_output = rgb_to_rgb_matrix(&ColorSpacePrimaries::SRGB_D65, &output_primaries);
+    (output_tf, working_to_output)
+}
+
+fn gamma_ramp_is_identity(gamma_size: u32, ramp: &[u16]) -> bool {
+    let size = gamma_size as usize;
+    if size == 0 || ramp.len() != size.saturating_mul(3) {
+        return false;
+    }
+    let denominator = (size.max(2) - 1) as u64;
+    ramp.chunks_exact(size).all(|channel| {
+        channel.iter().enumerate().all(|(index, &value)| {
+            value == ((index as u64 * u64::from(u16::MAX)) / denominator) as u16
+        })
+    })
+}
+
+/// Blob-valued CRTC properties whose contents change the color domain of the
+/// framebuffer reaching scanout. The tracker must never assume these are in
+/// their neutral state merely because a new `KmsState` has no blob handles of
+/// its own: DRM state can outlive the userspace FD which originally installed
+/// it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CrtcColorProperty {
+    DegammaLut,
+    Ctm,
+    GammaLut,
+}
+
+fn crtc_color_property(name: &str) -> Option<CrtcColorProperty> {
+    match name {
+        "DEGAMMA_LUT" => Some(CrtcColorProperty::DegammaLut),
+        "CTM" => Some(CrtcColorProperty::Ctm),
+        "GAMMA_LUT" => Some(CrtcColorProperty::GammaLut),
+        _ => None,
+    }
+}
+
+fn connector_color_property_neutral_value(name: &str) -> Option<u64> {
+    match name {
+        "HDR_OUTPUT_METADATA" | "Colorspace" => Some(0),
+        _ => None,
+    }
+}
+
+/// Delivery-stage ownership chosen by `refresh_color_pipeline_offload`.
+///
+/// Surface transforms do not depend on these flags: a scene-linear frame is
+/// always composed in common linear sRGB. The hardware flags only report that
+/// every participating CRTC owns the final gamut conversion and OETF;
+/// otherwise `software_regions` describes that remaining output work.
+#[derive(Clone, Debug, PartialEq)]
 pub(super) struct ColorPipelineDecision {
     pub hw_encode_active: bool,
-    pub shader_tf: i32,
-    pub shader_gamma: f32,
     pub hw_ctm_active: bool,
+    /// A tracked CRTC property could not be cleared or replaced. Presenting a
+    /// newly encoded frame while the hardware domain is uncertain would be
+    /// worse than retaining the last known-good scanout, so the backend keeps
+    /// retrying and suppresses KMS submission until ownership is coherent.
+    pub delivery_blocked: bool,
+    /// `Some` contains a complete, non-conflicting software delivery plan.
+    /// `None` requests the renderer's conservative global-sRGB fallback.
+    /// Successful all-CRTC hardware delivery also sets this to `None` because
+    /// no shader-side output conversion remains.
+    pub software_regions:
+        Option<Vec<crate::backend::wayland_udev::color_pipeline::OutputColorRegion>>,
 }
 
 /// A CRTC CTM operates on linear light. It is therefore only valid when the
@@ -263,6 +454,15 @@ pub(super) struct KmsState {
     /// compositor scene eligibility: KMS can still reject because overlays,
     /// cursor, config gates, or per-output state require composition.
     last_direct_scanout_outputs: Vec<crate::backend::api::DirectScanoutOutputStatus>,
+
+    /// Mirrors the most recent `ColorPipelineDecision::delivery_blocked` so
+    /// `render_if_needed` cannot submit an incompatible framebuffer after a
+    /// failed LUT/CTM teardown.
+    color_pipeline_delivery_blocked: bool,
+    /// Set only after the constructor's final all-CRTC neutral-color commit.
+    /// A failed/incomplete reinit must not run the Drop reset: the previous
+    /// `KmsState` still owns and tracks those live properties.
+    owns_scanout_color_state: bool,
 }
 
 #[derive(Clone)]
@@ -521,7 +721,7 @@ impl KmsState {
     }
 
     pub(super) fn any_frame_pending(&self) -> bool {
-        self.outputs.iter().any(|o| o.frame_pending)
+        self.outputs.iter().any(|o| !o.dpms_off && o.frame_pending)
     }
 
     /// Set the shared pending screencopy queue (called once after initialization).
@@ -602,18 +802,23 @@ impl KmsState {
 
     /// Get the total bounding box size covering all outputs.
     pub(super) fn total_screen_size(&self) -> (u32, u32) {
+        let bounded_extent = |origin: i32, size: i32| {
+            (i64::from(origin) + i64::from(size)).clamp(0, i64::from(i32::MAX)) as u32
+        };
         let w = self
             .outputs
             .iter()
-            .map(|o| (o.origin.0 + o.mode_size.0).max(0) as u32)
+            .map(|o| bounded_extent(o.origin.0, o.mode_size.0))
             .max()
-            .unwrap_or(1920);
+            .unwrap_or(1920)
+            .max(1);
         let h = self
             .outputs
             .iter()
-            .map(|o| (o.origin.1 + o.mode_size.1).max(0) as u32)
+            .map(|o| bounded_extent(o.origin.1, o.mode_size.1))
             .max()
-            .unwrap_or(1080);
+            .unwrap_or(1080)
+            .max(1);
         (w, h)
     }
 
@@ -784,6 +989,128 @@ impl KmsState {
         self.outputs.get(output_idx)?.color_pipeline_caps.clone()
     }
 
+    /// Whether every element that will reach scanout is already inside the
+    /// compositor's common linear-sRGB texture. Smithay currently adds the
+    /// cursor, drag icon, lock surface, and top/overlay layer surfaces after
+    /// the compositor has finalized that texture. Until those elements gain
+    /// an explicit color-domain adapter, their presence requires the global
+    /// encoded-sRGB fallback.
+    pub(super) fn external_elements_color_pipeline_safe(
+        &self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+    ) -> bool {
+        let capture_pending = self.pending_screenshot.is_some()
+            || self.pending_screenshot_region.is_some()
+            || self
+                .screencopy_pending
+                .as_ref()
+                .is_some_and(|queue| !queue.lock_safe().is_empty())
+            || self
+                .image_capture_pending
+                .as_ref()
+                .is_some_and(|queue| !queue.lock_safe().is_empty());
+        if capture_pending || state.session_locked || state.dnd_icon.is_some() {
+            return false;
+        }
+
+        let cursor_x = state.pointer_location.x.round() as i32;
+        let cursor_y = state.pointer_location.y.round() as i32;
+        for output in &self.outputs {
+            if output.dpms_off || state.soft_disabled_outputs.contains(&output.output_name) {
+                continue;
+            }
+            let (ox, oy) = output.origin;
+            let (width, height) = output.mode_size;
+            if cursor_x >= ox
+                && cursor_y >= oy
+                && cursor_x < ox.saturating_add(width)
+                && cursor_y < oy.saturating_add(height)
+            {
+                return false;
+            }
+
+            let map = layer_map_for_output(&output.output);
+            if [WlrLayer::Overlay, WlrLayer::Top]
+                .into_iter()
+                .any(|layer| map.layers_on(layer).next().is_some())
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Rebuild output transfer/gamut targets after the backend has attached
+    /// EDID capabilities to each Smithay `Output`.
+    ///
+    /// KMS construction necessarily precedes that attachment, so the initial
+    /// cache is the conservative sRGB default. A changed target invalidates
+    /// both pieces of installed hardware state: retaining either the previous
+    /// OETF LUT or CTM for even one frame would scan out pixels in the wrong
+    /// color domain.
+    pub(super) fn refresh_output_color_targets(&mut self) -> bool {
+        let targets: Vec<_> = self
+            .outputs
+            .iter()
+            .map(|output| {
+                let params = crate::backend::wayland_udev::color_management::params_for_output(
+                    &output.output,
+                );
+                output_color_target(&params)
+            })
+            .collect();
+
+        let mut changed = false;
+        let mut ready = true;
+        for (index, (output_tf, output_ctm)) in targets.into_iter().enumerate() {
+            if self.outputs[index].output_tf == output_tf
+                && self.outputs[index].output_ctm == output_ctm
+            {
+                continue;
+            }
+
+            let mut teardown_ok = true;
+            if self.outputs[index].installed_gamma_lut.is_some() {
+                if let Err(error) = self.uninstall_gamma_lut(index) {
+                    log::warn!(
+                        "[kms-cm] stale LUT teardown on {} failed: {error}",
+                        self.outputs[index].output_name,
+                    );
+                    teardown_ok = false;
+                }
+            }
+            if teardown_ok && self.outputs[index].installed_ctm.is_some() {
+                if let Err(error) = self.uninstall_ctm(index) {
+                    log::warn!(
+                        "[kms-cm] stale CTM teardown on {} failed: {error}",
+                        self.outputs[index].output_name,
+                    );
+                    teardown_ok = false;
+                }
+            }
+            if !teardown_ok {
+                // Keep the cached target paired with the tracked hardware
+                // state. The per-frame refresh retries this transition and
+                // suppresses presentation in the meantime.
+                ready = false;
+                continue;
+            }
+
+            self.outputs[index].output_tf = output_tf;
+            self.outputs[index].output_ctm = output_ctm;
+            changed = true;
+            log::info!(
+                "[kms-cm] refreshed output target for {} (tf={output_tf:?})",
+                self.outputs[index].output_name,
+            );
+        }
+
+        if changed {
+            self.needs_render = true;
+        }
+        ready
+    }
+
     /// Set a single DRM object property. On atomic drivers this issues an atomic
     /// commit (probed with `TEST_ONLY` first); if the property cannot be set
     /// atomically (e.g. the legacy-only DPMS property on some drivers) it cleanly
@@ -817,6 +1144,90 @@ impl KmsState {
             .map_err(|e| format!("DRM set_property failed: {e:?}"))
     }
 
+    /// Establish the neutral color-domain baseline for every CRTC and
+    /// connector claimed by a newly-created KMS state.
+    ///
+    /// A previous compositor/master may have left blob ids bound even though
+    /// this instance starts with `installed_gamma_lut = None` and
+    /// `installed_ctm = None`. Clear every blob-valued color stage in one atomic
+    /// request so initialization either owns a known encoded-input baseline or
+    /// fails without partially invalidating the still-live old KMS state during
+    /// a reinit.
+    fn reset_scanout_color_properties(
+        dev: &DrmDevice,
+        crtcs: &[crtc::Handle],
+        connectors: &[connector::Handle],
+    ) -> Result<usize, String> {
+        use smithay::reexports::drm::control::AtomicCommitFlags;
+        use smithay::reexports::drm::control::atomic::AtomicModeReq;
+
+        let mut crtc_properties = Vec::new();
+        for &crtc in crtcs {
+            let props = dev
+                .get_properties(crtc)
+                .map_err(|e| format!("get CRTC {crtc:?} properties failed: {e:?}"))?;
+            let (handles, _values) = props.as_props_and_values();
+            for &property in handles {
+                let info = dev.get_property(property).map_err(|e| {
+                    format!("get CRTC {crtc:?} property {property:?} failed: {e:?}")
+                })?;
+                let name = info.name().to_str().map_err(|_| {
+                    format!("CRTC {crtc:?} property {property:?} has a non-UTF-8 name")
+                })?;
+                if let Some(kind) = crtc_color_property(name) {
+                    crtc_properties.push((crtc, property, kind));
+                }
+            }
+        }
+
+        let mut connector_properties = Vec::new();
+        for &connector in connectors {
+            let props = dev
+                .get_properties(connector)
+                .map_err(|e| format!("get connector {connector:?} properties failed: {e:?}"))?;
+            let (handles, _values) = props.as_props_and_values();
+            for &property in handles {
+                let info = dev.get_property(property).map_err(|e| {
+                    format!("get connector {connector:?} property {property:?} failed: {e:?}")
+                })?;
+                let name = info.name().to_str().map_err(|_| {
+                    format!("connector {connector:?} property {property:?} has a non-UTF-8 name")
+                })?;
+                if let Some(neutral_value) = connector_color_property_neutral_value(name) {
+                    connector_properties.push((connector, property, neutral_value));
+                }
+            }
+        }
+
+        let property_count = crtc_properties.len() + connector_properties.len();
+        if property_count == 0 {
+            return Ok(0);
+        }
+        if !dev.is_atomic() {
+            // There is no all-or-nothing transaction with which to protect a
+            // still-active old KMS state from a partial reinit reset. Refuse to
+            // claim the CRTCs instead of clearing a prefix through legacy
+            // SETPROPERTY and then discovering that a later property failed.
+            return Err(format!(
+                "found {property_count} scanout color properties but atomic modesetting is unavailable"
+            ));
+        }
+
+        let mut request = AtomicModeReq::new();
+        for &(crtc, property, _kind) in &crtc_properties {
+            request.add_raw_property(crtc.into(), property, 0);
+        }
+        for &(connector, property, neutral_value) in &connector_properties {
+            request.add_raw_property(connector.into(), property, neutral_value);
+        }
+        dev.atomic_commit(AtomicCommitFlags::TEST_ONLY, request.clone())
+            .map_err(|e| format!("test neutral scanout color reset failed: {e:?}"))?;
+        dev.atomic_commit(AtomicCommitFlags::empty(), request)
+            .map_err(|e| format!("commit neutral scanout color reset failed: {e:?}"))?;
+
+        Ok(property_count)
+    }
+
     /// Set VRR enabled/disabled for a given output (by index into self.outputs).
     pub(super) fn set_vrr_for_output(
         &mut self,
@@ -827,6 +1238,12 @@ impl KmsState {
             .outputs
             .get(output_idx)
             .ok_or("output index out of range")?;
+        if output.drm_mode_uncertain {
+            return Err(format!(
+                "output '{}' hardware mode is uncertain after a failed modeset rollback",
+                output.output_name
+            ));
+        }
         let crtc = output.crtc;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
@@ -860,11 +1277,11 @@ impl KmsState {
         output_idx: usize,
         blob: Option<&[u8; 32]>,
     ) -> Result<(), String> {
-        let output = self
+        let (conn_handle, smithay_output) = self
             .outputs
             .get(output_idx)
+            .map(|output| (output.connector, output.output.clone()))
             .ok_or("output index out of range")?;
-        let conn_handle = output.connector;
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
 
@@ -880,17 +1297,31 @@ impl KmsState {
             0
         };
 
+        let mut property_result = Err("HDR_OUTPUT_METADATA property not found on connector".into());
         if let Ok(props) = dev.get_properties(conn_handle) {
             let (handles, _values) = props.as_props_and_values();
             for &prop_handle in handles {
                 if let Ok(info) = dev.get_property(prop_handle) {
                     if info.name().to_str() == Ok("HDR_OUTPUT_METADATA") {
-                        return Self::set_drm_property(dev, conn_handle, prop_handle, blob_id);
+                        property_result =
+                            Self::set_drm_property(dev, conn_handle, prop_handle, blob_id);
+                        break;
                     }
                 }
             }
         }
-        Err("HDR_OUTPUT_METADATA property not found on connector".to_string())
+        drop(mgr);
+        property_result?;
+
+        crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
+            &smithay_output,
+            blob.is_some(),
+        );
+        if !self.refresh_output_color_targets() {
+            self.color_pipeline_delivery_blocked = true;
+        }
+        self.needs_render = true;
+        Ok(())
     }
 
     pub(super) fn output_index_by_name(&self, name: &str) -> Option<usize> {
@@ -907,28 +1338,6 @@ impl KmsState {
             .get(output_idx)
             .ok_or("output index out of range")?;
         let conn_handle = output.connector;
-        // When powering off, drop any installed GAMMA_LUT and free its blob
-        // so the CRTC isn't carrying stale color state while blanked; the next
-        // render_if_needed pass after power-on will reinstall via
-        // refresh_color_pipeline_offload.
-        if !on && self.outputs[output_idx].installed_gamma_lut.is_some() {
-            // Best-effort: log + continue. DPMS itself is more important than
-            // a clean LUT teardown.
-            if let Err(e) = self.uninstall_gamma_lut(output_idx) {
-                log::debug!(
-                    "[kms-cm] DPMS-off LUT teardown failed on {}: {e}",
-                    self.outputs[output_idx].output_name
-                );
-            }
-        }
-        if !on && self.outputs[output_idx].installed_ctm.is_some() {
-            if let Err(e) = self.uninstall_ctm(output_idx) {
-                log::debug!(
-                    "[kms-cm] DPMS-off CTM teardown failed on {}: {e}",
-                    self.outputs[output_idx].output_name
-                );
-            }
-        }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
         let mut result: Result<(), String> =
@@ -952,8 +1361,76 @@ impl KmsState {
         // LUT on a powered-down CRTC or skip a still-powered-on one.
         if result.is_ok() {
             self.outputs[output_idx].dpms_off = !on;
+            if !on && self.outputs[output_idx].frame_pending {
+                // A powered-down connector may never emit the vblank for an
+                // already queued flip. Retire the DrmOutput bookkeeping now so
+                // it cannot keep every other CRTC behind `can_present=false`,
+                // and so power-on starts from a clean full-redraw request.
+                let _ = self.outputs[output_idx].drm_output.frame_submitted();
+                self.outputs[output_idx].frame_pending = false;
+                self.outputs[output_idx].frame_pending_since = None;
+            }
+            // Change the connector power state first. If that write fails the
+            // still-visible scanout must retain its matching LUT/CTM instead
+            // of being reinterpreted mid-frame. Once blanked, drop both blobs;
+            // power-on schedules a fresh frame which reinstalls or replaces
+            // the complete delivery plan.
+            if !on && self.outputs[output_idx].installed_gamma_lut.is_some() {
+                if let Err(e) = self.uninstall_gamma_lut(output_idx) {
+                    log::warn!(
+                        "[kms-cm] DPMS-off LUT teardown failed on {}: {e}",
+                        self.outputs[output_idx].output_name
+                    );
+                }
+            }
+            if !on && self.outputs[output_idx].installed_ctm.is_some() {
+                if let Err(e) = self.uninstall_ctm(output_idx) {
+                    log::warn!(
+                        "[kms-cm] DPMS-off CTM teardown failed on {}: {e}",
+                        self.outputs[output_idx].output_name
+                    );
+                }
+            }
         }
         result
+    }
+
+    /// Return every CRTC to its default encoded-input state before the
+    /// compositor (and therefore the common-linear producer) is removed.
+    /// Failure keeps the tracked blob alive and blocks scanout so a later
+    /// runtime-toggle retry cannot silently feed encoded client buffers
+    /// through a stale output transform.
+    pub(super) fn disable_color_pipeline(&mut self) -> Result<(), String> {
+        for index in 0..self.outputs.len() {
+            // Clear the linear-light matrix first. If that fails, leave the
+            // paired OETF and all tracked handles untouched; presentation is
+            // blocked and the caller retains the compositor for a retry.
+            if self.outputs[index].installed_ctm.is_some() {
+                if let Err(error) = self.uninstall_ctm(index) {
+                    self.color_pipeline_delivery_blocked = true;
+                    return Err(error);
+                }
+            }
+            if self.outputs[index].installed_gamma_lut.is_some() {
+                if let Err(error) = self.uninstall_gamma_lut(index) {
+                    self.color_pipeline_delivery_blocked = true;
+                    return Err(error);
+                }
+            }
+        }
+        for index in 0..self.outputs.len() {
+            if crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                &self.outputs[index].output,
+            ) {
+                if let Err(error) = self.set_hdr_metadata_for_output(index, None) {
+                    self.color_pipeline_delivery_blocked = true;
+                    return Err(error);
+                }
+            }
+        }
+        self.color_pipeline_delivery_blocked = false;
+        self.needs_render = true;
+        Ok(())
     }
 
     // ============================================================
@@ -1056,8 +1533,10 @@ impl KmsState {
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
         // Set GAMMA_LUT to 0 first so the CRTC reverts before the blob is
-        // destroyed. Best-effort: even if this fails we still try to free the
-        // blob (a leaked blob is preferable to a dangling kernel reference).
+        // destroyed. If clearing fails, retain both the blob handle and the
+        // tracked state: the CRTC may still reference this transform and the
+        // next refresh must be able to retry instead of falsely selecting a
+        // software-encoded route underneath it.
         let mut prop_result: Result<(), String> =
             Err("GAMMA_LUT property not found on CRTC".to_string());
         if let Ok(props) = dev.get_properties(crtc) {
@@ -1071,16 +1550,15 @@ impl KmsState {
                 }
             }
         }
+        prop_result?;
         let _ = dev.destroy_property_blob(blob);
         drop(mgr);
 
         self.outputs[output_idx].installed_gamma_lut = None;
-        let name = &self.outputs[output_idx].output_name;
-        if let Err(e) = &prop_result {
-            log::debug!("[kms-cm] uninstall GAMMA_LUT on {name}: prop clear failed: {e}");
-        } else {
-            log::info!("[kms-cm] uninstalled GAMMA_LUT on {name}");
-        }
+        log::info!(
+            "[kms-cm] uninstalled GAMMA_LUT on {}",
+            self.outputs[output_idx].output_name
+        );
         Ok(())
     }
 
@@ -1180,40 +1658,62 @@ impl KmsState {
                 }
             }
         }
+        prop_result?;
         let _ = dev.destroy_property_blob(blob);
         drop(mgr);
 
         self.outputs[output_idx].installed_ctm = None;
-        let name = &self.outputs[output_idx].output_name;
-        if let Err(e) = &prop_result {
-            log::debug!("[kms-cm] uninstall CTM on {name}: prop clear failed: {e}");
-        } else {
-            log::info!("[kms-cm] uninstalled CTM on {name}");
-        }
+        log::info!(
+            "[kms-cm] uninstalled CTM on {}",
+            self.outputs[output_idx].output_name
+        );
         Ok(())
     }
 
-    /// Returns the per-frame color-pipeline decision. HW offload is
-    /// all-or-nothing across active outputs because the compositor renders a
-    /// single global FBO that feeds every output.
+    /// Returns the per-frame color-pipeline decision. Hardware ownership is a
+    /// paired CTM+LUT transaction across every participating output; otherwise
+    /// independently described software regions consume the common scene.
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
-        compositor_offload_safe: bool,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
     ) -> ColorPipelineDecision {
         use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
+        let mut hdr_metadata_ready = true;
+        if !scene_linear_active {
+            for index in 0..self.outputs.len() {
+                if crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                    &self.outputs[index].output,
+                ) && let Err(error) = self.set_hdr_metadata_for_output(index, None)
+                {
+                    log::warn!(
+                        "[kms-cm] failed to return {} to SDR signalling: {error}",
+                        self.outputs[index].output_name
+                    );
+                    hdr_metadata_ready = false;
+                }
+            }
+        }
+
+        // EDID/user-data can change independently of a modeset, and a failed
+        // property teardown must be retried before any differently encoded
+        // framebuffer reaches scanout.
+        let output_targets_ready = hdr_metadata_ready && self.refresh_output_color_targets();
+
         let behavior = crate::config::CONFIG.load();
-        let gate_on = behavior.behavior().kms_color_pipeline_offload
+        let mut gate_on = behavior.behavior().kms_color_pipeline_offload
             && crate::config::scene_linear_render_path_requested(
                 behavior.behavior().color_management_render_path,
                 behavior.behavior().scene_linear_compositing,
             )
-            && compositor_offload_safe;
+            && linear_tail_safe;
         // CTM transforms linear RGB, and the installed GAMMA_LUT contains the
         // output OETF. Both therefore require an actually allocated linear
-        // scene target. `compositor_offload_safe` also rejects frames with
-        // encoded-space overlays, which the LUT would otherwise encode twice.
+        // scene target. `linear_tail_safe` also rejects compositor and
+        // KMS-side elements that would otherwise enter after output delivery
+        // in the wrong domain.
         drop(behavior);
         let n = self.outputs.len();
 
@@ -1226,6 +1726,30 @@ impl KmsState {
             .iter()
             .map(|o| !o.dpms_off && !state.soft_disabled_outputs.contains(&o.output_name))
             .collect();
+        if self
+            .outputs
+            .iter()
+            .enumerate()
+            .any(|(index, output)| participating[index] && output.legacy_gamma_override)
+        {
+            gate_on = false;
+        }
+
+        let region_candidates: Vec<OutputColorRegionCandidate> = self
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| OutputColorRegionCandidate {
+                participating: participating[index],
+                origin: output.origin,
+                mode_size: output.mode_size,
+                scale: output.output.current_scale().fractional_scale(),
+                transform: output.output.current_transform(),
+                output_tf: output.output_tf,
+                working_to_output_row_major: output.output_ctm,
+            })
+            .collect();
+        let software_regions = plan_software_color_regions(&region_candidates);
 
         let uniform_tf: Option<TransferKind> = {
             let mut tf: Option<TransferKind> = None;
@@ -1245,15 +1769,11 @@ impl KmsState {
             tf
         };
 
-        let shader_fallback = uniform_tf.unwrap_or(TransferKind::Srgb);
-        let shader_tf = shader_fallback.shader_id();
-        let shader_gamma = shader_fallback.gamma_for_shader();
-
         let mut decision = ColorPipelineDecision {
             hw_encode_active: false,
-            shader_tf,
-            shader_gamma,
             hw_ctm_active: false,
+            delivery_blocked: !output_targets_ready,
+            software_regions,
         };
 
         let Some(target) = uniform_tf.filter(|_| gate_on) else {
@@ -1265,7 +1785,7 @@ impl KmsState {
                     let _ = self.uninstall_ctm(i);
                 }
             }
-            return decision;
+            return self.finish_color_pipeline_decision(decision, &participating);
         };
 
         // --- GAMMA_LUT activation: drop on non-participating, then cap-check
@@ -1384,6 +1904,67 @@ impl KmsState {
             decision.hw_ctm_active = !ctm_install_failed;
         }
 
+        if decision.hw_encode_active && decision.hw_ctm_active {
+            // The CRTC pair consumes the common linear-sRGB texture directly;
+            // no software output conversion remains.
+            decision.software_regions = None;
+        } else {
+            // A hardware OETF without the matching linear-light gamut stage
+            // leaves no unambiguous domain for the shared framebuffer. Roll
+            // back every LUT and use the complete software plan (or the
+            // renderer's explicit global-sRGB fallback when it is unavailable).
+            if decision.hw_encode_active {
+                for i in 0..n {
+                    if self.outputs[i].installed_gamma_lut.is_some() {
+                        let _ = self.uninstall_gamma_lut(i);
+                    }
+                }
+            }
+            if decision.hw_ctm_active {
+                for i in 0..n {
+                    if self.outputs[i].installed_ctm.is_some() {
+                        let _ = self.uninstall_ctm(i);
+                    }
+                }
+            }
+            decision.hw_encode_active = false;
+            decision.hw_ctm_active = false;
+        }
+
+        self.finish_color_pipeline_decision(decision, &participating)
+    }
+
+    fn finish_color_pipeline_decision(
+        &mut self,
+        mut decision: ColorPipelineDecision,
+        participating: &[bool],
+    ) -> ColorPipelineDecision {
+        let hardware_pair_active = decision.hw_encode_active && decision.hw_ctm_active;
+        if decision.hw_encode_active != decision.hw_ctm_active {
+            decision.delivery_blocked = true;
+        }
+
+        for (index, output) in self.outputs.iter().enumerate() {
+            if !participating.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            let has_lut = output.installed_gamma_lut.is_some();
+            let has_ctm = output.installed_ctm.is_some();
+            let coherent = if hardware_pair_active {
+                has_lut && has_ctm
+            } else {
+                !has_lut && !has_ctm
+            };
+            if !coherent {
+                decision.delivery_blocked = true;
+                break;
+            }
+        }
+
+        self.color_pipeline_delivery_blocked = decision.delivery_blocked;
+        if decision.delivery_blocked {
+            log::warn!("[kms-cm] holding the last scanout while LUT/CTM ownership is unresolved");
+        }
         decision
     }
 
@@ -1393,16 +1974,8 @@ impl KmsState {
         gamma_size: u32,
         ramp: &[u16],
     ) -> Result<(), String> {
-        let output = self
-            .outputs
-            .get(output_idx)
-            .ok_or("output index out of range")?;
-        let crtc = output.crtc;
-        let mgr = self.drm_output_manager.lock();
-        let dev = mgr.device();
-
         let sz = gamma_size as usize;
-        let expected_len = sz * 3;
+        let expected_len = sz.checked_mul(3).ok_or("gamma ramp length overflow")?;
         if ramp.len() != expected_len {
             return Err(format!(
                 "gamma ramp length mismatch: got {} expected {}",
@@ -1410,13 +1983,233 @@ impl KmsState {
                 expected_len
             ));
         }
+        let crtc = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?
+            .crtc;
+        let identity = gamma_ramp_is_identity(gamma_size, ramp);
+
+        // zwlr-gamma-control and the compositor output OETF both own the CRTC
+        // GAMMA_LUT. Never let them coexist: move gamut/OETF delivery back to
+        // shaders before installing the client ramp. Identity restoration on
+        // resource destruction releases the override for the next frame.
+        if self.outputs[output_idx].installed_ctm.is_some() {
+            self.uninstall_ctm(output_idx)?;
+        }
+        if self.outputs[output_idx].installed_gamma_lut.is_some() {
+            self.uninstall_gamma_lut(output_idx)?;
+        }
 
         let red = &ramp[..sz];
         let green = &ramp[sz..2 * sz];
         let blue = &ramp[2 * sz..3 * sz];
+        let result = {
+            let mgr = self.drm_output_manager.lock();
+            mgr.device()
+                .set_gamma(crtc, red, green, blue)
+                .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
+        };
+        self.outputs[output_idx].legacy_gamma_override = result.is_err() || !identity;
+        self.needs_render = true;
+        result
+    }
 
-        dev.set_gamma(crtc, red, green, blue)
-            .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
+    fn output_configuration_state(
+        &self,
+        output_idx: usize,
+    ) -> Result<OutputConfigurationState, String> {
+        let output = self
+            .outputs
+            .get(output_idx)
+            .ok_or("output index out of range")?;
+        let mode = output
+            .output
+            .current_mode()
+            .ok_or_else(|| format!("output '{}' has no current mode", output.output_name))?;
+        let location = output.output.current_location();
+        let position = (location.x, location.y);
+        if output.origin != position {
+            return Err(format!(
+                "output '{}' has divergent KMS {:?} and wl_output {:?} positions",
+                output.output_name, output.origin, position
+            ));
+        }
+        if output.mode_size != (mode.size.w, mode.size.h) {
+            return Err(format!(
+                "output '{}' has divergent KMS {:?} and wl_output {:?} modes",
+                output.output_name,
+                output.mode_size,
+                (mode.size.w, mode.size.h)
+            ));
+        }
+        Ok(OutputConfigurationState {
+            mode: (mode.size.w, mode.size.h, mode.refresh),
+            position,
+            scale: output.output.current_scale().fractional_scale(),
+            wl_transform: smithay_transform_to_wl(output.output.current_transform()),
+            dpms_on: !output.dpms_off,
+        })
+    }
+
+    /// Capture every requested output before the first transaction mutation.
+    /// Unknown outputs and internally divergent advertised/KMS state reject the
+    /// transaction while it is still side-effect free.
+    pub(super) fn snapshot_output_configuration(
+        &self,
+        output_names: &[String],
+    ) -> Result<OutputConfigurationSnapshot, String> {
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        for name in output_names {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            let output_idx = self
+                .output_index_by_name(name)
+                .ok_or_else(|| format!("unknown output '{name}'"))?;
+            entries.push(OutputConfigurationSnapshotEntry {
+                name: name.clone(),
+                state: self.output_configuration_state(output_idx)?,
+            });
+        }
+        Ok(OutputConfigurationSnapshot { entries })
+    }
+
+    /// Restore every output whose mutation was attempted, in reverse order.
+    /// The existing single-output modeset rollback remains the inner safety
+    /// net; this outer transaction rollback repairs outputs which succeeded
+    /// before a later output failed.
+    pub(super) fn rollback_output_configuration(
+        &mut self,
+        snapshot: &OutputConfigurationSnapshot,
+        touched_outputs: &[String],
+    ) -> Result<usize, String> {
+        let snapshot_names: Vec<_> = snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        let plan = plan_output_configuration_rollback(&snapshot_names, touched_outputs)?;
+        let planned = plan.len();
+        let mut restored = 0;
+        let mut failures = Vec::new();
+
+        for snapshot_index in plan {
+            let entry = snapshot.entries[snapshot_index].clone();
+            let Some(output_idx) = self.output_index_by_name(&entry.name) else {
+                failures.push(format!(
+                    "'{}': output disappeared during rollback",
+                    entry.name
+                ));
+                continue;
+            };
+
+            let before = self.output_configuration_state(output_idx);
+            let mode_changed = rollback_mode_requires_restore(
+                before.as_ref().ok().map(|current| current.mode),
+                entry.state.mode,
+                self.outputs[output_idx].drm_mode_uncertain,
+            );
+            let configuration_changed = before.as_ref().map_or(true, |current| {
+                mode_changed
+                    || current.position != entry.state.position
+                    || current.scale != entry.state.scale
+                    || current.wl_transform != entry.state.wl_transform
+            });
+            let mut operation_errors = Vec::new();
+
+            // A real modeset is most reliable on a powered connector. An
+            // originally-off output is blanked again after its mode and
+            // advertised state have been restored.
+            if mode_changed && self.outputs[output_idx].dpms_off {
+                if let Err(error) = self.set_dpms_for_output(output_idx, true) {
+                    operation_errors.push(format!("temporary DPMS-on failed: {error}"));
+                }
+            }
+
+            if configuration_changed {
+                let restore_mode = mode_changed.then_some(entry.state.mode);
+                if let Err(error) = self.configure_output_with_modeset_policy(
+                    &entry.name,
+                    restore_mode,
+                    Some(entry.state.position),
+                    Some(entry.state.wl_transform),
+                    Some(entry.state.scale),
+                    true,
+                ) {
+                    operation_errors.push(format!("configuration restore failed: {error}"));
+                }
+            }
+
+            let dpms_on = !self.outputs[output_idx].dpms_off;
+            if dpms_on != entry.state.dpms_on
+                && let Err(error) = self.set_dpms_for_output(output_idx, entry.state.dpms_on)
+            {
+                operation_errors.push(format!("DPMS restore failed: {error}"));
+            }
+
+            let hardware_mode_certain = !self.outputs[output_idx].drm_mode_uncertain;
+            match self.output_configuration_state(output_idx) {
+                Ok(current) if current == entry.state && hardware_mode_certain => {
+                    restored += 1;
+                    if !operation_errors.is_empty() {
+                        log::debug!(
+                            "[output-mgmt] '{}' rollback reached the snapshot after transient errors: {}",
+                            entry.name,
+                            operation_errors.join(", ")
+                        );
+                    }
+                }
+                Ok(current) => {
+                    let mut mismatches = Vec::new();
+                    if current.mode != entry.state.mode || !hardware_mode_certain {
+                        mismatches.push("mode/refresh");
+                    }
+                    if current.position != entry.state.position {
+                        mismatches.push("position");
+                    }
+                    if current.scale != entry.state.scale {
+                        mismatches.push("scale");
+                    }
+                    if current.wl_transform != entry.state.wl_transform {
+                        mismatches.push("transform");
+                    }
+                    if current.dpms_on != entry.state.dpms_on {
+                        mismatches.push("DPMS");
+                    }
+                    let operations = if operation_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", operation_errors.join(", "))
+                    };
+                    failures.push(format!(
+                        "'{}': final state differs in {}{}",
+                        entry.name,
+                        mismatches.join("/"),
+                        operations
+                    ));
+                }
+                Err(error) => {
+                    let operations = if operation_errors.is_empty() {
+                        String::new()
+                    } else {
+                        format!("; {}", operation_errors.join(", "))
+                    };
+                    failures.push(format!("'{}': {error}{operations}", entry.name));
+                }
+            }
+        }
+
+        self.needs_render = true;
+        if failures.is_empty() {
+            Ok(restored)
+        } else {
+            Err(format!(
+                "restored {restored}/{planned} touched output(s): {}",
+                failures.join("; ")
+            ))
+        }
     }
 
     /// Apply a client-requested output configuration (wlr-output-management).
@@ -1429,8 +2222,8 @@ impl KmsState {
     ///
     /// Safety:
     /// - Modeset is gated by `behavior.wlr_output_mgmt_allow_modeset` (default
-    ///   false); when disabled, mode changes are dropped silently and the
-    ///   non-modeset fields still apply.
+    ///   false); when disabled, the transaction is rejected before mutation
+    ///   rather than acknowledging a silently ignored mode request.
     /// - On `DrmOutput::use_mode` failure we attempt a best-effort rollback to
     ///   the previously-active DRM mode so the output is not stranded mid-
     ///   modeset.
@@ -1442,15 +2235,34 @@ impl KmsState {
         transform: Option<i32>,
         scale: Option<f64>,
     ) -> Result<(), String> {
+        let allow_modeset = crate::config::CONFIG
+            .load()
+            .behavior()
+            .wlr_output_mgmt_allow_modeset;
+        self.configure_output_with_modeset_policy(
+            name,
+            mode,
+            position,
+            transform,
+            scale,
+            allow_modeset,
+        )
+    }
+
+    fn configure_output_with_modeset_policy(
+        &mut self,
+        name: &str,
+        mode: Option<(i32, i32, i32)>,
+        position: Option<(i32, i32)>,
+        transform: Option<i32>,
+        scale: Option<f64>,
+        allow_modeset: bool,
+    ) -> Result<(), String> {
         let idx = self
             .output_index_by_name(name)
             .ok_or_else(|| format!("unknown output '{name}'"))?;
 
         // Resolve a DRM mode if a *different* mode was requested.
-        let allow_modeset = crate::config::CONFIG
-            .load()
-            .behavior()
-            .wlr_output_mgmt_allow_modeset;
         let mut prev_drm_mode: Option<smithay::reexports::drm::control::Mode> = None;
         let drm_mode = if let Some((w, h, refresh)) = mode {
             if !allow_modeset {
@@ -1464,17 +2276,31 @@ impl KmsState {
                 ));
             } else {
                 let conn = self.outputs[idx].connector;
+                let force_drm_mode = self.outputs[idx].drm_mode_uncertain;
                 let mgr = self.drm_output_manager.lock();
                 let info = mgr
                     .device()
                     .get_connector(conn, false)
                     .map_err(|e| format!("get_connector failed: {e:?}"))?;
-                let found = info.modes().iter().copied().find(|m| {
-                    let wl = WlMode::from(*m);
-                    wl.size.w == w
-                        && wl.size.h == h
-                        && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
-                });
+                // Prefer the exact refresh captured by a transaction snapshot;
+                // retain the protocol's ±200 mHz tolerance as a fallback for
+                // ordinary client requests.
+                let found = info
+                    .modes()
+                    .iter()
+                    .copied()
+                    .find(|m| {
+                        let wl = WlMode::from(*m);
+                        wl.size.w == w && wl.size.h == h && wl.refresh == refresh
+                    })
+                    .or_else(|| {
+                        info.modes().iter().copied().find(|m| {
+                            let wl = WlMode::from(*m);
+                            wl.size.w == w
+                                && wl.size.h == h
+                                && (refresh == 0 || (wl.refresh - refresh).abs() <= 200)
+                        })
+                    });
                 // Capture the currently-active DRM mode (not just the
                 // smithay-advertised WlMode) so we can roll back on failure.
                 let current_wl = self.outputs[idx].output.current_mode();
@@ -1486,7 +2312,10 @@ impl KmsState {
                 }
                 drop(mgr);
                 match found {
-                    Some(m) if self.outputs[idx].output.current_mode() != Some(WlMode::from(m)) => {
+                    Some(m)
+                        if force_drm_mode
+                            || self.outputs[idx].output.current_mode() != Some(WlMode::from(m)) =>
+                    {
                         Some(m)
                     }
                     Some(_) => None, // already the current mode; skip the modeset
@@ -1513,7 +2342,7 @@ impl KmsState {
                 // left in an undefined state. If rollback also fails, the output
                 // may be black; the user will need to physically replug or
                 // re-trigger DPMS via output-power-management.
-                let primary_err = format!("DRM use_mode failed: {e:?}");
+                let mut primary_err = format!("DRM use_mode failed: {e:?}");
                 if let Some(prev) = prev_drm_mode {
                     let rollback: DrmOutputRenderElements<GlesRenderer, SolidColorRenderElement> =
                         DrmOutputRenderElements::default();
@@ -1522,12 +2351,17 @@ impl KmsState {
                         .use_mode(prev, &mut self.renderer, &rollback)
                     {
                         Ok(()) => {
+                            self.outputs[idx].drm_mode_uncertain = false;
                             log::warn!(
                                 "{}: '{name}': modeset failed, rolled back to previous mode ({primary_err})",
                                 device_ctx("apply output mode")
                             );
                         }
                         Err(rollback_err) => {
+                            self.outputs[idx].drm_mode_uncertain = true;
+                            primary_err.push_str(&format!(
+                                "; previous-mode rollback failed: {rollback_err:?}"
+                            ));
                             log::error!(
                                 "{}: '{name}': modeset failed AND rollback failed: \
                                  primary={primary_err}, rollback={rollback_err:?}",
@@ -1536,6 +2370,8 @@ impl KmsState {
                         }
                     }
                 } else {
+                    self.outputs[idx].drm_mode_uncertain = true;
+                    primary_err.push_str("; no previous mode available for rollback");
                     log::error!(
                         "{}: '{name}': modeset failed, no previous mode captured for rollback ({primary_err})",
                         device_ctx("apply output mode")
@@ -1543,6 +2379,7 @@ impl KmsState {
                 }
                 return Err(primary_err);
             }
+            self.outputs[idx].drm_mode_uncertain = false;
             self.outputs[idx].mode_size = (m.size().0 as i32, m.size().1 as i32);
         }
 
@@ -2806,22 +3643,15 @@ impl KmsState {
                 .frame_callback_throttle
                 .unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
-            let (output_tf, output_ctm) = {
-                use crate::backend::wayland_udev::color_pipeline::{
-                    ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
-                };
-                let params =
-                    crate::backend::wayland_udev::color_management::params_for_output(&p.output);
-                let tf = TransferKind::from_params(&params);
-                let prim = ColorSpacePrimaries::from_params(&params);
-                let ctm = rgb_to_rgb_matrix(&ColorSpacePrimaries::SRGB_D65, &prim);
-                (tf, ctm)
-            };
+            let output_params =
+                crate::backend::wayland_udev::color_management::params_for_output(&p.output);
+            let (output_tf, output_ctm) = output_color_target(&output_params);
             outputs.push(KmsOutputState {
                 crtc: p.crtc,
                 connector: p.connector,
                 mode_size: p.mode_size,
                 origin: p.origin,
+                drm_mode_uncertain: false,
                 output: p.output,
                 drm_output,
                 frame_pending: false,
@@ -2840,6 +3670,7 @@ impl KmsState {
                 installed_ctm: None,
                 output_tf,
                 output_ctm,
+                legacy_gamma_override: false,
                 dpms_off: false,
             });
         }
@@ -2888,6 +3719,11 @@ impl KmsState {
             image_capture_toplevel_offscreen: None,
             last_presentation_time: None,
             last_direct_scanout_outputs: Vec::new(),
+            // Construction has not established the neutral hardware baseline
+            // yet. Even though the event loop cannot dispatch this handle until
+            // `new` returns, keep the invariant explicit in the state itself.
+            color_pipeline_delivery_blocked: true,
+            owns_scanout_color_state: false,
         }));
 
         let handle_clone = handle.clone();
@@ -2900,9 +3736,57 @@ impl KmsState {
                     log::warn!("{}: {err:?}", renderer_ctx("process DRM event"));
                 }
             })
-            .expect("failed to register drm notifier");
+            .map_err(|error| {
+                KmsInitError::InitializeOutput(format!("failed to register DRM notifier: {error}"))
+            })?;
 
         handle.borrow_mut().registration_token = Some(token);
+
+        // Do not inherit a previous DRM master's color blobs under an empty
+        // userspace tracker. This is deliberately the constructor's final
+        // fallible hardware step and one all-output transaction:
+        // `maybe_reinit_kms` keeps the old KMS state alive until construction
+        // succeeds, so a partial reset would make its next framebuffer use the
+        // wrong domain. Only the CRTCs/connectors selected and initialized
+        // above are touched. DEGAMMA is reset because an inherited decoder
+        // changes the input domain; HDR_OUTPUT_METADATA is reset because an
+        // inherited output signal would make the sink reinterpret safe sRGB.
+        let reset_result = {
+            let mut state = handle.borrow_mut();
+            let crtcs: Vec<_> = state.outputs.iter().map(|output| output.crtc).collect();
+            let connectors: Vec<_> = state
+                .outputs
+                .iter()
+                .map(|output| output.connector)
+                .collect();
+            let mgr = state.drm_output_manager.lock();
+            Self::reset_scanout_color_properties(mgr.device(), &crtcs, &connectors)
+        };
+        let cleared = match reset_result {
+            Ok(cleared) => cleared,
+            Err(error) => {
+                // Remove the callback's strong Rc before returning. Because
+                // owns_scanout_color_state is still false, dropping this failed
+                // construction cannot retry the reset and mutate color state
+                // still tracked by the old live KMS instance.
+                if let Some(token) = handle.borrow_mut().registration_token.take() {
+                    let _ = event_loop_handle.remove(token);
+                }
+                return Err(KmsInitError::InitializeOutput(format!(
+                    "failed to establish neutral scanout color state: {error}"
+                )));
+            }
+        };
+        {
+            let mut state = handle.borrow_mut();
+            state.owns_scanout_color_state = true;
+            state.color_pipeline_delivery_blocked = false;
+        }
+        if cleared > 0 {
+            log::info!(
+                "[kms-cm] reset {cleared} inherited DEGAMMA_LUT/CTM/GAMMA_LUT/HDR_OUTPUT_METADATA/Colorspace properties"
+            );
+        }
 
         Ok(handle)
     }
@@ -2913,12 +3797,13 @@ impl KmsState {
         cursor_kind: StdCursorKind,
         compositor: Option<&super::super::compositor::WaylandCompositor>,
     ) {
-        if !self.needs_render {
+        if !self.needs_render || self.color_pipeline_delivery_blocked {
             return;
         }
 
         self.last_direct_scanout_outputs.clear();
         let mut any_skipped = false;
+        let mut any_failed = false;
         for out_idx in 0..self.outputs.len() {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
@@ -2926,6 +3811,7 @@ impl KmsState {
             if state
                 .soft_disabled_outputs
                 .contains(&self.outputs[out_idx].output.name())
+                || self.outputs[out_idx].dpms_off
             {
                 continue;
             }
@@ -3779,6 +4665,7 @@ impl KmsState {
                     }
 
                     if let Err(err) = out.drm_output.queue_frame(()) {
+                        any_failed = true;
                         log::warn!("{}: {err:?}", renderer_ctx("queue DRM frame"));
 
                         // If we started while not being DRM master (e.g. GNOME was active),
@@ -3809,6 +4696,7 @@ impl KmsState {
                     }
                 }
                 Err(err) => {
+                    any_failed = true;
                     log::warn!("{}: {err:?}", renderer_ctx("render DRM frame"));
 
                     match self.drm_output_manager.lock().activate(false) {
@@ -3841,7 +4729,7 @@ impl KmsState {
             );
         }
 
-        if !any_skipped {
+        if !any_skipped && !any_failed {
             self.needs_render = false;
         }
 
@@ -3885,12 +4773,15 @@ impl KmsState {
 }
 
 impl Drop for KmsState {
-    /// Best-effort cleanup of GAMMA_LUT/CTM blobs still tracked at teardown.
-    /// The kernel reclaims blobs on FD close anyway, so this is belt-and-braces
-    /// — it eliminates the brief window in which an orderly shutdown leaks a
-    /// blob reference and avoids "blob leaked" dmesg warnings under
-    /// drm.debug=0x4.
+    /// Best-effort cleanup of CRTC/connector color state and tracked blobs at teardown.
+    /// Color properties can survive the userspace FD/master which installed
+    /// them, so clear the hardware references before releasing our blob ids.
+    /// The next KMS owner also performs a mandatory reset during initialization;
+    /// Drop remains best-effort because orderly teardown may run after DRM
+    /// master/session ownership has already been revoked.
     fn drop(&mut self) {
+        let crtcs: Vec<_> = self.outputs.iter().map(|output| output.crtc).collect();
+        let connectors: Vec<_> = self.outputs.iter().map(|output| output.connector).collect();
         let blobs: Vec<u64> = self
             .outputs
             .iter()
@@ -3901,13 +4792,27 @@ impl Drop for KmsState {
                     .chain(o.installed_ctm.into_iter())
             })
             .collect();
-        if blobs.is_empty() {
-            return;
-        }
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
+        if self.owns_scanout_color_state {
+            match Self::reset_scanout_color_properties(dev, &crtcs, &connectors) {
+                Ok(cleared) if cleared > 0 => {
+                    log::debug!(
+                        "[kms-cm] cleared {cleared} scanout color properties during teardown"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!(
+                        "[kms-cm] failed to clear scanout color properties during teardown: {error}"
+                    );
+                }
+            }
+        }
         for id in blobs {
-            let _ = dev.destroy_property_blob(id);
+            if let Err(error) = dev.destroy_property_blob(id) {
+                log::debug!("[kms-cm] destroy tracked color blob {id} failed: {error:?}");
+            }
         }
     }
 }
@@ -3923,6 +4828,19 @@ fn wl_transform_to_smithay(value: i32) -> Transform {
         6 => Transform::Flipped180,
         7 => Transform::Flipped270,
         _ => Transform::Normal,
+    }
+}
+
+fn smithay_transform_to_wl(transform: Transform) -> i32 {
+    match transform {
+        Transform::Normal => 0,
+        Transform::_90 => 1,
+        Transform::_180 => 2,
+        Transform::_270 => 3,
+        Transform::Flipped => 4,
+        Transform::Flipped90 => 5,
+        Transform::Flipped180 => 6,
+        Transform::Flipped270 => 7,
     }
 }
 
@@ -3981,7 +4899,31 @@ fn save_rgba_png(
 
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
-    use super::{compositor_output_texture_identity_matches, ctm_offload_allowed};
+    use super::{
+        CrtcColorProperty, OutputColorRegionCandidate, compositor_output_texture_identity_matches,
+        connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
+        gamma_ramp_is_identity, output_color_target, plan_output_configuration_rollback,
+        plan_software_color_regions, rollback_mode_requires_restore, smithay_transform_to_wl,
+        wl_transform_to_smithay,
+    };
+    use crate::backend::wayland_udev::color_management::ParametricParams;
+    use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+    use smithay::utils::Transform;
+
+    fn color_region_candidate(
+        origin: (i32, i32),
+        output_tf: TransferKind,
+    ) -> OutputColorRegionCandidate {
+        OutputColorRegionCandidate {
+            participating: true,
+            origin,
+            mode_size: (1920, 1080),
+            scale: 1.0,
+            transform: Transform::Normal,
+            output_tf,
+            working_to_output_row_major: IDENTITY_CTM,
+        }
+    }
 
     #[test]
     fn renderer_wrapper_identity_includes_generation_not_only_recycled_gl_name() {
@@ -3996,5 +4938,169 @@ mod compositor_texture_ownership_tests {
         assert!(!ctm_offload_allowed(false, true, true));
         assert!(!ctm_offload_allowed(true, false, true));
         assert!(!ctm_offload_allowed(true, true, false));
+    }
+
+    #[test]
+    fn gamma_override_identity_detection_matches_protocol_reset_ramp() {
+        let size = 4_u32;
+        let channel = [0_u16, 21_845, 43_690, 65_535];
+        let ramp = channel.repeat(3);
+        assert!(gamma_ramp_is_identity(size, &ramp));
+
+        let mut tinted = ramp;
+        tinted[5] = tinted[5].saturating_sub(1);
+        assert!(!gamma_ramp_is_identity(size, &tinted));
+        assert!(!gamma_ramp_is_identity(size, &tinted[..8]));
+    }
+
+    #[test]
+    fn crtc_color_reset_contract_covers_only_blob_valued_color_stages() {
+        assert_eq!(
+            crtc_color_property("DEGAMMA_LUT"),
+            Some(CrtcColorProperty::DegammaLut)
+        );
+        assert_eq!(crtc_color_property("CTM"), Some(CrtcColorProperty::Ctm));
+        assert_eq!(
+            crtc_color_property("GAMMA_LUT"),
+            Some(CrtcColorProperty::GammaLut)
+        );
+
+        // Size/capability metadata and unrelated CRTC properties must never be
+        // written to zero by the reset transaction.
+        for name in [
+            "DEGAMMA_LUT_SIZE",
+            "GAMMA_LUT_SIZE",
+            "ACTIVE",
+            "MODE_ID",
+            "VRR_ENABLED",
+        ] {
+            assert_eq!(
+                crtc_color_property(name),
+                None,
+                "unexpected reset for {name}"
+            );
+        }
+        assert_eq!(
+            connector_color_property_neutral_value("HDR_OUTPUT_METADATA"),
+            Some(0)
+        );
+        assert_eq!(
+            connector_color_property_neutral_value("Colorspace"),
+            Some(0)
+        );
+        assert_eq!(connector_color_property_neutral_value("EDID"), None);
+    }
+
+    #[test]
+    fn wl_transform_conversion_round_trips_every_protocol_value() {
+        for value in 0..=7 {
+            assert_eq!(
+                smithay_transform_to_wl(wl_transform_to_smithay(value)),
+                value
+            );
+        }
+        assert_eq!(wl_transform_to_smithay(-1), Transform::Normal);
+        assert_eq!(wl_transform_to_smithay(8), Transform::Normal);
+    }
+
+    #[test]
+    fn output_configuration_rollback_plan_is_reverse_and_unique() {
+        let snapshot_names = vec!["DP-1".into(), "HDMI-A-1".into(), "eDP-1".into()];
+        let touched = vec![
+            "DP-1".into(),
+            "HDMI-A-1".into(),
+            "DP-1".into(),
+            "eDP-1".into(),
+        ];
+        assert_eq!(
+            plan_output_configuration_rollback(&snapshot_names, &touched).unwrap(),
+            vec![2, 0, 1]
+        );
+
+        let missing = vec!["DP-1".into(), "UNKNOWN".into()];
+        assert!(plan_output_configuration_rollback(&snapshot_names, &missing).is_err());
+
+        let expected_mode = (1920, 1080, 60_000);
+        assert!(!rollback_mode_requires_restore(
+            Some(expected_mode),
+            expected_mode,
+            false
+        ));
+        assert!(rollback_mode_requires_restore(
+            Some(expected_mode),
+            expected_mode,
+            true
+        ));
+    }
+
+    #[test]
+    fn software_color_regions_accept_supported_mixed_output_layout() {
+        let candidates = [
+            color_region_candidate((0, 0), TransferKind::Gamma22),
+            color_region_candidate((1920, 0), TransferKind::St2084Pq),
+        ];
+        let regions = plan_software_color_regions(&candidates).expect("supported layout");
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].rect, [0, 0, 1920, 1080]);
+        assert_eq!(regions[1].rect, [1920, 0, 1920, 1080]);
+        assert_eq!(regions[1].output_tf, TransferKind::St2084Pq);
+    }
+
+    #[test]
+    fn software_color_regions_reject_ambiguous_or_unmappable_geometry() {
+        let base = color_region_candidate((0, 0), TransferKind::Gamma22);
+
+        let mut negative_origin = base;
+        negative_origin.origin = (-1, 0);
+        let mut empty_mode = base;
+        empty_mode.mode_size = (0, 1080);
+        let mut scaled = base;
+        scaled.scale = 2.0;
+        let mut rotated = base;
+        rotated.transform = Transform::_90;
+        for invalid in [negative_origin, empty_mode, scaled, rotated] {
+            assert!(plan_software_color_regions(&[invalid]).is_none());
+        }
+
+        let same_profile_mirror = [base, base];
+        assert!(plan_software_color_regions(&same_profile_mirror).is_some());
+
+        let different_tf_mirror = [base, color_region_candidate((0, 0), TransferKind::Hlg)];
+        assert!(plan_software_color_regions(&different_tf_mirror).is_none());
+
+        let mut different_gamut = base;
+        different_gamut.working_to_output_row_major[0] = 0.9;
+        assert!(plan_software_color_regions(&[base, different_gamut]).is_none());
+
+        let mut inactive_invalid = negative_origin;
+        inactive_invalid.participating = false;
+        assert_eq!(
+            plan_software_color_regions(&[base, inactive_invalid])
+                .expect("inactive output does not constrain the plan")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn output_color_target_maps_linear_srgb_to_advertised_profile() {
+        let hdr = ParametricParams {
+            primaries_named: Some(6),
+            tf_named: Some(11),
+            ..Default::default()
+        };
+        let (hdr_tf, hdr_matrix) = output_color_target(&hdr);
+        assert_eq!(hdr_tf, TransferKind::St2084Pq);
+        assert_ne!(hdr_matrix, IDENTITY_CTM);
+
+        let srgb = crate::backend::wayland_udev::color_management::srgb_params();
+        let (srgb_tf, srgb_matrix) = output_color_target(&srgb);
+        assert_eq!(srgb_tf, TransferKind::Srgb);
+        assert!(
+            srgb_matrix
+                .iter()
+                .zip(IDENTITY_CTM)
+                .all(|(actual, expected)| (*actual - expected).abs() < 1e-5)
+        );
     }
 }

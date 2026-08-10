@@ -14,6 +14,7 @@ use crate::backend::edid::EdidHdrCapabilities;
 /// `wp_color_manager_v1::transfer_function` values used by the policy.
 pub const TF_BT1886: u32 = 1;
 pub const TF_GAMMA22: u32 = 2;
+pub const TF_SRGB: u32 = 9;
 pub const TF_ST2084_PQ: u32 = 11;
 pub const TF_HLG: u32 = 13;
 
@@ -79,7 +80,7 @@ pub fn params_match(a: &ParametricParams, b: &ParametricParams) -> bool {
 pub fn srgb_params() -> ParametricParams {
     ParametricParams {
         primaries_named: Some(PRIMARIES_NAMED_SRGB),
-        tf_named: Some(TF_GAMMA22),
+        tf_named: Some(TF_SRGB),
         ..ParametricParams::default()
     }
 }

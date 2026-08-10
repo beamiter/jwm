@@ -98,40 +98,57 @@ semantics for live textures. Live faces consume the same per-window
 mirrored draw. Encoded premultiplied RGB is unpremultiplied, decoded, gamut
 mapped, optionally re-encoded, then premultiplied again; alpha-zero samples are
 forced to zero and filler faces never inherit a live window's transform.
-Explicit same-space PQ and HLG descriptions remain explicit in scene-linear
+Explicit PQ and HLG source descriptions retain their decode plan in scene-linear
 mode so they cannot fall through to the undescribed-sRGB fallback, while the
 encoded path still elides identity transforms and preserves direct-scanout and
 effect fast paths. Runtime matrices use one column-major/`GL_FALSE` upload
 contract shared with the ordinary window renderer.
 
-The skydome, caps, title and scroll strip bind their output color domain
-explicitly, so a static overview does not by itself disable safe CRTC
-OETF/CTM offload. If software already encoded the main scene as PQ, HLG, a
-power curve or another target transfer, the overview performs a monitor-local
-linear re-entry at its original layer: it decodes that output region back into
-the FP16 scene target, composites every overview material with linear
-premultiplied-alpha blending, then re-encodes only the same scissored region.
-This preserves transition/snap/border ordering without teaching five separate
-materials how to blend in a nonlinear target domain.
+The skydome, caps, title and scroll strip bind their color domain explicitly.
+With a live FP16 target, each described live face is converted from its source
+description into the compositor's normalized linear-sRGB workspace. Its plan no
+longer depends on pre-overview output overlap, so rotating or retargeting the
+prism across outputs cannot leave a face encoded for its old monitor. The whole
+overview remains in common linear light at its existing painter layer until the
+frame's output-delivery stage.
 
-Generated UI is still authored as sRGB. On a non-sRGB-primary output where no
-CRTC CTM is active, it has no separate sRGB-to-native gamut mapping; this is an
-existing global output-pipeline limitation rather than an overview-specific
-exception. JWM only arms a CRTC CTM after every participating output has
-accepted the hardware OETF, because applying that linear-light matrix to
-shader-encoded pixels would be invalid. Mixed transfer-function outputs still
-share one final shader encode, and a window's overview transform is still
-planned from its pre-overview output overlap. A common linear-sRGB workspace,
-per-output matrix/encode regions and cross-output overview retargeting remain
-future work.
+When every later pass is scene-linear-aware, JWM finalizes each supported
+physical output region with that output's linear-sRGB-to-native matrix and
+transfer function. The current software partition accepts nonnegative physical
+origins, unit scale, normal transform and nonconflicting overlaps. Alternatively,
+hardware delivery is armed only when every participating CRTC coherently accepts
+both its CTM and GAMMA_LUT; a LUT-only result is rolled back. Both routes keep
+mixed-transfer regions independent in the planner and shader infrastructure
+rather than choosing one global encode.
+
+Delivery deliberately falls back to one global sRGB encode whenever an
+encoded-only late overlay is visible, capture needs an encoded framebuffer, the
+FP16 target or a safe region plan is unavailable, or Smithay will append an
+external KMS cursor, drag icon, lock surface, or top/overlay layer. The ordinary
+desktop cursor is external and normally lies on an active output, so live
+per-output delivery is currently exercised mainly as infrastructure while most
+interactive frames use the fallback. Encoded-only generated UI and external
+elements do not yet participate in the common workspace. Until they do, JWM
+rejects enabling DRM `HDR_OUTPUT_METADATA`, clears inherited metadata during KMS
+ownership transitions, and keeps the actual output signal on exact sRGB; EDID
+PQ/HLG profiles exposed by diagnostics describe capability, not an active route.
+
+The working values are relative: JWM does not yet normalize SDR, PQ and HLG to
+one absolute luminance scale. Explicit non-D65 white points also lack a
+chromatic-adaptation transform; dynamic surface-description changes are not yet
+latched to their matching `wl_surface.commit`; and KMS color-property updates
+are not committed atomically with their matching framebuffer. Those are
+output-pipeline limits, not overview-specific exceptions.
 
 Headless GLES pixel regressions cover selection lighting, fade premultiplication,
 opaque-region alpha, texture-independent filler faces, linked polygon caps,
 reflection contact falloff, deterministic skydome pixels, scene-linear
-materials, non-symmetric color matrices, PQ/HLG identity plans and transparent
+materials, non-symmetric color matrices, explicit PQ/HLG decode plans and transparent
 color-managed texels. The fullscreen transfer pair is also checked against the
-CPU oracle for Linear, Power, BT.1886, Gamma 2.2, PQ, HLG and sRGB, while route
-and scissor tests lock the monitor-local software fallback. CI forces Mesa's
+CPU oracle for Linear, Power, BT.1886, Gamma 2.2, PQ, HLG and sRGB. Asymmetric
+matrix and disjoint-region pixel tests cover independent per-output delivery,
+including untouched gaps, while route/scissor tests lock conservative fallback
+selection. CI forces Mesa's
 surfaceless EGL platform and treats a missing GL context as a failure, so these
 checks cannot silently downgrade to skipped tests. The legacy workspace-cube
 branch is also rendered with hostile lit/filler uniforms to lock its original

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 /// wlr-output-management-unstable-v1 protocol implementation for JWM.
 ///
@@ -403,6 +404,79 @@ fn mode_is_change(current: Option<smithay::output::Mode>, requested: (i32, i32, 
     }
 }
 
+fn output_extent_is_supported(position: (i32, i32), mode_size: (i32, i32)) -> bool {
+    const MAX_FRAMEBUFFER_EXTENT: i32 = 32_768;
+    let (x, y) = position;
+    let (width, height) = mode_size;
+    x >= 0
+        && y >= 0
+        && width > 0
+        && height > 0
+        && x.checked_add(width)
+            .is_some_and(|right| right <= MAX_FRAMEBUFFER_EXTENT)
+        && y.checked_add(height)
+            .is_some_and(|bottom| bottom <= MAX_FRAMEBUFFER_EXTENT)
+}
+
+/// Project the physical framebuffer envelope after a configuration without
+/// mutating KMS. Soft-disable retains geometry, matching `KmsState`.
+pub(crate) fn proposed_output_framebuffer_size(
+    current_outputs: &[(String, (i32, i32), (i32, i32))],
+    changes: &[OutputConfigChange],
+) -> Result<(u32, u32), String> {
+    let mut layout = current_outputs
+        .iter()
+        .cloned()
+        .map(|(name, origin, mode)| (name, (origin, mode)))
+        .collect::<HashMap<_, _>>();
+
+    for change in changes {
+        let Some((origin, mode)) = layout.get_mut(&change.name) else {
+            return Err(format!("unknown output '{}'", change.name));
+        };
+        if !change.enabled {
+            continue;
+        }
+        if let Some(position) = change.position {
+            *origin = position;
+        }
+        if let Some((width, height, _)) = change.mode {
+            if width <= 0 || height <= 0 {
+                return Err(format!(
+                    "invalid mode {width}x{height} for output '{}'",
+                    change.name
+                ));
+            }
+            *mode = (width, height);
+        }
+    }
+
+    let bounded_extent = |origin: i32, size: i32| {
+        (i64::from(origin) + i64::from(size)).clamp(0, i64::from(i32::MAX)) as u32
+    };
+    let width = layout
+        .values()
+        .map(|(origin, mode)| bounded_extent(origin.0, mode.0))
+        .max()
+        .unwrap_or(1920)
+        .max(1);
+    let height = layout
+        .values()
+        .map(|(origin, mode)| bounded_extent(origin.1, mode.1))
+        .max()
+        .unwrap_or(1080)
+        .max(1);
+    Ok((width, height))
+}
+
+/// The advertised protocol head currently reports adaptive sync disabled and
+/// the output transaction snapshot does not own VRR state. Reject either
+/// explicit value instead of acknowledging a request the backend would
+/// silently ignore.
+fn adaptive_sync_request_supported(request: Option<bool>) -> bool {
+    request.is_none()
+}
+
 /// Validate the pending configuration against live outputs and lower it into a
 /// list of `OutputConfigChange`. Returns `Err` with a reason if invalid.
 fn build_changes(
@@ -502,6 +576,54 @@ fn build_changes(
             }
         }
 
+        if !adaptive_sync_request_supported(pending.adaptive_sync) {
+            let requested = if pending.adaptive_sync == Some(true) {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            return Err(OutputConfigValidationError::field(
+                &name,
+                "adaptive_sync",
+                Some("VRR_ENABLED"),
+                requested,
+                format!(
+                    "adaptive sync request '{requested}' for '{name}' is not transactionally supported"
+                ),
+            ));
+        }
+
+        if pending.position.is_some() || requested_mode.is_some() {
+            let position = pending.position.unwrap_or_else(|| {
+                let current = output.current_location();
+                (current.x, current.y)
+            });
+            let mode_size = requested_mode
+                .map(|(width, height, _)| (width, height))
+                .or_else(|| output.current_mode().map(|mode| (mode.size.w, mode.size.h)))
+                .ok_or_else(|| {
+                    OutputConfigValidationError::field(
+                        &name,
+                        "layout_extent",
+                        None,
+                        format!("{},{}", position.0, position.1),
+                        format!("cannot validate position for '{name}' without an active mode"),
+                    )
+                })?;
+            if !output_extent_is_supported(position, mode_size) {
+                return Err(OutputConfigValidationError::field(
+                    &name,
+                    "layout_extent",
+                    None,
+                    format!("{},{}", position.0, position.1),
+                    format!(
+                        "position ({},{}) with mode {}x{} for '{name}' is outside the compositor framebuffer domain",
+                        position.0, position.1, mode_size.0, mode_size.1
+                    ),
+                ));
+            }
+        }
+
         changes.push(OutputConfigChange {
             name,
             enabled: true,
@@ -538,6 +660,50 @@ fn build_changes(
     ) {
         return Err(OutputConfigValidationError::new(
             "configuration would leave no enabled outputs",
+        ));
+    }
+
+    // Apply cannot transactionally grow/shrink the compositor's complete FBO
+    // chain yet. Keep Test honest by enforcing the same deterministic envelope
+    // constraint here, before either request can queue a backend mutation.
+    let current_layout = state
+        .outputs
+        .iter()
+        .map(|output| {
+            let mode = output.current_mode().ok_or_else(|| {
+                OutputConfigValidationError::field(
+                    output.name(),
+                    "layout_extent",
+                    None,
+                    "missing-current-mode",
+                    format!(
+                        "cannot validate framebuffer envelope: output '{}' has no current mode",
+                        output.name()
+                    ),
+                )
+            })?;
+            let location = output.current_location();
+            Ok((
+                output.name(),
+                (location.x, location.y),
+                (mode.size.w, mode.size.h),
+            ))
+        })
+        .collect::<Result<Vec<_>, OutputConfigValidationError>>()?;
+    let current_size = proposed_output_framebuffer_size(&current_layout, &[])
+        .map_err(OutputConfigValidationError::new)?;
+    let proposed_size = proposed_output_framebuffer_size(&current_layout, &changes)
+        .map_err(OutputConfigValidationError::new)?;
+    if proposed_size != current_size {
+        return Err(OutputConfigValidationError::field(
+            "*",
+            "layout_extent",
+            None,
+            format!("{}x{}", proposed_size.0, proposed_size.1),
+            format!(
+                "runtime framebuffer envelope change from {}x{} to {}x{} is not yet supported; reinitialize KMS to apply this layout",
+                current_size.0, current_size.1, proposed_size.0, proposed_size.1
+            ),
         ));
     }
 
@@ -645,7 +811,11 @@ impl Dispatch<ZwlrOutputModeV1, OutputModeData> for JwmWaylandState {
 
 #[cfg(test)]
 mod tests {
-    use super::{OutputConfigValidationError, mode_is_change, output_config_leaves_enabled_output};
+    use super::{
+        OutputConfigValidationError, adaptive_sync_request_supported, mode_is_change,
+        output_config_leaves_enabled_output, output_extent_is_supported,
+        proposed_output_framebuffer_size,
+    };
     use crate::backend::api::OutputConfigChange;
     use smithay::output::Mode as SmithayMode;
     use smithay::utils::Size;
@@ -694,6 +864,52 @@ mod tests {
         let cur = mode(1920, 1080, 60_000);
         assert!(mode_is_change(Some(cur), (2560, 1440, 60_000)));
         assert!(mode_is_change(Some(cur), (2560, 1440, 0)));
+    }
+
+    #[test]
+    fn output_extent_rejects_negative_or_overflowing_framebuffer_coordinates() {
+        assert!(output_extent_is_supported((0, 0), (1920, 1080)));
+        assert!(output_extent_is_supported((1920, 0), (2560, 1440)));
+        assert!(!output_extent_is_supported((-1, 0), (1920, 1080)));
+        assert!(!output_extent_is_supported((0, -1), (1920, 1080)));
+        assert!(!output_extent_is_supported(
+            (i32::MAX - 10, 0),
+            (1920, 1080)
+        ));
+        assert!(!output_extent_is_supported((0, 0), (0, 1080)));
+    }
+
+    #[test]
+    fn adaptive_sync_requests_are_rejected_instead_of_silently_ignored() {
+        assert!(adaptive_sync_request_supported(None));
+        assert!(!adaptive_sync_request_supported(Some(false)));
+        assert!(!adaptive_sync_request_supported(Some(true)));
+    }
+
+    #[test]
+    fn framebuffer_envelope_projection_distinguishes_testable_layouts() {
+        let current = vec![
+            ("eDP-1".to_string(), (0, 0), (1920, 1080)),
+            ("DP-1".to_string(), (1920, 0), (1920, 1080)),
+        ];
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &[]).unwrap(),
+            (3840, 1080)
+        );
+
+        let mut shrunk = change("DP-1", true);
+        shrunk.position = Some((0, 0));
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &[shrunk]).unwrap(),
+            (1920, 1080)
+        );
+
+        let mut expanded = change("DP-1", true);
+        expanded.position = Some((2000, 0));
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &[expanded]).unwrap(),
+            (3920, 1080)
+        );
     }
 
     fn change(name: &str, enabled: bool) -> OutputConfigChange {

@@ -1,3 +1,4 @@
+use super::render::transform_for_encoded_srgb;
 use super::*;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs;
@@ -147,11 +148,21 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
+                let color_transform = win.color_transform.map(|transform| {
+                    if self.scene_linear_color_path_active() {
+                        transform_for_encoded_srgb(transform)
+                    } else {
+                        transform
+                    }
+                });
+                self.upload_window_color_transform(gl, color_transform, false);
+
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.reset_window_color_transform(gl);
 
                 // Highlight border if hovered (blue, 3px)
                 if entry.is_hovered {
@@ -385,11 +396,21 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
+                let color_transform = win.color_transform.map(|transform| {
+                    if self.scene_linear_color_path_active() {
+                        transform_for_encoded_srgb(transform)
+                    } else {
+                        transform
+                    }
+                });
+                self.upload_window_color_transform(gl, color_transform, false);
+
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, tex);
                 gl.Uniform1i(self.win_uniforms.texture, 0);
 
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.reset_window_color_transform(gl);
             }
         }
     }

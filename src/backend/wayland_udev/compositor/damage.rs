@@ -64,10 +64,11 @@ fn peek_animation_pending(active: bool, opacity: f32) -> bool {
 /// Simple damage tracking for the Wayland compositor.
 /// Tracks whether a redraw is needed based on scene changes.
 impl WaylandCompositor {
-    /// Hardware OETF/CTM offload is safe only while every pass written after
-    /// the linear window scene is itself linear-aware. Encoded-space overlays
-    /// would otherwise be encoded a second time by the CRTC LUT.
-    pub(crate) fn kms_color_pipeline_offload_safe(&self) -> bool {
+    /// Deferred output delivery is safe only while every compositor pass
+    /// written after the linear window scene is itself linear-aware.
+    /// Encoded-space overlays would otherwise be transformed twice by either
+    /// the final software regions or the CRTC LUT/CTM pair.
+    pub(crate) fn compositor_linear_tail_safe(&self) -> bool {
         if !self.scene_linear_requested || self.linear_fbo == 0 {
             return false;
         }
@@ -102,12 +103,20 @@ impl WaylandCompositor {
             || self.postprocess_active
             || self.debug_hud_enabled
             || self.debug_hud_extended
-            || (self.annotation_active && !self.annotation_strokes.is_empty())
+            // Every annotation primitive is currently encoded-only. Quads
+            // and labels are independent of freehand strokes, so checking the
+            // stroke list alone can let a text/shape-only frame leak past the
+            // linear-tail gate.
+            || self.annotation_active
             || self.screenshot_toolbar.is_some()
             || self.system_ui.is_some()
             || !self.toast_stack.is_empty()
             || !self.osd_slot.is_empty()
-            || self.recording_region_overlay.is_some();
+            || self.recording_region_overlay.is_some()
+            // Hardware delivery leaves output_fbo in linear light for KMS;
+            // readback consumers require a shader-encoded framebuffer.
+            || self.screenshot_requests.has_pending()
+            || self.recording_requires_composition();
 
         !encoded_overlay_active
     }
@@ -128,6 +137,15 @@ impl WaylandCompositor {
     ) -> Option<&'static str> {
         const EPSILON: f32 = 0.0001;
 
+        // A scene-linear frame is not scanout-ready until either the shader
+        // has applied its per-output gamut/OETF plan or KMS owns the matching
+        // CTM+LUT pair. Directly presenting a client buffer would bypass the
+        // software delivery stage, or feed encoded pixels into linear-light
+        // hardware properties. A future profile-aware scanout path may relax
+        // this only after proving the buffer and CRTC domains match.
+        if self.scene_linear_color_path_active() {
+            return Some("scene-linear output conversion requires composition");
+        }
         if self.postprocess_active {
             return Some("post-processing requires composition");
         }

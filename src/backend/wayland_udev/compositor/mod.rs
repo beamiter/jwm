@@ -339,6 +339,7 @@ pub(crate) struct SceneLinearEncodeUniforms {
     pub texture: i32,
     pub encode_tf: i32,
     pub encode_gamma: i32,
+    pub color_matrix: i32,
 }
 
 #[allow(dead_code)]
@@ -348,6 +349,14 @@ pub(crate) struct SceneLinearDecodeUniforms {
     pub texture: i32,
     pub decode_tf: i32,
     pub decode_gamma: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OutputColorFrameState {
+    linear_tail_safe: bool,
+    hw_encode_active: bool,
+    hw_ctm_active: bool,
+    software_regions: Option<Vec<crate::backend::wayland_udev::color_pipeline::OutputColorRegion>>,
 }
 
 pub(crate) struct TransitionUniforms {
@@ -720,6 +729,34 @@ pub(crate) struct MinimizedVisual {
     pub estimated_bytes: u64,
 }
 
+/// Output facts that can change a retained surface's legacy output-bound
+/// transform. Scene-linear plans are output-independent, but retaining the
+/// same context shape in both modes makes an output-profile transition a
+/// conservative generation boundary.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RetainedOutputColorContext {
+    pub rect: [i32; 4],
+    pub output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    pub working_to_output_row_major: [f32; 9],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RetainedColorPlanContext {
+    render_path_enabled: bool,
+    scene_linear_active: bool,
+    surface_description_generation: u64,
+    outputs: Vec<RetainedOutputColorContext>,
+}
+
+/// The first observation establishes the generation for a fresh compositor;
+/// only a transition can make an already-retained plan stale.
+fn retained_color_plan_context_changed(
+    previous: Option<&RetainedColorPlanContext>,
+    next: &RetainedColorPlanContext,
+) -> bool {
+    previous.is_some_and(|previous| previous != next)
+}
+
 #[derive(Clone)]
 pub(crate) struct DockPreview {
     pub window_id: u64,
@@ -886,6 +923,14 @@ pub(crate) struct WaylandCompositor {
     linear_fbo: u32,
     #[allow(dead_code)]
     linear_texture: u32,
+    /// Last delivery plan observed before rendering. Any change in output
+    /// participation, geometry, transfer, gamut ownership or the late-overlay
+    /// route forces a full frame so pixels cannot retain the previous domain.
+    last_output_color_frame_state: Option<OutputColorFrameState>,
+    /// Generation key for transforms copied into close/Genie/Dock retained
+    /// owners. Unlike raw retained pixels, those transform plans are tied to
+    /// the active working domain and output descriptions.
+    retained_color_plan_context: Option<RetainedColorPlanContext>,
     scene_fbo: u32,
     scene_texture: u32,
     blur_fbos: Vec<BlurFboLevel>,
@@ -1311,6 +1356,28 @@ const GL_RGB10_A2: u32 = 0x8059;
 const GL_UNSIGNED_INT_2_10_10_10_REV: u32 = 0x8368;
 const GL_RGBA16F: u32 = 0x881A;
 const GL_HALF_FLOAT: u32 = 0x140B;
+const GL_MAX_TEXTURE_SIZE: u32 = 0x0D33;
+
+fn validate_framebuffer_dimensions(w: u32, h: u32, max_texture_size: i32) -> Result<(), String> {
+    if w == 0 || h == 0 {
+        return Err(format!(
+            "compositor framebuffer dimensions must be non-zero (requested {w}x{h})"
+        ));
+    }
+    if max_texture_size <= 0 {
+        return Err(format!(
+            "GL_MAX_TEXTURE_SIZE returned an invalid value ({max_texture_size})"
+        ));
+    }
+
+    let max_texture_size = max_texture_size as u32;
+    if w > max_texture_size || h > max_texture_size {
+        return Err(format!(
+            "compositor framebuffer {w}x{h} exceeds GL_MAX_TEXTURE_SIZE={max_texture_size}"
+        ));
+    }
+    Ok(())
+}
 
 unsafe fn create_fbo_texture(gl: &ffi::Gles2, w: u32, h: u32) -> (u32, u32) {
     unsafe {
@@ -1440,12 +1507,13 @@ struct CompositorConstructionProbe {
     textures: Vec<u32>,
 }
 
-/// Owns every raw GLES name created before `WaylandCompositor` itself exists.
+/// Owns raw GLES names until a complete constructor or resize transaction
+/// transfers them to `WaylandCompositor`.
 ///
 /// The output texture is still a compositor-owned raw name at this stage;
 /// KMS cannot wrap it in a Smithay `GlesTexture` until `new` returns and the
-/// compositor is installed.  Consequently every constructor failure can and
-/// must delete it directly here.
+/// compositor is installed. Consequently every constructor/resize failure can
+/// and must delete its uncommitted names directly here.
 struct CompositorConstructionGuard<'gl, 'probe> {
     gl: &'gl ffi::Gles2,
     probe: Option<&'probe mut CompositorConstructionProbe>,
@@ -1569,6 +1637,31 @@ impl<'gl, 'probe> CompositorConstructionGuard<'gl, 'probe> {
         Ok((framebuffer, texture))
     }
 
+    unsafe fn create_fbo_texture_fp16(&mut self, w: u32, h: u32) -> Result<(u32, u32), u32> {
+        if self
+            .probe
+            .as_ref()
+            .and_then(|probe| probe.fail_before_framebuffer_count)
+            == Some(self.framebuffers.len())
+        {
+            return Err(ffi::FRAMEBUFFER_UNSUPPORTED);
+        }
+        let (framebuffer, texture) = unsafe { create_fbo_texture_fp16(self.gl, w, h)? };
+        if framebuffer != 0 {
+            self.framebuffers.push(framebuffer);
+            if let Some(probe) = &mut self.probe {
+                probe.framebuffers.push(framebuffer);
+            }
+        }
+        if texture != 0 {
+            self.textures.push(texture);
+            if let Some(probe) = &mut self.probe {
+                probe.textures.push(texture);
+            }
+        }
+        Ok((framebuffer, texture))
+    }
+
     unsafe fn create_required_fbo_texture(
         &mut self,
         w: u32,
@@ -1577,6 +1670,17 @@ impl<'gl, 'probe> CompositorConstructionGuard<'gl, 'probe> {
         label: &str,
     ) -> Result<(u32, u32), String> {
         unsafe { self.create_fbo_texture(w, h, internal_format) }.map_err(|status| {
+            format!("failed to create required {label} framebuffer ({w}x{h}, status=0x{status:x})")
+        })
+    }
+
+    unsafe fn create_required_fbo_texture_fp16(
+        &mut self,
+        w: u32,
+        h: u32,
+        label: &str,
+    ) -> Result<(u32, u32), String> {
+        unsafe { self.create_fbo_texture_fp16(w, h) }.map_err(|status| {
             format!("failed to create required {label} framebuffer ({w}x{h}, status=0x{status:x})")
         })
     }
@@ -1851,6 +1955,7 @@ impl WaylandCompositor {
                 texture: get_uniform_loc(gl, scene_linear_encode_program, "u_texture"),
                 encode_tf: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_tf"),
                 encode_gamma: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_gamma"),
+                color_matrix: get_uniform_loc(gl, scene_linear_encode_program, "u_color_matrix"),
             };
 
             let scene_linear_decode_uniforms = SceneLinearDecodeUniforms {
@@ -2182,6 +2287,8 @@ impl WaylandCompositor {
                 scene_linear_requested: scene_linear_enabled && linear_fbo != 0,
                 linear_fbo,
                 linear_texture,
+                last_output_color_frame_state: None,
+                retained_color_plan_context: None,
                 scene_fbo,
                 scene_texture,
                 blur_fbos,
@@ -3729,96 +3836,108 @@ impl WaylandCompositor {
 // Resize
 // ---------------------------------------------------------------------------
 
+struct CompositorFramebufferTargets {
+    output_fbo: u32,
+    output_texture: u32,
+    linear_fbo: u32,
+    linear_texture: u32,
+    scene_fbo: u32,
+    scene_texture: u32,
+    blur_fbos: Vec<BlurFboLevel>,
+    postprocess_fbo: u32,
+    postprocess_texture: u32,
+    transition_fbo: u32,
+    transition_texture: u32,
+}
+
+impl CompositorFramebufferTargets {
+    unsafe fn delete(mut self, gl: &ffi::Gles2) {
+        unsafe {
+            for mut level in self.blur_fbos.drain(..) {
+                delete_framebuffer_name(gl, &mut level.fbo);
+                delete_texture_name(gl, &mut level.texture);
+            }
+            delete_framebuffer_name(gl, &mut self.output_fbo);
+            delete_framebuffer_name(gl, &mut self.linear_fbo);
+            delete_framebuffer_name(gl, &mut self.scene_fbo);
+            delete_framebuffer_name(gl, &mut self.postprocess_fbo);
+            delete_framebuffer_name(gl, &mut self.transition_fbo);
+            delete_texture_name(gl, &mut self.output_texture);
+            delete_texture_name(gl, &mut self.linear_texture);
+            delete_texture_name(gl, &mut self.scene_texture);
+            delete_texture_name(gl, &mut self.postprocess_texture);
+            delete_texture_name(gl, &mut self.transition_texture);
+        }
+    }
+}
+
 impl WaylandCompositor {
-    /// Recreate FBOs at the new screen dimensions.
-    #[allow(dead_code)]
-    pub(crate) unsafe fn resize(&mut self, gl: &ffi::Gles2, w: u32, h: u32) {
+    unsafe fn validate_resize_dimensions(gl: &ffi::Gles2, w: u32, h: u32) -> Result<(), String> {
+        let mut max_texture_size = 0;
+        unsafe { gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &mut max_texture_size) };
+        validate_framebuffer_dimensions(w, h, max_texture_size)
+    }
+
+    /// Recreate every size-dependent render target as one transaction.
+    ///
+    /// The old chain remains live until the complete replacement (including
+    /// the optional scene-linear target) has been validated and allocated.
+    /// Allocation failure therefore leaves both the public dimensions and all
+    /// compositor-owned GL names unchanged.
+    pub(crate) unsafe fn resize(&mut self, gl: &ffi::Gles2, w: u32, h: u32) -> Result<(), String> {
+        unsafe { self.resize_inner(gl, w, h, None) }
+    }
+
+    unsafe fn resize_inner(
+        &mut self,
+        gl: &ffi::Gles2,
+        w: u32,
+        h: u32,
+        construction_probe: Option<&mut CompositorConstructionProbe>,
+    ) -> Result<(), String> {
         if w == self.screen_w && h == self.screen_h {
-            return;
+            return Ok(());
         }
 
-        self.screen_w = w;
-        self.screen_h = h;
-        // output_fbo is recreated below; its contents are undefined until a full
-        // redraw, so partial-damage frames must not persist stale regions.
-        self.force_full_damage_next = true;
+        unsafe { Self::validate_resize_dimensions(gl, w, h)? };
 
         unsafe {
-            gl.DeleteFramebuffers(1, &self.output_fbo);
-            gl.DeleteTextures(1, &self.output_texture);
-            gl.DeleteFramebuffers(1, &self.scene_fbo);
-            gl.DeleteTextures(1, &self.scene_texture);
-            gl.DeleteFramebuffers(1, &self.postprocess_fbo);
-            gl.DeleteTextures(1, &self.postprocess_texture);
-            gl.DeleteFramebuffers(1, &self.transition_fbo);
-            gl.DeleteTextures(1, &self.transition_texture);
-
-            for level in &self.blur_fbos {
-                gl.DeleteFramebuffers(1, &level.fbo);
-                gl.DeleteTextures(1, &level.texture);
-            }
-
-            let (output_fbo, output_texture) = if self.output_internal_format == GL_RGB10_A2 {
-                create_fbo_texture_10bit(gl, w, h)
-            } else {
-                create_fbo_texture(gl, w, h)
-            };
-            self.output_fbo = output_fbo;
-            self.output_texture = output_texture;
-            self.output_texture_generation = next_output_texture_generation();
-
-            // Mirror the requested runtime state. Programs are always built,
-            // so resize can also complete a hot enable.
-            if self.linear_fbo != 0 {
-                gl.DeleteFramebuffers(1, &self.linear_fbo);
-                gl.DeleteTextures(1, &self.linear_texture);
-                self.linear_fbo = 0;
-                self.linear_texture = 0;
-            }
-            if self.scene_linear_requested {
-                match create_fbo_texture_fp16(gl, w, h) {
-                    Ok((lf, lt)) => {
-                        self.linear_fbo = lf;
-                        self.linear_texture = lt;
-                    }
-                    Err(status) => {
-                        log::warn!(
-                            "[udev/compositor] disabling scene-linear compositing after \
-                             RGBA16F resize allocation failed (status=0x{status:x})"
-                        );
-                        self.scene_linear_requested = false;
-                    }
-                }
-            }
-
             // Keep the offscreen chain at the same bit depth as on construction
             // (see new()): 10-bit when the output is 10-bit, else 8-bit. Without
             // this the chain silently reverts to 8-bit after any resize.
-            let hdr_10bit = self.output_internal_format == GL_RGB10_A2;
-            let mk_fbo = |w: u32, h: u32| {
-                if hdr_10bit {
-                    create_fbo_texture_10bit(gl, w, h)
-                } else {
-                    create_fbo_texture(gl, w, h)
-                }
+            let output_internal_format = self.output_internal_format;
+            let mut allocation = CompositorConstructionGuard::new(gl, construction_probe);
+            let (output_fbo, output_texture) = allocation.create_required_fbo_texture(
+                w,
+                h,
+                output_internal_format,
+                "output resize",
+            )?;
+            let (linear_fbo, linear_texture) = if self.scene_linear_requested {
+                allocation.create_required_fbo_texture_fp16(w, h, "scene-linear resize")?
+            } else {
+                (0, 0)
             };
+            let (scene_fbo, scene_texture) = allocation.create_required_fbo_texture(
+                w,
+                h,
+                output_internal_format,
+                "scene resize",
+            )?;
 
-            let (scene_fbo, scene_texture) = mk_fbo(w, h);
-            self.scene_fbo = scene_fbo;
-            self.scene_texture = scene_texture;
-
-            self.blur_fbos.clear();
+            let mut blur_fbos = Vec::with_capacity(6);
             let mut bw = w / 2;
             let mut bh = h / 2;
             for _ in 0..6 {
-                if bw < 1 {
-                    bw = 1;
-                }
-                if bh < 1 {
-                    bh = 1;
-                }
-                let (fbo, texture) = mk_fbo(bw, bh);
-                self.blur_fbos.push(BlurFboLevel {
+                bw = bw.max(1);
+                bh = bh.max(1);
+                let (fbo, texture) = allocation.create_required_fbo_texture(
+                    bw,
+                    bh,
+                    output_internal_format,
+                    "blur resize",
+                )?;
+                blur_fbos.push(BlurFboLevel {
                     fbo,
                     texture,
                     width: bw,
@@ -3828,13 +3947,77 @@ impl WaylandCompositor {
                 bh /= 2;
             }
 
-            let (postprocess_fbo, postprocess_texture) = mk_fbo(w, h);
-            self.postprocess_fbo = postprocess_fbo;
-            self.postprocess_texture = postprocess_texture;
+            let (postprocess_fbo, postprocess_texture) = allocation.create_required_fbo_texture(
+                w,
+                h,
+                output_internal_format,
+                "postprocess resize",
+            )?;
+            let (transition_fbo, transition_texture) = allocation.create_required_fbo_texture(
+                w,
+                h,
+                output_internal_format,
+                "transition resize",
+            )?;
 
-            let (transition_fbo, transition_texture) = mk_fbo(w, h);
-            self.transition_fbo = transition_fbo;
-            self.transition_texture = transition_texture;
+            let replacement = CompositorFramebufferTargets {
+                output_fbo,
+                output_texture,
+                linear_fbo,
+                linear_texture,
+                scene_fbo,
+                scene_texture,
+                blur_fbos,
+                postprocess_fbo,
+                postprocess_texture,
+                transition_fbo,
+                transition_texture,
+            };
+
+            // From this point onward every operation is infallible. Transfer
+            // the guard's names to the compositor before installing them so a
+            // panic cannot make the guard delete names now referenced by self.
+            allocation.commit();
+            let old = CompositorFramebufferTargets {
+                output_fbo: std::mem::replace(&mut self.output_fbo, replacement.output_fbo),
+                output_texture: std::mem::replace(
+                    &mut self.output_texture,
+                    replacement.output_texture,
+                ),
+                linear_fbo: std::mem::replace(&mut self.linear_fbo, replacement.linear_fbo),
+                linear_texture: std::mem::replace(
+                    &mut self.linear_texture,
+                    replacement.linear_texture,
+                ),
+                scene_fbo: std::mem::replace(&mut self.scene_fbo, replacement.scene_fbo),
+                scene_texture: std::mem::replace(
+                    &mut self.scene_texture,
+                    replacement.scene_texture,
+                ),
+                blur_fbos: std::mem::replace(&mut self.blur_fbos, replacement.blur_fbos),
+                postprocess_fbo: std::mem::replace(
+                    &mut self.postprocess_fbo,
+                    replacement.postprocess_fbo,
+                ),
+                postprocess_texture: std::mem::replace(
+                    &mut self.postprocess_texture,
+                    replacement.postprocess_texture,
+                ),
+                transition_fbo: std::mem::replace(
+                    &mut self.transition_fbo,
+                    replacement.transition_fbo,
+                ),
+                transition_texture: std::mem::replace(
+                    &mut self.transition_texture,
+                    replacement.transition_texture,
+                ),
+            };
+
+            self.screen_w = w;
+            self.screen_h = h;
+            self.output_texture_generation = next_output_texture_generation();
+            self.glass_backdrop = None;
+            self.last_output_color_frame_state = None;
             self.transition_active = false;
             self.transition_snapshot_pending = false;
             self.transition_start = None;
@@ -3854,12 +4037,19 @@ impl WaylandCompositor {
             self.prev_motion_positions.clear();
             self.prev_window_positions_hash = 0;
 
+            old.delete(gl);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             gl.BindTexture(ffi::TEXTURE_2D, 0);
         }
 
+        // The replacement targets contain no previous frame, so every
+        // size-dependent subsystem must discard cached geometry/damage.
+        self.force_full_damage_next = true;
         self.needs_render = true;
         self.overview_titles_dirty = true;
         self.overview_monitor = (0, 0, w, h);
+        self.dirty_region_tracker.resize(w, h);
+        self.direct_scanout_mgr.update_screen_size(w, h);
+        Ok(())
     }
 }

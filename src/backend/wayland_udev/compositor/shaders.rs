@@ -36,7 +36,7 @@ const int TF_PQ = 4;
 const int TF_HLG = 5;
 const int TF_SRGB = 6;
 uniform int   u_color_managed;     // 0 = bypass (no transform), 1 = apply
-uniform mat3  u_color_matrix;      // linear surface→output RGB (uploaded column-major)
+uniform mat3  u_color_matrix;      // linear surface→current working-target RGB (column-major)
 uniform int   u_decode_tf;
 uniform float u_decode_gamma;      // used only when u_decode_tf == TF_POWER
 uniform int   u_encode_tf;
@@ -626,10 +626,10 @@ void main() {
 // SOTA #2 Phase 2.2: scene-linear encode pass
 // ---------------------------------------------------------------------------
 //
-// Fullscreen quad that reads the FP16 linear-scene FBO and applies the
-// output's forward EOTF, writing display-encoded values to output_fbo.
-// The compositor dispatches it at the main-scene boundary and reuses it for
-// monitor-local late-overlay re-entry after software output encoding.
+// Fullscreen quad that reads the FP16 common linear-sRGB FBO, applies a target
+// gamut matrix and forward transfer, and writes encoded values to output_fbo.
+// The compositor uses it for each eligible physical output region, for the
+// conservative whole-frame sRGB fallback, and for local fallback re-entry.
 //
 // Uses BLUR_DOWN_VERTEX for the vertex stage (same gl_VertexID-based
 // fullscreen quad). The TF discriminant values match TransferKind in
@@ -649,6 +649,7 @@ const int TF_SRGB = 6;
 uniform sampler2D u_texture;
 uniform int   u_encode_tf;
 uniform float u_encode_gamma;
+uniform mat3  u_color_matrix;
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -681,11 +682,17 @@ vec3 hlg_forward(vec3 l) {
 
 void main() {
     vec4 texel = texture(u_texture, v_uv);
-    vec3 c = max(texel.rgb, 0.0);
+    // The FP16 scene is stored in common linear-sRGB. Gamut-map each output
+    // region while values are still linear, then apply that output's OETF.
+    // Matrix math is valid directly on premultiplied RGB because it is linear
+    // and leaves alpha untouched. Production output storage is opaque after
+    // the background + source-over scene; alpha is passed through only so the
+    // fullscreen primitive remains deterministic in isolated shader tests.
+    vec3 c = u_color_matrix * texel.rgb;
     if (u_encode_tf == TF_LINEAR)       c = clamp(c, 0.0, 1.0);
-    else if (u_encode_tf == TF_POWER)   c = clamp(pow(c, vec3(1.0 / max(u_encode_gamma, 1e-3))), 0.0, 1.0);
-    else if (u_encode_tf == TF_BT1886)  c = clamp(pow(c, vec3(1.0 / 2.4)), 0.0, 1.0);
-    else if (u_encode_tf == TF_GAMMA22) c = clamp(pow(c, vec3(1.0 / 2.2)), 0.0, 1.0);
+    else if (u_encode_tf == TF_POWER)   c = clamp(pow(max(c, 0.0), vec3(1.0 / max(u_encode_gamma, 1e-3))), 0.0, 1.0);
+    else if (u_encode_tf == TF_BT1886)  c = clamp(pow(max(c, 0.0), vec3(1.0 / 2.4)), 0.0, 1.0);
+    else if (u_encode_tf == TF_GAMMA22) c = clamp(pow(max(c, 0.0), vec3(1.0 / 2.2)), 0.0, 1.0);
     else if (u_encode_tf == TF_PQ)      c = clamp(pq_forward(c), 0.0, 1.0);
     else if (u_encode_tf == TF_HLG)     c = clamp(hlg_forward(c), 0.0, 1.0);
     // TF_SRGB and the -1 default both encode sRGB; fall through to the else.
@@ -694,10 +701,10 @@ void main() {
 }
 "#;
 
-// Companion fullscreen-quad decode pass: reads the encoded output_fbo and
-// writes its linearization into the FP16 linear_fbo. Initial scene ingress
-// supplies the legacy sRGB default; a monitor-local late-overlay re-entry
-// supplies the exact transfer used by the preceding software encode.
+// Companion fullscreen-quad decode pass: reads encoded output_fbo storage and
+// writes its linearization into the FP16 working target. Initial scene ingress
+// supplies the legacy sRGB default; fallback overview re-entry supplies the
+// transfer used by the preceding conservative encode.
 
 pub const SCENE_LINEAR_DECODE_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
@@ -1103,9 +1110,12 @@ void main() {
         alpha *= contact * 0.48;
         color = mix(color, output_domain_color(vec3(0.05, 0.06, 0.09)), 0.24) * 0.90;
     }
-    // This UI material is reflective, not emissive. Bound straight color
-    // before premultiplication so highlights cannot leak through a fade.
-    frag_color = vec4(clamp(color, 0.0, 1.0) * alpha, alpha);
+    // Preserve extended linear-sRGB components in the FP16 working target:
+    // a wide-gamut source can require negative or >1 coordinates that the
+    // final output matrix brings back into range. Legacy encoded rendering
+    // retains the historical material clamp.
+    vec3 stored_color = u_scene_linear != 0 ? color : clamp(color, 0.0, 1.0);
+    frag_color = vec4(stored_color * alpha, alpha);
 }
 "#;
 

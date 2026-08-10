@@ -29,10 +29,6 @@ fn premultiplied_blend_factors() -> (u32, u32) {
     (ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA)
 }
 
-fn overlay_output_is_scene_linear(scene_linear_active: bool, hw_encode_active: bool) -> bool {
-    scene_linear_active && hw_encode_active
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverviewRenderRoute {
     LegacyEncoded,
@@ -40,15 +36,51 @@ enum OverviewRenderRoute {
     SoftwareReentry,
 }
 
-const fn overview_render_route(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FrameOutputRoute {
+    LegacyEncoded,
+    EarlySrgbFallback,
+    DeferredHardware,
+    DeferredRegions,
+}
+
+const fn frame_output_route(
     scene_linear_active: bool,
+    linear_tail_safe: bool,
     hw_encode_active: bool,
-) -> OverviewRenderRoute {
-    match (scene_linear_active, hw_encode_active) {
-        (true, true) => OverviewRenderRoute::DirectLinear,
-        (true, false) => OverviewRenderRoute::SoftwareReentry,
-        (false, _) => OverviewRenderRoute::LegacyEncoded,
+    hw_ctm_active: bool,
+    software_regions_available: bool,
+) -> FrameOutputRoute {
+    if !scene_linear_active {
+        return FrameOutputRoute::LegacyEncoded;
     }
+    if !linear_tail_safe {
+        return FrameOutputRoute::EarlySrgbFallback;
+    }
+    if hw_encode_active && hw_ctm_active {
+        return FrameOutputRoute::DeferredHardware;
+    }
+    if software_regions_available {
+        return FrameOutputRoute::DeferredRegions;
+    }
+    FrameOutputRoute::EarlySrgbFallback
+}
+
+const fn overview_render_route(output_route: FrameOutputRoute) -> OverviewRenderRoute {
+    match output_route {
+        FrameOutputRoute::LegacyEncoded => OverviewRenderRoute::LegacyEncoded,
+        FrameOutputRoute::EarlySrgbFallback => OverviewRenderRoute::SoftwareReentry,
+        FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions => {
+            OverviewRenderRoute::DirectLinear
+        }
+    }
+}
+
+fn previous_frame_requires_srgb_transition_snapshot(state: Option<&OutputColorFrameState>) -> bool {
+    state.is_some_and(|state| {
+        state.linear_tail_safe
+            && ((state.hw_encode_active && state.hw_ctm_active) || state.software_regions.is_some())
+    })
 }
 
 /// Clip a top-left-origin compositor rectangle to the global framebuffer and
@@ -76,8 +108,29 @@ fn overview_monitor_scissor(
     ])
 }
 
+fn intersect_scissors(a: [i32; 4], b: [i32; 4]) -> Option<[i32; 4]> {
+    let ax1 = i64::from(a[0]) + i64::from(a[2].max(0));
+    let ay1 = i64::from(a[1]) + i64::from(a[3].max(0));
+    let bx1 = i64::from(b[0]) + i64::from(b[2].max(0));
+    let by1 = i64::from(b[1]) + i64::from(b[3].max(0));
+    let x0 = i64::from(a[0]).max(i64::from(b[0]));
+    let y0 = i64::from(a[1]).max(i64::from(b[1]));
+    let x1 = ax1.min(bx1);
+    let y1 = ay1.min(by1);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some([
+        i32::try_from(x0).ok()?,
+        i32::try_from(y0).ok()?,
+        i32::try_from(x1 - x0).ok()?,
+        i32::try_from(y1 - y0).ok()?,
+    ])
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RetainedTexturePass {
+    CloseFade,
     Genie,
     StaticDockItem,
     DockPreview,
@@ -108,13 +161,20 @@ fn retained_color_plan(
     RetainedColorPlan {
         program: match pass {
             RetainedTexturePass::Genie => RetainedTextureProgram::Genie,
-            RetainedTexturePass::StaticDockItem | RetainedTexturePass::DockPreview => {
-                RetainedTextureProgram::Window
-            }
+            RetainedTexturePass::CloseFade
+            | RetainedTexturePass::StaticDockItem
+            | RetainedTexturePass::DockPreview => RetainedTextureProgram::Window,
         },
         transform,
         scene_linear,
     }
+}
+
+pub(super) fn transform_for_encoded_srgb(
+    mut transform: crate::backend::wayland_udev::color_pipeline::ColorTransform,
+) -> crate::backend::wayland_udev::color_pipeline::ColorTransform {
+    transform.forward_eotf = crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb;
+    transform
 }
 
 #[derive(Clone, Copy)]
@@ -198,11 +258,13 @@ fn is_opaque_output_occluder(candidate: OcclusionCandidate) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        OcclusionCandidate, OverviewRenderRoute, RetainedTexturePass, RetainedTextureProgram,
-        attention_requires_continuous_frames, edge_glow_requires_continuous_frames,
-        is_opaque_output_occluder, oriented_content_uv, overlay_output_is_scene_linear,
-        overview_monitor_scissor, overview_render_route, postprocess_requires_continuous_frames,
-        premultiplied_blend_factors, retained_color_plan, snap_preview_allows_partial_damage,
+        FrameOutputRoute, OcclusionCandidate, OutputColorFrameState, OverviewRenderRoute,
+        RetainedTexturePass, RetainedTextureProgram, attention_requires_continuous_frames,
+        edge_glow_requires_continuous_frames, frame_output_route, intersect_scissors,
+        is_opaque_output_occluder, oriented_content_uv, overview_monitor_scissor,
+        overview_render_route, postprocess_requires_continuous_frames, premultiplied_blend_factors,
+        previous_frame_requires_srgb_transition_snapshot, retained_color_plan,
+        snap_preview_allows_partial_damage, transform_for_encoded_srgb,
     };
     use crate::backend::wayland_udev::color_pipeline::{ColorTransform, TransferKind};
     use smithay::backend::renderer::gles::ffi;
@@ -233,31 +295,94 @@ mod tests {
     }
 
     #[test]
-    fn overlay_domain_is_linear_only_with_hardware_output_encoding() {
-        assert!(!overlay_output_is_scene_linear(false, false));
-        assert!(!overlay_output_is_scene_linear(false, true));
-        assert!(!overlay_output_is_scene_linear(true, false));
-        assert!(overlay_output_is_scene_linear(true, true));
-    }
+    fn output_route_covers_legacy_fallback_hardware_and_region_delivery() {
+        assert_eq!(
+            frame_output_route(false, true, true, true, true),
+            FrameOutputRoute::LegacyEncoded
+        );
+        assert_eq!(
+            frame_output_route(true, false, false, false, true),
+            FrameOutputRoute::EarlySrgbFallback
+        );
+        assert_eq!(
+            frame_output_route(true, true, true, true, false),
+            FrameOutputRoute::DeferredHardware
+        );
+        assert_eq!(
+            frame_output_route(true, true, false, false, true),
+            FrameOutputRoute::DeferredRegions
+        );
+        assert_eq!(
+            frame_output_route(true, true, true, false, true),
+            FrameOutputRoute::DeferredRegions
+        );
+        assert_eq!(
+            frame_output_route(true, true, false, false, false),
+            FrameOutputRoute::EarlySrgbFallback
+        );
 
-    #[test]
-    fn overview_render_route_covers_every_scene_and_hardware_combination() {
         assert_eq!(
-            overview_render_route(false, false),
+            overview_render_route(FrameOutputRoute::LegacyEncoded),
             OverviewRenderRoute::LegacyEncoded
         );
         assert_eq!(
-            overview_render_route(false, true),
-            OverviewRenderRoute::LegacyEncoded
+            overview_render_route(FrameOutputRoute::EarlySrgbFallback),
+            OverviewRenderRoute::SoftwareReentry
         );
         assert_eq!(
-            overview_render_route(true, true),
+            overview_render_route(FrameOutputRoute::DeferredHardware),
             OverviewRenderRoute::DirectLinear
         );
         assert_eq!(
-            overview_render_route(true, false),
-            OverviewRenderRoute::SoftwareReentry
+            overview_render_route(FrameOutputRoute::DeferredRegions),
+            OverviewRenderRoute::DirectLinear
         );
+    }
+
+    #[test]
+    fn encoded_srgb_overlay_plan_preserves_source_decode_and_gamut() {
+        let transform = ColorTransform {
+            inverse_eotf: TransferKind::St2084Pq,
+            matrix_row_major: [0.8, 0.1, 0.1, 0.2, 0.7, 0.1, 0.0, 0.2, 0.8],
+            forward_eotf: TransferKind::Linear,
+        };
+        let encoded = transform_for_encoded_srgb(transform);
+        assert_eq!(encoded.inverse_eotf, transform.inverse_eotf);
+        assert_eq!(encoded.matrix_row_major, transform.matrix_row_major);
+        assert_eq!(encoded.forward_eotf, TransferKind::Srgb);
+    }
+
+    #[test]
+    fn deferred_previous_frame_normalizes_transition_snapshot_to_srgb() {
+        let software = OutputColorFrameState {
+            linear_tail_safe: true,
+            hw_encode_active: false,
+            hw_ctm_active: false,
+            software_regions: Some(Vec::new()),
+        };
+        let hardware = OutputColorFrameState {
+            linear_tail_safe: true,
+            hw_encode_active: true,
+            hw_ctm_active: true,
+            software_regions: None,
+        };
+        let fallback = OutputColorFrameState {
+            linear_tail_safe: false,
+            hw_encode_active: false,
+            hw_ctm_active: false,
+            software_regions: Some(Vec::new()),
+        };
+
+        assert!(previous_frame_requires_srgb_transition_snapshot(Some(
+            &software
+        )));
+        assert!(previous_frame_requires_srgb_transition_snapshot(Some(
+            &hardware
+        )));
+        assert!(!previous_frame_requires_srgb_transition_snapshot(Some(
+            &fallback
+        )));
+        assert!(!previous_frame_requires_srgb_transition_snapshot(None));
     }
 
     #[test]
@@ -291,6 +416,23 @@ mod tests {
             overview_monitor_scissor((0, 1200, 100, 100), 1920, 1080),
             None
         );
+    }
+
+    #[test]
+    fn output_region_scissors_intersect_damage_without_overflow() {
+        assert_eq!(
+            intersect_scissors([100, 50, 400, 300], [250, 0, 400, 200]),
+            Some([250, 50, 250, 150])
+        );
+        assert_eq!(
+            intersect_scissors([0, 0, 100, 100], [100, 0, 100, 100]),
+            None
+        );
+        assert_eq!(
+            intersect_scissors([0, 0, i32::MAX, i32::MAX], [1, 2, 3, 4]),
+            Some([1, 2, 3, 4])
+        );
+        assert_eq!(intersect_scissors([0, 0, -1, 20], [0, 0, 10, 10]), None);
     }
 
     #[test]
@@ -456,6 +598,51 @@ impl WaylandCompositor {
         unsafe {
             gl.Enable(ffi::BLEND);
             gl.BlendFunc(src, dst);
+        }
+    }
+
+    pub(super) unsafe fn upload_window_color_transform(
+        &self,
+        gl: &ffi::Gles2,
+        transform: Option<crate::backend::wayland_udev::color_pipeline::ColorTransform>,
+        scene_linear: bool,
+    ) {
+        unsafe {
+            gl.Uniform1i(self.win_uniforms.scene_linear, i32::from(scene_linear));
+            if let Some(transform) = transform {
+                let matrix = transform.matrix_column_major();
+                gl.Uniform1i(self.win_uniforms.color_managed, 1);
+                gl.UniformMatrix3fv(
+                    self.win_uniforms.color_matrix,
+                    1,
+                    ffi::FALSE,
+                    matrix.as_ptr(),
+                );
+                gl.Uniform1i(
+                    self.win_uniforms.decode_tf,
+                    transform.inverse_eotf.shader_id(),
+                );
+                gl.Uniform1f(
+                    self.win_uniforms.decode_gamma,
+                    transform.inverse_eotf.gamma_for_shader(),
+                );
+                gl.Uniform1i(
+                    self.win_uniforms.encode_tf,
+                    transform.forward_eotf.shader_id(),
+                );
+                gl.Uniform1f(
+                    self.win_uniforms.encode_gamma,
+                    transform.forward_eotf.gamma_for_shader(),
+                );
+            } else {
+                gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            }
+        }
+    }
+
+    pub(super) unsafe fn reset_window_color_transform(&self, gl: &ffi::Gles2) {
+        unsafe {
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
         }
     }
 
@@ -625,10 +812,9 @@ impl WaylandCompositor {
             gl.UseProgram(self.program);
             self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
             gl.Uniform1i(self.win_uniforms.texture, 0);
-            gl.Uniform1i(self.win_uniforms.color_managed, 0);
-            // This pass runs after the optional scene-linear encode/blit. When
-            // hardware will encode at scanout the output FBO is still linear,
-            // so decode legacy sRGB texture data before blending into it.
+            // Retired surfaces share the active scene domain. In a common
+            // linear frame their retained source plan decodes/maps before
+            // blending; the legacy encoded path keeps its direct target plan.
             gl.Uniform1i(
                 self.win_uniforms.scene_linear,
                 if scene_linear_output { 1 } else { 0 },
@@ -690,9 +876,16 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.desat, 0.0);
                 gl.Uniform1f(self.win_uniforms.radius, radius);
                 gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                let color_plan = retained_color_plan(
+                    RetainedTexturePass::CloseFade,
+                    win.color_transform,
+                    scene_linear_output,
+                );
+                self.upload_retained_color_plan(gl, color_plan);
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, texture_owner.tex_id());
                 gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.reset_retained_color_plan(gl, color_plan);
             }
 
             gl.BindVertexArray(0);
@@ -927,12 +1120,11 @@ impl WaylandCompositor {
         }
     }
 
-    // SOTA #2 Phase 2.3: Linearize the currently-encoded output_fbo into
-    // linear_fbo so subsequent draws (with u_scene_linear=1) blend correctly.
-    // The initial scene pass supplies the legacy sRGB default; a late overlay
-    // re-entry supplies the exact transfer function used by the preceding
-    // software encode. Disables blending because every selected pixel is a
-    // full overwrite.
+    // Linearize selected encoded output_fbo storage into the common working
+    // target so subsequent u_scene_linear draws blend correctly. Initial scene
+    // ingress uses the legacy sRGB default; fallback overview re-entry uses the
+    // preceding conservative encode. Blending is disabled because every
+    // selected pixel is a full overwrite.
     fn dispatch_scene_linear_decode_pass(
         &self,
         gl: &ffi::Gles2,
@@ -979,16 +1171,17 @@ impl WaylandCompositor {
         }
     }
 
-    // SOTA #2 Phase 2.3: Encode the FP16 linear_fbo back into output_fbo
-    // using the output's forward EOTF. encode_tf < 0 means "sRGB default";
-    // the shader's else-branch covers it. encode_gamma is only consulted
-    // for TF_POWER. Disables blending.
+    // Finalize common linear-sRGB into output_fbo with the supplied gamut
+    // matrix and forward transfer. This serves a physical output region or the
+    // whole-frame sRGB fallback. encode_tf < 0 means "sRGB default";
+    // encode_gamma is consulted only for TF_POWER. Blending is disabled.
     fn dispatch_scene_linear_encode_pass(
         &self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         encode_tf: i32,
         encode_gamma: f32,
+        color_matrix_row_major: [f32; 9],
         scissor: Option<[i32; 4]>,
     ) {
         unsafe {
@@ -1016,6 +1209,15 @@ impl WaylandCompositor {
             gl.Uniform1i(self.scene_linear_encode_uniforms.texture, 0);
             gl.Uniform1i(self.scene_linear_encode_uniforms.encode_tf, encode_tf);
             gl.Uniform1f(self.scene_linear_encode_uniforms.encode_gamma, encode_gamma);
+            let color_matrix = crate::backend::wayland_udev::color_pipeline::matrix_to_column_major(
+                color_matrix_row_major,
+            );
+            gl.UniformMatrix3fv(
+                self.scene_linear_encode_uniforms.color_matrix,
+                1,
+                ffi::FALSE as u8,
+                color_matrix.as_ptr(),
+            );
             gl.ActiveTexture(ffi::TEXTURE0);
             gl.BindTexture(ffi::TEXTURE_2D, self.linear_texture);
             gl.BindVertexArray(self.quad_vao);
@@ -1026,6 +1228,78 @@ impl WaylandCompositor {
             if scissor.is_some() {
                 gl.Disable(ffi::SCISSOR_TEST);
             }
+        }
+    }
+
+    /// Finalize a common linear-sRGB frame into independently described output
+    /// regions. The full-frame path clears layout gaps to opaque black; partial
+    /// repair touches only damage intersections and preserves prior encoded
+    /// pixels elsewhere. KMS owns the final OETF/CTM stages when their flags
+    /// are active, so the corresponding shader operation becomes identity.
+    fn dispatch_output_color_regions(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        regions: &[crate::backend::wayland_udev::color_pipeline::OutputColorRegion],
+        hw_encode_active: bool,
+        hw_ctm_active: bool,
+        damage_scissor: Option<[i32; 4]>,
+    ) {
+        use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.Disable(ffi::SCISSOR_TEST);
+            if damage_scissor.is_none() {
+                gl.Disable(ffi::BLEND);
+                gl.ClearColor(0.0, 0.0, 0.0, 1.0);
+                gl.Clear(ffi::COLOR_BUFFER_BIT);
+                gl.Enable(ffi::BLEND);
+            }
+        }
+
+        for region in regions {
+            let [x, y, width, height] = region.rect;
+            let Some(mut scissor) = overview_monitor_scissor(
+                (x, y, width.max(0) as u32, height.max(0) as u32),
+                self.screen_w,
+                self.screen_h,
+            ) else {
+                continue;
+            };
+            if let Some(damage) = damage_scissor {
+                let Some(intersection) = intersect_scissors(scissor, damage) else {
+                    continue;
+                };
+                scissor = intersection;
+            }
+
+            let transfer = if hw_encode_active {
+                TransferKind::Linear
+            } else {
+                region.output_tf
+            };
+            let matrix = if hw_ctm_active {
+                IDENTITY_CTM
+            } else {
+                region.working_to_output_row_major
+            };
+            self.dispatch_scene_linear_encode_pass(
+                gl,
+                projection,
+                transfer.shader_id(),
+                transfer.gamma_for_shader(),
+                matrix,
+                Some(scissor),
+            );
+        }
+
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            gl.Disable(ffi::SCISSOR_TEST);
+            self.enable_premultiplied_blend(gl);
         }
     }
 
@@ -1124,7 +1398,7 @@ impl WaylandCompositor {
         Some(clamped)
     }
 
-    fn sync_scene_linear_target(&mut self, gl: &ffi::Gles2) {
+    pub(crate) fn sync_scene_linear_target(&mut self, gl: &ffi::Gles2) {
         let allocated = self.linear_fbo != 0;
         if allocated == self.scene_linear_requested {
             return;
@@ -1219,21 +1493,42 @@ impl WaylandCompositor {
     /// Main rendering function. Composites the entire scene into the output FBO.
     /// `scene` is a list of (window_id, x, y, w, h) in bottom-to-top order.
     /// `focused` is the currently focused window.
-    /// `hw_encode_active`: when true, the per-output CRTC `GAMMA_LUT` will
-    /// OETF-encode at scanout, so the shader-side encode pass must be skipped
-    /// (otherwise we double-encode).
-    /// `shader_encode_tf` / `shader_encode_gamma`: TF parameters used by the
-    /// shader encode pass when `hw_encode_active` is false. Ignored otherwise.
+    /// `linear_tail_safe` means every visible late overlay can consume the
+    /// common linear-sRGB working domain. Such frames defer output conversion
+    /// until immediately before capture/scanout. Unsafe frames explicitly fall
+    /// back to the historical global sRGB domain.
+    ///
+    /// `hw_encode_active` / `hw_ctm_active` identify output stages owned by KMS.
+    /// `software_output_regions` supplies the physical framebuffer partitions
+    /// and remaining gamut/transfer work for shader delivery.
     /// Returns true if a frame was rendered (false if skipped due to no changes).
     pub(crate) fn render_frame(
         &mut self,
         gl: &ffi::Gles2,
         scene: &[(u64, i32, i32, u32, u32)],
         focused: Option<u64>,
+        linear_tail_safe: bool,
         hw_encode_active: bool,
-        shader_encode_tf: i32,
-        shader_encode_gamma: f32,
+        hw_ctm_active: bool,
+        software_output_regions: Option<
+            &[crate::backend::wayland_udev::color_pipeline::OutputColorRegion],
+        >,
     ) -> bool {
+        let previous_frame_was_deferred = previous_frame_requires_srgb_transition_snapshot(
+            self.last_output_color_frame_state.as_ref(),
+        );
+        let output_color_state = OutputColorFrameState {
+            linear_tail_safe,
+            hw_encode_active,
+            hw_ctm_active,
+            software_regions: software_output_regions.map(|regions| regions.to_vec()),
+        };
+        if self.last_output_color_frame_state.as_ref() != Some(&output_color_state) {
+            self.last_output_color_frame_state = Some(output_color_state);
+            self.force_full_damage_next = true;
+            self.needs_render = true;
+        }
+
         // Hidden imports arrive as ordinary WindowState owners. Capture the
         // bounded tier before full-retained admission can evict an older
         // source, then run once more for any fallback armed while settling.
@@ -1288,6 +1583,24 @@ impl WaylandCompositor {
         // deferring this to the transition overlay would capture the new
         // workspace and make every transition sample an uninitialized/stale FBO.
         if self.transition_snapshot_pending {
+            if previous_frame_was_deferred && self.linear_fbo != 0 {
+                use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+                // Deferred delivery leaves the canonical previous workspace
+                // intact in linear_fbo while output_fbo may hold linear KMS
+                // pixels or independently encoded output regions. Normalize a
+                // temporary global-sRGB copy before the legacy transition
+                // shader captures it.
+                let projection = ortho(0.0, self.screen_w as f32, self.screen_h as f32, 0.0);
+                let fallback = TransferKind::Srgb;
+                self.dispatch_scene_linear_encode_pass(
+                    gl,
+                    &projection,
+                    fallback.shader_id(),
+                    fallback.gamma_for_shader(),
+                    IDENTITY_CTM,
+                    None,
+                );
+            }
             self.capture_transition_snapshot(gl);
             self.transition_snapshot_pending = false;
         }
@@ -2192,6 +2505,7 @@ impl WaylandCompositor {
                     gl.Uniform1f(self.win_uniforms.radius, radius);
                     gl.Uniform1f(self.win_uniforms.dim, 0.7);
                     gl.Uniform1f(self.win_uniforms.desat, 0.0);
+                    self.upload_window_color_transform(gl, wt.color_transform, scene_linear_active);
                     for ghost in wt.motion_trail.ghosts(
                         std::time::Instant::now(),
                         &trail_params,
@@ -2218,6 +2532,7 @@ impl WaylandCompositor {
                         );
                         gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
                     }
+                    self.reset_window_color_transform(gl);
                     // Restore main-pass uniforms; opacity/dim are written below
                     // anyway, but keep the texture bound for the standard draw.
                 }
@@ -2388,45 +2703,20 @@ impl WaylandCompositor {
             gl.UseProgram(0);
         }
 
-        if scene_linear_active {
-            if hw_encode_active {
-                // The CRTC LUT expects linear input, but KMS always consumes
-                // output_texture. Copy the completed linear window pass into
-                // output_fbo before encoded-space overlays are drawn. Without
-                // this copy output_texture remains the previous frame and every
-                // genie/border/particle pass is accidentally left bound to the
-                // private linear FBO.
-                self.blit_fbo(
-                    gl,
-                    self.linear_fbo,
-                    self.output_fbo,
-                    self.screen_w,
-                    self.screen_h,
-                );
-                unsafe {
-                    gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
-                    gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
-                }
-            } else {
-                // Encode linear_fbo → output_fbo using the uniform participating
-                // TF (sRGB fallback when outputs are mixed).
-                self.dispatch_scene_linear_encode_pass(
-                    gl,
-                    &projection,
-                    shader_encode_tf,
-                    shader_encode_gamma,
-                    None,
-                );
-            }
-        }
-
-        // Establish the default domain for post-scene overlays. Software
-        // overview rendering temporarily re-enters linear_fbo and restores
-        // this encoded state afterward; the hardware-OETF route remains
-        // linear throughout. This prevents expose, peek, debug HUD and system
-        // UI from inheriting stale main-scene uniforms.
-        let overlay_scene_linear =
-            overlay_output_is_scene_linear(scene_linear_active, hw_encode_active);
+        let output_route = frame_output_route(
+            scene_linear_active,
+            linear_tail_safe,
+            hw_encode_active,
+            hw_ctm_active,
+            software_output_regions.is_some(),
+        );
+        // Retained-window and border passes are color-domain aware, so keep
+        // them in the common FP16 target even when a later encoded-only effect
+        // will force the global-sRGB fallback. Encoding at the old main-window
+        // boundary made Genie/Dock transforms write linear RGB into an encoded
+        // target because their canonical surface plans intentionally end in
+        // the common working space.
+        let overlay_scene_linear = scene_linear_active;
         unsafe {
             self.sync_overlay_color_domain(gl, overlay_scene_linear);
         }
@@ -2444,7 +2734,7 @@ impl WaylandCompositor {
                 && win.texture_owner.is_some()
         }) {
             self.frame_profiler.zone_start("close_fade");
-            self.render_close_fades(gl, &projection, scene_linear_active && hw_encode_active);
+            self.render_close_fades(gl, &projection, overlay_scene_linear);
             self.frame_profiler.zone_end();
         }
 
@@ -2462,11 +2752,7 @@ impl WaylandCompositor {
                 gl.Uniform1i(self.genie_uniforms.color_managed, 0);
                 gl.Uniform1i(
                     self.genie_uniforms.scene_linear,
-                    if scene_linear_active && hw_encode_active {
-                        1
-                    } else {
-                        0
-                    },
+                    i32::from(overlay_scene_linear),
                 );
                 gl.Uniform1f(self.genie_uniforms.ripple_progress, 0.0);
                 gl.Uniform1f(self.genie_uniforms.ripple_amplitude, 0.0);
@@ -2478,7 +2764,7 @@ impl WaylandCompositor {
                     let color_plan = retained_color_plan(
                         RetainedTexturePass::Genie,
                         ga.color_transform,
-                        scene_linear_active && hw_encode_active,
+                        overlay_scene_linear,
                     );
                     self.upload_retained_color_plan(gl, color_plan);
                     let (progress, _) = genie_progress(
@@ -2520,7 +2806,6 @@ impl WaylandCompositor {
             self.frame_profiler.zone_end();
         }
 
-        let overlay_scene_linear = scene_linear_active && hw_encode_active;
         self.render_minimized_dock_items(gl, &projection, overlay_scene_linear);
         self.render_dock_preview(gl, &projection, overlay_scene_linear);
 
@@ -2534,11 +2819,7 @@ impl WaylandCompositor {
                 self.set_projection_uniform(gl, self.border_uniforms.projection, &projection);
                 gl.Uniform1i(
                     self.border_uniforms.scene_linear,
-                    if scene_linear_active && hw_encode_active {
-                        1
-                    } else {
-                        0
-                    },
+                    i32::from(overlay_scene_linear),
                 );
                 gl.BindVertexArray(self.quad_vao);
 
@@ -2661,11 +2942,7 @@ impl WaylandCompositor {
                         );
                         gl.Uniform1i(
                             self.gradient_border_uniforms.scene_linear,
-                            if scene_linear_active && hw_encode_active {
-                                1
-                            } else {
-                                0
-                            },
+                            i32::from(overlay_scene_linear),
                         );
                         gl.Uniform4f(self.gradient_border_uniforms.color_a, ar, ag, ab, aa * fade);
                         gl.Uniform4f(self.gradient_border_uniforms.color_b, br, bg, bb, ba * fade);
@@ -2736,6 +3013,25 @@ impl WaylandCompositor {
         // is defined in effects.rs.
         self.render_genie_animations(gl, &projection);
 
+        if output_route == FrameOutputRoute::EarlySrgbFallback {
+            use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+            // The passes above are linear-aware. Convert only at the first
+            // encoded-only layer so their existing z-order remains intact and
+            // all following effects see the historical global-sRGB domain.
+            let fallback = TransferKind::Srgb;
+            self.dispatch_scene_linear_encode_pass(
+                gl,
+                &projection,
+                fallback.shader_id(),
+                fallback.gamma_for_shader(),
+                IDENTITY_CTM,
+                None,
+            );
+            unsafe {
+                self.sync_overlay_color_domain(gl, false);
+            }
+        }
+
         // =================================================================
         // 12. Workspace transitions
         // =================================================================
@@ -2756,7 +3052,7 @@ impl WaylandCompositor {
                 self.clear_overview_textures(gl);
             }
         } else if self.overview_opacity > 0.0 {
-            match overview_render_route(scene_linear_active, hw_encode_active) {
+            match overview_render_route(output_route) {
                 OverviewRenderRoute::LegacyEncoded => {
                     self.render_overview(gl, &projection, false);
                 }
@@ -2764,29 +3060,32 @@ impl WaylandCompositor {
                     self.render_overview(gl, &projection, true);
                 }
                 OverviewRenderRoute::SoftwareReentry => {
-                    // The main scene has already been software-encoded into
-                    // output_fbo so encoded-only overlays can keep their legacy
-                    // ordering. Re-enter linear light only over the overview's
-                    // monitor, composite every generated material and unmanaged
-                    // texture there, then encode the exact same region back.
+                    use crate::backend::wayland_udev::color_pipeline::{
+                        IDENTITY_CTM, TransferKind,
+                    };
+                    // An incompatible late overlay selected the explicit global
+                    // sRGB fallback. Re-enter common linear light only over the
+                    // overview monitor, then restore that same sRGB region.
                     if let Some(scissor) = overview_monitor_scissor(
                         self.overview_monitor,
                         self.screen_w,
                         self.screen_h,
                     ) {
+                        let fallback = TransferKind::Srgb;
                         self.dispatch_scene_linear_decode_pass(
                             gl,
                             &projection,
-                            shader_encode_tf,
-                            shader_encode_gamma,
+                            fallback.shader_id(),
+                            fallback.gamma_for_shader(),
                             Some(scissor),
                         );
                         self.render_overview(gl, &projection, true);
                         self.dispatch_scene_linear_encode_pass(
                             gl,
                             &projection,
-                            shader_encode_tf,
-                            shader_encode_gamma,
+                            fallback.shader_id(),
+                            fallback.gamma_for_shader(),
+                            IDENTITY_CTM,
                             Some(scissor),
                         );
                         unsafe {
@@ -2953,6 +3252,45 @@ impl WaylandCompositor {
         }
 
         self.frame_profiler.zone_end();
+
+        // =================================================================
+        // 18b. Output delivery
+        // =================================================================
+        // Linear-tail-safe frames remain in the common FP16 target through
+        // every compatible late overlay. Convert only now, immediately before
+        // screenshots/recording and KMS consume output_texture.
+        match output_route {
+            FrameOutputRoute::DeferredHardware => {
+                self.blit_fbo(
+                    gl,
+                    self.linear_fbo,
+                    self.output_fbo,
+                    self.screen_w,
+                    self.screen_h,
+                );
+                unsafe {
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+                    gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                    gl.Disable(ffi::SCISSOR_TEST);
+                    self.enable_premultiplied_blend(gl);
+                }
+            }
+            FrameOutputRoute::DeferredRegions => {
+                if let Some(regions) = software_output_regions {
+                    self.dispatch_output_color_regions(
+                        gl,
+                        &projection,
+                        regions,
+                        hw_encode_active,
+                        hw_ctm_active,
+                        damage_scissor,
+                    );
+                } else {
+                    debug_assert!(false, "deferred output route requires software regions");
+                }
+            }
+            FrameOutputRoute::LegacyEncoded | FrameOutputRoute::EarlySrgbFallback => {}
+        }
 
         // A locked compositor must never expose the client scene through an
         // IPC or protocol screenshot. Draw the opaque shield before readback.

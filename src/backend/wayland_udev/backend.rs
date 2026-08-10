@@ -1,12 +1,15 @@
 use crate::backend::wayland::state::JwmWaylandState;
 use crate::backend::wayland_dummy_ops::*;
 use crate::backend::wayland_key_ops::UdevKeyOps;
+use crate::backend::wayland_udev::color_management::ParametricParams;
+use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use crate::sync_ext::MutexExt;
 
 #[path = "../udev_kms.rs"]
 mod kms;
 use self::kms::KmsState;
 use super::compositor::{CompositorOutputTextureOwnership, WaylandCompositor};
+use super::output_management::proposed_output_framebuffer_size;
 use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
@@ -86,6 +89,34 @@ fn gesture_swipe_should_intercept(
     bindings: &[crate::config::GestureSwipeConfig],
 ) -> bool {
     fingers >= 3 && bindings.iter().any(|binding| binding.fingers == fingers)
+}
+
+/// Build the per-surface color plan for the frame's actual render target.
+///
+/// A live scene-linear target has one canonical linear-sRGB domain. Its
+/// surface plan is therefore source-owned and deliberately independent of the
+/// window rectangle, output ordering and CRTC offload state. The encoded
+/// fallback retains the historical largest-overlap output policy.
+fn plan_frame_surface_color_transform(
+    surface: &ParametricParams,
+    scene_linear_active: bool,
+    window_rect: Rectangle<i32, Logical>,
+    output_targets: &[(Rectangle<i32, Logical>, ParametricParams)],
+) -> Option<ColorTransform> {
+    if scene_linear_active {
+        return Some(ColorTransform::build_to_linear_srgb(surface));
+    }
+
+    output_targets
+        .iter()
+        .filter_map(|(rect, output)| {
+            let overlap = rect.intersection(window_rect).map_or(0, |intersection| {
+                i64::from(intersection.size.w.max(0)) * i64::from(intersection.size.h.max(0))
+            });
+            (overlap > 0).then_some((overlap, output))
+        })
+        .max_by_key(|(overlap, _)| *overlap)
+        .and_then(|(_, output)| ColorTransform::build(surface, output))
 }
 
 fn region_fully_covers_rect(region: &RegionAttributes, target: Rectangle<i32, Logical>) -> bool {
@@ -1255,7 +1286,7 @@ impl UdevBackend {
         }
     }
 
-    fn sync_wayland_state_from_kms(&mut self) {
+    fn sync_wayland_state_from_kms(&mut self, resize_compositor: bool) {
         let Some(kms) = self.kms.as_ref() else {
             self.state.outputs.clear();
             self.state.gamma_sizes.clear();
@@ -1265,6 +1296,30 @@ impl UdevBackend {
         self.state.outputs = kms.borrow().outputs();
         self.state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
         attach_edid_caps_to_outputs(&self.state.outputs, &self.shared.lock_safe().outputs);
+        kms.borrow_mut().refresh_output_color_targets();
+        if resize_compositor && let Some(compositor) = self.compositor.as_mut() {
+            let (width, height) = kms.borrow().total_screen_size();
+            match kms
+                .borrow_mut()
+                .with_renderer(|gl| unsafe { compositor.resize(gl, width, height) })
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    log::error!(
+                        "[udev/compositor] rejected output-target resize after layout change: {error}"
+                    );
+                    compositor.force_full_redraw();
+                    self.state.needs_redraw = true;
+                }
+                Err(error) => {
+                    log::error!(
+                        "[udev/compositor] failed to access GL for output-target resize after layout change: {error:?}"
+                    );
+                    compositor.force_full_redraw();
+                    self.state.needs_redraw = true;
+                }
+            }
+        }
 
         if env_flag("JWM_DMABUF") {
             let kms_ref = kms.borrow();
@@ -1386,7 +1441,10 @@ impl UdevBackend {
 
                 self.kms = Some(new_kms);
                 self.state.needs_redraw = true;
-                self.sync_wayland_state_from_kms();
+                // The rebuilt KMS state owns a fresh EGL context. Never use it
+                // to resize/delete raw names from the old compositor; the next
+                // step replaces that compositor wholesale in the new context.
+                self.sync_wayland_state_from_kms(false);
 
                 // The rebuilt KMS state carries a fresh EGL context, so every GL
                 // object the compositor created in the previous context (shaders,
@@ -1899,6 +1957,8 @@ impl UdevBackend {
         if let Some(kms) = &kms {
             state.outputs = kms.borrow().outputs();
             state.gamma_sizes = kms.borrow_mut().gamma_sizes().into_iter().collect();
+            attach_edid_caps_to_outputs(&state.outputs, &shared.lock_safe().outputs);
+            kms.borrow_mut().refresh_output_color_targets();
 
             // Keep linux-dmabuf opt-in for now. Electron/VSCode binds
             // compositor globals very early, and this path has been observed to
@@ -3974,40 +4034,35 @@ impl DisplayControl for UdevBackend {
     fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
         let kms = self
             .kms
-            .as_ref()
+            .clone()
             .ok_or(BackendError::Unsupported("no KMS"))?;
+        if enabled {
+            // HDR signalling cannot safely remain active on frames which fall
+            // back to encoded sRGB because cursor/lock/layer elements still
+            // bypass the common-linear compositor. Fail closed until those
+            // KMS-external elements participate in output color delivery.
+            return Err(BackendError::Unsupported(
+                "HDR metadata enable is unavailable until KMS-external elements participate in the color pipeline",
+            ));
+        }
         let shared = self.shared.lock_safe();
-        let info = shared
-            .outputs
-            .iter()
-            .find(|candidate| candidate.id == output)
-            .ok_or(BackendError::NotFound("output not found"))?;
         let index = shared
             .outputs
             .iter()
             .position(|candidate| candidate.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
-        let caps = info.hdr_metadata.clone();
         drop(shared);
-        if enabled {
-            let caps = caps.ok_or(BackendError::Unsupported(
-                "output does not advertise HDR in EDID",
-            ))?;
-            let peak = crate::config::CONFIG
-                .load()
-                .behavior()
-                .hdr_peak_nits
-                .round()
-                .clamp(0.0, u16::MAX as f32) as u16;
-            let blob = crate::backend::hdr_metadata::build_from_edid(&caps, peak);
-            kms.borrow_mut()
-                .set_hdr_metadata_for_output(index, Some(&blob))
-                .map_err(BackendError::Message)
-        } else {
-            kms.borrow_mut()
-                .set_hdr_metadata_for_output(index, None)
-                .map_err(BackendError::Message)
+        kms.borrow_mut()
+            .set_hdr_metadata_for_output(index, None)
+            .map_err(BackendError::Message)?;
+
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.force_full_redraw();
         }
+        self.state.needs_redraw = true;
+        kms.borrow_mut().request_render();
+        self.request_flush();
+        Ok(())
     }
 }
 
@@ -4339,6 +4394,20 @@ impl Backend for UdevBackend {
                 })
                 .expect("compositor presence was checked");
             let mut kms_ref = kms.borrow_mut();
+            kms_ref.with_renderer(|_| ()).map_err(|error| {
+                BackendError::Message(format!(
+                    "failed to acquire the KMS GL context for compositor teardown preflight: {error}"
+                ))
+            })?;
+            if let Err(error) = kms_ref.disable_color_pipeline() {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.force_full_redraw();
+                }
+                self.state.needs_redraw = true;
+                return Err(BackendError::Message(format!(
+                    "cannot disable Wayland compositor while KMS color properties remain active: {error}"
+                )));
+            }
             let renderer_owns_output = kms_ref
                 .compositor_output_texture_is_renderer_owned(output_texture, output_generation);
             let output_ownership = if renderer_owns_output {
@@ -4358,6 +4427,10 @@ impl Backend for UdevBackend {
             let released = match release_result {
                 Ok(released) => released,
                 Err(error) => {
+                    if let Some(compositor) = self.compositor.as_mut() {
+                        compositor.force_full_redraw();
+                    }
+                    self.state.needs_redraw = true;
                     return Err(BackendError::Message(format!(
                         "failed to acquire the KMS GL context for compositor teardown: {error}"
                     )));
@@ -5055,173 +5128,222 @@ impl Backend for UdevBackend {
         }
 
         // Phase 2: Update compositor window textures then render into FBO.
-        let result = if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
-            // Synthetic popup ids are not represented in
-            // `state.compositor_dead_windows`. Retire any that disappeared from
-            // this frame before releasing their backend offscreen owner, so
-            // close-fade rendering can keep a safe GlesTexture clone.
-            compositor.retire_absent_auxiliary_windows(&full_scene);
-            for (win_id, texture, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
-                compositor.update_window_texture(
-                    *win_id,
-                    texture.clone(),
-                    *w,
-                    *h,
-                    *has_alpha,
-                    *y_inverted,
-                    *content_uv,
-                );
-            }
-            offscreen.retain(|window_id, _| {
-                !crate::backend::wayland_udev::compositor::is_auxiliary_window_id(*window_id)
-                    || full_scene
-                        .iter()
-                        .any(|(live_id, _, _, _, _)| live_id == window_id)
-            });
-            // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
-            for &(win_id, _, _, _, _) in &full_scene {
-                let wid = WindowId::from_raw(win_id);
-                if let Some(app_id) = self.state.window_app_id.get(&wid) {
-                    if !app_id.is_empty() {
-                        compositor.set_window_class(win_id, app_id);
+        let result = 'render_result: {
+            if let (Some(compositor), Some(kms)) = (&mut self.compositor, &self.kms) {
+                // Synthetic popup ids are not represented in
+                // `state.compositor_dead_windows`. Retire any that disappeared from
+                // this frame before releasing their backend offscreen owner, so
+                // close-fade rendering can keep a safe GlesTexture clone.
+                compositor.retire_absent_auxiliary_windows(&full_scene);
+                for (win_id, texture, w, h, has_alpha, y_inverted, content_uv) in &tex_updates {
+                    compositor.update_window_texture(
+                        *win_id,
+                        texture.clone(),
+                        *w,
+                        *h,
+                        *has_alpha,
+                        *y_inverted,
+                        *content_uv,
+                    );
+                }
+                offscreen.retain(|window_id, _| {
+                    !crate::backend::wayland_udev::compositor::is_auxiliary_window_id(*window_id)
+                        || full_scene
+                            .iter()
+                            .any(|(live_id, _, _, _, _)| live_id == window_id)
+                });
+                // Sync window class/app_id for per-class rules (frosted glass strength, etc.)
+                for &(win_id, _, _, _, _) in &full_scene {
+                    let wid = WindowId::from_raw(win_id);
+                    if let Some(app_id) = self.state.window_app_id.get(&wid) {
+                        if !app_id.is_empty() {
+                            compositor.set_window_class(win_id, app_id);
+                        }
+                    }
+                    if let Some(&fullscreen) = self.state.window_is_fullscreen.get(&wid) {
+                        compositor.set_window_fullscreen(win_id, fullscreen);
                     }
                 }
-                if let Some(&fullscreen) = self.state.window_is_fullscreen.get(&wid) {
-                    compositor.set_window_fullscreen(win_id, fullscreen);
+                // Resolve a hot scene-linear toggle before building this frame's
+                // surface plans. Requested intent alone is insufficient: FP16
+                // allocation can fail, while checking the old active state would
+                // otherwise make the first successful frame use output-bound
+                // matrices inside the new common working target.
+                if let Err(error) = kms
+                    .borrow_mut()
+                    .with_renderer(|gl| compositor.sync_scene_linear_target(gl))
+                {
+                    log::warn!(
+                        "[udev/compositor] failed to synchronize scene-linear target before color planning: {error:?}"
+                    );
                 }
-            }
-            // Decide once per frame whether the per-output CRTC GAMMA_LUT
-            // will do the OETF at scanout and whether each CRTC's CTM will do
-            // the sRGB→output-primaries gamut map. The per-surface
-            // ColorTransform pass below reads `decision.hw_ctm_active` to
-            // choose its target params (sRGB when true, the overlapping
-            // output's primaries otherwise), so this must run first.
-            let compositor_offload_safe = compositor.kms_color_pipeline_offload_safe();
-            let decision = kms
-                .borrow_mut()
-                .refresh_color_pipeline_offload(&self.state, compositor_offload_safe);
-            let cm_render_gate = crate::config::CONFIG
-                .load()
-                .behavior()
-                .color_management_render_path;
-            // Color transforms describe this frame's scene. Clear the previous
-            // snapshot first so windows that left the scene cannot retain a
-            // stale transform (and stale direct-scanout blocker).
-            compositor.clear_all_color_transforms();
-            if cm_render_gate {
-                use crate::backend::edid::EdidHdrCapabilities;
-                use crate::backend::wayland_udev::color_management::{
-                    params_from_edid, srgb_params,
+                // Decide once per frame who owns final common-linear-sRGB →
+                // output delivery. Surface plans below remain source-owned and
+                // geometry-independent; this decision only selects paired CRTC
+                // CTM/LUT, per-output shader regions, or global-sRGB fallback.
+                let compositor_tail_safe = compositor.compositor_linear_tail_safe();
+                let external_elements_safe = kms
+                    .borrow()
+                    .external_elements_color_pipeline_safe(&self.state);
+                let linear_tail_safe = compositor_tail_safe && external_elements_safe;
+                let scene_linear_color_path = compositor.scene_linear_color_path_active();
+                let decision = kms.borrow_mut().refresh_color_pipeline_offload(
+                    &self.state,
+                    linear_tail_safe,
+                    scene_linear_color_path,
+                );
+                if decision.delivery_blocked {
+                    // Keep the last known-good scanout visible while KMS retries a
+                    // failed LUT/CTM transition. Rendering a new software-encoded
+                    // frame under unknown hardware properties would corrupt every
+                    // pixel, so preserve redraw intent instead of consuming it.
+                    compositor.force_full_redraw();
+                    self.state.needs_redraw = true;
+                    break 'render_result false;
+                }
+                let cm_render_gate = crate::config::CONFIG
+                    .load()
+                    .behavior()
+                    .color_management_render_path;
+                use crate::backend::wayland_udev::color_management::params_for_output;
+                use crate::backend::wayland_udev::color_pipeline::{
+                    ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
                 };
-                use crate::backend::wayland_udev::color_pipeline::ColorTransform;
                 use smithay::utils::{Logical, Point, Rectangle};
 
-                // Take the surface→params map once per frame instead of
-                // acquiring the wp-color-management mutex per-window.
-                let surface_params_map = self
+                // The retained-plan generation includes output geometry and
+                // color targets even in common-linear mode. Surface transforms
+                // are output-independent there, but treating an EDID/profile
+                // transition as a boundary is the conservative rule for raw
+                // textures which may outlive their Wayland surface.
+                let output_cache: Vec<(Rectangle<i32, Logical>, ParametricParams)> = self
+                    .state
+                    .outputs
+                    .iter()
+                    .filter_map(|o| {
+                        let mode = o.current_mode()?;
+                        let scale = o.current_scale().fractional_scale();
+                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                        let logical_size = o.current_transform().transform_size(logical_size);
+                        let rect =
+                            Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                        let params = params_for_output(o);
+                        Some((rect, params))
+                    })
+                    .collect();
+                let retained_output_context = output_cache
+                    .iter()
+                    .map(|(rect, params)| {
+                        let output_primaries = ColorSpacePrimaries::from_params(params);
+                        crate::backend::wayland_udev::compositor::RetainedOutputColorContext {
+                            rect: [rect.loc.x, rect.loc.y, rect.size.w, rect.size.h],
+                            output_tf: TransferKind::from_params(params),
+                            working_to_output_row_major: rgb_to_rgb_matrix(
+                                &ColorSpacePrimaries::SRGB_D65,
+                                &output_primaries,
+                            ),
+                        }
+                    })
+                    .collect();
+                let surface_description_generation = self
                     .state
                     .color_manager
                     .as_ref()
-                    .map(|cm| cm.snapshot_surface_params())
-                    .unwrap_or_default();
-
-                // When the per-output CTM will convert sRGB→native primaries
-                // at scanout (3.3c), every surface should converge on sRGB
-                // primaries in the FBO. Build the per-output cache only when
-                // we still need it for the "match the overlapping output"
-                // fallback.
-                let srgb_target = srgb_params();
-                let scene_linear_color_path = compositor.scene_linear_color_path_requested();
-                let output_cache: Vec<(Rectangle<i32, Logical>, _)> = if decision.hw_ctm_active {
-                    Vec::new()
-                } else {
-                    self.state
-                        .outputs
-                        .iter()
-                        .filter_map(|o| {
-                            let mode = o.current_mode()?;
-                            let scale = o.current_scale().fractional_scale();
-                            let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
-                            let logical_size = o.current_transform().transform_size(logical_size);
-                            let rect =
-                                Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
-                            let params = o
-                                .user_data()
-                                .get::<EdidHdrCapabilities>()
-                                .map(params_from_edid)
-                                .unwrap_or_else(srgb_params);
-                            Some((rect, params))
-                        })
-                        .collect()
-                };
-
-                for &(win_id, x, y, w, h) in &full_scene {
-                    let wid = WindowId::from_raw(win_id);
-                    let surface = self.state.surface_for_window(wid);
-                    let surface_params = surface
+                    .map(|manager| manager.surface_description_generation())
+                    .unwrap_or(0);
+                compositor.reconcile_retained_color_plan_context(
+                    cm_render_gate,
+                    scene_linear_color_path,
+                    surface_description_generation,
+                    retained_output_context,
+                );
+                // Color transforms describe this frame's scene. Clear the previous
+                // snapshot first so windows that left the scene cannot retain a
+                // stale transform (and stale direct-scanout blocker).
+                compositor.clear_all_color_transforms();
+                if cm_render_gate {
+                    // Take the surface→params map once per frame instead of
+                    // acquiring the wp-color-management mutex per-window.
+                    let surface_params_map = self
+                        .state
+                        .color_manager
                         .as_ref()
-                        .and_then(|s| surface_params_map.get(&s.id()));
+                        .map(|cm| cm.snapshot_surface_params())
+                        .unwrap_or_default();
 
-                    let xform = if let Some(sp) = surface_params {
-                        if decision.hw_ctm_active {
-                            ColorTransform::build_for_render_path(
-                                sp,
-                                &srgb_target,
-                                scene_linear_color_path,
-                            )
+                    // A successfully allocated scene-linear target is always
+                    // canonical linear sRGB. Hidden minimized imports are not
+                    // drawable scene entries, but they must receive the same
+                    // current-generation source plan before retained capture.
+                    for &(win_id, x, y, w, h) in
+                        full_scene
+                            .iter()
+                            .chain(texture_scene.iter().filter(|(candidate, ..)| {
+                                !full_scene.iter().any(|(live_id, ..)| live_id == candidate)
+                            }))
+                    {
+                        let wid = WindowId::from_raw(win_id);
+                        let surface = self.state.surface_for_window(wid);
+                        let surface_params = surface
+                            .as_ref()
+                            .and_then(|s| surface_params_map.get(&s.id()));
+
+                        let hidden_minimized_capture =
+                            !full_scene.iter().any(|(live_id, ..)| *live_id == win_id);
+                        let (x, y, w, h) = if hidden_minimized_capture {
+                            let Some(geometry) = compositor.minimized_color_plan_geometry(win_id)
+                            else {
+                                // Never let a parked hidden-client rectangle
+                                // choose a legacy output-bound transform.
+                                continue;
+                            };
+                            geometry
                         } else {
-                            let win_rect = Rectangle::<i32, Logical>::new(
-                                Point::from((x, y)),
-                                (w.max(1) as i32, h.max(1) as i32).into(),
-                            );
-                            let output_params = output_cache
-                                .iter()
-                                .max_by_key(|(rect, _)| {
-                                    rect.intersection(win_rect)
-                                        .map(|r| r.size.w.max(0) as i64 * r.size.h.max(0) as i64)
-                                        .unwrap_or(0)
-                                })
-                                .map(|(_, p)| p);
-                            output_params.and_then(|op| {
-                                ColorTransform::build_for_render_path(
-                                    sp,
-                                    op,
-                                    scene_linear_color_path,
-                                )
-                            })
-                        }
-                    } else {
-                        None
-                    };
-                    compositor.set_window_color_transform(win_id, xform);
+                            (x, y, w, h)
+                        };
+                        let win_rect = Rectangle::<i32, Logical>::new(
+                            Point::from((x, y)),
+                            (w.max(1) as i32, h.max(1) as i32).into(),
+                        );
+                        let xform = surface_params.and_then(|sp| {
+                            plan_frame_surface_color_transform(
+                                sp,
+                                scene_linear_color_path,
+                                win_rect,
+                                &output_cache,
+                            )
+                        });
+                        compositor.set_window_color_transform(win_id, xform);
+                    }
                 }
+                // Feed vblank presentation time for frame pacing
+                if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
+                    compositor.on_vblank_presented(presented_at);
+                }
+                let rendered = kms
+                    .borrow_mut()
+                    .with_renderer(|gl| {
+                        compositor.render_frame(
+                            gl,
+                            &full_scene,
+                            focused_window,
+                            linear_tail_safe,
+                            decision.hw_encode_active,
+                            decision.hw_ctm_active,
+                            decision.software_regions.as_deref(),
+                        )
+                    })
+                    .unwrap_or(false);
+                if crf_log_this {
+                    log::debug!("[crf] render_frame returned {rendered}");
+                }
+                if rendered {
+                    kms.borrow_mut().request_render();
+                }
+                rendered
+            } else {
+                false
             }
-            // Feed vblank presentation time for frame pacing
-            if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
-                compositor.on_vblank_presented(presented_at);
-            }
-            let rendered = kms
-                .borrow_mut()
-                .with_renderer(|gl| {
-                    compositor.render_frame(
-                        gl,
-                        &full_scene,
-                        focused_window,
-                        decision.hw_encode_active,
-                        decision.shader_tf,
-                        decision.shader_gamma,
-                    )
-                })
-                .unwrap_or(false);
-            if crf_log_this {
-                log::debug!("[crf] render_frame returned {rendered}");
-            }
-            if rendered {
-                kms.borrow_mut().request_render();
-            }
-            rendered
-        } else {
-            false
         };
 
         // A subsurface/wp_viewport client uses a backend-created offscreen
@@ -5280,18 +5402,29 @@ impl Backend for UdevBackend {
                         on,
                     }) => {
                         handled_any = true;
+                        let mut power_changed = false;
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
                             let idx = kms.output_index_by_name(output_name);
                             if let Some(idx) = idx {
-                                if let Err(e) = kms.set_dpms_for_output(idx, on).backend_context(
+                                match kms.set_dpms_for_output(idx, on).backend_context(
                                     "wayland-udev",
                                     ErrorBoundary::Device,
                                     "set DPMS output power state",
                                 ) {
-                                    log::warn!("{e}");
+                                    Ok(()) => power_changed = true,
+                                    Err(e) => log::warn!("{e}"),
                                 }
                             }
+                        }
+                        if power_changed {
+                            // Participation and color-delivery ownership both
+                            // change across DPMS. Persist the request until KMS
+                            // can present, then force a full common-scene redraw
+                            // so a power-on never exposes a buffer prepared for
+                            // the previous LUT/CTM state.
+                            self.state.needs_redraw = true;
+                            self.request_flush();
                         }
                     }
                     Some(BackendEvent::GammaSet {
@@ -5300,10 +5433,12 @@ impl Backend for UdevBackend {
                         ref ramp,
                     }) => {
                         handled_any = true;
+                        let mut gamma_attempted = false;
                         if let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
                             let idx = kms.output_index_by_name(output_name);
                             if let Some(idx) = idx {
+                                gamma_attempted = true;
                                 if let Err(e) = kms
                                     .set_gamma_for_output(idx, gamma_size, ramp)
                                     .backend_context(
@@ -5315,6 +5450,14 @@ impl Backend for UdevBackend {
                                     log::warn!("{e}");
                                 }
                             }
+                        }
+                        if gamma_attempted {
+                            // The user ramp and compositor OETF are mutually
+                            // exclusive owners. Even a failed ioctl may follow
+                            // a successful hardware-pipeline teardown, so
+                            // force a full route re-evaluation before scanout.
+                            self.state.needs_redraw = true;
+                            self.request_flush();
                         }
                     }
                     Some(BackendEvent::OutputConfigure { changes }) => {
@@ -5335,22 +5478,148 @@ impl Backend for UdevBackend {
                             &soft_disabled_before,
                         );
                         let mut failed_outputs = Vec::new();
-                        if let Some(ref kms) = self.kms {
+                        let mut output_mutation_attempted = false;
+                        let mut touched_outputs = Vec::new();
+                        let mut configuration_before = None;
+                        // Runtime target resize is allocation-transactional,
+                        // but a failed allocation after a successful DRM
+                        // modeset would still leave KMS and the retained FBO at
+                        // different dimensions. Until framebuffer preparation
+                        // can span the DRM transaction, allow only changes that
+                        // preserve the current physical envelope.
+                        if self.compositor.is_some()
+                            && let Some(ref kms) = self.kms
+                        {
+                            let preflight = {
+                                let kms = kms.borrow();
+                                let current_size = kms.total_screen_size();
+                                let outputs = kms.outputs();
+                                let mut current_layout = Vec::with_capacity(outputs.len());
+                                let mut layout_error = None;
+                                for output in outputs {
+                                    let Some(mode) = output.current_mode() else {
+                                        layout_error = Some(format!(
+                                            "cannot validate framebuffer envelope: output '{}' has no current mode",
+                                            output.name()
+                                        ));
+                                        break;
+                                    };
+                                    let location = output.current_location();
+                                    current_layout.push((
+                                        output.name(),
+                                        (location.x, location.y),
+                                        (mode.size.w, mode.size.h),
+                                    ));
+                                }
+                                match layout_error {
+                                    Some(error) => Err(error),
+                                    None => proposed_output_framebuffer_size(
+                                        &current_layout,
+                                        &changes,
+                                    )
+                                    .and_then(|proposed_size| {
+                                        if proposed_size == current_size {
+                                            Ok(())
+                                        } else {
+                                            Err(format!(
+                                                "runtime framebuffer envelope change from {}x{} to {}x{} is not yet supported; reinitialize KMS to apply this layout",
+                                                current_size.0,
+                                                current_size.1,
+                                                proposed_size.0,
+                                                proposed_size.1
+                                            ))
+                                        }
+                                    }),
+                                }
+                            };
+                            if let Err(error) = preflight {
+                                let mut failure = output_management_failure("*", error);
+                                failure.field = Some("layout_extent".into());
+                                failed_outputs.push(failure);
+                                all_ok = false;
+                            }
+                        }
+
+                        // Capture all requested outputs after the allocation/
+                        // extent preflight but before the first DPMS, modeset,
+                        // or advertised-state mutation. A snapshot failure is
+                        // therefore a side-effect-free transaction rejection.
+                        if all_ok {
+                            if let Some(ref kms) = self.kms {
+                                let output_names: Vec<_> =
+                                    changes.iter().map(|change| change.name.clone()).collect();
+                                match kms.borrow().snapshot_output_configuration(&output_names) {
+                                    Ok(snapshot) => configuration_before = Some(snapshot),
+                                    Err(error) => {
+                                        log::warn!(
+                                            "[output-mgmt] transaction {tx_id} snapshot failed: {error}"
+                                        );
+                                        failed_outputs.push(output_management_failure("*", error));
+                                        all_ok = false;
+                                    }
+                                }
+                            } else {
+                                failed_outputs.push(output_management_failure(
+                                    "*",
+                                    "no KMS backend available".into(),
+                                ));
+                                all_ok = false;
+                            }
+                        }
+
+                        if all_ok && let Some(ref kms) = self.kms {
                             let mut kms = kms.borrow_mut();
                             for change in &changes {
+                                output_mutation_attempted = true;
+                                touched_outputs.push(change.name.clone());
                                 if !change.enabled {
-                                    // Soft disable: mark the output so the renderer
-                                    // skips frame submission; we keep the DrmOutput
-                                    // alive (a full DRM teardown is unfinished).
+                                    // Keep the DrmOutput object for a later
+                                    // re-enable, but physically blank the CRTC.
+                                    // Merely skipping submission would leave a
+                                    // frozen common-linear buffer visible after
+                                    // its LUT/CTM had been removed.
                                     log::info!(
                                         "[output-mgmt] soft-disabling output '{}'",
                                         change.name
                                     );
-                                    self.state.soft_disabled_outputs.insert(change.name.clone());
+                                    let result = kms
+                                        .output_index_by_name(&change.name)
+                                        .ok_or_else(|| format!("unknown output '{}'", change.name))
+                                        .and_then(|index| kms.set_dpms_for_output(index, false));
+                                    if let Err(error) = result {
+                                        log::warn!("[output-mgmt] '{}': {error}", change.name);
+                                        failed_outputs.push(output_management_failure(
+                                            change.name.clone(),
+                                            error,
+                                        ));
+                                        all_ok = false;
+                                        break;
+                                    } else {
+                                        self.state
+                                            .soft_disabled_outputs
+                                            .insert(change.name.clone());
+                                    }
                                     continue;
                                 }
-                                // Re-enabling clears the soft-disable flag.
-                                self.state.soft_disabled_outputs.remove(&change.name);
+                                // Re-enabling powers the retained DrmOutput on
+                                // before applying its requested geometry.
+                                let was_soft_disabled =
+                                    self.state.soft_disabled_outputs.remove(&change.name);
+                                if was_soft_disabled {
+                                    let result = kms
+                                        .output_index_by_name(&change.name)
+                                        .ok_or_else(|| format!("unknown output '{}'", change.name))
+                                        .and_then(|index| kms.set_dpms_for_output(index, true));
+                                    if let Err(error) = result {
+                                        log::warn!("[output-mgmt] '{}': {error}", change.name);
+                                        failed_outputs.push(output_management_failure(
+                                            change.name.clone(),
+                                            error,
+                                        ));
+                                        all_ok = false;
+                                        break;
+                                    }
+                                }
                                 if let Err(e) = kms
                                     .configure_output(
                                         &change.name,
@@ -5380,25 +5649,43 @@ impl Backend for UdevBackend {
                                     }
                                     failed_outputs.push(failure);
                                     all_ok = false;
+                                    break;
                                 }
                             }
-                        } else {
-                            failed_outputs.push(output_management_failure(
-                                "*",
-                                "no KMS backend available".into(),
-                            ));
-                            all_ok = false;
                         }
                         let mut rollback_attempted = false;
-                        let rollback_succeeded = true;
+                        let mut rollback_succeeded = true;
                         let mut rollback_reason = None;
-                        if !all_ok {
+                        if !all_ok && output_mutation_attempted {
                             rollback_attempted = true;
                             self.state.soft_disabled_outputs = soft_disabled_before;
-                            rollback_reason = Some(
-                                "restored soft-disabled output set; DRM mode rollback is handled inside configure_output when possible"
-                                    .to_string(),
-                            );
+                            match (self.kms.as_ref(), configuration_before.as_ref()) {
+                                (Some(kms), Some(snapshot)) => {
+                                    match kms
+                                        .borrow_mut()
+                                        .rollback_output_configuration(snapshot, &touched_outputs)
+                                    {
+                                        Ok(restored) => {
+                                            rollback_reason = Some(format!(
+                                                "restored soft-disabled membership and mode/refresh/position/scale/transform/DPMS for {restored} touched output(s) in reverse order"
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            rollback_succeeded = false;
+                                            rollback_reason = Some(format!(
+                                                "restored soft-disabled membership; KMS rollback incomplete: {error}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    rollback_succeeded = false;
+                                    rollback_reason = Some(
+                                        "restored soft-disabled membership; pre-mutation KMS snapshot unavailable"
+                                            .to_string(),
+                                    );
+                                }
+                            }
                         }
                         if rollback_attempted && !rollback_succeeded {
                             log::warn!(
@@ -5407,7 +5694,7 @@ impl Backend for UdevBackend {
                             );
                         }
                         // Refresh advertised outputs and trigger a relayout.
-                        self.sync_wayland_state_from_kms();
+                        self.sync_wayland_state_from_kms(true);
                         let outputs_after = output_management_snapshot(
                             &self.shared.lock_safe().outputs,
                             &self.state.soft_disabled_outputs,
@@ -5726,6 +6013,18 @@ mod udev_backend_selection_tests {
     use super::*;
     use crate::config::{ArgumentConfig, GestureSwipeConfig};
 
+    fn color_params(primaries_named: u32, tf_named: u32) -> ParametricParams {
+        ParametricParams {
+            primaries_named: Some(primaries_named),
+            tf_named: Some(tf_named),
+            ..ParametricParams::default()
+        }
+    }
+
+    fn logical_rect(x: i32, y: i32, width: i32, height: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (width, height).into())
+    }
+
     fn swipe_binding(fingers: u32, direction: &str) -> GestureSwipeConfig {
         GestureSwipeConfig {
             fingers,
@@ -5750,6 +6049,93 @@ mod udev_backend_selection_tests {
             3,
             &[swipe_binding(3, "left")]
         ));
+    }
+
+    #[test]
+    fn scene_linear_surface_plan_ignores_geometry_output_order_and_overview_target() {
+        // A BT.2020/PQ source makes both candidate legacy targets visibly
+        // different from the canonical source→linear-sRGB plan.
+        let source = color_params(6, 11);
+        let left_output = color_params(1, 2);
+        let right_output = color_params(6, 13);
+        let left = logical_rect(0, 0, 1000, 800);
+        let right = logical_rect(1000, 0, 1000, 800);
+        let forward = vec![(left, left_output.clone()), (right, right_output.clone())];
+        let reverse = vec![(right, right_output), (left, left_output)];
+        let expected = Some(ColorTransform::build_to_linear_srgb(&source));
+
+        // These rectangles model the window before overview on either output,
+        // a cross-output placement, and a detached overview target. Overview
+        // consumes the already-built WindowState plan, so none may retarget it.
+        let placements = [
+            logical_rect(100, 100, 600, 500),
+            logical_rect(1200, 100, 600, 500),
+            logical_rect(750, 100, 700, 500),
+            logical_rect(2400, 100, 600, 500),
+        ];
+        for outputs in [&forward[..], &reverse[..], &[][..]] {
+            for placement in placements {
+                assert_eq!(
+                    plan_frame_surface_color_transform(&source, true, placement, outputs),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_scene_linear_target_uses_legacy_largest_overlap_plan() {
+        let source = color_params(6, 11);
+        let left_output = color_params(1, 2);
+        // Matching source/output descriptions exercise legacy identity
+        // elision: an inactive/missing FP16 target must not force an explicit
+        // scene-linear decode plan.
+        let right_output = source.clone();
+        let left = logical_rect(0, 0, 1000, 800);
+        let right = logical_rect(1000, 0, 1000, 800);
+        let forward = vec![(left, left_output.clone()), (right, right_output.clone())];
+        let reverse = vec![(right, right_output.clone()), (left, left_output.clone())];
+
+        for outputs in [&forward[..], &reverse[..]] {
+            assert_eq!(
+                plan_frame_surface_color_transform(
+                    &source,
+                    false,
+                    logical_rect(100, 100, 600, 500),
+                    outputs,
+                ),
+                ColorTransform::build(&source, &left_output)
+            );
+            assert_eq!(
+                plan_frame_surface_color_transform(
+                    &source,
+                    false,
+                    logical_rect(1200, 100, 600, 500),
+                    outputs,
+                ),
+                ColorTransform::build(&source, &right_output)
+            );
+        }
+
+        assert_eq!(
+            plan_frame_surface_color_transform(
+                &source,
+                false,
+                logical_rect(100, 100, 600, 500),
+                &[],
+            ),
+            None
+        );
+        assert_eq!(
+            plan_frame_surface_color_transform(
+                &source,
+                false,
+                logical_rect(4000, 100, 600, 500),
+                &forward,
+            ),
+            None,
+            "zero-overlap legacy geometry must not inherit an arbitrary output plan"
+        );
     }
 
     #[test]
@@ -5859,6 +6245,58 @@ mod udev_backend_selection_tests {
             "[wayland-udev/device] configure output: no KMS backend available".to_string(),
         );
         assert_eq!(failure.field.as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn output_management_envelope_preflight_allows_only_same_size_layouts() {
+        let current = vec![
+            ("DP-1".to_string(), (0, 0), (1920, 1080)),
+            ("HDMI-A-1".to_string(), (1920, 0), (2560, 1440)),
+        ];
+        let change =
+            |name: &str, enabled: bool, position, mode| crate::backend::api::OutputConfigChange {
+                name: name.to_string(),
+                enabled,
+                position,
+                mode,
+                transform: None,
+                scale: None,
+                adaptive_sync: None,
+            };
+
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &[]).unwrap(),
+            (4480, 1440)
+        );
+        // Swapping the outputs preserves the existing maximum right/bottom
+        // edges even though both origins change.
+        let rearranged = vec![
+            change("DP-1", true, Some((2560, 0)), None),
+            change("HDMI-A-1", true, Some((0, 0)), None),
+        ];
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &rearranged).unwrap(),
+            (4480, 1440)
+        );
+
+        let expanded = vec![change("HDMI-A-1", true, Some((2000, 0)), None)];
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &expanded).unwrap(),
+            (4560, 1440)
+        );
+
+        // A soft-disabled DrmOutput retains its mode/origin, so even hostile
+        // geometry fields on the disabled change cannot alter the projection.
+        let disabled = vec![change(
+            "HDMI-A-1",
+            false,
+            Some((9000, 0)),
+            Some((8000, 4000, 60_000)),
+        )];
+        assert_eq!(
+            proposed_output_framebuffer_size(&current, &disabled).unwrap(),
+            (4480, 1440)
+        );
     }
 
     #[test]

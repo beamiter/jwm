@@ -215,13 +215,24 @@ mock implementing the complete backend surface. (First met by
   scene-linear PQ/HLG identities and correct straight-color conversion for
   premultiplied surfaces. Legacy 3D workspace-transition output is pixel-tested
   behind the shader's compatibility branch. Surfaceless EGL is a required CI
-  gate rather than a soft-skipped shader check. Software PQ/HLG/Power output
-  now gives the overview a monitor-local linear island at its existing layer,
-  with target-aware decode and re-encode passes preserving both premultiplied
-  blending and pixels outside the monitor. The next output-pipeline slice is a
-  common linear-sRGB workspace plus per-output gamut/transfer encode regions;
-  mixed-transfer outputs and cross-output overview retargeting remain explicit
-  limitations until then.
+  gate rather than a soft-skipped shader check. The former monitor-local re-entry
+  has now become a normalized linear-sRGB common workspace: described windows
+  and overview faces are source-mapped once, remain output-independent while the
+  prism moves, and reach per-output gamut/transfer delivery only after the safe
+  linear tail. Supported nonnegative, unit-scale, unrotated physical regions are
+  finalized independently in software; coherent hardware delivery requires the
+  matching CTM+GAMMA_LUT pair on every participating CRTC and rolls back a
+  LUT-only result. Encoded late overlays, capture, KMS-external elements,
+  unsupported topology and missing FP16 targets choose the global-sRGB fallback
+  for the whole frame. The normal cursor is currently one such external element,
+  so interactive sessions mostly exercise that fallback. Native HDR signalling
+  remains fail-closed SDR/sRGB in this slice: the enable command is rejected and
+  inherited connector metadata is cleared until those external elements can be
+  adapted without mixing domains. The next slice is to color-adapt or internalize
+  those elements, establish an absolute-luminance
+  working-white convention, add chromatic adaptation for non-D65 descriptions,
+  latch dynamic surface descriptions to their matching surface commit, and
+  coordinate KMS color properties with the matching framebuffer atomically.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

@@ -415,9 +415,10 @@ fn color_transfer_name(tf_named: Option<u32>) -> &'static str {
     match tf_named {
         Some(1) => "bt1886",
         Some(2) => "gamma22",
+        Some(5) => "ext_linear",
+        Some(9) => "srgb",
         Some(11) => "st2084_pq",
         Some(13) => "hlg",
-        Some(14) => "ext_linear",
         Some(_) => "unknown",
         None => "custom_or_unset",
     }
@@ -508,52 +509,131 @@ fn color_session_policy_json(
     scene_linear_enabled: bool,
     advanced_enabled: bool,
 ) -> serde_json::Value {
+    use crate::backend::color_policy::{params_from_edid, srgb_params};
+
     let hdr_output_count = outputs.iter().filter(|output| output.hdr_capable).count();
     let sdr_output_count = outputs.len().saturating_sub(hdr_output_count);
     let mixed_hdr_outputs = hdr_output_count > 0 && sdr_output_count > 0;
-    let hdr_active = hdr_enabled && hdr_output_count > 0;
+    let output_profile_classes = outputs
+        .iter()
+        .map(|output| {
+            // Profile heterogeneity describes attached-output capability,
+            // independent of whether the advanced render gate is currently
+            // enabled. The gate is reported separately as a blocker below.
+            let params = output
+                .hdr_metadata
+                .as_ref()
+                .map(params_from_edid)
+                .unwrap_or_else(srgb_params);
+            (params.primaries_named, params.tf_named)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let heterogeneous_output_profiles = output_profile_classes.len() > 1;
+    // `behavior.hdr_enabled` controls JWM's HDR post-process policy; output
+    // transfer selection is independently derived from EDID + the advanced
+    // color-management gate.  Keep the compatibility field below, but label
+    // it as a request rather than an observed scanout route.
+    let hdr_postprocess_requested = hdr_enabled && hdr_output_count > 0;
 
-    let sdr_on_hdr_policy = if !hdr_active {
+    let sdr_on_hdr_policy = if !hdr_postprocess_requested {
         "hdr_disabled_or_no_hdr_outputs"
     } else if render_path_enabled && advanced_enabled {
-        "preserve_sdr_with_surface_color_transform"
+        "normalized_transfer_and_gamut_without_absolute_luminance_mapping"
     } else {
         "legacy_sdr_passthrough_on_hdr_output"
     };
 
-    let mixed_hdr_policy = if !mixed_hdr_outputs {
-        "single_output_class"
-    } else if render_path_enabled && scene_linear_enabled {
-        "scene_linear_global_encode"
-    } else if render_path_enabled {
-        "per_surface_transform_without_scene_linear_blending"
-    } else {
+    let mixed_hdr_policy = if !advanced_enabled || !render_path_enabled {
         "safe_srgb_legacy_compositing"
+    } else if !heterogeneous_output_profiles {
+        "single_output_class"
+    } else if scene_linear_enabled {
+        "per_output_delivery_infrastructure_sdr_signalling_fail_closed"
+    } else {
+        "per_surface_transform_without_scene_linear_blending"
     };
 
     let mut blockers = Vec::new();
-    if hdr_active && !advanced_enabled {
+    if hdr_postprocess_requested && !advanced_enabled {
         blockers.push("advanced_color_management_disabled");
     }
-    if hdr_active && !render_path_enabled {
+    if hdr_postprocess_requested && !render_path_enabled {
         blockers.push("color_management_render_path_disabled");
     }
-    if mixed_hdr_outputs && !scene_linear_enabled {
+    if heterogeneous_output_profiles && !scene_linear_enabled {
         blockers.push("scene_linear_compositing_inactive");
     }
-    if mixed_hdr_outputs && scene_linear_enabled {
-        blockers.push("per_output_encode_unavailable");
+    if hdr_postprocess_requested {
+        blockers.push("hdr_signalling_enable_unavailable_until_external_elements_adapted");
     }
+
+    // This status endpoint has no last-frame delivery snapshot. Report the
+    // implemented policy and its eligibility constraints, not an invented
+    // claim that software regions or KMS properties are active right now.
+    let per_output_delivery_available = render_path_enabled && scene_linear_enabled;
 
     serde_json::json!({
         "hdr_output_count": hdr_output_count,
         "sdr_output_count": sdr_output_count,
         "mixed_hdr_outputs": mixed_hdr_outputs,
-        "hdr_active": hdr_active,
+        "heterogeneous_output_profiles": heterogeneous_output_profiles,
+        // Compatibility field now reflects the physical signal instead of a
+        // configuration request. HDR enable is fail-closed in this slice.
+        "hdr_active": false,
+        "hdr_active_semantics": "physical_output_signal_fail_closed_sdr",
+        "hdr_postprocess_requested_on_capable_output": hdr_postprocess_requested,
         "sdr_on_hdr_policy": sdr_on_hdr_policy,
         "mixed_hdr_policy": mixed_hdr_policy,
         "scene_linear_enabled": scene_linear_enabled,
         "blockers": blockers,
+        "delivery_capabilities": {
+            "capability": if per_output_delivery_available {
+                "normalized_linear_srgb_per_output_delivery_infrastructure"
+            } else {
+                "inactive"
+            },
+            "working_space": if scene_linear_enabled {
+                "normalized_linear_srgb"
+            } else {
+                "legacy_encoded_srgb"
+            },
+            "luminance_model": "source_transfer_native_normalized",
+            "software_per_output_encode_regions": per_output_delivery_available,
+            "software_region_scope": "linear_tail_safe_supported_physical_regions",
+            "software_region_requirements": [
+                "nonnegative_physical_origin",
+                "unit_scale",
+                "normal_transform",
+                "nonconflicting_overlap"
+            ],
+            "hardware_delivery_policy": "paired_all_output_crtc_lut_ctm_or_none",
+            "runtime_output_signal_policy": "sdr_srgb_fail_closed",
+            "hdr_signalling_enable_available": false,
+        },
+        "fallback_policy": {
+            "route": "global_srgb",
+            "selection": "per_frame",
+            "route_observation": "last_frame_not_exposed",
+            "triggers": [
+                "encoded_late_overlay",
+                "kms_external_cursor",
+                "kms_external_drag_icon",
+                "kms_external_lock_surface",
+                "kms_external_top_or_overlay_layer",
+                "capture",
+                "unsupported_output_topology",
+                "scene_linear_target_unavailable"
+            ],
+            "normal_desktop_cursor_effect": "usually_selects_global_srgb_fallback"
+        },
+        "limitations": [
+            "absolute_luminance_normalization_unavailable",
+            "non_d65_chromatic_adaptation_unavailable",
+            "surface_color_description_commit_latching_unavailable",
+            "hdr_signalling_enable_unavailable_until_external_elements_adapted",
+            "kms_external_elements_not_color_adapted",
+            "kms_color_properties_and_framebuffer_not_atomic"
+        ],
     })
 }
 
@@ -565,14 +645,14 @@ fn output_color_policy_json(
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
 
-    let policy_source = if !advanced_enabled {
+    let capability_source = if !advanced_enabled {
         "srgb_safe_default"
     } else if output.hdr_metadata.is_some() {
-        "edid_hdr"
+        "edid_hdr_capability"
     } else {
         "srgb_no_edid"
     };
-    let params = if advanced_enabled {
+    let capability_params = if advanced_enabled {
         output
             .hdr_metadata
             .as_ref()
@@ -581,6 +661,7 @@ fn output_color_policy_json(
     } else {
         srgb_params()
     };
+    let runtime_params = srgb_params();
     let kms_ctm = kms_color
         .and_then(|c| c.get("ctm_supported"))
         .and_then(|v| v.as_bool())
@@ -589,21 +670,33 @@ fn output_color_policy_json(
         .and_then(|c| c.get("gamma_lut_supported"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let wants_non_srgb = params.primaries_named != Some(1) || params.tf_named != Some(2);
+    let wants_non_srgb = capability_params.primaries_named != Some(1)
+        || capability_params.tf_named != Some(crate::backend::color_policy::TF_SRGB);
     let shader_fallback_required = render_path_enabled && wants_non_srgb && !(kms_ctm && kms_gamma);
 
     serde_json::json!({
         "advanced_enabled": advanced_enabled,
         "render_path_enabled": render_path_enabled,
-        "policy_source": policy_source,
-        "selected_transfer_function": color_transfer_name(params.tf_named),
-        "selected_transfer_function_raw": params.tf_named,
-        "selected_primaries": color_primaries_name(params.primaries_named),
-        "selected_primaries_raw": params.primaries_named,
-        "min_luminance": params.min_lum,
-        "max_luminance": params.max_lum,
-        "reference_luminance": params.reference_lum,
+        "policy_source": "runtime_srgb_fail_closed",
+        "capability_source": capability_source,
+        "selected_transfer_function": color_transfer_name(runtime_params.tf_named),
+        "selected_transfer_function_raw": runtime_params.tf_named,
+        "selected_primaries": color_primaries_name(runtime_params.primaries_named),
+        "selected_primaries_raw": runtime_params.primaries_named,
+        "capability_transfer_function": color_transfer_name(capability_params.tf_named),
+        "capability_transfer_function_raw": capability_params.tf_named,
+        "capability_primaries": color_primaries_name(capability_params.primaries_named),
+        "capability_primaries_raw": capability_params.primaries_named,
+        "min_luminance": capability_params.min_lum,
+        "max_luminance": capability_params.max_lum,
+        "reference_luminance": capability_params.reference_lum,
+        "non_srgb_profile_needs_software_without_kms_pair": shader_fallback_required,
+        // Compatibility alias: this is a static delivery requirement, not a
+        // claim that the last frame actually took a shader route.
         "shader_fallback_required": shader_fallback_required,
+        "shader_fallback_semantics": "static_non_srgb_profile_hint_not_active_route",
+        "selected_profile_semantics": "active_fail_closed_output_target",
+        "delivery_route_observation": "last_frame_not_exposed",
     })
 }
 
@@ -615,6 +708,7 @@ fn render_decisions_json(
     hdr_config_enabled: bool,
     blur_config_enabled: bool,
     color_render_path_enabled: bool,
+    scene_linear_target_active: bool,
     color_advanced_enabled: bool,
     kms_color_offload_enabled: bool,
 ) -> serde_json::Value {
@@ -728,45 +822,64 @@ fn render_decisions_json(
         .iter()
         .filter(|output| output.get("hdr_capable").and_then(|value| value.as_bool()) == Some(true))
         .count();
+    let hdr_requested_on_capable_output = hdr_config_enabled && hdr_capable_output_count > 0;
     let hdr_decision = serde_json::json!({
         "configured": hdr_config_enabled,
-        "active": hdr_config_enabled && hdr_capable_output_count > 0,
-        "reason": if hdr_config_enabled {
-            if hdr_capable_output_count > 0 {
-                "enabled_with_hdr_outputs"
-            } else {
-                "no_hdr_capable_outputs"
-            }
+        // The diagnostics backend currently exposes target allocation, but
+        // not the actual per-frame output delivery route. Do not report a
+        // configuration/capability conjunction as observed HDR scanout.
+        "active": serde_json::Value::Null,
+        "active_observation": "last_frame_not_exposed",
+        "requested_on_capable_output": hdr_requested_on_capable_output,
+        "reason": if hdr_requested_on_capable_output {
+            "last_frame_not_exposed"
+        } else if hdr_config_enabled {
+            "no_hdr_capable_outputs"
         } else {
             "disabled_by_config"
         },
         "capable_output_count": hdr_capable_output_count,
     });
 
-    let shader_fallback_output_count = outputs
+    let non_srgb_software_requirement_output_count = outputs
         .iter()
         .filter(|output| {
             output
                 .get("color_management")
-                .and_then(|value| value.get("shader_fallback_required"))
+                .and_then(|value| {
+                    value
+                        .get("non_srgb_profile_needs_software_without_kms_pair")
+                        .or_else(|| value.get("shader_fallback_required"))
+                })
                 .and_then(|value| value.as_bool())
                 == Some(true)
         })
         .count();
     let color_pipeline_decision = serde_json::json!({
         "configured": color_render_path_enabled,
-        "active": color_render_path_enabled,
+        // Kept for schema compatibility. No last-frame route snapshot exists,
+        // so a boolean here would conflate configured intent with runtime use.
+        "active": serde_json::Value::Null,
+        "active_observation": "last_frame_not_exposed",
+        "scene_linear_target_active": scene_linear_target_active,
+        "capability": if color_render_path_enabled && scene_linear_target_active {
+            "normalized_linear_srgb_per_output_delivery"
+        } else if color_render_path_enabled {
+            "per_surface_encoded_color_transform"
+        } else {
+            "disabled"
+        },
         "advanced_protocol_enabled": color_advanced_enabled,
         "kms_offload_configured": kms_color_offload_enabled,
-        "shader_fallback_output_count": shader_fallback_output_count,
+        "non_srgb_software_requirement_output_count": non_srgb_software_requirement_output_count,
+        // Compatibility alias; it does not identify the active frame route.
+        "shader_fallback_output_count": non_srgb_software_requirement_output_count,
         "reason": if !color_render_path_enabled {
             "render_path_disabled_by_config"
-        } else if shader_fallback_output_count > 0 {
-            "shader_fallback_required_for_some_outputs"
-        } else if kms_color_offload_enabled {
-            "kms_offload_available_or_not_required"
+        } else if !scene_linear_target_active {
+            "scene_linear_target_inactive"
         } else {
-            "shader_path_active"
+            "last_frame_route_not_exposed"
         },
     });
 
@@ -1898,6 +2011,7 @@ impl Jwm {
             cfg.behavior().hdr_enabled,
             cfg.behavior().blur_enabled,
             color_render_path_enabled,
+            scene_linear_enabled,
             color_advanced_enabled,
             cfg.behavior().kms_color_pipeline_offload,
         );
@@ -1997,7 +2111,8 @@ impl Jwm {
     /// Apply a single in-memory config override (does not touch the file).
     /// args: { "key": "appearance.border_px", "value": <json> }
     /// args: { "output": "<name>", "enabled": true|false }
-    /// Pushes (or clears) the HDR_OUTPUT_METADATA blob on a KMS connector.
+    /// Clears HDR_OUTPUT_METADATA. Enable requests fail closed until KMS-side
+    /// external elements participate in the color pipeline.
     fn handle_set_hdr_metadata_command(
         &mut self,
         backend: &mut dyn Backend,
@@ -2975,8 +3090,9 @@ mod tests {
             false,
         );
 
-        assert_eq!(value["policy_source"], "srgb_safe_default");
-        assert_eq!(value["selected_transfer_function"], "gamma22");
+        assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
+        assert_eq!(value["capability_source"], "srgb_safe_default");
+        assert_eq!(value["selected_transfer_function"], "srgb");
         assert_eq!(value["selected_primaries"], "srgb");
     }
 
@@ -2995,10 +3111,25 @@ mod tests {
             true,
         );
 
-        assert_eq!(value["policy_source"], "edid_hdr");
-        assert_eq!(value["selected_transfer_function"], "st2084_pq");
-        assert_eq!(value["selected_primaries"], "bt2020");
+        assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
+        assert_eq!(value["capability_source"], "edid_hdr_capability");
+        assert_eq!(value["selected_transfer_function"], "srgb");
+        assert_eq!(value["selected_primaries"], "srgb");
+        assert_eq!(value["capability_transfer_function"], "st2084_pq");
+        assert_eq!(value["capability_primaries"], "bt2020");
+        assert_eq!(
+            value["non_srgb_profile_needs_software_without_kms_pair"],
+            true
+        );
         assert_eq!(value["shader_fallback_required"], true);
+        assert_eq!(
+            value["shader_fallback_semantics"],
+            "static_non_srgb_profile_hint_not_active_route"
+        );
+        assert_eq!(
+            value["delivery_route_observation"],
+            "last_frame_not_exposed"
+        );
     }
 
     #[test]
@@ -3072,14 +3203,61 @@ mod tests {
 
         let full = color_session_policy_json(&[hdr.clone(), sdr.clone()], true, true, true, true);
         assert_eq!(full["mixed_hdr_outputs"], true);
+        assert_eq!(full["heterogeneous_output_profiles"], true);
         assert_eq!(
             full["sdr_on_hdr_policy"],
-            "preserve_sdr_with_surface_color_transform"
+            "normalized_transfer_and_gamut_without_absolute_luminance_mapping"
         );
-        assert_eq!(full["mixed_hdr_policy"], "scene_linear_global_encode");
+        assert_eq!(
+            full["hdr_active_semantics"],
+            "physical_output_signal_fail_closed_sdr"
+        );
+        assert_eq!(full["hdr_active"], false);
+        assert_eq!(
+            full["mixed_hdr_policy"],
+            "per_output_delivery_infrastructure_sdr_signalling_fail_closed"
+        );
         assert_eq!(
             full["blockers"],
-            serde_json::json!(["per_output_encode_unavailable"])
+            serde_json::json!([
+                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
+            ])
+        );
+        assert_eq!(
+            full["delivery_capabilities"]["working_space"],
+            "normalized_linear_srgb"
+        );
+        assert_eq!(
+            full["delivery_capabilities"]["luminance_model"],
+            "source_transfer_native_normalized"
+        );
+        assert_eq!(
+            full["delivery_capabilities"]["software_per_output_encode_regions"],
+            true
+        );
+        assert_eq!(
+            full["delivery_capabilities"]["hardware_delivery_policy"],
+            "paired_all_output_crtc_lut_ctm_or_none"
+        );
+        assert_eq!(full["fallback_policy"]["route"], "global_srgb");
+        assert_eq!(
+            full["fallback_policy"]["route_observation"],
+            "last_frame_not_exposed"
+        );
+        assert_eq!(
+            full["fallback_policy"]["normal_desktop_cursor_effect"],
+            "usually_selects_global_srgb_fallback"
+        );
+        assert_eq!(
+            full["limitations"],
+            serde_json::json!([
+                "absolute_luminance_normalization_unavailable",
+                "non_d65_chromatic_adaptation_unavailable",
+                "surface_color_description_commit_latching_unavailable",
+                "hdr_signalling_enable_unavailable_until_external_elements_adapted",
+                "kms_external_elements_not_color_adapted",
+                "kms_color_properties_and_framebuffer_not_atomic"
+            ])
         );
 
         let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false);
@@ -3093,7 +3271,8 @@ mod tests {
             serde_json::json!([
                 "advanced_color_management_disabled",
                 "color_management_render_path_disabled",
-                "scene_linear_compositing_inactive"
+                "scene_linear_compositing_inactive",
+                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
             ])
         );
 
@@ -3107,6 +3286,46 @@ mod tests {
         assert_eq!(
             configured_without_render_path["scene_linear_enabled"],
             false
+        );
+        assert_eq!(
+            configured_without_render_path["delivery_capabilities"]["working_space"],
+            "legacy_encoded_srgb"
+        );
+        assert_eq!(
+            configured_without_render_path["delivery_capabilities"]["software_per_output_encode_regions"],
+            false
+        );
+
+        let pq = output(Some(EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        }));
+        let mut hlg = output(Some(EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            supports_bt2020: true,
+            supports_pq: false,
+            supports_hlg: true,
+        }));
+        hlg.id = OutputId(3);
+        hlg.name = "HDMI-A-2".into();
+        hlg.identity = OutputIdentity::connector_only("HDMI-A-2");
+        let pq_hlg = color_session_policy_json(&[pq, hlg], true, true, false, true);
+        assert_eq!(pq_hlg["mixed_hdr_outputs"], false);
+        assert_eq!(pq_hlg["heterogeneous_output_profiles"], true);
+        assert_eq!(
+            pq_hlg["mixed_hdr_policy"],
+            "per_surface_transform_without_scene_linear_blending"
+        );
+        assert_eq!(
+            pq_hlg["blockers"],
+            serde_json::json!([
+                "scene_linear_compositing_inactive",
+                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
+            ])
         );
     }
 
@@ -3295,6 +3514,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         );
 
         assert_eq!(decisions["direct_scanout"]["active"], false);
@@ -3323,12 +3543,34 @@ mod tests {
             true,
             true,
             true,
+            true,
             false,
         );
 
         assert_eq!(decisions["blur"]["active"], true);
-        assert_eq!(decisions["hdr"]["active"], false);
+        assert_eq!(decisions["hdr"]["active"], serde_json::Value::Null);
+        assert_eq!(
+            decisions["hdr"]["active_observation"],
+            "last_frame_not_exposed"
+        );
+        assert_eq!(decisions["hdr"]["requested_on_capable_output"], false);
         assert_eq!(decisions["hdr"]["reason"], "no_hdr_capable_outputs");
         assert_eq!(decisions["tearing"]["active"], true);
+        assert_eq!(
+            decisions["color_pipeline"]["active"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["active_observation"],
+            "last_frame_not_exposed"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["scene_linear_target_active"],
+            true
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["capability"],
+            "normalized_linear_srgb_per_output_delivery"
+        );
     }
 }

@@ -3,8 +3,8 @@
 /// The protocol lets clients describe surface colorimetry (HDR transfer curves,
 /// primaries, mastering metadata) and query per-output preferred image
 /// descriptions. Surface snapshots feed the compositor's per-window transform
-/// plans, while output preferences come from EDID color/HDR capabilities with
-/// an sRGB fallback.
+/// plans, while output preferences use an EDID HDR profile only while KMS is
+/// actively signalling that profile; the safe default is sRGB.
 ///
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).
@@ -36,9 +36,32 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const COLOR_MANAGER_VERSION: u32 = 1;
+
+#[derive(Debug, Default)]
+struct OutputHdrMetadataState {
+    active: AtomicBool,
+}
+
+#[cfg_attr(not(feature = "backend-wayland-udev"), allow(dead_code))]
+pub(crate) fn set_output_hdr_metadata_active(output: &Output, active: bool) {
+    output
+        .user_data()
+        .insert_if_missing_threadsafe::<OutputHdrMetadataState, _>(OutputHdrMetadataState::default);
+    if let Some(state) = output.user_data().get::<OutputHdrMetadataState>() {
+        state.active.store(active, Ordering::Release);
+    }
+}
+
+pub(crate) fn output_hdr_metadata_active(output: &Output) -> bool {
+    output
+        .user_data()
+        .get::<OutputHdrMetadataState>()
+        .is_some_and(|state| state.active.load(Ordering::Acquire))
+}
 
 #[derive(Debug, Clone)]
 pub enum ImageDescriptionState {
@@ -74,13 +97,17 @@ struct FeedbackBucket {
     outputs: HashSet<String>,
     /// (id, params) of the most recently emitted preferred description. Used
     /// to short-circuit redundant preferred_changed events when the picked
-    /// output's EDID-derived params haven't actually changed.
+    /// output's currently signalled params haven't actually changed.
     last_preferred: Option<(u64, ParametricParams)>,
 }
 
 /// Singleton state held by JwmWaylandState.
 pub struct ColorManagerState {
     id_counter: Arc<Mutex<u64>>,
+    /// Monotonic invalidation clock for compositor copies of surface color
+    /// plans. Image descriptions are immutable once ready, so identity changes
+    /// and removals are the only transitions which need to advance it.
+    surface_description_generation: AtomicU64,
     /// Per-surface applied image description (set via
     /// wp_color_management_surface_v1.set_image_description). Stores the full
     /// parametric params so the render path can read them without re-walking
@@ -96,6 +123,7 @@ impl ColorManagerState {
     pub fn new() -> Self {
         Self {
             id_counter: Arc::new(Mutex::new(1)),
+            surface_description_generation: AtomicU64::new(1),
             surface_descriptions: Arc::new(Mutex::new(HashMap::new())),
             feedback: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -106,6 +134,37 @@ impl ColorManagerState {
         let id = *g;
         *g = g.wrapping_add(1);
         id
+    }
+
+    pub fn surface_description_generation(&self) -> u64 {
+        self.surface_description_generation.load(Ordering::Acquire)
+    }
+
+    fn set_surface_description(&self, surface: ObjectId, record: SurfaceDescriptionRecord) -> bool {
+        let mut descriptions = self.surface_descriptions.lock_safe();
+        let changed = descriptions
+            .get(&surface)
+            .is_none_or(|previous| previous.identity != record.identity);
+        descriptions.insert(surface, record);
+        drop(descriptions);
+        if changed {
+            self.surface_description_generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        changed
+    }
+
+    fn remove_surface_description(&self, surface: &ObjectId) -> bool {
+        let changed = self
+            .surface_descriptions
+            .lock_safe()
+            .remove(surface)
+            .is_some();
+        if changed {
+            self.surface_description_generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        changed
     }
 
     /// Snapshot the surface→description map in one lock acquisition. The
@@ -159,7 +218,7 @@ impl ColorManagerState {
     }
 
     /// A surface gained a frame on `output`. Builds a new preferred description
-    /// from the output's EDID caps (or sRGB fallback) and, if the params differ
+    /// from the output's active signal (or sRGB fallback) and, if the params differ
     /// from what we last emitted, fires preferred_changed on every live
     /// feedback resource for this surface.
     pub fn on_surface_enters_output(&self, surface: &ObjectId, output: &Output) {
@@ -212,14 +271,24 @@ impl ColorManagerState {
     }
 }
 
+fn params_for_output_policy(
+    advanced_enabled: bool,
+    hdr_metadata_active: bool,
+    edid: Option<&EdidHdrCapabilities>,
+) -> ParametricParams {
+    if advanced_enabled && hdr_metadata_active {
+        edid.map(params_from_edid).unwrap_or_else(srgb_params)
+    } else {
+        srgb_params()
+    }
+}
+
 pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
-    if !advanced_color_management_enabled() {
-        return srgb_params();
-    }
-    match output.user_data().get::<EdidHdrCapabilities>() {
-        Some(caps) => params_from_edid(caps),
-        None => srgb_params(),
-    }
+    params_for_output_policy(
+        advanced_color_management_enabled(),
+        output_hdr_metadata_active(output),
+        output.user_data().get::<EdidHdrCapabilities>(),
+    )
 }
 
 impl Default for ColorManagerState {
@@ -243,6 +312,7 @@ fn emit_manager_caps(resource: &WpColorManagerV1) {
     // Mandatory: perceptual.
     resource.supported_intent(RenderIntent::Perceptual);
     resource.supported_feature(Feature::Parametric);
+    resource.supported_tf_named(TransferFunction::Srgb);
     resource.supported_tf_named(TransferFunction::Gamma22);
     resource.supported_primaries_named(Primaries::Srgb);
     if advanced_color_management_enabled() {
@@ -261,18 +331,12 @@ fn emit_manager_caps(resource: &WpColorManagerV1) {
     resource.done();
 }
 
-/// Build the per-output image description params. Looks up EDID HDR caps stashed
-/// on the smithay Output's user_data (see `attach_edid_caps_to_outputs` in the
-/// wayland_udev backend).
+/// Build the per-output image description params. EDID HDR caps stashed on the
+/// Smithay output are selected only while KMS confirms that HDR metadata is
+/// actively signalled; otherwise clients receive the exact-sRGB safe default.
 fn params_for_wl_output(wl_output: &WlOutput) -> ParametricParams {
-    if !advanced_color_management_enabled() {
-        return srgb_params();
-    }
     match Output::from_resource(wl_output) {
-        Some(o) => match o.user_data().get::<EdidHdrCapabilities>() {
-            Some(caps) => params_from_edid(caps),
-            None => srgb_params(),
-        },
+        Some(output) => params_for_output(&output),
         None => srgb_params(),
     }
 }
@@ -429,10 +493,12 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
     ) {
         match request {
             wp_color_management_surface_v1::Request::Destroy => {
-                if let Some(cm) = state.color_manager.as_ref() {
-                    cm.surface_descriptions
-                        .lock_safe()
-                        .remove(&data.surface.id());
+                let changed = state
+                    .color_manager
+                    .as_ref()
+                    .is_some_and(|cm| cm.remove_surface_description(&data.surface.id()));
+                if changed {
+                    state.needs_redraw = true;
                 }
             }
             wp_color_management_surface_v1::Request::SetImageDescription {
@@ -454,16 +520,18 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
                         ImageDescriptionState::Failed => None,
                     });
                 if let (Some(record), Some(cm)) = (snapshot, state.color_manager.as_ref()) {
-                    cm.surface_descriptions
-                        .lock_safe()
-                        .insert(data.surface.id(), record);
+                    if cm.set_surface_description(data.surface.id(), record) {
+                        state.needs_redraw = true;
+                    }
                 }
             }
             wp_color_management_surface_v1::Request::UnsetImageDescription => {
-                if let Some(cm) = state.color_manager.as_ref() {
-                    cm.surface_descriptions
-                        .lock_safe()
-                        .remove(&data.surface.id());
+                let changed = state
+                    .color_manager
+                    .as_ref()
+                    .is_some_and(|cm| cm.remove_surface_description(&data.surface.id()));
+                if changed {
+                    state.needs_redraw = true;
                 }
             }
             _ => {}
@@ -477,10 +545,11 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
         data: &SurfaceCmData,
     ) {
         if let Some(cm) = state.color_manager.as_ref() {
-            cm.surface_descriptions
-                .lock_safe()
-                .remove(&data.surface.id());
+            let changed = cm.remove_surface_description(&data.surface.id());
             cm.forget_surface(&data.surface.id());
+            if changed {
+                state.needs_redraw = true;
+            }
         }
     }
 }
@@ -896,6 +965,7 @@ mod tests {
     fn policy_constants_match_the_protocol_enums() {
         assert_eq!(color_policy::TF_BT1886, TransferFunction::Bt1886 as u32);
         assert_eq!(color_policy::TF_GAMMA22, TransferFunction::Gamma22 as u32);
+        assert_eq!(color_policy::TF_SRGB, TransferFunction::Srgb as u32);
         assert_eq!(
             color_policy::TF_ST2084_PQ,
             TransferFunction::St2084Pq as u32
@@ -905,6 +975,38 @@ mod tests {
         assert_eq!(
             color_policy::PRIMARIES_NAMED_BT2020,
             Primaries::Bt2020 as u32
+        );
+    }
+
+    #[test]
+    fn output_params_policy_never_leaks_edid_hdr_past_the_advanced_gate() {
+        let hdr = EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+
+        let gated = params_for_output_policy(false, true, Some(&hdr));
+        assert_eq!(gated.tf_named, Some(color_policy::TF_SRGB));
+        assert_eq!(
+            gated.primaries_named,
+            Some(color_policy::PRIMARIES_NAMED_SRGB)
+        );
+
+        let inactive = params_for_output_policy(true, false, Some(&hdr));
+        assert_eq!(inactive.tf_named, Some(color_policy::TF_SRGB));
+        assert_eq!(
+            inactive.primaries_named,
+            Some(color_policy::PRIMARIES_NAMED_SRGB)
+        );
+
+        let advanced = params_for_output_policy(true, true, Some(&hdr));
+        assert_eq!(advanced.tf_named, Some(color_policy::TF_ST2084_PQ));
+        assert_eq!(
+            advanced.primaries_named,
+            Some(color_policy::PRIMARIES_NAMED_BT2020)
         );
     }
 }
