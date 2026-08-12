@@ -1596,6 +1596,9 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_set_magnifier(&mut self, _enabled: bool) {}
     fn compositor_set_snap_preview(&mut self, _preview: Option<(f32, f32, f32, f32)>) {}
     fn compositor_clear_snap_preview_immediate(&mut self) {}
+    /// Freeze the current compositor scene while an interactive screenshot is
+    /// being edited. Backends without a texture overlay keep the old behavior.
+    fn compositor_set_screenshot_freeze(&mut self, _active: bool) {}
 
     fn compositor_set_overview_mode(
         &mut self,

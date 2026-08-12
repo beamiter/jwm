@@ -612,6 +612,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_set_screenshot_freeze(&mut self, active: bool) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.set_screenshot_freeze(active);
+                }
+            }
+
             fn compositor_set_overview_mode(
                 &mut self,
                 active: bool,

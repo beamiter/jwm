@@ -966,6 +966,7 @@ impl Jwm {
         }
 
         self.features.screenshot.start();
+        backend.compositor_set_screenshot_freeze(true);
         self.features.capture.screenshot = CaptureTarget::Region;
         self.features
             .screenshot
@@ -1065,6 +1066,7 @@ impl Jwm {
     pub(crate) fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
         self.features.screenshot.cancel();
+        backend.compositor_set_screenshot_freeze(false);
         backend.compositor_set_annotation_mode(false);
         backend.compositor_set_screenshot_toolbar(None);
         if backend.has_compositor() {
@@ -1124,6 +1126,7 @@ impl Jwm {
                 // it: the compositor captures the very next frame, and a strip
                 // still on screen would be baked into the PNG.
                 self.features.screenshot.cancel();
+                backend.compositor_set_screenshot_freeze(false);
                 backend.compositor_set_annotation_mode(false);
                 backend.compositor_set_screenshot_toolbar(None);
                 if backend.has_compositor() {

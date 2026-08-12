@@ -430,6 +430,120 @@ fn dirty_below_requires_full_blur_redraw(
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    /// Arm or disarm the interactive screenshot scene freeze. The actual copy
+    /// is deferred until the next completed scene, so the selection overlay
+    /// can never become part of the frozen image.
+    pub(crate) fn set_screenshot_freeze(&mut self, active: bool) {
+        self.screenshot_freeze_pending = active;
+        if !active {
+            if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                }
+            }
+            self.screenshot_freeze_size = None;
+        }
+        self.needs_render = true;
+    }
+
+    fn capture_screenshot_freeze(&mut self) {
+        if !self.screenshot_freeze_pending {
+            return;
+        }
+        let size_changed = self.screenshot_freeze_size != Some((self.screen_w, self.screen_h));
+        if size_changed {
+            if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                }
+            }
+            self.screenshot_freeze_size = None;
+        }
+        if self.screenshot_freeze_fbo.is_none() {
+            match unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                Ok(target) => {
+                    self.screenshot_freeze_fbo = Some(target);
+                    self.screenshot_freeze_size = Some((self.screen_w, self.screen_h));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "{}: {error}",
+                        self.renderer_ctx("screenshot-freeze: allocate scene FBO")
+                    );
+                    return;
+                }
+            }
+        }
+        let Some((freeze_fbo, _)) = self.screenshot_freeze_fbo else {
+            return;
+        };
+        unsafe {
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(freeze_fbo));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+        self.screenshot_freeze_pending = false;
+    }
+
+    fn render_screenshot_freeze(&self, projection: &[f32; 16]) {
+        let Some((_, texture)) = self.screenshot_freeze_fbo else {
+            return;
+        };
+        unsafe {
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.use_program(Some(self.transition_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.transition_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl
+                .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(
+                self.transition_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl
+                .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+            self.gl.uniform_4_f32(
+                self.transition_uniforms.uv_rect.as_ref(),
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            );
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.use_program(None);
+            self.gl.disable(glow::BLEND);
+        }
+    }
+
     // =====================================================================
     // Tag-switch slide transition
     // =====================================================================
@@ -5676,6 +5790,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
         // Capture BEFORE rendering snap preview / annotations so the screenshot
         // doesn't include the selection overlay or annotation strokes.
+        self.capture_screenshot_freeze();
         let has_pending_screenshot = self.screenshot_requests.has_pending();
         for request in self.screenshot_requests.take_all() {
             match request {
@@ -5697,6 +5812,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 5g: Snap preview ===
         // Skip on the frame that captured a screenshot (overlay was already cleared
         // logically; rendering it would leave a ghost on the next visible frame).
+        // The frozen scene is deliberately below screenshot annotations and
+        // the toolbar, but above the live window scene.
+        self.render_screenshot_freeze(&proj);
+
         if !has_pending_screenshot {
             self.render_snap_preview(&proj);
         }

@@ -2471,12 +2471,17 @@ impl KmsState {
             }
         };
 
-        // 5. Save as PNG (pixels are ABGR8888 / RGBA from GL perspective)
-        if let Err(e) = save_rgba_png(path, width as u32, height as u32, pixels) {
-            log::error!("{}: {e}", renderer_ctx("screenshot: save PNG"));
-        } else {
-            log::info!("[screenshot] saved to {}", path.display());
-        }
+        // PNG compression and filesystem I/O are deliberately outside the
+        // compositor frame. Readback still has to happen on the GL thread,
+        // but encoding a 4K frame must not block input and presentation.
+        let pixels = pixels.to_vec();
+        spawn_screenshot_png_write(
+            path.to_owned(),
+            width as u32,
+            height as u32,
+            pixels,
+            "screenshot",
+        );
     }
 
     /// Render to offscreen, then crop a region and save as PNG.
@@ -2574,18 +2579,7 @@ impl KmsState {
                 .copy_from_slice(&full_pixels[src_offset..src_offset + crop_row_bytes]);
         }
 
-        if let Err(e) = save_rgba_png(path, cw, ch, &cropped) {
-            log::error!("{}: {e}", renderer_ctx("screenshot-region: save PNG"));
-        } else {
-            log::info!(
-                "[screenshot-region] saved to {} ({}x{} at {},{})",
-                path.display(),
-                cw,
-                ch,
-                x,
-                y
-            );
-        }
+        spawn_screenshot_png_write(path.to_owned(), cw, ch, cropped, "screenshot-region");
     }
 
     /// Fulfill pending wlr-screencopy copy requests for a given output.
@@ -4895,6 +4889,27 @@ fn save_rgba_png(
 
     writer.write_image_data(pixels)?;
     Ok(())
+}
+
+/// Persist a completed readback without holding up the compositor's frame
+/// loop. The pixel buffer is owned before this is called, so the renderer and
+/// its GL mapping can be released immediately.
+fn spawn_screenshot_png_write(
+    path: std::path::PathBuf,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+    label: &'static str,
+) {
+    match std::thread::Builder::new()
+        .name("jwm-screenshot-png".to_owned())
+        .spawn(move || match save_rgba_png(&path, width, height, &pixels) {
+            Ok(()) => log::info!("[{label}] saved to {}", path.display()),
+            Err(error) => log::error!("[{label}: save PNG] {error}"),
+        }) {
+        Ok(_) => {}
+        Err(error) => log::error!("[screenshot] could not start PNG writer: {error}"),
+    }
 }
 
 #[cfg(test)]
