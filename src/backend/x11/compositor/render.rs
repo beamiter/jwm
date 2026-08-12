@@ -451,6 +451,11 @@ impl<C: CompositorConnection> Compositor<C> {
         if !self.screenshot_freeze_pending {
             return;
         }
+        let stable_source = self.presented_scene_fbo.as_ref().and_then(|(fbo, _)| {
+            self.presented_scene_status
+                .is_usable(self.screen_w, self.screen_h)
+                .then_some(*fbo)
+        });
         let size_changed = self.screenshot_freeze_size != Some((self.screen_w, self.screen_h));
         if size_changed {
             if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
@@ -480,7 +485,17 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         unsafe {
-            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            // A newly allocated target is black. A stale partial-damage
+            // scissor would therefore copy only repaired pixels and leave
+            // client-sized black holes in the frozen scene. Freeze from the
+            // last successfully presented full scene when available, and make
+            // the fallback back-buffer copy explicitly unscissored.
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            self.gl
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, stable_source);
             self.gl
                 .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(freeze_fbo));
             self.gl.blit_framebuffer(
@@ -498,6 +513,9 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
         }
         self.screenshot_freeze_pending = false;
     }
@@ -507,6 +525,10 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         unsafe {
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
             self.gl.enable(glow::BLEND);
             self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(Some(self.transition_program));
@@ -541,6 +563,9 @@ impl<C: CompositorConnection> Compositor<C> {
             self.gl.bind_texture(glow::TEXTURE_2D, None);
             self.gl.use_program(None);
             self.gl.disable(glow::BLEND);
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
         }
     }
 
