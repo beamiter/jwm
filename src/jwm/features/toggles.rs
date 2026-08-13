@@ -1669,12 +1669,36 @@ impl Jwm {
                 self.cancel_recording_region_interaction(backend);
                 return Ok(());
             }
+            if let Err(error) = Self::require_recording_runtime() {
+                backend.compositor_push_toast(crate::backend::api::ToastNotification {
+                    title: "\u{f03d}  Recording unavailable".into(),
+                    body: error.clone(),
+                    urgency: 2,
+                    timeout_ms: 8000,
+                });
+                return Err(error.into());
+            }
             let output_path = self.prepare_recording_output_path()?;
             self.begin_recording_region_selection(backend, output_path)?;
         } else {
             self.stop_recording(backend)?;
         }
         Ok(())
+    }
+
+    fn require_recording_runtime() -> Result<(), String> {
+        let path = std::env::var_os("PATH");
+        let missing = crate::jwm::features::recording_plan::missing_runtime_tools(|tool| {
+            crate::terminal_prober::command_exists_in_path(tool, path.as_deref())
+        });
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "missing {} in PATH; install the ffmpeg package",
+                missing.join(" and ")
+            ))
+        }
     }
 
     /// Enter interactive move/resize mode while keeping the encoder running.
@@ -1967,6 +1991,11 @@ impl Jwm {
         if !backend.has_compositor() {
             return Err("screen recording requires an active compositor".into());
         }
+        // Do this before mutating RecordingState.  Previously a missing
+        // ffmpeg executable made the compositor reject the child spawn while
+        // the WM still reported an active recording, then "stopped" without
+        // ever creating an MP4.
+        Self::require_recording_runtime()?;
         let output = std::path::Path::new(output_path);
         crate::jwm::features::recording_plan::validate_output_path(output)?;
         if let Some(parent) = output.parent() {

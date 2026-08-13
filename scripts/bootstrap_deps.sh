@@ -119,6 +119,9 @@ APT_BAR=(
 # Runtime helpers useful for nested testing / running a session.
 APT_RUNTIME=(
     xwayland xserver-xephyr
+    # Built-in screen recording encodes and validates MP4 files through these
+    # two executables (both are shipped by Debian/Ubuntu's ffmpeg package).
+    ffmpeg
 )
 
 # Optional: xdg-desktop-portal ScreenCast backend (PipeWire).

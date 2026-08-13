@@ -32,6 +32,8 @@ development backends.
 
 JWM requires the normal Linux X11, Wayland, DRM/GBM, libinput, libseat, EGL/GL,
 ALSA, D-Bus, and font/rendering development packages for your distribution.
+The built-in MP4 recorder additionally requires the `ffmpeg` and `ffprobe`
+executables (the `ffmpeg` package on Debian/Ubuntu).
 The minimum supported Rust version with the committed `Cargo.lock` is 1.89;
 it is declared in `Cargo.toml` and checked in CI.
 

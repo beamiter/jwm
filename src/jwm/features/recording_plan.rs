@@ -8,6 +8,21 @@
 use crate::core::types::Rect;
 use std::path::{Path, PathBuf};
 
+/// External programs required by the compositor recording pipeline.
+pub const RECORDING_RUNTIME_TOOLS: [&str; 2] = ["ffmpeg", "ffprobe"];
+
+/// Return the recording helpers which are not executable in the current
+/// environment.  The availability predicate is injected so startup/IPC code
+/// can use `PATH` while the policy remains deterministic in tests.
+pub fn missing_runtime_tools(
+    mut executable_available: impl FnMut(&str) -> bool,
+) -> Vec<&'static str> {
+    RECORDING_RUNTIME_TOOLS
+        .into_iter()
+        .filter(|tool| !executable_available(tool))
+        .collect()
+}
+
 /// 录制区域在两个方向上的最小尺寸（像素）。
 pub const MIN_RECORDING_DIMENSION: i32 = 16;
 
@@ -193,6 +208,16 @@ mod tests {
                 .unwrap_err()
                 .contains("recording_output_dir")
         );
+    }
+
+    #[test]
+    fn recording_runtime_requires_encoder_and_validator() {
+        assert!(missing_runtime_tools(|_| true).is_empty());
+        assert_eq!(
+            missing_runtime_tools(|tool| tool == "ffmpeg"),
+            vec!["ffprobe"]
+        );
+        assert_eq!(missing_runtime_tools(|_| false), vec!["ffmpeg", "ffprobe"]);
     }
 
     #[test]
