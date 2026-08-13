@@ -1397,6 +1397,12 @@ impl Jwm {
             backend.compositor_set_peek_mode(false);
             info!("[config] closed peek after peek_enabled=false");
         }
+        if self.features.screenshot.active {
+            // The selector can remain open across a config reload. Apply the
+            // new scene policy immediately instead of waiting for the next
+            // screenshot session.
+            backend.compositor_set_screenshot_freeze(cfg.behavior().screenshot_freeze_enabled);
+        }
 
         // 2. Re-apply color schemes
         let colors = cfg.colors();

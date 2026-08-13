@@ -444,6 +444,17 @@ impl<C: CompositorConnection> Compositor<C> {
         // recreated lazily from the first complete frame at the new geometry;
         // tag switches before then intentionally fall back to no animation.
         self.retire_presented_scene_snapshot();
+        // An active screenshot freeze also owns a full-output target. Retire
+        // the old-sized image and recapture the first complete frame at the
+        // new geometry instead of stretching stale pixels indefinitely.
+        if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
+            unsafe {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(texture);
+            }
+            self.screenshot_freeze_size = None;
+            self.screenshot_freeze_pending = true;
+        }
 
         // Recreate blur FBOs for new screen size. The chain also backs the
         // frosted-glass UI theme, so its presence — not `blur_enabled` — is

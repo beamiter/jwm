@@ -965,15 +965,20 @@ impl Jwm {
             }
         }
 
+        let freeze_enabled = crate::config::CONFIG
+            .load()
+            .behavior()
+            .screenshot_freeze_enabled;
         self.features.screenshot.start();
-        backend.compositor_set_screenshot_freeze(true);
+        backend.compositor_set_screenshot_freeze(freeze_enabled);
         self.features.capture.screenshot = CaptureTarget::Region;
         self.features
             .screenshot
             .set_output_path(screenshot_path.to_owned());
         info!(
-            "[take_screenshot] interactive capture → {} (G/W/M/D or Tab selects source)",
-            screenshot_path
+            "[take_screenshot] interactive capture → {} (scene={}, G/W/M/D or Tab selects source)",
+            screenshot_path,
+            if freeze_enabled { "frozen" } else { "live" }
         );
         Ok(true)
     }

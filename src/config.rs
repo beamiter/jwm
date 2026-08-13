@@ -960,6 +960,11 @@ pub struct BehaviorConfig {
     /// Annotation pen width in pixels.
     #[serde(default = "default_annotation_line_width")]
     pub annotation_line_width: f32,
+    /// Freeze the fully composited desktop behind the interactive screenshot
+    /// selector/editor. Disable this to keep client windows and animations
+    /// live while a region is selected or annotated.
+    #[serde(default = "default_true")]
+    pub screenshot_freeze_enabled: bool,
 
     // --- Phase 7: Diagnostics ---
     /// Enable shader hot reload from files.
@@ -1892,6 +1897,7 @@ impl Default for Config {
                     colorblind_mode: String::new(),
                     annotation_color: default_annotation_color(),
                     annotation_line_width: default_annotation_line_width(),
+                    screenshot_freeze_enabled: true,
                     // Phase 7: Diagnostics
                     shader_hot_reload: false,
                     shader_dir: String::new(),
@@ -3801,6 +3807,9 @@ impl Config {
             "behavior.fading" => self.inner.behavior.fading = as_bool()?,
             "behavior.wobbly_windows" => self.inner.behavior.wobbly_windows = as_bool()?,
             "behavior.motion_trail" => self.inner.behavior.motion_trail = as_bool()?,
+            "behavior.screenshot_freeze_enabled" => {
+                self.inner.behavior.screenshot_freeze_enabled = as_bool()?
+            }
             "behavior.recording_fps" => {
                 let v = as_u32()?;
                 if !(1..=240).contains(&v) {
@@ -4189,6 +4198,22 @@ mod tests {
             .join("\n");
         let parsed: TomlConfig = toml::from_str(&without_api).unwrap();
         assert_eq!(parsed.behavior.compositor_api, "egl");
+    }
+
+    #[test]
+    fn screenshot_freeze_defaults_on_and_old_configs_remain_compatible() {
+        let config = Config::default();
+        assert!(config.behavior().screenshot_freeze_enabled);
+
+        let serialized = toml::to_string(&config.inner).unwrap();
+        assert!(serialized.contains("screenshot_freeze_enabled = true"));
+        let without_freeze_setting = serialized
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("screenshot_freeze_enabled"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: TomlConfig = toml::from_str(&without_freeze_setting).unwrap();
+        assert!(parsed.behavior.screenshot_freeze_enabled);
     }
 
     #[test]
@@ -4871,6 +4896,24 @@ border_px = 3
                 .is_err()
         );
         assert_eq!(cfg.behavior().recording_fps, 30);
+    }
+
+    #[test]
+    fn screenshot_freeze_is_hot_tunable() {
+        let mut cfg = Config::default();
+        cfg.set_value(
+            "behavior.screenshot_freeze_enabled",
+            &serde_json::json!(false),
+        )
+        .unwrap();
+        assert!(!cfg.behavior().screenshot_freeze_enabled);
+        assert!(
+            cfg.set_value(
+                "behavior.screenshot_freeze_enabled",
+                &serde_json::json!("false"),
+            )
+            .is_err()
+        );
     }
 
     #[test]
