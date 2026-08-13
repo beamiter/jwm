@@ -197,6 +197,53 @@ conversions remain for that consumer and should not gain new ones.
 `render_over(None)` is still exactly `render`, so retained Cairo call sites
 keep compiling either way.
 
+## Icons
+
+Two different things in a bar are called icons, and they fail in two different
+ways.
+
+**Glyph icons** — tags, the metrics cluster, the shell entry — are private-use
+code points from a patched Nerd Font. A bar's `font` is normally a UI face that
+has none of them, so Pango resolves each one through the generic fontconfig
+sort, and the private use area is unassigned: any installed font may claim those
+code points, and stock Arial claims several. That is how a gear tag renders as a
+stray tick and a home tag as an empty box, on one machine and not the next.
+`icon_font` fixes the family that backs those glyphs; leaving it unset lets
+`icon_font::select_icon_family` pick an installed patched font deterministically
+(`XBAR_ICON_FONT` overrides it for one process). Cairo frontends apply this
+inside `CairoBar::new`, so no bar has to thread a second font through.
+
+```toml
+[presentation]
+icon_font = "Symbols Nerd Font Mono"   # optional; auto-detected when omitted
+```
+
+**The window icon** is the real desktop icon of the application owning the
+focused window, drawn beside its title. JWM sends the X11 class or Wayland
+app-id in the monitor snapshot; `app_icon::AppIconResolver` turns that into a
+file through the freedesktop desktop-entry and icon-theme lookup (including
+`StartupWMClass`), caching every answer — misses included, since a miss is the
+one that costs a directory walk. `BarRuntime` resolves on focus changes and the
+scene carries a `SceneNode::Image` naming the file, so each renderer decodes and
+caches textures its own way. Only raster icons are offered: no renderer here
+carries an SVG rasterizer, and an application with a scalable-only icon shows
+its title alone rather than a placeholder. `visibility.client_icon = false`
+turns it off; `ModelConfig::resolve_client_icons = false` stops the lookup
+entirely.
+
+## Layouts
+
+`display::CANONICAL_LAYOUTS` is the one table describing JWM's layouts — wire
+id, name, symbol, label — in cycle order. JWM derives its own cycle, symbols and
+labels from it, so a layout added there reaches every bar's layout menu without
+a second edit.
+
+The menu still follows the *running* window manager rather than the table it was
+compiled against: each snapshot carries how many layouts the compositor offers
+and which one is in use, so a compositor with fewer layouts drops the entries it
+cannot enter, one with more gets the extra ids appended by number, and the
+active entry is marked from the id instead of guessed from the symbol.
+
 ## Shell surface
 
 Bars can reach the window manager's own shell — launcher, notification center,

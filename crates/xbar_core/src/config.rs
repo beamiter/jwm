@@ -240,6 +240,7 @@ struct FilePresentation {
     dock_separator_width: Option<f32>,
     left_fraction: Option<f32>,
     tag_labels: Option<Vec<String>>,
+    icon_font: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -281,7 +282,8 @@ impl BarConfig {
     /// `$XDG_CONFIG_HOME/xbar/config.toml`, else `$HOME/.config/xbar/config.toml`.
     /// A missing conventional file yields the defaults. Afterwards a non-empty
     /// `XBAR_FONT` environment variable overrides the font, preserving the
-    /// pre-config workflow of every native bar.
+    /// pre-config workflow of every native bar, and `XBAR_ICON_FONT` does the
+    /// same for the family that backs private-use icon glyphs.
     pub fn load_default() -> Result<Self, ConfigError> {
         let mut config = match Self::default_path() {
             Some((path, required)) if path.is_file() || required => Self::load(&path)?,
@@ -291,6 +293,11 @@ impl BarConfig {
             && !font.is_empty()
         {
             config.font = font;
+        }
+        if let Ok(icon_font) = std::env::var("XBAR_ICON_FONT")
+            && !icon_font.trim().is_empty()
+        {
+            config.presentation.icon_font = Some(icon_font);
         }
         Ok(config)
     }
@@ -445,6 +452,15 @@ impl BarConfig {
                 });
             }
             presentation.tag_labels = labels;
+        }
+        if let Some(icon_font) = file.presentation.icon_font {
+            if icon_font.trim().is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    field: "presentation.icon_font",
+                    reason: "icon_font must name a font family",
+                });
+            }
+            presentation.icon_font = Some(icon_font);
         }
 
         config.glass = glass_from_file(file.glass)?;

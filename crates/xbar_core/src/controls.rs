@@ -130,6 +130,10 @@ pub struct BarPresentation {
     pub layout_choices: Vec<ControlSpec>,
     /// Omitted when hidden or empty, matching the current layout behavior.
     pub client_name: Option<ControlSpec>,
+    /// Desktop icon for the focused window, when one was resolved and the
+    /// title itself is visible — an icon with nothing to sit beside would be
+    /// a mystery button rather than a label.
+    pub client_icon: Option<crate::app_icon::AppIcon>,
     /// Stable minimized-window controls in compositor-provided order.
     pub minimized_windows: Vec<ControlSpec>,
     /// The shared fixed-capacity list omitted additional minimized windows.
@@ -208,27 +212,7 @@ impl PresentationProjector {
         .with_enabled(view.wm_available);
 
         let layout_choices = if view.layout_selector_open {
-            config
-                .layouts
-                .iter()
-                .map(|layout| {
-                    control(
-                        NodeId::LayoutOption(layout.id),
-                        String::new(),
-                        layout.label.clone(),
-                        None,
-                        None,
-                        None,
-                        ControlState::default(),
-                        InputBindings {
-                            primary: Some(UserAction::SetLayout(layout.id)),
-                            ..InputBindings::default()
-                        },
-                    )
-                    .with_availability(view.wm_available)
-                    .with_enabled(view.wm_available)
-                })
-                .collect()
+            layout_menu(view, config)
         } else {
             Vec::new()
         };
@@ -280,17 +264,86 @@ impl PresentationProjector {
             Vec::new()
         };
 
+        let client_icon = client_name
+            .is_some()
+            .then(|| {
+                config
+                    .visibility
+                    .client_icon
+                    .then(|| view.client_icon.cloned())
+            })
+            .flatten()
+            .flatten();
+
         BarPresentation {
             theme: view.theme,
             tags,
             layout_button,
             layout_choices,
             client_name,
+            client_icon,
             minimized_windows,
             minimized_overflow: view.minimized_overflow,
             status: status_controls(view, config),
         }
     }
+}
+
+/// The open layout menu: one entry per layout the *window manager* offers.
+///
+/// [`PresentationConfig::layouts`] is what this bar build knows how to label,
+/// and [`BarView::layout_count`] is what the compositor on the other end of the
+/// transport actually has. They agree when both come from the same tree, and
+/// this reconciles them when they do not, in both directions:
+///
+/// * a compositor with fewer layouts drops the entries it cannot enter, so the
+///   menu has no button that quietly does nothing;
+/// * a compositor with more gets the extra identifiers appended, labelled by
+///   number, so its new layouts are still reachable from a bar that predates
+///   them.
+///
+/// Both rely on identifiers being assigned densely from zero as layouts are
+/// added — the property `canonical_layout_ids_are_dense_and_appended` pins.
+fn layout_menu(view: BarView<'_>, config: &PresentationConfig) -> Vec<ControlSpec> {
+    let offered = view.layout_count;
+    let extra = crate::display::unknown_layout_ids(offered)
+        .map(crate::LayoutId)
+        // A host that configured its own catalog may already label an
+        // identifier past the canonical table; listing it twice would give one
+        // layout two buttons.
+        .filter(|id| !config.layouts.iter().any(|layout| layout.id == *id))
+        .map(|id| (id, crate::display::unknown_layout_label(id)));
+
+    config
+        .layouts
+        .iter()
+        .filter(|layout| crate::display::layout_is_offered(layout.id, offered))
+        .map(|layout| (layout.id, layout.label.clone()))
+        .chain(extra)
+        .map(|(id, label)| {
+            control(
+                NodeId::LayoutOption(id),
+                String::new(),
+                label,
+                None,
+                None,
+                None,
+                ControlState {
+                    // Only the compositor's own answer marks the entry in use.
+                    // Matching the symbol back to an identifier would guess for
+                    // exactly the layouts this bar does not know.
+                    selected: view.layout == Some(id),
+                    ..ControlState::default()
+                },
+                InputBindings {
+                    primary: Some(UserAction::SetLayout(id)),
+                    ..InputBindings::default()
+                },
+            )
+            .with_availability(view.wm_available)
+            .with_enabled(view.wm_available)
+        })
+        .collect()
 }
 
 fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<ControlSpec> {
@@ -618,7 +671,11 @@ mod tests {
             monitor: MonitorId(2),
             geometry: None,
             layout_symbol: "[]=".to_owned(),
+            layout: None,
+            layout_count: None,
             client_name: "terminal".to_owned(),
+            client_app_id: String::new(),
+            client_icon: None,
             minimized_windows: Vec::new(),
             minimized_overflow: false,
             time: "12:34".to_owned(),
@@ -753,6 +810,103 @@ mod tests {
         assert_eq!(
             open.layout_choices[1].bindings.primary,
             Some(UserAction::SetLayout(LayoutId(42)))
+        );
+    }
+
+    /// The stock menu is every layout the window manager reported, in cycle
+    /// order, with the one in use marked from the identifier it sent.
+    #[test]
+    fn the_open_menu_offers_every_layout_the_window_manager_reports() {
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+        snapshot.layout_count = Some(crate::display::CANONICAL_LAYOUT_COUNT);
+        snapshot.layout = Some(LayoutId(2));
+
+        let open = PresentationProjector::project(snapshot.view(), &PresentationConfig::default());
+        assert_eq!(
+            open.layout_choices.len(),
+            crate::display::CANONICAL_LAYOUT_COUNT
+        );
+        let selected: Vec<_> = open
+            .layout_choices
+            .iter()
+            .filter(|choice| choice.state.selected)
+            .map(|choice| choice.id)
+            .collect();
+        assert_eq!(selected, vec![NodeId::LayoutOption(LayoutId(2))]);
+        assert!(
+            open.layout_choices
+                .iter()
+                .all(|choice| choice.state.enabled)
+        );
+    }
+
+    /// A compositor with fewer layouts than this bar knows must not leave dead
+    /// entries in the menu, and one with more must still be reachable.
+    #[test]
+    fn the_menu_follows_the_window_manager_in_both_directions() {
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+        let config = PresentationConfig::default();
+
+        snapshot.layout_count = Some(3);
+        let narrowed = PresentationProjector::project(snapshot.view(), &config);
+        assert_eq!(
+            narrowed
+                .layout_choices
+                .iter()
+                .map(|choice| choice.id)
+                .collect::<Vec<_>>(),
+            vec![
+                NodeId::LayoutOption(LayoutId(0)),
+                NodeId::LayoutOption(LayoutId(2)),
+                NodeId::LayoutOption(LayoutId(1)),
+            ],
+            "only the identifiers a three-layout compositor accepts, still in cycle order"
+        );
+
+        let known = crate::display::CANONICAL_LAYOUT_COUNT;
+        snapshot.layout_count = Some(known + 2);
+        let widened = PresentationProjector::project(snapshot.view(), &config);
+        assert_eq!(widened.layout_choices.len(), known + 2);
+        let appended: Vec<_> = widened.layout_choices[known..]
+            .iter()
+            .map(|choice| (choice.id, choice.text()))
+            .collect();
+        assert_eq!(
+            appended,
+            vec![
+                (
+                    NodeId::LayoutOption(LayoutId(known as u32)),
+                    format!("L{known}")
+                ),
+                (
+                    NodeId::LayoutOption(LayoutId(known as u32 + 1)),
+                    format!("L{}", known + 1)
+                ),
+            ]
+        );
+    }
+
+    /// A window manager that never reports a count — an older one, or a
+    /// transport that does not carry it — leaves the bar on its own catalog
+    /// rather than emptying the menu.
+    #[test]
+    fn a_silent_window_manager_keeps_the_compiled_catalog() {
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+        snapshot.layout_count = None;
+        snapshot.layout = None;
+
+        let open = PresentationProjector::project(snapshot.view(), &PresentationConfig::default());
+        assert_eq!(
+            open.layout_choices.len(),
+            crate::display::CANONICAL_LAYOUT_COUNT
+        );
+        assert!(
+            open.layout_choices
+                .iter()
+                .all(|choice| !choice.state.selected)
         );
     }
 

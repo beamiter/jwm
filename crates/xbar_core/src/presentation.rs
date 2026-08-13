@@ -198,6 +198,8 @@ pub enum NodeId {
     LayoutButton,
     LayoutOption(LayoutId),
     Client,
+    /// Desktop icon of the application owning the focused window.
+    ClientIcon,
     Monitor,
     Cpu,
     Memory,
@@ -240,6 +242,27 @@ pub struct Stroke {
     pub width: f32,
 }
 
+/// A raster image a renderer is asked to draw.
+///
+/// The scene names a file rather than carrying pixels: decoding and texture
+/// caching belong to the renderer, which is the only layer that knows its own
+/// pixel format and how long a texture should live. `key` is stable for a given
+/// file, so a renderer can cache on it without hashing paths every frame.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ImageSource {
+    pub key: u64,
+    pub path: std::path::PathBuf,
+}
+
+impl From<&crate::app_icon::AppIcon> for ImageSource {
+    fn from(icon: &crate::app_icon::AppIcon) -> Self {
+        Self {
+            key: icon.key,
+            path: icon.path.clone(),
+        }
+    }
+}
+
 /// Minimal display list understood by both retained and immediate renderers.
 /// Multiple primitives may share a semantic [`NodeId`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -274,6 +297,15 @@ pub enum SceneNode {
         width: f32,
         state: VisualState,
     },
+    /// A raster image scaled to fit `bounds` while keeping its aspect ratio.
+    /// A renderer that cannot decode the file draws nothing, which is the same
+    /// outcome as an unresolved icon.
+    Image {
+        id: NodeId,
+        bounds: Rect,
+        source: ImageSource,
+        state: VisualState,
+    },
 }
 
 impl SceneNode {
@@ -283,7 +315,8 @@ impl SceneNode {
             Self::Background { id, .. }
             | Self::RoundedRect { id, .. }
             | Self::Text { id, .. }
-            | Self::Polyline { id, .. } => *id,
+            | Self::Polyline { id, .. }
+            | Self::Image { id, .. } => *id,
         }
     }
 
@@ -293,7 +326,8 @@ impl SceneNode {
             Self::Background { bounds, .. }
             | Self::RoundedRect { bounds, .. }
             | Self::Text { bounds, .. }
-            | Self::Polyline { bounds, .. } => *bounds,
+            | Self::Polyline { bounds, .. }
+            | Self::Image { bounds, .. } => *bounds,
         }
     }
 
@@ -308,7 +342,8 @@ impl SceneNode {
             },
             Self::RoundedRect { state, .. }
             | Self::Text { state, .. }
-            | Self::Polyline { state, .. } => *state,
+            | Self::Polyline { state, .. }
+            | Self::Image { state, .. } => *state,
         }
     }
 }
@@ -737,6 +772,10 @@ impl PresentationLabels {
 #[serde(default)]
 pub struct PresentationVisibility {
     pub client_name: bool,
+    /// Desktop icon of the focused window's application, drawn beside its
+    /// title. Follows `client_name`: without the title there is nothing for
+    /// the icon to label.
+    pub client_icon: bool,
     /// macOS-style shelf containing windows minimized by the WM.
     pub minimized_windows: bool,
     pub monitor: bool,
@@ -760,6 +799,7 @@ impl Default for PresentationVisibility {
     fn default() -> Self {
         Self {
             client_name: true,
+            client_icon: true,
             minimized_windows: true,
             monitor: true,
             system: true,
@@ -808,6 +848,11 @@ pub struct PresentationConfig {
     pub tag_labels: Vec<String>,
     pub layouts: Vec<LayoutChoice>,
     pub labels: PresentationLabels,
+    /// Font family that backs private-use icon glyphs, when the host wants a
+    /// specific one. `None` lets the renderer pick an installed patched font
+    /// itself — see [`crate::icon_font`] for why leaving it to the generic
+    /// font fallback is not an option.
+    pub icon_font: Option<String>,
     /// Optional band-aware/dynamic icon preset for widget and scene
     /// projections. `labels` remains the fallback and customization surface.
     pub icon_set: Option<IconSet>,
@@ -850,12 +895,13 @@ impl Default for PresentationConfig {
                 .collect(),
             layouts: crate::display::CANONICAL_LAYOUTS
                 .into_iter()
-                .map(|(id, label)| LayoutChoice {
-                    id,
-                    label: label.to_owned(),
+                .map(|layout| LayoutChoice {
+                    id: layout.id,
+                    label: layout.symbol.to_owned(),
                 })
                 .collect(),
             labels: PresentationLabels::default(),
+            icon_font: None,
             icon_set: None,
             usage_thresholds: UsageThresholds::default(),
             battery_thresholds: BatteryThresholds::default(),
@@ -978,6 +1024,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             layout_button,
             layout_choices,
             client_name,
+            client_icon,
             minimized_windows,
             minimized_overflow,
             status,
@@ -1124,19 +1171,13 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             let client_right = right_cursor.min(content_right);
             let available = client_right - client_left;
             if available >= self.minimum_visible_width() {
-                let bounds = Rect::new(client_left, y, available, pill_height);
-                let text = self.fit_text(&client_name.value, available, 0.0);
-                if !text.is_empty() {
-                    scene.nodes.push(SceneNode::Text {
-                        id: NodeId::Client,
-                        bounds,
-                        text,
-                        size: self.font_size(),
-                        color: palette.muted_text,
-                        align: TextAlign::Center,
-                        state: VisualState::default(),
-                    });
-                }
+                self.push_client_title(
+                    &mut scene,
+                    Rect::new(client_left, y, available, pill_height),
+                    &client_name.value,
+                    client_icon.as_ref(),
+                    palette,
+                );
             }
         }
 
@@ -1145,6 +1186,79 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         }
 
         scene
+    }
+
+    /// The focused window's title, optionally preceded by its desktop icon.
+    ///
+    /// Icon and title are centred *as one group* rather than centring the text
+    /// and hanging the icon off its left edge: the title is what the eye tracks
+    /// across the bar, and a title that shifts sideways when an icon resolves
+    /// (or fails to) reads as the bar twitching. The icon is dropped when the
+    /// remaining width would leave the title too narrow to read, which keeps a
+    /// crowded bar showing the more informative half.
+    fn push_client_title(
+        &self,
+        scene: &mut Scene,
+        bounds: Rect,
+        title: &str,
+        icon: Option<&crate::app_icon::AppIcon>,
+        palette: Palette,
+    ) {
+        let gap = finite_non_negative(self.config.item_gap);
+        let icon_size = icon
+            .map(|_| self.client_icon_size(bounds.height))
+            .filter(|size| {
+                *size > 0.0 && bounds.width - (*size + gap) >= self.minimum_visible_width()
+            })
+            .unwrap_or(0.0);
+        let icon_advance = if icon_size > 0.0 {
+            icon_size + gap
+        } else {
+            0.0
+        };
+
+        let text = self.fit_text(title, bounds.width - icon_advance, 0.0);
+        if text.is_empty() {
+            return;
+        }
+        let text_width = self
+            .measurer
+            .measure(&text, self.font_size())
+            .width
+            .min(bounds.width - icon_advance);
+        let group_width = text_width + icon_advance;
+        let group_left = bounds.x + ((bounds.width - group_width) * 0.5).max(0.0);
+
+        if let (Some(icon), true) = (icon, icon_size > 0.0) {
+            let top = bounds.y + ((bounds.height - icon_size) * 0.5).max(0.0);
+            scene.nodes.push(SceneNode::Image {
+                id: NodeId::ClientIcon,
+                bounds: Rect::new(group_left, top, icon_size, icon_size),
+                source: ImageSource::from(icon),
+                state: VisualState::default(),
+            });
+        }
+
+        scene.nodes.push(SceneNode::Text {
+            id: NodeId::Client,
+            bounds: Rect::new(
+                group_left + icon_advance,
+                bounds.y,
+                text_width,
+                bounds.height,
+            ),
+            text,
+            size: self.font_size(),
+            color: palette.muted_text,
+            align: TextAlign::Center,
+            state: VisualState::default(),
+        });
+    }
+
+    /// Square edge of the title icon. Tied to the pill height so it matches the
+    /// glyphs around it at any bar height or font size.
+    fn client_icon_size(&self, pill_height: f32) -> f32 {
+        (finite_non_negative(pill_height) * 0.72).floor().max(0.0)
     }
 
     fn push_dock_hover_title(
@@ -1751,22 +1865,29 @@ mod tests {
     #[test]
     fn default_layout_choices_follow_explicit_jwm_protocol_ids() {
         let layouts = PresentationConfig::default().layouts;
+        // Every layout the window manager can be put into is offered, in cycle
+        // order, each carrying the wire ID rather than its position.
+        assert_eq!(layouts.len(), crate::display::CANONICAL_LAYOUT_COUNT);
         assert_eq!(
-            layouts,
-            vec![
-                LayoutChoice {
-                    id: LayoutId(0),
-                    label: "[]=".to_owned(),
-                },
-                LayoutChoice {
-                    id: LayoutId(1),
-                    label: "><>".to_owned(),
-                },
-                LayoutChoice {
-                    id: LayoutId(2),
-                    label: "[M]".to_owned(),
-                },
-            ]
+            layouts.first(),
+            Some(&LayoutChoice {
+                id: LayoutId(0),
+                label: "[]=".to_owned(),
+            })
+        );
+        assert_eq!(
+            layouts.last(),
+            Some(&LayoutChoice {
+                id: LayoutId(1),
+                label: "><>".to_owned(),
+            })
+        );
+        assert_eq!(
+            layouts.iter().find(|choice| choice.id == LayoutId(2)),
+            Some(&LayoutChoice {
+                id: LayoutId(2),
+                label: "[M]".to_owned(),
+            })
         );
     }
 
@@ -1834,7 +1955,11 @@ mod tests {
             monitor: MonitorId(2),
             geometry: None,
             layout_symbol: "[]=",
+            layout: None,
+            layout_count: None,
             client_name,
+            client_app_id: "",
+            client_icon: None,
             minimized_windows: &[],
             minimized_overflow: false,
             time: "2026-07-14 12:34",
@@ -2270,6 +2395,93 @@ mod tests {
                 .nodes_for(NodeId::Tag(last))
                 .any(|node| { matches!(node, SceneNode::Text { text, .. } if text == "12") })
         );
+    }
+
+    fn icon_bounds(scene: &Scene) -> Option<Rect> {
+        scene.nodes.iter().find_map(|node| match node {
+            SceneNode::Image { bounds, .. } => Some(*bounds),
+            _ => None,
+        })
+    }
+
+    fn title_bounds(scene: &Scene) -> Option<Rect> {
+        scene.nodes_for(NodeId::Client).find_map(|node| match node {
+            SceneNode::Text { bounds, .. } => Some(*bounds),
+            _ => None,
+        })
+    }
+
+    /// The icon leads the title, and the pair is centred where the title alone
+    /// would have been — so resolving an icon does not shove the title sideways.
+    #[test]
+    fn the_window_icon_and_its_title_are_centred_as_one_group() {
+        let tags = vec![TagState::default(); 2];
+        let icon = crate::app_icon::AppIcon::new(std::path::PathBuf::from("/icons/editor.png"));
+        let engine = engine();
+        let viewport = Size::new(1200.0, 38.0);
+
+        let mut with_icon = view(&tags, "Editor");
+        with_icon.client_icon = Some(&icon);
+        let scene = engine.build(with_icon, viewport, &InteractionState::default());
+        let image = icon_bounds(&scene).expect("an icon node");
+        let title = title_bounds(&scene).expect("a title node");
+
+        assert!(
+            image.right() <= title.x + f32::EPSILON,
+            "icon {image:?} must precede title {title:?}"
+        );
+        assert!(image.width > 0.0 && (image.width - image.height).abs() < f32::EPSILON);
+
+        let plain = engine.build(
+            view(&tags, "Editor"),
+            viewport,
+            &InteractionState::default(),
+        );
+        assert!(icon_bounds(&plain).is_none());
+        let plain_title = title_bounds(&plain).expect("a title node");
+        let group_centre = (image.x + title.right()) * 0.5;
+        let plain_centre = plain_title.x + plain_title.width * 0.5;
+        assert!(
+            (group_centre - plain_centre).abs() < 1.0,
+            "group centre {group_centre} drifted from {plain_centre}"
+        );
+    }
+
+    /// On a bar with no room to spare the title wins: it carries more meaning
+    /// than the icon, and half an icon carries none.
+    #[test]
+    fn a_crowded_bar_drops_the_icon_before_the_title() {
+        let tags = vec![TagState::default(); 9];
+        let icon = crate::app_icon::AppIcon::new(std::path::PathBuf::from("/icons/editor.png"));
+        let mut narrow = view(&tags, "Editor");
+        narrow.client_icon = Some(&icon);
+        let scene = engine().build(narrow, Size::new(360.0, 38.0), &InteractionState::default());
+        assert!(icon_bounds(&scene).is_none());
+    }
+
+    #[test]
+    fn hiding_the_icon_leaves_the_title_exactly_where_it_was() {
+        let tags = vec![TagState::default(); 2];
+        let icon = crate::app_icon::AppIcon::new(std::path::PathBuf::from("/icons/editor.png"));
+        let mut hidden = view(&tags, "Editor");
+        hidden.client_icon = Some(&icon);
+        let engine = LayoutEngine::new(
+            PresentationConfig {
+                visibility: PresentationVisibility {
+                    client_icon: false,
+                    ..PresentationVisibility::default()
+                },
+                ..PresentationConfig::default()
+            },
+            ApproximateTextMeasurer::default(),
+        );
+        let scene = engine.build(
+            hidden,
+            Size::new(1200.0, 38.0),
+            &InteractionState::default(),
+        );
+        assert!(icon_bounds(&scene).is_none());
+        assert!(title_bounds(&scene).is_some());
     }
 
     #[test]

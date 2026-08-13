@@ -1,5 +1,10 @@
 // src/core/layout.rs
 use super::types::Rect;
+use std::sync::LazyLock;
+use xbar_core::LayoutId;
+use xbar_core::display::{
+    CANONICAL_LAYOUTS, CanonicalLayout, canonical_layout, canonical_layout_by_name,
+};
 
 // 用于布局计算的客户端信息
 #[derive(Clone, Copy)]
@@ -190,23 +195,21 @@ impl LayoutEnum {
     pub const VSTACK: Self = Self("vstack");
     pub const ANY: Self = Self("");
 
+    /// The row this layout occupies in the shared protocol catalog, if any.
+    /// `LayoutEnum::ANY` and any name outside the catalog have none.
+    fn canonical(&self) -> Option<&'static CanonicalLayout> {
+        canonical_layout_by_name(self.0)
+    }
+
     pub fn symbol(&self) -> &str {
-        match self.0 {
-            "tile" => "[]=",
-            "float" => "><>",
-            "monocle" => "[M]",
-            "fibonacci" => "[@]",
-            "centeredmaster" => "|M|",
-            "bstack" => "TTT",
-            "grid" => "HHH",
-            "deck" => "[D]",
-            "threecol" => "|||",
-            "tatami" => "[+]",
-            "fullscreen" => "[ ]",
-            "scrolling" => "[S]",
-            "vstack" => "V[]",
-            _ => "",
-        }
+        self.canonical().map_or("", |layout| layout.symbol)
+    }
+
+    /// Identifier this layout travels under on the status-bar protocol. A
+    /// layout outside the catalog has no wire representation and reports
+    /// `None` rather than a plausible-looking zero.
+    pub fn protocol_id(&self) -> Option<u32> {
+        self.canonical().map(|layout| layout.id.0)
     }
 
     pub fn is_tile(&self) -> bool {
@@ -236,42 +239,40 @@ impl LayoutEnum {
         self.0 == "fullscreen"
     }
 
-    /// 所有布局的循环顺序
-    const CYCLE: &'static [LayoutEnum] = &[
-        Self::TILE,
-        Self::FIBONACCI,
-        Self::CENTERED_MASTER,
-        Self::BSTACK,
-        Self::GRID,
-        Self::DECK,
-        Self::THREE_COL,
-        Self::TATAMI,
-        Self::MONOCLE,
-        Self::FULLSCREEN,
-        Self::SCROLLING,
-        Self::VSTACK,
-        Self::FLOAT,
-    ];
+    /// 所有布局的循环顺序 — the shared catalog's own order, so the cycle, the
+    /// picker's film strip and every status bar's layout menu offer exactly
+    /// the same layouts without three lists to keep in step.
+    fn cycle() -> &'static [LayoutEnum] {
+        static CYCLE: LazyLock<Vec<LayoutEnum>> = LazyLock::new(|| {
+            CANONICAL_LAYOUTS
+                .iter()
+                .map(|layout| LayoutEnum(layout.name))
+                .collect()
+        });
+        &CYCLE
+    }
 
     pub fn cycle_next(&self) -> &'static LayoutEnum {
-        let idx = Self::CYCLE.iter().position(|l| l == self).unwrap_or(0);
-        &Self::CYCLE[(idx + 1) % Self::CYCLE.len()]
+        let cycle = Self::cycle();
+        let idx = cycle.iter().position(|l| l == self).unwrap_or(0);
+        &cycle[(idx + 1) % cycle.len()]
     }
 
     pub fn cycle_prev(&self) -> &'static LayoutEnum {
-        let idx = Self::CYCLE.iter().position(|l| l == self).unwrap_or(0);
-        &Self::CYCLE[(idx + Self::CYCLE.len() - 1) % Self::CYCLE.len()]
+        let cycle = Self::cycle();
+        let idx = cycle.iter().position(|l| l == self).unwrap_or(0);
+        &cycle[(idx + cycle.len() - 1) % cycle.len()]
     }
 
     /// Every layout, in the order the cycle visits them. This is what the
     /// layout picker lays out on its film strip.
     pub fn all() -> &'static [LayoutEnum] {
-        Self::CYCLE
+        Self::cycle()
     }
 
     /// Position in [`LayoutEnum::all`], or 0 for a layout that is not in it.
     pub fn cycle_index(&self) -> usize {
-        Self::CYCLE.iter().position(|l| l == self).unwrap_or(0)
+        Self::cycle().iter().position(|l| l == self).unwrap_or(0)
     }
 
     /// The layout `name` identifies — `tile`, `fibonacci`, `centeredmaster`, …
@@ -283,27 +284,12 @@ impl LayoutEnum {
     /// silently missing from one of them.
     pub fn from_name(name: &str) -> Option<&'static LayoutEnum> {
         let name = name.trim().to_ascii_lowercase();
-        Self::CYCLE.iter().find(|layout| layout.0 == name)
+        Self::cycle().iter().find(|layout| layout.0 == name)
     }
 
     /// Human-facing name, for UI that has room for more than the symbol.
     pub fn label(&self) -> &'static str {
-        match self.0 {
-            "tile" => "Tile",
-            "float" => "Float",
-            "monocle" => "Monocle",
-            "fibonacci" => "Fibonacci",
-            "centeredmaster" => "Centered Master",
-            "bstack" => "Bottom Stack",
-            "grid" => "Grid",
-            "deck" => "Deck",
-            "threecol" => "Three Column",
-            "tatami" => "Tatami",
-            "fullscreen" => "Fullscreen",
-            "scrolling" => "Scrolling",
-            "vstack" => "V-Stack",
-            _ => "Layout",
-        }
+        self.canonical().map_or("Layout", |layout| layout.label)
     }
 }
 
@@ -428,24 +414,14 @@ pub fn preview_frames(layout: &LayoutEnum, count: usize) -> Vec<[f32; 4]> {
         .collect()
 }
 
+/// Protocol identifier → layout, as a status bar's `SetLayout` sends it.
+///
+/// An identifier outside the shared catalog resolves to [`LayoutEnum::ANY`],
+/// which `setlayout` treats as "leave the layout alone" — a bar built against a
+/// newer catalog cannot push this compositor into a layout it does not have.
 impl From<u32> for LayoutEnum {
     fn from(value: u32) -> Self {
-        match value {
-            0 => LayoutEnum::TILE,
-            1 => LayoutEnum::FLOAT,
-            2 => LayoutEnum::MONOCLE,
-            3 => LayoutEnum::FIBONACCI,
-            4 => LayoutEnum::CENTERED_MASTER,
-            5 => LayoutEnum::BSTACK,
-            6 => LayoutEnum::GRID,
-            7 => LayoutEnum::DECK,
-            8 => LayoutEnum::THREE_COL,
-            9 => LayoutEnum::TATAMI,
-            10 => LayoutEnum::FULLSCREEN,
-            11 => LayoutEnum::SCROLLING,
-            12 => LayoutEnum::VSTACK,
-            _ => LayoutEnum::ANY,
-        }
+        canonical_layout(LayoutId(value)).map_or(LayoutEnum::ANY, |layout| LayoutEnum(layout.name))
     }
 }
 
@@ -1368,6 +1344,42 @@ mod tests {
     #[test]
     fn test_layout_enum_symbol_unknown() {
         assert_eq!(LayoutEnum::ANY.symbol(), "");
+    }
+
+    /// The cycle, the picker and every status bar's layout menu are the same
+    /// list seen from three places. If this drifts, a bar offers a layout this
+    /// compositor cannot enter, or hides one it can.
+    #[test]
+    fn the_cycle_is_the_shared_protocol_catalog() {
+        let names: Vec<&str> = LayoutEnum::all().iter().map(|layout| layout.0).collect();
+        let catalog: Vec<&str> = CANONICAL_LAYOUTS.iter().map(|row| row.name).collect();
+        assert_eq!(names, catalog);
+    }
+
+    /// Round-tripping every wire identifier is what makes a bar's layout pill
+    /// land on the layout it drew.
+    #[test]
+    fn every_protocol_id_round_trips_through_the_layout_it_names() {
+        for row in CANONICAL_LAYOUTS {
+            let layout = LayoutEnum::from(row.id.0);
+            assert_eq!(layout.0, row.name);
+            assert_eq!(layout.protocol_id(), Some(row.id.0));
+            assert_eq!(layout.symbol(), row.symbol);
+            assert_eq!(layout.label(), row.label);
+            assert_eq!(LayoutEnum::from_name(row.name), Some(&layout));
+        }
+    }
+
+    /// A bar built against a newer catalog must not be able to push this
+    /// compositor into a layout it has no arrangement for.
+    #[test]
+    fn an_unknown_protocol_id_resolves_to_no_layout_at_all() {
+        assert_eq!(LayoutEnum::from(u32::MAX), LayoutEnum::ANY);
+        assert_eq!(
+            LayoutEnum::from(CANONICAL_LAYOUTS.len() as u32 + 1),
+            LayoutEnum::ANY
+        );
+        assert_eq!(LayoutEnum::ANY.protocol_id(), None);
     }
 
     #[test]

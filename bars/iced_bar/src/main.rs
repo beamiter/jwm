@@ -1054,14 +1054,34 @@ impl IcedBar {
             .on_press(Message::ToggleLayoutSelector)
     }
 
+    /// One button per layout the *window manager* offers.
+    ///
+    /// The shared catalog says what this build can label; the snapshot says what
+    /// the compositor on the other end actually has, and which of them is in
+    /// use. See `xbar_core::display` for why the two are reconciled rather than
+    /// one trusted blindly.
     fn layout_options_row(&self) -> Element<'_, Message> {
-        let layouts: [(&str, u32); 3] = [("[]=", 0), ("><>", 1), ("[M]", 2)];
-        let current = self.runtime.view().layout_symbol;
+        let view = self.runtime.view();
+        let offered = view.layout_count;
+        let layouts: Vec<(String, u32, bool)> = xbar_core::display::CANONICAL_LAYOUTS
+            .iter()
+            .filter(|layout| xbar_core::display::layout_is_offered(layout.id, offered))
+            .map(|layout| (layout.symbol.to_owned(), layout.id.0))
+            .chain(
+                xbar_core::display::unknown_layout_ids(offered)
+                    .map(xbar_core::LayoutId)
+                    .map(|id| (xbar_core::display::unknown_layout_label(id), id.0)),
+            )
+            .map(|(symbol, id)| {
+                let current = view
+                    .layout
+                    .map_or(symbol == view.layout_symbol, |layout| layout.0 == id);
+                (symbol, id, current)
+            })
+            .collect();
 
         let mut row = Row::new().spacing(6);
-        for (sym, idx) in layouts {
-            let is_current = sym == current;
-
+        for (sym, idx, is_current) in layouts {
             let btn = button(text(sym).color(Color::WHITE))
                 .padding([3, 10])
                 .height(Self::PILL_HEIGHT)

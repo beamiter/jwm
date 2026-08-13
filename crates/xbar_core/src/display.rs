@@ -545,13 +545,58 @@ impl IconSet {
     }
 }
 
-/// Canonical JWM layout protocol mapping. IDs are explicit and must never be
-/// inferred from a presentation-order array.
-pub const CANONICAL_LAYOUTS: [(LayoutId, &str); 3] = [
-    (LayoutId(0), "[]="),
-    (LayoutId(1), "><>"),
-    (LayoutId(2), "[M]"),
+/// One layout as both sides of the protocol know it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CanonicalLayout {
+    /// Wire identifier carried by `SetLayout`. Explicit, and never inferred
+    /// from this table's order.
+    pub id: LayoutId,
+    /// Name used by the window manager's configuration and IPC.
+    pub name: &'static str,
+    /// Compact symbol the bar shows in its layout pill.
+    pub symbol: &'static str,
+    /// Human-facing name for UI with room for more than the symbol.
+    pub label: &'static str,
+}
+
+impl CanonicalLayout {
+    const fn new(id: u32, name: &'static str, symbol: &'static str, label: &'static str) -> Self {
+        Self {
+            id: LayoutId(id),
+            name,
+            symbol,
+            label,
+        }
+    }
+}
+
+/// Canonical JWM layout protocol mapping — the one table both sides read.
+///
+/// The window manager derives its symbols, labels, names and cycle order from
+/// this array, and every bar builds its layout picker from it, so a layout
+/// added here appears in both without a second edit and without either side
+/// silently offering a layout the other does not have. Rows are in *cycle*
+/// order (the order `cyclelayout` visits them), which is also the order a
+/// picker should present; the wire ID lives in the row precisely because that
+/// order is a presentation choice and the ID is not.
+pub const CANONICAL_LAYOUTS: [CanonicalLayout; 13] = [
+    CanonicalLayout::new(0, "tile", "[]=", "Tile"),
+    CanonicalLayout::new(3, "fibonacci", "[@]", "Fibonacci"),
+    CanonicalLayout::new(4, "centeredmaster", "|M|", "Centered Master"),
+    CanonicalLayout::new(5, "bstack", "TTT", "Bottom Stack"),
+    CanonicalLayout::new(6, "grid", "HHH", "Grid"),
+    CanonicalLayout::new(7, "deck", "[D]", "Deck"),
+    CanonicalLayout::new(8, "threecol", "|||", "Three Column"),
+    CanonicalLayout::new(9, "tatami", "[+]", "Tatami"),
+    CanonicalLayout::new(2, "monocle", "[M]", "Monocle"),
+    CanonicalLayout::new(10, "fullscreen", "[ ]", "Fullscreen"),
+    CanonicalLayout::new(11, "scrolling", "[S]", "Scrolling"),
+    CanonicalLayout::new(12, "vstack", "V[]", "V-Stack"),
+    CanonicalLayout::new(1, "float", "><>", "Float"),
 ];
+
+/// How many layouts this build of the protocol knows about.
+pub const CANONICAL_LAYOUT_COUNT: usize = CANONICAL_LAYOUTS.len();
 
 /// Owned, serializable layout catalog entry for toolkit and web state stores.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -560,12 +605,12 @@ pub struct LayoutCatalogEntry {
     pub symbol: String,
 }
 
-/// Return an owned canonical catalog in protocol ID order.
+/// Return an owned canonical catalog in cycle order.
 #[must_use]
-pub fn canonical_layout_catalog() -> [LayoutCatalogEntry; 3] {
-    CANONICAL_LAYOUTS.map(|(id, symbol)| LayoutCatalogEntry {
-        id,
-        symbol: symbol.to_owned(),
+pub fn canonical_layout_catalog() -> [LayoutCatalogEntry; CANONICAL_LAYOUT_COUNT] {
+    CANONICAL_LAYOUTS.map(|layout| LayoutCatalogEntry {
+        id: layout.id,
+        symbol: layout.symbol.to_owned(),
     })
 }
 
@@ -575,15 +620,57 @@ pub fn canonical_layout_id(symbol: &str) -> Option<LayoutId> {
     let symbol = symbol.trim();
     CANONICAL_LAYOUTS
         .iter()
-        .find_map(|(id, candidate)| (*candidate == symbol).then_some(*id))
+        .find_map(|layout| (layout.symbol == symbol).then_some(layout.id))
 }
 
 /// Look up a canonical symbol by protocol ID.
 #[must_use]
 pub fn canonical_layout_symbol(id: LayoutId) -> Option<&'static str> {
+    canonical_layout(id).map(|layout| layout.symbol)
+}
+
+/// Look up a whole row by protocol ID.
+#[must_use]
+pub fn canonical_layout(id: LayoutId) -> Option<&'static CanonicalLayout> {
+    CANONICAL_LAYOUTS.iter().find(|layout| layout.id == id)
+}
+
+/// Whether a window manager offering `offered` layouts accepts `id`.
+///
+/// `None` means the window manager did not say how many it has, and a bar then
+/// trusts its own catalog. Identifiers are dense and appended as layouts are
+/// added — see `canonical_layout_ids_are_dense_and_appended` — so "the first
+/// `offered` identifiers" is exactly "the layouts a smaller compositor has".
+#[must_use]
+pub fn layout_is_offered(id: LayoutId, offered: Option<usize>) -> bool {
+    offered.is_none_or(|count| (id.0 as usize) < count)
+}
+
+/// Identifiers a window manager offers that this build has no row for.
+///
+/// A bar built before a layout existed still lets the user reach it, labelled
+/// by number, instead of pretending the compositor has fewer layouts than it
+/// does.
+#[must_use]
+pub fn unknown_layout_ids(offered: Option<usize>) -> std::ops::Range<u32> {
+    let first_unknown = CANONICAL_LAYOUT_COUNT as u32;
+    let last = offered.map_or(first_unknown, |count| count as u32);
+    first_unknown..last.max(first_unknown)
+}
+
+/// Label for a layout this build has no symbol for.
+#[must_use]
+pub fn unknown_layout_label(id: LayoutId) -> String {
+    format!("L{}", id.0)
+}
+
+/// Look up a whole row by window-manager layout name, case-insensitively.
+#[must_use]
+pub fn canonical_layout_by_name(name: &str) -> Option<&'static CanonicalLayout> {
+    let name = name.trim();
     CANONICAL_LAYOUTS
         .iter()
-        .find_map(|(candidate, symbol)| (*candidate == id).then_some(*symbol))
+        .find(|layout| layout.name.eq_ignore_ascii_case(name))
 }
 
 #[cfg(test)]
@@ -733,15 +820,56 @@ mod tests {
     #[test]
     fn canonical_layout_ids_are_explicit_and_stable() {
         let catalog = canonical_layout_catalog();
+        // Cycle order leads with tile and ends with float; the IDs in between
+        // are deliberately not the array index.
         assert_eq!(catalog[0].id, LayoutId(0));
         assert_eq!(catalog[0].symbol, "[]=");
-        assert_eq!(catalog[1].id, LayoutId(1));
-        assert_eq!(catalog[1].symbol, "><>");
-        assert_eq!(catalog[2].id, LayoutId(2));
-        assert_eq!(catalog[2].symbol, "[M]");
+        assert_eq!(catalog[1].id, LayoutId(3));
+        assert_eq!(catalog[1].symbol, "[@]");
+        assert_eq!(catalog[CANONICAL_LAYOUT_COUNT - 1].id, LayoutId(1));
+        assert_eq!(catalog[CANONICAL_LAYOUT_COUNT - 1].symbol, "><>");
         assert_eq!(canonical_layout_id("  ><>  "), Some(LayoutId(1)));
         assert_eq!(canonical_layout_id("<><>"), None);
         assert_eq!(canonical_layout_symbol(LayoutId(2)), Some("[M]"));
         assert_eq!(canonical_layout_symbol(LayoutId(99)), None);
+        assert_eq!(
+            canonical_layout(LayoutId(2)).map(|l| l.name),
+            Some("monocle")
+        );
+        assert_eq!(
+            canonical_layout_by_name("CenteredMaster").map(|l| l.id),
+            Some(LayoutId(4))
+        );
+        assert_eq!(canonical_layout_by_name("spiral"), None);
+    }
+
+    /// A bar reconciles its own catalog with the layout *count* a compositor
+    /// reports, which only works while identifiers are dense and a new layout
+    /// takes the next one. Adding a layout with a gap in the identifiers would
+    /// make the older bars around it drop entries they can in fact enter.
+    #[test]
+    fn canonical_layout_ids_are_dense_and_appended() {
+        let mut ids: Vec<u32> = CANONICAL_LAYOUTS.iter().map(|layout| layout.id.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..CANONICAL_LAYOUT_COUNT as u32).collect::<Vec<_>>());
+    }
+
+    /// Both sides index this table by ID, and the bar labels an unknown ID by
+    /// its number — so a duplicate ID or symbol would quietly make one layout
+    /// unreachable rather than fail anywhere visible.
+    #[test]
+    fn every_canonical_layout_is_uniquely_addressable() {
+        for (index, layout) in CANONICAL_LAYOUTS.iter().enumerate() {
+            assert!(!layout.name.is_empty() && !layout.symbol.is_empty());
+            for other in CANONICAL_LAYOUTS.iter().skip(index + 1) {
+                assert_ne!(layout.id, other.id, "duplicate id: {}", layout.name);
+                assert_ne!(layout.name, other.name, "duplicate name: {}", layout.name);
+                assert_ne!(
+                    layout.symbol, other.symbol,
+                    "duplicate symbol: {}",
+                    layout.name
+                );
+            }
+        }
     }
 }

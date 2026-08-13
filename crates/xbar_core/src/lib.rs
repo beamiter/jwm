@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod app_icon;
 #[cfg(feature = "provider-alsa")]
 pub mod audio_manager;
 #[cfg(feature = "provider-battery-sysfs")]
@@ -22,6 +23,7 @@ pub mod dock;
 pub mod frontend;
 #[cfg(feature = "glass")]
 pub mod glass;
+pub mod icon_font;
 #[cfg(feature = "runtime-linux")]
 pub mod linux;
 #[cfg(feature = "logging-flexi")]

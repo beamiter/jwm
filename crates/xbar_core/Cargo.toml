@@ -24,7 +24,7 @@ provider-battery-sysfs = []
 provider-brightnessctl = ["dep:log"]
 provider-network-sysfs = []
 provider-system = ["dep:sysinfo"]
-render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:pango", "dep:pangocairo"]
+render-cairo = ["dep:anyhow", "dep:cairo-rs", "dep:image", "dep:pango", "dep:pangocairo"]
 runtime-linux = ["dep:libc", "dep:log"]
 transport-shared = ["dep:shared_structures"]
 

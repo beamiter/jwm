@@ -92,13 +92,29 @@ pub struct MonitorInfo {
     pub tag_status_vec: [TagStatus; MAX_TAGS],
     #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
     pub client_name: [u8; MAX_CLIENT_NAME_LEN],
+    /// Wayland app-id or X11 class of the focused client, for a bar that wants
+    /// to show its desktop icon beside the title. Empty when nothing is
+    /// focused, or when the window carries no identity of its own.
+    #[cfg_attr(feature = "serde", serde(with = "serde_big_array::BigArray"))]
+    pub client_app_id: [u8; MAX_APP_ID_LEN],
     pub ltsymbol: [u8; MAX_LT_SYMBOL_LEN],
+    /// How many layouts this window manager can be put into.
+    ///
+    /// A bar sizes its layout menu from this rather than from its own compiled
+    /// catalog, so a compositor that gained a layout is offered in full and one
+    /// that dropped one is not offered a dead entry. Zero means the window
+    /// manager did not say, and the bar falls back to its own catalog.
+    pub layout_count: u32,
+    /// Protocol identifier of the layout currently in use, so a bar can mark
+    /// it in that menu without matching symbols back to identifiers.
+    pub layout_id: u32,
 }
 
 impl Default for MonitorInfo {
     fn default() -> Self {
         Self {
             client_name: [0; MAX_CLIENT_NAME_LEN],
+            client_app_id: [0; MAX_APP_ID_LEN],
             tag_status_vec: [TagStatus::default(); MAX_TAGS],
             monitor_num: 0,
             monitor_width: 0,
@@ -106,6 +122,8 @@ impl Default for MonitorInfo {
             monitor_x: 0,
             monitor_y: 0,
             ltsymbol: [0; MAX_LT_SYMBOL_LEN],
+            layout_count: 0,
+            layout_id: 0,
         }
     }
 }
@@ -125,6 +143,21 @@ impl MonitorInfo {
     #[must_use]
     pub fn client_name_lossy(&self) -> Cow<'_, str> {
         bytes_lossy(&self.client_name)
+    }
+
+    pub fn set_client_app_id(&mut self, app_id: &str) {
+        copy_utf8_truncated(&mut self.client_app_id, app_id);
+    }
+
+    #[must_use]
+    pub fn get_client_app_id(&self) -> String {
+        self.client_app_id_lossy().into_owned()
+    }
+
+    /// 以零拷贝形式返回焦点窗口的 app-id，非 UTF-8 时做损坏替换。
+    #[must_use]
+    pub fn client_app_id_lossy(&self) -> Cow<'_, str> {
+        bytes_lossy(&self.client_app_id)
     }
 
     pub fn set_ltsymbol(&mut self, symbol: &str) {
@@ -1222,10 +1255,12 @@ mod tests {
         let sz_msg = std::mem::size_of::<SharedMessage>();
         let sz_cmd = std::mem::size_of::<SharedCommand>();
         assert!(sz_tag > 0);
-        assert!(sz_mi >= sz_tag * MAX_TAGS + MAX_CLIENT_NAME_LEN + MAX_LT_SYMBOL_LEN);
+        assert!(
+            sz_mi >= sz_tag * MAX_TAGS + MAX_CLIENT_NAME_LEN + MAX_APP_ID_LEN + MAX_LT_SYMBOL_LEN
+        );
         assert_eq!(std::mem::size_of::<MinimizedWindowInfo>(), 176);
         assert_eq!(std::mem::size_of::<MinimizedWindowAnchor>(), 16);
-        assert_eq!(sz_msg, 3064);
+        assert_eq!(sz_msg, 3136);
         assert_eq!(sz_cmd, 64);
     }
 

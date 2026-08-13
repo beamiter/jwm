@@ -7,10 +7,12 @@
 //! why adding a status cell to the core shows up here with no work.
 
 use egui::{
-    Color32, CornerRadius, FontFamily, FontId, Painter, Pos2, Rect as EguiRect, Shape,
-    Stroke as EguiStroke, StrokeKind, Vec2,
+    Color32, ColorImage, Context, CornerRadius, FontFamily, FontId, Id, Painter, Pos2,
+    Rect as EguiRect, Shape, Stroke as EguiStroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
-use xbar_core::presentation::{Rect, Rgba, Scene, SceneNode, Size, TextAlign, TextMeasurer};
+use xbar_core::presentation::{
+    ImageSource, Rect, Rgba, Scene, SceneNode, Size, TextAlign, TextMeasurer,
+};
 
 /// Text metrics for `LayoutEngine`, forwarded to a caller-supplied closure.
 ///
@@ -82,7 +84,8 @@ pub fn paint(painter: &Painter, origin: Pos2, scene: &Scene, style: &SceneStyle)
         let Some(visible) = bounds.intersection(clip) else {
             continue;
         };
-        let painter = painter.with_clip_rect(to_screen(visible, origin).intersect(painter.clip_rect()));
+        let painter =
+            painter.with_clip_rect(to_screen(visible, origin).intersect(painter.clip_rect()));
         let rect = to_screen(bounds, origin);
 
         match node {
@@ -160,8 +163,55 @@ pub fn paint(painter: &Painter, origin: Pos2, scene: &Scene, style: &SceneStyle)
                     EguiStroke::new(*width, color(*line_color, 1.0)),
                 ));
             }
+            SceneNode::Image { source, .. } => {
+                let Some(texture) = image_texture(painter.ctx(), source) else {
+                    continue;
+                };
+                let size = texture.size_vec2();
+                if size.x <= 0.0 || size.y <= 0.0 {
+                    continue;
+                }
+                // Fit inside the bounds the engine reserved, keeping the
+                // artwork's own aspect ratio, exactly like the Cairo renderer.
+                let scale = (bounds.width / size.x).min(bounds.height / size.y);
+                let fitted = EguiRect::from_center_size(rect.center(), size * scale);
+                painter.image(
+                    texture.id(),
+                    fitted,
+                    EguiRect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
         }
     }
+}
+
+/// Texture for one scene image, uploaded at most once per file.
+///
+/// egui hands out no place to keep renderer state across frames, so the handle
+/// lives in the context's own temporary store keyed by the scene's stable image
+/// key. A file that cannot be decoded is remembered as `None`, so a broken icon
+/// costs one failed decode rather than one per frame.
+fn image_texture(ctx: &Context, source: &ImageSource) -> Option<TextureHandle> {
+    let id = Id::new(("xbar-scene-image", source.key));
+    if let Some(cached) = ctx.data(|data| data.get_temp::<Option<TextureHandle>>(id)) {
+        return cached;
+    }
+    let texture = decode_image(&source.path).map(|image| {
+        ctx.load_texture(
+            format!("xbar-scene-image-{}", source.key),
+            image,
+            TextureOptions::LINEAR,
+        )
+    });
+    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    texture
+}
+
+fn decode_image(path: &std::path::Path) -> Option<ColorImage> {
+    let rgba = image::open(path).ok()?.into_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Some(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
 
 fn to_screen(rect: Rect, origin: Pos2) -> EguiRect {

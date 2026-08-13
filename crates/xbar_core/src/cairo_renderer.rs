@@ -4,14 +4,18 @@
 //! should configure the Cairo context transform before calling [`CairoRenderer::render`].
 
 use anyhow::Result;
-use cairo::{Context, Extend, Filter, ImageSurface, LineCap, LineJoin, Operator};
+use cairo::{Context, Extend, Filter, Format, ImageSurface, LineCap, LineJoin, Operator};
 use pango::prelude::FontMapExt as _;
 use pango::{FontDescription, Layout};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::Path;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::presentation::{
-    Damage, InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene, SceneNode,
-    Size, Stroke, TextAlign, TextMeasurer,
+    Damage, ImageSource, InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene,
+    SceneNode, Size, Stroke, TextAlign, TextMeasurer,
 };
 use crate::{
     BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate, UserAction,
@@ -22,15 +26,36 @@ use crate::{
 pub struct CairoRenderer {
     font: FontDescription,
     background_opacity: Option<f64>,
+    /// Decoded scene images, keyed by [`ImageSource::key`].
+    ///
+    /// Rendering takes `&self`, and an icon is drawn on every frame while the
+    /// window stays focused, so the decode has to be remembered behind shared
+    /// mutability rather than repeated. Failures are cached as `None`: a file
+    /// this build cannot decode will not start decoding between two frames,
+    /// and retrying it every frame would put image decoding in the hot path
+    /// for exactly the icons that never appear.
+    images: RefCell<HashMap<u64, Option<Rc<ImageSurface>>>>,
 }
 
 impl CairoRenderer {
     #[must_use]
-    pub const fn new(font: FontDescription) -> Self {
+    pub fn new(font: FontDescription) -> Self {
         Self {
             font,
             background_opacity: None,
+            images: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Construct a renderer whose font description also names an icon family.
+    ///
+    /// `configured` is the host's explicit choice; `None` lets
+    /// [`crate::icon_font`] pick an installed patched font. Either way the
+    /// private-use glyphs in bar labels stop depending on which font the
+    /// generic fontconfig sort happens to hand this session.
+    #[must_use]
+    pub fn with_icon_font(font: FontDescription, configured: Option<&str>) -> Self {
+        Self::new(crate::icon_font::with_icon_fallback(&font, configured))
     }
 
     /// Multiply background-node alpha by `opacity`.
@@ -199,6 +224,7 @@ impl CairoRenderer {
                     width,
                     ..
                 } => draw_polyline(context, points, *color, *width)?,
+                SceneNode::Image { source, .. } => self.draw_image(context, bounds, source)?,
             }
             context.status()?;
             Ok(())
@@ -271,6 +297,103 @@ impl CairoRenderer {
         context.status()?;
         Ok(())
     }
+}
+
+impl CairoRenderer {
+    /// Draw a scene image scaled to fit `bounds`, keeping its aspect ratio and
+    /// centred on what is left over.
+    ///
+    /// An image that cannot be decoded draws nothing at all. That is the same
+    /// result the bar shows for an application whose icon was never found, so
+    /// a broken file degrades into the plain title instead of a placeholder
+    /// the user cannot act on.
+    fn draw_image(&self, context: &Context, bounds: Rect, source: &ImageSource) -> Result<()> {
+        let Some(surface) = self.image_surface(source) else {
+            return Ok(());
+        };
+        let (image_width, image_height) = (f64::from(surface.width()), f64::from(surface.height()));
+        if image_width <= 0.0 || image_height <= 0.0 || bounds.is_empty() {
+            return Ok(());
+        }
+
+        let scale =
+            (f64::from(bounds.width) / image_width).min(f64::from(bounds.height) / image_height);
+        let (width, height) = (image_width * scale, image_height * scale);
+        let x = f64::from(bounds.x) + (f64::from(bounds.width) - width) * 0.5;
+        let y = f64::from(bounds.y) + (f64::from(bounds.height) - height) * 0.5;
+
+        with_saved(context, || {
+            context.translate(x, y);
+            context.scale(scale, scale);
+            context.set_source_surface(surface.as_ref(), 0.0, 0.0)?;
+            let pattern = context.source();
+            pattern.set_extend(Extend::Pad);
+            // Icons are almost always downscaled from a larger theme size, and
+            // Good is the filter cairo picks for that without the cost of
+            // Best on every frame.
+            pattern.set_filter(Filter::Good);
+            context.paint()?;
+            context.status()?;
+            Ok(())
+        })
+    }
+
+    fn image_surface(&self, source: &ImageSource) -> Option<Rc<ImageSurface>> {
+        if let Some(cached) = self.images.borrow().get(&source.key) {
+            return cached.clone();
+        }
+        let decoded = decode_image(&source.path).map(Rc::new);
+        if decoded.is_none() {
+            log_image_failure(&source.path);
+        }
+        self.images.borrow_mut().insert(source.key, decoded.clone());
+        decoded
+    }
+}
+
+#[cfg(feature = "logging-flexi")]
+fn log_image_failure(path: &Path) {
+    log::debug!("[bar] no drawable image at {}", path.display());
+}
+
+#[cfg(not(feature = "logging-flexi"))]
+fn log_image_failure(_path: &Path) {}
+
+/// Decode a raster file into a Cairo-native premultiplied surface.
+fn decode_image(path: &Path) -> Option<ImageSurface> {
+    let rgba = image::open(path).ok()?.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    let (width, height) = (i32::try_from(width).ok()?, i32::try_from(height).ok()?);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let mut surface = ImageSurface::create(Format::ARgb32, width, height).ok()?;
+    let stride = usize::try_from(surface.stride()).ok()?;
+    {
+        let mut destination = surface.data().ok()?;
+        for (y, row) in rgba.rows().enumerate() {
+            let line = y * stride;
+            for (x, pixel) in row.enumerate() {
+                let [red, green, blue, alpha] = pixel.0;
+                let offset = line + x * 4;
+                let Some(target) = destination.get_mut(offset..offset + 4) else {
+                    continue;
+                };
+                // Format::ARgb32 is a native-endian 0xAARRGGBB word with
+                // premultiplied colour, which on a little-endian host is these
+                // four bytes in this order.
+                target[0] = premultiply(blue, alpha);
+                target[1] = premultiply(green, alpha);
+                target[2] = premultiply(red, alpha);
+                target[3] = alpha;
+            }
+        }
+    }
+    Some(surface)
+}
+
+fn premultiply(channel: u8, alpha: u8) -> u8 {
+    ((u32::from(channel) * u32::from(alpha) + 127) / 255) as u8
 }
 
 /// Union of a layout's ink and logical pixel extents, relative to the layout
@@ -363,6 +486,11 @@ impl CairoBar {
         config: crate::presentation::PresentationConfig,
         font: FontDescription,
     ) -> Self {
+        // The icon family is resolved here rather than by the caller so that
+        // every Cairo frontend gets deterministic private-use glyphs from the
+        // same configuration field, without threading a second font argument
+        // through ten `main.rs` files.
+        let renderer = CairoRenderer::with_icon_font(font, config.icon_font.as_deref());
         Self {
             runtime,
             config,
@@ -370,7 +498,7 @@ impl CairoBar {
             last_pointer: None,
             pressed_button: None,
             scene: empty_scene(),
-            renderer: CairoRenderer::new(font),
+            renderer,
             last_damage: Damage::default(),
             pending_runtime: RuntimeUpdate::default(),
             dock_reporter: DockReporter::new(),
@@ -1440,6 +1568,87 @@ mod tests {
 
         let line = pixel(20, 29);
         assert!((line as u8) > ((line >> 16) as u8));
+    }
+
+    /// A scene image reaches the surface: decoded, premultiplied the way Cairo
+    /// expects, scaled into its bounds, and cached so the second frame costs
+    /// nothing.
+    #[test]
+    fn a_scene_image_is_decoded_scaled_and_cached() {
+        let directory = std::env::temp_dir().join(format!(
+            "xbar_scene_image_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let icon_path = directory.join("icon.png");
+        // Half-transparent green: the alpha proves premultiplication happened.
+        let source = image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 255, 0, 128]));
+        source.save(&icon_path).unwrap();
+
+        let (width, height) = (16_i32, 16_i32);
+        let scene = Scene {
+            viewport: Size::new(width as f32, height as f32),
+            clip: Rect::new(0.0, 0.0, width as f32, height as f32),
+            hits: Vec::new(),
+            nodes: vec![
+                SceneNode::Background {
+                    id: NodeId::Background,
+                    bounds: Rect::new(0.0, 0.0, width as f32, height as f32),
+                    fill: Rgba::new(0.0, 0.0, 0.0, 1.0),
+                },
+                SceneNode::Image {
+                    id: NodeId::ClientIcon,
+                    bounds: Rect::new(0.0, 0.0, 8.0, 8.0),
+                    source: ImageSource::from(&crate::app_icon::AppIcon::new(icon_path.clone())),
+                    state: VisualState::default(),
+                },
+                SceneNode::Image {
+                    id: NodeId::ClientIcon,
+                    bounds: Rect::new(8.0, 8.0, 8.0, 8.0),
+                    source: ImageSource::from(&crate::app_icon::AppIcon::new(
+                        directory.join("missing.png"),
+                    )),
+                    state: VisualState::default(),
+                },
+            ],
+        };
+
+        let mut surface = ImageSurface::create(Format::ARgb32, width, height).unwrap();
+        let renderer = CairoRenderer::new(FontDescription::from_string("Sans"));
+        {
+            let context = Context::new(&surface).unwrap();
+            renderer.render(&context, &scene).unwrap();
+            renderer.render(&context, &scene).unwrap();
+        }
+        surface.flush();
+
+        assert_eq!(
+            renderer.images.borrow().len(),
+            2,
+            "both the drawable file and the failure are remembered"
+        );
+
+        let stride = surface.stride() as usize;
+        let data = surface.data().unwrap();
+        let pixel = |x: usize, y: usize| {
+            let offset = y * stride + x * 4;
+            u32::from_ne_bytes(data[offset..offset + 4].try_into().unwrap())
+        };
+
+        // Inside the icon's bounds: green over black at 50% alpha, twice over.
+        let inside = pixel(4, 4);
+        assert!(
+            ((inside >> 8) as u8) > 100,
+            "expected green ink, got {inside:#010x}"
+        );
+        // An undecodable image leaves its bounds exactly as the background.
+        assert_eq!(pixel(12, 12), pixel(15, 2));
+
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// The whole point of a backdrop: the bar's background must tint it rather

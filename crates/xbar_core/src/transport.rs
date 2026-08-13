@@ -110,7 +110,12 @@ fn snapshot_from_shared(message: SharedMessage) -> WmSnapshot {
             info.monitor_height,
         ),
         layout_symbol: info.ltsymbol_lossy().into_owned(),
+        // A window manager that predates these fields sends zeroes, which is
+        // "did not say" rather than "no layouts and layout 0".
+        layout: (info.layout_count != 0).then_some(crate::LayoutId(info.layout_id)),
+        layout_count: (info.layout_count != 0).then_some(info.layout_count as usize),
         client_name: info.client_name_lossy().into_owned(),
+        client_app_id: info.client_app_id_lossy().into_owned(),
         tags: info
             .tag_status_vec
             .into_iter()

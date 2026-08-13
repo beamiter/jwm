@@ -4,6 +4,7 @@
 //! 窗口信息、监视器几何等。
 
 use crate::config::CONFIG;
+use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use xbar_core::shared_structures::{
     MAX_MINIMIZED_WINDOWS, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MINIMIZED_WINDOW_FLAG_URGENT,
@@ -133,6 +134,26 @@ impl StatusBarBuilder {
         String::new()
     }
 
+    /// Application identity of the focused client, for the bar's title icon.
+    ///
+    /// The class is preferred over the instance because it is what a desktop
+    /// entry's `StartupWMClass` matches, and what a Wayland `app_id` becomes
+    /// on this side; the instance is only a fallback for X11 clients that set
+    /// one half of `WM_CLASS`.
+    pub fn get_selected_client_app_id(
+        clients: &slotmap::SlotMap<ClientKey, WMClient>,
+        monitor: &WMMonitor,
+    ) -> String {
+        let Some(client) = monitor.sel.and_then(|key| clients.get(key)) else {
+            return String::new();
+        };
+        if !client.class.is_empty() {
+            client.class.clone()
+        } else {
+            client.instance.clone()
+        }
+    }
+
     /// Project the hidden clients owned by one monitor into the fixed-size
     /// wire records consumed by every bar frontend.
     ///
@@ -213,6 +234,12 @@ impl StatusBarBuilder {
         monitor_info.monitor_height = monitor.geometry.m_h;
         monitor_info.monitor_num = monitor.num;
         monitor_info.set_ltsymbol(&monitor.lt_symbol);
+        // The bar builds its layout menu from what this compositor actually
+        // offers, so it can neither hide a layout nor offer a dead one after
+        // the catalog grows. A layout outside the catalog reports id 0, which
+        // is what `ltsymbol` already conveys on its own.
+        monitor_info.layout_count = LayoutEnum::all().len() as u32;
+        monitor_info.layout_id = monitor.lt.protocol_id().unwrap_or_default();
 
         // 计算标签掩码
         let (occupied_tags_mask, urgent_tags_mask) =
@@ -237,6 +264,7 @@ impl StatusBarBuilder {
         // 设置选中客户端名称
         let selected_client_name = Self::get_selected_client_name(clients, monitor);
         monitor_info.set_client_name(&selected_client_name);
+        monitor_info.set_client_app_id(&Self::get_selected_client_app_id(clients, monitor));
 
         message.monitor_info = monitor_info;
         let mut minimized = Self::get_minimized_windows(clients, monitor_clients, monitor.num);

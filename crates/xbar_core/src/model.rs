@@ -351,7 +351,17 @@ pub struct WmSnapshot {
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: String,
+    /// Layout in use, as the window manager identifies it on the wire.
+    #[serde(default)]
+    pub layout: Option<LayoutId>,
+    /// How many layouts the window manager offers. `None` when it did not say,
+    /// which leaves the bar on its own compiled catalog.
+    #[serde(default)]
+    pub layout_count: Option<usize>,
     pub client_name: String,
+    /// Wayland app-id or X11 class of the focused window, empty when unknown.
+    #[serde(default)]
+    pub client_app_id: String,
     pub tags: Vec<TagState>,
     #[serde(default)]
     pub minimized_windows: Vec<MinimizedWindow>,
@@ -735,6 +745,12 @@ pub struct ModelConfig {
     pub clock_minute_format: String,
     /// Chrono format used by the optional clock adapter with seconds.
     pub clock_second_format: String,
+    /// Look the focused window's desktop icon up from its application
+    /// identity. On by default: the lookup is cached per identity and only
+    /// runs when focus moves to a different application, so a bar that shows
+    /// the title gets the matching icon without opting in. Hosts that do not
+    /// want a bar touching the desktop database turn it off here.
+    pub resolve_client_icons: bool,
 }
 
 impl Default for ModelConfig {
@@ -747,6 +763,7 @@ impl Default for ModelConfig {
             show_seconds: false,
             clock_minute_format: "%Y-%m-%d %H:%M".to_owned(),
             clock_second_format: "%Y-%m-%d %H:%M:%S".to_owned(),
+            resolve_client_icons: true,
         }
     }
 }
@@ -832,6 +849,10 @@ pub enum BarEvent {
     Battery(BatteryState),
     Network(NetworkState),
     Media(MediaState),
+    /// Desktop icon resolved for the focused window's application identity.
+    /// Filesystem lookup is a host concern, so the model is told the answer
+    /// rather than going looking for it.
+    ClientIcon(Option<crate::app_icon::AppIcon>),
     User(UserAction),
 }
 
@@ -1121,7 +1142,15 @@ pub struct BarView<'a> {
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: &'a str,
+    /// Layout in use, when the window manager names it on the wire.
+    pub layout: Option<LayoutId>,
+    /// Layouts the window manager offers, when it says how many.
+    pub layout_count: Option<usize>,
     pub client_name: &'a str,
+    /// Application identity of the focused window, for its desktop icon.
+    pub client_app_id: &'a str,
+    /// Desktop icon resolved for [`Self::client_app_id`], when one was found.
+    pub client_icon: Option<&'a crate::app_icon::AppIcon>,
     pub minimized_windows: &'a [MinimizedWindow],
     pub minimized_overflow: bool,
     pub time: &'a str,
@@ -1154,7 +1183,15 @@ pub struct BarSnapshot {
     pub monitor: MonitorId,
     pub geometry: Option<MonitorGeometry>,
     pub layout_symbol: String,
+    #[serde(default)]
+    pub layout: Option<LayoutId>,
+    #[serde(default)]
+    pub layout_count: Option<usize>,
     pub client_name: String,
+    #[serde(default)]
+    pub client_app_id: String,
+    #[serde(default)]
+    pub client_icon: Option<crate::app_icon::AppIcon>,
     #[serde(default)]
     pub minimized_windows: Vec<MinimizedWindow>,
     #[serde(default)]
@@ -1185,7 +1222,11 @@ impl BarSnapshot {
             monitor: self.monitor,
             geometry: self.geometry,
             layout_symbol: &self.layout_symbol,
+            layout: self.layout,
+            layout_count: self.layout_count,
             client_name: &self.client_name,
+            client_app_id: &self.client_app_id,
+            client_icon: self.client_icon.as_ref(),
             minimized_windows: &self.minimized_windows,
             minimized_overflow: self.minimized_overflow,
             time: &self.time,
@@ -1217,7 +1258,11 @@ pub struct BarModel {
     monitor: MonitorId,
     geometry: Option<MonitorGeometry>,
     layout_symbol: String,
+    layout: Option<LayoutId>,
+    layout_count: Option<usize>,
     client_name: String,
+    client_app_id: String,
+    client_icon: Option<crate::app_icon::AppIcon>,
     minimized_windows: Vec<MinimizedWindow>,
     minimized_overflow: bool,
     clock: ClockState,
@@ -1252,7 +1297,11 @@ impl BarModel {
             monitor: MonitorId::default(),
             geometry: None,
             layout_symbol: "[]=".to_owned(),
+            layout: None,
+            layout_count: None,
             client_name: String::new(),
+            client_app_id: String::new(),
+            client_icon: None,
             minimized_windows: Vec::new(),
             minimized_overflow: false,
             clock: ClockState::default(),
@@ -1287,7 +1336,11 @@ impl BarModel {
             monitor: self.monitor,
             geometry: self.geometry,
             layout_symbol: &self.layout_symbol,
+            layout: self.layout,
+            layout_count: self.layout_count,
             client_name: &self.client_name,
+            client_app_id: &self.client_app_id,
+            client_icon: self.client_icon.as_ref(),
             minimized_windows: &self.minimized_windows,
             minimized_overflow: self.minimized_overflow,
             time: if self.show_seconds {
@@ -1321,7 +1374,11 @@ impl BarModel {
             monitor: view.monitor,
             geometry: view.geometry,
             layout_symbol: view.layout_symbol.to_owned(),
+            layout: view.layout,
+            layout_count: view.layout_count,
             client_name: view.client_name.to_owned(),
+            client_app_id: view.client_app_id.to_owned(),
+            client_icon: view.client_icon.cloned(),
             minimized_windows: view.minimized_windows.to_vec(),
             minimized_overflow: view.minimized_overflow,
             time: view.time.to_owned(),
@@ -1353,7 +1410,20 @@ impl BarModel {
             BarEvent::Battery(battery) => Ok(self.replace_battery(battery)),
             BarEvent::Network(network) => Ok(self.replace_network(network)),
             BarEvent::Media(media) => Ok(self.replace_media(media)),
+            BarEvent::ClientIcon(icon) => Ok(self.replace_client_icon(icon)),
             BarEvent::User(action) => self.update_user(action),
+        }
+    }
+
+    /// Attach (or drop) the icon a host resolved for the focused application.
+    fn replace_client_icon(&mut self, icon: Option<crate::app_icon::AppIcon>) -> ModelUpdate {
+        if self.client_icon == icon {
+            return ModelUpdate::default();
+        }
+        self.client_icon = icon;
+        ModelUpdate {
+            dirty: DirtyBits::new(DirtyBits::CLIENT_CHANGED),
+            effects: Vec::new(),
         }
     }
 
@@ -1387,10 +1457,14 @@ impl BarModel {
         {
             dirty.set(DirtyBits::MONITOR_CHANGED);
         }
-        if self.layout_symbol != snapshot.layout_symbol {
+        if self.layout_symbol != snapshot.layout_symbol
+            || self.layout != snapshot.layout
+            || self.layout_count != snapshot.layout_count
+        {
             dirty.set(DirtyBits::LAYOUT_CHANGED);
         }
-        if self.client_name != snapshot.client_name {
+        if self.client_name != snapshot.client_name || self.client_app_id != snapshot.client_app_id
+        {
             dirty.set(DirtyBits::CLIENT_CHANGED);
         }
         if self.wm_session_id != snapshot.wm_session_id
@@ -1412,7 +1486,17 @@ impl BarModel {
         self.monitor = snapshot.monitor;
         self.geometry = snapshot.geometry;
         self.layout_symbol = snapshot.layout_symbol;
+        self.layout = snapshot.layout;
+        self.layout_count = snapshot.layout_count;
         self.client_name = snapshot.client_name;
+        if self.client_app_id != snapshot.client_app_id {
+            // The icon belongs to the application that was focused, not to the
+            // one that is. Dropping it here means a bar shows no icon for a
+            // moment rather than the previous window's icon under the new
+            // window's title; the host resolves the replacement.
+            self.client_app_id = snapshot.client_app_id;
+            self.client_icon = None;
+        }
         self.minimized_windows = snapshot.minimized_windows;
         self.minimized_overflow = snapshot.minimized_overflow;
 
@@ -1435,8 +1519,13 @@ impl BarModel {
         }
 
         let geometry_was_set = self.geometry.is_some();
-        let layout_changed = self.layout_symbol != "[]=" || self.layout_selector_open;
-        let client_changed = !self.client_name.is_empty();
+        let layout_changed = self.layout_symbol != "[]="
+            || self.layout_selector_open
+            || self.layout.is_some()
+            || self.layout_count.is_some();
+        let client_changed = !self.client_name.is_empty()
+            || !self.client_app_id.is_empty()
+            || self.client_icon.is_some();
         let minimized_changed = self.wm_session_id != 0
             || !self.minimized_windows.is_empty()
             || self.minimized_overflow;
@@ -1450,7 +1539,11 @@ impl BarModel {
         self.geometry = None;
         self.layout_symbol.clear();
         self.layout_symbol.push_str("[]=");
+        self.layout = None;
+        self.layout_count = None;
         self.client_name.clear();
+        self.client_app_id.clear();
+        self.client_icon = None;
         self.minimized_windows.clear();
         self.minimized_overflow = false;
         self.layout_selector_open = false;

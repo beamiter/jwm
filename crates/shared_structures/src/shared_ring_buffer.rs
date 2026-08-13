@@ -87,8 +87,11 @@ pub(crate) struct WireMessage {
     monitor_y: i32,
     pub(crate) tag_flags: [u8; MAX_TAGS],
     client_name: [u8; crate::MAX_CLIENT_NAME_LEN],
+    client_app_id: [u8; crate::MAX_APP_ID_LEN],
     ltsymbol: [u8; crate::MAX_LT_SYMBOL_LEN],
     _reserved: [u8; 3],
+    layout_count: u32,
+    layout_id: u32,
     minimized_count: u32,
     minimized_flags: u32,
     minimized_windows: [WireMinimizedWindowInfo; MAX_MINIMIZED_WINDOWS],
@@ -101,9 +104,10 @@ const _: () = assert!(
             + 4 * 5
             + MAX_TAGS
             + crate::MAX_CLIENT_NAME_LEN
+            + crate::MAX_APP_ID_LEN
             + crate::MAX_LT_SYMBOL_LEN
             + 3
-            + 4 * 2
+            + 4 * 4
             + std::mem::size_of::<WireMinimizedWindowInfo>() * MAX_MINIMIZED_WINDOWS
 );
 
@@ -199,8 +203,11 @@ impl From<&SharedMessage> for WireMessage {
             monitor_y: message.monitor_info.monitor_y,
             tag_flags,
             client_name: message.monitor_info.client_name,
+            client_app_id: message.monitor_info.client_app_id,
             ltsymbol: message.monitor_info.ltsymbol,
             _reserved: [0; 3],
+            layout_count: message.monitor_info.layout_count,
+            layout_id: message.monitor_info.layout_id,
             minimized_count: message.minimized_count.min(MAX_MINIMIZED_WINDOWS as u32),
             minimized_flags: message.minimized_flags,
             minimized_windows,
@@ -217,7 +224,10 @@ impl From<WireMessage> for SharedMessage {
             monitor_x: message.monitor_x,
             monitor_y: message.monitor_y,
             client_name: message.client_name,
+            client_app_id: message.client_app_id,
             ltsymbol: message.ltsymbol,
+            layout_count: message.layout_count,
+            layout_id: message.layout_id,
             ..crate::MonitorInfo::default()
         };
         for (status, flags) in monitor_info
@@ -662,9 +672,12 @@ mod tests {
     }
 
     #[test]
-    fn v13_wire_layout_is_exact_and_padding_free() {
+    fn v14_wire_layout_is_exact_and_padding_free() {
         assert_eq!(std::mem::size_of::<WireMinimizedWindowInfo>(), 176);
-        assert_eq!(std::mem::size_of::<WireMessage>(), 3040);
+        assert_eq!(std::mem::size_of::<WireMessage>(), 3112);
+        assert_eq!(std::mem::offset_of!(WireMessage, client_app_id), 181);
+        assert_eq!(std::mem::offset_of!(WireMessage, layout_count), 280);
+        assert_eq!(std::mem::offset_of!(WireMessage, layout_id), 284);
         assert_eq!(std::mem::size_of::<WireCommand>(), 64);
         assert_eq!(std::mem::offset_of!(WireCommand, cmd_type), 0);
         assert_eq!(std::mem::offset_of!(WireCommand, parameter), 4);

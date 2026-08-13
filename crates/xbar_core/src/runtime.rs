@@ -590,6 +590,9 @@ pub struct BarRuntime {
     battery: crate::battery::BatteryManager,
     #[cfg(feature = "provider-network-sysfs")]
     network: crate::network::NetworkMonitor,
+    /// Desktop-icon lookup for the focused window, absent when the host
+    /// switched it off in [`ModelConfig`].
+    client_icons: Option<crate::app_icon::AppIconResolver>,
 }
 
 impl Default for BarRuntime {
@@ -600,6 +603,9 @@ impl Default for BarRuntime {
 
 impl BarRuntime {
     pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
+        let client_icons = config
+            .resolve_client_icons
+            .then(crate::app_icon::AppIconResolver::default);
         Ok(Self {
             model: BarModel::new(config)?,
             pending_changes: DirtyBits::all(),
@@ -624,6 +630,7 @@ impl BarRuntime {
             battery: crate::battery::BatteryManager::new(),
             #[cfg(feature = "provider-network-sysfs")]
             network: crate::network::NetworkMonitor::new(),
+            client_icons,
         })
     }
 
@@ -782,7 +789,44 @@ impl BarRuntime {
     /// Reduce any semantic event and execute every effect supported by the
     /// currently enabled adapters.
     pub fn apply_event(&mut self, event: BarEvent) -> RuntimeUpdate {
-        match self.model.update(event) {
+        let mut update = match self.model.update(event) {
+            Ok(update) => self.consume_model_update(update),
+            Err(error) => RuntimeUpdate::issue(RuntimeIssue::Model(error)),
+        };
+        // Focus moved to a different application, so the icon beside the title
+        // has to follow it. This is the one place that knows both that the
+        // identity changed and how to reach the desktop database.
+        if update.changes.contains(DirtyBits::CLIENT_CHANGED) {
+            update.merge(self.refresh_client_icon());
+        }
+        update
+    }
+
+    /// Replace the desktop-icon lookup, or remove it with `None`.
+    ///
+    /// Hosts that keep their applications and icon themes somewhere other than
+    /// the freedesktop base directories install their own resolver here; the
+    /// default one reads the environment.
+    pub fn set_client_icon_resolver(
+        &mut self,
+        resolver: Option<crate::app_icon::AppIconResolver>,
+    ) -> RuntimeUpdate {
+        self.client_icons = resolver;
+        self.refresh_client_icon()
+    }
+
+    /// Resolve the focused application's icon and hand it to the model.
+    ///
+    /// Cheap in the common case: [`AppIconResolver`](crate::app_icon::AppIconResolver)
+    /// answers from its cache for every identity it has already seen, and the
+    /// model absorbs an unchanged answer without marking anything dirty.
+    fn refresh_client_icon(&mut self) -> RuntimeUpdate {
+        let Some(resolver) = self.client_icons.as_mut() else {
+            return RuntimeUpdate::default();
+        };
+        let app_id = self.model.view().client_app_id.to_owned();
+        let icon = resolver.resolve(&app_id).cloned();
+        match self.model.update(BarEvent::ClientIcon(icon)) {
             Ok(update) => self.consume_model_update(update),
             Err(error) => RuntimeUpdate::issue(RuntimeIssue::Model(error)),
         }
@@ -1480,6 +1524,60 @@ mod tests {
                 .collect(),
             ..WmSnapshot::default()
         }
+    }
+
+    /// Focus moving to another application must swap the icon with it, and a
+    /// window whose application has no icon must not keep the previous one.
+    #[test]
+    fn the_title_icon_follows_the_focused_application() {
+        let root = std::env::temp_dir().join(format!(
+            "xbar_runtime_icons_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let pixmaps = root.join("pixmaps");
+        std::fs::create_dir_all(&pixmaps).expect("scratch icons");
+        let editor = pixmaps.join("editor.png");
+        std::fs::write(&editor, "icon").expect("scratch icon");
+
+        let mut runtime = BarRuntime::default();
+        runtime.set_client_icon_resolver(Some(crate::app_icon::AppIconResolver::with_paths(
+            crate::app_icon::IconSearchPaths::new(
+                Vec::new(),
+                Vec::new(),
+                vec![pixmaps.clone()],
+                Vec::new(),
+            ),
+            24,
+        )));
+
+        let focused = |app_id: &str| WmSnapshot {
+            sequence: Some(1),
+            monitor: MonitorId(0),
+            layout_symbol: "[]=".to_owned(),
+            client_name: "window".to_owned(),
+            client_app_id: app_id.to_owned(),
+            ..WmSnapshot::default()
+        };
+
+        let update = runtime.apply_event(BarEvent::WindowManager(focused("editor")));
+        assert!(update.changes.contains(DirtyBits::CLIENT_CHANGED));
+        assert_eq!(
+            runtime.snapshot().client_icon.map(|icon| icon.path),
+            Some(editor)
+        );
+
+        let _ = runtime.apply_event(BarEvent::WindowManager(focused("ghost")));
+        assert_eq!(runtime.snapshot().client_icon, None);
+
+        let _ = runtime.apply_event(BarEvent::WindowManagerUnavailable);
+        assert_eq!(runtime.snapshot().client_icon, None);
+        assert!(runtime.snapshot().client_app_id.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(feature = "transport-shared")]

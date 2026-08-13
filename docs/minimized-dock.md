@@ -50,7 +50,7 @@ scale. Negative monitor origins and fractional scale factors are valid.
 
 ## Protocol and restart behavior
 
-The Dock metadata is part of shared-memory protocol v13. Each message includes
+The Dock metadata is part of shared-memory protocol v14. Each message includes
 a window-manager session id, minimized-list generation, explicit overflow bit,
 and at most 16 fixed-size window records. Commands carry a 64-bit window id,
 the same session id, source monitor, exact generation, and an anchor rectangle.

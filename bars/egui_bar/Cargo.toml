@@ -15,6 +15,10 @@ xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions"
 # by name and registered explicitly; see `src/fonts.rs`.
 font-kit = "0.14"
 
+# Desktop icons resolved for the focused window arrive as file paths; egui
+# uploads textures but decodes nothing itself.
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
+
 # Compositor detection and the EWMH dock properties eframe does not set. The
 # unsafe-code features expose `xcb_ffi`, whose raw connection handle is what
 # the startup surface probe builds its scratch wgpu surface on.
