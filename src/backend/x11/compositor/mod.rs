@@ -663,6 +663,12 @@ where
     snap_animation_duration_ms: u64,
     snap_target: Option<SnapPreview>,
 
+    // Interactive screenshot mode keeps this GPU scene copy above live
+    // windows, so the desktop appears frozen while the user annotates it.
+    screenshot_freeze_pending: bool,
+    screenshot_freeze_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    screenshot_freeze_size: Option<(u32, u32)>,
+
     // --- Phase 5: Window Peek (Boss Key) ---
     peek_active: bool,
     peek_enabled: bool,
@@ -1052,6 +1058,11 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_framebuffer(fbo);
                 self.gl.delete_texture(tex);
             }
+            if let Some((fbo, tex)) = self.screenshot_freeze_fbo.take() {
+                self.gl.delete_framebuffer(fbo);
+                self.gl.delete_texture(tex);
+            }
+            self.screenshot_freeze_size = None;
             if let Some(frame) = self.waterlily_texture.take() {
                 self.gl.delete_texture(frame.texture);
                 if let Some(texture) = frame.occupancy_texture {

@@ -4,6 +4,112 @@
 
 ---
 
+## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
+
+**现状**
+
+`01b41a8` 已建立 normalized linear-sRGB 工作空间、逐输出软件交付区域，以及成对安装/
+回滚的 CRTC CTM + GAMMA_LUT 路径。合成器内部窗口、3D overview 和 retained effect
+已经在最终输出变换前进入同一个线性工作域。
+
+但 cursor、DnD drag icon、session-lock surface、top/overlay layer surface 仍由 KMS/Smithay
+在 compositor texture 之外组装，没有经过 source -> common-linear 转换。只要其中任一元素
+可见，`external_elements_color_pipeline_safe` 就会让整帧退回 exact-sRGB；普通桌面的光标
+通常位于活动输出上，因此逐输出交付目前主要还是基础设施。若干 encoded-only 帧尾 overlay
+和 capture 也仍是独立 blocker。为避免 HDR signal 与实际像素域不一致，
+`HDR_OUTPUT_METADATA` enable 继续 fail-closed 拒绝，EDID HDR profile 只作为能力信息。
+
+**原则：HDR enable 是本队列的终点，不是下一个补丁。** 仅适配 cursor/KMS 外部元素仍不足以
+安全开放 HDR；absolute luminance、surface-description commit latch、10-bit scanout，以及颜色
+属性与匹配 framebuffer 的原子提交都是硬前置。以下里程碑应独立落地，任何未满足条件都保持
+exact-sRGB fallback。
+
+**缺口**
+
+1. **没有 last-success 交付快照。** IPC 当前只能报告能力/配置，不能回答最后一次成功呈现
+   实际走了 global-sRGB、software region 还是 KMS CTM+LUT，也不能可靠报告逐输出 TF、
+   primaries、HDR/Colorspace signal 与 fallback reason。
+2. **外部元素没有统一颜色所有权。** 需要把 cursor、DnD、lock、top/overlay 全部
+   internalize 到 common-linear compositor pass，或提供数学等价的 per-element adapter；
+   不能只修 cursor，否则剩余元素仍会触发同一个 fallback。
+3. **几何与 alpha 契约尚未锁定。** internalize/adapt 时必须保留 cursor hotspot、输出
+   transform/scale、layer z-order、damage 和 premultiplied alpha；无颜色描述的元素按 sRGB
+   ingress，导入失败或描述不受支持时必须退回 exact-sRGB，不能混域继续提交。
+4. **帧尾仍有第二套颜色域。** Expose/Peek、tabs、particles、edge glow、HUD、annotation、
+   toolbar、toast/OSD、recording overlay 等必须逐类标注为 common-linear-aware，或保留具名
+   blocker；capture/readback 要从明确编码的独立 view 派生，不能通过改变物理 scanout route
+   来获得截图。
+5. **真实 HDR 语义尚不完整。** normalized linear-sRGB 目前没有统一 absolute-luminance/
+   working-white、tone mapping 或非 D65 chromatic adaptation；surface description 也尚未与
+   对应 `wl_surface.commit` 原子锁存。
+6. **KMS 交付还不是 framebuffer 原子事务。** `DEGAMMA/CTM/GAMMA`、connector
+   `Colorspace`/`HDR_OUTPUT_METADATA` 与目标 FB 必须同一 TEST_ONLY + atomic commit；还要
+   明确要求并验证 HDR scanout 的 10-bit（或更高）format/plane/connector 链。direct scanout
+   在未证明 profile passthrough 正确前继续阻断。
+
+**落点与顺序**
+
+1. **P0：last-success 诊断** — `src/backend/udev_kms.rs`、
+   `src/backend/wayland_udev/backend.rs`、`src/jwm/ipc_handler.rs`
+   - 只在 framebuffer/属性成功提交并进入可呈现状态后更新 generation、逐输出 route/target、
+     active signal 和 blocker；失败或 blocked attempt 不得覆盖上一份成功快照。
+   - IPC 明确区分 EDID capability、用户 request、attempt 与实际 scanout，不再从配置静态推断
+     active HDR；尚无成功快照时返回 null/unknown。
+2. **P0：KMS 外部元素颜色计划** — `src/backend/udev_kms.rs`
+   - 把 `external_elements_color_pipeline_safe` 的总 bool 拆成可诊断的逐类计划，完整覆盖
+     cursor（主题与 fallback）、DnD、lock、top/overlay 及各自 subsurface tree；计划必须以
+     实际可见/可导入元素为准。
+   - 让同一份计划驱动 element assembly、颜色交付 route 与 blocker reason，避免检查与绘制
+     两套枚举再次漂移。
+3. **P0：internalize/adapt** — `src/backend/wayland_udev/backend.rs` 与
+   `compositor/{render,mod}.rs`
+   - 优先把上述元素按正确 z-order 绘入 FP16 common-linear target，再执行现有逐输出
+     matrix + OETF；保留 exact-sRGB fallback 作为每帧 fail-closed 路径。
+   - 复用 `color_management.rs` / `color_pipeline.rs` 的 sRGB ingress、矩阵布局和 transfer
+     规则，不为 cursor/layer 复制另一套 GLSL 传递函数。
+4. **P0：清理其余 linear-tail blocker** — `compositor/{damage,render,expose}.rs`
+   - 建立帧尾 domain table，让每一类 overlay 要么在 final delivery 前绘制，要么有显式颜色
+     adapter；capture/recording 使用独立、目标明确的 view，不再反向约束物理输出 route。
+5. **P1：补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
+   - 定义 working white/absolute luminance、SDR/PQ/HLG 标尺与 tone-map policy；实现并测试
+     非 D65 CAT。将 image-description pending/current 双缓冲，只在匹配 surface commit 生效。
+6. **P1：KMS 原子交付与位深** — `src/backend/udev_kms.rs`
+   - 将 plane FB、CRTC color stages 与 connector signalling 合并为同一受控 atomic request；
+     跨 DRM device 或 10-bit 链路不完整时继续软件 SDR，不宣称 hardware HDR active。
+7. **P2：开放真实 HDR enable** — `src/backend/udev_kms.rs` 与 `src/jwm/ipc_handler.rs`
+   - 只有工作域、全部可见 tail element、capture、atomic KMS 和位深门槛同时满足时，才提交
+     `Colorspace` + HDR metadata + 匹配 FB；使 enable/disable、DPMS、gamma-control、
+     hotplug/reinit 和 compositor runtime toggle 都保持可回滚的一致状态。
+8. **贯穿测试** — `src/backend/wayland_udev/compositor/headless_render.rs` 及 KMS 纯策略测试
+   - 增加外部元素 source-sRGB -> common-linear -> PQ/HLG/sRGB output 的像素 oracle，覆盖
+     半透明边缘、cursor hotspot、跨输出移动、DnD、lock、top/overlay 和导入失败。
+   - 覆盖 last-success 快照、route 切换、capture 不改变 scanout、10-bit format 协商、属性/
+     pageflip 提交失败、DPMS/hotplug/reinit，以及“旧 framebuffer + 新属性”不得被提交。
+
+**验收目标**
+
+- IPC 的 active route/signal 只来自最后一次成功呈现；失败 attempt 不会产生 false-active。
+- 普通 cursor、DnD、lock、top/overlay 可见时不再天然触发 global-sRGB fallback；任何未适配
+  或导入失败的元素仍会稳定、可诊断地退回 exact-sRGB。
+- SDR 画面与当前路径像素一致；PQ/HLG/广色域输出中外部元素只做一次 OETF/色域变换，
+  alpha 混合、跨输出边界和 mixed-output region 都有严格 EGL 像素回归。
+- capture/recording 与每类帧尾 overlay 都有 domain 契约；启用它们不造成双重编码，也不会
+  为获取截图而切换物理输出 signal。
+- HDR metadata 只有在 absolute-luminance、commit latch、10-bit 链路，以及 framebuffer 与
+  完整颜色属性的同一受控提交都验证成功后才标记 active；失败、关闭、VT/KMS reinit 后不会
+  遗留 connector/CRTC 颜色状态。
+- `cargo fmt --all -- --check`、六组 backend feature check、严格 surfaceless EGL 全套和 KMS
+  状态机测试全部通过。
+
+**P0（里程碑 1–4）的非目标**
+
+- 开放 HDR signalling；在 P1/P2 完成前 enable 继续明确拒绝。
+- HDR/SDR absolute-luminance、tone mapping、working-white、非 D65 CAT 和 surface-description
+  commit latch；这些属于 P1，不能用 P0 的 normalized workspace 冒充完成。
+- negative-origin、non-unit scale、rotated 或冲突 overlap 输出拓扑的逐输出交付。
+
+---
+
 ## DONE: wayland_udev 补齐 attention_animation（2026-08-07）
 
 `attention_animation` 现在真正控制 Wayland 紧急边框，颜色、脉动周期与

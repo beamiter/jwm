@@ -55,6 +55,18 @@ fn minimized_dock_requires_composition(
     has_targeted_cached_visual || has_preview || iconic_recapture_pending
 }
 
+fn screenshot_freeze_requires_composition(capture_pending: bool, scene_captured: bool) -> bool {
+    capture_pending || scene_captured
+}
+
+fn screenshot_freeze_change_needed(
+    requested: bool,
+    capture_pending: bool,
+    scene_captured: bool,
+) -> bool {
+    requested != (capture_pending || scene_captured)
+}
+
 /// Resolve and consume each transient render source before resolving the next
 /// one. Minimized thumbnail sources contain bare GL object names: resolving a
 /// later CPU-only item may upload it and evict an older GPU-LRU entry, so a
@@ -430,6 +442,167 @@ fn dirty_below_requires_full_blur_redraw(
 }
 
 impl<C: CompositorConnection> Compositor<C> {
+    /// Arm or disarm the interactive screenshot scene freeze. The actual copy
+    /// is deferred until the next completed scene, so the selection overlay
+    /// can never become part of the frozen image.
+    pub(crate) fn set_screenshot_freeze(&mut self, active: bool) {
+        if !screenshot_freeze_change_needed(
+            active,
+            self.screenshot_freeze_pending,
+            self.screenshot_freeze_fbo.is_some(),
+        ) {
+            return;
+        }
+        self.screenshot_freeze_pending = active;
+        if active {
+            // The freeze target is a complete full-output image. Do not let
+            // its source depend on the contents retained by an EGL/GLX
+            // partial-damage back buffer: the next frame must rebuild every
+            // pixel before capture.
+            self.damage_tracker.mark_all_dirty();
+            self.dirty_region_tracker.mark_all_dirty();
+            self.buffer_age_damage_history.clear();
+        } else {
+            if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                }
+            }
+            self.screenshot_freeze_size = None;
+        }
+        self.needs_render = true;
+    }
+
+    fn capture_screenshot_freeze(&mut self) {
+        if !self.screenshot_freeze_pending {
+            return;
+        }
+        let size_changed = self.screenshot_freeze_size != Some((self.screen_w, self.screen_h));
+        if size_changed {
+            if let Some((fbo, texture)) = self.screenshot_freeze_fbo.take() {
+                unsafe {
+                    self.gl.delete_framebuffer(fbo);
+                    self.gl.delete_texture(texture);
+                }
+            }
+            self.screenshot_freeze_size = None;
+        }
+        if self.screenshot_freeze_fbo.is_none() {
+            match unsafe { Self::create_scene_fbo(&self.gl, self.screen_w, self.screen_h) } {
+                Ok(target) => {
+                    self.screenshot_freeze_fbo = Some(target);
+                    self.screenshot_freeze_size = Some((self.screen_w, self.screen_h));
+                }
+                Err(error) => {
+                    log::warn!(
+                        "{}: {error}",
+                        self.renderer_ctx("screenshot-freeze: allocate scene FBO")
+                    );
+                    // Freezing is a visual convenience, not a prerequisite
+                    // for the editor. Fail open to the live scene instead of
+                    // retaining a request that blocks fullscreen bypass and
+                    // retries the same allocation on every later damage frame.
+                    self.screenshot_freeze_pending = false;
+                    self.screenshot_freeze_size = None;
+                    return;
+                }
+            }
+        }
+        let Some((freeze_fbo, _)) = self.screenshot_freeze_fbo else {
+            return;
+        };
+        unsafe {
+            // set_screenshot_freeze forced this frame to redraw the complete
+            // output. Capture that freshly rendered scene, not the persistent
+            // transition snapshot: the latter is maintained incrementally and
+            // may still contain undefined pixels from an older partial-damage
+            // back buffer. A stale GL scissor must not clip this full copy.
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(freeze_fbo));
+            self.gl.blit_framebuffer(
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                0,
+                0,
+                self.screen_w as i32,
+                self.screen_h as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+        self.screenshot_freeze_pending = false;
+    }
+
+    fn render_screenshot_freeze(&self, projection: &[f32; 16]) {
+        let Some((_, texture)) = self.screenshot_freeze_fbo else {
+            return;
+        };
+        unsafe {
+            let scissor_enabled = self.gl.is_enabled(glow::SCISSOR_TEST);
+            let blend_enabled = self.gl.is_enabled(glow::BLEND);
+            if scissor_enabled {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+            // This texture is the already-composited final scene. Replace the
+            // live scene exactly instead of interpreting its stored alpha as
+            // another translucent layer.
+            if blend_enabled {
+                self.gl.disable(glow::BLEND);
+            }
+            self.gl.use_program(Some(self.transition_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.transition_uniforms.projection.as_ref(),
+                false,
+                projection,
+            );
+            self.gl
+                .uniform_1_i32(self.transition_uniforms.texture.as_ref(), 0);
+            self.gl.uniform_4_f32(
+                self.transition_uniforms.rect.as_ref(),
+                0.0,
+                0.0,
+                self.screen_w as f32,
+                self.screen_h as f32,
+            );
+            self.gl
+                .uniform_1_f32(self.transition_uniforms.opacity.as_ref(), 1.0);
+            self.gl.uniform_4_f32(
+                self.transition_uniforms.uv_rect.as_ref(),
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            );
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            self.gl.bind_vertex_array(None);
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.use_program(None);
+            if blend_enabled {
+                self.gl.enable(glow::BLEND);
+            }
+            if scissor_enabled {
+                self.gl.enable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+
     // =====================================================================
     // Tag-switch slide transition
     // =====================================================================
@@ -2484,6 +2657,10 @@ impl<C: CompositorConnection> Compositor<C> {
     ) -> bool {
         if self.needs_postprocess()
             || self.screenshot_requests.has_pending()
+            || screenshot_freeze_requires_composition(
+                self.screenshot_freeze_pending,
+                self.screenshot_freeze_fbo.is_some(),
+            )
             || self.system_ui.is_some()
             || self.debug_hud
             || self.recording_active
@@ -3515,6 +3692,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // buffer-age repair path remain incremental.
         has_dirty |= damage_wakeup;
         let force_render = self.screenshot_requests.has_pending()
+            || self.screenshot_freeze_pending
             || self.debug_hud
             || self.transition_active()
             || overview_animating
@@ -5676,6 +5854,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Feature 12: Screenshot capture (after all rendering, before overlays) ===
         // Capture BEFORE rendering snap preview / annotations so the screenshot
         // doesn't include the selection overlay or annotation strokes.
+        self.capture_screenshot_freeze();
         let has_pending_screenshot = self.screenshot_requests.has_pending();
         for request in self.screenshot_requests.take_all() {
             match request {
@@ -5697,6 +5876,10 @@ impl<C: CompositorConnection> Compositor<C> {
         // === Pass 5g: Snap preview ===
         // Skip on the frame that captured a screenshot (overlay was already cleared
         // logically; rendering it would leave a ghost on the next visible frame).
+        // The frozen scene is deliberately below screenshot annotations and
+        // the toolbar, but above the live window scene.
+        self.render_screenshot_freeze(&proj);
+
         if !has_pending_screenshot {
             self.render_snap_preview(&proj);
         }
@@ -6278,7 +6461,8 @@ mod tests {
         dirty_below_affects_backdrop, dirty_below_requires_full_blur_redraw,
         edge_effects_require_composition, focus_highlight_style, intersect_gl_scissors,
         is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
-        rect_covers_output, resolve_and_draw_each, transformed_overlays_require_full_redraw,
+        rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
+        screenshot_freeze_requires_composition, transformed_overlays_require_full_redraw,
         transition_capture_plan, wallpaper_blend_plan, window_prefers_direct_presentation,
     };
 
@@ -6344,6 +6528,23 @@ mod tests {
             minimized_dock_requires_composition(false, false, true),
             "a due retained recapture must reach the make-current barrier even without Dock drawing"
         );
+    }
+
+    #[test]
+    fn screenshot_freeze_blocks_fullscreen_bypass_before_and_after_capture() {
+        assert!(screenshot_freeze_requires_composition(true, false));
+        assert!(screenshot_freeze_requires_composition(false, true));
+        assert!(!screenshot_freeze_requires_composition(false, false));
+    }
+
+    #[test]
+    fn repeated_screenshot_freeze_requests_do_not_recapture_the_scene() {
+        assert!(screenshot_freeze_change_needed(true, false, false));
+        assert!(!screenshot_freeze_change_needed(true, true, false));
+        assert!(!screenshot_freeze_change_needed(true, false, true));
+        assert!(screenshot_freeze_change_needed(false, true, false));
+        assert!(screenshot_freeze_change_needed(false, false, true));
+        assert!(!screenshot_freeze_change_needed(false, false, false));
     }
 
     #[test]

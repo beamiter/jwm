@@ -215,6 +215,15 @@ grabber, so it works identically under X11 and Wayland and needs nothing
 installed. `take_screenshot_fullscreen` captures the whole desktop with no
 interaction.
 
+The X11 compositor freezes the desktop behind the interactive selector/editor
+by default. To keep clients and animations live instead, set this in the
+`[behavior]` section; config reload and `set_config` take effect immediately:
+
+```toml
+[behavior]
+screenshot_freeze_enabled = false
+```
+
 ## Portal and diagnostics
 
 The optional `portal/` crate provides JWM's screencast portal backend. Its

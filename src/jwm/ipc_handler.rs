@@ -1587,6 +1587,7 @@ impl Jwm {
                 "tags_length": cfg.tags_length(),
                 "show_bar": cfg.show_bar(),
                 "do_not_disturb": self.do_not_disturb,
+                "screenshot_freeze_enabled": cfg.behavior().screenshot_freeze_enabled,
                 "recording_fps": cfg.behavior().recording_fps,
                 "recording_encoder": cfg.behavior().recording_encoder,
                 "recording_audio_enabled": cfg.behavior().recording_audio_enabled,

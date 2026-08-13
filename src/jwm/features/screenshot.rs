@@ -965,14 +965,20 @@ impl Jwm {
             }
         }
 
+        let freeze_enabled = crate::config::CONFIG
+            .load()
+            .behavior()
+            .screenshot_freeze_enabled;
         self.features.screenshot.start();
+        backend.compositor_set_screenshot_freeze(freeze_enabled);
         self.features.capture.screenshot = CaptureTarget::Region;
         self.features
             .screenshot
             .set_output_path(screenshot_path.to_owned());
         info!(
-            "[take_screenshot] interactive capture → {} (G/W/M/D or Tab selects source)",
-            screenshot_path
+            "[take_screenshot] interactive capture → {} (scene={}, G/W/M/D or Tab selects source)",
+            screenshot_path,
+            if freeze_enabled { "frozen" } else { "live" }
         );
         Ok(true)
     }
@@ -1065,6 +1071,7 @@ impl Jwm {
     pub(crate) fn cancel_screenshot_select(&mut self, backend: &mut dyn Backend) {
         info!("[take_screenshot] cancelling region selection");
         self.features.screenshot.cancel();
+        backend.compositor_set_screenshot_freeze(false);
         backend.compositor_set_annotation_mode(false);
         backend.compositor_set_screenshot_toolbar(None);
         if backend.has_compositor() {
@@ -1124,6 +1131,7 @@ impl Jwm {
                 // it: the compositor captures the very next frame, and a strip
                 // still on screen would be baked into the PNG.
                 self.features.screenshot.cancel();
+                backend.compositor_set_screenshot_freeze(false);
                 backend.compositor_set_annotation_mode(false);
                 backend.compositor_set_screenshot_toolbar(None);
                 if backend.has_compositor() {

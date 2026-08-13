@@ -1188,6 +1188,9 @@ impl<C: CompositorConnection> Compositor<C> {
             snap_preview_color: behavior.snap_preview_color,
             snap_animation_duration_ms: behavior.snap_animation_duration_ms,
             snap_target: None,
+            screenshot_freeze_pending: false,
+            screenshot_freeze_fbo: None,
+            screenshot_freeze_size: None,
             // Phase 5: Window Peek
             peek_active: false,
             peek_enabled: behavior.peek_enabled,

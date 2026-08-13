@@ -18,7 +18,7 @@ use crate::jwm::features::screenshot::{
     ScreenshotAnnotation, ScreenshotTool, ToolbarCommand, marker_ink,
 };
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
-use crate::jwm::types::{WMArgEnum, WMClickType};
+use crate::jwm::types::{WMArgEnum, WMClickType, WMFuncType};
 use log::{error, info};
 
 /// A rectangle from two corners in any order, as `[x, y, w, h]`.
@@ -1010,6 +1010,33 @@ impl Jwm {
             | Mods::MOD3
             | Mods::MOD5;
 
+        // Screenshot bindings are compositor-global actions, not panel input.
+        // Keep them reachable while a shell surface owns the keyboard grab;
+        // otherwise Alt+S is consumed by the modal UI and native capture is
+        // impossible until the panel is dismissed. Never bypass the lock
+        // screen, which must not expose its contents to a screenshot.
+        if self.features.system_ui.is_active() && !self.features.system_ui.is_locked() {
+            if let Some((func, arg)) = self
+                .key_bindings
+                .iter()
+                .find(|kc| {
+                    keysym == kc.key_sym
+                        && (kc.mask & key_mods) == clean_state
+                        && kc.func_opt.is_some_and(Self::is_native_screenshot)
+                })
+                .and_then(|kc| kc.func_opt.map(|func| (func, kc.arg.clone())))
+            {
+                // The panel's overlay and grabs would otherwise intercept the
+                // selection pointer events (and make the panel appear in a
+                // fullscreen capture). Close it before entering capture mode.
+                self.close_system_ui(backend);
+                if let Err(error) = func(self, backend, &arg) {
+                    error!("Error executing screenshot shortcut from system UI: {error}");
+                }
+                return Ok(());
+            }
+        }
+
         // Built-in system UI is modal and consumes every key. This branch is
         // shared by X11rb, XCB and Wayland-udev, keeping behavior identical.
         if self.features.system_ui.is_active() {
@@ -1678,6 +1705,11 @@ impl Jwm {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn is_native_screenshot(func: WMFuncType) -> bool {
+        std::ptr::fn_addr_eq(func, Jwm::take_screenshot as WMFuncType)
+            || std::ptr::fn_addr_eq(func, Jwm::take_screenshot_fullscreen as WMFuncType)
     }
 
     pub(crate) fn on_button_press_internal(
