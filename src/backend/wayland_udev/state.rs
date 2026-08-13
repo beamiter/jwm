@@ -556,9 +556,8 @@ impl JwmWaylandState {
     /// tree. `None` is possible for legacy XWayland association paths whose
     /// first commit predated the WindowId mapping; callers must retain a
     /// bounded fallback retry for that case.
-    // This source is also compiled under `backend::wayland_udev::state` as a
-    // compatibility module; the udev backend consumes the shared
-    // `backend::wayland::state` instance.
+    // The compatibility path `backend::wayland_udev::state` re-exports this
+    // module, so both public paths name the same state type.
     #[allow(dead_code)]
     pub(crate) fn surface_commit_epoch(&self, win: WindowId) -> Option<u64> {
         self.surface_commit_epochs.get(&win).copied()

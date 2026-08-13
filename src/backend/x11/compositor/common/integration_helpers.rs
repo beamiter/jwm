@@ -103,7 +103,6 @@ pub fn render_batched_windows_example<C: HasContext>(
 ///     render_batched_windows_example(...);
 /// }
 /// ```
-
 /// Performance monitoring helper
 ///
 /// Call this periodically to log GLStateTracker and RenderBatcher statistics

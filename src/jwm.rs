@@ -1625,7 +1625,7 @@ impl Jwm {
         // Second-key bindings inside the chord are handled via grab_keyboard
         // after the leader fires, so they don't need to be globally grabbed.
         if let Some(chord) = &self.chord_compiled {
-            if !bindings.iter().any(|b| *b == chord.leader) {
+            if !bindings.contains(&chord.leader) {
                 bindings.push(chord.leader);
             }
         }
@@ -2235,8 +2235,6 @@ impl Jwm {
         }
         full_temp
     }
-
-    /// Prepare screenshot output path (shared by both interactive and fullscreen).
 
     /// 处理 Expose 事件（窗口需要重绘）
     fn expose(

@@ -129,8 +129,10 @@ impl GlxPlatform {
             return Err("glXBindTexImageEXT / glXReleaseTexImageEXT not available".into());
         }
         let tfp = TfpFunctions {
-            bind: unsafe { std::mem::transmute(bind_ptr) },
-            release: unsafe { std::mem::transmute(release_ptr) },
+            bind: unsafe { std::mem::transmute::<*const c_void, GlXBindTexImageExt>(bind_ptr) },
+            release: unsafe {
+                std::mem::transmute::<*const c_void, GlXReleaseTexImageExt>(release_ptr)
+            },
         };
 
         enable_glx_vsync(display, drawable);

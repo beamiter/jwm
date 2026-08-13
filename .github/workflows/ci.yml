@@ -37,10 +37,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check bootstrap and installer shell syntax
+      - name: Check bootstrap, packaging, and installer shell syntax
         run: |
           bash -n scripts/bootstrap_deps.sh
           bash -n scripts/install_jwm_scripts.sh
+          bash -n scripts/package-release.sh
+          bash -n scripts/install-release.sh
+          bash -n scripts/test-install-lifecycle.sh
+
+      - name: Exercise release install lifecycle
+        run: bash scripts/test-install-lifecycle.sh
 
   check-and-test:
     name: Check, Clippy, and test
@@ -99,7 +105,7 @@ jobs:
         run: cargo check --locked --all-targets
 
       - name: Run Clippy
-        run: cargo clippy --locked --lib --bins --tests --no-deps
+        run: cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 
       - name: Run tests
         run: cargo test --locked --lib --bins --tests
@@ -246,8 +252,9 @@ jobs:
         with:
           workspaces: bridge
 
-      # The root `cargo fmt --all` does not reach this crate: it is a
-      # separate package, not a workspace member.
+      # Keep an explicit bridge gate because this service has a much smaller
+      # dependency and runtime surface than the compositor, even though it is
+      # now also a root-workspace member.
       - name: Check formatting
         working-directory: bridge
         run: cargo fmt --all -- --check

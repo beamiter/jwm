@@ -536,7 +536,7 @@ mod tests {
     fn software_cursor_is_offset_and_clipped_to_recording_region() {
         let mut frame = vec![0_u8; 100 * 50 * 4];
         composite_software_cursor(&mut frame, 100, 50, (200, 100, 400, 200), (400.0, 200.0));
-        assert!(frame.iter().any(|&channel| channel == 250));
+        assert!(frame.contains(&250));
 
         let mut outside = vec![0_u8; 100 * 50 * 4];
         composite_software_cursor(&mut outside, 100, 50, (200, 100, 400, 200), (50.0, 50.0));

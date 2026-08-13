@@ -9,9 +9,10 @@
 ## Validation
 
 - [ ] `cargo fmt --all -- --check`
-- [ ] `cargo check --all-targets`
-- [ ] `cargo clippy --all-targets --no-deps`
-- [ ] `cargo test --lib --bins --tests`
+- [ ] `cargo check --locked --all-targets`
+- [ ] `cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings`
+- [ ] `cargo test --locked --lib --bins --tests`
+- [ ] Changed workspace adapters / bar hosts were tested explicitly
 - [ ] Relevant nested backend exercised
 - [ ] Relevant native backend exercised, or the gap is explained below
 

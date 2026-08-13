@@ -1,3 +1,6 @@
+#![deny(clippy::correctness, clippy::suspicious, clippy::perf)]
+#![allow(clippy::style, clippy::complexity, clippy::pedantic)]
+
 use clap::Parser;
 use jwm::application::{
     ApplicationOptions, BackendChoice, BenchmarkRequest, config_path, generate_config_templates,

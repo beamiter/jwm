@@ -487,14 +487,18 @@ pub struct Pertag {
 impl Pertag {
     pub fn new(show_bar: bool, tags_length: usize) -> Self {
         let len = tags_length + 1;
+        // Layout descriptors are immutable, so all tags can intentionally
+        // share the default instances until a tag selects another layout.
+        let default_layout = Rc::new(LayoutEnum::FIBONACCI);
+        let default_prev_layout = Rc::new(LayoutEnum::TILE);
         Self {
             cur_tag: 0,
             prev_tag: 0,
             n_masters: vec![0; len],
             m_facts: vec![0.; len],
             gaps: vec![0; len],
-            lts: vec![Rc::new(LayoutEnum::FIBONACCI); len],
-            prev_lts: vec![Rc::new(LayoutEnum::TILE); len],
+            lts: vec![default_layout; len],
+            prev_lts: vec![default_prev_layout; len],
             show_bars: vec![show_bar; len],
             sel: vec![None; len],
         }

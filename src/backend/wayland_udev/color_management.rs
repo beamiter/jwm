@@ -171,6 +171,10 @@ impl ColorManagerState {
     /// returned map is decoupled from the live state and safe to consult
     /// across many surfaces without re-locking per-surface (used by the
     /// render-path color-management pass).
+    #[allow(
+        clippy::mutable_key_type,
+        reason = "Wayland ObjectId hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
+    )]
     pub fn snapshot_surface_params(&self) -> HashMap<ObjectId, ParametricParams> {
         self.surface_descriptions
             .lock_safe()

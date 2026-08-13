@@ -6,6 +6,12 @@ animations and compositor effects with a JSON IPC control plane. The project is
 under active development and supports both direct DRM/KMS sessions and nested
 development backends.
 
+> **Release status:** JWM has not published a stable release. The manifest
+> version identifies development builds, not a production-support commitment.
+> See [compatibility](docs/compatibility.md), the tested
+> [upgrade/rollback lifecycle](docs/upgrade.md), and the maintainer
+> [release process](docs/release-process.md).
+
 ## Highlights
 
 - X11RB and XCB window-manager backends with an integrated X11 compositor.
@@ -257,6 +263,18 @@ The external Julia simulation worker and frame protocol are documented in
 Architecture boundaries and the incremental migration plan are in
 [docs/architecture.md](docs/architecture.md). The delivery sequence for larger
 changes is tracked in [the evolution roadmap](docs/roadmap.md).
+
+## Releases and versioning
+
+Release automation accepts only `jwm-v<semver>` tags whose version exactly
+matches the root `jwm` package. It builds an x86_64 Linux bundle on Ubuntu 22.04,
+a tagged source archive, `SHA256SUMS`, and artifact provenance. Other systems
+should build from source; no multi-architecture binary support is claimed.
+
+Monorepo components use independent SemVer. A JWM tag does not change the
+version of the bridge, portal, shared protocol, bar core/providers, or bars.
+See [CHANGELOG.md](CHANGELOG.md) and the config, IPC, session, backend, and
+driver policies in [compatibility](docs/compatibility.md).
 
 ## Contributing and security
 

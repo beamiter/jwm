@@ -362,7 +362,7 @@ mod tests {
             map.insert(
                 "test_key".to_string(),
                 CachedProgram {
-                    program: unsafe { std::mem::transmute(1u32) },
+                    program: unsafe { std::mem::transmute::<u32, glow::NativeProgram>(1u32) },
                     vert_hash: 0,
                     frag_hash: 0,
                 },

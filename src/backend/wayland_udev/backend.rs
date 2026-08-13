@@ -5264,6 +5264,10 @@ impl Backend for UdevBackend {
                 if cm_render_gate {
                     // Take the surface→params map once per frame instead of
                     // acquiring the wp-color-management mutex per-window.
+                    #[allow(
+                        clippy::mutable_key_type,
+                        reason = "Wayland ObjectId hashes by stable protocol-object identity; the per-frame map avoids locking once per rendered surface"
+                    )]
                     let surface_params_map = self
                         .state
                         .color_manager
@@ -6060,8 +6064,8 @@ mod udev_backend_selection_tests {
         let right_output = color_params(6, 13);
         let left = logical_rect(0, 0, 1000, 800);
         let right = logical_rect(1000, 0, 1000, 800);
-        let forward = vec![(left, left_output.clone()), (right, right_output.clone())];
-        let reverse = vec![(right, right_output), (left, left_output)];
+        let forward = [(left, left_output.clone()), (right, right_output.clone())];
+        let reverse = [(right, right_output), (left, left_output)];
         let expected = Some(ColorTransform::build_to_linear_srgb(&source));
 
         // These rectangles model the window before overview on either output,
@@ -6093,8 +6097,8 @@ mod udev_backend_selection_tests {
         let right_output = source.clone();
         let left = logical_rect(0, 0, 1000, 800);
         let right = logical_rect(1000, 0, 1000, 800);
-        let forward = vec![(left, left_output.clone()), (right, right_output.clone())];
-        let reverse = vec![(right, right_output.clone()), (left, left_output.clone())];
+        let forward = [(left, left_output.clone()), (right, right_output.clone())];
+        let reverse = [(right, right_output.clone()), (left, left_output.clone())];
 
         for outputs in [&forward[..], &reverse[..]] {
             assert_eq!(

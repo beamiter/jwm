@@ -21,7 +21,7 @@ use xbar_core::{
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, PointerAction},
-    render::cairo::CairoBar,
+    render::cairo::{CairoBar, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
@@ -281,6 +281,14 @@ impl App {
             return;
         }
         self.logical_size = size.to_logical(self.scale_factor);
+        // The WM's ConfigureNotify is authoritative. JWM deliberately owns
+        // the reserved status-bar height, which may differ from xbar_core's
+        // standalone default; keeping the presentation config in step avoids
+        // drawing a shorter bar into a taller window (and requesting the old
+        // height again on the next monitor update).
+        if let Some(height) = logical_bar_height(size, self.scale_factor) {
+            self.bar.config_mut().bar_height = height;
+        }
         if self.pixels_width == size.width && self.pixels_height == size.height {
             return;
         }
@@ -303,6 +311,17 @@ impl App {
     fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
         let update = self.bar.pointer_action(point, action);
         self.handle_runtime_update(update);
+    }
+
+    fn handle_pointer_input(&mut self, input: PointerInput) {
+        let update = self.bar.handle_pointer(input);
+        let needs_redraw = update.needs_redraw();
+        self.handle_runtime_update(update.into_runtime());
+        // Pressed/hovered visuals can change without producing a runtime
+        // effect, so RuntimeUpdate alone is not enough to schedule this frame.
+        if needs_redraw {
+            self.request_redraw();
+        }
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -423,18 +442,22 @@ impl App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use tao::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed
-                    && let Some(point) = self.last_cursor_pos
-                {
-                    let action = match button {
-                        MouseButton::Left => Some(PointerAction::Primary),
-                        MouseButton::Right => Some(PointerAction::Secondary),
-                        MouseButton::Middle | MouseButton::Other(_) => None,
-                        _ => None,
+                let Some(point) = self.last_cursor_pos else {
+                    return None;
+                };
+                let button = match button {
+                    MouseButton::Left => Some(PointerButton::Primary),
+                    MouseButton::Right => Some(PointerButton::Secondary),
+                    MouseButton::Middle | MouseButton::Other(_) => None,
+                    _ => None,
+                };
+                if let Some(button) = button {
+                    let input = match state {
+                        ElementState::Pressed => PointerInput::Press { point, button },
+                        ElementState::Released => PointerInput::Release { point, button },
+                        _ => return None,
                     };
-                    if let Some(action) = action {
-                        self.handle_pointer_action(point, action);
-                    }
+                    self.handle_pointer_input(input);
                 }
             }
             _ => {}
@@ -448,6 +471,18 @@ impl App {
 /// would stay invisible until the window manager corrects it.
 fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
     (size.width > 1 && size.height > 1).then_some(size)
+}
+
+/// Convert an authoritative physical ConfigureNotify height into the logical
+/// height used by the bar model. Toolkit scale factors should always be
+/// positive and finite, but rejecting a broken value keeps it out of the
+/// long-lived presentation config.
+fn logical_bar_height(size: PhysicalSize<u32>, scale_factor: f64) -> Option<f32> {
+    if size.height == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+    let height = f64::from(size.height) / scale_factor;
+    (height.is_finite() && height > 0.0 && height <= f64::from(f32::MAX)).then_some(height as f32)
 }
 
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
@@ -606,5 +641,32 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("tao event loop exited with status {exit_code}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_window_height_becomes_the_bar_layout_height() {
+        assert_eq!(
+            logical_bar_height(PhysicalSize::new(1920, 42), 1.0),
+            Some(42.0)
+        );
+        assert_eq!(
+            logical_bar_height(PhysicalSize::new(3840, 84), 2.0),
+            Some(42.0)
+        );
+    }
+
+    #[test]
+    fn invalid_configure_height_or_scale_does_not_poison_the_bar_config() {
+        assert_eq!(logical_bar_height(PhysicalSize::new(1920, 0), 1.0), None);
+        assert_eq!(logical_bar_height(PhysicalSize::new(1920, 42), 0.0), None);
+        assert_eq!(
+            logical_bar_height(PhysicalSize::new(1920, 42), f64::NAN),
+            None
+        );
     }
 }

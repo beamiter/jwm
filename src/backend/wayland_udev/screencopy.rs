@@ -20,9 +20,9 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 
-// IMPORTANT: Use the canonical path that matches Display<JwmWaylandState> in backend.rs.
-// Do NOT use `super::state::JwmWaylandState` — that's a different type due to the #[path]
-// attribute in wayland.rs re-exporting the same file under a different module path.
+// Use the canonical path that matches Display<JwmWaylandState> in backend.rs.
+// `wayland_udev::state` is now a compatibility re-export of this same module,
+// rather than a second compilation of the state implementation.
 use crate::backend::wayland::state::JwmWaylandState;
 
 // ---- Shared pending-copy queue ---------------------------------------------------

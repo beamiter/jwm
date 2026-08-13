@@ -1,0 +1,160 @@
+name: Release
+
+on:
+  push:
+    tags: ["jwm-v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  release:
+    name: Validate, package, and publish
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and jwm version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^jwm-v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?)$ ]]; then
+            echo "release tag must match jwm-v<semver>; got: $tag" >&2
+            exit 1
+          fi
+          version="${tag#jwm-v}"
+          cargo_version="$(sed -n '/^\[package\]$/,/^\[/s/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "$cargo_version" || "$version" != "$cargo_version" ]]; then
+            echo "tag version $version does not equal jwm Cargo version ${cargo_version:-<missing>}" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libglib2.0-dev libcairo2-dev \
+            libpango1.0-dev libasound2-dev libdbus-1-dev libudev-dev \
+            libinput-dev libseat-dev libdrm-dev libgbm-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libwayland-dev \
+            libxkbcommon-dev libx11-dev libx11-xcb-dev libxext-dev \
+            libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
+            libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev \
+            libxfixes-dev libxi-dev libxrandr-dev libxrender-dev
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Cargo build data
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check release shell syntax
+        run: >-
+          bash -n scripts/package-release.sh scripts/install-release.sh
+          scripts/test-install-lifecycle.sh
+
+      - name: Check all targets
+        run: cargo check --locked --all-targets
+
+      - name: Run Clippy
+        run: cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
+
+      - name: Check every backend feature profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          profiles=(
+            backend-x11rb
+            backend-xcb
+            backend-wayland-udev
+            backend-wayland-nested
+            backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter
+          )
+          cargo check --locked --all-targets --no-default-features
+          for profile in "${profiles[@]}"; do
+            cargo check --locked --all-targets --no-default-features --features "$profile"
+          done
+
+      - name: Run tests
+        run: cargo test --locked --lib --bins --tests
+        env:
+          EGL_PLATFORM: surfaceless
+          JWM_REQUIRE_HEADLESS_GL: 1
+
+      - name: Test bundled protocol, adapters, and bar
+        run: |
+          cargo test --locked -p shared_structures --all-targets
+          cargo test --locked -p xbar_core --all-features --all-targets
+          cargo clippy --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets --no-deps -- -D warnings
+          cargo test --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets
+          cargo test --locked --manifest-path bars/tao_pixels_bar/Cargo.toml --all-targets
+
+      - name: Test release install lifecycle
+        run: bash scripts/test-install-lifecycle.sh
+
+      - name: Build release bundle
+        run: bash scripts/package-release.sh --output-dir dist
+
+      - name: Create Git source archive and SHA-256 manifest
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix="jwm-${VERSION}/" \
+            --output="dist/jwm-${VERSION}-source.tar.gz" "$TAG"
+          find dist -maxdepth 1 -type f -name '*.sha256' -delete
+          (
+            cd dist
+            mapfile -d '' artifacts < <(find . -maxdepth 1 -type f \
+              \( -name '*.tar.gz' -o -name '*.tar.zst' -o -name '*.zip' \) \
+              -printf '%f\0' | sort -z)
+            (( ${#artifacts[@]} > 0 )) || { echo "no release archives" >&2; exit 1; }
+            sha256sum "${artifacts[@]}" > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Attest archive provenance
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find dist -maxdepth 1 -type f \
+            \( -name '*.tar.gz' -o -name '*.tar.zst' -o -name '*.zip' -o -name SHA256SUMS \) \
+            -print0 | sort -z)
+          gh release create "$TAG" "${assets[@]}" --verify-tag \
+            --title "JWM ${VERSION}" --generate-notes

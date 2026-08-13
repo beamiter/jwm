@@ -31,12 +31,29 @@ forced the increase.
 cargo build --locked
 cargo fmt --all -- --check
 cargo check --locked --all-targets
-cargo clippy --locked --all-targets --no-deps
+cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 cargo test --locked --lib --bins --tests
 ```
 
-Run focused tests while iterating, but run the complete commands before opening
-a pull request. Portal changes use the independent manifest and scripts:
+Those commands validate the main `jwm` package. The workspace also contains
+the shared protocol and bar adapters; changes below `crates/xbar_core` must run:
+
+```bash
+cargo test --locked -p xbar_core --all-features --all-targets
+cargo clippy --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets --no-deps -- -D warnings
+cargo test --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets
+```
+
+The main crate denies Clippy's correctness, suspicious, and performance groups,
+so findings in those groups fail the build. Existing style/complexity/pedantic
+debt is deliberately non-blocking until it can be removed in reviewed batches;
+new broad `allow` attributes are not an acceptable way around the high-signal
+gate. A necessary exception belongs on the smallest item and must explain the
+invariant that makes it safe.
+
+Run focused tests while iterating, but run the applicable complete commands
+before opening a pull request. Portal changes use the independent build
+environment and scripts:
 
 ```bash
 scripts/test-portal.sh

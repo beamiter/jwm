@@ -3261,10 +3261,11 @@ impl Jwm {
                 Some(c) => c.win,
                 None => return,
             };
-            if !self.pending_pings.contains_key(&win) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_pings.entry(win)
+            {
                 let ts = now.elapsed().subsec_millis();
                 if let Ok(true) = backend.property_ops().send_ping(win, ts) {
-                    self.pending_pings.insert(win, now);
+                    entry.insert(now);
                 }
             }
         }

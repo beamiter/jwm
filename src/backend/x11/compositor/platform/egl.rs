@@ -324,9 +324,17 @@ impl EglPlatform {
                 display,
                 context,
                 surface,
-                create_image: unsafe { std::mem::transmute(create_image_ptr) },
-                destroy_image: unsafe { std::mem::transmute(destroy_image_ptr) },
-                image_target_texture: unsafe { std::mem::transmute(image_target_ptr) },
+                create_image: unsafe {
+                    std::mem::transmute::<*const c_void, EglCreateImage>(create_image_ptr)
+                },
+                destroy_image: unsafe {
+                    std::mem::transmute::<*const c_void, EglDestroyImage>(destroy_image_ptr)
+                },
+                image_target_texture: unsafe {
+                    std::mem::transmute::<*const c_void, GlEglImageTargetTexture2dOes>(
+                        image_target_ptr,
+                    )
+                },
                 swap_buffers_with_damage: Cell::new(swap_buffers_with_damage),
                 set_damage_region: Cell::new(set_damage_region),
                 buffer_age_supported: Cell::new(buffer_age_supported),

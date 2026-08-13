@@ -1,5 +1,6 @@
 /target
-Cargo.lock
+# The default release bundle is built with --locked, so its application lock
+# file is committed alongside the bar just like the root JWM lockfile.
 **/*.rs.bk
 *.pdb
 .idea/

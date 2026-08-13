@@ -16,7 +16,9 @@ pub mod screencopy;
 
 pub mod tearing_control;
 
-pub mod state;
+// Preserve the historical path without compiling the implementation as a
+// second, type-incompatible module.
+pub use crate::backend::wayland::state;
 
 pub mod workspace_protocol;
 

@@ -542,6 +542,10 @@ impl KmsState {
 
         let throttle = out.frame_callback_throttle;
         let output = out.output.clone();
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "Wayland Weak hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
+        )]
         let visible = out.frame_callback_visible.clone();
         let refresh = out.refresh_interval;
         let commit_deadline = presentation_time.map(Time::<Monotonic>::from);
@@ -3930,6 +3934,10 @@ impl KmsState {
 
             let out = &mut self.outputs[out_idx];
 
+            #[allow(
+                clippy::mutable_key_type,
+                reason = "Wayland Weak hashes by stable protocol-object identity; a set is required for frame visibility and output enter/leave differences"
+            )]
             let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
             let mut frame_roots: Vec<WlSurface> = Vec::new();
 

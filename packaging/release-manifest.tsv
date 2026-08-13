@@ -1,0 +1,21 @@
+# JWM release manifest, format 1.
+# Columns: kind<TAB>source<TAB>version_path<TAB>stable_path<TAB>mode
+# A dash means that the field is intentionally unused. Paths are relative and
+# are validated by both the packager and the installer.
+built	jwm	bin/jwm	usr/local/bin/jwm	0755
+built	jwm-tool	bin/jwm-tool	usr/local/bin/jwm-tool	0755
+built	jwm-support	bin/jwm-support	usr/local/bin/jwm-support	0755
+built	jwm-bridge	bin/jwm-bridge	usr/local/bin/jwm-bridge	0755
+built	tao_pixels_bar	bin/tao_pixels_bar	usr/local/bin/tao_pixels_bar	0755
+repo-file	jwm-x11rb.desktop	share/xsessions/jwm-x11rb.desktop	usr/share/xsessions/jwm-x11rb.desktop	0644
+repo-file	jwm-x11rb-debug.desktop	share/xsessions/jwm-x11rb-debug.desktop	usr/share/xsessions/jwm-x11rb-debug.desktop	0644
+repo-file	jwm-xcb.desktop	share/xsessions/jwm-xcb.desktop	usr/share/xsessions/jwm-xcb.desktop	0644
+repo-file	jwm-xcb-debug.desktop	share/xsessions/jwm-xcb-debug.desktop	usr/share/xsessions/jwm-xcb-debug.desktop	0644
+repo-file	jwm-wayland.desktop	share/wayland-sessions/jwm-wayland.desktop	usr/share/wayland-sessions/jwm-wayland.desktop	0644
+repo-file	jwm-wayland-debug.desktop	share/wayland-sessions/jwm-wayland-debug.desktop	usr/share/wayland-sessions/jwm-wayland-debug.desktop	0644
+repo-file	bridge/dist/org.freedesktop.Notifications.service	share/dbus-1/services/org.freedesktop.Notifications.service	usr/share/dbus-1/services/org.freedesktop.Notifications.service	0644
+repo-file	README.md	share/doc/jwm/README.md	-	0644
+repo-file	CHANGELOG.md	share/doc/jwm/CHANGELOG.md	-	0644
+repo-file	LICENSE	share/doc/jwm/LICENSE	-	0644
+repo-tree	docs	share/doc/jwm/docs	-	0644
+stable-link	-	share/doc/jwm	usr/local/share/doc/jwm	-

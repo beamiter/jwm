@@ -40,7 +40,7 @@ pub(crate) fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
         if h[start..start + n]
             .iter()
             .zip(ne)
-            .all(|(a, b)| a.to_ascii_lowercase() == b.to_ascii_lowercase())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
         {
             return true;
         }

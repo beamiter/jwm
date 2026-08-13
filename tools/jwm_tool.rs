@@ -1,3 +1,6 @@
+#![deny(clippy::correctness, clippy::suspicious, clippy::perf)]
+#![allow(clippy::style, clippy::complexity, clippy::pedantic)]
+
 use chrono::Local;
 use clap::{Parser, Subcommand};
 use glob::glob;

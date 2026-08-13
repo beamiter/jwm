@@ -62,7 +62,7 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache Cargo build data
         uses: Swatinem/rust-cache@v2
@@ -81,6 +81,15 @@ jobs:
 
       - name: Test every xbar_core adapter feature
         run: cargo test --locked -p xbar_core --all-features --all-targets
+
+      # These are workspace members but not dependencies of the root JWM
+      # package. Keep their process/IPC adapters in the same gate as the core
+      # protocol they extend instead of silently relying on a bar to build
+      # them transitively.
+      - name: Check Linux action and D-Bus adapter crates
+        run: |
+          cargo clippy --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets --no-deps -- -D warnings
+          cargo test --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets
 
   native-presenters:
     name: Native presenters (${{ matrix.family }})

@@ -681,6 +681,10 @@ impl WaylandX11Backend {
             Rectangle::<i32, Logical>::new((ox, oy).into(), (out_w, out_h).into());
 
         let mut elements: Vec<X11RenderElement<GlesRenderer>> = Vec::new();
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "Wayland Weak hashes by stable protocol-object identity; a set is required for frame visibility and output enter/leave differences"
+        )]
         let mut visible_surfaces: HashSet<wayland_server::Weak<WlSurface>> = HashSet::new();
         let mut frame_roots: Vec<WlSurface> = Vec::new();
 
@@ -1069,6 +1073,10 @@ impl WaylandX11Backend {
             }
         });
         let output = self.output.clone();
+        #[allow(
+            clippy::mutable_key_type,
+            reason = "Wayland Weak hashes by stable protocol-object identity; moving the visibility set into the callback preserves constant-time membership checks"
+        )]
         let visible = visible_surfaces;
         for root in &frame_roots {
             send_frames_surface_tree(root, &output, now, throttle, |surface, states| {

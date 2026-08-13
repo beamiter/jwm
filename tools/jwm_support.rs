@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
-#![warn(clippy::all, clippy::pedantic)]
+#![deny(clippy::correctness, clippy::suspicious, clippy::perf)]
+#![allow(clippy::style, clippy::complexity, clippy::pedantic)]
 
 use chrono::{SecondsFormat, Utc};
 use clap::Parser;

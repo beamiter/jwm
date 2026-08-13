@@ -1,5 +1,11 @@
 #![warn(dead_code, unused, unreachable_pub)]
-#![warn(clippy::all, clippy::pedantic)]
+// Keep the automatic gate focused on bug-prone diagnostics. Enabling every
+// style and pedantic lint across the renderer/backends produced thousands of
+// repeated warnings, which hid new correctness findings in CI. Individual
+// modules can opt into stricter policy while the existing style debt is paid
+// down (doctor.rs already does).
+#![deny(clippy::correctness, clippy::suspicious, clippy::perf)]
+#![allow(clippy::style, clippy::complexity, clippy::pedantic)]
 
 pub mod alloc_counter;
 pub mod application;

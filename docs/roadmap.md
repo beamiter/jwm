@@ -361,12 +361,21 @@ contract.
 
 ## Phase 6 — release readiness
 
-- Publish signed source archives and checksums from an immutable tag.
-- Generate a changelog from reviewed pull requests.
-- Package `jwm`, `jwm-tool`, `jwm-support`, desktop sessions, and documentation.
-- Validate install, upgrade, config backup, rollback, and uninstall paths.
-- Document supported distributions, driver constraints, and known backend gaps.
-- Define a deprecation window for IPC, configuration, and session schema changes.
+- [x] Automate tag/version validation, quality gates, binary packaging, a Git
+      source archive, SHA-256 checksums, provenance, and GitHub Release creation
+      for `jwm-v*` tags.
+- [x] Add a manually curated changelog and maintainer release checklist.
+- [x] Package the JWM binaries, bridge, selected bar, session assets, license,
+      changelog, and documentation in a versioned bundle.
+- [x] Test isolated install, upgrade, rollback, uninstall, and restoration of
+      legacy paths.
+- [x] Document the ABI target, driver/backend gaps, verification, configuration
+      backup, rollback, uninstall, and schema deprecation windows.
+- [ ] Enable release immutability in GitHub repository settings; this is an
+      administrator policy and cannot be asserted by a workflow.
+- [ ] Complete real-hardware validation and publish the first release.
 
 A release is ready when a fresh installation can be diagnosed, upgraded, and
 rolled back using documented commands, not merely when a release build succeeds.
+The implemented automation makes those operations repeatable; this roadmap does
+not claim that a stable release has already been published.

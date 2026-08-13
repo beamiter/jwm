@@ -3,9 +3,11 @@
 ## Supported versions
 
 JWM is under active development and does not yet publish stable releases. The
-current `master` branch is the only version receiving security fixes. Historical
-commits, experimental branches, local forks, and third-party status bars are not
-covered by this policy.
+current `master` branch is the only version receiving security fixes. The
+`0.2.0` manifest version is not stable or supported. Historical commits,
+experimental branches, unpublished local packages, local forks, and third-party
+status bars are not covered. When stable releases begin, this section will name
+supported lines and end dates; do not infer support from a version or archive.
 
 ## Reporting a vulnerability
 
@@ -43,6 +45,17 @@ The maintainer will validate scope, coordinate a fix on a private branch when
 necessary, and credit the reporter unless anonymity is requested. Disclosure
 timing depends on exploitability, downstream coordination, and the availability
 of a tested fix.
+
+Schema-affecting fixes should follow
+[`docs/compatibility.md`](docs/compatibility.md). An urgent security removal may
+shorten a deprecation window, but requires an advisory, changelog entry, and
+actionable migration or disablement guidance.
+
+Checksums and provenance detect changed artifacts and identify their workflow;
+they do not prove an artifact vulnerability-free. Maintainers must enable
+GitHub release immutability in repository settings before publishing—the
+workflow cannot enable it—and publish corrections under a new version rather
+than replacing assets. See [the release process](docs/release-process.md).
 
 ## Security boundaries
 
