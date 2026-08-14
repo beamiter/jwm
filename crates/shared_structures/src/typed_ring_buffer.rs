@@ -21,6 +21,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RING_BUFFER_MAGIC: u64 = 0x52494E47_42554646;
 const RING_BUFFER_VERSION: u64 = 14;
+// v13 -> v14 only changed the payload schema. Keep this list deliberately
+// narrow: reclaiming an unknown version would require guessing where its
+// creator PID lives and could unlink a live mapping.
+const RECLAIMABLE_LEGACY_VERSION: u64 = 13;
 const LAYOUT_MARKER: u32 = 0x5352_4234; // "SRB4"
 
 /// mmap 对基址的对齐保证（Linux 基础页大小）。payload 对齐超过它时
@@ -325,6 +329,77 @@ fn absolute_flink_path(path: &str) -> Result<PathBuf> {
         ));
     }
     Ok(target)
+}
+
+/// Header prefix whose layout is identical in protocols v13 and v14.
+///
+/// Only fields up to `creator_pid` are represented so legacy recovery does
+/// not interpret payload fingerprints or queue state using the current ABI.
+#[repr(C)]
+struct LegacyV13HeaderPrefix {
+    magic: AtomicU64,
+    version: AtomicU64,
+    total_size: u64,
+    buffer_size: u32,
+    command_buffer_size: u32,
+    backend_id: u32,
+    message_slot_size: u32,
+    command_slot_size: u32,
+    layout_marker: u32,
+    is_destroyed: AtomicU32,
+    creator_pid: u32,
+}
+
+const _: () = assert!(
+    size_of::<LegacyV13HeaderPrefix>() == std::mem::offset_of!(GenericHeader, message_fingerprint)
+);
+
+struct ReclaimableLegacyMapping {
+    shmem: Shmem,
+    version: u64,
+    creator_pid: u32,
+}
+
+/// Open just enough of a known legacy mapping to decide whether its creator
+/// has exited. Unknown or malformed versions are never considered reclaimable.
+fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLegacyMapping>> {
+    let flink_path = absolute_flink_path(path)?;
+    let shmem = ShmemConf::new()
+        .flink(&flink_path)
+        .open()
+        .map_err(|error| map_shmem_error("failed to probe legacy shared memory", error))?;
+
+    if shmem.len() < size_of::<LegacyV13HeaderPrefix>() {
+        return Ok(None);
+    }
+    let base_ptr = shmem.as_ptr();
+    if (base_ptr as usize) % align_of::<LegacyV13HeaderPrefix>() != 0 {
+        return Ok(None);
+    }
+
+    let header = base_ptr.cast::<LegacyV13HeaderPrefix>();
+    // SAFETY: the mapping length and alignment cover the verified v13 prefix.
+    // Its atomic fields were initialized before the flink was published.
+    let magic = unsafe { (*header).magic.load(Ordering::Acquire) };
+    let version = unsafe { (*header).version.load(Ordering::Relaxed) };
+    if magic != RING_BUFFER_MAGIC || version != RECLAIMABLE_LEGACY_VERSION {
+        return Ok(None);
+    }
+
+    // SAFETY: these plain fields are inside the checked v13 prefix and become
+    // visible after the Acquire load of the published magic value.
+    let total_size = unsafe { std::ptr::addr_of!((*header).total_size).read() };
+    let layout_marker = unsafe { std::ptr::addr_of!((*header).layout_marker).read() };
+    let creator_pid = unsafe { std::ptr::addr_of!((*header).creator_pid).read() };
+    if total_size != shmem.len() as u64 || layout_marker != LAYOUT_MARKER || creator_pid == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(ReclaimableLegacyMapping {
+        shmem,
+        version,
+        creator_pid,
+    }))
 }
 
 /// Atomically publishes a fully initialized mapping without exposing a partially written flink.
@@ -969,7 +1044,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                 Some(options.strategy),
                 Some(options.adaptive_poll_spins),
             ) {
-                Ok(buffer) => {
+                Ok(mut buffer) => {
                     if may_reclaim && !buffer.is_creator() && !buffer.creator_alive() {
                         // 只回收一次：若竞争者抢先重建，第二轮 open 到的就是新映射。
                         may_reclaim = false;
@@ -977,14 +1052,52 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                             "reclaiming stale shared ring buffer {path}: creator {} is gone",
                             buffer.creator_pid()
                         );
+                        // The original owner is gone, so also assume ownership
+                        // of the OS mapping and let Shmem remove both it and the
+                        // flink. Otherwise every recovered crash leaks a
+                        // /dev/shm/shmem_* object.
+                        buffer.shmem.set_owner(true);
                         drop(buffer);
-                        let _ = std::fs::remove_file(absolute_flink_path(path)?);
                         if let Some(buffer) = create(&mut may_create)? {
                             return Ok(buffer);
                         }
                         continue;
                     }
                     return Ok(buffer);
+                }
+                Err(error) if error.kind() == ErrorKind::InvalidData && may_reclaim => {
+                    let legacy = match probe_reclaimable_legacy_mapping(path) {
+                        Ok(legacy) => legacy,
+                        // The flink disappeared between open and probe. Let
+                        // the normal create/retry path observe the new state.
+                        Err(probe_error) if probe_error.kind() == ErrorKind::NotFound => continue,
+                        Err(_) => return Err(error),
+                    };
+                    let Some(mut legacy) = legacy else {
+                        // Unknown/malformed legacy data is never reclaimed.
+                        // Retry once without probing so a concurrently
+                        // replaced valid mapping can still win the race.
+                        may_reclaim = false;
+                        continue;
+                    };
+                    if process_alive(legacy.creator_pid) {
+                        return Err(error);
+                    }
+
+                    // A protocol mismatch normally remains a hard error. The
+                    // sole exception is a verified v13 header whose creator is
+                    // dead, which is the crash residue reclaim_stale promises
+                    // to replace.
+                    may_reclaim = false;
+                    warn!(
+                        "reclaiming stale shared ring buffer {path}: legacy protocol {} creator {} is gone",
+                        legacy.version, legacy.creator_pid
+                    );
+                    legacy.shmem.set_owner(true);
+                    drop(legacy);
+                    if let Some(buffer) = create(&mut may_create)? {
+                        return Ok(buffer);
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::NotFound && may_create => {
                     if let Some(buffer) = create(&mut may_create)? {
@@ -1711,6 +1824,69 @@ mod tests {
         // [u32; 2] 与 u64 槽大小相同（16 字节），只有类型指纹能拒绝错配。
         let mismatch = TypedRingBuffer::<[u32; 2], u64>::open_auto(&path, Some(0));
         assert_eq!(mismatch.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn typed_reclaim_stale_replaces_dead_v13_mapping() {
+        const DEAD_PID: u32 = u32::MAX;
+
+        let path = mk_path("reclaim_dead_v13");
+        let mut legacy: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        // SAFETY: the test owns the mapping and no other thread accesses its
+        // immutable header metadata. v13 and v14 share this exact prefix.
+        unsafe {
+            (*legacy.header)
+                .version
+                .store(RECLAIMABLE_LEGACY_VERSION, Ordering::Relaxed);
+            std::ptr::addr_of_mut!((*legacy.header).creator_pid).write(DEAD_PID);
+        }
+
+        let replacement: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed(&path)
+            .unwrap();
+        assert!(replacement.is_creator());
+        assert_eq!(
+            replacement.header().version.load(Ordering::Relaxed),
+            RING_BUFFER_VERSION
+        );
+        assert_eq!(replacement.creator_pid(), std::process::id());
+
+        // The old creator still holds an fd after its name was reclaimed. Do
+        // not let its Drop unlink the replacement's freshly published flink.
+        legacy.flink_path.take();
+        drop(legacy);
+        drop(replacement);
+    }
+
+    #[test]
+    fn typed_reclaim_stale_preserves_live_v13_mapping() {
+        let path = mk_path("preserve_live_v13");
+        let legacy: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        legacy
+            .header()
+            .version
+            .store(RECLAIMABLE_LEGACY_VERSION, Ordering::Relaxed);
+
+        let error = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed::<u64, u64>(&path)
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(Path::new(&path).is_file());
+
+        legacy
+            .header()
+            .version
+            .store(RING_BUFFER_VERSION, Ordering::Relaxed);
     }
 
     #[test]
