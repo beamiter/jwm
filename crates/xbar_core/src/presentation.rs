@@ -941,16 +941,32 @@ impl PresentationConfig {
     /// two icon vocabularies on the same bar — Nerd Font on the right, emoji in
     /// the tag pills.
     ///
-    /// Only a wholly untouched preset is replaced. A config that names its own
-    /// labels *or* its own tag labels has said what it wants and keeps it,
-    /// which is why both halves are checked rather than just the one being
-    /// read. Returns whether the swap happened.
+    /// The two halves are upgraded independently. A config that customizes
+    /// tag labels still gets Nerd Font status icons, while a config that
+    /// customizes status labels still gets Nerd Font tags. This matters for
+    /// older configs, which commonly supplied only `tag_labels`: treating the
+    /// preset as all-or-nothing would leave the untouched status half as
+    /// colorful emoji. Returns whether either stock half was replaced.
     pub fn apply_nerd_font_icons_if_stock(&mut self) -> bool {
         let stock = Self::default();
-        if self.labels != stock.labels || self.tag_labels != stock.tag_labels {
+        let replace_labels = self.labels == stock.labels && self.icon_set.is_none();
+        let replace_tags = self.tag_labels == stock.tag_labels;
+        if !replace_labels && !replace_tags {
             return false;
         }
-        self.apply_icon_set(&IconSet::nerd_font());
+
+        let icons = IconSet::nerd_font();
+        if replace_labels {
+            self.labels = PresentationLabels::from(&icons);
+            // Dynamic battery and volume bands are part of the status preset,
+            // so activate them only when that half was still stock.
+            self.icon_set = Some(icons.clone());
+        }
+        if replace_tags {
+            self.tag_labels = (0..MAX_MODEL_TAGS)
+                .map(|index| icons.tag_icon(index).into_owned())
+                .collect();
+        }
         true
     }
 }
@@ -1920,22 +1936,35 @@ mod tests {
     }
 
     #[test]
-    fn nerd_font_swap_leaves_a_customized_preset_alone() {
-        // Customizing only the tag labels must still protect them: the guard
-        // reads `labels`, so checking that half alone would silently clobber
-        // the half the caller actually set.
+    fn nerd_font_swap_upgrades_each_stock_half_independently() {
+        let icons = IconSet::nerd_font();
+
+        // This is the shape of older xbar config files: custom Nerd Font tags
+        // on the left, with the untouched emoji status preset on the right.
+        // The tags must survive while the status icons are upgraded.
         let mut config = PresentationConfig {
             tag_labels: vec!["one".to_owned(), "two".to_owned()],
             ..PresentationConfig::default()
         };
-        assert!(!config.apply_nerd_font_icons_if_stock());
+        assert!(config.apply_nerd_font_icons_if_stock());
         assert_eq!(config.tag_labels, vec!["one".to_owned(), "two".to_owned()]);
+        assert_eq!(config.labels.cpu, icons.cpu);
+        assert_eq!(config.icon_set.as_ref(), Some(&icons));
 
+        // The inverse customization is independent too: semantic labels stay
+        // owned by the caller, while untouched emoji tags are upgraded.
         let mut config = PresentationConfig::default();
         config.labels.cpu = "CPU".to_owned();
-        assert!(!config.apply_nerd_font_icons_if_stock());
+        assert!(config.apply_nerd_font_icons_if_stock());
         assert_eq!(config.labels.cpu, "CPU");
-        assert_eq!(config.tag_labels[0], "🖥");
+        assert_eq!(config.tag_labels[0], icons.tag_icon(0));
+        assert_eq!(config.icon_set, None);
+
+        // Once both halves are customized there is no stock surface to touch.
+        config.tag_labels = vec!["tag".to_owned()];
+        assert!(!config.apply_nerd_font_icons_if_stock());
+        assert_eq!(config.tag_labels, vec!["tag".to_owned()]);
+        assert_eq!(config.labels.cpu, "CPU");
     }
 
     fn view<'a>(tags: &'a [TagState], client_name: &'a str) -> BarView<'a> {
