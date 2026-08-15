@@ -765,6 +765,9 @@ where
     /// Live only while recording: keeps the XFixes cursor round-trip off this
     /// thread. See `RecordingCursorSampler`.
     recording_cursor_sampler: Option<RecordingCursorSampler>,
+    /// Pointer position at the last capture, so cursor motion over an otherwise
+    /// still screen still counts as a reason to capture.
+    recording_last_cursor: Option<(i32, i32)>,
     recording_frame_region: [(i32, i32, u32, u32); 2],
     recording_region: (i32, i32, u32, u32),
     recording_output_size: (u32, u32),

@@ -1,4 +1,5 @@
 // render_frame and rendering helpers
+use super::features::recording_capture_warranted;
 #[allow(unused_imports)]
 use super::math::ortho;
 #[allow(unused_imports)]
@@ -3703,12 +3704,18 @@ impl<C: CompositorConnection> Compositor<C> {
             || ripples_active
             || focus_highlight_active
             || wallpaper_crossfade_active
-            // Not `recording_active`: only a frame that is actually about to be
-            // captured justifies recompositing the whole screen. Forcing it for
-            // the whole recording made a 30 fps encoder drive a full-screen
-            // composite on every 1 ms event-loop iteration. The loop still wakes
-            // in time because `compositor_frame_deadline` sleeps to the next one.
-            || self.recording_frame_due()
+            // Recording forces a composite only when it will capture something
+            // that is not already on tape. Client damage and animations reach
+            // the gate through `has_dirty`/`scene_changed` below and capture at
+            // the recording rate on their own; this term covers the two things
+            // that produce a new frame without producing damage — the cursor
+            // sprite moving, and the idle heartbeat that keeps the encoded
+            // timeline from ending early on a motionless screen.
+            || recording_capture_warranted(
+                self.recording_frame_due(),
+                self.recording_heartbeat_due(),
+                self.recording_cursor_moved(),
+            )
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active

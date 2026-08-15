@@ -280,6 +280,13 @@ unsafe fn sample_cursor(
 }
 
 impl RecordingCursor {
+    /// Root position of the pointer in this sample. The cursor is drawn in
+    /// after the scene is composited, so it moving is a change the compositor's
+    /// own damage tracking never sees.
+    pub(super) fn position(&self) -> (i32, i32) {
+        (self.hotspot_x, self.hotspot_y)
+    }
+
     pub(super) fn composite_into(
         &self,
         rgba: &mut [u8],

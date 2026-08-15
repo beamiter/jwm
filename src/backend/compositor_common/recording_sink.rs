@@ -33,6 +33,25 @@ const QUEUE_DEPTH: usize = 2;
 /// shows up as its own periodic stall.
 const POOL_DEPTH: usize = QUEUE_DEPTH + 2;
 
+/// Ask the kernel for a bigger pipe to the encoder.
+///
+/// A pipe holds 64 KiB by default, so a 1080p frame is 127 separate blocking
+/// writes and a 4K frame is 507. Widening it to the usual 1 MiB ceiling cuts
+/// that to 8 and 32, and gives the encoder that much more slack to absorb a
+/// hiccup before the sink has to start dropping frames. Best effort: the limit
+/// is `/proc/sys/fs/pipe-max-size` and an unprivileged process may not reach it.
+fn widen_pipe(pipe: &std::process::ChildStdin, label: &'static str) {
+    use std::os::fd::AsRawFd;
+    const F_SETPIPE_SZ: i32 = 1031;
+    const TARGET: i32 = 1024 * 1024;
+    // SAFETY: `pipe` owns the descriptor for the duration of the call, and
+    // F_SETPIPE_SZ only resizes the kernel buffer behind it.
+    let applied = unsafe { libc::fcntl(pipe.as_raw_fd(), F_SETPIPE_SZ, TARGET) };
+    if applied < 0 {
+        log::debug!("{label}: could not widen the encoder pipe; keeping the default size");
+    }
+}
+
 /// Owns the encoder child process and the thread that feeds it.
 pub struct RecordingSink {
     frames: Option<SyncSender<Vec<u8>>>,
@@ -69,6 +88,9 @@ impl RecordingSink {
                     return;
                 };
                 let mut stdin = child.stdin.take();
+                if let Some(pipe) = stdin.as_ref() {
+                    widen_pipe(pipe, label);
+                }
                 while let Ok(frame) = frames_rx.recv() {
                     if let Some(pipe) = stdin.as_mut()
                         && let Err(error) = pipe.write_all(&frame)

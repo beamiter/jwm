@@ -47,6 +47,15 @@ monorepo use independent Semantic Versions.
   and the X11 and Wayland event loops sleep until the next one is due instead of
   polling at 1 ms. The capture clock advances by a whole frame interval, so a
   30 fps recording samples at 30 fps rather than drifting toward 20.
+- Screen recording no longer recomposites and re-encodes a screen that has not
+  changed. It captures when a client draws, when an animation runs, or when the
+  cursor moves, and otherwise keeps the encoded timeline alive with a 2 fps
+  heartbeat instead of 30 full-screen captures a second. On a 1080p30 recording
+  this cut the compositor's CPU by 82% with a moving pointer and 90% on a still
+  desktop, for a file with the same frame count, duration and contents.
+- The pipe carrying frames to the encoder is widened from the default 64 KiB to
+  1 MiB, which turns a 1080p frame from 127 blocking writes into 8 and leaves
+  the encoder more slack before the recorder has to drop a frame.
 - Capturing a recording frame no longer makes a synchronous X server round-trip
   for the cursor. `XFixesGetCursorImage` — the only source for both the cursor
   image and its true root position, since motion over a client window never

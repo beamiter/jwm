@@ -106,6 +106,34 @@ const fn overview_request_allowed(enabled: bool, requested_active: bool) -> bool
     enabled || !requested_active
 }
 
+/// Whether an active recording should force a composite this frame.
+///
+/// Client damage and animations already reach the render gate on their own, so
+/// this only decides the two cases that produce a new recorded frame without
+/// producing any damage: the cursor sprite moving, and the idle heartbeat.
+pub(super) const fn recording_capture_warranted(
+    frame_due: bool,
+    idle_due: bool,
+    cursor_moved: bool,
+) -> bool {
+    frame_due && (idle_due || cursor_moved)
+}
+
+/// Whether a motionless screen is owed a capture anyway.
+///
+/// Dropping unchanged frames is safe for the encoded file only up to a point:
+/// ffmpeg stamps each frame it receives with its arrival wall clock and the
+/// constant output rate duplicates it to fill the gap, but the file still ends
+/// at the *last* frame it was given. Without a heartbeat, a recording left on a
+/// still desktop for its final ten seconds would simply be ten seconds short.
+fn recording_idle_capture_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    heartbeat: std::time::Duration,
+) -> bool {
+    last.is_none_or(|last| now.duration_since(last) >= heartbeat)
+}
+
 /// Advance the recording capture clock by exactly one interval rather than
 /// restarting it from `now`.
 ///
@@ -1562,6 +1590,7 @@ impl<C: CompositorConnection> Compositor<C> {
         ));
         self.recording_active = true;
         self.recording_last_frame = None;
+        self.recording_last_cursor = None;
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
         self.recording_cursor = [None, None];
@@ -1616,6 +1645,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         self.recording_cursor = [None, None];
+        self.recording_last_cursor = None;
         // Joins its worker, which the condvar wakes immediately.
         self.recording_cursor_sampler = None;
         if let Some((fbo, texture)) = self.recording_fbo.take() {
@@ -1655,6 +1685,40 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn recording_frame_due(&self) -> bool {
         self.recording_frame_deadline()
             .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// How long a screen with nothing happening on it may go without being
+    /// captured. See `recording_idle_capture_due` for why it cannot be
+    /// unbounded.
+    const RECORDING_IDLE_HEARTBEAT: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Whether a capture is owed even though nothing on screen has changed.
+    pub(crate) fn recording_heartbeat_due(&self) -> bool {
+        recording_idle_capture_due(
+            self.recording_last_frame,
+            std::time::Instant::now(),
+            Self::RECORDING_IDLE_HEARTBEAT,
+        )
+    }
+
+    /// Whether the pointer has moved since the frame we last captured.
+    ///
+    /// The cursor is a server-side sprite drawn in after compositing, so it is
+    /// invisible to the compositor's damage tracking: without this, moving the
+    /// mouse across an otherwise still desktop would record a cursor that jumps
+    /// only twice a second.
+    pub(super) fn recording_cursor_moved(&self) -> bool {
+        let Some(sampler) = self.recording_cursor_sampler.as_ref() else {
+            return false;
+        };
+        match (
+            sampler.latest().map(|cursor| cursor.position()),
+            self.recording_last_cursor,
+        ) {
+            (Some(now), Some(last)) => now != last,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
     }
 
     /// Time until the next recording frame, or `None` when not recording. The
@@ -1742,10 +1806,12 @@ impl<C: CompositorConnection> Compositor<C> {
                 // Keep cursor metadata paired with this PBO. The asynchronous
                 // PBO is mapped one capture later, by which time a fast-moving
                 // cursor may already be at a different position.
-                self.recording_cursor[written_pbo] = self
+                let cursor = self
                     .recording_cursor_sampler
                     .as_ref()
                     .and_then(RecordingCursorSampler::latest);
+                self.recording_last_cursor = cursor.as_ref().map(RecordingCursor::position);
+                self.recording_cursor[written_pbo] = cursor;
                 self.recording_frame_region[written_pbo] = self.recording_region;
 
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1853,10 +1919,54 @@ impl<C: CompositorConnection> Compositor<C> {
 
 #[cfg(test)]
 mod recording_pacing_tests {
-    use super::advance_recording_deadline;
+    use super::{
+        advance_recording_deadline, recording_capture_warranted, recording_idle_capture_due,
+    };
     use std::time::{Duration, Instant};
 
     const THIRTY_FPS: Duration = Duration::from_nanos(33_333_333);
+    const HEARTBEAT: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn an_unchanged_screen_is_captured_only_on_the_heartbeat() {
+        // The whole point: a still desktop must not drive 30 full-screen
+        // recomposites a second to hand the encoder 30 identical frames.
+        assert!(!recording_capture_warranted(true, false, false));
+        assert!(recording_capture_warranted(true, true, false));
+    }
+
+    #[test]
+    fn a_moving_cursor_alone_warrants_a_capture() {
+        // The cursor is a server sprite drawn in after compositing, so it moves
+        // without producing any damage the render gate would otherwise see.
+        assert!(recording_capture_warranted(true, false, true));
+    }
+
+    #[test]
+    fn nothing_is_captured_before_its_frame_is_due() {
+        // Neither reason may outrun the configured frame rate.
+        assert!(!recording_capture_warranted(false, true, true));
+    }
+
+    #[test]
+    fn a_still_screen_still_owes_a_frame_within_the_heartbeat() {
+        // Guards the file's duration: ffmpeg's constant-rate output only fills
+        // up to the last frame it received, so an unbounded idle gap would end
+        // the recording early.
+        let last = Instant::now();
+        assert!(!recording_idle_capture_due(
+            Some(last),
+            last + Duration::from_millis(100),
+            HEARTBEAT
+        ));
+        assert!(recording_idle_capture_due(
+            Some(last),
+            last + Duration::from_millis(500),
+            HEARTBEAT
+        ));
+        // The very first frame of a recording is always owed.
+        assert!(recording_idle_capture_due(None, Instant::now(), HEARTBEAT));
+    }
 
     #[test]
     fn the_first_capture_anchors_on_the_present() {
