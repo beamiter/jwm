@@ -3466,6 +3466,18 @@ impl WaylandCompositor {
     /// Returns true if the compositor has pending work that requires a new frame.
     pub(crate) fn needs_render(&self) -> bool {
         self.needs_render
+            // A recording that is due for its next capture. The udev loop gates
+            // `handler.update` — and therefore every render — on this, so a
+            // completely static desktop would otherwise produce no frames at all
+            // for the encoder to read. `next_wakeup` carries the interval in
+            // between, so this is true only on the frames that get captured.
+            || self.recording.frame_due()
+            // Start and stop both run inside render_frame, where the GL context
+            // is current. Without this a stop requested after the encoder pipe
+            // broke — which clears the active flag, and with it `frame_due` —
+            // would never reach a frame, stranding ffmpeg on an open stdin.
+            || self.pending_recording_stop
+            || self.pending_recording_start.is_some()
             || self.dock_preview.as_ref().is_some_and(|preview| {
                 !preview.awaiting_source
                     && crate::backend::compositor_common::genie::preview_lease_timeout(
@@ -3480,15 +3492,21 @@ impl WaylandCompositor {
     /// transitions already use the regular 16 ms animation cadence; this is
     /// only needed so a crashed bar or lost LEAVE cannot strand a preview.
     pub(crate) fn next_wakeup(&self) -> Option<std::time::Duration> {
-        let preview = self.dock_preview.as_ref()?;
-        if preview.awaiting_source {
-            return None;
-        }
-        crate::backend::compositor_common::genie::preview_lease_timeout(
-            preview.direction,
-            Instant::now(),
-            preview.lease_deadline,
-        )
+        // An active recording paces itself rather than following client damage,
+        // so its next capture is a wakeup reason of its own.
+        let recording = self.recording.frame_deadline();
+        let preview_lease = self
+            .dock_preview
+            .as_ref()
+            .filter(|preview| !preview.awaiting_source)
+            .and_then(|preview| {
+                crate::backend::compositor_common::genie::preview_lease_timeout(
+                    preview.direction,
+                    Instant::now(),
+                    preview.lease_deadline,
+                )
+            });
+        [recording, preview_lease].into_iter().flatten().min()
     }
 
     /// Clear the needs_render flag after a frame has been rendered.

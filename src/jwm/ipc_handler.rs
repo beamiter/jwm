@@ -1621,8 +1621,15 @@ impl Jwm {
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
-                let finalized =
-                    !active && output_path.as_deref().is_some_and(recording_file_is_valid);
+                // Validating the file forks ffprobe and blocks this thread on
+                // it, and `stop` deliberately keeps `output_path` so the bar can
+                // still report where the recording went — so an uncached probe
+                // ran on every status poll for the rest of the session. Probe
+                // only while the answer can still change: never during
+                // recording, and never again once the file has passed.
+                let finalized = !active
+                    && (self.features.recording.finalized
+                        || output_path.as_deref().is_some_and(recording_file_is_valid));
                 self.features.recording.finalized = finalized;
                 let should_broadcast = finalized && !self.features.recording.finalization_reported;
                 if should_broadcast {

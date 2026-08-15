@@ -3589,6 +3589,9 @@ impl CompositorMedia for UdevBackend {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.stop_recording();
         }
+        // Mirrors the start path: the stop is applied inside render_frame, so
+        // the loop has to be woken for one.
+        self.request_render();
     }
 
     fn compositor_notify_audio_timing(
@@ -5830,7 +5833,18 @@ impl Backend for UdevBackend {
             // Session/DRM events will wake us; the overdue deadline is then
             // consumed as soon as `can_present` becomes true.
             let handler_wakeup = handler_wakeup_timeout(can_present, handler.next_wakeup());
-            let compositor_wakeup = can_present
+            // Only when the compositor is not already asking for a frame. Its
+            // deadlines — a due recording capture, an expired preview lease —
+            // read as `ZERO` precisely while they are pending, and this array is
+            // a `min()` with no floor, so consulting them in that state would
+            // turn the dispatch into a non-blocking poll for as long as
+            // something downstream (a blocked KMS delivery, a vanished DRM
+            // device) keeps the frame from being produced. When work is pending
+            // the 16 ms `render_work_pending` cadence governs the retry; the
+            // deadline is only interesting while there is nothing to do yet.
+            // The X11 loops get this from testing `compositor_needs_render()`
+            // before falling back to `compositor_frame_deadline()`.
+            let compositor_wakeup = (can_present && !compositor_pending)
                 .then(|| {
                     self.compositor
                         .as_ref()

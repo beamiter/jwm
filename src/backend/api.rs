@@ -1774,6 +1774,15 @@ pub trait RenderScheduler: Send {
     fn compositor_needs_render(&self) -> bool {
         false
     }
+    /// How long an otherwise idle event loop may sleep before the compositor
+    /// itself needs a frame. Screen recording is the case that matters: it must
+    /// composite at the recording rate even on a completely static desktop, and
+    /// without a deadline the loop would either block until some client happens
+    /// to send an event or spin at 1 ms for the whole recording. `None` means
+    /// the compositor has no self-imposed deadline.
+    fn compositor_frame_deadline(&self) -> Option<std::time::Duration> {
+        None
+    }
     fn compositor_overlay_window(&self) -> Option<WindowId> {
         None
     }

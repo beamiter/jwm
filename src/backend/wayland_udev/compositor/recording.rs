@@ -1,11 +1,11 @@
+use crate::backend::compositor_common::recording_sink::RecordingSink;
 use smithay::backend::renderer::gles::ffi;
-use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub(crate) struct RecordingState {
     active: bool,
-    child: Option<Child>,
+    sink: Option<RecordingSink>,
     pbo: [u32; 2],
     current_pbo: usize,
     width: u32,
@@ -27,7 +27,7 @@ impl RecordingState {
     pub(crate) fn new() -> Self {
         Self {
             active: false,
-            child: None,
+            sink: None,
             pbo: [0; 2],
             current_pbo: 0,
             width: 0,
@@ -111,6 +111,7 @@ impl RecordingState {
         let fps = fps.to_string();
         use crate::backend::compositor_common::media::{
             RecordingEncoder, append_recording_audio_input, append_recording_audio_output,
+            append_recording_log_args, append_software_encoder_pacing, deprioritize_encoder,
             recording_audio_available, select_recording_encoder,
         };
         let encoder = select_recording_encoder(configured_encoder);
@@ -133,6 +134,7 @@ impl RecordingState {
 
         let quality = quality.to_string();
         let mut args: Vec<String> = Vec::new();
+        append_recording_log_args(&mut args);
         if matches!(encoder, RecordingEncoder::Vaapi) {
             args.extend(["-vaapi_device", "/dev/dri/renderD128"].map(str::to_string));
         }
@@ -173,12 +175,12 @@ impl RecordingState {
                 ]
                 .map(str::to_string),
             ),
-            RecordingEncoder::Software => args.extend(
-                [
-                    "vflip", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-b:v", bitrate,
-                ]
-                .map(str::to_string),
-            ),
+            RecordingEncoder::Software => {
+                args.extend(
+                    ["vflip", "-c:v", "libx264", "-crf", "23", "-b:v", bitrate].map(str::to_string),
+                );
+                append_software_encoder_pacing(&mut args);
+            }
         }
         if with_audio {
             append_recording_audio_output(&mut args, &audio_bitrate);
@@ -204,13 +206,14 @@ impl RecordingState {
                 "off"
             }
         );
-        let child = match Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        command
             .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-        {
+            .stderr(Stdio::from(stderr));
+        deprioritize_encoder(&mut command);
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 unsafe { self.release_gpu_resources(gl) };
@@ -218,7 +221,14 @@ impl RecordingState {
             }
         };
 
-        self.child = Some(child);
+        // Frames reach ffmpeg through a writer thread that drops them when the
+        // encoder is behind. Writing an 8 MB frame into a 64 KiB pipe from the
+        // render loop stalled the whole session whenever the encoder lagged.
+        self.sink = Some(RecordingSink::spawn(
+            child,
+            (self.width as usize) * (self.height as usize) * 4,
+            "[recording]",
+        ));
         self.active = true;
         self.frame_count = 0;
         self.current_pbo = 0;
@@ -237,12 +247,10 @@ impl RecordingState {
         if !self.active {
             return;
         }
-
-        let frame_duration = Duration::from_secs_f64(1.0 / self.fps as f64);
-        if self.last_capture.elapsed() < frame_duration {
+        if !self.frame_due() {
             return;
         }
-        self.last_capture = Instant::now();
+        self.last_capture = self.next_capture_anchor();
 
         unsafe {
             gl.BindFramebuffer(ffi::READ_FRAMEBUFFER, source_fbo);
@@ -284,31 +292,7 @@ impl RecordingState {
                 // other PBO, which was filled by the preceding capture.
                 let other_pbo = written_pbo ^ 1;
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[other_pbo]);
-
-                let buffer_size = (self.width * self.height * 4) as isize;
-                let ptr =
-                    gl.MapBufferRange(ffi::PIXEL_PACK_BUFFER, 0, buffer_size, ffi::MAP_READ_BIT);
-
-                if !ptr.is_null() {
-                    let data = std::slice::from_raw_parts_mut(ptr as *mut u8, buffer_size as usize);
-                    composite_software_cursor(
-                        data,
-                        self.width,
-                        self.height,
-                        self.frame_regions[other_pbo],
-                        self.pointer_positions[other_pbo],
-                    );
-
-                    if let Some(ref mut child) = self.child {
-                        if let Some(ref mut stdin) = child.stdin {
-                            if let Err(e) = stdin.write_all(data) {
-                                log::warn!("[recording] ffmpeg input write failed: {e}");
-                            }
-                        }
-                    }
-
-                    gl.UnmapBuffer(ffi::PIXEL_PACK_BUFFER);
-                }
+                self.drain_pbo(gl, other_pbo);
             }
 
             gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
@@ -317,56 +301,94 @@ impl RecordingState {
         self.frame_count += 1;
     }
 
-    pub(crate) unsafe fn stop(&mut self, gl: &ffi::Gles2) {
-        if !self.active {
-            // Also heals a partially-initialized state from any future start
-            // failure introduced after raw allocation.
-            unsafe { self.release_gpu_resources(gl) };
+    /// Copy the already-bound pixel buffer into a pooled heap buffer, draw the
+    /// cursor on it and hand it to the writer thread.
+    ///
+    /// The copy is deliberately one bulk `copy_nonoverlapping`: mapped pixel
+    /// buffers commonly live in uncached or write-combined memory, where the
+    /// per-pixel read-modify-write that cursor compositing performs costs an
+    /// order of magnitude more than against the heap. Unmapping immediately
+    /// also releases the buffer back to the driver a frame earlier.
+    ///
+    /// # Safety
+    /// The caller must have the recording PBO for `pbo_index` bound to
+    /// `PIXEL_PACK_BUFFER` and a current GL context.
+    unsafe fn drain_pbo(&mut self, gl: &ffi::Gles2, pbo_index: usize) {
+        let Some(mut sink) = self.sink.take() else {
             return;
+        };
+        let buffer_size = (self.width as usize) * (self.height as usize) * 4;
+        let mut frame = sink.take_buffer();
+        let mut filled = false;
+        unsafe {
+            let ptr = gl.MapBufferRange(
+                ffi::PIXEL_PACK_BUFFER,
+                0,
+                buffer_size as isize,
+                ffi::MAP_READ_BIT,
+            );
+            if ptr.is_null() {
+                log::warn!("[recording] pixel buffer map returned null");
+            } else {
+                // The sink was sized from the same width/height that sized the
+                // PBO, so these always agree; clamp anyway rather than let a
+                // future divergence turn into an out-of-bounds copy.
+                debug_assert_eq!(frame.len(), buffer_size);
+                let copied = buffer_size.min(frame.len());
+                std::ptr::copy_nonoverlapping(ptr as *const u8, frame.as_mut_ptr(), copied);
+                gl.UnmapBuffer(ffi::PIXEL_PACK_BUFFER);
+                filled = copied == buffer_size;
+            }
         }
 
+        if filled {
+            composite_software_cursor(
+                &mut frame,
+                self.width,
+                self.height,
+                self.frame_regions[pbo_index],
+                self.pointer_positions[pbo_index],
+            );
+            sink.submit(frame);
+        } else {
+            sink.return_buffer(frame);
+        }
+        if sink.is_broken() {
+            log::warn!("[recording] ffmpeg input closed; stopping capture");
+            self.active = false;
+        }
+        self.sink = Some(sink);
+    }
+
+    pub(crate) unsafe fn stop(&mut self, gl: &ffi::Gles2) {
         // The most recent ReadPixels has no subsequent capture to trigger its
         // readback. Drain it before closing stdin so the file is complete.
-        if self.frame_count > 0 {
+        // Skipped once the encoder pipe has already failed — there is nothing
+        // left to write to.
+        if self.active && self.frame_count > 0 {
             let last_pbo = self.current_pbo ^ 1;
             unsafe {
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[last_pbo]);
-                let buffer_size = (self.width * self.height * 4) as isize;
-                let ptr =
-                    gl.MapBufferRange(ffi::PIXEL_PACK_BUFFER, 0, buffer_size, ffi::MAP_READ_BIT);
-                if !ptr.is_null() {
-                    let data = std::slice::from_raw_parts_mut(ptr as *mut u8, buffer_size as usize);
-                    composite_software_cursor(
-                        data,
-                        self.width,
-                        self.height,
-                        self.frame_regions[last_pbo],
-                        self.pointer_positions[last_pbo],
-                    );
-                    if let Some(child) = self.child.as_mut() {
-                        if let Some(stdin) = child.stdin.as_mut() {
-                            if let Err(e) = stdin.write_all(data) {
-                                log::warn!("[recording] final ffmpeg input write failed: {e}");
-                            }
-                        }
-                    }
-                    gl.UnmapBuffer(ffi::PIXEL_PACK_BUFFER);
-                }
+                self.drain_pbo(gl, last_pbo);
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
             }
         }
 
-        if let Some(mut child) = self.child.take() {
-            drop(child.stdin.take());
-            match child.wait() {
-                Ok(status) if !status.success() => log::warn!(
-                    "[recording] ffmpeg exited with {status}; see /tmp/jwm-wayland-recording-ffmpeg.log"
-                ),
-                Err(e) => log::warn!("[recording] failed waiting for ffmpeg: {e}"),
-                Ok(_) => {}
-            }
+        // Unconditional, not gated on `active`: a broken encoder pipe clears
+        // that flag on its own, and skipping teardown there would strand the
+        // writer thread holding ffmpeg's stdin open — the encoder would wait
+        // forever for input and never finalize its file.
+        //
+        // Do not wait for ffmpeg either. Its exit path flushes the encoder and,
+        // with `+faststart`, rewrites the whole MP4 to move the moov atom to the
+        // front; on a long recording that is seconds during which this thread
+        // would render nothing and answer no input. The writer thread reaps it.
+        if let Some(sink) = self.sink.take() {
+            log::info!("[recording] stopped ({})", sink.finish());
         }
 
+        // Also heals a partially-initialized state from a start that failed
+        // after raw allocation.
         unsafe { self.release_gpu_resources(gl) };
 
         self.active = false;
@@ -394,6 +416,46 @@ impl RecordingState {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Whether the next capture is due. Recording used to force a full-screen
+    /// recomposite on every loop iteration to feed an encoder that only takes
+    /// `fps` frames a second; the composite is only worth doing when a frame
+    /// will actually be read back from it.
+    pub(crate) fn frame_due(&self) -> bool {
+        self.frame_deadline()
+            .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// Time until the next capture, or `None` when not recording. The event
+    /// loop folds this into its dispatch timeout so a static desktop is still
+    /// captured at the configured rate.
+    pub(crate) fn frame_deadline(&self) -> Option<Duration> {
+        if !self.active {
+            return None;
+        }
+        Some(
+            self.frame_interval()
+                .saturating_sub(self.last_capture.elapsed()),
+        )
+    }
+
+    fn frame_interval(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / self.fps.clamp(1, 240) as f64)
+    }
+
+    /// Advance the capture clock by one interval rather than restarting it from
+    /// the present, so the time a frame itself takes does not push every later
+    /// capture progressively later. Falling more than one interval behind
+    /// resynchronizes to now instead of bursting to catch up.
+    fn next_capture_anchor(&self) -> Instant {
+        let now = Instant::now();
+        let next = self.last_capture + self.frame_interval();
+        if next + self.frame_interval() > now {
+            next
+        } else {
+            now
+        }
     }
 
     pub(crate) fn set_region(&mut self, region: (i32, i32, u32, u32)) {
@@ -530,7 +592,57 @@ fn draw_scaled_cursor_rect(
 
 #[cfg(test)]
 mod tests {
-    use super::composite_software_cursor;
+    use super::{Duration, Instant, RecordingState, composite_software_cursor};
+
+    #[test]
+    fn an_idle_recorder_asks_the_event_loop_for_nothing() {
+        let state = RecordingState::new();
+        assert_eq!(state.frame_deadline(), None);
+        assert!(!state.frame_due());
+    }
+
+    #[test]
+    fn a_capture_is_due_only_once_its_interval_has_passed() {
+        let mut state = RecordingState::new();
+        state.active = true;
+        state.fps = 30;
+
+        state.last_capture = Instant::now();
+        assert!(
+            !state.frame_due(),
+            "a frame captured just now must not force another composite"
+        );
+        let remaining = state
+            .frame_deadline()
+            .expect("an active recording paces itself");
+        assert!(
+            remaining > Duration::ZERO && remaining <= Duration::from_millis(34),
+            "deadline should be the remainder of one 30 fps frame, got {remaining:?}"
+        );
+
+        state.last_capture = Instant::now() - Duration::from_millis(100);
+        assert!(state.frame_due());
+        assert_eq!(state.frame_deadline(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn the_capture_clock_advances_by_an_interval_and_resyncs_when_far_behind() {
+        let mut state = RecordingState::new();
+        state.active = true;
+        state.fps = 30;
+        let interval = state.frame_interval();
+
+        // A capture that ran 40 ms after the last one on a 33.3 ms budget still
+        // advances by exactly one interval; restarting at `now` would push every
+        // later capture further out and degrade the real sampling rate.
+        state.last_capture = Instant::now() - Duration::from_millis(40);
+        assert_eq!(state.next_capture_anchor(), state.last_capture + interval);
+
+        // Half a second behind is 15 missed frames: resynchronize rather than
+        // submit them back to back into the encoder we are protecting.
+        state.last_capture = Instant::now() - Duration::from_millis(500);
+        assert!(state.next_capture_anchor() > state.last_capture + interval);
+    }
 
     #[test]
     fn software_cursor_is_offset_and_clipped_to_recording_region() {

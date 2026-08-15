@@ -2045,6 +2045,11 @@ impl RenderScheduler for XcbBackend {
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().is_some_and(|c| c.needs_render())
     }
+    fn compositor_frame_deadline(&self) -> Option<std::time::Duration> {
+        self.compositor
+            .as_ref()
+            .and_then(|c| c.recording_frame_deadline())
+    }
     fn compositor_overlay_window(&self) -> Option<WindowId> {
         self.compositor
             .as_ref()
@@ -2633,10 +2638,12 @@ impl Backend for XcbBackend {
             should_exit: false,
         };
         while !data.should_exit {
+            // See the x11rb loop: recording paces itself, so an idle loop sleeps
+            // until the next capture is due rather than until the next event.
             let timeout = if data.handler.needs_tick() || data.backend.compositor_needs_render() {
                 Some(Duration::from_millis(1))
             } else {
-                None
+                data.backend.compositor_frame_deadline()
             };
             event_loop.dispatch(timeout, &mut data)?;
             if !data.should_exit {

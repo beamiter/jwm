@@ -1828,14 +1828,17 @@ impl WaylandCompositor {
         // KMS scheduling, screenshots, and recording all agree on liveness.
         let screenshot_pending =
             self.screenshot_requests.has_pending() || self.screenshot_readback.has_pending();
-        let recording_active = self.recording.is_active();
+        // Not "recording is on" but "a recording frame is due": the encoder
+        // consumes `recording_fps` frames a second, and compositing the whole
+        // screen more often than that is work no one ever reads.
+        let recording_frame_due = self.recording.frame_due();
 
         let force_render = any_animating
             || postprocess_continuous
             || self.debug_hud_enabled
             || edge_glow_continuous
             || screenshot_pending
-            || recording_active;
+            || recording_frame_due;
 
         // Texture existence is stable after a window's first frame and must
         // not keep the render loop alive. Only content committed since the
@@ -1849,11 +1852,13 @@ impl WaylandCompositor {
         }
         // If animations are still running, keep the flag set so the next
         // tick_animations call re-invokes compositor_render_frame automatically.
+        // Recording deliberately does not re-arm the flag: `next_wakeup` carries
+        // its deadline to the event loop, which sleeps until the next capture
+        // instead of re-rendering the screen at display rate in between.
         self.needs_render = any_animating
             || self.has_active_animations()
             || postprocess_continuous
             || edge_glow_continuous
-            || recording_active
             || self.screenshot_readback.has_pending();
 
         // Rate-limited diagnostic logging (once per second when scene is non-empty)

@@ -3703,7 +3703,12 @@ impl<C: CompositorConnection> Compositor<C> {
             || ripples_active
             || focus_highlight_active
             || wallpaper_crossfade_active
-            || self.recording_active
+            // Not `recording_active`: only a frame that is actually about to be
+            // captured justifies recompositing the whole screen. Forcing it for
+            // the whole recording made a 30 fps encoder drive a full-screen
+            // composite on every 1 ms event-loop iteration. The loop still wakes
+            // in time because `compositor_frame_deadline` sleeps to the next one.
+            || self.recording_frame_due()
             || self.annotation_active
             || wallpaper_just_loaded
             || wobbly_active
@@ -6379,10 +6384,11 @@ impl<C: CompositorConnection> Compositor<C> {
             self.needs_render = true;
         }
 
-        // Schedule re-render if recording is active (need continuous frames)
-        if self.recording_active {
-            self.needs_render = true;
-        }
+        // Recording deliberately does not re-arm the flag here. It paces itself:
+        // `needs_render()` reports true when the next capture is due and
+        // `compositor_frame_deadline()` tells the event loop how long to sleep
+        // until then. Re-arming instead forced the frame gate above to draw on
+        // every loop iteration, whether or not a capture would follow.
 
         // Animate zoom-to-fit scale
         if (self.zoom_to_fit_scale - self.zoom_to_fit_target).abs() > 0.001 {

@@ -103,7 +103,12 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn needs_render(&self) -> bool {
         if self.needs_render
             || self.damage_render_pending
-            || self.recording_active
+            // Only when a capture is actually due. Reporting the whole
+            // recording as "needs render" pinned both X11 loops to a 1 ms
+            // dispatch timeout and rebuilt the scene ~1000 times a second to
+            // feed a 30 fps encoder; `compositor_frame_deadline` now sleeps
+            // exactly until the next frame instead.
+            || self.recording_frame_due()
             || self.iconic_snapshot_recapture_pending()
         {
             return true;

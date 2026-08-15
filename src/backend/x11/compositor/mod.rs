@@ -758,7 +758,7 @@ where
     recording_quality: u32,
     recording_encoder: String,
     recording_output_dir: String,
-    recording_process: Option<std::process::Child>,
+    recording_sink: Option<crate::backend::compositor_common::recording_sink::RecordingSink>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
     recording_cursor: [Option<RecordingCursor>; 2],
@@ -1100,13 +1100,17 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                 self.gl.delete_texture(texture);
             }
         }
-        // Stop recording if active
+        // Stop recording if active. Deliberately not a join: this Drop also runs
+        // when compositing is switched off at runtime, on the live WM thread, so
+        // waiting for ffmpeg's `+faststart` rewrite here would reintroduce
+        // exactly the freeze the writer thread exists to prevent. Detaching is
+        // safe in both cases — the thread drains and finalizes on its own, and
+        // if the process exits first the kernel closes ffmpeg's stdin for us.
         if self.recording_active {
             self.recording_active = false;
-            if let Some(mut child) = self.recording_process.take() {
-                drop(child.stdin.take());
-                let _ = child.wait();
-            }
+        }
+        if let Some(sink) = self.recording_sink.take() {
+            log::info!("compositor: recording torn down ({})", sink.finish());
         }
         // Tear down synchronously: remove_window() could start a fade-out
         // animation that never ticks again during Drop. Free imported pixmaps,

@@ -756,6 +756,11 @@ impl RenderScheduler for X11rbBackend {
     fn compositor_needs_render(&self) -> bool {
         self.compositor.as_ref().is_some_and(|c| c.needs_render())
     }
+    fn compositor_frame_deadline(&self) -> Option<std::time::Duration> {
+        self.compositor
+            .as_ref()
+            .and_then(|c| c.recording_frame_deadline())
+    }
     fn compositor_overlay_window(&self) -> Option<WindowId> {
         self.compositor
             .as_ref()
@@ -1464,11 +1469,15 @@ impl Backend for X11rbBackend {
             // Without this, dispatch(None) only wakes on the 20ms calloop timer,
             // which drifts against the vblank period and produces severe stutter
             // (the exact symptom: smooth when mouse moves, choppy when still).
+            // Screen recording is the one consumer that needs a frame on a
+            // schedule of its own rather than in response to an event, so an
+            // otherwise idle loop sleeps until its next capture is due instead
+            // of blocking until some client happens to draw.
             let timeout =
                 if loop_data.handler.needs_tick() || loop_data.backend.compositor_needs_render() {
                     Some(Duration::from_millis(1))
                 } else {
-                    None
+                    loop_data.backend.compositor_frame_deadline()
                 };
             event_loop
                 .dispatch(timeout, &mut loop_data)

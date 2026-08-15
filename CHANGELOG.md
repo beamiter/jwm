@@ -35,6 +35,27 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Screen recording no longer freezes the desktop. The compositor used to write
+  each captured frame — 8 MB at 1080p — straight into ffmpeg's 64 KiB stdin pipe
+  from its render loop, so whenever the encoder fell behind, the one thread that
+  serves input and repaints for every client parked inside `write`. Frames now
+  go to a writer thread through a short bounded queue and are dropped when the
+  encoder cannot keep up. Stopping a recording no longer waits for ffmpeg to
+  rewrite the file for `+faststart` either.
+- An active recording no longer pins the compositor into a continuous
+  full-screen redraw. It now composites only on the frames it actually captures,
+  and the X11 and Wayland event loops sleep until the next one is due instead of
+  polling at 1 ms. The capture clock advances by a whole frame interval, so a
+  30 fps recording samples at 30 fps rather than drifting toward 20.
+- Screen recording competes far less with the desktop for CPU: the software
+  encoder runs at `veryfast` with half the cores rather than `medium` with all
+  of them, ffmpeg is started one nice level down, and the X11 recorder pins
+  `yuv420p` instead of letting libx264 negotiate the roughly twice-as-expensive
+  `yuv444p`. ffmpeg's per-frame progress line no longer accumulates in `/tmp`.
+- Starting a recording no longer re-probes the available hardware encoders and
+  the ALSA demuxer on every keypress, and querying recording status no longer
+  runs `ffprobe` on the window manager's thread once the output has been
+  validated.
 - Bar tag glyphs no longer depend on which font fontconfig happens to hand a
   private-use code point: an installed Nerd Font is named explicitly in the
   font description (configurable as `presentation.icon_font`). The gear and

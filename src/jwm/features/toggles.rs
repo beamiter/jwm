@@ -2088,11 +2088,22 @@ impl Jwm {
             match plan {
                 FinalizationPlan::Nothing => return,
                 FinalizationPlan::ValidateSingle { segment, move_to } => {
-                    // The Wayland compositor closes ffmpeg on its next GL frame.
-                    // Do not move its MP4 before ffmpeg has written the moov atom,
-                    // otherwise the final path can point at an unplayable file.
-                    let ready = (0..100).any(|_| {
-                        let status = std::process::Command::new("ffprobe")
+                    // Do not move the MP4 before ffmpeg has written the moov
+                    // atom, otherwise the final path can point at an unplayable
+                    // file. The compositor now hands the encoder off to a writer
+                    // thread instead of waiting for it, so this poll has to
+                    // outlast ffmpeg's own exit work: flushing the encoder and,
+                    // with `+faststart`, rewriting the whole file to move that
+                    // atom to the front. That is seconds for a long recording
+                    // and longer on a slow disk, so the budget is a minute —
+                    // polled tightly at first, then slowly, because it is only
+                    // the first second that usually matters.
+                    const FINALIZE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+                    let deadline = std::time::Instant::now() + FINALIZE_BUDGET;
+                    let mut ready = false;
+                    let mut attempt = 0_u32;
+                    while !ready && std::time::Instant::now() < deadline {
+                        ready = std::process::Command::new("ffprobe")
                             .args([
                                 "-v",
                                 "error",
@@ -2107,14 +2118,16 @@ impl Jwm {
                             .stderr(std::process::Stdio::null())
                             .status()
                             .is_ok_and(|status| status.success());
-                        if !status {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        if !ready {
+                            let backoff = if attempt < 20 { 50 } else { 500 };
+                            std::thread::sleep(std::time::Duration::from_millis(backoff));
+                            attempt += 1;
                         }
-                        status
-                    });
+                    }
                     if !ready {
                         log::error!(
-                            "[recording] output was not finalized within 5s; leaving it at {segment}"
+                            "[recording] output was not finalized within {}s; leaving it at {segment}",
+                            FINALIZE_BUDGET.as_secs()
                         );
                         return;
                     }

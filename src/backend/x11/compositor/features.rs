@@ -106,6 +106,25 @@ const fn overview_request_allowed(enabled: bool, requested_active: bool) -> bool
     enabled || !requested_active
 }
 
+/// Advance the recording capture clock by exactly one interval rather than
+/// restarting it from `now`.
+///
+/// Re-anchoring on the present discards the time the frame itself took, so each
+/// capture slips a little later than the last and the cadence quantizes up to
+/// the next whole render period — the reason a 30 fps recording on a 60 Hz
+/// display sampled closer to 20. Falling more than one interval behind
+/// resynchronizes to `now` instead of bursting to catch up.
+fn advance_recording_deadline(
+    last: Option<std::time::Instant>,
+    interval: std::time::Duration,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    match last.map(|last| last + interval) {
+        Some(next) if next + interval > now => next,
+        _ => now,
+    }
+}
+
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
         // Opening a panel springs it out of the bar; closing one forgets its
@@ -1392,8 +1411,10 @@ impl<C: CompositorConnection> Compositor<C> {
 
         use crate::backend::compositor_common::media::{
             RecordingEncoder, append_recording_audio_input, append_recording_audio_output,
+            append_recording_log_args, append_software_encoder_pacing, deprioritize_encoder,
             recording_audio_available, select_recording_encoder,
         };
+        use crate::backend::compositor_common::recording_sink::RecordingSink;
         let encoder = select_recording_encoder(&self.recording_encoder);
         let (audio_enabled, audio_device, audio_bitrate) = {
             let cfg = crate::config::CONFIG.load();
@@ -1425,6 +1446,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let fps_str = fps.to_string();
         let mut args: Vec<String> = Vec::new();
 
+        append_recording_log_args(&mut args);
         if matches!(encoder, RecordingEncoder::Vaapi) {
             args.extend(["-vaapi_device", "/dev/dri/renderD128"].map(str::to_string));
         }
@@ -1464,8 +1486,19 @@ impl<C: CompositorConnection> Compositor<C> {
             }
             _ => args.extend(["-b:v", bitrate.as_str()].map(str::to_string)),
         }
+        if matches!(encoder, RecordingEncoder::Software) {
+            append_software_encoder_pacing(&mut args);
+        }
         if with_audio {
             append_recording_audio_output(&mut args, &audio_bitrate);
+        }
+        // Pin the output chroma format. Left to negotiate from RGBA input,
+        // libx264 picks yuv444p / High 4:4:4 Predictive: roughly twice the
+        // encoding work per frame — which is what pushes the encoder behind the
+        // capture rate in the first place — and a profile many players refuse.
+        // The VAAPI path already converts to nv12 in its filter chain.
+        if !matches!(encoder, RecordingEncoder::Vaapi) {
+            args.extend(["-pix_fmt", "yuv420p"].map(str::to_string));
         }
         args.extend(
             [
@@ -1479,13 +1512,14 @@ impl<C: CompositorConnection> Compositor<C> {
             .map(str::to_string),
         );
 
-        let child = match std::process::Command::new("ffmpeg")
+        let mut command = std::process::Command::new("ffmpeg");
+        command
             .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
-            .stderr(stderr_file)
-            .spawn()
-        {
+            .stderr(stderr_file);
+        deprioritize_encoder(&mut command);
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(e) => {
                 log::warn!("compositor: failed to start ffmpeg: {e}");
@@ -1512,7 +1546,14 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        self.recording_process = Some(child);
+        // The encoder is fed from its own thread: a full RGBA frame is orders of
+        // magnitude larger than a pipe buffer, so writing it from here is what
+        // used to freeze the whole session whenever ffmpeg fell behind.
+        self.recording_sink = Some(RecordingSink::spawn(
+            child,
+            (w as usize) * (h as usize) * 4,
+            "compositor",
+        ));
         self.recording_fbo = Some(recording_fbo);
         self.recording_active = true;
         self.recording_last_frame = None;
@@ -1549,7 +1590,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // `capture_recording_frame` clears recording_active when the ffmpeg
         // pipe breaks.  The child and PBOs still need cleanup in that case;
         // returning solely on the flag leaks a zombie ffmpeg process.
-        if !self.recording_active && self.recording_process.is_none() {
+        if !self.recording_active && self.recording_sink.is_none() {
             return;
         }
         let was_active = self.recording_active;
@@ -1577,31 +1618,81 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
 
-        if let Some(mut child) = self.recording_process.take() {
-            drop(child.stdin.take());
-            if let Ok(status) = child.wait() {
-                if !status.success() {
-                    log::warn!("compositor: ffmpeg exited with {status}; see /tmp/jwm-ffmpeg.log");
-                }
-            }
+        // Hand the encoder off rather than waiting for it. ffmpeg's exit path
+        // flushes the encoder and, with `+faststart`, rewrites the entire MP4 to
+        // move the moov atom to the front — seconds of work on a long recording,
+        // during which the compositor would render and accept input for nobody.
+        // The writer thread reaps the child; failures surface in the log.
+        if let Some(sink) = self.recording_sink.take() {
+            log::info!("compositor: recording stopped ({})", sink.finish());
+        } else {
+            log::info!("compositor: recording stopped");
         }
-        log::info!("compositor: recording stopped");
+    }
+
+    /// Interval between captured frames at the configured recording rate.
+    fn recording_frame_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(1.0 / self.recording_frame_rate() as f64)
+    }
+
+    fn recording_frame_rate(&self) -> u32 {
+        self.recording_fps.clamp(1, 240)
+    }
+
+    /// Whether the next recording frame is due. This is what keeps recording
+    /// from turning the compositor into a free-running renderer: a full-screen
+    /// recomposite is only worth doing when a frame will actually be captured
+    /// from it. Reporting the whole recording as "needs render" instead pinned
+    /// both X11 loops to a 1 ms dispatch timeout and recomposited the entire
+    /// screen ~1000 times a second to feed a 30 fps encoder.
+    pub(crate) fn recording_frame_due(&self) -> bool {
+        self.recording_frame_deadline()
+            .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// Time until the next recording frame, or `None` when not recording. The
+    /// event loop sleeps on this so a static desktop still gets captured at the
+    /// configured rate without polling for it.
+    pub(crate) fn recording_frame_deadline(&self) -> Option<std::time::Duration> {
+        if !self.recording_active {
+            return None;
+        }
+        let Some(last) = self.recording_last_frame else {
+            return Some(std::time::Duration::ZERO);
+        };
+        Some(
+            self.recording_frame_interval()
+                .saturating_sub(std::time::Instant::now().duration_since(last)),
+        )
     }
 
     pub(super) fn capture_recording_frame(&mut self) {
         if !self.recording_active {
             return;
         }
-
-        let now = std::time::Instant::now();
-        let min_interval =
-            std::time::Duration::from_secs_f32(1.0 / self.recording_fps.clamp(1, 240) as f32);
-        if let Some(last) = self.recording_last_frame {
-            if now.duration_since(last) < min_interval {
-                return;
-            }
+        // A broken encoder pipe is reported asynchronously by the writer
+        // thread; stop feeding it as soon as we notice.
+        if self
+            .recording_sink
+            .as_ref()
+            .is_some_and(|sink| sink.is_broken())
+        {
+            log::warn!("compositor: recording encoder pipe closed; stopping capture");
+            self.recording_active = false;
+            return;
         }
-        self.recording_last_frame = Some(now);
+
+        // The render gate uses the same deadline, so a frame that reached here
+        // for some other reason (client damage, an animation) still only
+        // captures at the recording rate.
+        if !self.recording_frame_due() {
+            return;
+        }
+        self.recording_last_frame = Some(advance_recording_deadline(
+            self.recording_last_frame,
+            self.recording_frame_interval(),
+            std::time::Instant::now(),
+        ));
 
         let (w, h) = self.recording_output_size;
         let Some((recording_fbo, _)) = self.recording_fbo else {
@@ -1662,9 +1753,14 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(pbo) = self.recording_pbo[pbo_index] else {
             return;
         };
+        let Some(mut sink) = self.recording_sink.take() else {
+            return;
+        };
         let cursor = self.recording_cursor[pbo_index].take();
         let (width, height) = self.recording_output_size;
-        let buf_size = (width * height * 4) as usize;
+        let buf_size = (width as usize) * (height as usize) * 4;
+        let mut frame = sink.take_buffer();
+        let mut filled = false;
         unsafe {
             self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
             let ptr = self.gl.map_buffer_range(
@@ -1676,28 +1772,44 @@ impl<C: CompositorConnection> Compositor<C> {
             if ptr.is_null() {
                 log::warn!("compositor: recording PBO map returned null");
             } else {
-                let pixels = std::slice::from_raw_parts_mut(ptr as *mut u8, buf_size);
-                if let Some(cursor) = cursor.as_ref() {
-                    cursor.composite_into(
-                        pixels,
-                        width,
-                        height,
-                        self.recording_frame_region[pbo_index],
-                    );
-                }
-                if let Some(child) = self.recording_process.as_mut() {
-                    if let Some(stdin) = child.stdin.as_mut() {
-                        use std::io::Write;
-                        if let Err(e) = stdin.write_all(pixels) {
-                            log::warn!("compositor: recording write failed: {e}, stopping");
-                            self.recording_active = false;
-                        }
-                    }
-                }
+                // Copy straight out and unmap. Mapped pixel-buffer memory is
+                // frequently uncached or write-combined, where the byte-at-a-time
+                // reads that cursor compositing and the pipe write do run an
+                // order of magnitude slower than against the heap. One bulk copy
+                // is the only access this path makes to it.
+                // The sink was sized from the same `recording_output_size` that
+                // sized the PBO, so these always agree; clamp anyway rather than
+                // let a future divergence turn into an out-of-bounds copy.
+                debug_assert_eq!(frame.len(), buf_size);
+                let copied = buf_size.min(frame.len());
+                std::ptr::copy_nonoverlapping(ptr as *const u8, frame.as_mut_ptr(), copied);
                 self.gl.unmap_buffer(glow::PIXEL_PACK_BUFFER);
+                filled = copied == buf_size;
             }
             self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         }
+
+        if filled {
+            if let Some(cursor) = cursor.as_ref() {
+                cursor.composite_into(
+                    &mut frame,
+                    width,
+                    height,
+                    self.recording_frame_region[pbo_index],
+                );
+            }
+            // Non-blocking: a frame the encoder has no room for is dropped, and
+            // ffmpeg's wall-clock input timestamps plus the constant output rate
+            // keep the result correctly paced.
+            sink.submit(frame);
+        } else {
+            sink.return_buffer(frame);
+        }
+        if sink.is_broken() {
+            log::warn!("compositor: recording encoder pipe closed; stopping capture");
+            self.recording_active = false;
+        }
+        self.recording_sink = Some(sink);
     }
 
     /// P6A: Process deferred X11 operations
@@ -1726,6 +1838,42 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recording_pacing_tests {
+    use super::advance_recording_deadline;
+    use std::time::{Duration, Instant};
+
+    const THIRTY_FPS: Duration = Duration::from_nanos(33_333_333);
+
+    #[test]
+    fn the_first_capture_anchors_on_the_present() {
+        let now = Instant::now();
+        assert_eq!(advance_recording_deadline(None, THIRTY_FPS, now), now);
+    }
+
+    #[test]
+    fn a_late_capture_still_advances_by_one_whole_interval() {
+        // The frame took 40 ms on a 33.3 ms budget. Restarting the clock at
+        // `now` would push every later capture 6.7 ms further out, which is how
+        // a 30 fps recording degraded toward a 20 fps sampling cadence.
+        let last = Instant::now();
+        let now = last + Duration::from_millis(40);
+        assert_eq!(
+            advance_recording_deadline(Some(last), THIRTY_FPS, now),
+            last + THIRTY_FPS
+        );
+    }
+
+    #[test]
+    fn falling_far_behind_resynchronizes_instead_of_bursting() {
+        // Half a second of stall is 15 missed frames; catching up would submit
+        // them back to back and flood the encoder we are trying to protect.
+        let last = Instant::now();
+        let now = last + Duration::from_millis(500);
+        assert_eq!(advance_recording_deadline(Some(last), THIRTY_FPS, now), now);
     }
 }
 
