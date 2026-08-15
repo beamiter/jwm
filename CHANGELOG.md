@@ -47,6 +47,24 @@ monorepo use independent Semantic Versions.
   and the X11 and Wayland event loops sleep until the next one is due instead of
   polling at 1 ms. The capture clock advances by a whole frame interval, so a
   30 fps recording samples at 30 fps rather than drifting toward 20.
+- Hardware video encoding actually works now. `behavior.recording_encoder`
+  defaults to `auto`, but the probe that was meant to detect NVENC asked it to
+  encode a 64x64 frame — below NVENC's minimum frame size — so it failed on
+  every machine that had a working NVENC and `auto` silently fell back to
+  libx264. The VAAPI probe failed for its own reason: it fed a software frame to
+  an encoder that needs a hardware one. Both probes now use a 256x256 frame and
+  build the same hardware frame the real command does. On an NVENC machine this
+  cut the encoder process's CPU by 80-92% (1483 -> 301 ticks over twenty seconds
+  of continuously changing 1080p content, 733 -> 82 for an ordinary desktop).
+- `-pix_fmt yuv420p` is no longer forced on the hardware encoders. They convert
+  from RGB on the GPU, so naming an output format only inserted a CPU
+  conversion pass in front of them; removing it measured 17% off NVENC's process
+  CPU with byte-identical colour. The software encoder still pins yuv420p,
+  without which libx264 negotiates the far more expensive yuv444p.
+- The recording capture target is now 8-bit RGBA rather than the 10-bit format
+  the blur pipeline uses. Frames are read back as 8-bit bytes and encoded to an
+  8-bit stream, so the extra precision was being paid for and discarded, and a
+  format-matched readback stays on the driver's fast path.
 - Screen recording no longer recomposites and re-encodes a screen that has not
   changed. It captures when a client draws, when an animation runs, or when the
   cursor moves, and otherwise keeps the encoded timeline alive with a 2 fps
@@ -65,9 +83,8 @@ monorepo use independent Semantic Versions.
   frame.
 - Screen recording competes far less with the desktop for CPU: the software
   encoder runs at `veryfast` with half the cores rather than `medium` with all
-  of them, ffmpeg is started one nice level down, and the X11 recorder pins
-  `yuv420p` instead of letting libx264 negotiate the roughly twice-as-expensive
-  `yuv444p`. ffmpeg's per-frame progress line no longer accumulates in `/tmp`.
+  of them, and ffmpeg is started one nice level down. Its per-frame progress
+  line no longer accumulates in `/tmp`.
 - Starting a recording no longer re-probes the available hardware encoders and
   the ALSA demuxer on every keypress, and querying recording status no longer
   runs `ffprobe` on the window manager's thread once the output has been

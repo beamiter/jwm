@@ -170,6 +170,78 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// Create the recording capture FBO.
+    ///
+    /// Deliberately 8-bit RGBA rather than the scene FBO's 10-bit format. The
+    /// recording reads this target back as `RGBA`/`UNSIGNED_BYTE`, and asking a
+    /// driver to read 8-bit bytes out of an `RGB10_A2` attachment takes it off
+    /// the fast path: the readback stops being a straight DMA of the
+    /// attachment's own layout and becomes a per-pixel format conversion,
+    /// measured at roughly four times the cost of a matching-format read. The
+    /// output is an 8-bit H.264 stream, so the extra two bits per channel were
+    /// being paid for and then discarded.
+    pub(super) unsafe fn create_recording_fbo(
+        gl: &glow::Context,
+        w: u32,
+        h: u32,
+    ) -> Result<(glow::Framebuffer, glow::Texture), String> {
+        unsafe {
+            let tex = gl
+                .create_texture()
+                .map_err(|e| format!("recording_fbo tex: {e}"))?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                w as i32,
+                h as i32,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(None),
+            );
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+            }
+
+            let fbo = match gl.create_framebuffer() {
+                Ok(fbo) => fbo,
+                Err(error) => {
+                    gl.bind_texture(glow::TEXTURE_2D, None);
+                    gl.delete_texture(tex);
+                    return Err(format!("recording_fbo: {error}"));
+                }
+            };
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex),
+                0,
+            );
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_texture(glow::TEXTURE_2D, None);
+                gl.delete_framebuffer(fbo);
+                gl.delete_texture(tex);
+                return Err(format!(
+                    "recording_fbo incomplete (RGBA8, status=0x{status:04x})"
+                ));
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            Ok((fbo, tex))
+        }
+    }
+
     /// Capture the current framebuffer into scene_fbo, then run dual Kawase blur passes.
     /// `source_fbo` specifies which FBO to read from (None = default back buffer).
     pub(super) fn run_blur_passes_from_fbo(

@@ -123,18 +123,35 @@ pub fn select_recording_encoder(configured: &str) -> RecordingEncoder {
     encoder
 }
 
+/// A probe frame large enough for every hardware encoder to accept.
+///
+/// This is not cosmetic. NVENC refuses anything below its minimum frame size —
+/// the old 64x64 probe failed with "Frame Dimension less than the minimum
+/// supported value" on hardware that encodes 4K perfectly well, so `auto`
+/// rejected NVENC on every machine that had it and silently fell back to
+/// libx264. 256x256 clears the minimum for NVENC, VAAPI and QSV alike.
+const ENCODER_PROBE_SIZE: &str = "nullsrc=s=256x256";
+
+/// The render node VAAPI encodes on. Kept in one place so the probe and the
+/// real command can never disagree about which device was tested.
+pub const VAAPI_DEVICE: &str = "/dev/dri/renderD128";
+
 fn probe_recording_encoder(configured: &str) -> RecordingEncoder {
     match configured {
         "nvenc" => RecordingEncoder::Nvenc,
         "vaapi" => RecordingEncoder::Vaapi,
         "software" => RecordingEncoder::Software,
+        // `-pix_fmt yuv420p` because `nullsrc` alone leaves the format
+        // unspecified, which the encoder then rejects for its own reasons.
         _ if probe(&[
             "-f",
             "lavfi",
             "-i",
-            "nullsrc=s=64x64",
+            ENCODER_PROBE_SIZE,
             "-frames:v",
             "1",
+            "-pix_fmt",
+            "yuv420p",
             "-c:v",
             "h264_nvenc",
             "-f",
@@ -144,16 +161,22 @@ fn probe_recording_encoder(configured: &str) -> RecordingEncoder {
         {
             RecordingEncoder::Nvenc
         }
-        _ if std::path::Path::new("/dev/dri/renderD128").exists()
+        // The probe has to build the same hardware frame the real command does.
+        // Feeding h264_vaapi a software frame fails with "Function not
+        // implemented" no matter how capable the device is, which is why this
+        // arm never selected VAAPI either.
+        _ if std::path::Path::new(VAAPI_DEVICE).exists()
             && probe(&[
                 "-vaapi_device",
-                "/dev/dri/renderD128",
+                VAAPI_DEVICE,
                 "-f",
                 "lavfi",
                 "-i",
-                "nullsrc=s=64x64",
+                ENCODER_PROBE_SIZE,
                 "-frames:v",
                 "1",
+                "-vf",
+                "format=nv12,hwupload",
                 "-c:v",
                 "h264_vaapi",
                 "-f",

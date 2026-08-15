@@ -109,6 +109,7 @@ impl RecordingState {
         // encoder look like a successfully-created but unplayable MP4.
         let size = format!("{}x{}", self.width, self.height);
         let fps = fps.to_string();
+        use crate::backend::compositor_common::media::VAAPI_DEVICE;
         use crate::backend::compositor_common::media::{
             RecordingEncoder, append_recording_audio_input, append_recording_audio_output,
             append_recording_log_args, append_software_encoder_pacing, deprioritize_encoder,
@@ -136,7 +137,7 @@ impl RecordingState {
         let mut args: Vec<String> = Vec::new();
         append_recording_log_args(&mut args);
         if matches!(encoder, RecordingEncoder::Vaapi) {
-            args.extend(["-vaapi_device", "/dev/dri/renderD128"].map(str::to_string));
+            args.extend(["-vaapi_device", VAAPI_DEVICE].map(str::to_string));
         }
         args.extend(
             [
@@ -185,17 +186,15 @@ impl RecordingState {
         if with_audio {
             append_recording_audio_output(&mut args, &audio_bitrate);
         }
+        // Software only: libx264 would otherwise negotiate yuv444p from RGBA
+        // input, at roughly twice the encoding cost. The hardware encoders
+        // convert from RGB on the GPU, so naming a format here just forces a
+        // CPU swscale pass in front of them.
+        if matches!(encoder, RecordingEncoder::Software) {
+            args.extend(["-pix_fmt", "yuv420p"].map(str::to_string));
+        }
         args.extend(
-            [
-                "-r",
-                fps.as_str(),
-                "-pix_fmt",
-                "yuv420p",
-                "-movflags",
-                "+faststart",
-                output_path,
-            ]
-            .map(str::to_string),
+            ["-r", fps.as_str(), "-movflags", "+faststart", output_path].map(str::to_string),
         );
         let codec_name = encoder.codec_name("libx264");
         log::info!(
