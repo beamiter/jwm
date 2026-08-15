@@ -12,6 +12,8 @@ use self::glx::GlxPlatform;
 use super::{OmlSyncControl, PixmapBinding};
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 /// EGL/GLES 3 platform adapter: context, surface, and EGLImage ownership.
 mod egl;
@@ -51,7 +53,6 @@ impl GraphicsApiPreference {
 pub(super) struct GraphicsPlatform {
     xlib_display: *mut x11::xlib::Display,
     screen_num: i32,
-    cursor_capture_supported: bool,
     backend: PlatformBackend,
     closed: bool,
 }
@@ -61,14 +62,221 @@ enum PlatformBackend {
     Egl(EglPlatform),
 }
 
+#[derive(Clone)]
 pub(super) struct RecordingCursor {
-    pixels: Vec<u32>,
+    /// Shared so a sample that reuses an unchanged cursor shape, and the clone
+    /// the capture path takes, both cost a refcount rather than a copy.
+    pixels: Arc<Vec<u32>>,
     width: u32,
     height: u32,
     hotspot_x: i32,
     hotspot_y: i32,
     xhot: i32,
     yhot: i32,
+}
+
+/// Samples the X server cursor on a connection and thread of its own.
+///
+/// XComposite redirects windows but not the pointer, so the cursor is a
+/// server-side sprite that never appears in `glReadPixels` and recording has to
+/// draw it in. `XFixesGetCursorImage` is the only source for both its image and
+/// its exact root position, and the window manager's own pointer tracking
+/// cannot stand in: motion over a client window is delivered to that client and
+/// never reaches us, so a locally tracked position goes stale the moment the
+/// pointer crosses a window and the recorded cursor lands in the wrong place.
+///
+/// It is also a request-with-reply — it flushes and blocks in `read()` until
+/// the server answers. Called once per captured frame it put a synchronous
+/// server round-trip, plus a fresh pixel allocation, inside the capture path
+/// between `glReadPixels` and the framebuffer unbinds, on the one thread that
+/// also serves input and repaints for every client. The sampler moves both onto
+/// a worker with its own display — Xlib allows that as long as no `Display` is
+/// shared across threads — and the capture path takes the latest sample without
+/// ever waiting for the server.
+pub(super) struct RecordingCursorSampler {
+    latest: Arc<Mutex<Option<RecordingCursor>>>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    display: Option<SamplerDisplay>,
+}
+
+/// A display the sampler worker borrows for its lifetime.
+///
+/// Xlib is only thread-safe once `XInitThreads` has been called, which jwm does
+/// not do, so this deliberately does not open or close the connection on the
+/// worker: `XOpenDisplay` and `XCloseDisplay` mutate a process-wide display list
+/// that would then be racing the compositor thread's own Xlib use. Both happen
+/// on the compositor thread instead — the open before the worker starts, the
+/// close after it is joined — leaving the worker to only issue requests. The
+/// remaining process-wide state a request touches is the XFixes extension list,
+/// and the sampler is the only XFixes user in the process.
+struct SamplerDisplay(*mut x11::xlib::Display);
+
+// SAFETY: the pointer is created and destroyed on the compositor thread while
+// the worker is not running, and only the worker dereferences it in between, so
+// the display is never touched by two threads at once.
+unsafe impl Send for SamplerDisplay {}
+
+impl RecordingCursorSampler {
+    /// Begin sampling for a recording capturing one frame every `interval`.
+    pub(super) fn start(interval: Duration) -> Self {
+        let latest = Arc::new(Mutex::new(None));
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
+
+        // A private connection: the compositor's own display belongs to this
+        // thread, and sharing it is exactly what the worker exists to avoid.
+        let display = unsafe { x11::xlib::XOpenDisplay(ptr::null()) };
+        let usable = !display.is_null()
+            && unsafe {
+                let mut event_base = 0;
+                let mut error_base = 0;
+                x11::xfixes::XFixesQueryExtension(display, &mut event_base, &mut error_base) != 0
+            };
+        if !usable {
+            if display.is_null() {
+                log::warn!("compositor: recording cursor sampler could not open a display");
+            } else {
+                log::warn!("compositor: XFixes unavailable; recordings omit the cursor");
+                unsafe { x11::xlib::XCloseDisplay(display) };
+            }
+            return Self {
+                latest,
+                stop,
+                worker: None,
+                display: None,
+            };
+        }
+        // Sample at twice the capture rate: a sample is then at most half a
+        // frame old when a capture picks it up, which keeps a fast-moving
+        // pointer aligned with the frame it is drawn onto. The extra round trip
+        // costs nothing on a thread nobody waits for. The bounds keep a 240 fps
+        // recording from hammering the server and a 1 fps one from letting the
+        // cursor lag a whole second behind.
+        let period = (interval / 2).clamp(Duration::from_millis(4), Duration::from_millis(50));
+        let worker_latest = Arc::clone(&latest);
+        let worker_stop = Arc::clone(&stop);
+        let borrowed = SamplerDisplay(display);
+        let worker = std::thread::Builder::new()
+            .name("jwm-cursor-sampler".into())
+            .spawn(move || {
+                let borrowed = borrowed;
+                sample_cursor_until_stopped(borrowed.0, &worker_latest, &worker_stop, period);
+            })
+            .map_err(|error| {
+                log::warn!("compositor: recording cursor sampler unavailable: {error}");
+            })
+            .ok();
+        Self {
+            latest,
+            stop,
+            worker,
+            display: Some(SamplerDisplay(display)),
+        }
+    }
+
+    /// The most recent sample, or `None` before the first one lands or when the
+    /// server has no XFixes. Never blocks on the server.
+    pub(super) fn latest(&self) -> Option<RecordingCursor> {
+        self.latest.lock().ok().and_then(|latest| latest.clone())
+    }
+}
+
+impl Drop for RecordingCursorSampler {
+    fn drop(&mut self) {
+        let (stopped, wakeup) = &*self.stop;
+        if let Ok(mut stopped) = stopped.lock() {
+            *stopped = true;
+        }
+        // The worker waits on the condvar rather than sleeping, so the join is
+        // bounded by one in-flight round trip instead of a sampling period.
+        wakeup.notify_all();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        // Only now that the worker is gone: closing the display is the other
+        // half of the process-wide state the worker must not touch.
+        if let Some(display) = self.display.take() {
+            unsafe { x11::xlib::XCloseDisplay(display.0) };
+        }
+    }
+}
+
+/// # Safety
+/// `display` must be a live Xlib connection used by no other thread for as long
+/// as this runs.
+fn sample_cursor_until_stopped(
+    display: *mut x11::xlib::Display,
+    latest: &Mutex<Option<RecordingCursor>>,
+    stop: &(Mutex<bool>, Condvar),
+    period: Duration,
+) {
+    // The serial changes only when the cursor image does, which is orders of
+    // magnitude rarer than the position, so an unchanged shape reuses its pixel
+    // buffer instead of converting every sample afresh.
+    let mut cached_shape: Option<(u64, Arc<Vec<u32>>)> = None;
+    let (stopped, wakeup) = stop;
+    loop {
+        if let Some(cursor) = unsafe { sample_cursor(display, &mut cached_shape) }
+            && let Ok(mut latest) = latest.lock()
+        {
+            *latest = Some(cursor);
+        }
+        let Ok(guard) = stopped.lock() else {
+            break;
+        };
+        if *guard {
+            break;
+        }
+        let Ok((guard, _)) = wakeup.wait_timeout(guard, period) else {
+            break;
+        };
+        if *guard {
+            break;
+        }
+    }
+}
+
+/// # Safety
+/// `display` must be a live Xlib connection owned by the calling thread.
+unsafe fn sample_cursor(
+    display: *mut x11::xlib::Display,
+    cached_shape: &mut Option<(u64, Arc<Vec<u32>>)>,
+) -> Option<RecordingCursor> {
+    unsafe {
+        let image = x11::xfixes::XFixesGetCursorImage(display);
+        if image.is_null() {
+            return None;
+        }
+        let image_ref = &*image;
+        let serial = image_ref.cursor_serial as u64;
+        let pixels = match cached_shape {
+            Some((cached_serial, pixels)) if *cached_serial == serial => Some(Arc::clone(pixels)),
+            _ => usize::from(image_ref.width)
+                .checked_mul(usize::from(image_ref.height))
+                .filter(|_| !image_ref.pixels.is_null())
+                .map(|pixel_count| {
+                    let pixels: Arc<Vec<u32>> = Arc::new(
+                        std::slice::from_raw_parts(image_ref.pixels, pixel_count)
+                            .iter()
+                            .map(|&pixel| pixel as u32)
+                            .collect(),
+                    );
+                    *cached_shape = Some((serial, Arc::clone(&pixels)));
+                    pixels
+                }),
+        };
+        let sample = pixels.map(|pixels| RecordingCursor {
+            pixels,
+            width: u32::from(image_ref.width),
+            height: u32::from(image_ref.height),
+            hotspot_x: i32::from(image_ref.x),
+            hotspot_y: i32::from(image_ref.y),
+            xhot: i32::from(image_ref.xhot),
+            yhot: i32::from(image_ref.yhot),
+        });
+        x11::xlib::XFree(image.cast());
+        sample
+    }
 }
 
 impl RecordingCursor {
@@ -113,11 +321,6 @@ impl GraphicsPlatform {
             x11::xlib::XSetErrorHandler(Some(super::ignore_x_error));
         }
         let screen_num = unsafe { x11::xlib::XDefaultScreen(xlib_display) };
-        let cursor_capture_supported = unsafe {
-            let mut event_base = 0;
-            let mut error_base = 0;
-            x11::xfixes::XFixesQueryExtension(xlib_display, &mut event_base, &mut error_base) != 0
-        };
 
         let backend_result = match preference {
             GraphicsApiPreference::Glx => GlxPlatform::new(
@@ -163,7 +366,6 @@ impl GraphicsPlatform {
         let platform = Self {
             xlib_display,
             screen_num,
-            cursor_capture_supported,
             backend,
             closed: false,
         };
@@ -269,47 +471,6 @@ impl GraphicsPlatform {
             PlatformBackend::Egl(egl) => egl.wait_native()?,
         }
         Ok(())
-    }
-
-    /// Composite the X server cursor into a bottom-up RGBA readback buffer.
-    ///
-    /// XComposite redirects windows, but the X server cursor is a separate
-    /// sprite and is consequently absent from `glReadPixels`.  XFixes exposes
-    /// the current premultiplied ARGB cursor image and its exact root position,
-    /// allowing recording to add it without affecting the on-screen back
-    /// buffer (where the server still draws the real cursor).
-    pub(super) fn capture_recording_cursor(&self) -> Option<RecordingCursor> {
-        if !self.cursor_capture_supported || self.xlib_display.is_null() {
-            return None;
-        }
-
-        unsafe {
-            let image = x11::xfixes::XFixesGetCursorImage(self.xlib_display);
-            if image.is_null() {
-                return None;
-            }
-
-            let image_ref = &*image;
-            let pixel_count =
-                usize::from(image_ref.width).checked_mul(usize::from(image_ref.height));
-            let snapshot = pixel_count
-                .filter(|_| !image_ref.pixels.is_null())
-                .map(|pixel_count| RecordingCursor {
-                    pixels: std::slice::from_raw_parts(image_ref.pixels, pixel_count)
-                        .iter()
-                        .map(|&pixel| pixel as u32)
-                        .collect(),
-                    width: u32::from(image_ref.width),
-                    height: u32::from(image_ref.height),
-                    hotspot_x: i32::from(image_ref.x),
-                    hotspot_y: i32::from(image_ref.y),
-                    xhot: i32::from(image_ref.xhot),
-                    yhot: i32::from(image_ref.yhot),
-                });
-
-            x11::xlib::XFree(image.cast());
-            snapshot
-        }
     }
 
     pub(super) fn import_pixmap(

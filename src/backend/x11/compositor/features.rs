@@ -1555,6 +1555,11 @@ impl<C: CompositorConnection> Compositor<C> {
             "compositor",
         ));
         self.recording_fbo = Some(recording_fbo);
+        // The cursor is sampled on its own connection for as long as the
+        // recording lasts, so the capture path never waits on the X server.
+        self.recording_cursor_sampler = Some(RecordingCursorSampler::start(
+            std::time::Duration::from_secs_f64(1.0 / f64::from(fps)),
+        ));
         self.recording_active = true;
         self.recording_last_frame = None;
         self.recording_current_pbo = 0;
@@ -1611,6 +1616,8 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         self.recording_cursor = [None, None];
+        // Joins its worker, which the condvar wakes immediately.
+        self.recording_cursor_sampler = None;
         if let Some((fbo, texture)) = self.recording_fbo.take() {
             unsafe {
                 self.gl.delete_framebuffer(fbo);
@@ -1735,7 +1742,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 // Keep cursor metadata paired with this PBO. The asynchronous
                 // PBO is mapped one capture later, by which time a fast-moving
                 // cursor may already be at a different position.
-                self.recording_cursor[written_pbo] = self.graphics.capture_recording_cursor();
+                self.recording_cursor[written_pbo] = self
+                    .recording_cursor_sampler
+                    .as_ref()
+                    .and_then(RecordingCursorSampler::latest);
                 self.recording_frame_region[written_pbo] = self.recording_region;
 
                 self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);

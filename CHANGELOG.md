@@ -47,6 +47,13 @@ monorepo use independent Semantic Versions.
   and the X11 and Wayland event loops sleep until the next one is due instead of
   polling at 1 ms. The capture clock advances by a whole frame interval, so a
   30 fps recording samples at 30 fps rather than drifting toward 20.
+- Capturing a recording frame no longer makes a synchronous X server round-trip
+  for the cursor. `XFixesGetCursorImage` — the only source for both the cursor
+  image and its true root position, since motion over a client window never
+  reaches the window manager — now runs on a sampler thread with a connection of
+  its own, and the capture path takes the latest sample without waiting. An
+  unchanged cursor shape reuses its pixel buffer instead of reallocating per
+  frame.
 - Screen recording competes far less with the desktop for CPU: the software
   encoder runs at `veryfast` with half the cores rather than `medium` with all
   of them, ffmpeg is started one nice level down, and the X11 recorder pins

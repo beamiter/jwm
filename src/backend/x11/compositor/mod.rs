@@ -762,6 +762,9 @@ where
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
     recording_cursor: [Option<RecordingCursor>; 2],
+    /// Live only while recording: keeps the XFixes cursor round-trip off this
+    /// thread. See `RecordingCursorSampler`.
+    recording_cursor_sampler: Option<RecordingCursorSampler>,
     recording_frame_region: [(i32, i32, u32, u32); 2],
     recording_region: (i32, i32, u32, u32),
     recording_output_size: (u32, u32),
@@ -1109,6 +1112,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         if self.recording_active {
             self.recording_active = false;
         }
+        self.recording_cursor_sampler = None;
         if let Some(sink) = self.recording_sink.take() {
             log::info!("compositor: recording torn down ({})", sink.finish());
         }
