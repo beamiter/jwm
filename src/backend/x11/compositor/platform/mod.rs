@@ -67,6 +67,10 @@ pub(super) struct RecordingCursor {
     /// Shared so a sample that reuses an unchanged cursor shape, and the clone
     /// the capture path takes, both cost a refcount rather than a copy.
     pixels: Arc<Vec<u32>>,
+    /// Identifies the cursor *shape*. It changes only when the image does,
+    /// which lets the GPU path skip re-uploading the texture on the vast
+    /// majority of frames, where only the position moved.
+    serial: u64,
     width: u32,
     height: u32,
     hotspot_x: i32,
@@ -267,6 +271,7 @@ unsafe fn sample_cursor(
         };
         let sample = pixels.map(|pixels| RecordingCursor {
             pixels,
+            serial,
             width: u32::from(image_ref.width),
             height: u32::from(image_ref.height),
             hotspot_x: i32::from(image_ref.x),
@@ -287,26 +292,35 @@ impl RecordingCursor {
         (self.hotspot_x, self.hotspot_y)
     }
 
-    pub(super) fn composite_into(
-        &self,
-        rgba: &mut [u8],
-        width: u32,
-        height: u32,
-        source_region: (i32, i32, u32, u32),
-    ) {
-        composite_premultiplied_argb_cursor(
-            rgba,
-            width,
-            height,
-            &self.pixels,
-            self.width,
-            self.height,
-            self.hotspot_x,
-            self.hotspot_y,
-            self.xhot,
-            self.yhot,
-            source_region,
-        );
+    /// Identity of the cursor shape, for skipping redundant texture uploads.
+    pub(super) fn serial(&self) -> u64 {
+        self.serial
+    }
+
+    pub(super) fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// Where the cursor image's top-left corner sits in root coordinates.
+    pub(super) fn top_left(&self) -> (i32, i32) {
+        (self.hotspot_x - self.xhot, self.hotspot_y - self.yhot)
+    }
+
+    /// The image as premultiplied RGBA bytes, ready for `glTexImage2D`.
+    ///
+    /// XFixes hands back premultiplied ARGB packed one pixel per `unsigned
+    /// long`; GL wants tightly packed byte quads in RGBA order.
+    pub(super) fn to_rgba8(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.pixels.len() * 4);
+        for &argb in self.pixels.iter() {
+            bytes.extend_from_slice(&[
+                ((argb >> 16) & 0xff) as u8,
+                ((argb >> 8) & 0xff) as u8,
+                (argb & 0xff) as u8,
+                ((argb >> 24) & 0xff) as u8,
+            ]);
+        }
+        bytes
     }
 }
 
@@ -557,106 +571,6 @@ impl GraphicsPlatform {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn composite_premultiplied_argb_cursor(
-    frame: &mut [u8],
-    frame_width: u32,
-    frame_height: u32,
-    cursor: &[u32],
-    cursor_width: u32,
-    cursor_height: u32,
-    hotspot_x: i32,
-    hotspot_y: i32,
-    xhot: i32,
-    yhot: i32,
-    source_region: (i32, i32, u32, u32),
-) {
-    let Some(frame_len) = usize::try_from(frame_width)
-        .ok()
-        .and_then(|w| {
-            usize::try_from(frame_height)
-                .ok()
-                .and_then(|h| w.checked_mul(h))
-        })
-        .and_then(|pixels| pixels.checked_mul(4))
-    else {
-        return;
-    };
-    if frame.len() < frame_len {
-        return;
-    }
-
-    let (source_region_x, source_region_y, source_region_width, source_region_height) =
-        source_region;
-    if source_region_width == 0 || source_region_height == 0 {
-        return;
-    }
-    let scale_x = f64::from(frame_width) / f64::from(source_region_width);
-    let scale_y = f64::from(frame_height) / f64::from(source_region_height);
-    let cursor_left = hotspot_x - xhot;
-    let cursor_top = hotspot_y - yhot;
-    for source_y in 0..cursor_height {
-        let screen_y = cursor_top + source_y as i32;
-        let destination_top = ((screen_y - source_region_y) as f64 * scale_y).floor() as i32;
-        let destination_bottom = ((screen_y + 1 - source_region_y) as f64 * scale_y).ceil() as i32;
-        if destination_bottom <= 0 || destination_top >= frame_height as i32 {
-            continue;
-        }
-
-        for source_x in 0..cursor_width {
-            let screen_x = cursor_left + source_x as i32;
-            let destination_left = ((screen_x - source_region_x) as f64 * scale_x).floor() as i32;
-            let destination_right =
-                ((screen_x + 1 - source_region_x) as f64 * scale_x).ceil() as i32;
-            if destination_right <= 0 || destination_left >= frame_width as i32 {
-                continue;
-            }
-
-            let source_index = source_y as usize * cursor_width as usize + source_x as usize;
-            let Some(&argb) = cursor.get(source_index) else {
-                continue;
-            };
-            let alpha = (argb >> 24) as u8;
-            if alpha == 0 {
-                continue;
-            }
-
-            let inverse_alpha = 255 - u32::from(alpha);
-            let source_channels = [
-                ((argb >> 16) & 0xff) as u8,
-                ((argb >> 8) & 0xff) as u8,
-                (argb & 0xff) as u8,
-            ];
-            for destination_y in destination_top.max(0)..destination_bottom.min(frame_height as i32)
-            {
-                // glReadPixels stores row zero at the bottom while root and
-                // region coordinates use a top-left origin.
-                let frame_y = frame_height - 1 - destination_y as u32;
-                for destination_x in
-                    destination_left.max(0)..destination_right.min(frame_width as i32)
-                {
-                    let destination_index =
-                        ((frame_y as usize * frame_width as usize) + destination_x as usize) * 4;
-                    for (offset, source) in source_channels.into_iter().enumerate() {
-                        let destination = u32::from(frame[destination_index + offset]);
-                        frame[destination_index + offset] = u8::try_from(
-                            (u32::from(source) + (destination * inverse_alpha + 127) / 255)
-                                .min(255),
-                        )
-                        .unwrap_or(255);
-                    }
-                    let destination_alpha = u32::from(frame[destination_index + 3]);
-                    frame[destination_index + 3] = u8::try_from(
-                        (u32::from(alpha) + (destination_alpha * inverse_alpha + 127) / 255)
-                            .min(255),
-                    )
-                    .unwrap_or(255);
-                }
-            }
-        }
-    }
-}
-
 impl Drop for GraphicsPlatform {
     fn drop(&mut self) {
         self.shutdown();
@@ -665,7 +579,7 @@ impl Drop for GraphicsPlatform {
 
 #[cfg(test)]
 mod tests {
-    use super::{GraphicsApiPreference, composite_premultiplied_argb_cursor};
+    use super::GraphicsApiPreference;
 
     #[test]
     fn parses_graphics_api_aliases() {
@@ -686,56 +600,5 @@ mod tests {
             GraphicsApiPreference::Glx
         );
         assert!(GraphicsApiPreference::parse("vulkan").is_err());
-    }
-
-    #[test]
-    fn composites_xfixes_cursor_with_bottom_up_frame_coordinates() {
-        let mut frame = [10_u8, 20, 30, 255].repeat(3 * 3);
-        let cursor = [0xffff0000, 0x80008000];
-
-        composite_premultiplied_argb_cursor(
-            &mut frame,
-            3,
-            3,
-            &cursor,
-            2,
-            1,
-            1,
-            1,
-            0,
-            0,
-            (0, 0, 3, 3),
-        );
-
-        // Screen y=1 maps to the middle row in this symmetric 3-row frame.
-        let opaque_red = (1 * 3 + 1) * 4;
-        assert_eq!(&frame[opaque_red..opaque_red + 4], &[255, 0, 0, 255]);
-        let half_green = (1 * 3 + 2) * 4;
-        assert_eq!(&frame[half_green..half_green + 4], &[5, 138, 15, 255]);
-    }
-
-    #[test]
-    fn clips_cursor_at_recording_edges() {
-        let mut frame = vec![0_u8; 2 * 2 * 4];
-        let cursor = [0xffffffff; 4];
-
-        composite_premultiplied_argb_cursor(
-            &mut frame,
-            2,
-            2,
-            &cursor,
-            2,
-            2,
-            0,
-            0,
-            1,
-            1,
-            (0, 0, 2, 2),
-        );
-
-        // Only cursor source (1,1) lands on screen pixel (0,0), which is the
-        // second row in the bottom-up readback.
-        assert_eq!(&frame[8..12], &[255, 255, 255, 255]);
-        assert_eq!(frame.iter().filter(|&&channel| channel == 255).count(), 4);
     }
 }

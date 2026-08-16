@@ -142,6 +142,7 @@ mod config;
 mod event_apply;
 mod features;
 pub(crate) mod init;
+mod recording_gpu;
 mod render;
 mod rules;
 mod wallpaper;
@@ -768,6 +769,22 @@ where
     /// Pointer position at the last capture, so cursor motion over an otherwise
     /// still screen still counts as a reason to capture.
     recording_last_cursor: Option<(i32, i32)>,
+    // --- GPU recording pass: cursor overlay and NV12 packing ---
+    recording_cursor_program: Option<glow::Program>,
+    recording_cursor_rect: Option<glow::UniformLocation>,
+    recording_cursor_target: Option<glow::UniformLocation>,
+    recording_cursor_sampler_loc: Option<glow::UniformLocation>,
+    recording_cursor_texture: Option<glow::Texture>,
+    recording_cursor_texture_serial: Option<u64>,
+    recording_pack_program: Option<glow::Program>,
+    recording_pack_source: Option<glow::UniformLocation>,
+    recording_pack_video_size: Option<glow::UniformLocation>,
+    recording_pack_luma_rows: Option<glow::UniformLocation>,
+    recording_nv12_fbo: Option<(glow::Framebuffer, glow::Texture)>,
+    /// Whether this recording converts to NV12 on the GPU. False only when the
+    /// driver cannot hold the packed target, where the plain RGBA readback and
+    /// ffmpeg's own conversion stand in.
+    recording_nv12: bool,
     recording_frame_region: [(i32, i32, u32, u32); 2],
     recording_region: (i32, i32, u32, u32),
     recording_output_size: (u32, u32),

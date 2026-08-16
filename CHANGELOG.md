@@ -47,6 +47,25 @@ monorepo use independent Semantic Versions.
   and the X11 and Wayland event loops sleep until the next one is due instead of
   polling at 1 ms. The capture clock advances by a whole frame interval, so a
   30 fps recording samples at 30 fps rather than drifting toward 20.
+- Screen recording converts to NV12 on the GPU instead of shipping RGBA to the
+  encoder. A fullscreen pass packs the composited frame into a target laid out
+  as NV12, so the readback, the copy out of mapped memory, the pipe and ffmpeg's
+  read all carry 1.5 bytes per pixel instead of 4 — exactly 62.5% less, at every
+  resolution — and the encoder needs no conversion pass at all. Measured over
+  twenty seconds of continuously changing 1080p content, the encoder process
+  fell from 301 to 84 CPU ticks. The vertical flip moved into the same pass, so
+  `-vf vflip` is gone too. Drivers that cannot hold the packed target fall back
+  to the previous RGBA capture.
+- The mouse cursor is drawn into recordings on the GPU rather than blended into
+  every frame on the CPU, and its image is only re-uploaded when the cursor
+  shape changes rather than once per frame.
+- Recordings are no longer colour-shifted in most players. Frames were converted
+  with BT.601 and the file was tagged with nothing, so ffmpeg-based playback
+  guessed BT.601 and looked correct while mpv, VLC and browsers applied the
+  usual "HD means BT.709" rule and showed pure red as (255,23,0). The GPU
+  conversion uses BT.709 limited range — verified bit-exact against ffmpeg's own
+  conversion across primaries, black, white and grey — and the stream is now
+  tagged to match.
 - Hardware video encoding actually works now. `behavior.recording_encoder`
   defaults to `auto`, but the probe that was meant to detect NVENC asked it to
   encode a 64x64 frame — below NVENC's minimum frame size — so it failed on

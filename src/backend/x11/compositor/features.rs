@@ -2,6 +2,9 @@
 #[allow(unused_imports)]
 use super::math::ortho;
 use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
+use super::recording_gpu::{
+    nv12_aligned_size, nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits,
+};
 #[allow(unused_imports)]
 use super::*;
 #[allow(unused_imports)]
@@ -1422,7 +1425,15 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         self.set_recording_region(region);
-        let (_, _, w, h) = self.recording_region;
+        let (_, _, region_w, region_h) = self.recording_region;
+        // Snap to what the NV12 layout can express: four pixels share a luma
+        // texel and chroma is subsampled vertically. This costs at most three
+        // columns and one row, and 4:2:0 already requires even dimensions.
+        let (w, h) = nv12_aligned_size(region_w, region_h);
+        if w == 0 || h == 0 {
+            log::warn!("compositor: recording region {region_w}x{region_h} is too small to encode");
+            return;
+        }
         self.recording_output_size = (w, h);
         let fps = self.recording_fps.clamp(1, 240);
 
@@ -1432,6 +1443,43 @@ impl<C: CompositorConnection> Compositor<C> {
                 log::warn!("compositor: failed to create recording framebuffer: {error}");
                 return;
             }
+        };
+        if !self.build_recording_programs() {
+            unsafe {
+                self.gl.delete_framebuffer(recording_fbo.0);
+                self.gl.delete_texture(recording_fbo.1);
+            }
+            return;
+        }
+        // Convert on the GPU when the driver can hold the packed target, which
+        // every real desktop driver can. The plain RGBA readback stays as the
+        // fallback for a driver at the ES 3.0 minimum texture size.
+        let max_texture_size =
+            unsafe { self.gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) }.max(0) as u32;
+        let (packed_w, packed_h) = nv12_packed_target_size(w, h);
+        let nv12_fbo = nv12_target_fits(w, h, max_texture_size)
+            .then(|| unsafe { Self::create_recording_fbo(&self.gl, packed_w, packed_h) })
+            .and_then(|created| match created {
+                Ok(fbo) => Some(fbo),
+                Err(error) => {
+                    log::warn!("compositor: NV12 packing framebuffer unavailable: {error}");
+                    None
+                }
+            });
+        self.recording_nv12 = nv12_fbo.is_some();
+        if !self.recording_nv12 {
+            log::warn!(
+                "compositor: recording {w}x{h} needs a {packed_w}x{packed_h} packing target but \
+                 the driver caps textures at {max_texture_size}; falling back to RGBA capture"
+            );
+        }
+
+        // Everything downstream — PBO size, sink size, ffmpeg input format —
+        // follows from which capture path was chosen above.
+        let capture_frame_bytes = if self.recording_nv12 {
+            nv12_frame_bytes(w, h)
+        } else {
+            (w as usize) * (h as usize) * 4
         };
 
         let stderr_file = std::fs::File::create("/tmp/jwm-ffmpeg.log")
@@ -1489,7 +1537,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                "rgba",
+                if self.recording_nv12 { "nv12" } else { "rgba" },
                 "-s",
                 size_str.as_str(),
                 "-i",
@@ -1500,12 +1548,22 @@ impl<C: CompositorConnection> Compositor<C> {
         if with_audio {
             append_recording_audio_input(&mut args, &audio_device);
         }
-        match encoder {
-            RecordingEncoder::Nvenc => args.extend(["-vf", "vflip"].map(str::to_string)),
-            RecordingEncoder::Vaapi => {
-                args.extend(["-vf", "vflip,format=nv12,hwupload"].map(str::to_string))
+        // The packing shader samples the capture target upside down, so on that
+        // path the bytes already arrive the right way up and no `vflip` is
+        // needed. The RGBA fallback reads a bottom-up framebuffer and still
+        // does. VAAPI uploads either way, and nv12 needs no conversion with it.
+        let mut filters: Vec<&str> = Vec::new();
+        if !self.recording_nv12 {
+            filters.push("vflip");
+        }
+        if matches!(encoder, RecordingEncoder::Vaapi) {
+            if !self.recording_nv12 {
+                filters.push("format=nv12");
             }
-            RecordingEncoder::Software => args.extend(["-vf", "vflip"].map(str::to_string)),
+            filters.push("hwupload");
+        }
+        if !filters.is_empty() {
+            args.extend(["-vf".to_string(), filters.join(",")]);
         }
         args.push("-c:v".into());
         args.push(codec_name.into());
@@ -1531,6 +1589,23 @@ impl<C: CompositorConnection> Compositor<C> {
         // VAAPI already converts in its own filter chain.
         if matches!(encoder, RecordingEncoder::Software) {
             args.extend(["-pix_fmt", "yuv420p"].map(str::to_string));
+        }
+        if self.recording_nv12 {
+            // Must travel with the shader's BT.709 matrix. Tagging without
+            // converting, or converting without tagging, both shift colour.
+            args.extend(
+                [
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-color_range",
+                    "tv",
+                ]
+                .map(str::to_string),
+            );
         }
         args.extend(
             [
@@ -1569,7 +1644,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(buf));
                     self.gl.buffer_data_size(
                         glow::PIXEL_PACK_BUFFER,
-                        (w * h * 4) as i32,
+                        capture_frame_bytes as i32,
                         glow::STREAM_READ,
                     );
                     self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
@@ -1583,10 +1658,11 @@ impl<C: CompositorConnection> Compositor<C> {
         // used to freeze the whole session whenever ffmpeg fell behind.
         self.recording_sink = Some(RecordingSink::spawn(
             child,
-            (w as usize) * (h as usize) * 4,
+            capture_frame_bytes,
             "compositor",
         ));
         self.recording_fbo = Some(recording_fbo);
+        self.recording_nv12_fbo = nv12_fbo;
         // The cursor is sampled on its own connection for as long as the
         // recording lasts, so the capture path never waits on the X server.
         self.recording_cursor_sampler = Some(RecordingCursorSampler::start(
@@ -1650,6 +1726,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.recording_cursor = [None, None];
         self.recording_last_cursor = None;
+        self.release_recording_gpu();
         // Joins its worker, which the condvar wakes immediately.
         self.recording_cursor_sampler = None;
         if let Some((fbo, texture)) = self.recording_fbo.take() {
@@ -1776,57 +1853,83 @@ impl<C: CompositorConnection> Compositor<C> {
         // Overlap the current GPU readback with sending the preceding PBO to
         // ffmpeg. This avoids a GPU/CPU round-trip on every frame.
         let written_pbo = self.recording_current_pbo;
-        if let Some(pbo) = self.recording_pbo[written_pbo] {
-            unsafe {
-                let (x, y, region_width, region_height) = self.recording_region;
-                let source_bottom = self.screen_h as i32 - (y + region_height as i32);
-                self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-                self.gl
-                    .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(recording_fbo));
-                self.gl.blit_framebuffer(
-                    x,
-                    source_bottom,
-                    x + region_width as i32,
-                    source_bottom + region_height as i32,
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    glow::COLOR_BUFFER_BIT,
-                    glow::LINEAR,
-                );
-                self.gl
-                    .bind_framebuffer(glow::FRAMEBUFFER, Some(recording_fbo));
-                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
-                self.gl.read_pixels(
-                    0,
-                    0,
-                    w as i32,
-                    h as i32,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelPackData::BufferOffset(0),
-                );
-                // Keep cursor metadata paired with this PBO. The asynchronous
-                // PBO is mapped one capture later, by which time a fast-moving
-                // cursor may already be at a different position.
-                let cursor = self
-                    .recording_cursor_sampler
-                    .as_ref()
-                    .and_then(RecordingCursorSampler::latest);
-                self.recording_last_cursor = cursor.as_ref().map(RecordingCursor::position);
-                self.recording_cursor[written_pbo] = cursor;
-                self.recording_frame_region[written_pbo] = self.recording_region;
+        let Some(pbo) = self.recording_pbo[written_pbo] else {
+            return;
+        };
+        let region = self.recording_region;
+        // Sampled off-thread, so this never waits on the X server.
+        let cursor = self
+            .recording_cursor_sampler
+            .as_ref()
+            .and_then(RecordingCursorSampler::latest);
+        self.recording_last_cursor = cursor.as_ref().map(RecordingCursor::position);
 
-                self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
-                self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-            }
-            self.recording_current_pbo ^= 1;
-            if self.recording_captured_frames > 0 {
-                self.write_recording_pbo(written_pbo ^ 1);
-            }
-            self.recording_captured_frames += 1;
+        unsafe {
+            let (x, y, region_width, region_height) = region;
+            let source_bottom = self.screen_h as i32 - (y + region_height as i32);
+            self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.gl
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(recording_fbo));
+            self.gl.blit_framebuffer(
+                x,
+                source_bottom,
+                x + region_width as i32,
+                source_bottom + region_height as i32,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                glow::COLOR_BUFFER_BIT,
+                glow::LINEAR,
+            );
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(recording_fbo));
+            self.gl.viewport(0, 0, w as i32, h as i32);
         }
+        // The pointer is a server-side sprite that compositing never sees, so
+        // it is drawn in here — on the GPU, into the capture target, before the
+        // frame is packed. Doing it after the readback is what the CPU path used
+        // to do, and that is incompatible with a subsampled pixel format.
+        if let Some(cursor) = cursor.as_ref() {
+            self.draw_recording_cursor(cursor, region, (w, h));
+        }
+
+        // Convert to NV12 on the GPU so the readback, the copy out of mapped
+        // memory, the pipe and ffmpeg's read all carry 1.5 bytes per pixel
+        // instead of 4, and the encoder needs no conversion pass at all.
+        let (read_w, read_h) = if self.recording_nv12 {
+            if !self.pack_recording_nv12((w, h)) {
+                unsafe {
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                return;
+            }
+            nv12_packed_target_size(w, h)
+        } else {
+            (w, h)
+        };
+        unsafe {
+            self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, Some(pbo));
+            self.gl.read_pixels(
+                0,
+                0,
+                read_w as i32,
+                read_h as i32,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::BufferOffset(0),
+            );
+            self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl
+                .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+        }
+
+        self.recording_current_pbo ^= 1;
+        if self.recording_captured_frames > 0 {
+            self.write_recording_pbo(written_pbo ^ 1);
+        }
+        self.recording_captured_frames += 1;
     }
 
     fn write_recording_pbo(&mut self, pbo_index: usize) {
@@ -1836,9 +1939,12 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(mut sink) = self.recording_sink.take() else {
             return;
         };
-        let cursor = self.recording_cursor[pbo_index].take();
         let (width, height) = self.recording_output_size;
-        let buf_size = (width as usize) * (height as usize) * 4;
+        let buf_size = if self.recording_nv12 {
+            nv12_frame_bytes(width, height)
+        } else {
+            (width as usize) * (height as usize) * 4
+        };
         let mut frame = sink.take_buffer();
         let mut filled = false;
         unsafe {
@@ -1853,10 +1959,9 @@ impl<C: CompositorConnection> Compositor<C> {
                 log::warn!("compositor: recording PBO map returned null");
             } else {
                 // Copy straight out and unmap. Mapped pixel-buffer memory is
-                // frequently uncached or write-combined, where the byte-at-a-time
-                // reads that cursor compositing and the pipe write do run an
-                // order of magnitude slower than against the heap. One bulk copy
-                // is the only access this path makes to it.
+                // frequently uncached or write-combined, where reads run an
+                // order of magnitude slower than against the heap, so one bulk
+                // copy is the only access this path makes to it.
                 // The sink was sized from the same `recording_output_size` that
                 // sized the PBO, so these always agree; clamp anyway rather than
                 // let a future divergence turn into an out-of-bounds copy.
@@ -1870,14 +1975,8 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         if filled {
-            if let Some(cursor) = cursor.as_ref() {
-                cursor.composite_into(
-                    &mut frame,
-                    width,
-                    height,
-                    self.recording_frame_region[pbo_index],
-                );
-            }
+            // The cursor was drawn on the GPU before packing, so the bytes here
+            // are already a finished NV12 frame.
             // Non-blocking: a frame the encoder has no room for is dropped, and
             // ffmpeg's wall-clock input timestamps plus the constant output rate
             // keep the result correctly paced.
