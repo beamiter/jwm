@@ -1675,8 +1675,6 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_started_at = Some(std::time::Instant::now());
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
-        self.recording_cursor = [None, None];
-        self.recording_frame_region = [self.recording_region; 2];
         log::info!(
             "compositor: recording started to {output_path} (microphone={})",
             if with_audio {
@@ -1726,7 +1724,6 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        self.recording_cursor = [None, None];
         self.recording_last_cursor = None;
         self.recording_started_at = None;
         self.release_recording_gpu();

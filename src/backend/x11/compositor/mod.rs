@@ -763,7 +763,6 @@ where
     recording_sink: Option<crate::backend::compositor_common::recording_sink::RecordingSink>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],
-    recording_cursor: [Option<RecordingCursor>; 2],
     /// Live only while recording: keeps the XFixes cursor round-trip off this
     /// thread. See `RecordingCursorSampler`.
     recording_cursor_sampler: Option<RecordingCursorSampler>,
@@ -789,7 +788,6 @@ where
     /// When the recording started, for reporting the rate it is really running
     /// at rather than the rate it was asked for.
     recording_started_at: Option<std::time::Instant>,
-    recording_frame_region: [(i32, i32, u32, u32); 2],
     recording_region: (i32, i32, u32, u32),
     recording_output_size: (u32, u32),
     recording_fbo: Option<(glow::Framebuffer, glow::Texture)>,
