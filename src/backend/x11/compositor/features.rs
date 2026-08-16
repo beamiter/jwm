@@ -1467,7 +1467,10 @@ impl<C: CompositorConnection> Compositor<C> {
                     None
                 }
             });
-        self.recording_nv12 = nv12_fbo.is_some();
+        // Owned by the compositor from here on, so every later bail-out frees
+        // it through `release_recording_gpu` instead of having to remember to.
+        self.recording_nv12_fbo = nv12_fbo;
+        self.recording_nv12 = self.recording_nv12_fbo.is_some();
         if !self.recording_nv12 {
             log::warn!(
                 "compositor: recording {w}x{h} needs a {packed_w}x{packed_h} packing target but \
@@ -1635,6 +1638,8 @@ impl<C: CompositorConnection> Compositor<C> {
                     self.gl.delete_framebuffer(recording_fbo.0);
                     self.gl.delete_texture(recording_fbo.1);
                 }
+                self.release_recording_gpu();
+                self.recording_nv12 = false;
                 return;
             }
         };
@@ -1663,7 +1668,6 @@ impl<C: CompositorConnection> Compositor<C> {
             "compositor",
         ));
         self.recording_fbo = Some(recording_fbo);
-        self.recording_nv12_fbo = nv12_fbo;
         // The cursor is sampled on its own connection for as long as the
         // recording lasts, so the capture path never waits on the X server.
         self.recording_cursor_sampler = Some(RecordingCursorSampler::start(
@@ -1775,6 +1779,7 @@ impl<C: CompositorConnection> Compositor<C> {
             return None;
         }
         Some(crate::backend::api::RecordingStats {
+            output_size: self.recording_output_size,
             captured: self.recording_captured_frames,
             dropped: self
                 .recording_sink

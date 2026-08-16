@@ -991,6 +991,9 @@ pub struct BehaviorConfig {
     /// Cap the encoded height, scaling the capture down to fit and preserving
     /// aspect ratio. 0 records at the captured resolution.
     ///
+    /// X11 backend only; a Wayland session records at the captured resolution.
+    /// A cap too small to make a picture is ignored.
+    ///
     /// Everything downstream scales with the pixel count, so capping a 4K
     /// display to 1080p cuts the readback, the pipe and the encoder to a
     /// quarter. The downscale itself is free: the capture blit already resamples

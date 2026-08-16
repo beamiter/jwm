@@ -1655,10 +1655,16 @@ impl Jwm {
                         "width": region.w,
                         "height": region.h,
                     })),
-                    "output_size": self.features.recording.output_size.map(|(width, height)| serde_json::json!({
-                        "width": width,
-                        "height": height,
-                    })),
+                    // The compositor is authoritative: a height cap makes the
+                    // encoded size differ from the region the WM recorded.
+                    "output_size": backend
+                        .compositor_recording_stats()
+                        .map(|stats| stats.output_size)
+                        .or(self.features.recording.output_size)
+                        .map(|(width, height)| serde_json::json!({
+                            "width": width,
+                            "height": height,
+                        })),
                     "selecting_region": self.features.recording.selecting_region,
                     "adjusting_region": self.features.recording.adjusting_region,
                     // What the recording is actually achieving. A recorder that

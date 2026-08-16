@@ -150,19 +150,36 @@ pub(crate) const fn nv12_packed_target_size(width: u32, height: u32) -> (u32, u3
 ///
 /// A cap of zero, or one no smaller than the region, records at the captured
 /// resolution. The result is always snapped to what the NV12 layout can express.
+///
+/// A cap that cannot produce a usable picture falls back to the captured
+/// resolution rather than refusing to record. That covers both a nonsensically
+/// small cap and an extreme aspect ratio — a tall, narrow region under a modest
+/// cap scales its width below the four-pixel luma granularity, and snapping that
+/// down would otherwise yield a zero-width video and abort the recording while
+/// the window manager still believed it had started.
 pub(crate) fn recording_output_size(region_w: u32, region_h: u32, max_height: u32) -> (u32, u32) {
     if region_w == 0 || region_h == 0 {
         return (0, 0);
     }
-    if max_height == 0 || region_h <= max_height {
-        return nv12_aligned_size(region_w, region_h);
+    let native = nv12_aligned_size(region_w, region_h);
+    if max_height == 0 || max_height < MIN_ENCODED_HEIGHT || region_h <= max_height {
+        return native;
     }
     // Preserve aspect ratio; round the width rather than truncating so a 16:9
     // capture stays 16:9 to within the alignment snap.
     let scaled_w = (u64::from(region_w) * u64::from(max_height) + u64::from(region_h) / 2)
         / u64::from(region_h);
-    nv12_aligned_size(scaled_w.max(1) as u32, max_height)
+    let scaled = nv12_aligned_size(scaled_w.max(1) as u32, max_height);
+    if scaled.0 == 0 || scaled.1 == 0 {
+        return native;
+    }
+    scaled
 }
+
+/// The smallest height cap worth honouring. Below this the scaled picture is
+/// not a recording anyone wants, so the cap is treated as absent — which is
+/// what `behavior.recording_max_height` validation tells the user happens.
+pub(crate) const MIN_ENCODED_HEIGHT: u32 = 64;
 
 /// Whether a packed NV12 target of this size is within the driver's limits.
 ///
@@ -441,6 +458,40 @@ mod tests {
             3840 * 2160,
             "1080p from 4K should be exactly a quarter of the pixels"
         );
+    }
+
+    #[test]
+    fn a_cap_that_cannot_make_a_picture_falls_back_to_the_capture() {
+        // Validation tells the user a too-small cap is ignored; make that true.
+        assert_eq!(super::recording_output_size(1920, 1080, 1), (1920, 1080));
+        assert_eq!(super::recording_output_size(1920, 1080, 32), (1920, 1080));
+        // An extreme aspect ratio scales the width below the four-pixel luma
+        // granularity. Snapping that down would give a zero-width video and
+        // abort the recording while the window manager thought it had started.
+        assert_eq!(super::recording_output_size(16, 1080, 64), (16, 1080));
+        // A cap that can still express a picture is honoured as usual.
+        assert_eq!(super::recording_output_size(1920, 1080, 64), (112, 64));
+    }
+
+    #[test]
+    fn no_capped_size_is_ever_degenerate_for_a_real_region() {
+        for region_w in [4u32, 16, 64, 320, 1920, 3440] {
+            for region_h in [2u32, 64, 768, 1080, 1440, 2160] {
+                for cap in [0u32, 1, 32, 64, 240, 720, 1080, 4320] {
+                    let (w, h) = super::recording_output_size(region_w, region_h, cap);
+                    let native = super::nv12_aligned_size(region_w, region_h);
+                    if native.0 == 0 || native.1 == 0 {
+                        continue; // the region itself is unencodable
+                    }
+                    assert!(
+                        w > 0 && h > 0,
+                        "{region_w}x{region_h} cap {cap} produced {w}x{h}"
+                    );
+                    assert_eq!(w % 4, 0);
+                    assert_eq!(h % 2, 0);
+                }
+            }
+        }
     }
 
     #[test]

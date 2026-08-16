@@ -8,7 +8,8 @@ monorepo use independent Semantic Versions.
 ### Added
 
 - `behavior.recording_max_height` caps the encoded height, scaling the capture
-  down to fit and preserving aspect ratio. Every downstream cost scales with the
+  down to fit and preserving aspect ratio (X11 backend only; a Wayland session
+  records at the captured resolution). Every downstream cost scales with the
   pixel count, so capping a 4K display to 1080p cuts the readback, the pipe and
   the encoder to a quarter, and the downscale itself is free because the capture
   blit already resamples the region into the output. 0, the default, records at

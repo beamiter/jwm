@@ -1532,6 +1532,9 @@ pub trait CompositorControl: Send {
 /// the difference, so they are reported while the recording is still running.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RecordingStats {
+    /// The size actually being encoded, which differs from the captured region
+    /// when `behavior.recording_max_height` scales it down.
+    pub output_size: (u32, u32),
     /// Frames read back off the GPU since the recording started.
     pub captured: u64,
     /// Frames the encoder had no room for and the compositor discarded rather
@@ -1561,6 +1564,7 @@ mod recording_stats_tests {
     fn the_effective_rate_is_what_was_captured_not_what_was_asked_for() {
         // A recording configured for 30 fps that only managed 11.
         let stats = RecordingStats {
+            output_size: (1920, 1080),
             captured: 220,
             dropped: 0,
             elapsed_secs: 20.0,
@@ -1575,6 +1579,7 @@ mod recording_stats_tests {
         assert_eq!(stats.effective_fps(), 0.0);
         assert_eq!(
             RecordingStats {
+                output_size: (1920, 1080),
                 captured: 5,
                 dropped: 0,
                 elapsed_secs: 0.0,

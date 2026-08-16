@@ -936,7 +936,7 @@ impl Config {
             diagnostics.warning(
                 "behavior.recording_max_height",
                 format!(
-                    "{} is too small to encode; recording will use the captured height",
+                    "{} is too small to encode and will be ignored; recording will use the captured height",
                     behavior.recording_max_height
                 ),
                 Some("use 0 for native resolution, or at least 64".into()),

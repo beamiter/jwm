@@ -682,6 +682,7 @@ impl<C: CompositorConnection> Compositor<C> {
             .clone_from(&behavior.recording_encoder);
         self.recording_output_dir
             .clone_from(&behavior.recording_output_dir);
+        self.recording_max_height = behavior.recording_max_height;
 
         // --- Wallpaper (trigger async reload if path or mode changed) ---
         let new_mode = parse_wallpaper_mode(&behavior.wallpaper_mode);
