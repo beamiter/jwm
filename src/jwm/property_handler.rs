@@ -240,23 +240,49 @@ impl Jwm {
             .ok_or("Client not found")?;
 
         let (inst, cls) = backend.property_ops().get_class(win);
-        if let Some(client) = self.state.clients.get_mut(client_key) {
-            if !inst.is_empty() {
-                client.instance = inst;
-            }
-            if !cls.is_empty() {
-                client.class = cls;
-            }
+        // PropertyOps cannot currently distinguish a deleted WM_CLASS from a
+        // transient GetProperty failure. Preserve the last known identity in
+        // that ambiguous case instead of making the focused icon flicker.
+        if inst.is_empty() && cls.is_empty() {
+            return Ok(());
+        }
+        let changed = self
+            .state
+            .clients
+            .get_mut(client_key)
+            .is_some_and(|client| {
+                let instance_changed = !inst.is_empty() && client.instance != inst;
+                let class_changed = !cls.is_empty() && client.class != cls;
+                if !instance_changed && !class_changed {
+                    return false;
+                }
+                if instance_changed {
+                    client.instance = inst;
+                }
+                if class_changed {
+                    client.class = cls;
+                }
+                true
+            });
+        if !changed {
+            return Ok(());
         }
 
-        // The Dock uses the class/app-id as its stable visual label. Hidden
-        // clients therefore need the same refresh as the selected title even
-        // though they cannot be the monitor's focused client.
+        // A selected client's title icon and a hidden client's Dock identity
+        // both derive from this field. Toolkits may publish WM_CLASS after
+        // mapping, so refresh either projection immediately rather than
+        // waiting for an unrelated title/focus event.
+        let should_update_bar = self.is_client_selected(client_key)
+            || self
+                .state
+                .clients
+                .get(client_key)
+                .is_some_and(|client| client.state.is_hidden);
         let monitor_id = self
             .state
             .clients
             .get(client_key)
-            .filter(|client| client.state.is_hidden)
+            .filter(|_| should_update_bar)
             .and_then(|client| client.mon)
             .and_then(|mon_key| self.state.monitors.get(mon_key))
             .map(|monitor| monitor.num);

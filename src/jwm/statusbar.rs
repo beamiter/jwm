@@ -154,6 +154,32 @@ impl StatusBarBuilder {
         }
     }
 
+    /// Project the focused client's user-facing metadata into a bar snapshot.
+    ///
+    /// Keep the title and application identity together here. The production
+    /// publisher has slightly different geometry and generation bookkeeping
+    /// from [`Self::build_message`], but both paths must agree on these two
+    /// fields or a renderer receives a title with no identity to resolve into
+    /// a desktop icon.
+    pub fn set_selected_client_metadata(
+        info: &mut MonitorInfo,
+        clients: &slotmap::SlotMap<ClientKey, WMClient>,
+        monitor: &WMMonitor,
+    ) {
+        let Some(client) = monitor.sel.and_then(|key| clients.get(key)) else {
+            info.set_client_name("");
+            info.set_client_app_id("");
+            return;
+        };
+        info.set_client_name(&client.name);
+        let app_id = if client.class.is_empty() {
+            &client.instance
+        } else {
+            &client.class
+        };
+        info.set_client_app_id(app_id);
+    }
+
     /// Project the hidden clients owned by one monitor into the fixed-size
     /// wire records consumed by every bar frontend.
     ///
@@ -261,10 +287,8 @@ impl StatusBarBuilder {
             monitor_info.set_tag_status(i, tag_status);
         }
 
-        // 设置选中客户端名称
-        let selected_client_name = Self::get_selected_client_name(clients, monitor);
-        monitor_info.set_client_name(&selected_client_name);
-        monitor_info.set_client_app_id(&Self::get_selected_client_app_id(clients, monitor));
+        // 设置选中客户端名称及 desktop icon 查找所需的应用身份。
+        Self::set_selected_client_metadata(&mut monitor_info, clients, monitor);
 
         message.monitor_info = monitor_info;
         let mut minimized = Self::get_minimized_windows(clients, monitor_clients, monitor.num);
@@ -430,6 +454,42 @@ mod tests {
 
         let name = StatusBarBuilder::get_selected_client_name(&clients, &monitor);
         assert_eq!(name, "");
+    }
+
+    #[test]
+    fn selected_client_metadata_keeps_title_and_desktop_identity_together() {
+        let mut clients = slotmap::SlotMap::new();
+        let mut frost = create_test_client(0b0001, false, "jwm");
+        frost.instance = "frost".to_owned();
+        frost.class = "io.github.beamiter.frost".to_owned();
+        let key = clients.insert(frost);
+        let mut monitor = WMMonitor::new();
+        monitor.sel = Some(key);
+        let mut info = MonitorInfo::default();
+
+        StatusBarBuilder::set_selected_client_metadata(&mut info, &clients, &monitor);
+
+        assert_eq!(info.get_client_name(), "jwm");
+        assert_eq!(info.get_client_app_id(), "io.github.beamiter.frost");
+    }
+
+    #[test]
+    fn selected_client_metadata_falls_back_to_instance_and_clears_when_unfocused() {
+        let mut clients = slotmap::SlotMap::new();
+        let mut client = create_test_client(0b0001, false, "Terminal");
+        client.instance = "terminal-instance".to_owned();
+        let key = clients.insert(client);
+        let mut monitor = WMMonitor::new();
+        monitor.sel = Some(key);
+        let mut info = MonitorInfo::default();
+
+        StatusBarBuilder::set_selected_client_metadata(&mut info, &clients, &monitor);
+        assert_eq!(info.get_client_app_id(), "terminal-instance");
+
+        monitor.sel = None;
+        StatusBarBuilder::set_selected_client_metadata(&mut info, &clients, &monitor);
+        assert_eq!(info.get_client_name(), "");
+        assert_eq!(info.get_client_app_id(), "");
     }
 
     #[test]

@@ -2343,8 +2343,15 @@ impl Jwm {
             );
             monitor_info_for_message.set_tag_status(i, tag_status);
         }
-        let selected_client_name = self.get_selected_client_name(mon_key);
-        monitor_info_for_message.set_client_name(&selected_client_name);
+        // Title and application identity are one projection: the latter is
+        // what every bar resolves through the desktop-entry/icon-theme
+        // database. Keeping this shared with StatusBarBuilder::build_message
+        // prevents the live publisher from silently dropping the icon input.
+        StatusBarBuilder::set_selected_client_metadata(
+            &mut monitor_info_for_message,
+            &self.state.clients,
+            monitor,
+        );
         self.message.monitor_info = monitor_info_for_message;
 
         let monitor_clients = self
@@ -2426,14 +2433,6 @@ impl Jwm {
             StatusBarBuilder::is_filled_tag(&self.state.clients, monitor, tag_bit, is_selected)
         } else {
             false
-        }
-    }
-
-    fn get_selected_client_name(&self, mon_key: MonitorKey) -> String {
-        if let Some(monitor) = self.state.monitors.get(mon_key) {
-            StatusBarBuilder::get_selected_client_name(&self.state.clients, monitor)
-        } else {
-            String::new()
         }
     }
 }
