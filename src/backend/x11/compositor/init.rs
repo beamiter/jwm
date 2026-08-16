@@ -1274,6 +1274,7 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_pack_luma_rows: None,
             recording_nv12_fbo: None,
             recording_nv12: false,
+            recording_started_at: None,
             recording_frame_region: [(0, 0, screen_w, screen_h); 2],
             recording_region: (0, 0, screen_w, screen_h),
             recording_output_size: (screen_w, screen_h),

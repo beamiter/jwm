@@ -543,6 +543,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_recording_stats(
+                &self,
+            ) -> Option<$crate::backend::api::RecordingStats> {
+                self.compositor.as_ref()?.recording_stats()
+            }
+
             fn compositor_request_live_thumbnail(
                 &mut self,
                 window: u32,

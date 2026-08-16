@@ -1671,6 +1671,7 @@ impl<C: CompositorConnection> Compositor<C> {
         self.recording_active = true;
         self.recording_last_frame = None;
         self.recording_last_cursor = None;
+        self.recording_started_at = Some(std::time::Instant::now());
         self.recording_current_pbo = 0;
         self.recording_captured_frames = 0;
         self.recording_cursor = [None, None];
@@ -1726,6 +1727,7 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.recording_cursor = [None, None];
         self.recording_last_cursor = None;
+        self.recording_started_at = None;
         self.release_recording_gpu();
         // Joins its worker, which the condvar wakes immediately.
         self.recording_cursor_sampler = None;
@@ -1766,6 +1768,22 @@ impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn recording_frame_due(&self) -> bool {
         self.recording_frame_deadline()
             .is_some_and(|remaining| remaining.is_zero())
+    }
+
+    /// What the recording in progress is actually achieving.
+    pub(crate) fn recording_stats(&self) -> Option<crate::backend::api::RecordingStats> {
+        let started = self.recording_started_at?;
+        if !self.recording_active {
+            return None;
+        }
+        Some(crate::backend::api::RecordingStats {
+            captured: self.recording_captured_frames,
+            dropped: self
+                .recording_sink
+                .as_ref()
+                .map_or(0, |sink| sink.dropped_frames()),
+            elapsed_secs: started.elapsed().as_secs_f64(),
+        })
     }
 
     /// How long a screen with nothing happening on it may go without being

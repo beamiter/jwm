@@ -1661,6 +1661,19 @@ impl Jwm {
                     })),
                     "selecting_region": self.features.recording.selecting_region,
                     "adjusting_region": self.features.recording.adjusting_region,
+                    // What the recording is actually achieving. A recorder that
+                    // silently runs at a third of the requested rate, or that is
+                    // discarding frames because the encoder cannot keep up,
+                    // looks healthy until the file is played back; these are the
+                    // numbers that say otherwise while it is still running.
+                    // `captured_fps` well under `fps` is normal on a static
+                    // screen, where unchanged frames are deliberately skipped.
+                    "capture": backend.compositor_recording_stats().map(|stats| serde_json::json!({
+                        "captured_frames": stats.captured,
+                        "dropped_frames": stats.dropped,
+                        "captured_fps": (stats.effective_fps() * 10.0).round() / 10.0,
+                        "elapsed_secs": (stats.elapsed_secs * 10.0).round() / 10.0,
+                    })),
                 })))
             }
             "get_audio_recording_status" => {

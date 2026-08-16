@@ -1523,6 +1523,68 @@ pub trait CompositorControl: Send {
     fn compositor_apply_config(&mut self) {}
 }
 
+/// What a recording in progress is actually achieving, as opposed to what it
+/// was asked for.
+///
+/// A recorder that quietly runs at a third of the requested rate, or that is
+/// dropping frames because the encoder cannot keep up, looks exactly like a
+/// healthy one until the file is played back. These are the numbers that tell
+/// the difference, so they are reported while the recording is still running.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RecordingStats {
+    /// Frames read back off the GPU since the recording started.
+    pub captured: u64,
+    /// Frames the encoder had no room for and the compositor discarded rather
+    /// than block on. Any non-zero value means the encoder is behind.
+    pub dropped: u64,
+    /// Wall-clock seconds since the recording started.
+    pub elapsed_secs: f64,
+}
+
+impl RecordingStats {
+    /// Frames actually captured per second of wall clock. Well below the
+    /// configured rate means the capture path, not the encoder, is the limit —
+    /// including the deliberate case of a screen that simply is not changing.
+    pub fn effective_fps(&self) -> f64 {
+        if self.elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        self.captured as f64 / self.elapsed_secs
+    }
+}
+
+#[cfg(test)]
+mod recording_stats_tests {
+    use super::RecordingStats;
+
+    #[test]
+    fn the_effective_rate_is_what_was_captured_not_what_was_asked_for() {
+        // A recording configured for 30 fps that only managed 11.
+        let stats = RecordingStats {
+            captured: 220,
+            dropped: 0,
+            elapsed_secs: 20.0,
+        };
+        assert!((stats.effective_fps() - 11.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_recording_that_has_not_run_yet_reports_no_rate() {
+        // Guards the division: stats are readable the instant recording starts.
+        let stats = RecordingStats::default();
+        assert_eq!(stats.effective_fps(), 0.0);
+        assert_eq!(
+            RecordingStats {
+                captured: 5,
+                dropped: 0,
+                elapsed_secs: 0.0,
+            }
+            .effective_fps(),
+            0.0
+        );
+    }
+}
+
 /// Capture, thumbnail, recording and media-timing operations.
 pub trait CompositorMedia: Send {
     fn take_screenshot_to_file(&mut self, _path: &std::path::Path) -> Result<bool, BackendError> {
@@ -1564,6 +1626,10 @@ pub trait CompositorMedia: Send {
     fn compositor_set_recording_region(&mut self, _region: (i32, i32, u32, u32)) {}
     fn compositor_set_recording_region_overlay(&mut self, _region: Option<(i32, i32, u32, u32)>) {}
     fn compositor_stop_recording(&mut self) {}
+    /// How the recording in progress is actually going, or `None` when none is.
+    fn compositor_recording_stats(&self) -> Option<RecordingStats> {
+        None
+    }
 
     fn compositor_notify_audio_timing(
         &mut self,

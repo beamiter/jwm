@@ -47,6 +47,11 @@ monorepo use independent Semantic Versions.
   and the X11 and Wayland event loops sleep until the next one is due instead of
   polling at 1 ms. The capture clock advances by a whole frame interval, so a
   30 fps recording samples at 30 fps rather than drifting toward 20.
+- `get_recording_status` now reports what the recording is actually achieving,
+  not just what it was configured for: frames captured, frames dropped because
+  the encoder could not keep up, elapsed time, and the effective capture rate.
+  A recorder silently running at a third of the requested rate used to look
+  identical to a healthy one until the file was played back.
 - Screen recording converts to NV12 on the GPU instead of shipping RGBA to the
   encoder. A fullscreen pass packs the composited frame into a target laid out
   as NV12, so the readback, the copy out of mapped memory, the pipe and ffmpeg's

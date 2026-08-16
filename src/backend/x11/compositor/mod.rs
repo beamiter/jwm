@@ -785,6 +785,9 @@ where
     /// driver cannot hold the packed target, where the plain RGBA readback and
     /// ffmpeg's own conversion stand in.
     recording_nv12: bool,
+    /// When the recording started, for reporting the rate it is really running
+    /// at rather than the rate it was asked for.
+    recording_started_at: Option<std::time::Instant>,
     recording_frame_region: [(i32, i32, u32, u32); 2],
     recording_region: (i32, i32, u32, u32),
     recording_output_size: (u32, u32),
