@@ -795,11 +795,44 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Wait until `path` refuses connections, i.e. it really is the stale
+    /// socket file the caller means to hand to `bind_owned_socket`.
+    ///
+    /// Binding a listener and dropping it is not enough on its own inside a
+    /// test binary. `fork` copies the whole descriptor table and `CLOEXEC` only
+    /// takes effect at `exec`, so any sibling test that spawns a process during
+    /// the window when this listener exists leaves its child holding a copy —
+    /// and the socket keeps answering until that child execs. Measured
+    /// directly: a forked child that merely sleeps keeps a closed listener
+    /// connectable, three times out of three.
+    ///
+    /// `bind_owned_socket` is right to treat a socket that answers as live, so
+    /// the fix belongs here: establish the precondition rather than weaken the
+    /// assertion about what recovery does.
+    fn wait_until_socket_is_stale(path: &Path) {
+        for _ in 0..500 {
+            match UnixStream::connect(path) {
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => return,
+                // Some other process still holds a descriptor for it; that can
+                // only be a child that has not reached `exec` yet, and no new
+                // one can inherit it now that this process has closed it.
+                Ok(stream) => drop(stream),
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!(
+            "{} kept accepting connections; it never became stale",
+            path.display()
+        );
+    }
+
     #[test]
     fn stale_owned_socket_is_recovered() {
         let path = temporary_path("stale").with_extension("sock");
         let stale = UnixListener::bind(&path).unwrap();
         drop(stale);
+        wait_until_socket_is_stale(&path);
 
         let (replacement, replacement_identity) = bind_owned_socket(&path).unwrap();
 
@@ -941,10 +974,34 @@ mod tests {
             client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
         assert_eq!(final_frame.unwrap(), ["final-message"]);
         assert_eq!(bytes_read, b"final-message\n".len());
-        let (disconnect, bytes_read) =
-            client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
-        assert_eq!(bytes_read, 0);
-        assert_eq!(disconnect.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        // The writer end is closed, but a sibling test that forked between
+        // `UnixStream::pair` and that close leaves its child holding a copy of
+        // the descriptor until it reaches `exec` — the same mechanism spelled
+        // out on `wait_until_socket_is_stale`. Until then the read side reports
+        // "nothing yet" instead of end-of-file, which is not a violation of
+        // what this test asserts. Poll for the disconnect, with a bound so a
+        // genuinely missing end-of-file still fails.
+        let mut disconnect = None;
+        for _ in 0..500 {
+            let (result, bytes_read) =
+                client.read_messages(MAX_MESSAGES_PER_POLL, MAX_READ_BYTES_PER_POLL);
+            assert_eq!(bytes_read, 0, "no bytes should follow the final frame");
+            match result {
+                Err(error) => {
+                    disconnect = Some(error);
+                    break;
+                }
+                Ok(messages) => {
+                    assert!(
+                        messages.is_empty(),
+                        "no message should follow the final frame"
+                    );
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let disconnect = disconnect.expect("the read side never reported end-of-file");
+        assert_eq!(disconnect.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

@@ -256,7 +256,7 @@ impl RecordingState {
             if self.nv12 {
                 let pack_source =
                     format!("#version 300 es\nprecision highp float;\n{NV12_PACK_FRAGMENT_BODY}");
-                let programs = unsafe {
+                let programs = {
                     super::shader_cache::ShaderCache::compile_program(
                         gl,
                         RECORDING_QUAD_VERTEX,
@@ -282,7 +282,7 @@ impl RecordingState {
                              falling back to RGBA capture"
                         );
                         self.nv12 = false;
-                        unsafe { self.release_packed_target(gl) };
+                        self.release_packed_target(gl);
                     }
                 }
             }
