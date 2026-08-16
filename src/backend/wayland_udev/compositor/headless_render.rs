@@ -25,9 +25,32 @@ enum GlApi {
     GlCore33,
 }
 
+/// Serializes every headless GL section in the process.
+///
+/// The test harness runs these tests on as many threads as the machine has
+/// cores, and they all drive the same driver through the one `EGLDisplay` that
+/// `EGL_DEFAULT_DISPLAY` hands out. NVIDIA's EGL implementation crashes under
+/// that: with four threads compiling shaders concurrently and its on-disk
+/// shader cache disabled, `cargo test` segfaulted inside
+/// `libnvidia-eglcore.so` in 5 runs out of 5, while the same binary at
+/// `--test-threads=1` was clean in 5 out of 5.
+///
+/// It normally hides because the driver's shader cache absorbs the second and
+/// later runs, so the crash surfaces exactly when shader source changes — which
+/// is when someone is most likely to blame their own edit for it.
+///
+/// The tests gain nothing from overlapping their GPU work, so the lock is held
+/// for the whole life of the context: creation, compilation, drawing, readback
+/// and teardown. Everything else in the suite still runs in parallel.
+static HEADLESS_GL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct HeadlessGl {
     gl: glow::Context,
     display: egl::EGLDisplay,
+    context: egl::EGLContext,
+    /// Released only once the context above is gone. Declared last so it drops
+    /// after `Drop for HeadlessGl` has finished tearing the context down.
+    _serialized: std::sync::MutexGuard<'static, ()>,
 }
 
 impl HeadlessGl {
@@ -44,6 +67,13 @@ impl HeadlessGl {
     }
 
     fn try_new(api: GlApi) -> Option<Self> {
+        // Taken before the first EGL call. A poisoned lock only means some
+        // earlier test panicked; the GL state is rebuilt from scratch here
+        // anyway, so it is not a reason to fail every test after it.
+        let serialized = HEADLESS_GL_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // EGL enums not surfaced by the egl 0.2.7 crate.
         const EGL_OPENGL_BIT: egl::EGLint = 0x0008;
         const EGL_CONTEXT_MINOR_VERSION: egl::EGLint = 0x30FB;
@@ -108,18 +138,34 @@ impl HeadlessGl {
         let gl = unsafe {
             glow::Context::from_loader_function(|s| egl::get_proc_address(s) as *const c_void)
         };
-        Some(Self { gl, display })
+        Some(Self {
+            gl,
+            display,
+            context,
+            _serialized: serialized,
+        })
     }
 }
 
 impl Drop for HeadlessGl {
     fn drop(&mut self) {
+        // Release the context from this thread and then actually destroy it.
+        //
+        // Dropping only the binding used to leak the `EGLContext`. Every
+        // headless test creates one, `EGL_DEFAULT_DISPLAY` hands them all the
+        // same shared `EGLDisplay`, and the test harness creates them on worker
+        // threads that then exit — so the driver was left holding a growing set
+        // of live contexts whose creating threads were gone, and tore that down
+        // in its own exit handler after the harness had reported every test as
+        // passing. That is the shape of the intermittent SIGSEGV at the end of
+        // `cargo test`: no test failed, the process just could not exit.
         egl::make_current(
             self.display,
             egl::EGL_NO_SURFACE,
             egl::EGL_NO_SURFACE,
             egl::EGL_NO_CONTEXT,
         );
+        egl::destroy_context(self.display, self.context);
     }
 }
 
