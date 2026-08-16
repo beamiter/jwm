@@ -991,7 +991,6 @@ pub struct BehaviorConfig {
     /// Cap the encoded height, scaling the capture down to fit and preserving
     /// aspect ratio. 0 records at the captured resolution.
     ///
-    /// X11 backend only; a Wayland session records at the captured resolution.
     /// A cap too small to make a picture is ignored.
     ///
     /// Everything downstream scales with the pixel count, so capping a 4K

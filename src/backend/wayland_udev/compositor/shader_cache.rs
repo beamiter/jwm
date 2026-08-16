@@ -81,7 +81,7 @@ impl ShaderCache {
                 }
             }
 
-            let program = self.compile_program(gl, vert_src, frag_src)?;
+            let program = Self::compile_program(gl, vert_src, frag_src)?;
 
             if self.enabled {
                 self.save_program_binary(gl, program, name);
@@ -130,15 +130,21 @@ impl ShaderCache {
         hasher.finish()
     }
 
-    unsafe fn compile_program(
-        &self,
+    /// Compile and link a program. Associated rather than a method: the cache
+    /// contributes nothing here, and passes that own their own GL objects and
+    /// share nothing — the recorder's packing and cursor passes — need the
+    /// compile without the bookkeeping.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
+    pub(crate) unsafe fn compile_program(
         gl: &ffi::Gles2,
         vert_src: &str,
         frag_src: &str,
     ) -> Result<u32, String> {
         unsafe {
-            let vert_shader = self.compile_shader(gl, ffi::VERTEX_SHADER, vert_src)?;
-            let frag_shader = self.compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src)?;
+            let vert_shader = Self::compile_shader(gl, ffi::VERTEX_SHADER, vert_src)?;
+            let frag_shader = Self::compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src)?;
 
             let program = gl.CreateProgram();
             gl.AttachShader(program, vert_shader);
@@ -168,8 +174,9 @@ impl ShaderCache {
         }
     }
 
+    /// # Safety
+    /// Requires a current GL context.
     unsafe fn compile_shader(
-        &self,
         gl: &ffi::Gles2,
         shader_type: u32,
         source: &str,

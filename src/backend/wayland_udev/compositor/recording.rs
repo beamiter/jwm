@@ -1,7 +1,120 @@
+use crate::backend::compositor_common::recording_nv12::{
+    NV12_PACK_FRAGMENT_BODY, nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits,
+    recording_output_size,
+};
 use crate::backend::compositor_common::recording_sink::RecordingSink;
 use smithay::backend::renderer::gles::ffi;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// Fullscreen quad shared by both recording passes.
+///
+/// Attribute-free so it needs no vertex buffer of its own; the recorder draws
+/// it as a four-vertex triangle strip.
+pub(super) const RECORDING_QUAD_VERTEX: &str = r#"#version 300 es
+precision highp float;
+void main() {
+    vec2 corner = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));
+    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+/// Draws the pointer into the capture target.
+///
+/// The Wayland session has no cursor image to sample: KMS scans the real cursor
+/// out on its own plane, so the compositor only ever knows where the pointer is.
+/// The recorder therefore synthesises the same arrow it always has — the shape
+/// below is `SOFTWARE_CURSOR_RECTS` expressed for the GPU, drawn as a black
+/// shadow offset by one cursor unit and then an opaque white fill, exactly as
+/// the CPU compositing pass did it.
+///
+/// `u_origin` is where the pointer sits in the recorded frame and `u_scale` how
+/// many output pixels one cursor unit spans, so the arrow follows a scaled
+/// region the same way the scene does.
+pub(super) const RECORDING_CURSOR_FRAGMENT: &str = r#"#version 300 es
+precision highp float;
+
+uniform vec2 u_origin;
+uniform vec2 u_scale;
+uniform vec2 u_target_size;
+out vec4 frag_color;
+
+const int RECT_COUNT = 13;
+const vec4 RECTS[13] = vec4[13](
+    vec4(0.0,  0.0,  1.0, 1.0),
+    vec4(0.0,  1.0,  2.0, 1.0),
+    vec4(0.0,  2.0,  3.0, 1.0),
+    vec4(0.0,  3.0,  4.0, 1.0),
+    vec4(0.0,  4.0,  5.0, 1.0),
+    vec4(0.0,  5.0,  6.0, 1.0),
+    vec4(0.0,  6.0,  7.0, 1.0),
+    vec4(0.0,  7.0,  8.0, 1.0),
+    vec4(0.0,  8.0,  9.0, 1.0),
+    vec4(0.0,  9.0, 10.0, 1.0),
+    vec4(0.0, 10.0, 11.0, 1.0),
+    vec4(3.0, 11.0,  3.0, 7.0),
+    vec4(2.0, 18.0,  5.0, 2.0)
+);
+
+bool covered(vec2 local) {
+    for (int i = 0; i < RECT_COUNT; ++i) {
+        vec4 r = RECTS[i];
+        if (local.x >= r.x && local.x < r.x + r.z
+         && local.y >= r.y && local.y < r.y + r.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void main() {
+    // The capture target is bottom-up; the pointer is reported top-down.
+    vec2 pixel = vec2(gl_FragCoord.x, u_target_size.y - gl_FragCoord.y);
+    vec2 local = (pixel - u_origin) / u_scale;
+    if (covered(local)) {
+        frag_color = vec4(250.0 / 255.0, 250.0 / 255.0, 250.0 / 255.0, 1.0);
+    } else if (covered(local - vec2(1.0))) {
+        frag_color = vec4(0.0, 0.0, 0.0, 140.0 / 255.0);
+    } else {
+        discard;
+    }
+}
+"#;
+
+/// Set a uniform by name. `name` must be NUL-terminated.
+///
+/// # Safety
+/// Requires `program` in use and a current GL context.
+unsafe fn uniform_1i(gl: &ffi::Gles2, program: u32, name: &[u8], value: i32) {
+    unsafe {
+        let location = gl.GetUniformLocation(program, name.as_ptr() as *const _);
+        if location >= 0 {
+            gl.Uniform1i(location, value);
+        }
+    }
+}
+
+/// # Safety
+/// Requires `program` in use and a current GL context.
+unsafe fn uniform_1f(gl: &ffi::Gles2, program: u32, name: &[u8], value: f32) {
+    unsafe {
+        let location = gl.GetUniformLocation(program, name.as_ptr() as *const _);
+        if location >= 0 {
+            gl.Uniform1f(location, value);
+        }
+    }
+}
+
+/// # Safety
+/// Requires `program` in use and a current GL context.
+unsafe fn uniform_2f(gl: &ffi::Gles2, program: u32, name: &[u8], x: f32, y: f32) {
+    unsafe {
+        let location = gl.GetUniformLocation(program, name.as_ptr() as *const _);
+        if location >= 0 {
+            gl.Uniform2f(location, x, y);
+        }
+    }
+}
 
 pub(crate) struct RecordingState {
     active: bool,
@@ -15,12 +128,17 @@ pub(crate) struct RecordingState {
     region: (i32, i32, u32, u32),
     capture_fbo: u32,
     capture_texture: u32,
-    frame_regions: [(i32, i32, u32, u32); 2],
-    pointer_positions: [(f32, f32); 2],
     frame_count: u64,
     start_time: Option<Instant>,
     fps: u32,
     last_capture: Instant,
+    /// Packed NV12 target and the passes that fill it. Zero when this recording
+    /// fell back to a plain RGBA readback.
+    packed_fbo: u32,
+    packed_texture: u32,
+    pack_program: u32,
+    cursor_program: u32,
+    nv12: bool,
 }
 
 impl RecordingState {
@@ -37,12 +155,15 @@ impl RecordingState {
             region: (0, 0, 0, 0),
             capture_fbo: 0,
             capture_texture: 0,
-            frame_regions: [(0, 0, 0, 0); 2],
-            pointer_positions: [(0.0, 0.0); 2],
             frame_count: 0,
             start_time: None,
             fps: 30,
             last_capture: Instant::now(),
+            packed_fbo: 0,
+            packed_texture: 0,
+            pack_program: 0,
+            cursor_program: 0,
+            nv12: false,
         }
     }
 
@@ -71,10 +192,17 @@ impl RecordingState {
         self.source_width = width;
         self.source_height = height;
         self.region = region;
-        self.width = region.2;
-        self.height = region.3;
+        let max_height = crate::config::CONFIG.load().behavior().recording_max_height;
+        let (encoded_w, encoded_h) = recording_output_size(region.2, region.3, max_height);
+        if encoded_w == 0 || encoded_h == 0 {
+            return Err(format!(
+                "recording region {}x{} is too small to encode",
+                region.2, region.3
+            ));
+        }
+        self.width = encoded_w;
+        self.height = encoded_h;
         self.fps = fps;
-        self.frame_regions = [region; 2];
 
         unsafe {
             const GL_RGBA8: u32 = 0x8058;
@@ -91,7 +219,75 @@ impl RecordingState {
             self.capture_texture = capture_texture;
             gl.GenBuffers(2, self.pbo.as_mut_ptr());
 
-            let buffer_size = (self.width * self.height * 4) as isize;
+            // Convert on the GPU when the driver can hold the packed target,
+            // which every real desktop driver can. The plain RGBA readback
+            // stays as the fallback for one at the ES 3.0 minimum size.
+            let mut max_texture_size: ffi::types::GLint = 0;
+            gl.GetIntegerv(ffi::MAX_TEXTURE_SIZE, &mut max_texture_size);
+            let (packed_w, packed_h) = nv12_packed_target_size(self.width, self.height);
+            self.nv12 = nv12_target_fits(self.width, self.height, max_texture_size.max(0) as u32);
+            if self.nv12 {
+                match super::create_fbo_texture_fmt(gl, packed_w, packed_h, GL_RGBA8) {
+                    Ok((fbo, texture)) => {
+                        self.packed_fbo = fbo;
+                        self.packed_texture = texture;
+                    }
+                    Err(status) => {
+                        log::warn!(
+                            "[recording] NV12 packing target {packed_w}x{packed_h} unavailable \
+                             (status=0x{status:x}); falling back to RGBA capture"
+                        );
+                        self.nv12 = false;
+                    }
+                }
+            } else {
+                log::warn!(
+                    "[recording] {}x{} needs a {packed_w}x{packed_h} packing target but the \
+                     driver caps textures at {max_texture_size}; falling back to RGBA capture",
+                    self.width,
+                    self.height
+                );
+            }
+
+            // Compile before the buffers are sized: a shader that fails to
+            // build falls back to the RGBA readback, which needs a larger
+            // buffer than NV12, and a PBO sized for the wrong one would be
+            // overrun by the very next glReadPixels.
+            if self.nv12 {
+                let pack_source =
+                    format!("#version 300 es\nprecision highp float;\n{NV12_PACK_FRAGMENT_BODY}");
+                let programs = unsafe {
+                    super::shader_cache::ShaderCache::compile_program(
+                        gl,
+                        RECORDING_QUAD_VERTEX,
+                        &pack_source,
+                    )
+                    .and_then(|pack| {
+                        super::shader_cache::ShaderCache::compile_program(
+                            gl,
+                            RECORDING_QUAD_VERTEX,
+                            RECORDING_CURSOR_FRAGMENT,
+                        )
+                        .map(|cursor| (pack, cursor))
+                    })
+                };
+                match programs {
+                    Ok((pack, cursor)) => {
+                        self.pack_program = pack;
+                        self.cursor_program = cursor;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "[recording] recording shaders failed to compile ({error}); \
+                             falling back to RGBA capture"
+                        );
+                        self.nv12 = false;
+                        unsafe { self.release_packed_target(gl) };
+                    }
+                }
+            }
+
+            let buffer_size = self.frame_bytes() as isize;
             for i in 0..2 {
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[i]);
                 gl.BufferData(
@@ -147,7 +343,7 @@ impl RecordingState {
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                "rgba",
+                if self.nv12 { "nv12" } else { "rgba" },
                 "-s",
                 size.as_str(),
                 "-i",
@@ -158,15 +354,29 @@ impl RecordingState {
         if with_audio {
             append_recording_audio_input(&mut args, &audio_device);
         }
-        // OpenGL's origin is bottom-left, unlike normal video.
-        args.push("-vf".into());
+        // The packing shader samples the capture target upside down, so on that
+        // path the bytes already arrive the right way up. The RGBA fallback
+        // reads a bottom-up framebuffer and still needs the flip. VAAPI uploads
+        // either way, and nv12 needs no conversion with it.
+        let mut filters: Vec<&str> = Vec::new();
+        if !self.nv12 {
+            filters.push("vflip");
+        }
+        if matches!(encoder, RecordingEncoder::Vaapi) {
+            if !self.nv12 {
+                filters.push("format=nv12");
+            }
+            filters.push("hwupload");
+        }
+        if !filters.is_empty() {
+            args.extend(["-vf".to_string(), filters.join(",")]);
+        }
         match encoder {
             RecordingEncoder::Nvenc => {
-                args.extend(["vflip", "-c:v", "h264_nvenc", "-b:v", bitrate].map(str::to_string))
+                args.extend(["-c:v", "h264_nvenc", "-b:v", bitrate].map(str::to_string))
             }
             RecordingEncoder::Vaapi => args.extend(
                 [
-                    "vflip,format=nv12,hwupload",
                     "-c:v",
                     "h264_vaapi",
                     "-rc_mode",
@@ -177,11 +387,26 @@ impl RecordingState {
                 .map(str::to_string),
             ),
             RecordingEncoder::Software => {
-                args.extend(
-                    ["vflip", "-c:v", "libx264", "-crf", "23", "-b:v", bitrate].map(str::to_string),
-                );
+                args.extend(["-c:v", "libx264", "-crf", "23", "-b:v", bitrate].map(str::to_string));
                 append_software_encoder_pacing(&mut args);
             }
+        }
+        if self.nv12 {
+            // Must travel with the shader's BT.709 matrix. Tagging without
+            // converting, or converting without tagging, both shift colour.
+            args.extend(
+                [
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
+                    "-color_range",
+                    "tv",
+                ]
+                .map(str::to_string),
+            );
         }
         if with_audio {
             append_recording_audio_output(&mut args, &audio_bitrate);
@@ -225,7 +450,7 @@ impl RecordingState {
         // render loop stalled the whole session whenever the encoder lagged.
         self.sink = Some(RecordingSink::spawn(
             child,
-            (self.width as usize) * (self.height as usize) * 4,
+            self.frame_bytes(),
             "[recording]",
         ));
         self.active = true;
@@ -269,20 +494,32 @@ impl RecordingState {
                 ffi::LINEAR,
             );
             gl.BindFramebuffer(ffi::FRAMEBUFFER, self.capture_fbo);
+            gl.Viewport(0, 0, self.width as i32, self.height as i32);
 
+            // The pointer is drawn into the capture target before packing. The
+            // CPU pass this replaces wrote it into the readback buffer
+            // afterwards, which a subsampled pixel format cannot accommodate.
+            self.draw_cursor(gl, pointer_position);
+
+            // Convert to NV12 on the GPU so the readback, the copy out of
+            // mapped memory, the pipe and ffmpeg's read all carry 1.5 bytes per
+            // pixel instead of 4, and the encoder needs no conversion pass.
+            if self.nv12 {
+                self.pack_nv12(gl);
+            }
+
+            let (read_w, read_h) = self.readback_extent();
             let written_pbo = self.current_pbo;
             gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[written_pbo]);
             gl.ReadPixels(
                 0,
                 0,
-                self.width as i32,
-                self.height as i32,
+                read_w as i32,
+                read_h as i32,
                 ffi::RGBA,
                 ffi::UNSIGNED_BYTE,
                 std::ptr::null_mut(),
             );
-            self.frame_regions[written_pbo] = self.region;
-            self.pointer_positions[written_pbo] = pointer_position;
 
             self.current_pbo ^= 1;
 
@@ -291,32 +528,37 @@ impl RecordingState {
                 // other PBO, which was filled by the preceding capture.
                 let other_pbo = written_pbo ^ 1;
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[other_pbo]);
-                self.drain_pbo(gl, other_pbo);
+                self.drain_pbo(gl);
             }
 
             gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
             gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+            // Restore what the rest of the frame is entitled to assume. The
+            // capture borrows the viewport and the blend enable for its own
+            // passes, and whatever draws next would otherwise inherit them.
+            gl.Viewport(0, 0, self.source_width as i32, self.source_height as i32);
+            gl.Disable(ffi::BLEND);
+            gl.UseProgram(0);
         }
         self.frame_count += 1;
     }
 
-    /// Copy the already-bound pixel buffer into a pooled heap buffer, draw the
-    /// cursor on it and hand it to the writer thread.
+    /// Copy the already-bound pixel buffer into a pooled heap buffer and hand
+    /// it to the writer thread.
     ///
     /// The copy is deliberately one bulk `copy_nonoverlapping`: mapped pixel
-    /// buffers commonly live in uncached or write-combined memory, where the
-    /// per-pixel read-modify-write that cursor compositing performs costs an
-    /// order of magnitude more than against the heap. Unmapping immediately
-    /// also releases the buffer back to the driver a frame earlier.
+    /// buffers commonly live in uncached or write-combined memory, where reads
+    /// cost an order of magnitude more than against the heap. Unmapping
+    /// immediately also releases the buffer back to the driver a frame earlier.
     ///
     /// # Safety
-    /// The caller must have the recording PBO for `pbo_index` bound to
-    /// `PIXEL_PACK_BUFFER` and a current GL context.
-    unsafe fn drain_pbo(&mut self, gl: &ffi::Gles2, pbo_index: usize) {
+    /// The caller must have the recording PBO bound to `PIXEL_PACK_BUFFER` and
+    /// a current GL context.
+    unsafe fn drain_pbo(&mut self, gl: &ffi::Gles2) {
         let Some(mut sink) = self.sink.take() else {
             return;
         };
-        let buffer_size = (self.width as usize) * (self.height as usize) * 4;
+        let buffer_size = self.frame_bytes();
         let mut frame = sink.take_buffer();
         let mut filled = false;
         unsafe {
@@ -341,13 +583,8 @@ impl RecordingState {
         }
 
         if filled {
-            composite_software_cursor(
-                &mut frame,
-                self.width,
-                self.height,
-                self.frame_regions[pbo_index],
-                self.pointer_positions[pbo_index],
-            );
+            // Already a finished frame: the cursor was drawn on the GPU before
+            // packing.
             sink.submit(frame);
         } else {
             sink.return_buffer(frame);
@@ -368,7 +605,7 @@ impl RecordingState {
             let last_pbo = self.current_pbo ^ 1;
             unsafe {
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, self.pbo[last_pbo]);
-                self.drain_pbo(gl, last_pbo);
+                self.drain_pbo(gl);
                 gl.BindBuffer(ffi::PIXEL_PACK_BUFFER, 0);
             }
         }
@@ -396,6 +633,37 @@ impl RecordingState {
     /// Release raw recording objects regardless of the business-level
     /// `active` flag. Every handle is cleared after deletion, making this safe
     /// to call from both error rollback and compositor teardown.
+    /// Bytes in one captured frame, which the PBOs and the encoder sink size to.
+    fn frame_bytes(&self) -> usize {
+        if self.nv12 {
+            nv12_frame_bytes(self.width, self.height)
+        } else {
+            (self.width as usize) * (self.height as usize) * 4
+        }
+    }
+
+    /// Extent `glReadPixels` covers: the packed target, or the frame itself.
+    fn readback_extent(&self) -> (u32, u32) {
+        if self.nv12 {
+            nv12_packed_target_size(self.width, self.height)
+        } else {
+            (self.width, self.height)
+        }
+    }
+
+    unsafe fn release_packed_target(&mut self, gl: &ffi::Gles2) {
+        unsafe {
+            if self.packed_fbo != 0 {
+                gl.DeleteFramebuffers(1, &self.packed_fbo);
+            }
+            if self.packed_texture != 0 {
+                gl.DeleteTextures(1, &self.packed_texture);
+            }
+        }
+        self.packed_fbo = 0;
+        self.packed_texture = 0;
+    }
+
     pub(crate) unsafe fn release_gpu_resources(&mut self, gl: &ffi::Gles2) {
         unsafe {
             if self.pbo.iter().any(|&buffer| buffer != 0) {
@@ -408,6 +676,17 @@ impl RecordingState {
                 gl.DeleteTextures(1, &self.capture_texture);
             }
         }
+        unsafe {
+            self.release_packed_target(gl);
+            for program in [self.pack_program, self.cursor_program] {
+                if program != 0 {
+                    gl.DeleteProgram(program);
+                }
+            }
+        }
+        self.pack_program = 0;
+        self.cursor_program = 0;
+        self.nv12 = false;
         self.pbo = [0; 2];
         self.capture_fbo = 0;
         self.capture_texture = 0;
@@ -415,6 +694,72 @@ impl RecordingState {
 
     pub(crate) fn is_active(&self) -> bool {
         self.active
+    }
+
+    /// Draw the synthesised pointer into the capture target.
+    ///
+    /// # Safety
+    /// Requires the capture framebuffer bound and a current GL context.
+    unsafe fn draw_cursor(&self, gl: &ffi::Gles2, pointer: (f32, f32)) {
+        if self.cursor_program == 0 {
+            return;
+        }
+        let (region_x, region_y, region_w, region_h) = self.region;
+        if region_w == 0 || region_h == 0 {
+            return;
+        }
+        let scale_x = self.width as f32 / region_w as f32;
+        let scale_y = self.height as f32 / region_h as f32;
+        let origin = [
+            (pointer.0.round() - region_x as f32) * scale_x,
+            (pointer.1.round() - region_y as f32) * scale_y,
+        ];
+        unsafe {
+            gl.UseProgram(self.cursor_program);
+            uniform_2f(gl, self.cursor_program, b"u_origin\0", origin[0], origin[1]);
+            uniform_2f(gl, self.cursor_program, b"u_scale\0", scale_x, scale_y);
+            uniform_2f(
+                gl,
+                self.cursor_program,
+                b"u_target_size\0",
+                self.width as f32,
+                self.height as f32,
+            );
+            gl.Enable(ffi::BLEND);
+            // The synthesised arrow carries straight alpha, unlike the
+            // premultiplied cursor image the X11 backend samples.
+            gl.BlendFunc(ffi::SRC_ALPHA, ffi::ONE_MINUS_SRC_ALPHA);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.Disable(ffi::BLEND);
+        }
+    }
+
+    /// Render the capture target into its packed NV12 form and leave the packed
+    /// framebuffer bound for the readback.
+    ///
+    /// # Safety
+    /// Requires a current GL context.
+    unsafe fn pack_nv12(&self, gl: &ffi::Gles2) {
+        let (packed_w, packed_h) = nv12_packed_target_size(self.width, self.height);
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.packed_fbo);
+            gl.Viewport(0, 0, packed_w as i32, packed_h as i32);
+            gl.Disable(ffi::BLEND);
+            gl.UseProgram(self.pack_program);
+            uniform_1i(gl, self.pack_program, b"u_source\0", 0);
+            uniform_2f(
+                gl,
+                self.pack_program,
+                b"u_video_size\0",
+                self.width as f32,
+                self.height as f32,
+            );
+            uniform_1f(gl, self.pack_program, b"u_luma_rows\0", self.height as f32);
+            gl.ActiveTexture(ffi::TEXTURE0);
+            gl.BindTexture(ffi::TEXTURE_2D, self.capture_texture);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            gl.BindTexture(ffi::TEXTURE_2D, 0);
+        }
     }
 
     /// Whether the next capture is due. Recording used to force a full-screen
@@ -487,111 +832,9 @@ impl RecordingState {
     }
 }
 
-// Coordinates are relative to the pointer hotspot at (0, 0).
-const SOFTWARE_CURSOR_RECTS: &[(i32, i32, i32, i32)] = &[
-    (0, 0, 1, 1),
-    (0, 1, 2, 1),
-    (0, 2, 3, 1),
-    (0, 3, 4, 1),
-    (0, 4, 5, 1),
-    (0, 5, 6, 1),
-    (0, 6, 7, 1),
-    (0, 7, 8, 1),
-    (0, 8, 9, 1),
-    (0, 9, 10, 1),
-    (0, 10, 11, 1),
-    (3, 11, 3, 7),
-    (2, 18, 5, 2),
-];
-
-fn composite_software_cursor(
-    frame: &mut [u8],
-    frame_width: u32,
-    frame_height: u32,
-    source_region: (i32, i32, u32, u32),
-    pointer_position: (f32, f32),
-) {
-    let (_, _, region_width, region_height) = source_region;
-    if region_width == 0 || region_height == 0 {
-        return;
-    }
-    let scale_x = frame_width as f64 / region_width as f64;
-    let scale_y = frame_height as f64 / region_height as f64;
-    let pointer_x = pointer_position.0.round() as i32;
-    let pointer_y = pointer_position.1.round() as i32;
-
-    for &(offset_x, offset_y, width, height) in SOFTWARE_CURSOR_RECTS {
-        draw_scaled_cursor_rect(
-            frame,
-            frame_width,
-            frame_height,
-            source_region,
-            (
-                pointer_x + offset_x + 1,
-                pointer_y + offset_y + 1,
-                width,
-                height,
-            ),
-            scale_x,
-            scale_y,
-            [0, 0, 0, 140],
-        );
-    }
-    for &(offset_x, offset_y, width, height) in SOFTWARE_CURSOR_RECTS {
-        draw_scaled_cursor_rect(
-            frame,
-            frame_width,
-            frame_height,
-            source_region,
-            (pointer_x + offset_x, pointer_y + offset_y, width, height),
-            scale_x,
-            scale_y,
-            [250, 250, 250, 255],
-        );
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_scaled_cursor_rect(
-    frame: &mut [u8],
-    frame_width: u32,
-    frame_height: u32,
-    source_region: (i32, i32, u32, u32),
-    rect: (i32, i32, i32, i32),
-    scale_x: f64,
-    scale_y: f64,
-    color: [u8; 4],
-) {
-    let (region_x, region_y, _, _) = source_region;
-    let (x, y, width, height) = rect;
-    let left = ((x - region_x) as f64 * scale_x).floor() as i32;
-    let right = ((x + width - region_x) as f64 * scale_x).ceil() as i32;
-    let top = ((y - region_y) as f64 * scale_y).floor() as i32;
-    let bottom = ((y + height - region_y) as f64 * scale_y).ceil() as i32;
-    let alpha = u32::from(color[3]);
-    let inverse_alpha = 255 - alpha;
-
-    for output_y in top.max(0)..bottom.min(frame_height as i32) {
-        let frame_y = frame_height - 1 - output_y as u32;
-        for output_x in left.max(0)..right.min(frame_width as i32) {
-            let index = (frame_y as usize * frame_width as usize + output_x as usize) * 4;
-            if index + 3 >= frame.len() {
-                continue;
-            }
-            for channel in 0..3 {
-                frame[index + channel] = ((u32::from(color[channel]) * alpha
-                    + u32::from(frame[index + channel]) * inverse_alpha
-                    + 127)
-                    / 255) as u8;
-            }
-            frame[index + 3] = 255;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Duration, Instant, RecordingState, composite_software_cursor};
+    use super::{Duration, Instant, RecordingState};
 
     #[test]
     fn an_idle_recorder_asks_the_event_loop_for_nothing() {
@@ -641,16 +884,5 @@ mod tests {
         // submit them back to back into the encoder we are protecting.
         state.last_capture = Instant::now() - Duration::from_millis(500);
         assert!(state.next_capture_anchor() > state.last_capture + interval);
-    }
-
-    #[test]
-    fn software_cursor_is_offset_and_clipped_to_recording_region() {
-        let mut frame = vec![0_u8; 100 * 50 * 4];
-        composite_software_cursor(&mut frame, 100, 50, (200, 100, 400, 200), (400.0, 200.0));
-        assert!(frame.contains(&250));
-
-        let mut outside = vec![0_u8; 100 * 50 * 4];
-        composite_software_cursor(&mut outside, 100, 50, (200, 100, 400, 200), (50.0, 50.0));
-        assert!(outside.iter().all(|&channel| channel == 0));
     }
 }

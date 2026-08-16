@@ -16,7 +16,7 @@ use glow::HasContext as _;
 use std::os::raw::c_void;
 
 /// Which client API / profile the headless context exposes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum GlApi {
     /// OpenGL ES 3 — for the Wayland backend's `#version 300 es` shaders.
     Gles3,
@@ -5737,4 +5737,306 @@ fn x11_island_corners_are_asymmetric() {
         s::VERTEX_SHADER,
         s::BORDER_FRAGMENT_SHADER,
     );
+}
+
+/// Run the shared NV12 packing shader on real hardware and compare every byte
+/// against an independent software conversion.
+///
+/// This is the check that the packing layout and the colour matrix are right.
+/// Both backends share the shader body, so proving it once proves it for both;
+/// the `api` argument covers the two version headers they compile it under.
+///
+/// The reference in `recording_nv12` is written from the BT.709 specification
+/// rather than ported from the shader, so agreement between them is evidence
+/// about the specification and not just about the two copies matching.
+#[cfg(test)]
+fn assert_nv12_pack_matches_reference(api: GlApi, version_header: &str) {
+    use crate::backend::compositor_common::recording_nv12::{
+        NV12_PACK_FRAGMENT_BODY, nv12_frame_bytes, nv12_packed_target_size, reference_nv12,
+    };
+
+    let Some(h) = HeadlessGl::new(api) else {
+        eprintln!("headless GL unavailable - skipping NV12 packing test");
+        return;
+    };
+    let gl = &h.gl;
+
+    // Big enough to exercise several luma texels and chroma sites, and not a
+    // flat colour: a gradient plus saturated patches catches a transposed axis
+    // or an off-by-one in the layout that a uniform image would hide.
+    const W: usize = 64;
+    const H: usize = 32;
+    let source: Vec<[u8; 3]> = (0..W * H)
+        .map(|i| {
+            let (x, y) = (i % W, i / W);
+            match (x / 8 + y / 8) % 4 {
+                0 => [(x * 4) as u8, (y * 8) as u8, 128],
+                1 => [255, 0, 0],
+                2 => [0, 255, 0],
+                _ => [0, 0, 255],
+            }
+        })
+        .collect();
+
+    let vertex = format!(
+        "{version_header}\nvoid main() {{\n    vec2 c = vec2(float(gl_VertexID & 1), float(gl_VertexID >> 1));\n    gl_Position = vec4(c * 2.0 - 1.0, 0.0, 1.0);\n}}\n"
+    );
+    let fragment = format!("{version_header}\n{NV12_PACK_FRAGMENT_BODY}");
+    let program = link(gl, &vertex, &fragment)
+        .unwrap_or_else(|error| panic!("NV12 packing shader failed to link ({api:?}): {error}"));
+
+    let (packed_w, packed_h) = nv12_packed_target_size(W as u32, H as u32);
+    let packed = unsafe {
+        // The scene the compositor would have captured, bottom-up like a real
+        // capture target, since the shader flips it back on the way out.
+        let mut rgba = vec![0u8; W * H * 4];
+        for y in 0..H {
+            for x in 0..W {
+                let c = source[y * W + x];
+                let dst = ((H - 1 - y) * W + x) * 4;
+                rgba[dst..dst + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let src_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            W as i32,
+            H as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(&rgba)),
+        );
+        for (name, value) in [
+            (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+            (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+        }
+
+        let out_tex = gl.create_texture().unwrap();
+        gl.bind_texture(glow::TEXTURE_2D, Some(out_tex));
+        gl.tex_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            glow::RGBA8 as i32,
+            packed_w as i32,
+            packed_h as i32,
+            0,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(None),
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MIN_FILTER,
+            glow::NEAREST as i32,
+        );
+        gl.tex_parameter_i32(
+            glow::TEXTURE_2D,
+            glow::TEXTURE_MAG_FILTER,
+            glow::NEAREST as i32,
+        );
+        let fbo = gl.create_framebuffer().unwrap();
+        gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::COLOR_ATTACHMENT0,
+            glow::TEXTURE_2D,
+            Some(out_tex),
+            0,
+        );
+        assert_eq!(
+            gl.check_framebuffer_status(glow::FRAMEBUFFER),
+            glow::FRAMEBUFFER_COMPLETE,
+            "packed NV12 FBO incomplete"
+        );
+
+        gl.viewport(0, 0, packed_w as i32, packed_h as i32);
+        gl.disable(glow::BLEND);
+        gl.use_program(Some(program));
+        gl.active_texture(glow::TEXTURE0);
+        gl.bind_texture(glow::TEXTURE_2D, Some(src_tex));
+        gl.uniform_1_i32(gl.get_uniform_location(program, "u_source").as_ref(), 0);
+        gl.uniform_2_f32(
+            gl.get_uniform_location(program, "u_video_size").as_ref(),
+            W as f32,
+            H as f32,
+        );
+        gl.uniform_1_f32(
+            gl.get_uniform_location(program, "u_luma_rows").as_ref(),
+            H as f32,
+        );
+        let (vao, vbo) = create_quad_vao(gl);
+        gl.bind_vertex_array(Some(vao));
+        gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        gl.finish();
+
+        let mut packed = vec![0u8; nv12_frame_bytes(W as u32, H as u32)];
+        gl.read_pixels(
+            0,
+            0,
+            packed_w as i32,
+            packed_h as i32,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelPackData::Slice(Some(&mut packed)),
+        );
+
+        gl.bind_vertex_array(None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(fbo);
+        gl.delete_texture(out_tex);
+        gl.delete_texture(src_tex);
+        gl.delete_program(program);
+        packed
+    };
+
+    let expected = reference_nv12(&source, W, H);
+    assert_eq!(
+        packed.len(),
+        expected.len(),
+        "packed frame is the wrong size"
+    );
+
+    // One code value of slack: the shader works in float and the reference in
+    // double, so the two can land either side of a rounding boundary.
+    let luma_end = W * H;
+    let mut worst = 0i32;
+    let mut worst_at = 0usize;
+    for (i, (&got, &want)) in packed.iter().zip(expected.iter()).enumerate() {
+        let delta = i32::from(got) - i32::from(want);
+        if delta.abs() > worst {
+            worst = delta.abs();
+            worst_at = i;
+        }
+    }
+    assert!(
+        worst <= 1,
+        "{api:?}: NV12 output differs from the reference by {worst} at byte {worst_at} \
+         ({} plane, got {}, want {})",
+        if worst_at < luma_end {
+            "luma"
+        } else {
+            "chroma"
+        },
+        packed[worst_at],
+        expected[worst_at]
+    );
+}
+
+#[test]
+fn nv12_packing_is_correct_on_gles3() {
+    assert_nv12_pack_matches_reference(GlApi::Gles3, "#version 300 es\nprecision highp float;");
+}
+
+#[cfg(feature = "x11-backends")]
+#[test]
+fn nv12_packing_is_correct_on_desktop_gl() {
+    assert_nv12_pack_matches_reference(GlApi::GlCore33, "#version 330 core");
+}
+
+/// Draw the Wayland recorder's synthesised pointer and check its shape.
+///
+/// That backend has no cursor image to sample — KMS scans the real pointer out
+/// on its own plane — so the recorder draws an arrow of its own. Moving that
+/// from a CPU loop into a shader is only safe if the shape survives, and this
+/// backend cannot be run on a development machine, so the shape is asserted
+/// here instead: the arrow's rows are 1, 2, 3 ... 11 pixels wide, then a
+/// 3-wide stem, then a 5-wide tail, exactly as `SOFTWARE_CURSOR_RECTS` says.
+#[cfg(test)]
+#[test]
+fn wayland_recording_cursor_draws_the_expected_arrow() {
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping recording cursor test");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 48;
+    const H: i32 = 40;
+    const ORIGIN_X: f32 = 6.0;
+    const ORIGIN_Y: f32 = 4.0;
+
+    let program = link(
+        gl,
+        super::recording::RECORDING_QUAD_VERTEX,
+        super::recording::RECORDING_CURSOR_FRAGMENT,
+    )
+    .unwrap_or_else(|error| panic!("recording cursor shader failed to link: {error}"));
+
+    // Mid-grey so the opaque fill, the 55%-alpha shadow and untouched pixels
+    // are three distinguishable values.
+    let frame = render_program_frame(
+        gl,
+        program,
+        [0, 0, 0, 255],
+        W,
+        H,
+        [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0],
+        |gl| unsafe {
+            gl.uniform_2_f32(
+                gl.get_uniform_location(program, "u_origin").as_ref(),
+                ORIGIN_X,
+                ORIGIN_Y,
+            );
+            gl.uniform_2_f32(
+                gl.get_uniform_location(program, "u_scale").as_ref(),
+                1.0,
+                1.0,
+            );
+            gl.uniform_2_f32(
+                gl.get_uniform_location(program, "u_target_size").as_ref(),
+                W as f32,
+                H as f32,
+            );
+            // The same straight-alpha blend `draw_cursor` sets up, so the
+            // shadow's 55% alpha is exercised rather than assumed.
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        },
+        |gl| unsafe { gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4) },
+    );
+    unsafe { gl.disable(glow::BLEND) };
+    unsafe { gl.delete_program(program) };
+
+    // The readback is bottom-up; the shader places the pointer top-down.
+    let fill_width = |arrow_row: i32| -> usize {
+        let readback_row = H - 1 - (ORIGIN_Y as i32 + arrow_row);
+        (0..W)
+            .filter(|x| {
+                let p = ((readback_row * W + x) * 4) as usize;
+                frame[p] > 200
+            })
+            .count()
+    };
+
+    let widths: Vec<usize> = (0..20).map(fill_width).collect();
+    assert_eq!(
+        widths,
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 3, 3, 3, 3, 3, 3, 3, 5, 5],
+        "arrow outline does not match SOFTWARE_CURSOR_RECTS"
+    );
+
+    // The tip sits exactly at the pointer, and the shadow one pixel down-right.
+    let at = |x: i32, y_top: i32| -> [u8; 3] {
+        let p = (((H - 1 - y_top) * W + x) * 4) as usize;
+        [frame[p], frame[p + 1], frame[p + 2]]
+    };
+    assert_eq!(at(ORIGIN_X as i32, ORIGIN_Y as i32), [250, 250, 250]);
+    // The shadow is the same arrow offset by one pixel down and right, drawn
+    // under the fill, so it is only visible past the fill's bottom edge — the
+    // tail occupies rows 18 and 19, leaving row 20 to the shadow alone.
+    let shadow = at(ORIGIN_X as i32 + 3, ORIGIN_Y as i32 + 20);
+    assert!(
+        shadow[0] < 100 && shadow[0] > 20,
+        "expected the shadow to blend towards black, got {shadow:?}"
+    );
+    // Nothing is painted away from the arrow: the shader discards there.
+    assert_eq!(at(W - 2, 1), [128, 128, 128]);
 }

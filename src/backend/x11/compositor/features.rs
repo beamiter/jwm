@@ -2,11 +2,11 @@
 #[allow(unused_imports)]
 use super::math::ortho;
 use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
-use super::recording_gpu::{
-    nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_output_size,
-};
 #[allow(unused_imports)]
 use super::*;
+use crate::backend::compositor_common::recording_nv12::{
+    nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_output_size,
+};
 #[allow(unused_imports)]
 use glow::HasContext;
 #[allow(unused_imports)]

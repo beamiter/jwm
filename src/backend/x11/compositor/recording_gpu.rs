@@ -9,6 +9,13 @@
 //! of mapped memory, the pipe, and ffmpeg's read.
 
 use super::*;
+use crate::backend::compositor_common::recording_nv12::{
+    NV12_PACK_FRAGMENT_BODY, nv12_packed_target_size,
+};
+#[cfg(test)]
+use crate::backend::compositor_common::recording_nv12::{
+    nv12_aligned_size, nv12_frame_bytes, recording_output_size,
+};
 
 /// Vertex stage for the cursor quad.
 ///
@@ -49,148 +56,14 @@ void main() {
 }
 "#;
 
-/// Packs the composited scene into an NV12 buffer laid out inside an RGBA8
-/// target of (width/4) x (height * 3/2) texels.
+/// Fragment stage of the NV12 packing pass.
 ///
-/// Four luma bytes ride in one RGBA texel, which is what makes this portable:
-/// GLES3 only guarantees `GL_RGBA`/`GL_UNSIGNED_BYTE` for `glReadPixels`, so a
-/// single-channel R8 target — the obvious way to write a luma plane — could not
-/// be read back on the EGL path this compositor uses by default.
-///
-/// Rows below `u_luma_rows` hold the Y plane, one texel per four pixels. The
-/// rows above hold NV12's interleaved chroma plane: one texel carries
-/// (U,V) for two adjacent 2x2 chroma sites, so a chroma row is `width` bytes
-/// wide exactly like a luma row, and the two regions stay contiguous.
-///
-/// `gl_FragCoord.y` counts from the bottom of the target, which is also the
-/// order `glReadPixels` returns rows in, so the packed regions land in the
-/// buffer the right way round without any further flipping. The *image* is
-/// flipped here instead, which is what lets the encoder drop `-vf vflip`.
-///
-/// The matrix is BT.709 limited range, and the encoder tags the stream to
-/// match. That is a deliberate change from what swscale did, which was BT.601
-/// on an untagged HD stream: ffmpeg-based playback guessed BT.601 and looked
-/// right, which is why it went unnoticed, but mpv, VLC and browsers apply the
-/// usual "HD means BT.709" heuristic and showed every recording with a colour
-/// shift — pure red came back as (255,23,0). Converting and tagging have to
-/// change together; tagging alone turns a bug most players hide into one they
-/// all show.
-pub(crate) const RECORDING_PACK_FRAGMENT: &str = r#"#version 330 core
-uniform sampler2D u_source;
-uniform vec2 u_video_size;
-uniform float u_luma_rows;
-out vec4 frag_color;
-
-vec3 fetch(vec2 pixel) {
-    vec2 clamped = clamp(pixel, vec2(0.0), u_video_size - 1.0);
-    // Flip: the source target is bottom-up, video rows run top-down.
-    vec2 uv = vec2(clamped.x + 0.5, u_video_size.y - 0.5 - clamped.y) / u_video_size;
-    return texture(u_source, uv).rgb;
-}
-
-// BT.709 limited range: the Rec.709 luma weights scaled by 219/255 with a
-// 16/255 pedestal, and the chroma axes scaled by 224/255 about 128/255.
-float luma(vec3 c) {
-    return 0.182586 * c.r + 0.614231 * c.g + 0.062007 * c.b + 0.062745;
-}
-
-vec2 chroma(vec3 c) {
-    return vec2(
-        -0.100644 * c.r - 0.338572 * c.g + 0.439216 * c.b + 0.501961,
-         0.439216 * c.r - 0.398942 * c.g - 0.040274 * c.b + 0.501961
-    );
-}
-
-void main() {
-    vec2 texel = floor(gl_FragCoord.xy);
-    if (texel.y < u_luma_rows) {
-        float x = texel.x * 4.0;
-        frag_color = vec4(
-            luma(fetch(vec2(x, texel.y))),
-            luma(fetch(vec2(x + 1.0, texel.y))),
-            luma(fetch(vec2(x + 2.0, texel.y))),
-            luma(fetch(vec2(x + 3.0, texel.y)))
-        );
-    } else {
-        float row = (texel.y - u_luma_rows) * 2.0;
-        float x = texel.x * 4.0;
-        // Average each 2x2 site in RGB before converting, which is what the
-        // CPU converter this replaces also did.
-        vec3 left = 0.25 * (fetch(vec2(x, row)) + fetch(vec2(x + 1.0, row))
-                          + fetch(vec2(x, row + 1.0)) + fetch(vec2(x + 1.0, row + 1.0)));
-        vec3 right = 0.25 * (fetch(vec2(x + 2.0, row)) + fetch(vec2(x + 3.0, row))
-                           + fetch(vec2(x + 2.0, row + 1.0)) + fetch(vec2(x + 3.0, row + 1.0)));
-        frag_color = vec4(chroma(left), chroma(right));
-    }
-}
-"#;
-
-/// Video dimensions the NV12 layout can express: four pixels share a luma
-/// texel, and chroma is subsampled by two vertically.
-pub(crate) const fn nv12_aligned_size(width: u32, height: u32) -> (u32, u32) {
-    (width & !3, height & !1)
-}
-
-/// Byte size of one NV12 frame.
-pub(crate) const fn nv12_frame_bytes(width: u32, height: u32) -> usize {
-    (width as usize) * (height as usize) * 3 / 2
-}
-
-/// Dimensions of the RGBA8 target the packing pass renders into.
-pub(crate) const fn nv12_packed_target_size(width: u32, height: u32) -> (u32, u32) {
-    (width / 4, height + height / 2)
-}
-
-/// Encoded size for a captured region, honouring a height cap.
-///
-/// Every downstream cost — readback, the copy out of mapped memory, the pipe,
-/// the encoder — scales with the pixel count, so capping a 4K capture to 1080p
-/// cuts all of them to a quarter. The scaling itself is free because the
-/// capture blit already resamples the region into the output target.
-///
-/// A cap of zero, or one no smaller than the region, records at the captured
-/// resolution. The result is always snapped to what the NV12 layout can express.
-///
-/// A cap that cannot produce a usable picture falls back to the captured
-/// resolution rather than refusing to record. That covers both a nonsensically
-/// small cap and an extreme aspect ratio — a tall, narrow region under a modest
-/// cap scales its width below the four-pixel luma granularity, and snapping that
-/// down would otherwise yield a zero-width video and abort the recording while
-/// the window manager still believed it had started.
-pub(crate) fn recording_output_size(region_w: u32, region_h: u32, max_height: u32) -> (u32, u32) {
-    if region_w == 0 || region_h == 0 {
-        return (0, 0);
-    }
-    let native = nv12_aligned_size(region_w, region_h);
-    if max_height == 0 || max_height < MIN_ENCODED_HEIGHT || region_h <= max_height {
-        return native;
-    }
-    // Preserve aspect ratio; round the width rather than truncating so a 16:9
-    // capture stays 16:9 to within the alignment snap.
-    let scaled_w = (u64::from(region_w) * u64::from(max_height) + u64::from(region_h) / 2)
-        / u64::from(region_h);
-    let scaled = nv12_aligned_size(scaled_w.max(1) as u32, max_height);
-    if scaled.0 == 0 || scaled.1 == 0 {
-        return native;
-    }
-    scaled
-}
-
-/// The smallest height cap worth honouring. Below this the scaled picture is
-/// not a recording anyone wants, so the cap is treated as absent — which is
-/// what `behavior.recording_max_height` validation tells the user happens.
-pub(crate) const MIN_ENCODED_HEIGHT: u32 = 64;
-
-/// Whether a packed NV12 target of this size is within the driver's limits.
-///
-/// The packed layout is half again as tall as the video, so a 4K recording asks
-/// for a 3240-row texture. Desktop GL and every real GLES3 driver allow far
-/// more, but ES 3.0 only *requires* 2048, which a 1440p recording already
-/// exceeds. Recording falls back to the plain RGBA readback rather than
-/// failing when a driver really is that limited.
-pub(crate) const fn nv12_target_fits(width: u32, height: u32, max_texture_size: u32) -> bool {
-    let (packed_w, packed_h) = nv12_packed_target_size(width, height);
-    packed_w > 0 && packed_h > 0 && packed_w <= max_texture_size && packed_h <= max_texture_size
+/// The body — layout, colour matrix and vertical flip — is shared with the
+/// Wayland backend so the two backends cannot disagree about what a recorded
+/// frame means. Only the version header differs; the shader cache rewrites this
+/// one into ESSL for the GLES path.
+pub(crate) fn recording_pack_fragment() -> String {
+    format!("#version 330 core\n{NV12_PACK_FRAGMENT_BODY}")
 }
 
 /// Where the cursor image lands in the recorded frame, as `[x, y, w, h]` in
@@ -245,7 +118,7 @@ impl<C: CompositorConnection> Compositor<C> {
             &self.gl,
             "recording_pack_nv12",
             RECORDING_PACK_VERTEX,
-            RECORDING_PACK_FRAGMENT,
+            &recording_pack_fragment(),
         );
         let (cursor, pack) = match (cursor, pack) {
             (Ok(cursor), Ok(pack)) => (cursor, pack),

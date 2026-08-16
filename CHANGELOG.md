@@ -8,13 +8,11 @@ monorepo use independent Semantic Versions.
 ### Added
 
 - `behavior.recording_max_height` caps the encoded height, scaling the capture
-  down to fit and preserving aspect ratio (X11 backend only; a Wayland session
-  records at the captured resolution). Every downstream cost scales with the
+  down to fit and preserving aspect ratio. Every downstream cost scales with the
   pixel count, so capping a 4K display to 1080p cuts the readback, the pipe and
   the encoder to a quarter, and the downscale itself is free because the capture
   blit already resamples the region into the output. 0, the default, records at
   the captured resolution.
-
 - Status bars show the focused window's desktop icon beside its title. JWM
   publishes the window's application identity in shared-memory protocol v14 and
   `xbar_core` resolves it through the freedesktop desktop-entry and icon-theme
@@ -61,8 +59,8 @@ monorepo use independent Semantic Versions.
   A recorder silently running at a third of the requested rate used to look
   identical to a healthy one until the file was played back.
 - Screen recording converts to NV12 on the GPU instead of shipping RGBA to the
-  encoder. A fullscreen pass packs the composited frame into a target laid out
-  as NV12, so the readback, the copy out of mapped memory, the pipe and ffmpeg's
+  encoder, on both the X11 and the Wayland backend. A fullscreen pass packs the
+  composited frame into a target laid out as NV12, so the readback, the copy out of mapped memory, the pipe and ffmpeg's
   read all carry 1.5 bytes per pixel instead of 4 — exactly 62.5% less, at every
   resolution — and the encoder needs no conversion pass at all. Measured over
   twenty seconds of continuously changing 1080p content, the encoder process
@@ -70,8 +68,10 @@ monorepo use independent Semantic Versions.
   `-vf vflip` is gone too. Drivers that cannot hold the packed target fall back
   to the previous RGBA capture.
 - The mouse cursor is drawn into recordings on the GPU rather than blended into
-  every frame on the CPU, and its image is only re-uploaded when the cursor
-  shape changes rather than once per frame.
+  every frame on the CPU. The X11 recorder re-uploads the cursor image only when
+  its shape changes rather than once per frame; the Wayland recorder, which has
+  no cursor image to sample because KMS scans the real pointer out on its own
+  plane, draws the same synthesised arrow it always has.
 - Recordings are no longer colour-shifted in most players. Frames were converted
   with BT.601 and the file was tagged with nothing, so ffmpeg-based playback
   guessed BT.601 and looked correct while mpv, VLC and browsers applied the
