@@ -1915,8 +1915,15 @@ impl<C: CompositorConnection> Compositor<C> {
         // instead of 4, and the encoder needs no conversion pass at all.
         let (read_w, read_h) = if self.recording_nv12 {
             if !self.pack_recording_nv12((w, h)) {
+                // Same restoration as the success path below: bailing out must
+                // not leave the frame with a capture-sized viewport or the
+                // cursor pass's blend state.
                 unsafe {
                     self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                    self.gl
+                        .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+                    self.gl.enable(glow::BLEND);
+                    self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
                 }
                 return;
             }
@@ -1937,8 +1944,15 @@ impl<C: CompositorConnection> Compositor<C> {
             );
             self.gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            // Put back the GL state the rest of the frame is entitled to
+            // assume. The compositor sets blending up once at startup and never
+            // re-establishes it per draw, so the packing pass turning it off
+            // would have left whatever draws next — the recording region
+            // overlay is right behind us — compositing without alpha.
             self.gl
                 .viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
         }
 
         self.recording_current_pbo ^= 1;
