@@ -141,6 +141,29 @@ pub(crate) const fn nv12_packed_target_size(width: u32, height: u32) -> (u32, u3
     (width / 4, height + height / 2)
 }
 
+/// Encoded size for a captured region, honouring a height cap.
+///
+/// Every downstream cost — readback, the copy out of mapped memory, the pipe,
+/// the encoder — scales with the pixel count, so capping a 4K capture to 1080p
+/// cuts all of them to a quarter. The scaling itself is free because the
+/// capture blit already resamples the region into the output target.
+///
+/// A cap of zero, or one no smaller than the region, records at the captured
+/// resolution. The result is always snapped to what the NV12 layout can express.
+pub(crate) fn recording_output_size(region_w: u32, region_h: u32, max_height: u32) -> (u32, u32) {
+    if region_w == 0 || region_h == 0 {
+        return (0, 0);
+    }
+    if max_height == 0 || region_h <= max_height {
+        return nv12_aligned_size(region_w, region_h);
+    }
+    // Preserve aspect ratio; round the width rather than truncating so a 16:9
+    // capture stays 16:9 to within the alignment snap.
+    let scaled_w = (u64::from(region_w) * u64::from(max_height) + u64::from(region_h) / 2)
+        / u64::from(region_h);
+    nv12_aligned_size(scaled_w.max(1) as u32, max_height)
+}
+
 /// Whether a packed NV12 target of this size is within the driver's limits.
 ///
 /// The packed layout is half again as tall as the video, so a 4K recording asks
@@ -396,6 +419,45 @@ mod tests {
     use super::{
         nv12_aligned_size, nv12_frame_bytes, nv12_packed_target_size, recording_cursor_rect,
     };
+
+    #[test]
+    fn no_height_cap_records_at_the_captured_resolution() {
+        assert_eq!(super::recording_output_size(3840, 2160, 0), (3840, 2160));
+        // A cap at or above the capture changes nothing.
+        assert_eq!(super::recording_output_size(1920, 1080, 1080), (1920, 1080));
+        assert_eq!(super::recording_output_size(1920, 1080, 2160), (1920, 1080));
+    }
+
+    #[test]
+    fn a_height_cap_scales_down_and_keeps_the_aspect_ratio() {
+        // The case that matters: 4K to 1080p is a quarter of the pixels, so a
+        // quarter of the readback, pipe and encoder work.
+        assert_eq!(super::recording_output_size(3840, 2160, 1080), (1920, 1080));
+        assert_eq!(super::recording_output_size(3840, 2160, 720), (1280, 720));
+        assert_eq!(super::recording_output_size(2560, 1440, 1080), (1920, 1080));
+        let (w, h) = super::recording_output_size(3840, 2160, 1080);
+        assert_eq!(
+            (w as usize) * (h as usize) * 4,
+            3840 * 2160,
+            "1080p from 4K should be exactly a quarter of the pixels"
+        );
+    }
+
+    #[test]
+    fn a_scaled_size_is_still_something_the_nv12_layout_can_express() {
+        // Odd captures and awkward ratios must still land on the alignment.
+        for (rw, rh, cap) in [
+            (1366u32, 768u32, 480u32),
+            (1023, 767, 300),
+            (3440, 1440, 900),
+        ] {
+            let (w, h) = super::recording_output_size(rw, rh, cap);
+            assert_eq!(w % 4, 0, "{rw}x{rh} cap {cap} gave width {w}");
+            assert_eq!(h % 2, 0, "{rw}x{rh} cap {cap} gave height {h}");
+            assert!(h <= cap);
+        }
+        assert_eq!(super::recording_output_size(0, 1080, 720), (0, 0));
+    }
 
     #[test]
     fn a_fullscreen_recording_places_the_cursor_at_its_root_position() {

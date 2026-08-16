@@ -988,6 +988,15 @@ pub struct BehaviorConfig {
     /// Recording encoder: "auto" (probe NVENC>VAAPI>SW), "nvenc", "vaapi", "software".
     #[serde(default = "default_recording_encoder")]
     pub recording_encoder: String,
+    /// Cap the encoded height, scaling the capture down to fit and preserving
+    /// aspect ratio. 0 records at the captured resolution.
+    ///
+    /// Everything downstream scales with the pixel count, so capping a 4K
+    /// display to 1080p cuts the readback, the pipe and the encoder to a
+    /// quarter. The downscale itself is free: the capture blit already resamples
+    /// the region into the output.
+    #[serde(default)]
+    pub recording_max_height: u32,
     /// Recording output directory (empty = $XDG_VIDEOS_DIR or ~/Videos).
     #[serde(default)]
     pub recording_output_dir: String,
@@ -1906,6 +1915,7 @@ impl Default for Config {
                     recording_bitrate: default_recording_bitrate(),
                     recording_quality: default_recording_quality(),
                     recording_encoder: default_recording_encoder(),
+                    recording_max_height: 0,
                     recording_output_dir: String::new(),
                     recording_audio_enabled: true,
                     recording_audio_device: default_audio_recording_device(),

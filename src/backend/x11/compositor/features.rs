@@ -3,7 +3,7 @@
 use super::math::ortho;
 use super::prism::{MAX_PRISM_SIDES, MIN_PRISM_SIDES};
 use super::recording_gpu::{
-    nv12_aligned_size, nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits,
+    nv12_frame_bytes, nv12_packed_target_size, nv12_target_fits, recording_output_size,
 };
 #[allow(unused_imports)]
 use super::*;
@@ -1426,10 +1426,11 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         self.set_recording_region(region);
         let (_, _, region_w, region_h) = self.recording_region;
-        // Snap to what the NV12 layout can express: four pixels share a luma
-        // texel and chroma is subsampled vertically. This costs at most three
-        // columns and one row, and 4:2:0 already requires even dimensions.
-        let (w, h) = nv12_aligned_size(region_w, region_h);
+        // Scale to the configured height cap if there is one, then snap to what
+        // the NV12 layout can express: four pixels share a luma texel and chroma
+        // is subsampled vertically. The snap costs at most three columns and one
+        // row, and 4:2:0 already requires even dimensions.
+        let (w, h) = recording_output_size(region_w, region_h, self.recording_max_height);
         if w == 0 || h == 0 {
             log::warn!("compositor: recording region {region_w}x{region_h} is too small to encode");
             return;
@@ -1516,7 +1517,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let bitrate = &self.recording_bitrate;
         let quality_str = self.recording_quality.to_string();
         log::info!(
-            "compositor: recording encoder={codec_name}, size={w}x{h}, fps={fps}, bitrate={bitrate}, qp={quality_str}, output={output_path}"
+            "compositor: recording encoder={codec_name}, capture={region_w}x{region_h}, size={w}x{h}, fps={fps}, bitrate={bitrate}, qp={quality_str}, output={output_path}"
         );
 
         let size_str = format!("{w}x{h}");

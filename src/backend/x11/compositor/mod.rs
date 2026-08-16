@@ -759,6 +759,7 @@ where
     recording_quality: u32,
     recording_encoder: String,
     recording_output_dir: String,
+    recording_max_height: u32,
     recording_sink: Option<crate::backend::compositor_common::recording_sink::RecordingSink>,
     recording_last_frame: Option<std::time::Instant>,
     recording_pbo: [Option<glow::Buffer>; 2],

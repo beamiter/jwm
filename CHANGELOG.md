@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `behavior.recording_max_height` caps the encoded height, scaling the capture
+  down to fit and preserving aspect ratio. Every downstream cost scales with the
+  pixel count, so capping a 4K display to 1080p cuts the readback, the pipe and
+  the encoder to a quarter, and the downscale itself is free because the capture
+  blit already resamples the region into the output. 0, the default, records at
+  the captured resolution.
+
 - Status bars show the focused window's desktop icon beside its title. JWM
   publishes the window's application identity in shared-memory protocol v14 and
   `xbar_core` resolves it through the freedesktop desktop-entry and icon-theme

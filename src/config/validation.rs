@@ -932,6 +932,16 @@ impl Config {
                 Some("use a value from 1 through 240".into()),
             );
         }
+        if behavior.recording_max_height != 0 && behavior.recording_max_height < 64 {
+            diagnostics.warning(
+                "behavior.recording_max_height",
+                format!(
+                    "{} is too small to encode; recording will use the captured height",
+                    behavior.recording_max_height
+                ),
+                Some("use 0 for native resolution, or at least 64".into()),
+            );
+        }
         if behavior.recording_quality > 51 {
             diagnostics.warning(
                 "behavior.recording_quality",

@@ -1256,6 +1256,7 @@ impl<C: CompositorConnection> Compositor<C> {
             recording_quality: behavior.recording_quality,
             recording_encoder: behavior.recording_encoder.clone(),
             recording_output_dir: behavior.recording_output_dir.clone(),
+            recording_max_height: behavior.recording_max_height,
             recording_sink: None,
             recording_last_frame: None,
             recording_pbo: [None, None],
