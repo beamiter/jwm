@@ -61,6 +61,15 @@ monorepo use independent Semantic Versions.
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if
   shared-memory setup or capture fails.
+- Remote X11 capture now caches the root geometry, compositor owner and XFixes
+  cursor shape behind checked Core/RandR and XFixes notifications. Stable
+  frames reuse cursor pixels and their scaled image while querying only pointer
+  position. All source modes observe compositor-owner epochs so a restarted
+  compositor receives a fresh capture-inhibitor notification, while Root mode
+  never acquires the overlay. Resize and owner races are authoritatively
+  reconciled and retried once before disabling XRender or falling back from the
+  overlay, and each unavailable notification path independently retains its
+  previous polling fallback.
 - Host video records now have one absolute 10-second budget across every
   partial socket write and the final flush. A peer can no longer keep a frame
   sender alive indefinitely by slowly draining bytes and restarting the

@@ -177,6 +177,21 @@ two frames beyond the latest one actually drawn by the viewer; while that credit
 is exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
 
+The host caches the root geometry, compositor owner and XFixes cursor shape.
+Checked core/RandR and XFixes notifications invalidate those caches, after
+which the host performs one authoritative `GetGeometry`, `GetSelectionOwner` or
+`GetCursorImage` query. A stable frame therefore fetches only the lightweight
+pointer position and reuses the premultiplied cursor pixels, including their
+scaled form. A cursor serial change during readback suppresses the stale cursor
+for that frame and refreshes it on the next frame. Every source mode tracks
+compositor-manager owner changes so a newly started compositor receives a fresh
+capture-inhibitor property notification; event-driven stable frames do not poll
+that selection, and Root mode never acquires the overlay. If an individual
+notification facility is unavailable, only that cache returns to its reliable
+polling path. RandR resize or compositor-owner races are reconciled and retried
+once before XRender is disabled or Auto capture falls back to root; a transient
+overlay-acquire failure is retried with a bounded delay.
+
 The host emits rolling pipeline telemetry every five seconds, including an
 explicit zero-send window while the sender is blocked on display credit or a
 socket write. The viewer emits each non-empty five-second activity window. Both

@@ -5,21 +5,24 @@
 //! x11rb and xcb JWM backends render into the same X Composite overlay, so one
 //! small X11 client covers both transports.
 
-use super::RemoteResult;
+use super::{RemoteError, RemoteResult};
 use image::{RgbImage, RgbaImage, imageops::FilterType};
 use std::borrow::Cow;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
 use std::ptr::{self, NonNull};
+use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::cookie::Cookie;
 use x11rb::image::{BitsPerPixel, Image as XImage, PixelLayout, ScanlinePad};
 use x11rb::protocol::render::{CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, Format, ImageFormat, Pixmap, PropMode,
-    Screen, VisualClass, Visualid, Visualtype, Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
+    Format, ImageFormat, Pixmap, PropMode, QueryPointerReply, Screen, VisualClass, Visualid,
+    Visualtype, Window, WindowClass,
 };
-use x11rb::protocol::{composite, render, shm, xfixes};
+use x11rb::protocol::{Event, composite, randr, render, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::TryParseFd;
@@ -27,10 +30,12 @@ use x11rb::x11_utils::TryParseFd;
 const COMPOSITE_CLIENT_VERSION: (u32, u32) = (0, 4);
 const COMPOSITE_OVERLAY_VERSION: (u32, u32) = (0, 3);
 const XFIXES_CLIENT_VERSION: (u32, u32) = (5, 0);
+const RANDR_CLIENT_VERSION: (u32, u32) = (1, 6);
 const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
 const RENDER_TRANSFORM_VERSION: (u32, u32) = (0, 10);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const REMOTE_CAPTURE_OWNER: &[u8] = b"_JWM_REMOTE_CAPTURE_OWNER";
+const OVERLAY_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,16 +75,95 @@ pub struct CapturedFrame {
     pub source_height: u16,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureFailureKind {
+    Render,
+    Readback,
+    Fatal,
+}
+
+struct CaptureFailure {
+    kind: CaptureFailureKind,
+    error: RemoteError,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReconciledCapture {
+    drawable: Window,
+    width: u16,
+    height: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlaySyncAction {
+    None,
+    Release,
+    Acquire,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OverlaySyncDecision {
+    publish_inhibitor: bool,
+    action: OverlaySyncAction,
+}
+
+impl CaptureFailure {
+    fn render(error: RemoteError) -> Self {
+        Self {
+            kind: CaptureFailureKind::Render,
+            error,
+        }
+    }
+
+    fn readback(error: RemoteError) -> Self {
+        Self {
+            kind: CaptureFailureKind::Readback,
+            error,
+        }
+    }
+
+    fn fatal(error: RemoteError) -> Self {
+        Self {
+            kind: CaptureFailureKind::Fatal,
+            error,
+        }
+    }
+}
+
+fn overlay_sync_decision(
+    requested_source: CaptureSource,
+    composite_ready: bool,
+    owner: Window,
+    overlay_acquired: bool,
+    transitioned: bool,
+    retry_due: bool,
+) -> OverlaySyncDecision {
+    let action = if requested_source == CaptureSource::Root || !composite_ready {
+        OverlaySyncAction::None
+    } else if owner == x11rb::NONE {
+        OverlaySyncAction::Release
+    } else if !overlay_acquired && (transitioned || retry_due) {
+        OverlaySyncAction::Acquire
+    } else {
+        OverlaySyncAction::None
+    };
+    OverlaySyncDecision {
+        publish_inhibitor: transitioned,
+        action,
+    }
+}
+
 pub struct X11Capture {
     conn: RustConnection,
     screen_num: usize,
     root: Window,
     drawable: Window,
     overlay_acquired: bool,
-    compositor_selection: Option<Atom>,
-    compositor_owner: Window,
+    next_overlay_retry: Option<Instant>,
+    compositor: CompositorTracker,
     composite_ready: bool,
-    cursor_available: bool,
+    cursor: CursorCapture,
+    root_geometry: RootGeometryCache,
     inhibitor_atom: Atom,
     inhibitor_window: Window,
     requested_source: CaptureSource,
@@ -106,11 +190,24 @@ impl X11Capture {
         // frame establishes the exact native image size.
         let shm_readback = ShmReadback::connect(&conn, screen.root_depth);
 
-        let compositor_selection = compositor_selection(&conn, screen_num)?;
-        let compositor_owner = conn
-            .get_selection_owner(compositor_selection)?
-            .reply()?
-            .owner;
+        let xfixes_ready = match query_xfixes(&conn) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("remote: XFixes cursor capture unavailable: {error}");
+                false
+            }
+        };
+        let cursor = if xfixes_ready {
+            CursorCapture::new(select_cursor_events(&conn, root))
+        } else {
+            CursorCapture::disabled()
+        };
+        let geometry_event_driven = select_geometry_events(&conn, root);
+        // Subscribe before taking the authoritative baseline. Any resize that
+        // races this reply remains queued and invalidates it before capture.
+        let geometry = conn.get_geometry(root)?.reply()?;
+        let root_geometry =
+            RootGeometryCache::new(geometry.width, geometry.height, geometry_event_driven);
         let composite_ready = if requested_source == CaptureSource::Root {
             false
         } else {
@@ -125,25 +222,36 @@ impl X11Capture {
                 Err(error) => return Err(error),
             }
         };
-        let (drawable, overlay_acquired) = match requested_source {
-            CaptureSource::Root => (root, false),
+        // Every source tracks the compositor-manager epoch. A newly started
+        // compositor does not receive an old capture-inhibitor PropertyNotify,
+        // so even Root capture must republish it after an owner transition.
+        let selection = compositor_selection(&conn, screen_num)?;
+        let event_driven = xfixes_ready && select_compositor_events(&conn, root, selection);
+        // Selection notifications were enabled first, so a concurrent owner
+        // transition is queued and reconciled before the first frame.
+        let compositor_owner = conn.get_selection_owner(selection)?.reply()?.owner;
+        let compositor = CompositorTracker::new(selection, compositor_owner, event_driven);
+        let (drawable, overlay_acquired, next_overlay_retry) = match requested_source {
+            CaptureSource::Root => (root, false, None),
             CaptureSource::Auto if !composite_ready || compositor_owner == x11rb::NONE => {
-                if compositor_owner == x11rb::NONE {
+                if composite_ready && compositor_owner == x11rb::NONE {
                     eprintln!("remote: no X11 compositor owner found; using root capture");
                 }
-                (root, false)
+                (root, false, None)
             }
             CaptureSource::Overlay if compositor_owner == x11rb::NONE => {
                 return Err(invalid_data("no X11 compositor owns this screen").into());
             }
-            CaptureSource::Auto | CaptureSource::Overlay => (acquire_overlay(&conn, root)?, true),
-        };
-        let cursor_available = match query_xfixes(&conn) {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("remote: XFixes cursor capture unavailable: {error}");
-                false
-            }
+            CaptureSource::Auto => match acquire_overlay(&conn, root) {
+                Ok(overlay) => (overlay, true, None),
+                Err(error) => {
+                    eprintln!(
+                        "remote: compositor overlay unavailable ({error}); using root capture and retrying"
+                    );
+                    (root, false, Some(Instant::now() + OVERLAY_RETRY_DELAY))
+                }
+            },
+            CaptureSource::Overlay => (acquire_overlay(&conn, root)?, true, None),
         };
         let (inhibitor_atom, inhibitor_window) = match install_capture_inhibitor(&conn, root) {
             Ok(inhibitor) => inhibitor,
@@ -169,23 +277,29 @@ impl X11Capture {
             }
         };
 
-        Ok(Self {
+        let mut capture = Self {
             conn,
             screen_num,
             root,
             drawable,
             overlay_acquired,
-            compositor_selection: Some(compositor_selection),
-            compositor_owner,
+            next_overlay_retry,
+            compositor,
             composite_ready,
-            cursor_available,
+            cursor,
+            root_geometry,
             inhibitor_atom,
             inhibitor_window,
             requested_source,
             max_width,
             render_scaler,
             shm_readback,
-        })
+        };
+        // Drain notifications queued between subscription and the baselines.
+        // No pixels are captured until all three caches have been reconciled.
+        capture.drain_dynamic_events()?;
+        capture.sync_overlay_source()?;
+        Ok(capture)
     }
 
     /// Capture and optionally downscale a frame.
@@ -196,39 +310,93 @@ impl X11Capture {
     /// the compositor on very large roots, which is why the MVP exposes a
     /// conservative frame-rate default.
     pub fn frame(&mut self) -> RemoteResult<CapturedFrame> {
+        self.drain_dynamic_events()?;
         self.sync_overlay_source()?;
-        match self.capture_drawable(self.drawable) {
-            Ok(frame) => Ok(frame),
-            Err(error) if self.overlay_acquired && self.requested_source == CaptureSource::Auto => {
-                eprintln!(
-                    "remote: compositor overlay readback failed ({error}); switching to root capture"
-                );
-                self.release_overlay();
-                self.capture_drawable(self.root)
+        let (mut source_width, mut source_height) =
+            self.root_geometry.dimensions(&self.conn, self.root)?;
+        validate_root_geometry(source_width, source_height)?;
+
+        let mut drawable = self.drawable;
+        let mut allow_render = true;
+        let mut dynamic_retry_available = true;
+        loop {
+            match self.capture_drawable(drawable, source_width, source_height, allow_render) {
+                Ok(frame) => return Ok(frame),
+                Err(failure) if failure.kind == CaptureFailureKind::Fatal => {
+                    return Err(failure.error);
+                }
+                Err(failure) => {
+                    if dynamic_retry_available {
+                        if let Some(reconciled) = self.reconcile_after_capture_failure(
+                            drawable,
+                            source_width,
+                            source_height,
+                        )? {
+                            dynamic_retry_available = false;
+                            drawable = reconciled.drawable;
+                            source_width = reconciled.width;
+                            source_height = reconciled.height;
+                            validate_root_geometry(source_width, source_height)?;
+                            continue;
+                        }
+                    }
+
+                    match failure.kind {
+                        CaptureFailureKind::Render => {
+                            eprintln!(
+                                "jwm-remote: XRender downscaling stopped ({}); using CPU fallback",
+                                failure.error
+                            );
+                            self.release_render_scaler();
+                            allow_render = false;
+                        }
+                        CaptureFailureKind::Readback
+                            if self.overlay_acquired
+                                && self.requested_source == CaptureSource::Auto =>
+                        {
+                            eprintln!(
+                                "remote: compositor overlay readback failed ({}); switching to root capture",
+                                failure.error
+                            );
+                            self.release_overlay();
+                            drawable = self.root;
+                            allow_render = false;
+                        }
+                        CaptureFailureKind::Readback => return Err(failure.error),
+                        CaptureFailureKind::Fatal => unreachable!(),
+                    }
+                }
             }
-            Err(error) => Err(error),
         }
     }
 
-    fn capture_drawable(&mut self, drawable: Window) -> RemoteResult<CapturedFrame> {
-        let geometry = self.conn.get_geometry(self.root)?.reply()?;
-        let source_width = geometry.width;
-        let source_height = geometry.height;
-        if source_width == 0 || source_height == 0 {
-            return Err(invalid_data("X11 root has an empty geometry").into());
-        }
-        super::frame::validate_dimensions(source_width, source_height)?;
-
+    fn capture_drawable(
+        &mut self,
+        drawable: Window,
+        source_width: u16,
+        source_height: u16,
+        allow_render: bool,
+    ) -> Result<CapturedFrame, CaptureFailure> {
         let (output_width, output_height) =
             scaled_dimensions(source_width, source_height, self.max_width);
         // A Window used directly as an XRender source does not reliably
         // include its child windows. The Composite overlay has the final
         // composited pixels, while root fallback deliberately keeps the
         // proven GetImage + CPU resize path.
-        if drawable != self.root && (output_width != source_width || output_height != source_height)
+        if drawable != self.root
+            && (output_width != source_width || output_height != source_height)
+            && self.render_scaler.is_some()
+            && allow_render
         {
-            let render_result = self.render_scaler.as_mut().map(|scaler| {
-                scaler.capture(
+            let pending_cursor = self
+                .cursor
+                .prepare(&self.conn, self.root)
+                .map_err(CaptureFailure::fatal)?;
+            let render_result = self
+                .render_scaler
+                .as_mut()
+                .expect("Render scaler presence checked above")
+                .capture(
                     &self.conn,
                     &mut self.shm_readback,
                     drawable,
@@ -236,30 +404,36 @@ impl X11Capture {
                     source_height,
                     output_width,
                     output_height,
-                )
-            });
-            if let Some(result) = render_result {
-                match result {
-                    Ok(mut image) => {
-                        self.composite_cursor(&mut image, source_width, source_height)?;
-                        return Ok(CapturedFrame {
-                            image,
-                            source_width,
-                            source_height,
-                        });
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "jwm-remote: XRender downscaling stopped ({error}); using CPU fallback"
-                        );
-                        self.release_render_scaler();
-                    }
+                );
+            match render_result {
+                Ok(mut image) => {
+                    let position = resolve_pending_cursor(
+                        &self.conn,
+                        self.root,
+                        &mut self.cursor,
+                        pending_cursor,
+                    );
+                    self.finish_cursor(position, &mut image, source_width, source_height)
+                        .map_err(CaptureFailure::fatal)?;
+                    return Ok(CapturedFrame {
+                        image,
+                        source_width,
+                        source_height,
+                    });
+                }
+                Err(error) => {
+                    pending_cursor.discard();
+                    return Err(CaptureFailure::render(error));
                 }
             }
         }
 
-        let root_depth = self.screen()?.root_depth;
-        let mut image = self.shm_readback.capture_rgb(
+        let root_depth = self.screen().map_err(CaptureFailure::fatal)?.root_depth;
+        let pending_cursor = self
+            .cursor
+            .prepare(&self.conn, self.root)
+            .map_err(CaptureFailure::fatal)?;
+        let image_result = self.shm_readback.capture_rgb(
             &self.conn,
             drawable,
             source_width,
@@ -268,8 +442,18 @@ impl X11Capture {
                 screen_num: self.screen_num,
                 expected_depth: root_depth,
             },
-        )?;
-        self.composite_cursor(&mut image, source_width, source_height)?;
+        );
+        let mut image = match image_result {
+            Ok(image) => image,
+            Err(error) => {
+                pending_cursor.discard();
+                return Err(CaptureFailure::readback(error));
+            }
+        };
+        let position =
+            resolve_pending_cursor(&self.conn, self.root, &mut self.cursor, pending_cursor);
+        self.finish_cursor(position, &mut image, source_width, source_height)
+            .map_err(CaptureFailure::fatal)?;
         let image = if output_width == source_width && output_height == source_height {
             image
         } else {
@@ -288,26 +472,22 @@ impl X11Capture {
         })
     }
 
-    fn composite_cursor(
+    fn finish_cursor(
         &mut self,
+        position: Option<(i32, i32)>,
         image: &mut RgbImage,
         source_width: u16,
         source_height: u16,
     ) -> RemoteResult<()> {
-        if !self.cursor_available {
-            return Ok(());
+        // A cursor can change while the synchronous frame readback is in
+        // flight. Consume the notification before using the cached sprite; a
+        // serial mismatch suppresses this frame and refreshes on the next one.
+        self.drain_dynamic_events()?;
+        if let Some((x, y)) = position {
+            self.cursor
+                .composite_at(image, x, y, source_width, source_height);
         }
-        match xfixes::get_cursor_image(&self.conn)?.reply() {
-            Ok(cursor) => {
-                composite_scaled_cursor(image, &cursor, source_width, source_height);
-                Ok(())
-            }
-            Err(error) => {
-                eprintln!("remote: cursor capture stopped: {error}");
-                self.cursor_available = false;
-                Ok(())
-            }
-        }
+        Ok(())
     }
 
     fn screen(&self) -> RemoteResult<&Screen> {
@@ -319,40 +499,120 @@ impl X11Capture {
     }
 
     fn sync_overlay_source(&mut self) -> RemoteResult<()> {
-        let Some(selection) = self.compositor_selection else {
-            return Ok(());
-        };
-        let owner = self.conn.get_selection_owner(selection)?.reply()?.owner;
-        if owner == self.compositor_owner {
-            return Ok(());
-        }
+        self.sync_overlay_source_with_force(false).map(|_| ())
+    }
 
-        self.release_overlay();
-        self.compositor_owner = owner;
-        self.publish_capture_inhibitor()?;
-        if self.requested_source == CaptureSource::Root {
-            return Ok(());
+    fn sync_overlay_source_with_force(&mut self, force: bool) -> RemoteResult<bool> {
+        let transitioned = self.compositor.refresh(&self.conn, force)?;
+        let owner = self.compositor.owner();
+        let retry_due = self
+            .next_overlay_retry
+            .is_some_and(|deadline| Instant::now() >= deadline);
+        if !transitioned && !retry_due {
+            return Ok(false);
         }
-        if owner == x11rb::NONE {
-            if self.requested_source == CaptureSource::Overlay {
-                return Err(invalid_data("X11 compositor stopped during remote capture").into());
+        let decision = overlay_sync_decision(
+            self.requested_source,
+            self.composite_ready,
+            owner,
+            self.overlay_acquired,
+            transitioned,
+            retry_due,
+        );
+        if decision.publish_inhibitor {
+            self.publish_capture_inhibitor()?;
+        }
+        // The Composite overlay is a screen-level server resource. A direct
+        // non-NONE owner handoff does not invalidate an already-held overlay.
+        let was_overlay_acquired = self.overlay_acquired;
+        match decision.action {
+            OverlaySyncAction::None => {}
+            OverlaySyncAction::Release => {
+                self.next_overlay_retry = None;
+                self.release_overlay();
+                if self.requested_source == CaptureSource::Overlay {
+                    return Err(invalid_data("X11 compositor stopped during remote capture").into());
+                }
             }
-            self.drawable = self.root;
-            return Ok(());
-        }
-        if self.composite_ready {
-            match acquire_overlay(&self.conn, self.root) {
+            OverlaySyncAction::Acquire => match acquire_overlay(&self.conn, self.root) {
                 Ok(overlay) => {
                     self.drawable = overlay;
                     self.overlay_acquired = true;
+                    self.next_overlay_retry = None;
                 }
                 Err(error) if self.requested_source == CaptureSource::Auto => {
                     eprintln!(
-                        "remote: new compositor overlay unavailable ({error}); using root capture"
+                        "remote: compositor overlay unavailable ({error}); using root capture and retrying"
                     );
                     self.drawable = self.root;
+                    self.next_overlay_retry = Some(Instant::now() + OVERLAY_RETRY_DELAY);
                 }
                 Err(error) => return Err(error),
+            },
+        }
+        Ok(transitioned || self.overlay_acquired != was_overlay_acquired)
+    }
+
+    fn reconcile_after_capture_failure(
+        &mut self,
+        attempted_drawable: Window,
+        attempted_width: u16,
+        attempted_height: u16,
+    ) -> RemoteResult<Option<ReconciledCapture>> {
+        self.drain_dynamic_events()?;
+        let source_transition = self.sync_overlay_source_with_force(true)?;
+        let (width, height) = self
+            .root_geometry
+            .refresh_authoritative(&self.conn, self.root)?;
+        let changed = source_transition
+            || self.drawable != attempted_drawable
+            || width != attempted_width
+            || height != attempted_height;
+        Ok(changed.then_some(ReconciledCapture {
+            drawable: self.drawable,
+            width,
+            height,
+        }))
+    }
+
+    fn drain_dynamic_events(&mut self) -> RemoteResult<()> {
+        while let Some(event) = self.conn.poll_for_event()? {
+            match event {
+                Event::ConfigureNotify(event)
+                    if event.event == self.root && event.window == self.root =>
+                {
+                    self.root_geometry.invalidate();
+                }
+                Event::RandrScreenChangeNotify(event) if event.root == self.root => {
+                    // RandR reports the unrotated screen size in this event.
+                    // Treat it only as an invalidator and query root geometry.
+                    self.root_geometry.invalidate();
+                }
+                Event::XfixesCursorNotify(event) if event.window == self.root => {
+                    self.cursor.observe_serial(event.cursor_serial);
+                }
+                Event::XfixesSelectionNotify(event) if event.window == self.root => {
+                    if event.selection == self.compositor.selection() {
+                        self.compositor.invalidate();
+                    }
+                }
+                Event::Error(error) => {
+                    return Err(io::Error::other(format!(
+                        "asynchronous X11 error while capturing: {error:?}"
+                    ))
+                    .into());
+                }
+                Event::Unknown(_) => {
+                    let geometry = self.root_geometry.fall_back_to_polling();
+                    let cursor = self.cursor.fall_back_to_polling();
+                    let compositor = self.compositor.fall_back_to_polling();
+                    if geometry || cursor || compositor {
+                        eprintln!(
+                            "remote: unrecognized X11 event disabled event-driven capture caches"
+                        );
+                    }
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -389,6 +649,472 @@ impl X11Capture {
             .check()?;
         self.conn.flush()?;
         Ok(())
+    }
+}
+
+fn resolve_pending_cursor(
+    conn: &RustConnection,
+    root: Window,
+    cursor: &mut CursorCapture,
+    pending: PendingCursor<'_>,
+) -> Option<(i32, i32)> {
+    match cursor.resolve(conn, root, pending) {
+        Ok(position) => position,
+        Err(error) => {
+            eprintln!("remote: cursor capture stopped: {error}");
+            cursor.disable();
+            None
+        }
+    }
+}
+
+struct CompositorTracker {
+    selection: Atom,
+    owner: Window,
+    event_driven: bool,
+    dirty: bool,
+    saw_transition: bool,
+}
+
+impl CompositorTracker {
+    fn new(selection: Atom, owner: Window, event_driven: bool) -> Self {
+        Self {
+            selection,
+            owner,
+            event_driven,
+            dirty: false,
+            saw_transition: false,
+        }
+    }
+
+    fn selection(&self) -> Atom {
+        self.selection
+    }
+
+    fn owner(&self) -> Window {
+        self.owner
+    }
+
+    fn invalidate(&mut self) {
+        self.dirty = true;
+        self.saw_transition = true;
+    }
+
+    fn fall_back_to_polling(&mut self) -> bool {
+        if !self.event_driven {
+            return false;
+        }
+        self.event_driven = false;
+        self.dirty = true;
+        true
+    }
+
+    fn refresh(&mut self, conn: &RustConnection, force: bool) -> RemoteResult<bool> {
+        if self.event_driven && !self.dirty && !force {
+            return Ok(false);
+        }
+        let owner = conn.get_selection_owner(self.selection)?.reply()?.owner;
+        let changed = owner != self.owner;
+        let saw_transition = self.saw_transition;
+        self.owner = owner;
+        self.dirty = false;
+        self.saw_transition = false;
+        Ok(changed || saw_transition)
+    }
+}
+
+struct RootGeometryCache {
+    width: u16,
+    height: u16,
+    event_driven: bool,
+    dirty: bool,
+}
+
+impl RootGeometryCache {
+    fn new(width: u16, height: u16, event_driven: bool) -> Self {
+        Self {
+            width,
+            height,
+            event_driven,
+            dirty: false,
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn fall_back_to_polling(&mut self) -> bool {
+        if !self.event_driven {
+            return false;
+        }
+        self.event_driven = false;
+        self.dirty = true;
+        true
+    }
+
+    fn dimensions(&mut self, conn: &RustConnection, root: Window) -> RemoteResult<(u16, u16)> {
+        if !self.event_driven || self.dirty {
+            return self.refresh_authoritative(conn, root);
+        }
+        Ok((self.width, self.height))
+    }
+
+    fn refresh_authoritative(
+        &mut self,
+        conn: &RustConnection,
+        root: Window,
+    ) -> RemoteResult<(u16, u16)> {
+        let geometry = conn.get_geometry(root)?.reply()?;
+        self.width = geometry.width;
+        self.height = geometry.height;
+        self.dirty = false;
+        Ok((self.width, self.height))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorMode {
+    Disabled,
+    Polling,
+    EventDriven,
+}
+
+struct CursorCapture {
+    mode: CursorMode,
+    dirty: bool,
+    pending_serial: Option<u32>,
+    shape: Option<CursorShape>,
+}
+
+impl CursorCapture {
+    fn disabled() -> Self {
+        Self {
+            mode: CursorMode::Disabled,
+            dirty: false,
+            pending_serial: None,
+            shape: None,
+        }
+    }
+
+    fn new(event_driven: bool) -> Self {
+        Self {
+            mode: if event_driven {
+                CursorMode::EventDriven
+            } else {
+                CursorMode::Polling
+            },
+            dirty: true,
+            pending_serial: None,
+            shape: None,
+        }
+    }
+
+    fn disable(&mut self) {
+        self.mode = CursorMode::Disabled;
+        self.dirty = false;
+        self.pending_serial = None;
+        self.shape = None;
+    }
+
+    fn fall_back_to_polling(&mut self) -> bool {
+        if self.mode != CursorMode::EventDriven {
+            return false;
+        }
+        self.mode = CursorMode::Polling;
+        self.dirty = true;
+        self.pending_serial = None;
+        true
+    }
+
+    fn observe_serial(&mut self, serial: u32) {
+        if self.mode != CursorMode::EventDriven {
+            return;
+        }
+        self.pending_serial = Some(serial);
+        self.dirty = self
+            .shape
+            .as_ref()
+            .is_none_or(|shape| shape.serial != serial);
+    }
+
+    fn needs_shape(&self) -> bool {
+        self.mode == CursorMode::Polling || self.dirty || self.shape.is_none()
+    }
+
+    fn update_shape(&mut self, reply: &xfixes::GetCursorImageReply) -> RemoteResult<()> {
+        let pending_serial = self.pending_serial.take();
+        let replace = self
+            .shape
+            .as_ref()
+            .is_none_or(|shape| !shape.matches(reply));
+        if replace {
+            self.shape = Some(CursorShape::from_reply(reply)?);
+        }
+        self.dirty = self.mode == CursorMode::EventDriven
+            && pending_serial.is_some_and(|serial| serial != reply.cursor_serial);
+        Ok(())
+    }
+
+    fn prepare<'a>(
+        &self,
+        conn: &'a RustConnection,
+        root: Window,
+    ) -> RemoteResult<PendingCursor<'a>> {
+        match self.mode {
+            CursorMode::Disabled => Ok(PendingCursor::Disabled),
+            // Without cursor notifications, fetch both position and pixels
+            // after readback to preserve the reliable legacy snapshot path.
+            CursorMode::Polling => Ok(PendingCursor::Polling),
+            CursorMode::EventDriven => {
+                let pointer = conn.query_pointer(root)?;
+                let shape = if self.needs_shape() {
+                    match xfixes::get_cursor_image(conn) {
+                        Ok(shape) => Some(shape),
+                        Err(error) => {
+                            pointer.discard_reply_and_errors();
+                            return Err(error.into());
+                        }
+                    }
+                } else {
+                    None
+                };
+                Ok(PendingCursor::EventDriven { pointer, shape })
+            }
+        }
+    }
+
+    fn resolve(
+        &mut self,
+        conn: &RustConnection,
+        root: Window,
+        pending: PendingCursor<'_>,
+    ) -> RemoteResult<Option<(i32, i32)>> {
+        let pointer = match pending {
+            PendingCursor::Disabled => return Ok(None),
+            PendingCursor::Polling => {
+                let pointer = conn.query_pointer(root)?;
+                let shape = match xfixes::get_cursor_image(conn) {
+                    Ok(shape) => shape,
+                    Err(error) => {
+                        pointer.discard_reply_and_errors();
+                        return Err(error.into());
+                    }
+                };
+                let pointer = match pointer.reply() {
+                    Ok(pointer) => pointer,
+                    Err(error) => {
+                        shape.discard_reply_and_errors();
+                        return Err(error.into());
+                    }
+                };
+                self.update_shape(&shape.reply()?)?;
+                pointer
+            }
+            PendingCursor::EventDriven { pointer, shape } => {
+                let pointer = match pointer.reply() {
+                    Ok(pointer) => pointer,
+                    Err(error) => {
+                        if let Some(shape) = shape {
+                            shape.discard_reply_and_errors();
+                        }
+                        return Err(error.into());
+                    }
+                };
+                if let Some(shape) = shape {
+                    self.update_shape(&shape.reply()?)?;
+                }
+                pointer
+            }
+        };
+        Ok(pointer_position(root, &pointer))
+    }
+
+    fn composite_at(
+        &mut self,
+        image: &mut RgbImage,
+        pointer_x: i32,
+        pointer_y: i32,
+        source_width: u16,
+        source_height: u16,
+    ) {
+        if self.dirty {
+            return;
+        }
+        if let Some(shape) = self.shape.as_mut() {
+            shape.composite(image, pointer_x, pointer_y, source_width, source_height);
+        }
+    }
+}
+
+fn pointer_position(root: Window, pointer: &QueryPointerReply) -> Option<(i32, i32)> {
+    (pointer.same_screen && pointer.root == root)
+        .then_some((i32::from(pointer.root_x), i32::from(pointer.root_y)))
+}
+
+enum PendingCursor<'a> {
+    Disabled,
+    Polling,
+    EventDriven {
+        pointer: Cookie<'a, RustConnection, QueryPointerReply>,
+        shape: Option<Cookie<'a, RustConnection, xfixes::GetCursorImageReply>>,
+    },
+}
+
+impl PendingCursor<'_> {
+    fn discard(self) {
+        if let Self::EventDriven { pointer, shape } = self {
+            pointer.discard_reply_and_errors();
+            if let Some(shape) = shape {
+                shape.discard_reply_and_errors();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CursorScaleKey {
+    source_width: u16,
+    source_height: u16,
+    output_width: u32,
+    output_height: u32,
+}
+
+struct ScaledCursorShape {
+    key: CursorScaleKey,
+    image: RgbaImage,
+}
+
+struct CursorShape {
+    serial: u32,
+    width: u16,
+    height: u16,
+    xhot: u16,
+    yhot: u16,
+    image: RgbaImage,
+    scaled: Option<ScaledCursorShape>,
+}
+
+impl CursorShape {
+    fn matches(&self, reply: &xfixes::GetCursorImageReply) -> bool {
+        self.serial == reply.cursor_serial
+            && self.width == reply.width
+            && self.height == reply.height
+            && self.xhot == reply.xhot
+            && self.yhot == reply.yhot
+    }
+
+    fn from_reply(reply: &xfixes::GetCursorImageReply) -> RemoteResult<Self> {
+        let pixels = usize::from(reply.width)
+            .checked_mul(usize::from(reply.height))
+            .ok_or_else(|| invalid_data("XFixes cursor dimensions overflow"))?;
+        if reply.cursor_image.len() != pixels {
+            return Err(invalid_data("XFixes cursor image has an invalid length").into());
+        }
+        let bytes = pixels
+            .checked_mul(4)
+            .ok_or_else(|| invalid_data("XFixes cursor buffer size overflow"))?;
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes)
+            .map_err(|_| invalid_data("could not allocate the XFixes cursor buffer"))?;
+        for argb in reply.cursor_image.iter().copied() {
+            rgba.extend_from_slice(&[
+                ((argb >> 16) & 0xff) as u8,
+                ((argb >> 8) & 0xff) as u8,
+                (argb & 0xff) as u8,
+                ((argb >> 24) & 0xff) as u8,
+            ]);
+        }
+        let image = RgbaImage::from_raw(u32::from(reply.width), u32::from(reply.height), rgba)
+            .ok_or_else(|| invalid_data("XFixes cursor image dimensions are invalid"))?;
+        Ok(Self {
+            serial: reply.cursor_serial,
+            width: reply.width,
+            height: reply.height,
+            xhot: reply.xhot,
+            yhot: reply.yhot,
+            image,
+            scaled: None,
+        })
+    }
+
+    fn composite(
+        &mut self,
+        output: &mut RgbImage,
+        pointer_x: i32,
+        pointer_y: i32,
+        source_width: u16,
+        source_height: u16,
+    ) {
+        if self.width == 0 || self.height == 0 || source_width == 0 || source_height == 0 {
+            return;
+        }
+        if output.width() == u32::from(source_width) && output.height() == u32::from(source_height)
+        {
+            blend_premultiplied_cursor(
+                output,
+                &self.image,
+                pointer_x - i32::from(self.xhot),
+                pointer_y - i32::from(self.yhot),
+            );
+            return;
+        }
+
+        let key = CursorScaleKey {
+            source_width,
+            source_height,
+            output_width: output.width(),
+            output_height: output.height(),
+        };
+        if self.scaled.as_ref().is_none_or(|scaled| scaled.key != key) {
+            self.scaled = Some(ScaledCursorShape {
+                key,
+                image: image::imageops::resize(
+                    &self.image,
+                    scale_length(self.width, output.width(), source_width),
+                    scale_length(self.height, output.height(), source_height),
+                    FilterType::Triangle,
+                ),
+            });
+        }
+        let Some(scaled) = self.scaled.as_ref() else {
+            return;
+        };
+        blend_premultiplied_cursor(
+            output,
+            &scaled.image,
+            scale_coordinate(
+                pointer_x - i32::from(self.xhot),
+                output.width(),
+                source_width,
+            ),
+            scale_coordinate(
+                pointer_y - i32::from(self.yhot),
+                output.height(),
+                source_height,
+            ),
+        );
+    }
+}
+
+fn blend_premultiplied_cursor(output: &mut RgbImage, cursor: &RgbaImage, left: i32, top: i32) {
+    for (cursor_x, cursor_y, source) in cursor.enumerate_pixels() {
+        let x = left + cursor_x as i32;
+        let y = top + cursor_y as i32;
+        if x < 0 || y < 0 || x >= output.width() as i32 || y >= output.height() as i32 {
+            continue;
+        }
+        let alpha = u32::from(source[3]);
+        if alpha == 0 {
+            continue;
+        }
+        let inverse = 255 - alpha;
+        let pixel = output.get_pixel_mut(x as u32, y as u32);
+        for channel in 0..3 {
+            pixel[channel] = (u32::from(source[channel])
+                + (u32::from(pixel[channel]) * inverse + 127) / 255)
+                .min(255) as u8;
+        }
     }
 }
 
@@ -1229,8 +1955,104 @@ fn query_composite_overlay(conn: &RustConnection) -> RemoteResult<()> {
 }
 
 fn query_xfixes(conn: &RustConnection) -> RemoteResult<()> {
-    xfixes::query_version(conn, XFIXES_CLIENT_VERSION.0, XFIXES_CLIENT_VERSION.1)?.reply()?;
+    let version =
+        xfixes::query_version(conn, XFIXES_CLIENT_VERSION.0, XFIXES_CLIENT_VERSION.1)?.reply()?;
+    if !supports_xfixes_capture(version.major_version, version.minor_version) {
+        return Err(invalid_data(format!(
+            "XFixes {}.{} is too old; cursor and selection notifications require 1.0",
+            version.major_version, version.minor_version
+        ))
+        .into());
+    }
     Ok(())
+}
+
+fn supports_xfixes_capture(major: u32, minor: u32) -> bool {
+    (major, minor) >= (1, 0)
+}
+
+fn select_cursor_events(conn: &RustConnection, root: Window) -> bool {
+    let result: RemoteResult<()> = (|| {
+        xfixes::select_cursor_input(conn, root, xfixes::CursorNotifyMask::DISPLAY_CURSOR)?
+            .check()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "remote: XFixes cursor notifications unavailable ({error}); polling cursor images"
+            );
+            false
+        }
+    }
+}
+
+fn select_compositor_events(conn: &RustConnection, root: Window, selection: Atom) -> bool {
+    let mask = xfixes::SelectionEventMask::SET_SELECTION_OWNER
+        | xfixes::SelectionEventMask::SELECTION_WINDOW_DESTROY
+        | xfixes::SelectionEventMask::SELECTION_CLIENT_CLOSE;
+    let result: RemoteResult<()> = (|| {
+        xfixes::select_selection_input(conn, root, selection, mask)?.check()?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!(
+                "remote: XFixes compositor-owner notifications unavailable ({error}); polling the owner"
+            );
+            false
+        }
+    }
+}
+
+fn select_geometry_events(conn: &RustConnection, root: Window) -> bool {
+    let core_result: RemoteResult<()> = (|| {
+        let attributes = conn.get_window_attributes(root)?.reply()?;
+        let mask = attributes.your_event_mask | EventMask::STRUCTURE_NOTIFY;
+        conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().event_mask(mask))?
+            .check()?;
+        Ok(())
+    })();
+
+    let randr_result: RemoteResult<bool> = (|| {
+        if conn
+            .extension_information(randr::X11_EXTENSION_NAME)?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        // RandR requires QueryVersion before every other extension request.
+        let version =
+            randr::query_version(conn, RANDR_CLIENT_VERSION.0, RANDR_CLIENT_VERSION.1)?.reply()?;
+        if version.major_version < 1 {
+            return Err(invalid_data(format!(
+                "RandR {}.{} lacks screen-change notifications",
+                version.major_version, version.minor_version
+            ))
+            .into());
+        }
+        randr::select_input(conn, root, randr::NotifyMask::SCREEN_CHANGE)?.check()?;
+        Ok(true)
+    })();
+
+    let core_ready = core_result.is_ok();
+    let randr_ready = matches!(randr_result, Ok(true));
+    if !core_ready && !randr_ready {
+        let core_error = core_result
+            .err()
+            .map_or_else(|| "unavailable".to_owned(), |error| error.to_string());
+        let randr_error = match randr_result {
+            Ok(false) => "extension unavailable".to_owned(),
+            Ok(true) => unreachable!(),
+            Err(error) => error.to_string(),
+        };
+        eprintln!(
+            "remote: root geometry notifications unavailable (core: {core_error}; RandR: {randr_error}); polling geometry"
+        );
+    }
+    core_ready || randr_ready
 }
 
 fn install_capture_inhibitor(conn: &RustConnection, root: Window) -> RemoteResult<(Atom, Window)> {
@@ -1298,103 +2120,6 @@ fn install_capture_inhibitor(conn: &RustConnection, root: Window) -> RemoteResul
     Ok((atom, owner))
 }
 
-fn composite_cursor(image: &mut RgbImage, cursor: &xfixes::GetCursorImageReply) {
-    if cursor.width == 0 || cursor.height == 0 {
-        return;
-    }
-    let left = i32::from(cursor.x) - i32::from(cursor.xhot);
-    let top = i32::from(cursor.y) - i32::from(cursor.yhot);
-    for (index, argb) in cursor.cursor_image.iter().copied().enumerate() {
-        let cursor_x = (index % usize::from(cursor.width)) as i32;
-        let cursor_y = (index / usize::from(cursor.width)) as i32;
-        let x = left + cursor_x;
-        let y = top + cursor_y;
-        if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
-            continue;
-        }
-        let alpha = (argb >> 24) & 0xff;
-        if alpha == 0 {
-            continue;
-        }
-        let inverse = 255 - alpha;
-        let source = [(argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff];
-        let pixel = image.get_pixel_mut(x as u32, y as u32);
-        for channel in 0..3 {
-            pixel[channel] = (source[channel] + (u32::from(pixel[channel]) * inverse + 127) / 255)
-                .min(255) as u8;
-        }
-    }
-}
-
-fn composite_scaled_cursor(
-    image: &mut RgbImage,
-    cursor: &xfixes::GetCursorImageReply,
-    source_width: u16,
-    source_height: u16,
-) {
-    if image.width() == u32::from(source_width) && image.height() == u32::from(source_height) {
-        composite_cursor(image, cursor);
-        return;
-    }
-    if cursor.width == 0 || cursor.height == 0 || source_width == 0 || source_height == 0 {
-        return;
-    }
-    let pixel_count = usize::from(cursor.width) * usize::from(cursor.height);
-    if cursor.cursor_image.len() < pixel_count {
-        return;
-    }
-
-    // XFixes supplies premultiplied ARGB. Keeping the cursor premultiplied
-    // while filtering avoids dark/bright fringes around translucent edges.
-    let cursor_image =
-        RgbaImage::from_fn(u32::from(cursor.width), u32::from(cursor.height), |x, y| {
-            let index = y as usize * usize::from(cursor.width) + x as usize;
-            let argb = cursor.cursor_image[index];
-            image::Rgba([
-                ((argb >> 16) & 0xff) as u8,
-                ((argb >> 8) & 0xff) as u8,
-                (argb & 0xff) as u8,
-                ((argb >> 24) & 0xff) as u8,
-            ])
-        });
-    let scaled_width = scale_length(cursor.width, image.width(), source_width);
-    let scaled_height = scale_length(cursor.height, image.height(), source_height);
-    let cursor_image = image::imageops::resize(
-        &cursor_image,
-        scaled_width,
-        scaled_height,
-        FilterType::Triangle,
-    );
-    let left = scale_coordinate(
-        i32::from(cursor.x) - i32::from(cursor.xhot),
-        image.width(),
-        source_width,
-    );
-    let top = scale_coordinate(
-        i32::from(cursor.y) - i32::from(cursor.yhot),
-        image.height(),
-        source_height,
-    );
-    for (cursor_x, cursor_y, source) in cursor_image.enumerate_pixels() {
-        let x = left + cursor_x as i32;
-        let y = top + cursor_y as i32;
-        if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
-            continue;
-        }
-        let alpha = u32::from(source[3]);
-        if alpha == 0 {
-            continue;
-        }
-        let inverse = 255 - alpha;
-        let pixel = image.get_pixel_mut(x as u32, y as u32);
-        for channel in 0..3 {
-            pixel[channel] = (u32::from(source[channel])
-                + (u32::from(pixel[channel]) * inverse + 127) / 255)
-                .min(255) as u8;
-        }
-    }
-}
-
 fn scale_length(value: u16, output: u32, source: u16) -> u32 {
     ((u64::from(value) * u64::from(output) + u64::from(source) / 2) / u64::from(source)).max(1)
         as u32
@@ -1456,6 +2181,13 @@ pub fn scaled_dimensions(width: u16, height: u16, max_width: u16) -> (u16, u16) 
     (max_width, scaled_height)
 }
 
+fn validate_root_geometry(width: u16, height: u16) -> RemoteResult<()> {
+    if width == 0 || height == 0 {
+        return Err(invalid_data("X11 root has an empty geometry").into());
+    }
+    super::frame::validate_dimensions(width, height)
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -1499,28 +2231,28 @@ mod tests {
     fn premultiplied_cursor_pixels_blend_and_clip() {
         let mut image = RgbImage::from_pixel(2, 1, image::Rgb([255, 255, 255]));
         let cursor = xfixes::GetCursorImageReply {
-            x: 0,
-            y: 0,
             width: 2,
             height: 1,
             // Half-transparent premultiplied red, then fully opaque blue.
             cursor_image: vec![0x8080_0000, 0xff00_00ff],
             ..Default::default()
         };
-        composite_cursor(&mut image, &cursor);
+        CursorShape::from_reply(&cursor)
+            .unwrap()
+            .composite(&mut image, 0, 0, 2, 1);
         assert_eq!(image.get_pixel(0, 0).0, [255, 127, 127]);
         assert_eq!(image.get_pixel(1, 0).0, [0, 0, 255]);
 
         let clipped = xfixes::GetCursorImageReply {
-            x: 0,
-            y: 0,
             width: 1,
             height: 1,
             xhot: 2,
             cursor_image: vec![0xffff_ffff],
             ..Default::default()
         };
-        composite_cursor(&mut image, &clipped);
+        CursorShape::from_reply(&clipped)
+            .unwrap()
+            .composite(&mut image, 0, 0, 2, 1);
         assert_eq!(image.get_pixel(0, 0).0, [255, 127, 127]);
     }
 
@@ -1528,16 +2260,173 @@ mod tests {
     fn scaled_cursor_uses_the_encoded_frame_coordinate_space() {
         let mut image = RgbImage::from_pixel(2, 1, image::Rgb([255, 255, 255]));
         let cursor = xfixes::GetCursorImageReply {
-            x: 2,
-            y: 0,
             width: 2,
             height: 2,
             cursor_image: vec![0xffff_0000; 4],
             ..Default::default()
         };
-        composite_scaled_cursor(&mut image, &cursor, 4, 2);
+        CursorShape::from_reply(&cursor)
+            .unwrap()
+            .composite(&mut image, 2, 0, 4, 2);
         assert_eq!(image.get_pixel(0, 0).0, [255, 255, 255]);
         assert_eq!(image.get_pixel(1, 0).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn cursor_serial_drives_shape_refresh_and_stale_shapes_are_suppressed() {
+        let reply = xfixes::GetCursorImageReply {
+            width: 1,
+            height: 1,
+            cursor_serial: 7,
+            cursor_image: vec![0xffff_0000],
+            ..Default::default()
+        };
+        let mut cursor = CursorCapture::new(true);
+        assert!(cursor.needs_shape());
+        cursor.update_shape(&reply).unwrap();
+        assert!(!cursor.dirty);
+        assert!(!cursor.needs_shape());
+
+        // Redisplaying the same serial never refetches or rescales it.
+        cursor.observe_serial(7);
+        assert!(!cursor.dirty);
+        assert!(!cursor.needs_shape());
+
+        // If a notification and the authoritative reply disagree, do not
+        // paint either shape in that frame; fetch once more next frame.
+        cursor.observe_serial(8);
+        let newer = xfixes::GetCursorImageReply {
+            cursor_serial: 9,
+            ..reply.clone()
+        };
+        cursor.update_shape(&newer).unwrap();
+        assert!(cursor.dirty);
+        let mut image = RgbImage::from_pixel(1, 1, image::Rgb([255, 255, 255]));
+        cursor.composite_at(&mut image, 0, 0, 1, 1);
+        assert_eq!(image.get_pixel(0, 0).0, [255, 255, 255]);
+        assert!(cursor.needs_shape());
+
+        cursor.update_shape(&newer).unwrap();
+        assert!(!cursor.dirty);
+        cursor.composite_at(&mut image, 0, 0, 1, 1);
+        assert_eq!(image.get_pixel(0, 0).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn scaled_cursor_allocation_is_reused_until_geometry_changes() {
+        let reply = xfixes::GetCursorImageReply {
+            width: 2,
+            height: 2,
+            cursor_serial: 1,
+            cursor_image: vec![0xffff_ffff; 4],
+            ..Default::default()
+        };
+        let mut shape = CursorShape::from_reply(&reply).unwrap();
+        let mut half = RgbImage::new(2, 1);
+        shape.composite(&mut half, 0, 0, 4, 2);
+        let first = shape.scaled.as_ref().unwrap();
+        let first_key = first.key;
+        let first_ptr = first.image.as_raw().as_ptr();
+
+        shape.composite(&mut half, 1, 0, 4, 2);
+        let reused = shape.scaled.as_ref().unwrap();
+        assert_eq!(reused.key, first_key);
+        assert_eq!(reused.image.as_raw().as_ptr(), first_ptr);
+
+        let mut different = RgbImage::new(3, 2);
+        shape.composite(&mut different, 0, 0, 4, 2);
+        assert_ne!(shape.scaled.as_ref().unwrap().key, first_key);
+    }
+
+    #[test]
+    fn pointer_position_rejects_other_screens_and_roots() {
+        let pointer = QueryPointerReply {
+            same_screen: true,
+            root: 10,
+            root_x: -4,
+            root_y: 12,
+            ..Default::default()
+        };
+        assert_eq!(pointer_position(10, &pointer), Some((-4, 12)));
+        assert_eq!(pointer_position(11, &pointer), None);
+        assert_eq!(
+            pointer_position(
+                10,
+                &QueryPointerReply {
+                    same_screen: false,
+                    ..pointer
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn event_cache_states_invalidate_and_fall_back_independently() {
+        let mut geometry = RootGeometryCache::new(1920, 1080, true);
+        assert!(!geometry.dirty);
+        geometry.invalidate();
+        assert!(geometry.dirty);
+        assert!(geometry.fall_back_to_polling());
+        assert!(!geometry.event_driven);
+        assert!(!geometry.fall_back_to_polling());
+
+        let mut compositor = CompositorTracker::new(20, 30, true);
+        compositor.invalidate();
+        assert!(compositor.dirty);
+        assert!(compositor.saw_transition);
+        assert!(compositor.fall_back_to_polling());
+        assert!(!compositor.event_driven);
+
+        let mut cursor = CursorCapture::new(true);
+        assert!(cursor.fall_back_to_polling());
+        assert_eq!(cursor.mode, CursorMode::Polling);
+        assert!(!cursor.fall_back_to_polling());
+    }
+
+    #[test]
+    fn root_owner_epochs_republish_without_touching_the_overlay() {
+        let mut publishes = 0;
+        let mut overlay_actions = 0;
+        // A -> NONE -> B may be observed as two notifications or coalesced
+        // before the one authoritative owner query. Either transition must
+        // re-notify the compositor without acquiring/releasing its overlay.
+        for owner in [x11rb::NONE, 42] {
+            let decision =
+                overlay_sync_decision(CaptureSource::Root, false, owner, false, true, false);
+            publishes += usize::from(decision.publish_inhibitor);
+            overlay_actions += usize::from(decision.action != OverlaySyncAction::None);
+        }
+        assert_eq!(publishes, 2);
+        assert_eq!(overlay_actions, 0);
+
+        // Auto with Composite unavailable has the same inhibitor obligation.
+        let decision = overlay_sync_decision(CaptureSource::Auto, false, 42, false, true, false);
+        assert!(decision.publish_inhibitor);
+        assert_eq!(decision.action, OverlaySyncAction::None);
+    }
+
+    #[test]
+    fn overlay_decision_releases_only_at_final_none_and_reacquires_on_epoch() {
+        assert_eq!(
+            overlay_sync_decision(CaptureSource::Auto, true, x11rb::NONE, true, true, false).action,
+            OverlaySyncAction::Release
+        );
+        assert_eq!(
+            overlay_sync_decision(CaptureSource::Auto, true, 42, false, true, false).action,
+            OverlaySyncAction::Acquire
+        );
+        assert_eq!(
+            overlay_sync_decision(CaptureSource::Auto, true, 42, true, true, false).action,
+            OverlaySyncAction::None
+        );
+    }
+
+    #[test]
+    fn xfixes_capture_requires_version_one() {
+        assert!(!supports_xfixes_capture(0, 99));
+        assert!(supports_xfixes_capture(1, 0));
+        assert!(supports_xfixes_capture(5, 0));
     }
 
     #[test]
