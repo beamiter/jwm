@@ -49,6 +49,7 @@ ALL_BARS=(
     gtk_bar
     iced_bar
     relm_bar
+    tao_glow_bar
     tao_pixels_bar
     tao_softbuffer_bar
     tao_wgpu_bar
@@ -74,7 +75,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="tao_softbuffer_bar"
+JWM_BAR_NAME="tao_glow_bar"
 JWM_BAR_SET_BY_ARGS=false
 SKIP_BAR=false
 SKIP_JWM=false

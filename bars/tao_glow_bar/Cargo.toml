@@ -1,0 +1,31 @@
+[package]
+name = "tao_glow_bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+bytemuck = "1.25.2"
+cairo-rs = "0.22.0"
+glow = "0.18.0"
+glutin = "0.32.3"
+log = "0.4.33"
+pango = "0.22.8"
+raw-window-handle = "0.6"
+tao = "0.36.0"
+x11rb = "0.14"
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
+    "clock-chrono",
+    "config-toml",
+    "glass",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-network-sysfs",
+    "provider-system",
+    "render-cairo",
+    "runtime-linux",
+    "transport-shared",
+] }
+xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }

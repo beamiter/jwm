@@ -32,6 +32,7 @@ exclude = [
     "bars/gtk_bar",
     "bars/iced_bar",
     "bars/relm_bar",
+    "bars/tao_glow_bar",
     "bars/tao_pixels_bar",
     "bars/tao_softbuffer_bar",
     "bars/tao_wgpu_bar",

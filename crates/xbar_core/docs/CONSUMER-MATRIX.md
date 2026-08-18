@@ -23,7 +23,7 @@ and typed actions belong to `xbar_core`.
 | `xcb_bar`, `x11rb_bar` | X connection/window, Cairo surface, epoll registration | Cairo facade, `BarPlacement`/`EwmhStrut`, pointer facade, notifier slot, all providers, managed transport |
 | `xcb_wgpu_bar`, `x11rb_wgpu_bar` | X window plus wgpu surface/upload | Cairo scene/render source, placement/strut, pointer facade, notifier slot, all providers, managed transport |
 | `winit_pixels_bar`, `winit_softbuffer_bar`, `winit_wgpu_bar` | winit lifecycle and pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
-| `tao_pixels_bar`, `tao_softbuffer_bar`, `tao_wgpu_bar` | tao lifecycle and pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
+| `tao_glow_bar`, `tao_pixels_bar`, `tao_softbuffer_bar`, `tao_wgpu_bar` | tao lifecycle and glow/pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
 
 These consumers translate only their native event/window types. Core owns
 press/release matching, wheel direction, physical placement/strut values, and
