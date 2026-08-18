@@ -148,10 +148,12 @@ jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
 frame rate increase CPU and bandwidth together. With overlay capture and
 XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
 path prints its active source/output dimensions, and every session reports
-rolling capture/encode/write latency, which makes it clear which stage needs
-tuning. Root compatibility capture and older XRender servers retain the
-full-resolution readback plus CPU-resize fallback; for those paths, lower
-`--fps` as well as `--max-width` on very large combined multi-monitor roots.
+rolling capture/queue/encode/write latency and the number of stale frames it
+dropped. Capture and JPEG/network sending run as a two-stage pipeline with one
+queued latest frame, so a slow send cannot build an ever-older video backlog.
+Root compatibility capture and older XRender servers retain the full-resolution
+readback plus CPU-resize fallback; for those paths, lower `--fps` as well as
+`--max-width` on very large combined multi-monitor roots.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may
@@ -173,6 +175,9 @@ full-resolution readback plus CPU-resize fallback; for those paths, lower
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
 - JPEG video only: no audio, clipboard, file transfer, or adaptive codec yet;
+- video backpressure keeps one latest queued frame and drops older unsent
+  frames; it does not adapt the requested capture rate to a persistently slow
+  peer yet;
 - authenticated but unencrypted direct-LAN transport;
 - X11 `x11rb`/`xcb` JWM sessions only.
 

@@ -555,7 +555,6 @@ impl RenderScaler {
         )?
         .check();
         if let Err(error) = create {
-            let _ = render::free_picture(conn, picture);
             return Err(error.into());
         }
         if let Err(error) = render::set_picture_filter(conn, picture, b"bilinear", &[])?.check() {

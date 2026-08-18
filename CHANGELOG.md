@@ -37,9 +37,10 @@ monorepo use independent Semantic Versions.
 ### Changed
 
 - `jwm-remote` now downsizes Composite-overlay frames with XRender before
-  readback, reports capture/encode/write latency, and enforces an absolute
-  negotiation deadline on both peers. Full-resolution root readback remains a
-  compatibility fallback.
+  readback, overlaps capture with JPEG/network sending through a one-frame
+  latest-wins queue, reports stage latency and dropped stale frames, and
+  enforces an absolute negotiation deadline on both peers. Full-resolution root
+  readback remains a compatibility fallback.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,
