@@ -12,15 +12,17 @@ use std::time::{Duration, Instant};
 use image::RgbImage;
 use x11rb::CURRENT_TIME;
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
 use x11rb::image::{Image as XImage, PixelLayout};
-use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Gcontext,
     GrabMode, GrabStatus, Mapping, NotifyMode, Pixmap, PropMode, Rectangle, Screen, VisualClass,
     Visualtype, Window, WindowClass,
 };
+use x11rb::protocol::{ErrorKind, Event};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
+use x11rb::x11_utils::X11Error;
 
 use super::RemoteResult;
 use super::frame::DecodedFrame;
@@ -89,6 +91,8 @@ pub struct Viewer {
     held_keycodes: HashSet<u8>,
     pending_key_release: Option<PendingKeyRelease>,
     last_frame: Option<StoredFrame>,
+    closed: bool,
+    close_reported: bool,
 }
 
 impl Viewer {
@@ -244,6 +248,8 @@ impl Viewer {
             held_keycodes: HashSet::new(),
             pending_key_release: None,
             last_frame: None,
+            closed: false,
+            close_reported: false,
         })
     }
 
@@ -254,6 +260,10 @@ impl Viewer {
     /// `ReleaseAll` so the remote host cannot retain a half-finished chord.
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         let mut result = Vec::new();
+        if self.closed {
+            self.report_close(&mut result)?;
+            return Ok(result);
+        }
         let mut redraw = false;
 
         while let Some(event) = self.conn.poll_for_event()? {
@@ -289,12 +299,14 @@ impl Viewer {
                         && event.type_ == self.wm_protocols
                         && event.data.as_data32()[0] == self.wm_delete_window =>
                 {
-                    self.release_for_close(&mut result)?;
-                    result.push(ViewerEvent::Close);
+                    self.closed = true;
+                    self.report_close(&mut result)?;
+                    break;
                 }
                 Event::DestroyNotify(event) if event.window == self.window => {
-                    self.release_for_close(&mut result)?;
-                    result.push(ViewerEvent::Close);
+                    self.closed = true;
+                    self.report_close(&mut result)?;
+                    break;
                 }
                 Event::UnmapNotify(event) if event.window == self.window => {
                     self.release_local_grab()?;
@@ -392,6 +404,11 @@ impl Viewer {
                     }
                     self.f12_keycodes = f12_keycodes;
                 }
+                Event::Error(error) if is_closed_window_error(&error, self.window) => {
+                    self.closed = true;
+                    self.report_close(&mut result)?;
+                    break;
+                }
                 Event::Error(error) => {
                     return Err(io::Error::other(format!(
                         "X11 viewer received a protocol error: {error:?}"
@@ -409,8 +426,11 @@ impl Viewer {
             self.flush_pending_key_release(&mut result);
         }
 
-        if redraw {
+        if redraw && !self.closed {
             self.redraw()?;
+        }
+        if self.closed {
+            self.report_close(&mut result)?;
         }
         Ok(result)
     }
@@ -418,6 +438,9 @@ impl Viewer {
     /// Draw and retain a decoded frame.  The retained copy is used for Expose
     /// events and for rescaling after the window is resized.
     pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<()> {
+        if self.closed {
+            return Ok(());
+        }
         validate_frame(&frame)?;
         self.last_frame = Some(StoredFrame {
             source_width: frame.source_width,
@@ -557,7 +580,8 @@ impl Viewer {
 
     fn resize_backing(&mut self) -> RemoteResult<()> {
         let replacement = self.conn.generate_id()?;
-        self.conn
+        let create_result = self
+            .conn
             .create_pixmap(
                 self.depth,
                 replacement,
@@ -565,13 +589,20 @@ impl Viewer {
                 self.width,
                 self.height,
             )?
-            .check()?;
+            .check();
+        self.finish_window_request(create_result)?;
+        if self.closed {
+            return Ok(());
+        }
         let previous = std::mem::replace(&mut self.backing, replacement);
         self.conn.free_pixmap(previous)?.check()?;
         Ok(())
     }
 
-    fn redraw(&self) -> RemoteResult<()> {
+    fn redraw(&mut self) -> RemoteResult<()> {
+        if self.closed {
+            return Ok(());
+        }
         let Some(frame) = self.last_frame.as_ref() else {
             let fill = self.conn.poly_fill_rectangle(
                 self.backing,
@@ -595,7 +626,10 @@ impl Viewer {
                 self.height,
             )?;
             fill.check()?;
-            copy.check()?;
+            self.finish_window_request(copy.check())?;
+            if self.closed {
+                return Ok(());
+            }
             self.conn.flush()?;
             return Ok(());
         };
@@ -661,8 +695,32 @@ impl Viewer {
         for cookie in image_cookies {
             cookie.check()?;
         }
-        copy.check()?;
+        self.finish_window_request(copy.check())?;
+        if self.closed {
+            return Ok(());
+        }
         self.conn.flush()?;
+        Ok(())
+    }
+
+    fn finish_window_request(&mut self, result: Result<(), ReplyError>) -> RemoteResult<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(ReplyError::X11Error(error)) if is_closed_window_error(&error, self.window) => {
+                self.closed = true;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn report_close(&mut self, events: &mut Vec<ViewerEvent>) -> RemoteResult<()> {
+        if self.close_reported {
+            return Ok(());
+        }
+        self.release_for_close(events)?;
+        events.push(ViewerEvent::Close);
+        self.close_reported = true;
         Ok(())
     }
 }
@@ -765,6 +823,10 @@ fn push_pointer(events: &mut Vec<ViewerEvent>, x: u16, y: u16) {
     } else {
         events.push(ViewerEvent::Pointer { x, y });
     }
+}
+
+fn is_closed_window_error(error: &X11Error, window: Window) -> bool {
+    matches!(error.error_kind, ErrorKind::Drawable | ErrorKind::Window) && error.bad_value == window
 }
 
 fn intern_atom(conn: &RustConnection, name: &[u8]) -> RemoteResult<Atom> {
@@ -921,5 +983,24 @@ mod tests {
             map_pointer_to_source(0, 0, 100, 100, 100, 100, 0, 100),
             None
         );
+    }
+
+    #[test]
+    fn only_target_window_errors_are_terminal() {
+        let error = |error_kind, bad_value| X11Error {
+            error_kind,
+            error_code: 0,
+            sequence: 0,
+            bad_value,
+            minor_opcode: 0,
+            major_opcode: 0,
+            extension_name: None,
+            request_name: None,
+        };
+
+        assert!(is_closed_window_error(&error(ErrorKind::Drawable, 42), 42));
+        assert!(is_closed_window_error(&error(ErrorKind::Window, 42), 42));
+        assert!(!is_closed_window_error(&error(ErrorKind::Drawable, 7), 42));
+        assert!(!is_closed_window_error(&error(ErrorKind::Alloc, 42), 42));
     }
 }

@@ -140,10 +140,6 @@ fn viewer_loop(
 ) -> RemoteResult<()> {
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     loop {
-        if let Some(frame) = take_latest(state) {
-            viewer.draw(frame)?;
-        }
-
         let mut close = false;
         let events = viewer.poll_events()?;
         let mut wrote_input = false;
@@ -180,6 +176,10 @@ fn viewer_loop(
         }
         if close {
             return Ok(());
+        }
+
+        if let Some(frame) = take_latest(state) {
+            viewer.draw(frame)?;
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
