@@ -799,6 +799,13 @@ impl Jwm {
         }
 
         self.mark_bar_update_needed_if_visible(None);
+        // Focus is the latency-critical part of tab switching. Deferring this
+        // snapshot to the backend's periodic update source makes the bar
+        // compete with a busy X11/compositor event queue and can leave the old
+        // title/fill state visible for several frames. Publish while the new
+        // monitor selection is already authoritative; the regular update pass
+        // remains the retry path when a bar is not ready yet.
+        self.flush_pending_bar_updates();
 
         // Broadcast focus event
         if let Some(ck) = client_key_opt {
@@ -840,11 +847,14 @@ mod scratchpad_reveal_tests {
     use crate::core::models::WMClient;
     use crate::core::state::WMState;
     use crate::jwm::features::FeatureStates;
+    use crate::jwm::types::SecondaryBarInstance;
     use slotmap::SecondaryMap;
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
+    use std::process::Command;
     use std::sync::atomic::AtomicBool;
-    use xbar_core::shared_structures::SharedMessage;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use xbar_core::shared_structures::{SharedMessage, SharedRingBufferOptions};
 
     struct ScratchpadBackend {
         window_ops: DummyWindowOps,
@@ -1054,6 +1064,68 @@ mod scratchpad_reveal_tests {
             hdr_metadata: None,
             identity: crate::backend::api::OutputIdentity::connector_only(format!("test-{id}")),
         }
+    }
+
+    #[test]
+    fn focus_publishes_the_new_client_to_a_ready_bar_immediately() {
+        let mut jwm = empty_jwm();
+        jwm.add_monitor(output(1, 0));
+        let monitor_key = jwm.state.monitor_order[0];
+        let monitor_id = jwm.state.monitors[monitor_key].num;
+
+        let mut first = WMClient::new(WindowId::from_raw(0x801));
+        first.mon = Some(monitor_key);
+        first.state.tags = 1;
+        first.name = "first".into();
+        let first_key = jwm.insert_client(first);
+        jwm.attach_to_monitor(first_key, monitor_key);
+
+        let mut second = WMClient::new(WindowId::from_raw(0x802));
+        second.mon = Some(monitor_key);
+        second.state.tags = 1;
+        second.name = "second".into();
+        let second_key = jwm.insert_client(second);
+        jwm.attach_to_monitor(second_key, monitor_key);
+        jwm.state.monitors[monitor_key].set_selected_client_for_current_tag(Some(first_key));
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = format!("/tmp/jwm-focus-bar-{}-{nonce}", std::process::id());
+        let producer = SharedRingBufferOptions::new()
+            .create(&path)
+            .expect("create test status-bar ring");
+        let consumer = SharedRingBufferOptions::new()
+            .open(&path)
+            .expect("open test status-bar ring");
+        let mut child = Command::new("/bin/true")
+            .spawn()
+            .expect("spawn inert child");
+        child.wait().expect("reap inert child");
+        jwm.secondary_bars.insert(
+            monitor_id,
+            SecondaryBarInstance {
+                monitor_id,
+                shmem: producer,
+                pid: child.id(),
+                child,
+                client_key: None,
+                window: None,
+                has_focus: false,
+                last_spawn: Instant::now(),
+            },
+        );
+
+        jwm.focus(&mut ScratchpadBackend::new(), Some(second_key))
+            .expect("focus second tab");
+
+        let published = consumer
+            .try_read_latest_message()
+            .expect("read status-bar ring")
+            .expect("focus must publish without a periodic update");
+        assert_eq!(published.monitor_info.client_name_lossy(), "second");
+        assert!(jwm.pending_bar_updates.is_empty());
     }
 
     fn jwm_with_cross_monitor_scratchpad(

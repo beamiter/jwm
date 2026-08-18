@@ -26,7 +26,6 @@ use xbar_core::{
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-
 #[derive(Debug)]
 enum UserEvent {
     Tick,
@@ -100,17 +99,13 @@ impl App {
         if !self.depth_check_pending {
             return;
         }
-        use raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+        use raw_window_handle::HasWindowHandle as _;
         let Ok(handle) = self.window.window_handle() else {
             // Not realized yet; the next frame will ask again.
             return;
         };
         self.depth_check_pending = false;
-        let xid = match handle.as_raw() {
-            RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
-            RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
-            _ => None,
-        };
+        let xid = raw_x11_window_id(handle.as_raw());
         let argb = xid
             .zip(self.x11.as_ref())
             .is_some_and(|(xid, conn)| window_is_argb(conn, xid));
@@ -150,21 +145,24 @@ impl App {
                 buffer[y * width..(y + 1) * width].copy_from_slice(source);
             }
         }
-        match frame.damage {
-            Some(rect) if !rect.is_empty() => {
-                let damage = softbuffer::Rect {
-                    x: rect.x,
-                    y: rect.y,
-                    width: NonZeroU32::new(rect.width).expect("checked non-empty"),
-                    height: NonZeroU32::new(rect.height).expect("checked non-empty"),
-                };
-                buffer.present_with_damage(&[damage])
-            }
-            // First frame, a resize, or an unchanged scene after an expose:
-            // present everything.
-            _ => buffer.present(),
-        }
-        .map_err(|error| anyhow::anyhow!("failed to present softbuffer frame: {error}"))?;
+        // The bar is only one narrow scanline band. A complete upload is about
+        // 0.4 MiB at 2560x42 and avoids stale title pixels observed when the
+        // X11 SHM backend receives a succession of partial-damage presents.
+        buffer
+            .present()
+            .map_err(|error| anyhow::anyhow!("failed to present softbuffer frame: {error}"))?;
+
+        // softbuffer's X11 SHM backend queues PutImage plus a GetInputFocus
+        // completion cookie. `present*()` does not wait on that cookie; the
+        // wait normally happens when the next buffer is acquired. A status
+        // bar may have no next frame until the one-second clock tick, leaving
+        // the just-rendered title visibly stale. Reacquiring and immediately
+        // releasing the buffer completes that queued submission now.
+        drop(
+            self.soft_surface
+                .buffer_mut()
+                .map_err(|error| anyhow::anyhow!("failed to complete softbuffer frame: {error}"))?,
+        );
         Ok(())
     }
 
@@ -193,6 +191,12 @@ impl App {
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
+        if self.apply_runtime_update(update) {
+            self.request_redraw();
+        }
+    }
+
+    fn apply_runtime_update(&mut self, update: RuntimeUpdate) -> bool {
         let mut effects = std::mem::take(&mut self.effects);
         let needs_redraw = effects
             .route::<_, std::convert::Infallible>(update, |request| {
@@ -208,8 +212,31 @@ impl App {
             })
             .expect("geometry closure is infallible");
         self.effects = effects;
+        needs_redraw
+    }
+
+    fn handle_shared_update(&mut self, ack: WakeAck) {
+        let update = self.bar.poll_transport();
+
+        // Polling consumed the coalesced notification. Release the forwarder
+        // before painting so another rapid workspace switch can wake us while
+        // this frame is being presented.
+        ack.ack();
+
+        self.apply_transport_update(update);
+    }
+
+    fn apply_transport_update(&mut self, update: RuntimeUpdate) {
+        let needs_redraw = self.apply_runtime_update(update);
+        self.sync_transport_wake();
         if needs_redraw {
-            self.request_redraw();
+            // Transport updates already run on Tao's window thread. Present
+            // immediately instead of taking another trip through Tao's redraw
+            // queue, while normal expose/resize events retain that queue.
+            if let Err(error) = self.redraw() {
+                warn!("immediate shared-state redraw failed: {error:#}");
+                self.request_redraw();
+            }
         }
     }
 
@@ -312,6 +339,15 @@ fn window_is_argb(conn: &impl x11rb::connection::Connection, xid: u32) -> bool {
         .unwrap_or(false)
 }
 
+fn raw_x11_window_id(handle: raw_window_handle::RawWindowHandle) -> Option<u32> {
+    use raw_window_handle::RawWindowHandle;
+    match handle {
+        RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
+        RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
+        _ => None,
+    }
+}
+
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     initialize_logging("tao_softbuffer_bar", &shared_path)?;
@@ -400,7 +436,6 @@ fn main() -> Result<()> {
     app.handle_runtime_update(update);
     app.sync_transport_wake();
     app.request_redraw();
-
     let exit_code = event_loop.run_return(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -408,11 +443,7 @@ fn main() -> Result<()> {
             Event::UserEvent(UserEvent::Tick) => {
                 app.tick_and_poll();
             }
-            Event::UserEvent(UserEvent::SharedUpdated(_ack)) => {
-                let update = app.bar.poll_transport();
-                app.handle_runtime_update(update);
-                app.sync_transport_wake();
-            }
+            Event::UserEvent(UserEvent::SharedUpdated(ack)) => app.handle_shared_update(ack),
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                     *control_flow = ControlFlow::Exit;

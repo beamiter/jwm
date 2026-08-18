@@ -437,10 +437,18 @@ impl Jwm {
             return;
         }
 
-        // Update all monitor bars that have pending updates
-        for &mon_id in self.pending_bar_updates.clone().iter() {
+        // Take one batch so updates marked while publishing belong to the next
+        // pass. A monitor whose bar has not been spawned yet stays pending:
+        // focus can now call this method directly during early startup, before
+        // the normal supervisor/update ordering has created every bar.
+        let pending = std::mem::take(&mut self.pending_bar_updates);
+        for mon_id in pending {
             if let Some(mon_key) = self.get_monitor_by_id(mon_id) {
                 if !self.is_bar_visible_on_mon(mon_key) {
+                    continue;
+                }
+                if !self.secondary_bars.contains_key(&mon_id) {
+                    self.pending_bar_updates.insert(mon_id);
                     continue;
                 }
                 self.update_bar_message_for_monitor(Some(mon_key));
@@ -460,7 +468,6 @@ impl Jwm {
                 }
             }
         }
-        self.pending_bar_updates.clear();
     }
 
     pub(super) fn switch_to_monitor(

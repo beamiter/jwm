@@ -102,6 +102,20 @@ fn counts_for_smart_borders(class_name: &str, status_bar_name: &str, is_or: bool
     !(class_name == status_bar_name || class_name.contains(status_bar_name))
 }
 
+fn is_status_bar_class(class_name: &str, status_bar_name: &str) -> bool {
+    !status_bar_name.is_empty()
+        && (class_name == status_bar_name || class_name.contains(status_bar_name))
+}
+
+fn tfp_refresh_is_latency_critical(
+    window: u32,
+    focused: Option<u32>,
+    class_name: &str,
+    status_bar_name: &str,
+) -> bool {
+    Some(window) == focused || is_status_bar_class(class_name, status_bar_name)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TransitionCapturePlan {
     src: (i32, i32, i32, i32),
@@ -3824,7 +3838,9 @@ impl<C: CompositorConnection> Compositor<C> {
         let tfp_budget = std::time::Duration::from_micros(3000); // 3ms
         let tfp_start = std::time::Instant::now();
 
-        // Build priority-ordered window list: focused first, then rest of scene
+        // Build priority-ordered window list: focused first, then status bars,
+        // then the rest of the scene. A bar update is direct feedback for the
+        // focus action and must not sit behind the ordinary 3 ms TFP budget.
         let mut tfp_order = std::mem::take(&mut self.scratch_tfp_order);
         tfp_order.clear();
         tfp_order.reserve(scene.len());
@@ -3833,9 +3849,23 @@ impl<C: CompositorConnection> Compositor<C> {
             tfp_order.push(fw);
         }
         for &(win, _, _, _, _) in scene {
+            if Some(win) != focused
+                && self
+                    .windows
+                    .get(&win)
+                    .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
+            {
+                tfp_order.push(win);
+            }
+        }
+        for &(win, _, _, _, _) in scene {
             if Some(win) == focused {
                 focused_in_scene = true;
-            } else {
+            } else if !self
+                .windows
+                .get(&win)
+                .is_some_and(|wt| is_status_bar_class(&wt.class_name, frame_status_bar_name))
+            {
                 tfp_order.push(win);
             }
         }
@@ -3854,8 +3884,13 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         for win in &tfp_order {
             let win = *win;
-            // Budget check: focused window (index 0) always updates
-            if tfp_budget_exhausted && Some(win) != focused {
+            let latency_critical = self.windows.get(&win).is_some_and(|wt| {
+                tfp_refresh_is_latency_critical(win, focused, &wt.class_name, frame_status_bar_name)
+            });
+            // Focused windows and status bars always update. Otherwise a busy
+            // focused client can exhaust the budget every frame and starve the
+            // bar indefinitely, leaving its previous title on screen.
+            if tfp_budget_exhausted && !latency_critical {
                 continue;
             }
             if let Some(wt) = self.windows.get_mut(&win) {
@@ -3896,8 +3931,9 @@ impl<C: CompositorConnection> Compositor<C> {
                         self.audio_sync.mark_frame_rendered(win);
                     }
 
-                    // Check budget (but not for focused window)
-                    if Some(win) != focused && tfp_start.elapsed() > tfp_budget {
+                    // Check budget only for ordinary windows. Latency-critical
+                    // entries remain outside the starvation-prone budget.
+                    if !latency_critical && tfp_start.elapsed() > tfp_budget {
                         tfp_budget_exhausted = true;
                     }
                 }
@@ -6475,9 +6511,39 @@ mod tests {
         edge_effects_require_composition, focus_highlight_style, intersect_gl_scissors,
         is_opaque_occluder, minimized_dock_requires_composition, presented_scene_copy_plan,
         rect_covers_output, resolve_and_draw_each, screenshot_freeze_change_needed,
-        screenshot_freeze_requires_composition, transformed_overlays_require_full_redraw,
-        transition_capture_plan, wallpaper_blend_plan, window_prefers_direct_presentation,
+        screenshot_freeze_requires_composition, tfp_refresh_is_latency_critical,
+        transformed_overlays_require_full_redraw, transition_capture_plan, wallpaper_blend_plan,
+        window_prefers_direct_presentation,
     };
+
+    #[test]
+    fn status_bar_texture_refresh_is_latency_critical() {
+        assert!(tfp_refresh_is_latency_critical(
+            7,
+            Some(3),
+            "tao_softbuffer_bar",
+            "tao_softbuffer_bar",
+        ));
+        assert!(tfp_refresh_is_latency_critical(
+            7,
+            Some(3),
+            "prefix-tao_softbuffer_bar",
+            "tao_softbuffer_bar",
+        ));
+        assert!(tfp_refresh_is_latency_critical(
+            3,
+            Some(3),
+            "terminal",
+            "tao_softbuffer_bar",
+        ));
+        assert!(!tfp_refresh_is_latency_critical(
+            7,
+            Some(3),
+            "terminal",
+            "tao_softbuffer_bar",
+        ));
+        assert!(!tfp_refresh_is_latency_critical(7, Some(3), "terminal", "",));
+    }
 
     #[test]
     fn dock_sources_are_drawn_before_a_later_resolution_can_evict_them() {
