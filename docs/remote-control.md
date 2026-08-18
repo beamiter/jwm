@@ -157,13 +157,24 @@ jwm-remote connect 192.168.1.50:48221 \
 
 ## Tuning and troubleshooting
 
-The LAN defaults are a 12 FPS upper limit, JPEG quality 70, and a maximum
-encoded width of 1280 pixels. They favor a reliable first connection over
-maximum fidelity:
+The LAN defaults are a 12 FPS upper limit, adaptive JPEG quality 40–70, and a
+maximum encoded width of 1280 pixels. They favor a reliable first connection
+over maximum fidelity:
 
 ```bash
 jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
 ```
+
+`--jpeg-quality` is the adaptive upper bound. Repeated same-setting pressure
+from display-ACK latency, viewer superseding or exhausted two-frame credit
+causes a multiplicative decrease; isolated slow ACKs are absorbed by a small
+hysteresis score. Recovery is additive (`+1`) only after at least three seconds
+and an FPS-scaled run of healthy ACKs. `--jpeg-quality-floor` changes the
+default floor of 40; when the upper bound is below 40, the implicit floor
+follows that upper bound for backwards compatibility. Use
+`--fixed-jpeg-quality` to disable adaptation and always use the requested
+quality (it conflicts with an explicit floor). Encoder quality changes do not
+change the remote wire protocol.
 
 `--max-width 0` keeps the native root width. Higher resolution, quality, and
 frame rate increase CPU and bandwidth together. With overlay capture and
@@ -213,6 +224,16 @@ include viewer queue/draw work, ACK creation and flush, and return-network delay
 they are not the viewer's draw-call duration. `drawn-bytes` counts only the JPEG
 payloads of those proven ACK targets. `credit-wait` separately measures how long
 the sender waited for an available display credit.
+
+Adaptive quality attaches the exact encoder quality and a local setting epoch
+to each in-flight credit. Only ACKs for the current epoch affect its pressure
+score, and cumulative superseding counts only earlier frames from that same
+epoch; late ACKs from the previous quality therefore cannot cause a second
+decrease. Payload size remains telemetry and diagnostic context rather than a
+discrete quality threshold, avoiding oscillation when JPEG output crosses an
+arbitrary byte boundary. The ACK thread queues only bounded scalar feedback;
+the video sender alone updates and reads quality immediately before encoding,
+with encoding, logging and frame destruction outside the controller lock.
 
 The sender writes each JPEG directly behind its frame header in one reusable
 allocation while hard-bounding the total payload length, and the viewer's

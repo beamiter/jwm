@@ -57,6 +57,15 @@ monorepo use independent Semantic Versions.
   `viewer-superseded` frames; capture/send-to-ACK timings end when the host
   receives the ACK, while the viewer separately reports decode, queue and draw
   time.
+- Host JPEG quality now uses same-setting display ACK feedback without changing
+  the wire protocol. The existing `--jpeg-quality` value is its upper bound;
+  repeated ACK RTT, viewer-supersede and frame-credit pressure cause a
+  multiplicative decrease, while an FPS-scaled healthy run of at least three
+  seconds recovers additively by one. The default floor is 40,
+  `--jpeg-quality-floor` adjusts it, and `--fixed-jpeg-quality` restores a
+  constant quality. In-flight quality epochs prevent late old-setting ACKs from
+  causing a second decrease, and payload size remains diagnostic rather than a
+  discrete threshold.
 - `jwm-remote` uses MIT-SHM 1.2 file-descriptor segments for local X11 image
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if

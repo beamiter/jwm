@@ -34,6 +34,16 @@ const MAX_OUTSTANDING_FRAMES: u64 = 2;
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
+const JPEG_QUALITY_EVALUATION_INTERVAL: Duration = Duration::from_millis(500);
+const JPEG_QUALITY_CONGESTED_ACK_RTT: Duration = Duration::from_millis(350);
+const JPEG_QUALITY_HARD_ACK_RTT: Duration = Duration::from_millis(750);
+const JPEG_QUALITY_BACKLOG_ACK_RTT: Duration = Duration::from_millis(200);
+const JPEG_QUALITY_HEALTHY_ACK_RTT: Duration = Duration::from_millis(160);
+const JPEG_QUALITY_PRESSURE_THRESHOLD: u64 = 6;
+const JPEG_QUALITY_RECOVERY_DURATION: Duration = Duration::from_secs(3);
+const JPEG_QUALITY_MIN_RECOVERY_ACKS: u64 = 4;
+const JPEG_QUALITY_MAX_RECOVERY_ACKS: u64 = 24;
+const JPEG_QUALITY_STEP_UP: u8 = 1;
 
 trait SetWriteTimeout {
     fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
@@ -512,14 +522,257 @@ struct InFlightFrame {
     captured_at: Instant,
     sent_at: Instant,
     bytes: u64,
+    jpeg_quality: u8,
+    quality_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AckObservation {
     retired: u64,
     bytes: u64,
+    same_epoch_retired: u64,
+    same_epoch_outstanding_before: u64,
+    jpeg_quality: u8,
+    quality_epoch: u64,
     capture_to_ack: Duration,
     send_to_ack: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct JpegQualitySignals {
+    acknowledgements: u64,
+    viewer_superseded: u64,
+    pressure: u64,
+    max_ack_rtt: Duration,
+    max_payload_bytes: u64,
+    max_outstanding: u64,
+}
+
+impl JpegQualitySignals {
+    fn pressure_for_ack(ack: AckObservation) -> u64 {
+        let superseded = ack.same_epoch_retired > 1;
+        if ack.send_to_ack >= JPEG_QUALITY_HARD_ACK_RTT || superseded {
+            3
+        } else if ack.same_epoch_outstanding_before >= MAX_OUTSTANDING_FRAMES
+            && ack.send_to_ack >= JPEG_QUALITY_BACKLOG_ACK_RTT
+        {
+            2
+        } else if ack.send_to_ack >= JPEG_QUALITY_CONGESTED_ACK_RTT {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn record_ack(&mut self, ack: AckObservation, pressure: u64) {
+        self.acknowledgements = self.acknowledgements.saturating_add(1);
+        self.viewer_superseded = self
+            .viewer_superseded
+            .saturating_add(ack.same_epoch_retired.saturating_sub(1));
+        self.pressure = self.pressure.saturating_add(pressure);
+        self.max_ack_rtt = self.max_ack_rtt.max(ack.send_to_ack);
+        self.max_payload_bytes = self.max_payload_bytes.max(ack.bytes);
+        self.max_outstanding = self.max_outstanding.max(ack.same_epoch_outstanding_before);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimedAckObservation {
+    ack: AckObservation,
+    observed_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JpegQualityAdjustment {
+    Decreased,
+    Increased,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct JpegQualityDecision {
+    quality: u8,
+    epoch: u64,
+    previous: u8,
+    adjustment: Option<JpegQualityAdjustment>,
+    signals: JpegQualitySignals,
+    accumulated_pressure: u64,
+}
+
+struct JpegQualityState {
+    current: u8,
+    epoch: u64,
+    last_evaluated_at: Instant,
+    pressure: u64,
+    healthy_ack_streak: u64,
+    healthy_since: Option<Instant>,
+    signals: JpegQualitySignals,
+    pending_acks: VecDeque<TimedAckObservation>,
+}
+
+/// ACK-driven JPEG quality with one writer: only the video sender changes or
+/// reads `current`; the input thread merely appends small scalar observations.
+struct JpegQualityController {
+    maximum: u8,
+    floor: u8,
+    adaptive: bool,
+    recovery_ack_target: u64,
+    state: Mutex<JpegQualityState>,
+}
+
+impl JpegQualityController {
+    fn new_at(
+        maximum: u8,
+        floor: u8,
+        adaptive: bool,
+        frame_interval: Duration,
+        now: Instant,
+    ) -> io::Result<Self> {
+        if !(1..=100).contains(&maximum) {
+            return Err(invalid_data("JPEG quality must be between 1 and 100"));
+        }
+        if !(1..=maximum).contains(&floor) {
+            return Err(invalid_data(format!(
+                "JPEG quality floor {floor} exceeds the configured maximum {maximum}"
+            )));
+        }
+        Ok(Self {
+            maximum,
+            floor,
+            adaptive,
+            recovery_ack_target: jpeg_quality_recovery_ack_target(frame_interval),
+            state: Mutex::new(JpegQualityState {
+                current: maximum,
+                epoch: 0,
+                last_evaluated_at: now,
+                pressure: 0,
+                healthy_ack_streak: 0,
+                healthy_since: None,
+                signals: JpegQualitySignals::default(),
+                pending_acks: VecDeque::with_capacity(MAX_OUTSTANDING_FRAMES as usize),
+            }),
+        })
+    }
+
+    fn observe_ack_at(&self, ack: AckObservation, now: Instant) {
+        if !self.adaptive {
+            return;
+        }
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.pending_acks.push_back(TimedAckObservation {
+            ack,
+            observed_at: now,
+        });
+    }
+
+    fn quality_before_encode_at(&self, now: Instant) -> JpegQualityDecision {
+        if !self.adaptive {
+            return JpegQualityDecision {
+                quality: self.maximum,
+                epoch: 0,
+                previous: self.maximum,
+                adjustment: None,
+                signals: JpegQualitySignals::default(),
+                accumulated_pressure: 0,
+            };
+        }
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        while let Some(observation) = state.pending_acks.pop_front() {
+            let ack = observation.ack;
+            if ack.quality_epoch == state.epoch && ack.jpeg_quality == state.current {
+                let pressure = JpegQualitySignals::pressure_for_ack(ack);
+                state.signals.record_ack(ack, pressure);
+                if pressure != 0 {
+                    state.pressure = state.pressure.saturating_add(pressure);
+                    state.healthy_ack_streak = 0;
+                    state.healthy_since = None;
+                } else if ack.send_to_ack <= JPEG_QUALITY_HEALTHY_ACK_RTT {
+                    if state.pressure != 0 {
+                        state.pressure = state.pressure.saturating_sub(1);
+                        state.healthy_ack_streak = 0;
+                        state.healthy_since = None;
+                    } else {
+                        state.healthy_ack_streak = state.healthy_ack_streak.saturating_add(1);
+                        state.healthy_since.get_or_insert(observation.observed_at);
+                    }
+                } else {
+                    state.healthy_ack_streak = 0;
+                    state.healthy_since = None;
+                }
+            }
+        }
+        let previous = state.current;
+        if now.saturating_duration_since(state.last_evaluated_at) < JPEG_QUALITY_EVALUATION_INTERVAL
+        {
+            return JpegQualityDecision {
+                quality: previous,
+                epoch: state.epoch,
+                previous,
+                adjustment: None,
+                signals: state.signals,
+                accumulated_pressure: state.pressure,
+            };
+        }
+        state.last_evaluated_at = now;
+        let signals = std::mem::take(&mut state.signals);
+        let accumulated_pressure = state.pressure;
+        if state.pressure >= JPEG_QUALITY_PRESSURE_THRESHOLD {
+            state.current = jpeg_quality_decrease(state.current, self.floor);
+            state.pressure = 0;
+            state.healthy_ack_streak = 0;
+            state.healthy_since = None;
+        } else if state.current < self.maximum
+            && state.healthy_ack_streak >= self.recovery_ack_target
+            && state.healthy_since.is_some_and(|since| {
+                now.saturating_duration_since(since) >= JPEG_QUALITY_RECOVERY_DURATION
+            })
+        {
+            state.current = state
+                .current
+                .saturating_add(JPEG_QUALITY_STEP_UP)
+                .min(self.maximum);
+            state.pressure = 0;
+            state.healthy_ack_streak = 0;
+            state.healthy_since = None;
+        }
+        let adjustment = match state.current.cmp(&previous) {
+            std::cmp::Ordering::Less => Some(JpegQualityAdjustment::Decreased),
+            std::cmp::Ordering::Greater => Some(JpegQualityAdjustment::Increased),
+            std::cmp::Ordering::Equal => None,
+        };
+        if adjustment.is_some() {
+            state.epoch = state.epoch.wrapping_add(1);
+        }
+        JpegQualityDecision {
+            quality: state.current,
+            epoch: state.epoch,
+            previous,
+            adjustment,
+            signals,
+            accumulated_pressure,
+        }
+    }
+}
+
+fn jpeg_quality_recovery_ack_target(frame_interval: Duration) -> u64 {
+    let interval_nanos = frame_interval.as_nanos().max(1);
+    let target = JPEG_QUALITY_RECOVERY_DURATION
+        .as_nanos()
+        .div_ceil(interval_nanos);
+    u64::try_from(target).unwrap_or(u64::MAX).clamp(
+        JPEG_QUALITY_MIN_RECOVERY_ACKS,
+        JPEG_QUALITY_MAX_RECOVERY_ACKS,
+    )
+}
+
+fn jpeg_quality_decrease(current: u8, floor: u8) -> u8 {
+    let step = current.div_ceil(10).max(2);
+    current.saturating_sub(step).max(floor)
 }
 
 struct FrameCreditState {
@@ -597,6 +850,8 @@ impl FrameCredits {
         captured_at: Instant,
         sent_at: Instant,
         bytes: usize,
+        jpeg_quality: u8,
+        quality_epoch: u64,
     ) -> io::Result<u64> {
         let mut state = self
             .state
@@ -628,18 +883,31 @@ impl FrameCredits {
             captured_at,
             sent_at,
             bytes: u64::try_from(bytes).unwrap_or(u64::MAX),
+            jpeg_quality,
+            quality_epoch,
         });
         Ok(outstanding_frames(&state))
     }
 
+    #[cfg(test)]
     fn acknowledge(&self, sequence: u64) -> io::Result<Option<AckObservation>> {
         self.acknowledge_at(sequence, Instant::now())
     }
 
+    #[cfg(test)]
     fn acknowledge_at(
         &self,
         sequence: u64,
         acknowledged_at: Instant,
+    ) -> io::Result<Option<AckObservation>> {
+        self.acknowledge_at_with_observer(sequence, acknowledged_at, |_| {})
+    }
+
+    fn acknowledge_at_with_observer(
+        &self,
+        sequence: u64,
+        acknowledged_at: Instant,
+        observer: impl FnOnce(AckObservation),
     ) -> io::Result<Option<AckObservation>> {
         let mut state = self
             .state
@@ -667,17 +935,44 @@ impl FrameCredits {
             })?;
         let target = state.in_flight[target_index];
         let retired = u64::try_from(target_index + 1).unwrap_or(u64::MAX);
+        let same_epoch_retired = u64::try_from(
+            state
+                .in_flight
+                .iter()
+                .take(target_index + 1)
+                .filter(|frame| frame.quality_epoch == target.quality_epoch)
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        let same_epoch_outstanding_before = u64::try_from(
+            state
+                .in_flight
+                .iter()
+                .filter(|frame| frame.quality_epoch == target.quality_epoch)
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
         for _ in 0..=target_index {
             let _ = state.in_flight.pop_front();
         }
         state.last_acked = Some(sequence);
-        self.available.notify_all();
-        Ok(Some(AckObservation {
+        let observation = AckObservation {
             retired,
             bytes: target.bytes,
+            same_epoch_retired,
+            same_epoch_outstanding_before,
+            jpeg_quality: target.jpeg_quality,
+            quality_epoch: target.quality_epoch,
             capture_to_ack: acknowledged_at.saturating_duration_since(target.captured_at),
             send_to_ack: acknowledged_at.saturating_duration_since(target.sent_at),
-        }))
+        };
+        // The video sender can proceed as soon as this credit becomes visible.
+        // Queue its quality feedback first, while the credit mutex excludes the
+        // waiter; the observer only takes the independent scalar controller
+        // lock, and no quality-controller path takes credits in reverse order.
+        observer(observation);
+        self.available.notify_all();
+        Ok(Some(observation))
     }
 
     fn outstanding(&self) -> u64 {
@@ -777,6 +1072,8 @@ pub struct HostOptions {
     pub display: Option<String>,
     pub fps: u16,
     pub jpeg_quality: u8,
+    pub jpeg_quality_floor: u8,
+    pub fixed_jpeg_quality: bool,
     pub max_width: u16,
     pub capture_source: CaptureSource,
     pub allow_lan: bool,
@@ -785,6 +1082,13 @@ pub struct HostOptions {
 }
 
 pub fn run_host(options: HostOptions) -> RemoteResult<()> {
+    JpegQualityController::new_at(
+        options.jpeg_quality,
+        options.jpeg_quality_floor,
+        !options.fixed_jpeg_quality,
+        target_frame_interval(options.fps),
+        Instant::now(),
+    )?;
     let key = load_key_file(&options.key_file)?;
     let listener = TcpListener::bind(&options.listen)?;
     listener.set_nonblocking(true)?;
@@ -917,10 +1221,26 @@ fn serve_client(
     let first_stop = Arc::new(FirstStop::new());
     let credits = Arc::new(FrameCredits::new());
     let telemetry = Arc::new(HostTelemetry::new());
+    let jpeg_quality = Arc::new(JpegQualityController::new_at(
+        options.jpeg_quality,
+        options.jpeg_quality_floor,
+        !options.fixed_jpeg_quality,
+        target_frame_interval(options.fps),
+        Instant::now(),
+    )?);
+    if options.fixed_jpeg_quality {
+        eprintln!("jwm-remote: JPEG quality fixed at {}", options.jpeg_quality);
+    } else {
+        eprintln!(
+            "jwm-remote: adaptive JPEG quality active ({}..={})",
+            options.jpeg_quality_floor, options.jpeg_quality
+        );
+    }
     let input_running = Arc::clone(&running);
     let input_stop = Arc::clone(&first_stop);
     let input_credits = Arc::clone(&credits);
     let input_telemetry = Arc::clone(&telemetry);
+    let input_jpeg_quality = Arc::clone(&jpeg_quality);
     let input_thread = thread::Builder::new()
         .name("jwm-remote-input".into())
         .spawn(move || {
@@ -936,6 +1256,7 @@ fn serve_client(
                 &input_stop,
                 &input_credits,
                 &input_telemetry,
+                &input_jpeg_quality,
             )
         })?;
 
@@ -947,6 +1268,7 @@ fn serve_client(
         &first_stop,
         &credits,
         &telemetry,
+        &jpeg_quality,
         shutdown,
         options,
     );
@@ -983,6 +1305,7 @@ fn stream_frames(
     first_stop: &Arc<FirstStop>,
     credits: &Arc<FrameCredits>,
     telemetry: &Arc<HostTelemetry>,
+    jpeg_quality: &Arc<JpegQualityController>,
     shutdown: &AtomicBool,
     options: &HostOptions,
 ) -> RemoteResult<()> {
@@ -992,6 +1315,7 @@ fn stream_frames(
     let sender_stop = Arc::clone(first_stop);
     let sender_credits = Arc::clone(credits);
     let sender_telemetry = Arc::clone(telemetry);
+    let sender_jpeg_quality = Arc::clone(jpeg_quality);
     let sender_control = match control.try_clone() {
         Ok(control) => control,
         Err(error) => {
@@ -999,7 +1323,6 @@ fn stream_frames(
             return Err(error.into());
         }
     };
-    let jpeg_quality = options.jpeg_quality;
     let sender = match thread::Builder::new()
         .name("jwm-remote-video".into())
         .spawn(move || {
@@ -1010,7 +1333,7 @@ fn stream_frames(
                 &sender_running,
                 &sender_credits,
                 &sender_telemetry,
-                jpeg_quality,
+                &sender_jpeg_quality,
             );
             if result.is_err() {
                 sender_stop.record(StopCause::Sender);
@@ -1026,7 +1349,7 @@ fn stream_frames(
         }
     };
 
-    let interval = Duration::from_secs_f64(1.0 / f64::from(options.fps.clamp(1, 60)));
+    let interval = target_frame_interval(options.fps);
     let backpressure_refresh = backpressure_refresh_interval(interval);
     let mut next_frame = Instant::now();
     let capture_result = (|| -> RemoteResult<()> {
@@ -1103,13 +1426,17 @@ fn backpressure_refresh_interval(frame_interval: Duration) -> Duration {
         .clamp(MIN_BACKPRESSURE_REFRESH, MAX_BACKPRESSURE_REFRESH)
 }
 
+fn target_frame_interval(fps: u16) -> Duration {
+    Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 60)))
+}
+
 fn send_frames<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     mut writer: SessionWriter<DeadlineWriter<W>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
-    jpeg_quality: u8,
+    jpeg_quality: &JpegQualityController,
 ) -> RemoteResult<()> {
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
@@ -1127,14 +1454,38 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
             break;
         }
 
+        let quality = jpeg_quality.quality_before_encode_at(Instant::now());
+        if let Some(adjustment) = quality.adjustment {
+            let direction = match adjustment {
+                JpegQualityAdjustment::Decreased => "decreased",
+                JpegQualityAdjustment::Increased => "increased",
+            };
+            eprintln!(
+                "jwm-remote: adaptive JPEG quality {direction} {} -> {} (ACKs {}, pressure {}, max send-to-ACK {:.1} ms, payload {} bytes, same-epoch outstanding {}, viewer-superseded {})",
+                quality.previous,
+                quality.quality,
+                quality.signals.acknowledgements,
+                quality.accumulated_pressure,
+                quality.signals.max_ack_rtt.as_secs_f64() * 1000.0,
+                quality.signals.max_payload_bytes,
+                quality.signals.max_outstanding,
+                quality.signals.viewer_superseded,
+            );
+        }
         let encode_started = Instant::now();
-        encode_frame_into(&mut payload, sequence, &pending.frame, jpeg_quality)?;
+        encode_frame_into(&mut payload, sequence, &pending.frame, quality.quality)?;
         telemetry.record_encoded(encode_started.elapsed());
         // Publish the application sequence before the bytes reach the peer so
         // an immediate cumulative ACK can never race ahead of host state.
         let sent_at = Instant::now();
-        let outstanding =
-            credits.mark_sent(sequence, pending.captured_at, sent_at, payload.len())?;
+        let outstanding = credits.mark_sent(
+            sequence,
+            pending.captured_at,
+            sent_at,
+            payload.len(),
+            quality.quality,
+            quality.epoch,
+        )?;
         telemetry.record_outstanding(outstanding);
         let write_started = Instant::now();
         write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)?;
@@ -1244,6 +1595,7 @@ fn receive_input(
     first_stop: &FirstStop,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
+    jpeg_quality: &JpegQualityController,
 ) -> RemoteResult<()> {
     let mut payload = Vec::new();
     let session_result = (|| -> RemoteResult<()> {
@@ -1297,7 +1649,12 @@ fn receive_input(
                     return Err(invalid_data("client heartbeat payload must be empty").into());
                 }
                 MessageKind::FrameAck => {
-                    if let Some(ack) = credits.acknowledge(decode_frame_ack(&payload)?)? {
+                    let acknowledged_at = Instant::now();
+                    if let Some(ack) = credits.acknowledge_at_with_observer(
+                        decode_frame_ack(&payload)?,
+                        acknowledged_at,
+                        |ack| jpeg_quality.observe_ack_at(ack, acknowledged_at),
+                    )? {
                         telemetry.record_ack(ack);
                     }
                 }
@@ -1466,6 +1823,8 @@ mod tests {
             display: None,
             fps: 12,
             jpeg_quality: 70,
+            jpeg_quality_floor: 40,
+            fixed_jpeg_quality: false,
             max_width: 1280,
             capture_source: CaptureSource::Auto,
             allow_lan: false,
@@ -1581,10 +1940,10 @@ mod tests {
         let running = AtomicBool::new(true);
         let now = Instant::now();
         assert_eq!(credits.outstanding(), 0);
-        credits.mark_sent(0, now, now, 100).unwrap();
-        credits.mark_sent(1, now, now, 200).unwrap();
+        credits.mark_sent(0, now, now, 100, 70, 0).unwrap();
+        credits.mark_sent(1, now, now, 200, 70, 0).unwrap();
         assert_eq!(credits.outstanding(), MAX_OUTSTANDING_FRAMES);
-        assert!(credits.mark_sent(2, now, now, 300).is_err());
+        assert!(credits.mark_sent(2, now, now, 300, 70, 0).is_err());
         let error = credits
             .wait_for_credit(&running, Duration::from_millis(20))
             .unwrap_err();
@@ -1597,7 +1956,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        credits.mark_sent(2, now, now, 300).unwrap();
+        credits.mark_sent(2, now, now, 300, 70, 0).unwrap();
         assert!(credits.acknowledge(0).unwrap().is_none());
         assert_eq!(credits.outstanding(), 2);
         assert!(credits.acknowledge(3).is_err());
@@ -1610,7 +1969,7 @@ mod tests {
         let credits = FrameCredits::new();
         let base = Instant::now();
         credits
-            .mark_sent(0, base, base + Duration::from_millis(10), 100)
+            .mark_sent(0, base, base + Duration::from_millis(10), 100, 70, 3)
             .unwrap();
         credits
             .mark_sent(
@@ -1618,6 +1977,8 @@ mod tests {
                 base + Duration::from_millis(20),
                 base + Duration::from_millis(30),
                 200,
+                65,
+                4,
             )
             .unwrap();
 
@@ -1627,6 +1988,10 @@ mod tests {
             .unwrap();
         assert_eq!(ack.retired, 2);
         assert_eq!(ack.bytes, 200);
+        assert_eq!(ack.same_epoch_retired, 1);
+        assert_eq!(ack.same_epoch_outstanding_before, 1);
+        assert_eq!(ack.jpeg_quality, 65);
+        assert_eq!(ack.quality_epoch, 4);
         assert_eq!(ack.capture_to_ack, Duration::from_millis(60));
         assert_eq!(ack.send_to_ack, Duration::from_millis(50));
         assert_eq!(credits.outstanding(), 0);
@@ -1636,6 +2001,344 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn two_in_flight_old_epoch_acks_can_trigger_only_one_quality_drop() {
+        let base = Instant::now();
+        let credits = FrameCredits::new();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap();
+        credits.mark_sent(0, base, base, 100, 70, 0).unwrap();
+        credits
+            .mark_sent(1, base, base + Duration::from_millis(10), 100, 70, 0)
+            .unwrap();
+
+        let first_ack = credits
+            .acknowledge_at(0, base + Duration::from_millis(800))
+            .unwrap()
+            .unwrap();
+        controller.observe_ack_at(first_ack, base + Duration::from_millis(800));
+        let first = controller.quality_before_encode_at(base + Duration::from_secs(1));
+        assert_eq!((first.quality, first.epoch), (70, 0));
+
+        credits
+            .mark_sent(
+                2,
+                base + Duration::from_secs(1),
+                base + Duration::from_millis(1_100),
+                100,
+                first.quality,
+                first.epoch,
+            )
+            .unwrap();
+        let second_ack = credits
+            .acknowledge_at(1, base + Duration::from_millis(1_300))
+            .unwrap()
+            .unwrap();
+        controller.observe_ack_at(second_ack, base + Duration::from_millis(1_300));
+        let lowered = controller.quality_before_encode_at(base + Duration::from_millis(1_500));
+        assert_eq!((lowered.quality, lowered.epoch), (63, 1));
+
+        let late_old_ack = credits
+            .acknowledge_at(2, base + Duration::from_millis(1_800))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (late_old_ack.jpeg_quality, late_old_ack.quality_epoch),
+            (70, 0)
+        );
+        controller.observe_ack_at(late_old_ack, base + Duration::from_millis(1_800));
+        let ignored = controller.quality_before_encode_at(base + Duration::from_secs(2));
+        assert_eq!((ignored.quality, ignored.epoch), (63, 1));
+    }
+
+    fn quality_ack(
+        send_to_ack: Duration,
+        bytes: u64,
+        retired: u64,
+        same_epoch_outstanding_before: u64,
+        jpeg_quality: u8,
+        quality_epoch: u64,
+    ) -> AckObservation {
+        AckObservation {
+            retired,
+            bytes,
+            same_epoch_retired: retired,
+            same_epoch_outstanding_before,
+            jpeg_quality,
+            quality_epoch,
+            capture_to_ack: send_to_ack,
+            send_to_ack,
+        }
+    }
+
+    #[test]
+    fn adaptive_quality_drops_fast_but_respects_interval_and_floor() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 62, true, Duration::from_millis(100), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 500_000, 1, 1, 70, 0),
+            base + Duration::from_millis(100),
+        );
+        let early = controller.quality_before_encode_at(
+            base + JPEG_QUALITY_EVALUATION_INTERVAL - Duration::from_nanos(1),
+        );
+        assert_eq!(early.quality, 70);
+        assert_eq!(early.adjustment, None);
+
+        let isolated = controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL);
+        assert_eq!(isolated.quality, 70, "one hard RTT spike must not degrade");
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(810), 500_000, 1, 1, 70, 0),
+            base + Duration::from_millis(600),
+        );
+
+        let first =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 2);
+        assert_eq!(first.quality, 63);
+        assert_eq!(first.epoch, 1);
+        assert_eq!(first.adjustment, Some(JpegQualityAdjustment::Decreased));
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(1), 2_000_000, 2, 2, 63, 1),
+            base + Duration::from_millis(1_100),
+        );
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(1), 2_000_000, 1, 1, 63, 1),
+            base + Duration::from_millis(1_200),
+        );
+        let second =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 3);
+        assert_eq!(second.quality, 62, "the decrease must clamp at the floor");
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(1), 2_000_000, 2, 2, 62, 2),
+            base + Duration::from_millis(1_600),
+        );
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(1), 2_000_000, 1, 1, 62, 2),
+            base + Duration::from_millis(1_700),
+        );
+        let floor =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 4);
+        assert_eq!(floor.quality, 62);
+        assert_eq!(floor.adjustment, None);
+    }
+
+    #[test]
+    fn adaptive_quality_recovers_at_one_fps_after_time_and_sample_boundaries() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_secs(1), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 200_000, 1, 1, 70, 0),
+            base,
+        );
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 200_000, 1, 1, 70, 0),
+            base + Duration::from_millis(1),
+        );
+        assert_eq!(
+            controller
+                .quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL)
+                .quality,
+            63
+        );
+
+        assert_eq!(controller.recovery_ack_target, 4);
+        for second in 1_u64..=3 {
+            let observed_at = base + Duration::from_secs(second);
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(20), 3_000_000, 1, 1, 63, 1),
+                observed_at,
+            );
+            let decision = controller.quality_before_encode_at(observed_at);
+            assert_eq!(decision.quality, 63);
+            assert_eq!(decision.adjustment, None);
+        }
+        let elapsed_but_short = controller.quality_before_encode_at(base + Duration::from_secs(4));
+        assert_eq!(
+            elapsed_but_short.quality, 63,
+            "target - 1 ACKs cannot recover"
+        );
+
+        let fourth_at = base + Duration::from_millis(4_001);
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(20), 3_000_000, 1, 1, 63, 1),
+            fourth_at,
+        );
+        let recovered = controller.quality_before_encode_at(base + Duration::from_millis(4_500));
+        assert_eq!(recovered.quality, 64);
+        assert_eq!(recovered.adjustment, Some(JpegQualityAdjustment::Increased));
+    }
+
+    #[test]
+    fn adaptive_quality_uses_same_epoch_backlog_but_not_payload_alone() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(210), 4 * 1024 * 1024, 1, 1, 70, 0),
+            base + Duration::from_millis(100),
+        );
+        let sparse = controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL);
+        assert_eq!(
+            sparse.quality, 70,
+            "a large payload is diagnostic data, not a quality threshold"
+        );
+
+        for sample in 1_u32..=3 {
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(210), 100_000, 1, 2, 70, 0),
+                base + JPEG_QUALITY_EVALUATION_INTERVAL * sample + Duration::from_millis(100),
+            );
+            let decision = controller
+                .quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * (sample + 1));
+            if sample < 3 {
+                assert_eq!(decision.quality, 70);
+            } else {
+                assert_eq!(decision.quality, 63);
+            }
+        }
+    }
+
+    #[test]
+    fn adaptive_quality_ignores_late_feedback_from_an_older_quality_epoch() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 200_000, 1, 1, 70, 0),
+            base + Duration::from_millis(100),
+        );
+        let isolated = controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL);
+        assert_eq!((isolated.quality, isolated.epoch), (70, 0));
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 200_000, 1, 2, 70, 0),
+            base + Duration::from_millis(600),
+        );
+        let lowered =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 2);
+        assert_eq!((lowered.quality, lowered.epoch), (63, 1));
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(2), 4_000_000, 1, 1, 70, 0),
+            base + Duration::from_millis(1_100),
+        );
+        let ignored =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 3);
+        assert_eq!((ignored.quality, ignored.epoch), (63, 1));
+
+        for offset in [1_600, 1_700] {
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(800), 200_000, 1, 1, 63, 1),
+                base + Duration::from_millis(offset),
+            );
+        }
+        let current =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 4);
+        assert_eq!((current.quality, current.epoch), (56, 2));
+    }
+
+    #[test]
+    fn isolated_same_epoch_supersede_needs_a_second_pressure_sample() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(20), 100_000, 2, 2, 70, 0),
+            base + Duration::from_millis(100),
+        );
+        let isolated = controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL);
+        assert_eq!(isolated.quality, 70);
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(20), 100_000, 2, 2, 70, 0),
+            base + Duration::from_millis(600),
+        );
+        let repeated =
+            controller.quality_before_encode_at(base + JPEG_QUALITY_EVALUATION_INTERVAL * 2);
+        assert_eq!(repeated.quality, 63);
+    }
+
+    #[test]
+    fn healthy_acks_first_decay_pressure_without_counting_toward_recovery() {
+        let base = Instant::now();
+        let controller =
+            JpegQualityController::new_at(70, 40, true, Duration::from_secs(1), base).unwrap();
+        for offset in [100, 200] {
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(800), 100_000, 1, 1, 70, 0),
+                base + Duration::from_millis(offset),
+            );
+        }
+        let lowered = controller.quality_before_encode_at(base + Duration::from_millis(500));
+        assert_eq!((lowered.quality, lowered.epoch), (63, 1));
+
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 100_000, 1, 1, 63, 1),
+            base + Duration::from_millis(600),
+        );
+        let pressured = controller.quality_before_encode_at(base + Duration::from_secs(1));
+        assert_eq!(pressured.accumulated_pressure, 3);
+
+        for offset in [1_100, 1_200, 1_300] {
+            controller.observe_ack_at(
+                quality_ack(Duration::from_millis(20), 100_000, 1, 1, 63, 1),
+                base + Duration::from_millis(offset),
+            );
+        }
+        let decayed = controller.quality_before_encode_at(base + Duration::from_millis(1_500));
+        assert_eq!(decayed.quality, 63);
+        assert_eq!(decayed.accumulated_pressure, 0);
+        let state = controller.state.lock().unwrap();
+        assert_eq!(state.healthy_ack_streak, 0);
+        assert!(state.healthy_since.is_none());
+    }
+
+    #[test]
+    fn recovery_ack_target_scales_with_fps_and_is_bounded() {
+        assert_eq!(jpeg_quality_recovery_ack_target(Duration::from_secs(1)), 4);
+        assert_eq!(
+            jpeg_quality_recovery_ack_target(Duration::from_millis(500)),
+            6
+        );
+        assert_eq!(
+            jpeg_quality_recovery_ack_target(Duration::from_millis(125)),
+            24
+        );
+        assert_eq!(
+            jpeg_quality_recovery_ack_target(Duration::from_millis(1)),
+            24
+        );
+    }
+
+    #[test]
+    fn multiplicative_quality_decrease_respects_low_quality_and_floor_bounds() {
+        assert_eq!(jpeg_quality_decrease(100, 40), 90);
+        assert_eq!(jpeg_quality_decrease(40, 1), 36);
+        assert_eq!(jpeg_quality_decrease(42, 40), 40);
+        assert_eq!(jpeg_quality_decrease(40, 40), 40);
+    }
+
+    #[test]
+    fn fixed_quality_ignores_all_feedback_and_invalid_ranges_fail() {
+        let base = Instant::now();
+        assert!(JpegQualityController::new_at(0, 1, true, Duration::from_secs(1), base).is_err());
+        assert!(JpegQualityController::new_at(70, 71, true, Duration::from_secs(1), base).is_err());
+        let controller =
+            JpegQualityController::new_at(35, 35, false, Duration::from_secs(1), base).unwrap();
+        controller.observe_ack_at(
+            quality_ack(Duration::from_secs(10), u64::MAX, 2, 2, 35, 0),
+            base + Duration::from_secs(1),
+        );
+        let decision = controller.quality_before_encode_at(base + Duration::from_secs(10));
+        assert_eq!(decision.quality, 35);
+        assert_eq!(decision.adjustment, None);
     }
 
     #[test]
@@ -1703,6 +2406,8 @@ mod tests {
                 base + Duration::from_millis(1),
                 base + Duration::from_millis(2),
                 100,
+                70,
+                0,
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
@@ -1713,6 +2418,8 @@ mod tests {
                 base + Duration::from_millis(2),
                 base + Duration::from_millis(3),
                 200,
+                70,
+                0,
             )
             .unwrap();
         telemetry.record_outstanding(outstanding);
@@ -1761,8 +2468,8 @@ mod tests {
     fn closing_frame_credits_wakes_a_waiting_sender() {
         let credits = Arc::new(FrameCredits::new());
         let now = Instant::now();
-        credits.mark_sent(0, now, now, 100).unwrap();
-        credits.mark_sent(1, now, now, 100).unwrap();
+        credits.mark_sent(0, now, now, 100, 70, 0).unwrap();
+        credits.mark_sent(1, now, now, 100, 70, 0).unwrap();
         let running = Arc::new(AtomicBool::new(true));
         let waiting_credits = Arc::clone(&credits);
         let waiting_running = Arc::clone(&running);
@@ -1777,6 +2484,59 @@ mod tests {
     }
 
     #[test]
+    fn credit_feedback_is_visible_before_a_cumulative_ack_wakes_the_sender() {
+        let base = Instant::now();
+        let credits = Arc::new(FrameCredits::new());
+        credits.mark_sent(0, base, base, 100, 70, 0).unwrap();
+        credits
+            .mark_sent(1, base, base + Duration::from_millis(10), 100, 70, 0)
+            .unwrap();
+        let controller = Arc::new(
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap(),
+        );
+        controller.observe_ack_at(
+            quality_ack(Duration::from_millis(800), 100, 1, 1, 70, 0),
+            base + Duration::from_millis(100),
+        );
+        let seed = controller.quality_before_encode_at(base + Duration::from_millis(500));
+        assert_eq!((seed.quality, seed.accumulated_pressure), (70, 3));
+
+        let observed = Arc::new(AtomicBool::new(false));
+        let waiter_credits = Arc::clone(&credits);
+        let waiter_controller = Arc::clone(&controller);
+        let waiter_observed = Arc::clone(&observed);
+        let running = Arc::new(AtomicBool::new(true));
+        let waiter_running = Arc::clone(&running);
+        let waiter = thread::spawn(move || {
+            assert!(
+                waiter_credits
+                    .wait_for_credit(&waiter_running, Duration::from_secs(1))
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                waiter_observed.load(Ordering::Acquire),
+                "credit became visible before its quality observation"
+            );
+            waiter_controller.quality_before_encode_at(base + Duration::from_secs(1))
+        });
+
+        thread::sleep(Duration::from_millis(20));
+        let observer_controller = Arc::clone(&controller);
+        let observer_flag = Arc::clone(&observed);
+        let ack = credits
+            .acknowledge_at_with_observer(1, base + Duration::from_millis(900), move |ack| {
+                observer_controller.observe_ack_at(ack, base + Duration::from_millis(900));
+                observer_flag.store(true, Ordering::Release);
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack.retired, 2);
+        let decision = waiter.join().unwrap();
+        assert_eq!((decision.quality, decision.epoch), (63, 1));
+    }
+
+    #[test]
     fn display_credits_bound_wire_frames_and_keep_latest_sequence_continuous() {
         let mailbox = Arc::new(LatestMailbox::new());
         assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
@@ -1788,6 +2548,17 @@ mod tests {
         let sender_running = Arc::clone(&running);
         let sender_credits = Arc::clone(&credits);
         let sender_telemetry = Arc::clone(&telemetry);
+        let jpeg_quality = Arc::new(
+            JpegQualityController::new_at(
+                100,
+                100,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap(),
+        );
+        let sender_jpeg_quality = Arc::clone(&jpeg_quality);
         let writer = SessionWriter::new(
             DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
             [0x5a; 32],
@@ -1799,7 +2570,7 @@ mod tests {
                 &sender_running,
                 &sender_credits,
                 &sender_telemetry,
-                100,
+                &sender_jpeg_quality,
             )
         });
 
@@ -1964,6 +2735,17 @@ mod tests {
         let receiver_credits = Arc::clone(&credits);
         let telemetry = Arc::new(HostTelemetry::new());
         let receiver_telemetry = Arc::clone(&telemetry);
+        let jpeg_quality = Arc::new(
+            JpegQualityController::new_at(
+                70,
+                70,
+                false,
+                Duration::from_millis(100),
+                Instant::now(),
+            )
+            .unwrap(),
+        );
+        let receiver_jpeg_quality = Arc::clone(&jpeg_quality);
         let receiver = thread::spawn(move || {
             receive_input(
                 reader,
@@ -1976,6 +2758,7 @@ mod tests {
                 &receiver_stop,
                 &receiver_credits,
                 &receiver_telemetry,
+                &receiver_jpeg_quality,
             )
         });
 

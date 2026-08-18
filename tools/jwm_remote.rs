@@ -7,6 +7,8 @@ use jwm::remote::key::generate_key_file;
 use jwm::remote::x11_capture::CaptureSource;
 use std::path::PathBuf;
 
+const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "jwm-remote",
@@ -43,6 +45,18 @@ enum Command {
 
         #[arg(long, default_value = "70", value_parser = parse_quality)]
         jpeg_quality: u8,
+
+        /// Lowest quality used by ACK-driven adaptation (defaults to min(40, quality)).
+        #[arg(
+            long,
+            value_parser = parse_quality,
+            conflicts_with = "fixed_jpeg_quality"
+        )]
+        jpeg_quality_floor: Option<u8>,
+
+        /// Disable ACK-driven quality adaptation and always use --jpeg-quality.
+        #[arg(long)]
+        fixed_jpeg_quality: bool,
 
         /// Downscale wider frames; 0 keeps native width.
         #[arg(long, default_value = "1280", value_parser = parse_max_width)]
@@ -99,23 +113,30 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             display,
             fps,
             jpeg_quality,
+            jpeg_quality_floor,
+            fixed_jpeg_quality,
             max_width,
             capture_source,
             allow_lan,
             allow_input,
             once,
-        } => run_host(HostOptions {
-            listen,
-            key_file,
-            display,
-            fps,
-            jpeg_quality,
-            max_width,
-            capture_source,
-            allow_lan,
-            allow_input,
-            once,
-        }),
+        } => {
+            let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
+            run_host(HostOptions {
+                listen,
+                key_file,
+                display,
+                fps,
+                jpeg_quality,
+                jpeg_quality_floor,
+                fixed_jpeg_quality,
+                max_width,
+                capture_source,
+                allow_lan,
+                allow_input,
+                once,
+            })
+        }
         Command::Connect {
             address,
             key_file,
@@ -138,6 +159,16 @@ fn parse_fps(value: &str) -> Result<u16, String> {
 
 fn parse_quality(value: &str) -> Result<u8, String> {
     parse_range(value, 1, 100, "JPEG quality")
+}
+
+fn resolve_quality_floor(maximum: u8, explicit_floor: Option<u8>) -> Result<u8, String> {
+    let floor = explicit_floor.unwrap_or(maximum.min(DEFAULT_JPEG_QUALITY_FLOOR));
+    if floor > maximum {
+        return Err(format!(
+            "JPEG quality floor {floor} exceeds the configured maximum {maximum}"
+        ));
+    }
+    Ok(floor)
 }
 
 fn parse_max_width(value: &str) -> Result<u16, String> {
@@ -178,7 +209,27 @@ mod tests {
         assert_eq!(parse_fps("60"), Ok(60));
         assert!(parse_fps("0").is_err());
         assert!(parse_quality("101").is_err());
+        assert_eq!(resolve_quality_floor(70, None), Ok(40));
+        assert_eq!(resolve_quality_floor(25, None), Ok(25));
+        assert_eq!(resolve_quality_floor(70, Some(50)), Ok(50));
+        assert!(resolve_quality_floor(39, Some(40)).is_err());
         assert_eq!(parse_max_width("0"), Ok(0));
         assert!(parse_max_width("100").is_err());
+    }
+
+    #[test]
+    fn fixed_quality_conflicts_with_an_explicit_adaptive_floor() {
+        assert!(
+            Cli::try_parse_from([
+                "jwm-remote",
+                "host",
+                "--key-file",
+                "key",
+                "--fixed-jpeg-quality",
+                "--jpeg-quality-floor",
+                "40",
+            ])
+            .is_err()
+        );
     }
 }
