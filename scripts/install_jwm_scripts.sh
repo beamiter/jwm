@@ -59,10 +59,13 @@ ALL_BARS=(
     tauri_svelte_bar
     tauri_vue_bar
     tauri_yew_bar
+    winit_glow_bar
     winit_pixels_bar
     winit_softbuffer_bar
     winit_wgpu_bar
+    xcb_glow_bar
     xcb_wgpu_bar
+    x11rb_glow_bar
     x11rb_wgpu_bar
     x11rb_bar
     xcb_bar

@@ -21,8 +21,8 @@ and typed actions belong to `xbar_core`.
 | Consumers | Frontend-owned boundary | 0.4 core profile |
 |---|---|---|
 | `xcb_bar`, `x11rb_bar` | X connection/window, Cairo surface, epoll registration | Cairo facade, `BarPlacement`/`EwmhStrut`, pointer facade, notifier slot, all providers, managed transport |
-| `xcb_wgpu_bar`, `x11rb_wgpu_bar` | X window plus wgpu surface/upload | Cairo scene/render source, placement/strut, pointer facade, notifier slot, all providers, managed transport |
-| `winit_pixels_bar`, `winit_softbuffer_bar`, `winit_wgpu_bar` | winit lifecycle and pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
+| `xcb_glow_bar`, `x11rb_glow_bar`, `xcb_wgpu_bar`, `x11rb_wgpu_bar` | X window plus glow/wgpu surface/upload | Cairo scene/render source, placement/strut, pointer facade, notifier slot, all providers, managed transport |
+| `winit_glow_bar`, `winit_pixels_bar`, `winit_softbuffer_bar`, `winit_wgpu_bar` | winit lifecycle and glow/pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
 | `tao_glow_bar`, `tao_pixels_bar`, `tao_softbuffer_bar`, `tao_wgpu_bar` | tao lifecycle and glow/pixels/softbuffer/wgpu presentation | Cairo/pointer facade, placement, owned wake forwarding, all providers, managed transport |
 
 These consumers translate only their native event/window types. Core owns

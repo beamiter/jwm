@@ -1,0 +1,30 @@
+[package]
+name = "x11rb_glow_bar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+x11rb = { version = "0.13.2", features = ["all-extensions", "allow-unsafe-code", "dl-libxcb"] }
+anyhow = "1.0.103"
+xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
+    "clock-chrono",
+    "config-toml",
+    "glass",
+    "logging-flexi",
+    "provider-alsa",
+    "provider-battery-sysfs",
+    "provider-brightnessctl",
+    "provider-network-sysfs",
+    "provider-system",
+    "render-cairo",
+    "runtime-linux",
+    "transport-shared",
+] }
+xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
+bytemuck = "1.25.2"
+glow = "0.18.0"
+glutin = "0.32.3"
+libc = "0.2.186"
+log = "0.4.33"
+pango = "0.22.8"
+raw-window-handle = "0.6"
