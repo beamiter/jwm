@@ -41,12 +41,47 @@ pub const MAX_PAYLOAD_LEN: usize = 32 * 1024 * 1024;
 const RECORD_HEADER_LEN: usize = 1 + 8 + 4;
 const CLIENT_HANDSHAKE_LEN: usize = NONCE_LEN + MAC_LEN;
 const SHA256_BLOCK_LEN: usize = 64;
+const RETAINED_PAYLOAD_SOFT_LIMIT: usize = 8 * 1024 * 1024;
+const UNDERUSED_PAYLOADS_BEFORE_SHRINK: u8 = 32;
 
 const CLIENT_PROOF_DOMAIN: &[u8] = b"jwm-remote/v1/client-proof";
 const SERVER_PROOF_DOMAIN: &[u8] = b"jwm-remote/v1/server-proof";
 const C2S_KEY_DOMAIN: &[u8] = b"jwm-remote/v1/key/client-to-server";
 const S2C_KEY_DOMAIN: &[u8] = b"jwm-remote/v1/key/server-to-client";
 const RECORD_DOMAIN: &[u8] = b"jwm-remote/v1/record";
+
+/// Applies conservative hysteresis to long-lived reusable record buffers.
+///
+/// Stable frame sizes retain their allocation indefinitely. After an extreme
+/// frame, thirty-two consecutive payloads using at most a quarter of that
+/// capacity allow the buffer to shrink back toward an 8 MiB soft ceiling.
+#[derive(Default)]
+pub(crate) struct PayloadBufferRetention {
+    underused_payloads: u8,
+}
+
+impl PayloadBufferRetention {
+    pub(crate) fn observe(&mut self, payload: &mut Vec<u8>) {
+        let capacity = payload.capacity();
+        if !self.should_shrink(payload.len(), capacity) {
+            return;
+        }
+        payload.shrink_to(payload.len().max(RETAINED_PAYLOAD_SOFT_LIMIT));
+    }
+
+    fn should_shrink(&mut self, len: usize, capacity: usize) -> bool {
+        if capacity <= RETAINED_PAYLOAD_SOFT_LIMIT || len > capacity / 4 {
+            self.underused_payloads = 0;
+            return false;
+        }
+        self.underused_payloads = self.underused_payloads.saturating_add(1);
+        if self.underused_payloads < UNDERUSED_PAYLOADS_BEFORE_SHRINK {
+            return false;
+        }
+        self.underused_payloads = 0;
+        true
+    }
+}
 
 /// Application-level message type carried by an authenticated record.
 ///
@@ -231,54 +266,80 @@ impl<R> SessionReader<R> {
 }
 
 impl<R: Read> SessionReader<R> {
+    /// Read and authenticate the next record into a reusable payload buffer.
+    ///
+    /// The declared payload length is validated before resizing `payload`.
+    /// Every error leaves its visible length at zero, so unauthenticated or
+    /// truncated bytes are never returned to the caller. As with every
+    /// protocol error, callers must close the connection rather than retry.
+    pub fn read_message_into(
+        &mut self,
+        payload: &mut Vec<u8>,
+    ) -> Result<MessageKind, ProtocolError> {
+        let result = (|| {
+            if self.expected_sequence == u64::MAX {
+                return Err(ProtocolError::SequenceExhausted);
+            }
+
+            let mut header = [0_u8; RECORD_HEADER_LEN];
+            self.inner.read_exact(&mut header)?;
+
+            let received_sequence = u64::from_be_bytes(
+                header[1..9]
+                    .try_into()
+                    .expect("record sequence field has a fixed length"),
+            );
+            if received_sequence != self.expected_sequence {
+                return Err(ProtocolError::SequenceMismatch {
+                    expected: self.expected_sequence,
+                    received: received_sequence,
+                });
+            }
+
+            let payload_len = u32::from_be_bytes(
+                header[9..13]
+                    .try_into()
+                    .expect("record payload length field has a fixed length"),
+            ) as usize;
+            if payload_len > MAX_PAYLOAD_LEN {
+                return Err(ProtocolError::PayloadTooLarge {
+                    len: payload_len,
+                    max: MAX_PAYLOAD_LEN,
+                });
+            }
+
+            payload.resize(payload_len, 0);
+            self.inner.read_exact(payload)?;
+
+            let mut received_mac = [0_u8; MAC_LEN];
+            self.inner.read_exact(&mut received_mac)?;
+            let expected_mac = record_mac(&self.key, &header, payload);
+            if !constant_time_eq(&received_mac, &expected_mac) {
+                return Err(ProtocolError::AuthenticationFailed);
+            }
+
+            // Message kind is authenticated too. Do not let an untrusted kind
+            // byte short-circuit consumption of the complete record.
+            let kind = MessageKind::try_from(header[0])?;
+            self.expected_sequence += 1;
+            Ok(kind)
+        })();
+        if result.is_err() {
+            payload.clear();
+            if payload.capacity() > RETAINED_PAYLOAD_SOFT_LIMIT {
+                *payload = Vec::new();
+            }
+        }
+        result
+    }
+
     /// Read and authenticate the next record.
     ///
     /// The declared payload length is checked before allocating its buffer.
     /// Sequence numbers must begin at zero and increase by exactly one.
     pub fn read_message(&mut self) -> Result<(MessageKind, Vec<u8>), ProtocolError> {
-        if self.expected_sequence == u64::MAX {
-            return Err(ProtocolError::SequenceExhausted);
-        }
-
-        let mut header = [0_u8; RECORD_HEADER_LEN];
-        self.inner.read_exact(&mut header)?;
-
-        let kind = MessageKind::try_from(header[0])?;
-        let received_sequence = u64::from_be_bytes(
-            header[1..9]
-                .try_into()
-                .expect("record sequence field has a fixed length"),
-        );
-        if received_sequence != self.expected_sequence {
-            return Err(ProtocolError::SequenceMismatch {
-                expected: self.expected_sequence,
-                received: received_sequence,
-            });
-        }
-
-        let payload_len = u32::from_be_bytes(
-            header[9..13]
-                .try_into()
-                .expect("record payload length field has a fixed length"),
-        ) as usize;
-        if payload_len > MAX_PAYLOAD_LEN {
-            return Err(ProtocolError::PayloadTooLarge {
-                len: payload_len,
-                max: MAX_PAYLOAD_LEN,
-            });
-        }
-
-        let mut payload = vec![0_u8; payload_len];
-        self.inner.read_exact(&mut payload)?;
-
-        let mut received_mac = [0_u8; MAC_LEN];
-        self.inner.read_exact(&mut received_mac)?;
-        let expected_mac = record_mac(&self.key, &header, &payload);
-        if !constant_time_eq(&received_mac, &expected_mac) {
-            return Err(ProtocolError::AuthenticationFailed);
-        }
-
-        self.expected_sequence += 1;
+        let mut payload = Vec::new();
+        let kind = self.read_message_into(&mut payload)?;
         Ok((kind, payload))
     }
 }
@@ -644,10 +705,48 @@ mod tests {
         record[RECORD_HEADER_LEN] ^= 0x80;
 
         let mut reader = SessionReader::new(Cursor::new(record), key);
+        let mut payload = b"previous authenticated payload".to_vec();
         assert!(matches!(
-            reader.read_message(),
+            reader.read_message_into(&mut payload),
             Err(ProtocolError::AuthenticationFailed)
         ));
+        assert!(payload.is_empty());
+        assert_eq!(reader.expected_sequence(), 0);
+    }
+
+    #[test]
+    fn authenticated_reads_reuse_the_callers_payload_allocation() {
+        let key = [0x16; MAC_LEN];
+        let body = vec![0x5a; 4096];
+        let mut wire = encoded_record(key, 0, MessageKind::Frame, &body);
+        wire.extend_from_slice(&encoded_record(key, 1, MessageKind::Frame, &body));
+        wire.extend_from_slice(&encoded_record(key, 2, MessageKind::Close, b"done"));
+        let mut reader = SessionReader::new(Cursor::new(wire), key);
+        let mut payload = Vec::new();
+
+        assert_eq!(
+            reader.read_message_into(&mut payload).unwrap(),
+            MessageKind::Frame
+        );
+        assert_eq!(payload, body);
+        let allocation = payload.as_ptr();
+        let capacity = payload.capacity();
+
+        assert_eq!(
+            reader.read_message_into(&mut payload).unwrap(),
+            MessageKind::Frame
+        );
+        assert_eq!(payload, body);
+        assert_eq!(payload.as_ptr(), allocation);
+        assert_eq!(payload.capacity(), capacity);
+        assert_eq!(
+            reader.read_message_into(&mut payload).unwrap(),
+            MessageKind::Close
+        );
+        assert_eq!(payload, b"done");
+        assert_eq!(payload.as_ptr(), allocation);
+        assert_eq!(payload.capacity(), capacity);
+        assert_eq!(reader.expected_sequence(), 3);
     }
 
     #[test]
@@ -685,13 +784,26 @@ mod tests {
         header[9..13].copy_from_slice(&((MAX_PAYLOAD_LEN as u32) + 1).to_be_bytes());
 
         let mut reader = SessionReader::new(Cursor::new(header), [0x13; MAC_LEN]);
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(b"old");
+        let capacity = payload.capacity();
         assert!(matches!(
-            reader.read_message(),
+            reader.read_message_into(&mut payload),
             Err(ProtocolError::PayloadTooLarge {
                 len,
                 max: MAX_PAYLOAD_LEN
             }) if len == MAX_PAYLOAD_LEN + 1
         ));
+        assert!(payload.is_empty());
+        assert_eq!(payload.capacity(), capacity);
+        assert_eq!(reader.expected_sequence(), 0);
+
+        let mut oversized_retained = Vec::with_capacity(RETAINED_PAYLOAD_SOFT_LIMIT + 1);
+        oversized_retained.push(1);
+        let mut reader = SessionReader::new(Cursor::new(header), [0x13; MAC_LEN]);
+        assert!(reader.read_message_into(&mut oversized_retained).is_err());
+        assert!(oversized_retained.is_empty());
+        assert_eq!(oversized_retained.capacity(), 0);
     }
 
     #[test]
@@ -701,12 +813,58 @@ mod tests {
         record.pop();
 
         let mut reader = SessionReader::new(Cursor::new(record), key);
-        match reader.read_message() {
+        let mut payload = b"previous".to_vec();
+        match reader.read_message_into(&mut payload) {
             Err(ProtocolError::Io(error)) => {
                 assert_eq!(error.kind(), ErrorKind::UnexpectedEof);
             }
             other => panic!("expected truncated-record I/O error, got {other:?}"),
         }
+        assert!(payload.is_empty());
+        assert_eq!(reader.expected_sequence(), 0);
+    }
+
+    #[test]
+    fn truncated_payload_is_cleared_and_does_not_advance_sequence() {
+        let key = [0x17; MAC_LEN];
+        let mut record = encoded_record(key, 0, MessageKind::Frame, b"complete");
+        record.truncate(RECORD_HEADER_LEN + 3);
+        let mut reader = SessionReader::new(Cursor::new(record), key);
+        let mut payload = b"old".to_vec();
+
+        assert!(matches!(
+            reader.read_message_into(&mut payload),
+            Err(ProtocolError::Io(ref error)) if error.kind() == ErrorKind::UnexpectedEof
+        ));
+        assert!(payload.is_empty());
+        assert_eq!(reader.expected_sequence(), 0);
+    }
+
+    #[test]
+    fn payload_capacity_shrinks_only_after_sustained_underuse() {
+        let mut payload = Vec::with_capacity(RETAINED_PAYLOAD_SOFT_LIMIT * 2);
+        payload.push(1);
+        let original_capacity = payload.capacity();
+        let mut retention = PayloadBufferRetention::default();
+
+        for expected in 1..UNDERUSED_PAYLOADS_BEFORE_SHRINK {
+            assert!(!retention.should_shrink(1, original_capacity));
+            assert_eq!(retention.underused_payloads, expected);
+        }
+        assert!(retention.should_shrink(1, original_capacity));
+        assert_eq!(retention.underused_payloads, 0);
+
+        retention.observe(&mut payload);
+        assert_eq!(retention.underused_payloads, 1);
+        for _ in 1..UNDERUSED_PAYLOADS_BEFORE_SHRINK {
+            retention.observe(&mut payload);
+        }
+        assert_eq!(retention.underused_payloads, 0);
+        assert!(payload.capacity() < original_capacity);
+
+        payload.resize(payload.capacity() / 2, 0);
+        retention.observe(&mut payload);
+        assert_eq!(retention.underused_payloads, 0);
     }
 
     #[test]
@@ -717,14 +875,35 @@ mod tests {
 
     #[test]
     fn unknown_message_kind_is_a_protocol_error() {
+        let key = [0x15; MAC_LEN];
         let mut header = [0_u8; RECORD_HEADER_LEN];
         header[0] = 0xff;
+        let mac = record_mac(&key, &header, &[]);
+        let mut record = header.to_vec();
+        record.extend_from_slice(&mac);
 
-        let mut reader = SessionReader::new(Cursor::new(header), [0x15; MAC_LEN]);
+        let mut reader = SessionReader::new(Cursor::new(record), key);
         assert!(matches!(
             reader.read_message(),
             Err(ProtocolError::UnknownMessageKind(0xff))
         ));
+        assert_eq!(reader.expected_sequence(), 0);
+    }
+
+    #[test]
+    fn unauthenticated_unknown_kind_is_not_parsed_or_exposed() {
+        let key = [0x18; MAC_LEN];
+        let mut record = vec![0_u8; RECORD_HEADER_LEN + MAC_LEN];
+        record[0] = 0xff;
+        let mut reader = SessionReader::new(Cursor::new(record), key);
+        let mut payload = b"old".to_vec();
+
+        assert!(matches!(
+            reader.read_message_into(&mut payload),
+            Err(ProtocolError::AuthenticationFailed)
+        ));
+        assert!(payload.is_empty());
+        assert_eq!(reader.expected_sequence(), 0);
     }
 
     #[test]

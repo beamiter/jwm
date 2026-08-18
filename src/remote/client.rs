@@ -5,7 +5,9 @@ use super::deadline::TcpStreamDeadline;
 use super::frame::{DecodedFrame, decode_frame};
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, encode_frame_ack, encode_input};
-use super::protocol::{MessageKind, SessionReader, SessionWriter, client_handshake};
+use super::protocol::{
+    MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
+};
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
@@ -83,7 +85,10 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     let control = writer.get_ref().try_clone()?;
     let receiver = thread::Builder::new()
         .name("jwm-remote-video".into())
-        .spawn(move || receive_frames(reader, receive_state, last_sequence))?;
+        // Move the authenticated first-frame allocation into the receiver
+        // thread. It remains thread-local while avoiding a second large
+        // allocation for the next frame.
+        .spawn(move || receive_frames(reader, receive_state, last_sequence, payload))?;
 
     let pointer_enabled = hello.pointer_enabled && !options.view_only;
     let keyboard_enabled = hello.keyboard_enabled && !options.view_only;
@@ -265,9 +270,11 @@ fn receive_frames(
     mut reader: SessionReader<TcpStream>,
     state: Arc<ReceiveState>,
     mut last_sequence: u64,
+    mut payload: Vec<u8>,
 ) {
+    let mut payload_retention = PayloadBufferRetention::default();
     let result: RemoteResult<()> = (|| loop {
-        let (kind, payload) = reader.read_message()?;
+        let kind = reader.read_message_into(&mut payload)?;
         match kind {
             MessageKind::Frame => {
                 let frame = decode_frame(&payload)?;
@@ -300,6 +307,7 @@ fn receive_frames(
                 return Err(invalid_data("host sent an unexpected heartbeat").into());
             }
         }
+        payload_retention.observe(&mut payload);
     })();
 
     if let Err(error) = result

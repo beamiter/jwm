@@ -63,6 +63,11 @@ monorepo use independent Semantic Versions.
   retains a fully presented backing pixmap for Expose events; nonstandard
   visuals keep the generic/core path, and resize bursts allocate only their
   final size.
+- Remote JPEG encoding and authenticated record reads now reuse bounded
+  per-thread payload buffers. JPEG bytes are written directly behind the frame
+  header without an intermediate allocation, receive buffers are exposed only
+  after their MAC succeeds, and sustained use of much smaller frames releases
+  capacity retained by an earlier extreme frame.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,

@@ -42,6 +42,10 @@ The current application protocol is version 2. Update `jwm-remote` on both
 machines together; negotiation rejects older peers before screen or input data
 is exchanged. Version 2 acknowledges only frames successfully drawn by the
 viewer, which bounds host work and end-to-end video backlog.
+Authenticated record storage is reused only inside its owning network thread.
+The receiver validates the declared 32 MiB limit before growing that storage
+and clears it on every truncated, malformed, or unauthenticated record; message
+contents and kinds reach callers only after the MAC succeeds.
 
 The LAN MVP authenticates traffic and rejects modification/replay, but **does
 not encrypt screen images or input**. Use it only on a trusted, isolated LAN.
@@ -167,6 +171,12 @@ pipeline with one queued latest frame. The host permits at most two frames
 beyond the latest one actually drawn by the viewer; while that credit is
 exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
+The sender writes each JPEG directly behind its frame header in one reusable
+allocation while hard-bounding the total payload length, and the viewer's
+receiver likewise reuses one authenticated record allocation. After 32
+substantially smaller payloads, an allocation retained by an exceptional frame
+shrinks toward an 8 MiB ceiling; normal steady frame sizes do not churn
+allocations.
 The X11 viewer reuses its native upload allocation for unchanged display
 geometry. On the usual depth-24, 32-bits-per-pixel little-endian TrueColor
 visual it writes decoded RGB directly into the verified native layout and uses

@@ -2,10 +2,13 @@
 
 use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
-use super::frame::encode_frame;
+use super::frame::encode_frame_into;
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input};
-use super::protocol::{MessageKind, ProtocolError, SessionReader, SessionWriter, server_handshake};
+use super::protocol::{
+    MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
+    server_handshake,
+};
 use super::x11_capture::{CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -883,6 +886,8 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
     let mut report_encode = Duration::ZERO;
     let mut report_write = Duration::ZERO;
     let mut sequence = 0_u64;
+    let mut payload = Vec::new();
+    let mut payload_retention = PayloadBufferRetention::default();
 
     while running.load(Ordering::Acquire) {
         let Some(ack_wait) = credits.wait_for_credit(running, FRAME_ACK_TIMEOUT)? else {
@@ -898,7 +903,7 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
         report_queue += pending.captured_at.elapsed();
 
         let encode_started = Instant::now();
-        let payload = encode_frame(sequence, &pending.frame, jpeg_quality)?;
+        encode_frame_into(&mut payload, sequence, &pending.frame, jpeg_quality)?;
         report_encode += encode_started.elapsed();
         // Publish the application sequence before the bytes reach the peer so
         // an immediate cumulative ACK can never race ahead of host state.
@@ -935,6 +940,7 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
             report_encode = Duration::ZERO;
             report_write = Duration::ZERO;
         }
+        payload_retention.observe(&mut payload);
     }
     Ok(())
 }
@@ -979,13 +985,14 @@ fn receive_input(
     first_stop: &FirstStop,
     credits: &FrameCredits,
 ) -> RemoteResult<()> {
+    let mut payload = Vec::new();
     let session_result = (|| -> RemoteResult<()> {
         reader
             .get_ref()
             .set_read_timeout(Some(initial_activity_timeout))?;
         let mut awaiting_first_activity = true;
         while running.load(Ordering::Acquire) {
-            let (kind, payload) = reader.read_message()?;
+            let kind = reader.read_message_into(&mut payload)?;
             if awaiting_first_activity {
                 reader
                     .get_ref()
