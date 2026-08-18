@@ -1,36 +1,40 @@
 //! Small X11 viewer used by the remote-control client.
 //!
-//! The viewer intentionally uses only core X11.  That keeps it usable under
-//! JWM's x11rb and xcb backends without bringing a GUI toolkit into the
-//! remote-control process.
+//! The viewer uses core X11 plus an optional MIT-SHM upload fast path. That
+//! keeps it usable under JWM's x11rb and xcb backends without bringing a GUI
+//! toolkit into the remote-control process.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
+use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 
 use image::RgbImage;
 use x11rb::CURRENT_TIME;
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection};
 use x11rb::errors::ReplyError;
 use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Format,
-    Gcontext, GrabMode, GrabStatus, ImageOrder as X11ImageOrder, Mapping, NotifyMode, Pixmap,
-    PropMode, Rectangle, Screen, Setup, VisualClass, Visualtype, Window, WindowClass,
+    Gcontext, GrabMode, GrabStatus, ImageFormat, ImageOrder as X11ImageOrder, Mapping, NotifyMode,
+    Pixmap, PropMode, Rectangle, Screen, Setup, VisualClass, Visualtype, Window, WindowClass,
 };
-use x11rb::protocol::{ErrorKind, Event};
+use x11rb::protocol::{ErrorKind, Event, shm};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
-use x11rb::x11_utils::X11Error;
+use x11rb::x11_utils::{TryParseFd, X11Error};
 
-use super::RemoteResult;
 use super::frame::DecodedFrame;
+use super::{RemoteError, RemoteResult};
 
 const TITLE: &[u8] = b"JWM Remote";
 const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
 const XK_F12: u32 = 0xffc9;
 const KEY_RELEASE_DEFER: Duration = Duration::from_millis(8);
+const SHM_FD_VERSION: (u16, u16) = (1, 2);
 
 /// One local viewer operation for the remote-control client to send upstream.
 ///
@@ -96,6 +100,7 @@ pub struct Viewer {
     pixel_layout: PixelLayout,
     native_pixel_writer: NativePixelWriter,
     native_image: Option<XImage<'static>>,
+    shm_upload: ShmUpload,
     width: u16,
     height: u16,
     backing_valid: bool,
@@ -107,6 +112,7 @@ pub struct Viewer {
     f12_keycodes: Vec<u8>,
     held_keycodes: HashSet<u8>,
     pending_key_release: Option<PendingKeyRelease>,
+    deferred_events: VecDeque<Event>,
     last_frame: Option<StoredFrame>,
     closed: bool,
     close_reported: bool,
@@ -157,6 +163,14 @@ impl Viewer {
                 PixelLayout::from_visual_type(visual)?,
                 select_native_pixel_writer(conn.setup(), depth, visual),
             )
+        };
+        // MIT-SHM requires QueryVersion to complete before any other request
+        // from the extension. Segment allocation remains lazy until a frame is
+        // actually uploaded.
+        let shm_upload = if native_pixel_writer == NativePixelWriter::Bgrx32 {
+            ShmUpload::connect(&conn, root_depth)
+        } else {
+            ShmUpload::Disabled
         };
 
         let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
@@ -257,6 +271,7 @@ impl Viewer {
             pixel_layout,
             native_pixel_writer,
             native_image: None,
+            shm_upload,
             width: initial_width,
             height: initial_height,
             backing_valid: false,
@@ -268,6 +283,7 @@ impl Viewer {
             f12_keycodes,
             held_keycodes: HashSet::new(),
             pending_key_release: None,
+            deferred_events: VecDeque::new(),
             last_frame: None,
             closed: false,
             close_reported: false,
@@ -288,7 +304,14 @@ impl Viewer {
         let mut redraw = false;
         let backing_dimensions = (self.width, self.height);
 
-        while let Some(event) = self.conn.poll_for_event()? {
+        loop {
+            let event = if let Some(event) = self.deferred_events.pop_front() {
+                event
+            } else if let Some(event) = self.conn.poll_for_event()? {
+                event
+            } else {
+                break;
+            };
             if let Event::KeyPress(key) = &event
                 && self.pending_key_release.is_some_and(|release| {
                     release.keycode == key.detail && release.time == key.time
@@ -690,21 +713,28 @@ impl Viewer {
                 height: self.height,
             }],
         )?;
-        let image_cookies = if let Some((dst_x, dst_y)) = upload {
-            self.native_image
-                .as_ref()
-                .ok_or_else(|| invalid_data("native X11 image buffer was not allocated"))?
-                .put(&self.conn, self.backing, self.gc, dst_x, dst_y)?
-        } else {
-            Vec::new()
-        };
-        // Populate the retained pixmap completely before presenting it. If any
-        // chunk fails, no CopyArea has been queued and the previous window
-        // contents remain visible rather than a partially uploaded frame.
+        // Consume the fill's checked result before waiting for an SHM
+        // Completion. Otherwise wait_for_event could dequeue this request's
+        // X11 error and turn it into an unrelated deferred event.
         fill.check()?;
-        for cookie in image_cookies {
-            cookie.check()?;
+        if let Some((dst_x, dst_y)) = upload {
+            let image = self
+                .native_image
+                .as_ref()
+                .ok_or_else(|| invalid_data("native X11 image buffer was not allocated"))?;
+            self.shm_upload.upload_or_core(
+                &self.conn,
+                image,
+                self.backing,
+                self.gc,
+                dst_x,
+                dst_y,
+                &mut self.deferred_events,
+            )?;
         }
+        // Populate the retained pixmap completely before presenting it. If any
+        // fill/upload fails, no CopyArea has been queued and the previous
+        // window contents remain visible rather than a partially uploaded frame.
         self.conn.flush()?;
         self.backing_valid = true;
         Ok(())
@@ -754,6 +784,7 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
+        self.shm_upload.release(&self.conn);
         if self.grabbed {
             let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
             let _ = self.conn.ungrab_pointer(CURRENT_TIME);
@@ -761,6 +792,519 @@ impl Drop for Viewer {
         let _ = self.conn.free_cursor(self.blank_cursor);
         let _ = self.conn.flush();
     }
+}
+
+enum ShmUpload {
+    Disabled,
+    Enabled(EnabledShmUpload),
+}
+
+impl ShmUpload {
+    fn connect(conn: &RustConnection, depth: u8) -> Self {
+        match Self::try_connect(conn, depth) {
+            Ok(Some(upload)) => Self::Enabled(upload),
+            Ok(None) => Self::Disabled,
+            Err(error) => {
+                eprintln!(
+                    "jwm-remote: MIT-SHM FD upload unavailable ({error}); using core PutImage"
+                );
+                Self::Disabled
+            }
+        }
+    }
+
+    fn try_connect(conn: &RustConnection, depth: u8) -> RemoteResult<Option<EnabledShmUpload>> {
+        let Some(extension) = conn.extension_information(shm::X11_EXTENSION_NAME)? else {
+            eprintln!("jwm-remote: MIT-SHM unavailable for upload; using core PutImage");
+            return Ok(None);
+        };
+
+        // The protocol requires this reply before any other MIT-SHM request.
+        let version = shm::query_version(conn)?.reply()?;
+        if !supports_shm_fd_version(version.major_version, version.minor_version) {
+            eprintln!(
+                "jwm-remote: MIT-SHM {}.{} lacks 1.2 FD segments for upload; using core PutImage",
+                version.major_version, version.minor_version
+            );
+            return Ok(None);
+        }
+        let format = conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == depth)
+            .copied()
+            .ok_or_else(|| invalid_data(format!("X11 has no pixmap format for depth {depth}")))?;
+        // Validate both protocol enums and the exact native allocation formula
+        // before announcing SHM as available.
+        native_buffer_size(1, 1, format)?;
+        let image_byte_order = conn.setup().image_byte_order.try_into()?;
+        Ok(Some(EnabledShmUpload {
+            format,
+            image_byte_order,
+            version: (version.major_version, version.minor_version),
+            major_opcode: extension.major_opcode,
+            segment: None,
+            reported_active: false,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upload_or_core(
+        &mut self,
+        conn: &RustConnection,
+        image: &XImage<'_>,
+        drawable: Pixmap,
+        gc: Gcontext,
+        dst_x: i16,
+        dst_y: i16,
+        deferred_events: &mut VecDeque<Event>,
+    ) -> RemoteResult<()> {
+        let shm_attempt = match self {
+            Self::Disabled => None,
+            Self::Enabled(upload) => {
+                Some(upload.upload(conn, image, drawable, gc, dst_x, dst_y, deferred_events))
+            }
+        };
+        match resolve_upload(shm_attempt, || {
+            core_upload(conn, image, drawable, gc, dst_x, dst_y)
+        }) {
+            UploadOutcome::Uploaded => Ok(()),
+            UploadOutcome::CoreFallback { shm_error } => {
+                self.disable(conn);
+                eprintln!(
+                    "jwm-remote: MIT-SHM FD upload stopped ({shm_error}); using core PutImage"
+                );
+                Ok(())
+            }
+            UploadOutcome::Error(error) => Err(error),
+        }
+    }
+
+    fn disable(&mut self, conn: &RustConnection) {
+        if let Self::Enabled(mut upload) = std::mem::replace(self, Self::Disabled) {
+            upload.release(conn);
+        }
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        self.disable(conn);
+    }
+}
+
+struct EnabledShmUpload {
+    format: Format,
+    image_byte_order: ImageOrder,
+    version: (u16, u16),
+    major_opcode: u8,
+    segment: Option<ShmSegment>,
+    reported_active: bool,
+}
+
+impl EnabledShmUpload {
+    #[allow(clippy::too_many_arguments)]
+    fn upload(
+        &mut self,
+        conn: &RustConnection,
+        image: &XImage<'_>,
+        drawable: Pixmap,
+        gc: Gcontext,
+        dst_x: i16,
+        dst_y: i16,
+        deferred_events: &mut VecDeque<Event>,
+    ) -> ShmUploadAttempt<RemoteError> {
+        let image_size = match validate_native_upload(image, self.format, self.image_byte_order) {
+            Ok(size) => size,
+            Err(error) => return ShmUploadAttempt::Recoverable(error),
+        };
+        if let Err(error) = self.ensure_capacity(conn, image_size) {
+            return ShmUploadAttempt::Recoverable(error);
+        }
+
+        let (segment_id, capacity) = {
+            let Some(segment) = self.segment.as_mut() else {
+                return ShmUploadAttempt::Recoverable(
+                    invalid_data("MIT-SHM upload segment was not created").into(),
+                );
+            };
+            if let Err(error) = segment.mapping.copy_from(image.data()) {
+                return ShmUploadAttempt::Recoverable(error.into());
+            }
+            (segment.id, segment.mapping.len())
+        };
+
+        let cookie = match shm::put_image(
+            conn,
+            drawable,
+            gc,
+            image.width(),
+            image.height(),
+            0,
+            0,
+            image.width(),
+            image.height(),
+            dst_x,
+            dst_y,
+            image.depth(),
+            u8::from(ImageFormat::Z_PIXMAP),
+            true,
+            segment_id,
+            0,
+        ) {
+            Ok(cookie) => cookie,
+            // A transport failure does not establish whether the request is
+            // outstanding. Do not overwrite or detach the mapping and do not
+            // attempt another upload on this connection.
+            Err(error) => return ShmUploadAttempt::Fatal(error.into()),
+        };
+        let completion = ShmCompletionKey {
+            sequence: cookie.sequence_number() as u16,
+            drawable,
+            minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
+            major_event: self.major_opcode,
+            segment: segment_id,
+            offset: 0,
+        };
+        match cookie.check() {
+            Ok(()) => {}
+            // A server rejection means it never consumed the shared pixels,
+            // so core PutImage may safely retry this frame.
+            Err(ReplyError::X11Error(error)) => {
+                return ShmUploadAttempt::Recoverable(ReplyError::X11Error(error).into());
+            }
+            // Connection failure leaves completion/consumption unknowable.
+            Err(ReplyError::ConnectionError(error)) => {
+                return ShmUploadAttempt::Fatal(error.into());
+            }
+        }
+        if let Err(error) = wait_for_shm_completion(conn, completion, deferred_events) {
+            return ShmUploadAttempt::Fatal(error.into());
+        }
+
+        if !self.reported_active {
+            eprintln!(
+                "jwm-remote: MIT-SHM {}.{} FD upload active ({capacity} bytes)",
+                self.version.0, self.version.1
+            );
+            self.reported_active = true;
+        }
+        ShmUploadAttempt::Uploaded
+    }
+
+    fn ensure_capacity(&mut self, conn: &RustConnection, required: usize) -> RemoteResult<()> {
+        let current_capacity = self.segment.as_ref().map(|segment| segment.mapping.len());
+        if !shm_needs_growth(current_capacity, required) {
+            return Ok(());
+        }
+
+        // Construct and map the replacement before releasing the old segment.
+        // Every previous PutImage completion was consumed before this point.
+        let replacement = ShmSegment::create(conn, required)?;
+        let old = self.segment.replace(replacement);
+        if let Some(old) = old {
+            old.release(conn);
+        }
+        Ok(())
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        if let Some(segment) = self.segment.take() {
+            segment.release(conn);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShmCompletionKey {
+    sequence: u16,
+    drawable: Pixmap,
+    minor_event: u16,
+    major_event: u8,
+    segment: shm::Seg,
+    offset: u32,
+}
+
+fn is_matching_shm_completion(event: &shm::CompletionEvent, key: ShmCompletionKey) -> bool {
+    event.sequence == key.sequence
+        && event.drawable == key.drawable
+        && event.minor_event == key.minor_event
+        && event.major_event == key.major_event
+        && event.shmseg == key.segment
+        && event.offset == key.offset
+}
+
+fn wait_for_shm_completion(
+    conn: &RustConnection,
+    key: ShmCompletionKey,
+    deferred_events: &mut VecDeque<Event>,
+) -> Result<(), x11rb::errors::ConnectionError> {
+    loop {
+        let event = conn.wait_for_event()?;
+        if let Event::ShmCompletion(completion) = &event
+            && is_matching_shm_completion(completion, key)
+        {
+            return Ok(());
+        }
+        // Drawing is synchronous from the caller's perspective, but window,
+        // input, and close events can arrive while the server finishes reading
+        // the mapping. Preserve their original order for the next poll_events.
+        deferred_events.push_back(event);
+    }
+}
+
+struct ShmSegment {
+    id: shm::Seg,
+    mapping: MappedRegion,
+    // Kept until after munmap so descriptor/mapping teardown order is explicit.
+    _file: File,
+}
+
+impl ShmSegment {
+    fn create(conn: &RustConnection, capacity: usize) -> RemoteResult<Self> {
+        let size = u32::try_from(capacity)
+            .map_err(|_| invalid_data("MIT-SHM upload exceeds the protocol size limit"))?;
+        if size == 0 {
+            return Err(invalid_data("MIT-SHM upload buffer is empty").into());
+        }
+        let id = conn.generate_id()?;
+        // The client writes upload pixels; the server only needs read access.
+        let cookie = shm::create_segment(conn, id, size, true)?;
+        // Follow the validated capture-side lifecycle: a raw X11/transport
+        // error does not prove the server created the segment. Once a success
+        // reply exists, every parse/FD/mmap failure must detach the live XID.
+        let (buffer, mut fds) = cookie.raw_reply()?;
+        let reply = match shm::CreateSegmentReply::try_parse_fd(buffer.as_ref(), &mut fds) {
+            Ok((reply, _)) => reply,
+            Err(error) => {
+                detach_shm_segment(conn, id);
+                return Err(error.into());
+            }
+        };
+        let result = (|| -> RemoteResult<Self> {
+            if reply.nfd != 1 {
+                return Err(invalid_data(format!(
+                    "MIT-SHM CreateSegment returned {} file descriptors",
+                    reply.nfd
+                ))
+                .into());
+            }
+            let file = File::from(reply.shm_fd);
+            let file_size = file.metadata()?.len();
+            if file_size < u64::from(size) {
+                return Err(invalid_data(format!(
+                    "MIT-SHM segment is shorter than requested: {file_size} < {size}"
+                ))
+                .into());
+            }
+            let mapping = MappedRegion::new(&file, capacity)?;
+            Ok(Self {
+                id,
+                mapping,
+                _file: file,
+            })
+        })();
+        match result {
+            Ok(segment) => Ok(segment),
+            Err(error) => {
+                detach_shm_segment(conn, id);
+                Err(error)
+            }
+        }
+    }
+
+    fn release(self, conn: &RustConnection) {
+        // Every successful PutImage waits for its matching completion before
+        // returning. Check Detach before unmapping and closing the descriptor.
+        detach_shm_segment(conn, self.id);
+        drop(self);
+    }
+}
+
+fn detach_shm_segment(conn: &RustConnection, segment: shm::Seg) {
+    if let Ok(cookie) = shm::detach(conn, segment) {
+        let _ = cookie.check();
+    }
+}
+
+struct MappedRegion {
+    address: NonNull<u8>,
+    length: usize,
+}
+
+impl MappedRegion {
+    fn new(file: &File, length: usize) -> io::Result<Self> {
+        if length == 0 {
+            return Err(invalid_input("cannot mmap an empty MIT-SHM upload segment"));
+        }
+        // SAFETY: fstat established that `file` covers `length`, and this
+        // mapping is owned until the matching munmap in Drop.
+        let mapped = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                length,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let Some(address) = NonNull::new(mapped.cast::<u8>()) else {
+            // SAFETY: mmap succeeded and returned this exact address/length.
+            unsafe {
+                libc::munmap(mapped, length);
+            }
+            return Err(io::Error::other("MIT-SHM mmap returned a null address"));
+        };
+        Ok(Self { address, length })
+    }
+
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn copy_from(&mut self, source: &[u8]) -> io::Result<()> {
+        if source.len() > self.length {
+            return Err(invalid_data(format!(
+                "MIT-SHM upload exceeds its mapping: {} > {}",
+                source.len(),
+                self.length
+            )));
+        }
+        // SAFETY: &mut self provides exclusive access, the mapping is valid
+        // for `self.length`, and the previous matching Completion was consumed
+        // before this method can be called again.
+        let destination =
+            unsafe { std::slice::from_raw_parts_mut(self.address.as_ptr(), source.len()) };
+        destination.copy_from_slice(source);
+        Ok(())
+    }
+}
+
+impl Drop for MappedRegion {
+    fn drop(&mut self) {
+        // SAFETY: this exact pair came from the successful mmap in `new` and
+        // is unmapped exactly once here.
+        unsafe {
+            libc::munmap(self.address.as_ptr().cast(), self.length);
+        }
+    }
+}
+
+enum ShmUploadAttempt<E> {
+    Uploaded,
+    Recoverable(E),
+    Fatal(E),
+}
+
+enum UploadOutcome<E> {
+    Uploaded,
+    CoreFallback { shm_error: E },
+    Error(E),
+}
+
+fn resolve_upload<E>(
+    shm_attempt: Option<ShmUploadAttempt<E>>,
+    core: impl FnOnce() -> Result<(), E>,
+) -> UploadOutcome<E> {
+    match shm_attempt {
+        None => match core() {
+            Ok(()) => UploadOutcome::Uploaded,
+            Err(error) => UploadOutcome::Error(error),
+        },
+        Some(ShmUploadAttempt::Uploaded) => UploadOutcome::Uploaded,
+        Some(ShmUploadAttempt::Recoverable(shm_error)) => match core() {
+            Ok(()) => UploadOutcome::CoreFallback { shm_error },
+            // Preserve the core error and leave SHM enabled until Viewer Drop.
+            // A drawable failure must not be misdiagnosed as an SHM failure.
+            Err(error) => UploadOutcome::Error(error),
+        },
+        Some(ShmUploadAttempt::Fatal(error)) => UploadOutcome::Error(error),
+    }
+}
+
+fn core_upload(
+    conn: &RustConnection,
+    image: &XImage<'_>,
+    drawable: Pixmap,
+    gc: Gcontext,
+    dst_x: i16,
+    dst_y: i16,
+) -> RemoteResult<()> {
+    let cookies = image.put(conn, drawable, gc, dst_x, dst_y)?;
+    for cookie in cookies {
+        cookie.check()?;
+    }
+    Ok(())
+}
+
+fn supports_shm_fd_version(major: u16, minor: u16) -> bool {
+    (major, minor) >= SHM_FD_VERSION
+}
+
+fn shm_needs_growth(current_capacity: Option<usize>, required: usize) -> bool {
+    current_capacity.is_none_or(|capacity| capacity < required)
+}
+
+fn native_buffer_size(width: u16, height: u16, format: Format) -> RemoteResult<usize> {
+    if width == 0 || height == 0 {
+        return Err(invalid_data("MIT-SHM upload dimensions must be nonzero").into());
+    }
+    let bits_per_pixel = usize::from(
+        BitsPerPixel::try_from(format.bits_per_pixel)
+            .map_err(|_| invalid_data("X11 reported invalid native bits-per-pixel"))?,
+    );
+    let scanline_pad = usize::from(
+        ScanlinePad::try_from(format.scanline_pad)
+            .map_err(|_| invalid_data("X11 reported invalid native scanline padding"))?,
+    );
+    let row_bits = usize::from(width)
+        .checked_mul(bits_per_pixel)
+        .ok_or_else(|| invalid_data("MIT-SHM upload scanline size overflow"))?;
+    let padded_units = row_bits
+        .checked_add(scanline_pad - 1)
+        .ok_or_else(|| invalid_data("MIT-SHM upload scanline padding overflow"))?
+        / scanline_pad;
+    let padded_bits = padded_units
+        .checked_mul(scanline_pad)
+        .ok_or_else(|| invalid_data("MIT-SHM upload padded scanline size overflow"))?;
+    let size = (padded_bits / 8)
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| invalid_data("MIT-SHM upload image size overflow"))?;
+    u32::try_from(size)
+        .map_err(|_| invalid_data("MIT-SHM upload exceeds the protocol size limit"))?;
+    Ok(size)
+}
+
+fn validate_native_upload(
+    image: &XImage<'_>,
+    format: Format,
+    image_byte_order: ImageOrder,
+) -> RemoteResult<usize> {
+    let expected_bpp = BitsPerPixel::try_from(format.bits_per_pixel)
+        .map_err(|_| invalid_data("X11 reported invalid native bits-per-pixel"))?;
+    let expected_pad = ScanlinePad::try_from(format.scanline_pad)
+        .map_err(|_| invalid_data("X11 reported invalid native scanline padding"))?;
+    if image.depth() != format.depth
+        || image.bits_per_pixel() != expected_bpp
+        || image.scanline_pad() != expected_pad
+        || image.byte_order() != image_byte_order
+    {
+        return Err(
+            invalid_data("MIT-SHM upload image is not in the negotiated native layout").into(),
+        );
+    }
+    let expected_size = native_buffer_size(image.width(), image.height(), format)?;
+    if image.data().len() != expected_size {
+        return Err(invalid_data(format!(
+            "MIT-SHM upload buffer has {} bytes; expected {expected_size}",
+            image.data().len()
+        ))
+        .into());
+    }
+    Ok(expected_size)
 }
 
 fn select_native_pixel_writer(setup: &Setup, depth: u8, visual: Visualtype) -> NativePixelWriter {
@@ -1061,6 +1605,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn standard_visual() -> Visualtype {
         Visualtype {
@@ -1281,5 +1826,195 @@ mod tests {
     fn expose_copies_valid_backing_while_new_frames_and_resizes_repopulate() {
         assert_eq!(backing_work(true), BackingWork::CopyOnly);
         assert_eq!(backing_work(false), BackingWork::PopulateAndCopy);
+    }
+
+    #[test]
+    fn shm_fd_upload_requires_protocol_version_one_two() {
+        assert!(!supports_shm_fd_version(0, 99));
+        assert!(!supports_shm_fd_version(1, 1));
+        assert!(supports_shm_fd_version(1, 2));
+        assert!(supports_shm_fd_version(1, 3));
+        assert!(supports_shm_fd_version(2, 0));
+    }
+
+    #[test]
+    fn shm_upload_size_uses_native_stride_and_only_grows() {
+        let standard = standard_format();
+        assert_eq!(native_buffer_size(1, 1, standard).unwrap(), 4);
+        assert_eq!(native_buffer_size(3, 2, standard).unwrap(), 24);
+
+        let padded_16 = Format {
+            depth: 16,
+            bits_per_pixel: 16,
+            scanline_pad: 32,
+        };
+        // Three 16-bit pixels occupy 48 bits and round up to an 8-byte row.
+        assert_eq!(native_buffer_size(3, 2, padded_16).unwrap(), 16);
+        assert!(native_buffer_size(0, 2, padded_16).is_err());
+        assert!(native_buffer_size(2, 0, padded_16).is_err());
+        assert!(native_buffer_size(u16::MAX, u16::MAX, standard).is_err());
+        assert!(
+            native_buffer_size(
+                1,
+                1,
+                Format {
+                    scanline_pad: 24,
+                    ..standard
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            native_buffer_size(
+                1,
+                1,
+                Format {
+                    bits_per_pixel: 12,
+                    ..standard
+                }
+            )
+            .is_err()
+        );
+
+        assert!(shm_needs_growth(None, 24));
+        assert!(!shm_needs_growth(Some(24), 24));
+        assert!(!shm_needs_growth(Some(48), 24));
+        assert!(shm_needs_growth(Some(23), 24));
+    }
+
+    #[test]
+    fn shm_upload_requires_an_exact_native_ximage() {
+        let format = standard_format();
+        let image = XImage::allocate(
+            3,
+            2,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+        );
+        assert_eq!(
+            validate_native_upload(&image, format, ImageOrder::LsbFirst).unwrap(),
+            24
+        );
+        assert!(validate_native_upload(&image, format, ImageOrder::MsbFirst).is_err());
+        assert!(
+            validate_native_upload(
+                &image,
+                Format {
+                    depth: 32,
+                    ..format
+                },
+                ImageOrder::LsbFirst
+            )
+            .is_err()
+        );
+
+        // Image::new accepts trailing bytes, while ShmPutImage must use the
+        // exact native stride*height region promised to the server.
+        let oversized = XImage::new(
+            3,
+            2,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+            Cow::Owned(vec![0; 28]),
+        )
+        .unwrap();
+        assert!(validate_native_upload(&oversized, format, ImageOrder::LsbFirst).is_err());
+    }
+
+    #[test]
+    fn shm_completion_matching_is_strict() {
+        let key = ShmCompletionKey {
+            sequence: 71,
+            drawable: 10,
+            minor_event: u16::from(shm::PUT_IMAGE_REQUEST),
+            major_event: 130,
+            segment: 20,
+            offset: 0,
+        };
+        let event = shm::CompletionEvent {
+            sequence: key.sequence,
+            drawable: key.drawable,
+            minor_event: key.minor_event,
+            major_event: key.major_event,
+            shmseg: key.segment,
+            offset: key.offset,
+            ..Default::default()
+        };
+        assert!(is_matching_shm_completion(&event, key));
+        for changed in [
+            shm::CompletionEvent {
+                sequence: 72,
+                ..event
+            },
+            shm::CompletionEvent {
+                drawable: 11,
+                ..event
+            },
+            shm::CompletionEvent {
+                minor_event: 4,
+                ..event
+            },
+            shm::CompletionEvent {
+                major_event: 131,
+                ..event
+            },
+            shm::CompletionEvent {
+                shmseg: 21,
+                ..event
+            },
+            shm::CompletionEvent { offset: 4, ..event },
+        ] {
+            assert!(!is_matching_shm_completion(&changed, key));
+        }
+    }
+
+    #[test]
+    fn recoverable_shm_failure_uses_core_before_disabling() {
+        let core_calls = Cell::new(0);
+        let outcome = resolve_upload(None, || {
+            core_calls.set(core_calls.get() + 1);
+            Ok::<_, &'static str>(())
+        });
+        assert_eq!(core_calls.get(), 1);
+        assert!(matches!(outcome, UploadOutcome::Uploaded));
+
+        let core_calls = Cell::new(0);
+        let outcome = resolve_upload(Some(ShmUploadAttempt::Uploaded), || {
+            core_calls.set(core_calls.get() + 1);
+            Ok::<_, &'static str>(())
+        });
+        assert_eq!(core_calls.get(), 0);
+        assert!(matches!(outcome, UploadOutcome::Uploaded));
+
+        let core_calls = Cell::new(0);
+        let outcome = resolve_upload(Some(ShmUploadAttempt::Recoverable("shm")), || {
+            core_calls.set(core_calls.get() + 1);
+            Ok::<_, &'static str>(())
+        });
+        assert_eq!(core_calls.get(), 1);
+        assert!(matches!(
+            outcome,
+            UploadOutcome::CoreFallback { shm_error: "shm" }
+        ));
+
+        let core_calls = Cell::new(0);
+        let outcome = resolve_upload(Some(ShmUploadAttempt::Recoverable("shm")), || {
+            core_calls.set(core_calls.get() + 1);
+            Err::<(), _>("core")
+        });
+        assert_eq!(core_calls.get(), 1);
+        assert!(matches!(outcome, UploadOutcome::Error("core")));
+
+        let core_calls = Cell::new(0);
+        let outcome = resolve_upload(Some(ShmUploadAttempt::Fatal("connection")), || {
+            core_calls.set(core_calls.get() + 1);
+            Ok::<_, &'static str>(())
+        });
+        assert_eq!(core_calls.get(), 0);
+        assert!(matches!(outcome, UploadOutcome::Error("connection")));
     }
 }

@@ -169,10 +169,13 @@ exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
 The X11 viewer reuses its native upload allocation for unchanged display
 geometry. On the usual depth-24, 32-bits-per-pixel little-endian TrueColor
-visual it writes decoded RGB directly into the verified native layout;
-nonstandard visuals use the general mask-based conversion. Expose events copy
-the last completely uploaded backing image, and resize event bursts redraw only
-their final size.
+visual it writes decoded RGB directly into the verified native layout and uses
+an MIT-SHM 1.2 file-descriptor segment to avoid sending that image through the
+X11 socket. The segment is reused only after the matching server completion
+event; setup or rejected-upload failures retry the same frame with core
+`PutImage`. Nonstandard visuals use the general mask-based conversion and core
+upload. Expose events copy the last completely uploaded backing image, and
+resize event bursts redraw only their final size.
 Root compatibility capture and older XRender servers retain the
 full-resolution readback plus CPU-resize fallback; for those paths, lower
 `--fps` as well as `--max-width` on very large combined multi-monitor roots.
