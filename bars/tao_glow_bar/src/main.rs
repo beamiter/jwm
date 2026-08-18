@@ -24,7 +24,7 @@ use xbar_core::{
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
     presentation::{Point, PointerAction},
-    render::cairo::CairoBar,
+    render::cairo::{CairoBar, CpuCanvas},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
@@ -36,8 +36,7 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
-struct App {
-    window: Rc<Window>,
+struct GlPresenter {
     gl: glow::Context,
     surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
     context: glutin::context::PossiblyCurrentContext,
@@ -47,6 +46,150 @@ struct App {
     program: glow::NativeProgram,
     vao: glow::NativeVertexArray,
     texture: glow::NativeTexture,
+}
+
+impl GlPresenter {
+    fn new(window: &Window, physical_size: PhysicalSize<u32>) -> Result<Self> {
+        let (display, _config, surface, context, gl) = create_gl_surface(window)?;
+        let program = build_quad_program(&gl)?;
+        let vao = build_quad_mesh(&gl);
+        let texture = create_texture(&gl);
+
+        // The default framebuffer may be sRGB; the Cairo output is already
+        // in sRGB byte values, so a plain copy is correct.
+        unsafe {
+            gl.viewport(
+                0,
+                0,
+                physical_size.width as i32,
+                physical_size.height as i32,
+            );
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        }
+
+        Ok(Self {
+            gl,
+            surface,
+            context,
+            display,
+            program,
+            vao,
+            texture,
+        })
+    }
+
+    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
+        let mut frame = vec![
+            0u8;
+            (width as usize)
+                .saturating_mul(height as usize)
+                .saturating_mul(4)
+        ];
+        bar.render_into_bgra(&mut frame, width, height, width.saturating_mul(4), scale)?;
+        let _ = bar.runtime_mut().take_changes();
+
+        upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
+        draw_fullscreen_quad(&self.gl, self.vao, self.program, self.texture);
+        self.surface
+            .swap_buffers(&self.context)
+            .map_err(|error| anyhow::anyhow!("swap buffers failed: {error}"))
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        let width = NonZeroU32::new(size.width.max(1)).unwrap();
+        let height = NonZeroU32::new(size.height.max(1)).unwrap();
+        self.surface.resize(&self.context, width, height);
+        unsafe {
+            self.gl
+                .viewport(0, 0, width.get() as i32, height.get() as i32);
+        }
+    }
+}
+
+struct SoftwarePresenter {
+    canvas: CpuCanvas,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+}
+
+impl SoftwarePresenter {
+    fn new(window: &Rc<Window>, size: PhysicalSize<u32>) -> Result<Self> {
+        let context = softbuffer::Context::new(Rc::clone(window))
+            .map_err(|error| anyhow::anyhow!("failed to create softbuffer context: {error}"))?;
+        let mut surface = softbuffer::Surface::new(&context, Rc::clone(window))
+            .map_err(|error| anyhow::anyhow!("failed to create softbuffer surface: {error}"))?;
+        resize_soft_surface(&mut surface, size)?;
+        Ok(Self {
+            canvas: CpuCanvas::new(),
+            surface,
+        })
+    }
+
+    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
+        let frame = self.canvas.render(bar, width, height, scale)?;
+        let width = width as usize;
+        let height = height as usize;
+        let mut buffer = self
+            .surface
+            .buffer_mut()
+            .map_err(|error| anyhow::anyhow!("failed to acquire softbuffer frame: {error}"))?;
+        if buffer.len() < width * height {
+            anyhow::bail!("softbuffer returned an undersized frame");
+        }
+
+        let stride = frame.stride as usize;
+        if stride == width * 4 {
+            let source: &[u32] = bytemuck::cast_slice(&frame.data[..height * stride]);
+            buffer[..width * height].copy_from_slice(source);
+        } else {
+            for y in 0..height {
+                let row = &frame.data[y * stride..y * stride + width * 4];
+                let source: &[u32] = bytemuck::cast_slice(row);
+                buffer[y * width..(y + 1) * width].copy_from_slice(source);
+            }
+        }
+        buffer
+            .present()
+            .map_err(|error| anyhow::anyhow!("failed to present softbuffer frame: {error}"))?;
+        drop(
+            self.surface
+                .buffer_mut()
+                .map_err(|error| anyhow::anyhow!("failed to complete softbuffer frame: {error}"))?,
+        );
+        Ok(())
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        if let Err(error) = resize_soft_surface(&mut self.surface, size) {
+            warn!("failed to resize software surface: {error:#}");
+        }
+    }
+}
+
+enum Presenter {
+    OpenGl(GlPresenter),
+    Software(SoftwarePresenter),
+}
+
+impl Presenter {
+    fn redraw(&mut self, bar: &mut CairoBar, width: u32, height: u32, scale: f64) -> Result<()> {
+        match self {
+            Self::OpenGl(presenter) => presenter.redraw(bar, width, height, scale),
+            Self::Software(presenter) => presenter.redraw(bar, width, height, scale),
+        }
+    }
+
+    fn resize(&mut self, size: PhysicalSize<u32>) {
+        match self {
+            Self::OpenGl(presenter) => presenter.resize(size),
+            Self::Software(presenter) => presenter.resize(size),
+        }
+    }
+}
+
+struct App {
+    window: Rc<Window>,
+    presenter: Presenter,
     bar: CairoBar,
     scale_factor: f64,
     logical_size: LogicalSize<f64>,
@@ -76,34 +219,20 @@ impl App {
         compositor_active: bool,
     ) -> Result<Self> {
         let physical_size = window.inner_size();
-        let (display, _config, surface, context, gl) = create_gl_surface(&window)?;
-
-        let program = build_quad_program(&gl)?;
-        let vao = build_quad_mesh(&gl);
-        let texture = create_texture(&gl);
-
-        // The default framebuffer may be sRGB; the Cairo output is already
-        // in sRGB byte values, so a plain copy is correct.
-        unsafe {
-            gl.viewport(
-                0,
-                0,
-                physical_size.width as i32,
-                physical_size.height as i32,
-            );
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
-        }
+        let presenter = match GlPresenter::new(&window, physical_size) {
+            Ok(presenter) => {
+                info!("OpenGL presenter initialized");
+                Presenter::OpenGl(presenter)
+            }
+            Err(error) => {
+                warn!("OpenGL presenter unavailable ({error:#}); using software fallback");
+                Presenter::Software(SoftwarePresenter::new(&window, physical_size)?)
+            }
+        };
 
         Ok(Self {
             window,
-            gl,
-            surface,
-            context,
-            display,
-            program,
-            vao,
-            texture,
+            presenter,
             bar,
             scale_factor,
             logical_size,
@@ -145,29 +274,8 @@ impl App {
 
         self.resolve_translucency();
 
-        let mut frame = vec![
-            0u8;
-            (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4)
-        ];
-        self.bar.render_into_bgra(
-            &mut frame,
-            width,
-            height,
-            width.saturating_mul(4),
-            self.scale_factor,
-        )?;
-        let _ = self.bar.runtime_mut().take_changes();
-
-        upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
-        draw_fullscreen_quad(&self.gl, self.vao, self.program, self.texture);
-
-        self.surface
-            .swap_buffers(&self.context)
-            .map_err(|error| anyhow::anyhow!("swap buffers failed: {error}"))?;
-
-        Ok(())
+        self.presenter
+            .redraw(&mut self.bar, width, height, self.scale_factor)
     }
 
     fn request_redraw(&self) {
@@ -177,16 +285,7 @@ impl App {
     fn resize(&mut self, physical_size: PhysicalSize<u32>) {
         self.last_physical_size = physical_size;
         self.logical_size = physical_size.to_logical(self.scale_factor);
-        let width = physical_size.width.max(1);
-        let height = physical_size.height.max(1);
-        self.surface.resize(
-            &self.context,
-            NonZeroU32::new(width).unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-            NonZeroU32::new(height).unwrap_or_else(|| NonZeroU32::new(1).unwrap()),
-        );
-        unsafe {
-            self.gl.viewport(0, 0, width as i32, height as i32);
-        }
+        self.presenter.resize(physical_size);
         self.request_redraw();
     }
 
@@ -276,6 +375,19 @@ impl App {
     }
 }
 
+fn resize_soft_surface(
+    surface: &mut softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    size: PhysicalSize<u32>,
+) -> Result<()> {
+    let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+    else {
+        return Ok(());
+    };
+    surface
+        .resize(width, height)
+        .map_err(|error| anyhow::anyhow!("softbuffer resize failed: {error}"))
+}
+
 fn create_gl_surface(
     window: &Window,
 ) -> Result<(
@@ -298,11 +410,11 @@ fn create_gl_surface(
         .window_handle()
         .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
 
-    let preference = DisplayApiPreference::EglThenGlx(Box::new(|_register| {
-        // Do not install a custom Xlib error hook. Tao/GTK owns the display
-        // connection; unhandled GLX errors are fatal regardless.
-    }));
-    let display = unsafe { Display::new(display_handle.into(), preference) }
+    // EGL reports failures directly and is safe to abandon for the software
+    // presenter. GLX requires an Xlib error-hook registrar that Tao does not
+    // expose, so using it as an implicit fallback can leave a false-current
+    // context instead of a recoverable error.
+    let display = unsafe { Display::new(display_handle.into(), DisplayApiPreference::Egl) }
         .map_err(|error| anyhow::anyhow!("failed to create GL display: {error}"))?;
 
     let raw_window_handle = window_handle.into();
@@ -321,6 +433,7 @@ fn create_gl_surface(
         Some(config) => config,
         None => {
             let template = ConfigTemplateBuilder::new()
+                .with_alpha_size(0)
                 .compatible_with_native_window(raw_window_handle)
                 .build();
             unsafe { display.find_configs(template) }
