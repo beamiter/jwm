@@ -164,13 +164,34 @@ XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
 path prints its active source/output dimensions. MIT-SHM 1.2 file-descriptor
 segments avoid copying image payloads through the X11 socket when the local X
 server and transport support them; setup or runtime failure falls back to core
-`GetImage` on the same frame and drawable. Long-running sessions report rolling
-capture/queue/ack/encode/write latency plus captured, skipped, replaced, and
-outstanding frame counts. Capture and JPEG/network sending run as a two-stage
-pipeline with one queued latest frame. The host permits at most two frames
-beyond the latest one actually drawn by the viewer; while that credit is
-exhausted, redundant X11 readback is automatically reduced to a periodic
+`GetImage` on the same frame and drawable. Capture and JPEG/network sending run
+as a two-stage pipeline with one queued latest frame. The host permits at most
+two frames beyond the latest one actually drawn by the viewer; while that credit
+is exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
+
+The host emits rolling pipeline telemetry every five seconds, including an
+explicit zero-send window while the sender is blocked on display credit or a
+socket write. The viewer emits each non-empty five-second activity window. Both
+peers emit one final non-empty partial snapshot during cleanup. Host counters
+cover scheduled, captured, skipped, published, dequeued, encoded and sent work,
+payload bytes, current/maximum outstanding credit and maximum queue age; its
+stage averages cover capture, queue, credit wait, encode and write time. Host
+`replaced` means that a newer captured frame overwrote the one-slot
+capture-to-sender mailbox before encoding. Viewer `replaced` instead means that
+a newer decoded frame overwrote the viewer's one-slot latest-frame queue before
+drawing; the viewer also reports received, decoded, drawn and ACKed counts plus
+separate decode, queue and draw time.
+
+A cumulative ACK for sequence B proves only that B was drawn. The host therefore
+reports one `drawn-acks` target, all credits through B as `retired`, and the
+earlier retired targets without an individual ACK as `viewer-superseded`.
+`capture-to-ACK` and `send-to-ACK` end when the host receives that ACK, so they
+include viewer queue/draw work, ACK creation and flush, and return-network delay;
+they are not the viewer's draw-call duration. `drawn-bytes` counts only the JPEG
+payloads of those proven ACK targets. `credit-wait` separately measures how long
+the sender waited for an available display credit.
+
 The sender writes each JPEG directly behind its frame header in one reusable
 allocation while hard-bounding the total payload length, and the viewer's
 receiver likewise reuses one authenticated record allocation. After 32

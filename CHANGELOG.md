@@ -44,8 +44,15 @@ monorepo use independent Semantic Versions.
 - The JWM remote application protocol is now version 2. Cumulative frame
   acknowledgements cap video at two frames beyond what the viewer has actually
   drawn; sustained backpressure also throttles redundant X11 captures while a
-  periodically refreshed latest frame waits. Host telemetry distinguishes
-  captured, skipped, replaced, outstanding, and acknowledgement-wait work.
+  periodically refreshed latest frame waits.
+- Host and viewer now publish five-second and final pipeline telemetry without
+  changing the wire protocol. Host reports remain live through zero-send credit
+  or socket stalls and separate capture-mailbox replacement from the viewer's
+  decoded-frame replacement. Cumulative ACK output distinguishes the one proven
+  `drawn-acks` target from all `retired` credits and inferred
+  `viewer-superseded` frames; capture/send-to-ACK timings end when the host
+  receives the ACK, while the viewer separately reports decode, queue and draw
+  time.
 - `jwm-remote` uses MIT-SHM 1.2 file-descriptor segments for local X11 image
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if

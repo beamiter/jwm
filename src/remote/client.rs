@@ -12,6 +12,7 @@ use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
 use std::io;
+use std::io::Write as _;
 use std::net::{Shutdown, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +25,7 @@ const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
@@ -56,19 +58,22 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         eprintln!("jwm-remote: X11 keymaps differ; pointer works but keyboard is disabled");
     }
 
+    let state = Arc::new(ReceiveState::new());
+    let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
     let (kind, payload) = reader.read_message()?;
     if kind != MessageKind::Frame {
         return Err(invalid_data("host did not send an initial video frame").into());
     }
-    let first_frame = decode_frame(&payload)?;
+    state.telemetry.record_received();
+    let first_frame = decode_queued_frame(&payload, &state.telemetry)?;
     reader
         .get_ref()
         .set_read_timeout(Some(FRAME_IDLE_TIMEOUT))?;
-    let initial_width = u16::try_from(first_frame.image.width())
+    let initial_width = u16::try_from(first_frame.frame.image.width())
         .map_err(|_| invalid_data("initial frame is wider than an X11 window"))?;
-    let initial_height = u16::try_from(first_frame.image.height())
+    let initial_height = u16::try_from(first_frame.frame.image.height())
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
-    let last_sequence = first_frame.sequence;
+    let last_sequence = first_frame.frame.sequence;
     let mut viewer = Viewer::connect(
         options.display.as_deref(),
         initial_width,
@@ -78,9 +83,10 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         hello.keyboard_enabled.then_some(keymap_fingerprint),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
     )?;
-    draw_and_ack(&mut writer, first_frame, |frame| viewer.draw(frame))?;
+    draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
+        viewer.draw(frame)
+    })?;
 
-    let state = Arc::new(ReceiveState::new());
     let receive_state = Arc::clone(&state);
     let control = writer.get_ref().try_clone()?;
     let receiver = thread::Builder::new()
@@ -98,6 +104,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         &state,
         pointer_enabled,
         keyboard_enabled,
+        &mut telemetry_reporter,
     );
     state.stopping.store(true, Ordering::Release);
     if pointer_enabled || keyboard_enabled {
@@ -108,7 +115,9 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     let _ = writer.flush();
     let _ = control.shutdown(Shutdown::Both);
 
-    match receiver.join() {
+    let receiver_result = receiver.join();
+    telemetry_reporter.force_report();
+    match receiver_result {
         Ok(()) => {}
         Err(_) if loop_result.is_ok() => {
             return Err(io::Error::other("remote video thread panicked").into());
@@ -169,6 +178,7 @@ fn viewer_loop(
     state: &ReceiveState,
     pointer_enabled: bool,
     keyboard_enabled: bool,
+    telemetry_reporter: &mut ClientTelemetryReporter<'_>,
 ) -> RemoteResult<()> {
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     loop {
@@ -211,7 +221,7 @@ fn viewer_loop(
         }
 
         if let Some(frame) = take_latest(state) {
-            draw_and_ack(writer, frame, |frame| viewer.draw(frame))?;
+            draw_and_ack(writer, frame, &state.telemetry, |frame| viewer.draw(frame))?;
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -226,29 +236,218 @@ fn viewer_loop(
                 .unwrap_or_else(|| "host closed the remote session".to_string());
             return Err(io::Error::new(io::ErrorKind::ConnectionAborted, message).into());
         }
+        telemetry_reporter.maybe_report();
         thread::sleep(Duration::from_millis(4));
     }
 }
 
 fn draw_and_ack<W: std::io::Write>(
     writer: &mut SessionWriter<W>,
-    frame: DecodedFrame,
+    queued: QueuedFrame,
+    telemetry: &ClientTelemetry,
     draw: impl FnOnce(DecodedFrame) -> RemoteResult<bool>,
 ) -> RemoteResult<()> {
-    let sequence = frame.sequence;
-    if !draw(frame)? {
+    let sequence = queued.frame.sequence;
+    let draw_started = Instant::now();
+    let draw_result = draw(queued.frame);
+    let draw_finished = Instant::now();
+    if !draw_result? {
         return Ok(());
     }
+    telemetry.record_drawn_at(queued.ready_at, draw_started, draw_finished);
     writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
     writer.flush()?;
+    telemetry.record_acked();
     Ok(())
 }
 
+struct QueuedFrame {
+    frame: DecodedFrame,
+    ready_at: Instant,
+}
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct ClientTelemetryWindow {
+    received: u64,
+    decoded: u64,
+    replaced: u64,
+    drawn: u64,
+    acked: u64,
+    decode_elapsed: Duration,
+    queue_elapsed: Duration,
+    draw_elapsed: Duration,
+}
+
+impl ClientTelemetryWindow {
+    fn is_empty(self) -> bool {
+        self.received == 0
+            && self.decoded == 0
+            && self.replaced == 0
+            && self.drawn == 0
+            && self.acked == 0
+    }
+}
+
+#[derive(Default)]
+struct ClientTelemetry {
+    window: Mutex<ClientTelemetryWindow>,
+}
+
+impl ClientTelemetry {
+    fn record_received(&self) {
+        let mut window = self.lock_window();
+        window.received = window.received.saturating_add(1);
+    }
+
+    fn record_decoded_at(&self, decode_started: Instant, ready_at: Instant) {
+        let mut window = self.lock_window();
+        window.decoded = window.decoded.saturating_add(1);
+        window.decode_elapsed = window
+            .decode_elapsed
+            .saturating_add(ready_at.saturating_duration_since(decode_started));
+    }
+
+    fn record_replaced(&self) {
+        let mut window = self.lock_window();
+        window.replaced = window.replaced.saturating_add(1);
+    }
+
+    fn record_drawn_at(&self, ready_at: Instant, draw_started: Instant, draw_finished: Instant) {
+        let mut window = self.lock_window();
+        window.drawn = window.drawn.saturating_add(1);
+        window.queue_elapsed = window
+            .queue_elapsed
+            .saturating_add(draw_started.saturating_duration_since(ready_at));
+        window.draw_elapsed = window
+            .draw_elapsed
+            .saturating_add(draw_finished.saturating_duration_since(draw_started));
+    }
+
+    fn record_acked(&self) {
+        let mut window = self.lock_window();
+        window.acked = window.acked.saturating_add(1);
+    }
+
+    fn take_window(&self) -> ClientTelemetryWindow {
+        std::mem::take(&mut *self.lock_window())
+    }
+
+    fn lock_window(&self) -> std::sync::MutexGuard<'_, ClientTelemetryWindow> {
+        match self.window.lock() {
+            Ok(window) => window,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+struct ClientTelemetryReport {
+    window: ClientTelemetryWindow,
+    elapsed: Duration,
+}
+
+impl ClientTelemetryReport {
+    fn emit(self, final_report: bool) {
+        let label = if final_report {
+            "viewer final"
+        } else {
+            "viewer"
+        };
+        let _ = writeln!(
+            io::stderr().lock(),
+            "jwm-remote: {label} received {:.1} fps ({}), decoded {}, replaced {}, drawn {}, acked {}, decode/queue/draw {:.1}/{:.1}/{:.1} ms",
+            per_second(self.window.received, self.elapsed),
+            self.window.received,
+            self.window.decoded,
+            self.window.replaced,
+            self.window.drawn,
+            self.window.acked,
+            average_millis(self.window.decode_elapsed, self.window.decoded),
+            average_millis(self.window.queue_elapsed, self.window.drawn),
+            average_millis(self.window.draw_elapsed, self.window.drawn),
+        );
+    }
+}
+
+struct ClientTelemetryReporter<'a> {
+    telemetry: &'a ClientTelemetry,
+    window_started: Instant,
+    finished: bool,
+}
+
+impl<'a> ClientTelemetryReporter<'a> {
+    fn new(telemetry: &'a ClientTelemetry) -> Self {
+        Self::new_at(telemetry, Instant::now())
+    }
+
+    fn new_at(telemetry: &'a ClientTelemetry, window_started: Instant) -> Self {
+        Self {
+            telemetry,
+            window_started,
+            finished: false,
+        }
+    }
+
+    fn maybe_report(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(report) = self.maybe_report_at(Instant::now(), false) {
+            report.emit(false);
+        }
+    }
+
+    fn force_report(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Some(report) = self.maybe_report_at(Instant::now(), true) {
+            report.emit(true);
+        }
+        self.finished = true;
+    }
+
+    fn maybe_report_at(&mut self, now: Instant, force: bool) -> Option<ClientTelemetryReport> {
+        let elapsed = now.saturating_duration_since(self.window_started);
+        if !force && elapsed < TELEMETRY_INTERVAL {
+            return None;
+        }
+        self.window_started = now;
+        let window = self.telemetry.take_window();
+        (!window.is_empty()).then_some(ClientTelemetryReport { window, elapsed })
+    }
+}
+
+impl Drop for ClientTelemetryReporter<'_> {
+    fn drop(&mut self) {
+        // Reporting is diagnostic only: early startup/session errors still
+        // flush a partial window, while an empty/already-finished window is a
+        // no-op and can never change the session result.
+        self.force_report();
+    }
+}
+
+fn per_second(count: u64, elapsed: Duration) -> f64 {
+    if elapsed.is_zero() {
+        0.0
+    } else {
+        count as f64 / elapsed.as_secs_f64()
+    }
+}
+
+fn average_millis(duration: Duration, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        duration.as_secs_f64() * 1000.0 / count as f64
+    }
+}
+
 struct ReceiveState {
-    latest: Mutex<Option<DecodedFrame>>,
+    latest: Mutex<Option<QueuedFrame>>,
     error: Mutex<Option<String>>,
     alive: AtomicBool,
     stopping: AtomicBool,
+    telemetry: ClientTelemetry,
 }
 
 impl ReceiveState {
@@ -258,12 +457,26 @@ impl ReceiveState {
             error: Mutex::new(None),
             alive: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
+            telemetry: ClientTelemetry::default(),
         }
     }
 }
 
-fn take_latest(state: &ReceiveState) -> Option<DecodedFrame> {
+fn take_latest(state: &ReceiveState) -> Option<QueuedFrame> {
     state.latest.lock().unwrap().take()
+}
+
+fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
+    let mut latest = latest.lock().unwrap();
+    latest.replace(next)
+}
+
+fn decode_queued_frame(payload: &[u8], telemetry: &ClientTelemetry) -> RemoteResult<QueuedFrame> {
+    let decode_started = Instant::now();
+    let frame = decode_frame(payload)?;
+    let ready_at = Instant::now();
+    telemetry.record_decoded_at(decode_started, ready_at);
+    Ok(QueuedFrame { frame, ready_at })
 }
 
 fn receive_frames(
@@ -277,19 +490,26 @@ fn receive_frames(
         let kind = reader.read_message_into(&mut payload)?;
         match kind {
             MessageKind::Frame => {
-                let frame = decode_frame(&payload)?;
+                state.telemetry.record_received();
+                let queued = decode_queued_frame(&payload, &state.telemetry)?;
                 let expected = last_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
-                if frame.sequence != expected {
+                if queued.frame.sequence != expected {
                     return Err(invalid_data(format!(
                         "video frame sequence mismatch: expected {expected}, got {}",
-                        frame.sequence
+                        queued.frame.sequence
                     ))
                     .into());
                 }
-                last_sequence = frame.sequence;
-                *state.latest.lock().unwrap() = Some(frame);
+                last_sequence = queued.frame.sequence;
+                let replaced = replace_latest(&state.latest, queued);
+                if replaced.is_some() {
+                    state.telemetry.record_replaced();
+                }
+                // A decoded RGB frame can own a large allocation. The latest
+                // slot is unlocked before the stale frame reaches Drop.
+                drop(replaced);
             }
             MessageKind::Close => break Ok(()),
             MessageKind::FrameAck => {
@@ -343,26 +563,139 @@ mod tests {
         }
     }
 
+    fn queued_test_frame(sequence: u64) -> QueuedFrame {
+        QueuedFrame {
+            frame: decoded_test_frame(sequence),
+            ready_at: Instant::now(),
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushFailWriter(Vec<u8>);
+
+    impl Write for FlushFailWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("synthetic flush failure"))
+        }
+    }
+
     #[test]
     fn frame_is_acknowledged_only_after_a_successful_draw() {
         let key = [0x31; 32];
+        let telemetry = ClientTelemetry::default();
         let mut writer = SessionWriter::new(Vec::new(), key);
-        draw_and_ack(&mut writer, decoded_test_frame(9), |_| Ok(true)).unwrap();
+        draw_and_ack(&mut writer, queued_test_frame(9), &telemetry, |_| Ok(true)).unwrap();
         let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
         let (kind, payload) = reader.read_message().unwrap();
         assert_eq!(kind, MessageKind::FrameAck);
         assert_eq!(decode_frame_ack(&payload).unwrap(), 9);
+        let window = telemetry.take_window();
+        assert_eq!((window.drawn, window.acked), (1, 1));
 
         let mut writer = SessionWriter::new(Vec::new(), key);
-        let result = draw_and_ack(&mut writer, decoded_test_frame(10), |_| {
+        let result = draw_and_ack(&mut writer, queued_test_frame(10), &telemetry, |_| {
             Err(io::Error::other("synthetic draw failure").into())
         });
         assert!(result.is_err());
         assert!(writer.into_inner().is_empty());
 
         let mut writer = SessionWriter::new(Vec::new(), key);
-        draw_and_ack(&mut writer, decoded_test_frame(11), |_| Ok(false)).unwrap();
+        draw_and_ack(&mut writer, queued_test_frame(11), &telemetry, |_| {
+            Ok(false)
+        })
+        .unwrap();
         assert!(writer.into_inner().is_empty());
+        assert!(telemetry.take_window().is_empty());
+
+        let mut writer = SessionWriter::new(FlushFailWriter::default(), key);
+        let result = draw_and_ack(&mut writer, queued_test_frame(12), &telemetry, |_| Ok(true));
+        assert!(result.is_err());
+        let window = telemetry.take_window();
+        assert_eq!((window.drawn, window.acked), (1, 0));
+    }
+
+    #[test]
+    fn telemetry_windows_use_exact_stage_times_and_skip_empty_final_reports() {
+        let telemetry = ClientTelemetry::default();
+        let started = Instant::now();
+        telemetry.record_received();
+        telemetry.record_decoded_at(
+            started + Duration::from_millis(2),
+            started + Duration::from_millis(7),
+        );
+        telemetry.record_replaced();
+        telemetry.record_drawn_at(
+            started + Duration::from_millis(7),
+            started + Duration::from_millis(18),
+            started + Duration::from_millis(21),
+        );
+        telemetry.record_acked();
+
+        let mut reporter = ClientTelemetryReporter::new_at(&telemetry, started);
+        assert!(
+            reporter
+                .maybe_report_at(
+                    started + TELEMETRY_INTERVAL - Duration::from_nanos(1),
+                    false
+                )
+                .is_none()
+        );
+        let report = reporter
+            .maybe_report_at(started + TELEMETRY_INTERVAL, false)
+            .unwrap();
+        assert_eq!(report.elapsed, TELEMETRY_INTERVAL);
+        assert_eq!(
+            (
+                report.window.received,
+                report.window.decoded,
+                report.window.replaced,
+                report.window.drawn,
+                report.window.acked,
+            ),
+            (1, 1, 1, 1, 1)
+        );
+        assert_eq!(report.window.decode_elapsed, Duration::from_millis(5));
+        assert_eq!(report.window.queue_elapsed, Duration::from_millis(11));
+        assert_eq!(report.window.draw_elapsed, Duration::from_millis(3));
+
+        // A forced cleanup immediately after a periodic report must not emit
+        // a duplicate all-zero window.
+        assert!(
+            reporter
+                .maybe_report_at(started + TELEMETRY_INTERVAL, true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn authenticated_frame_is_received_even_when_jpeg_decode_fails() {
+        let telemetry = ClientTelemetry::default();
+        telemetry.record_received();
+        assert!(decode_queued_frame(b"not a frame", &telemetry).is_err());
+
+        let window = telemetry.take_window();
+        assert_eq!(window.received, 1);
+        assert_eq!(window.decoded, 0);
+        assert_eq!(window.decode_elapsed, Duration::ZERO);
+    }
+
+    #[test]
+    fn replacing_latest_returns_the_stale_value_after_unlocking() {
+        let latest = Mutex::new(Some(vec![1_u8; 1024]));
+        let stale = replace_latest(&latest, vec![2_u8; 2048]);
+
+        assert_eq!(stale.as_ref().map(Vec::len), Some(1024));
+        let current = latest
+            .try_lock()
+            .expect("latest-frame lock must be released before stale frame drop");
+        assert_eq!(current.as_ref().map(Vec::len), Some(2048));
+        drop(current);
+        drop(stale);
     }
 
     #[test]
