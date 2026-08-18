@@ -38,10 +38,17 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 2. Update `jwm-remote` on both
-machines together; negotiation rejects older peers before screen or input data
-is exchanged. Version 2 acknowledges only frames successfully drawn by the
-viewer, which bounds host work and end-to-end video backlog.
+The current application protocol is version 3. Version 2 is deliberately
+incompatible, so update `jwm-remote` on both machines together; negotiation
+rejects an older peer before screen or input data is exchanged. Version 3
+retains acknowledgements only for frames successfully drawn by the viewer,
+which bounds host work and end-to-end video backlog. It carries input in
+authenticated batches of 1–128 operations with a separate 641-byte payload
+limit. The client coalesces only adjacent pointer positions (latest wins); a
+key, button or release-all edge always ends that pointer run. Before causing
+any input side effect, the host decodes and validates the complete batch,
+preflights negotiated capabilities, the keyboard mapping and every XTEST
+operation, then queues the batch in order and flushes XTEST once.
 Authenticated record storage is reused only inside its owning network thread.
 The receiver validates the declared 32 MiB limit before growing that storage
 and clears it on every truncated, malformed, or unauthenticated record; message

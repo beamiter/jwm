@@ -4,7 +4,7 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::frame::encode_frame_into;
 use super::key::load_key_file;
-use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input};
+use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input_batch};
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
@@ -1260,22 +1260,32 @@ fn receive_input(
                 awaiting_first_activity = false;
             }
             match kind {
+                MessageKind::InputBatch => {
+                    let events = decode_input_batch(&payload)?;
+                    let Some(injector) = injector.as_mut() else {
+                        return Err(
+                            invalid_data("input was not negotiated for this session").into()
+                        );
+                    };
+                    let contains_keyboard = events
+                        .iter()
+                        .any(|event| matches!(event, super::x11_input::InputEvent::Key { .. }));
+                    if contains_keyboard && !keyboard_enabled {
+                        return Err(invalid_data("keyboard input was not negotiated").into());
+                    }
+                    if contains_keyboard {
+                        verify_injector_keymap(injector, verified_keymap)?;
+                    }
+                    injector.inject_batch(&events)?;
+                }
                 MessageKind::Pointer
                 | MessageKind::Key
                 | MessageKind::Button
                 | MessageKind::ReleaseAll => {
-                    let event = decode_input(kind, &payload)?;
-                    if matches!(event, super::x11_input::InputEvent::Key { .. })
-                        && !keyboard_enabled
-                    {
-                        return Err(invalid_data("keyboard input was not negotiated").into());
-                    }
-                    if let Some(injector) = injector.as_mut() {
-                        if matches!(event, super::x11_input::InputEvent::Key { .. }) {
-                            verify_injector_keymap(injector, verified_keymap)?;
-                        }
-                        injector.inject(event)?;
-                    }
+                    return Err(invalid_data(
+                        "legacy single-event input is invalid in application protocol v3",
+                    )
+                    .into());
                 }
                 MessageKind::Close => break,
                 MessageKind::Heartbeat if payload.is_empty() => {

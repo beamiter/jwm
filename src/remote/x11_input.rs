@@ -165,13 +165,42 @@ impl InputInjector {
     /// XTEST's `time` field is a delay in milliseconds, not the source X event
     /// timestamp, so interactive operations always use a zero delay here.
     pub fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
-        if event == InputEvent::ReleaseAll {
-            return self.release_all();
+        self.inject_batch(std::slice::from_ref(&event))
+    }
+
+    /// Validate a complete batch, queue its XTEST requests in order, then
+    /// flush the connection once. No request is queued until every keycode,
+    /// coordinate, button mapping, and `ReleaseAll` expansion is valid.
+    pub fn inject_batch(&mut self, events: &[InputEvent]) -> Result<(), InputError> {
+        if events.is_empty() {
+            return Ok(());
         }
 
-        self.send(event)?;
-        self.pressed.record_success(event);
-        Ok(())
+        let needs_pointer_mapping = events
+            .iter()
+            .any(|event| matches!(event, InputEvent::Button { .. } | InputEvent::ReleaseAll));
+        let pointer_mapping = if needs_pointer_mapping {
+            self.conn.get_pointer_mapping()?.reply()?.map
+        } else {
+            Vec::new()
+        };
+        let (prepared, next_pressed, uncertain_pressed) = prepare_batch(
+            events,
+            &self.pressed,
+            self.min_keycode,
+            self.max_keycode,
+            &pointer_mapping,
+        )?;
+        let conn = &self.conn;
+        let root = self.root;
+        execute_prepared_batch(
+            &mut self.pressed,
+            prepared,
+            next_pressed,
+            uncertain_pressed,
+            |request| queue_prepared(conn, root, request),
+            || conn.flush().map_err(InputError::from),
+        )
     }
 
     /// Drain X11 notifications and report whether the keyboard or modifier
@@ -220,73 +249,16 @@ impl InputInjector {
     }
 
     fn send(&self, event: InputEvent) -> Result<(), InputError> {
-        let (type_, detail, root_x, root_y) = match event {
-            InputEvent::Pointer { x, y } => (
-                MOTION_NOTIFY_EVENT,
-                ABSOLUTE_MOTION,
-                coordinate('x', x)?,
-                coordinate('y', y)?,
-            ),
-            InputEvent::Key { keycode, pressed } => {
-                if !(self.min_keycode..=self.max_keycode).contains(&keycode) {
-                    return Err(InputError::InvalidKeycode {
-                        keycode,
-                        min: self.min_keycode,
-                        max: self.max_keycode,
-                    });
-                }
-                (
-                    if pressed {
-                        KEY_PRESS_EVENT
-                    } else {
-                        KEY_RELEASE_EVENT
-                    },
-                    keycode,
-                    0,
-                    0,
-                )
-            }
-            InputEvent::Button { button, pressed } => {
-                if button == 0 {
-                    return Err(InputError::InvalidButton { button });
-                }
-                // Core events carry the logical button after the source
-                // server's mapping, while XTEST expects a physical button and
-                // applies the destination mapping. Invert the current host
-                // map on every sparse button edge so MappingNotify changes do
-                // not silently double-map left-handed input.
-                let mapping = self.conn.get_pointer_mapping()?.reply()?.map;
-                let physical = physical_button(&mapping, button)?;
-                (
-                    if pressed {
-                        BUTTON_PRESS_EVENT
-                    } else {
-                        BUTTON_RELEASE_EVENT
-                    },
-                    physical,
-                    0,
-                    0,
-                )
-            }
-            InputEvent::ReleaseAll => return Ok(()),
+        if event == InputEvent::ReleaseAll {
+            return Ok(());
+        }
+        let pointer_mapping = if matches!(event, InputEvent::Button { .. }) {
+            self.conn.get_pointer_mapping()?.reply()?.map
+        } else {
+            Vec::new()
         };
-
-        // XTEST has no modifier-mask argument.  Modifier keys arrive as normal
-        // ordered Key events and therefore update server state naturally.
-        self.conn
-            .xtest_fake_input(
-                type_,
-                detail,
-                NO_DELAY_MS,
-                self.root,
-                root_x,
-                root_y,
-                CORE_DEVICE,
-            )?
-            // Extension presence/version and value ranges were checked above.
-            // Avoid a synchronous X round-trip for every mouse movement, and do
-            // not leave asynchronous errors queued on this injection-only link.
-            .ignore_error();
+        let request = prepare_input(event, self.min_keycode, self.max_keycode, &pointer_mapping)?;
+        queue_prepared(&self.conn, self.root, request)?;
         self.conn.flush()?;
         Ok(())
     }
@@ -316,12 +288,163 @@ fn physical_button(mapping: &[u8], logical: u8) -> Result<u8, InputError> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreparedInput {
+    type_: u8,
+    detail: u8,
+    root_x: i16,
+    root_y: i16,
+}
+
+fn prepare_batch(
+    events: &[InputEvent],
+    pressed: &PressedState,
+    min_keycode: u8,
+    max_keycode: u8,
+    pointer_mapping: &[u8],
+) -> Result<(Vec<PreparedInput>, PressedState, PressedState), InputError> {
+    let mut next_pressed = pressed.clone();
+    // Until the one final flush succeeds, any prefix of the queued requests
+    // may have reached the X server. Retain every key/button that any such
+    // prefix could leave held so cleanup can release a conservative superset.
+    let mut uncertain_pressed = pressed.clone();
+    let mut prepared = Vec::with_capacity(events.len().saturating_add(pressed.held.len()));
+    for &event in events {
+        if event == InputEvent::ReleaseAll {
+            for release in next_pressed.release_plan() {
+                prepared.push(prepare_input(
+                    release,
+                    min_keycode,
+                    max_keycode,
+                    pointer_mapping,
+                )?);
+                next_pressed.record_success(release);
+            }
+            next_pressed.record_success(InputEvent::ReleaseAll);
+            continue;
+        }
+        prepared.push(prepare_input(
+            event,
+            min_keycode,
+            max_keycode,
+            pointer_mapping,
+        )?);
+        next_pressed.record_success(event);
+        uncertain_pressed.record_possible_press(event);
+    }
+    Ok((prepared, next_pressed, uncertain_pressed))
+}
+
+fn execute_prepared_batch<E>(
+    pressed: &mut PressedState,
+    prepared: Vec<PreparedInput>,
+    next_pressed: PressedState,
+    uncertain_pressed: PressedState,
+    mut queue: impl FnMut(PreparedInput) -> Result<(), E>,
+    mut flush: impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    // Queueing and flushing have side effects with an uncertain failure
+    // boundary. Install the conservative state first; validation errors return
+    // before this helper and therefore still leave the live state untouched.
+    *pressed = uncertain_pressed;
+    for request in prepared {
+        queue(request)?;
+    }
+    flush()?;
+    *pressed = next_pressed;
+    Ok(())
+}
+
+fn prepare_input(
+    event: InputEvent,
+    min_keycode: u8,
+    max_keycode: u8,
+    pointer_mapping: &[u8],
+) -> Result<PreparedInput, InputError> {
+    let (type_, detail, root_x, root_y) = match event {
+        InputEvent::Pointer { x, y } => (
+            MOTION_NOTIFY_EVENT,
+            ABSOLUTE_MOTION,
+            coordinate('x', x)?,
+            coordinate('y', y)?,
+        ),
+        InputEvent::Key { keycode, pressed } => {
+            if !(min_keycode..=max_keycode).contains(&keycode) {
+                return Err(InputError::InvalidKeycode {
+                    keycode,
+                    min: min_keycode,
+                    max: max_keycode,
+                });
+            }
+            (
+                if pressed {
+                    KEY_PRESS_EVENT
+                } else {
+                    KEY_RELEASE_EVENT
+                },
+                keycode,
+                0,
+                0,
+            )
+        }
+        InputEvent::Button { button, pressed } => {
+            if button == 0 {
+                return Err(InputError::InvalidButton { button });
+            }
+            // Core events carry the logical button after the source server's
+            // mapping, while XTEST expects a physical button and applies the
+            // destination mapping. One batch snapshots the mapping before it
+            // queues any sparse button edge.
+            let physical = physical_button(pointer_mapping, button)?;
+            (
+                if pressed {
+                    BUTTON_PRESS_EVENT
+                } else {
+                    BUTTON_RELEASE_EVENT
+                },
+                physical,
+                0,
+                0,
+            )
+        }
+        InputEvent::ReleaseAll => unreachable!("ReleaseAll is expanded before preparation"),
+    };
+    Ok(PreparedInput {
+        type_,
+        detail,
+        root_x,
+        root_y,
+    })
+}
+
+fn queue_prepared(
+    conn: &RustConnection,
+    root: Window,
+    request: PreparedInput,
+) -> Result<(), InputError> {
+    // XTEST has no modifier-mask argument. Modifier keys arrive as normal
+    // ordered Key events and therefore update server state naturally.
+    conn.xtest_fake_input(
+        request.type_,
+        request.detail,
+        NO_DELAY_MS,
+        root,
+        request.root_x,
+        request.root_y,
+        CORE_DEVICE,
+    )?
+    // Extension presence/version and value ranges were checked above. Avoid a
+    // synchronous round-trip per event and consume asynchronous error cookies.
+    .ignore_error();
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HeldInput {
     Key(u8),
     Button(u8),
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct PressedState {
     // One unified order lets release_all unwind mixed key/button chords in the
     // exact reverse order in which their first presses succeeded.
@@ -365,11 +488,24 @@ impl PressedState {
             })
             .collect()
     }
+
+    fn record_possible_press(&mut self, event: InputEvent) {
+        if matches!(
+            event,
+            InputEvent::Key { pressed: true, .. } | InputEvent::Button { pressed: true, .. }
+        ) {
+            self.record_success(event);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{InputEvent, PressedState, coordinate, physical_button, supports_required_xtest};
+    use super::{
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, InputEvent, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
+        MOTION_NOTIFY_EVENT, PressedState, coordinate, execute_prepared_batch, physical_button,
+        prepare_batch, supports_required_xtest,
+    };
 
     #[test]
     fn pressed_state_tracks_unique_inputs_in_press_order() {
@@ -465,5 +601,223 @@ mod tests {
         assert_eq!(physical_button(&[3, 2, 1, 4, 5], 1).unwrap(), 3);
         assert_eq!(physical_button(&[3, 2, 1, 4, 5], 3).unwrap(), 1);
         assert!(physical_button(&[3, 2, 1], 4).is_err());
+    }
+
+    #[test]
+    fn batch_prevalidation_preserves_edges_and_expands_release_all_in_reverse_order() {
+        let mut pressed = PressedState::default();
+        pressed.record_success(InputEvent::Key {
+            keycode: 38,
+            pressed: true,
+        });
+        pressed.record_success(InputEvent::Button {
+            button: 1,
+            pressed: true,
+        });
+        let events = [
+            InputEvent::Pointer { x: 120, y: 240 },
+            InputEvent::Key {
+                keycode: 39,
+                pressed: true,
+            },
+            InputEvent::ReleaseAll,
+            InputEvent::Button {
+                button: 3,
+                pressed: true,
+            },
+        ];
+
+        let (prepared, next_pressed, uncertain_pressed) =
+            prepare_batch(&events, &pressed, 8, 255, &[3, 2, 1, 4, 5]).unwrap();
+        let types_and_details: Vec<_> = prepared
+            .iter()
+            .map(|request| (request.type_, request.detail))
+            .collect();
+        assert_eq!(
+            types_and_details,
+            [
+                (MOTION_NOTIFY_EVENT, 0),
+                (KEY_PRESS_EVENT, 39),
+                (KEY_RELEASE_EVENT, 39),
+                (BUTTON_RELEASE_EVENT, 3),
+                (KEY_RELEASE_EVENT, 38),
+                (BUTTON_PRESS_EVENT, 1),
+            ]
+        );
+        assert_eq!(
+            next_pressed.release_plan(),
+            [InputEvent::Button {
+                button: 3,
+                pressed: false,
+            }]
+        );
+        assert_eq!(
+            uncertain_pressed.release_plan(),
+            [
+                InputEvent::Button {
+                    button: 3,
+                    pressed: false,
+                },
+                InputEvent::Key {
+                    keycode: 39,
+                    pressed: false,
+                },
+                InputEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: false,
+                },
+            ],
+            "the uncertain state must cover every held input in any request prefix"
+        );
+        assert_eq!(
+            pressed.release_plan(),
+            [
+                InputEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: false,
+                },
+            ],
+            "prevalidation must not mutate the live pressed state"
+        );
+    }
+
+    #[test]
+    fn invalid_final_batch_event_cannot_commit_a_valid_pressed_prefix() {
+        let pressed = PressedState::default();
+        let events = [
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            InputEvent::Pointer {
+                x: i16::MAX as u16 + 1,
+                y: 0,
+            },
+        ];
+
+        assert!(prepare_batch(&events, &pressed, 8, 255, &[]).is_err());
+        assert!(pressed.release_plan().is_empty());
+    }
+
+    #[test]
+    fn release_all_has_an_empty_final_state_but_retains_uncertain_cleanup() {
+        let mut initial = PressedState::default();
+        initial.record_success(InputEvent::Key {
+            keycode: 38,
+            pressed: true,
+        });
+        initial.record_success(InputEvent::Button {
+            button: 1,
+            pressed: true,
+        });
+
+        let (_, final_pressed, uncertain_pressed) = prepare_batch(
+            &[InputEvent::ReleaseAll],
+            &initial,
+            8,
+            255,
+            &[1, 2, 3, 4, 5],
+        )
+        .unwrap();
+        assert!(final_pressed.release_plan().is_empty());
+        assert_eq!(uncertain_pressed.release_plan(), initial.release_plan());
+    }
+
+    #[test]
+    fn queue_and_flush_failures_keep_a_conservative_cleanup_plan() {
+        let mut initial = PressedState::default();
+        initial.record_success(InputEvent::Key {
+            keycode: 37,
+            pressed: true,
+        });
+        let events = [
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            InputEvent::Key {
+                keycode: 38,
+                pressed: false,
+            },
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            InputEvent::ReleaseAll,
+            InputEvent::Button {
+                button: 3,
+                pressed: true,
+            },
+        ];
+        let (prepared, final_pressed, uncertain_pressed) =
+            prepare_batch(&events, &initial, 8, 255, &[1, 2, 3, 4, 5]).unwrap();
+        let uncertain_plan = uncertain_pressed.release_plan();
+        let final_plan = final_pressed.release_plan();
+
+        for fail_at in [1, 3] {
+            let mut live = initial.clone();
+            let mut queue_calls = 0;
+            let queue_error = execute_prepared_batch(
+                &mut live,
+                prepared.clone(),
+                final_pressed.clone(),
+                uncertain_pressed.clone(),
+                |_| {
+                    queue_calls += 1;
+                    if queue_calls == fail_at {
+                        Err("synthetic queue failure")
+                    } else {
+                        Ok(())
+                    }
+                },
+                || Ok(()),
+            )
+            .unwrap_err();
+            assert_eq!(queue_error, "synthetic queue failure");
+            assert_eq!(live.release_plan(), uncertain_plan);
+        }
+
+        let mut live = initial.clone();
+        let flush_error = execute_prepared_batch(
+            &mut live,
+            prepared.clone(),
+            final_pressed.clone(),
+            uncertain_pressed.clone(),
+            |_| Ok(()),
+            || Err("synthetic flush failure"),
+        )
+        .unwrap_err();
+        assert_eq!(flush_error, "synthetic flush failure");
+        assert_eq!(live.release_plan(), uncertain_plan);
+
+        let mut live = initial;
+        let mut queued = Vec::new();
+        let mut flushes = 0;
+        execute_prepared_batch(
+            &mut live,
+            prepared.clone(),
+            final_pressed,
+            uncertain_pressed,
+            |request| {
+                queued.push(request);
+                Ok::<(), &'static str>(())
+            },
+            || {
+                flushes += 1;
+                Ok::<(), &'static str>(())
+            },
+        )
+        .unwrap();
+        assert_eq!(queued, prepared);
+        assert_eq!(flushes, 1);
+        assert_eq!(live.release_plan(), final_plan);
     }
 }

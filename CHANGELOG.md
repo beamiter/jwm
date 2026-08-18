@@ -41,10 +41,14 @@ monorepo use independent Semantic Versions.
   latest-wins queue, reports stage latency and dropped stale frames, and
   enforces an absolute negotiation deadline on both peers. Full-resolution root
   readback remains a compatibility fallback.
-- The JWM remote application protocol is now version 2. Cumulative frame
-  acknowledgements cap video at two frames beyond what the viewer has actually
-  drawn; sustained backpressure also throttles redundant X11 captures while a
-  periodically refreshed latest frame waits.
+- The JWM remote application protocol is now version 3 and deliberately rejects
+  version 2, so both endpoints must be upgraded together. Cumulative frame
+  acknowledgements still cap video at two frames beyond what the viewer has
+  actually drawn, and sustained backpressure throttles redundant X11 captures.
+  Input now travels in authenticated batches of at most 128 operations and 641
+  bytes. Adjacent pointer positions are latest-wins without crossing key,
+  button or release-all edges; the host preflights each complete batch before
+  queuing it in order and flushing XTEST once.
 - Host and viewer now publish five-second and final pipeline telemetry without
   changing the wire protocol. Host reports remain live through zero-send credit
   or socket stalls and separate capture-mailbox replacement from the viewer's

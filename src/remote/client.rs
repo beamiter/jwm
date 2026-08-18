@@ -4,7 +4,9 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::frame::{DecodedFrame, decode_frame};
 use super::key::load_key_file;
-use super::messages::{ClientHello, ServerHello, encode_frame_ack, encode_input};
+use super::messages::{
+    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
+};
 use super::protocol::{
     MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
 };
@@ -108,8 +110,8 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     );
     state.stopping.store(true, Ordering::Release);
     if pointer_enabled || keyboard_enabled {
-        let (kind, payload) = encode_input(InputEvent::ReleaseAll);
-        let _ = writer.write_message(kind, &payload);
+        let mut payload = Vec::new();
+        let _ = write_input_batch(&mut writer, &[InputEvent::ReleaseAll], &mut payload);
     }
     let _ = writer.write_message(MessageKind::Close, &[]);
     let _ = writer.flush();
@@ -181,42 +183,27 @@ fn viewer_loop(
     telemetry_reporter: &mut ClientTelemetryReporter<'_>,
 ) -> RemoteResult<()> {
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
+    let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
+    let mut input_payload = Vec::new();
     loop {
-        let mut close = false;
         let events = viewer.poll_events()?;
-        let mut wrote_input = false;
-        for event in events {
-            if event == ViewerEvent::Close {
-                close = true;
-                continue;
-            }
-            let input = match event {
-                ViewerEvent::Pointer { x, y } if pointer_enabled => InputEvent::Pointer { x, y },
-                ViewerEvent::Key { keycode, pressed } if keyboard_enabled => {
-                    InputEvent::Key { keycode, pressed }
-                }
-                ViewerEvent::Button { button, pressed } if pointer_enabled => {
-                    InputEvent::Button { button, pressed }
-                }
-                ViewerEvent::ReleaseAll if pointer_enabled || keyboard_enabled => {
-                    InputEvent::ReleaseAll
-                }
-                ViewerEvent::Close => unreachable!(),
-                _ => continue,
-            };
-            let (kind, payload) = encode_input(input);
-            writer.write_message(kind, &payload)?;
-            wrote_input = true;
-        }
+        let outcome = for_each_input_batch(
+            events,
+            pointer_enabled,
+            keyboard_enabled,
+            &mut input_batch,
+            |batch| write_input_batch(writer, batch, &mut input_payload),
+        )?;
+        let mut wrote = outcome.wrote_input;
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
-            wrote_input = true;
+            wrote = true;
             next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
         }
-        if wrote_input {
+        if wrote {
             writer.flush()?;
         }
-        if close {
+        if outcome.close {
             return Ok(());
         }
 
@@ -239,6 +226,86 @@ fn viewer_loop(
         telemetry_reporter.maybe_report();
         thread::sleep(Duration::from_millis(4));
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct InputPollOutcome {
+    wrote_input: bool,
+    close: bool,
+}
+
+fn for_each_input_batch(
+    events: impl IntoIterator<Item = ViewerEvent>,
+    pointer_enabled: bool,
+    keyboard_enabled: bool,
+    batch: &mut Vec<InputEvent>,
+    mut emit: impl FnMut(&[InputEvent]) -> RemoteResult<()>,
+) -> RemoteResult<InputPollOutcome> {
+    batch.clear();
+    let mut outcome = InputPollOutcome::default();
+    let mut pointer_run_open = false;
+
+    for event in events {
+        if event == ViewerEvent::Close {
+            outcome.close = true;
+            break;
+        }
+        let input = match event {
+            ViewerEvent::Pointer { x, y } if pointer_enabled => InputEvent::Pointer { x, y },
+            ViewerEvent::Key { keycode, pressed } if keyboard_enabled => {
+                pointer_run_open = false;
+                InputEvent::Key { keycode, pressed }
+            }
+            ViewerEvent::Button { button, pressed } if pointer_enabled => {
+                pointer_run_open = false;
+                InputEvent::Button { button, pressed }
+            }
+            ViewerEvent::ReleaseAll if pointer_enabled || keyboard_enabled => {
+                pointer_run_open = false;
+                InputEvent::ReleaseAll
+            }
+            ViewerEvent::Key { .. } | ViewerEvent::Button { .. } | ViewerEvent::ReleaseAll => {
+                // Capability filtering must not accidentally merge pointer
+                // positions that were separated by a local input edge.
+                pointer_run_open = false;
+                continue;
+            }
+            ViewerEvent::Pointer { .. } => continue,
+            ViewerEvent::Close => unreachable!(),
+        };
+
+        if matches!(input, InputEvent::Pointer { .. })
+            && pointer_run_open
+            && let Some(previous @ InputEvent::Pointer { .. }) = batch.last_mut()
+        {
+            *previous = input;
+            continue;
+        }
+        if batch.len() == MAX_INPUT_BATCH_EVENTS {
+            emit(batch)?;
+            outcome.wrote_input = true;
+            batch.clear();
+        }
+        batch.push(input);
+        pointer_run_open = matches!(input, InputEvent::Pointer { .. });
+    }
+
+    if !batch.is_empty() {
+        emit(batch)?;
+        outcome.wrote_input = true;
+        batch.clear();
+    }
+    Ok(outcome)
+}
+
+fn write_input_batch<W: std::io::Write>(
+    writer: &mut SessionWriter<W>,
+    events: &[InputEvent],
+    payload: &mut Vec<u8>,
+) -> RemoteResult<()> {
+    encode_input_batch_into(events, payload)?;
+    writer.write_message(MessageKind::InputBatch, payload)?;
+    Ok(())
 }
 
 fn draw_and_ack<W: std::io::Write>(
@@ -520,7 +587,8 @@ fn receive_frames(
             | MessageKind::Pointer
             | MessageKind::Key
             | MessageKind::Button
-            | MessageKind::ReleaseAll => {
+            | MessageKind::ReleaseAll
+            | MessageKind::InputBatch => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
             MessageKind::Heartbeat => {
@@ -582,6 +650,298 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("synthetic flush failure"))
         }
+    }
+
+    fn pointer(position: u16) -> ViewerEvent {
+        ViewerEvent::Pointer {
+            x: position,
+            y: position + 1,
+        }
+    }
+
+    fn input_pointer(position: u16) -> InputEvent {
+        InputEvent::Pointer {
+            x: position,
+            y: position + 1,
+        }
+    }
+
+    fn collect_input_batches(
+        events: impl IntoIterator<Item = ViewerEvent>,
+        pointer_enabled: bool,
+        keyboard_enabled: bool,
+    ) -> (Vec<Vec<InputEvent>>, InputPollOutcome) {
+        let mut scratch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
+        let mut batches = Vec::new();
+        let outcome = for_each_input_batch(
+            events,
+            pointer_enabled,
+            keyboard_enabled,
+            &mut scratch,
+            |batch| {
+                assert!(!batch.is_empty());
+                assert!(batch.len() <= MAX_INPUT_BATCH_EVENTS);
+                batches.push(batch.to_vec());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(scratch.is_empty());
+        (batches, outcome)
+    }
+
+    #[test]
+    fn drag_motion_coalesces_only_between_button_edges() {
+        let (batches, outcome) = collect_input_batches(
+            [
+                pointer(1),
+                pointer(2),
+                ViewerEvent::Button {
+                    button: 1,
+                    pressed: true,
+                },
+                pointer(3),
+                pointer(4),
+                ViewerEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+            ],
+            true,
+            false,
+        );
+
+        assert_eq!(
+            batches,
+            [vec![
+                input_pointer(2),
+                InputEvent::Button {
+                    button: 1,
+                    pressed: true,
+                },
+                input_pointer(4),
+                InputEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+            ]]
+        );
+        assert_eq!(
+            outcome,
+            InputPollOutcome {
+                wrote_input: true,
+                close: false,
+            }
+        );
+    }
+
+    #[test]
+    fn scroll_button_edges_keep_each_pointer_position() {
+        let (batches, _) = collect_input_batches(
+            [
+                pointer(10),
+                ViewerEvent::Button {
+                    button: 4,
+                    pressed: true,
+                },
+                pointer(11),
+                ViewerEvent::Button {
+                    button: 4,
+                    pressed: false,
+                },
+                pointer(12),
+                ViewerEvent::Button {
+                    button: 5,
+                    pressed: true,
+                },
+                pointer(13),
+                ViewerEvent::Button {
+                    button: 5,
+                    pressed: false,
+                },
+            ],
+            true,
+            false,
+        );
+
+        assert_eq!(
+            batches,
+            [vec![
+                input_pointer(10),
+                InputEvent::Button {
+                    button: 4,
+                    pressed: true,
+                },
+                input_pointer(11),
+                InputEvent::Button {
+                    button: 4,
+                    pressed: false,
+                },
+                input_pointer(12),
+                InputEvent::Button {
+                    button: 5,
+                    pressed: true,
+                },
+                input_pointer(13),
+                InputEvent::Button {
+                    button: 5,
+                    pressed: false,
+                },
+            ]]
+        );
+    }
+
+    #[test]
+    fn f12_release_all_partitions_pointer_runs() {
+        let (batches, _) = collect_input_batches(
+            [
+                ViewerEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+                pointer(20),
+                pointer(21),
+                // The viewer keeps F12 local and represents it upstream as
+                // this ReleaseAll edge.
+                ViewerEvent::ReleaseAll,
+                pointer(22),
+                pointer(23),
+            ],
+            true,
+            true,
+        );
+
+        assert_eq!(
+            batches,
+            [vec![
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+                input_pointer(21),
+                InputEvent::ReleaseAll,
+                input_pointer(23),
+            ]]
+        );
+    }
+
+    #[test]
+    fn all_forwarded_edges_partition_pointer_runs_in_order() {
+        let (batches, _) = collect_input_batches(
+            [
+                pointer(30),
+                pointer(31),
+                ViewerEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+                pointer(32),
+                pointer(33),
+                ViewerEvent::Key {
+                    keycode: 38,
+                    pressed: false,
+                },
+                pointer(34),
+                pointer(35),
+                ViewerEvent::Button {
+                    button: 1,
+                    pressed: true,
+                },
+                pointer(36),
+                pointer(37),
+                ViewerEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+                pointer(38),
+                pointer(39),
+                ViewerEvent::ReleaseAll,
+                pointer(40),
+                pointer(41),
+            ],
+            true,
+            true,
+        );
+
+        assert_eq!(
+            batches.concat(),
+            vec![
+                input_pointer(31),
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+                input_pointer(33),
+                InputEvent::Key {
+                    keycode: 38,
+                    pressed: false,
+                },
+                input_pointer(35),
+                InputEvent::Button {
+                    button: 1,
+                    pressed: true,
+                },
+                input_pointer(37),
+                InputEvent::Button {
+                    button: 1,
+                    pressed: false,
+                },
+                input_pointer(39),
+                InputEvent::ReleaseAll,
+                input_pointer(41),
+            ]
+        );
+    }
+
+    #[test]
+    fn close_preserves_release_all_and_discards_later_events() {
+        let (batches, outcome) = collect_input_batches(
+            [
+                pointer(50),
+                pointer(51),
+                ViewerEvent::ReleaseAll,
+                ViewerEvent::Close,
+                pointer(52),
+                ViewerEvent::Key {
+                    keycode: 38,
+                    pressed: true,
+                },
+            ],
+            true,
+            true,
+        );
+
+        assert_eq!(batches, [vec![input_pointer(51), InputEvent::ReleaseAll]]);
+        assert!(outcome.close);
+        assert!(outcome.wrote_input);
+    }
+
+    #[test]
+    fn batches_are_bounded_and_full_tail_pointer_stays_latest_wins() {
+        let mut events = vec![ViewerEvent::ReleaseAll; MAX_INPUT_BATCH_EVENTS - 1];
+        let mut expected = vec![InputEvent::ReleaseAll; MAX_INPUT_BATCH_EVENTS - 1];
+        events.extend([pointer(60), pointer(61)]);
+        expected.push(input_pointer(61));
+        for index in 0..(MAX_INPUT_BATCH_EVENTS * 2) {
+            let event = ViewerEvent::Key {
+                keycode: 38,
+                pressed: index % 2 == 0,
+            };
+            events.push(event);
+            expected.push(InputEvent::Key {
+                keycode: 38,
+                pressed: index % 2 == 0,
+            });
+        }
+
+        let (batches, outcome) = collect_input_batches(events, true, true);
+        assert_eq!(
+            batches.iter().map(Vec::len).collect::<Vec<_>>(),
+            [128, 128, 128]
+        );
+        assert_eq!(batches.concat(), expected);
+        assert!(outcome.wrote_input);
+        assert!(!outcome.close);
     }
 
     #[test]

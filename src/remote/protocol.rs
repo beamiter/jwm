@@ -97,13 +97,13 @@ pub enum MessageKind {
     HelloAck = 2,
     /// One complete encoded frame.
     Frame = 3,
-    /// Pointer motion payload.
+    /// Legacy single pointer payload; version-3 peers use [`Self::InputBatch`].
     Pointer = 4,
-    /// Keyboard press or release payload.
+    /// Legacy single key payload; version-3 peers use [`Self::InputBatch`].
     Key = 5,
-    /// Pointer-button press or release payload.
+    /// Legacy single button payload; version-3 peers use [`Self::InputBatch`].
     Button = 6,
-    /// Release every key and button held by this session.
+    /// Legacy single release-all payload; version-3 peers use [`Self::InputBatch`].
     ReleaseAll = 7,
     /// Graceful session shutdown.
     Close = 8,
@@ -111,6 +111,8 @@ pub enum MessageKind {
     Heartbeat = 9,
     /// Cumulative acknowledgement of the latest frame drawn by the client.
     FrameAck = 10,
+    /// One atomically decoded batch of pointer, key, button, or release events.
+    InputBatch = 11,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -128,6 +130,7 @@ impl TryFrom<u8> for MessageKind {
             8 => Ok(Self::Close),
             9 => Ok(Self::Heartbeat),
             10 => Ok(Self::FrameAck),
+            11 => Ok(Self::InputBatch),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }
@@ -868,9 +871,11 @@ mod tests {
     }
 
     #[test]
-    fn frame_ack_message_kind_has_stable_wire_value() {
+    fn recently_added_message_kinds_have_stable_wire_values() {
         assert_eq!(u8::from(MessageKind::FrameAck), 10);
         assert_eq!(MessageKind::try_from(10).unwrap(), MessageKind::FrameAck);
+        assert_eq!(u8::from(MessageKind::InputBatch), 11);
+        assert_eq!(MessageKind::try_from(11).unwrap(), MessageKind::InputBatch);
     }
 
     #[test]
