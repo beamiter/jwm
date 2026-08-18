@@ -445,6 +445,8 @@ pub enum PropertyKind {
     MotifHints,
     GtkFrameExtents,
     BypassCompositor,
+    /// JWM-private root marker held by an out-of-process remote capture host.
+    RemoteCapture,
     OpaqueRegion,
     NetWmIcon,
     UserTime,

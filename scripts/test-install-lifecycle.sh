@@ -48,13 +48,13 @@ for session in \
 done
 
 make_fake_bundle() {
-    local version=$1 marker=$2 bundle root
+    local version=$1 marker=$2 manifest=${3:-$MANIFEST} bundle root
     bundle="$TMP_ROOT/bundle-$version"
     root="$bundle/payload/usr/local/lib/jwm/versions/$version"
     local kind source version_path stable_path mode extra destination
     mkdir -p -- "$root"
     cp -- "$INSTALLER" "$bundle/install-release.sh"
-    cp -- "$MANIFEST" "$bundle/release-manifest.tsv"
+    cp -- "$manifest" "$bundle/release-manifest.tsv"
     printf '%s\n' "$version" > "$bundle/VERSION"
 
     while IFS=$'\t' read -r kind source version_path stable_path mode extra || [[ -n ${kind:-} ]]; do
@@ -81,7 +81,7 @@ make_fake_bundle() {
                 ;;
             *) fail "unknown test manifest kind: $kind" ;;
         esac
-    done < "$MANIFEST"
+    done < "$manifest"
     printf '%s\n' "$bundle"
 }
 
@@ -89,8 +89,14 @@ mkdir -p -- "$DESTDIR/usr/local/bin"
 printf 'legacy-jwm\n' > "$DESTDIR/usr/local/bin/jwm"
 chmod 0751 -- "$DESTDIR/usr/local/bin/jwm"
 
-BUNDLE_V1=$(make_fake_bundle 1.0.0 release-v1)
-BUNDLE_V2=$(make_fake_bundle 2.0.0 release-v2)
+# Model a real pre-remote release: v1 has no helper entry at all, while v2
+# adds jwm-remote as versioned-only content.  The stable destination map must
+# remain compatible across that manifest extension.
+LEGACY_MANIFEST="$TMP_ROOT/release-manifest-v1.tsv"
+awk -F '\t' '$1 == "built" && $2 == "jwm-remote" { next } { print }' \
+    "$MANIFEST" > "$LEGACY_MANIFEST"
+BUNDLE_V1=$(make_fake_bundle 1.0.0 release-v1 "$LEGACY_MANIFEST")
+BUNDLE_V2=$(make_fake_bundle 2.0.0 release-v2 "$MANIFEST")
 
 # Bundle extraction metadata is untrusted input. A privileged installation
 # must not preserve a user's writable or set-id modes in the immutable tree.
@@ -136,6 +142,10 @@ bash "$BUNDLE_V1/install-release.sh" install --destdir "$DESTDIR" --replace
 assert_relative_link "$DESTDIR/usr/local/bin/jwm"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
 assert_file_contains "$DESTDIR/usr/local/lib/jwm/.release-state/backups/usr/local/bin/jwm" legacy-jwm
+[[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
+    fail "pre-remote v1 unexpectedly contains jwm-remote"
+[[ ! -e $DESTDIR/usr/local/bin/jwm-remote && ! -L $DESTDIR/usr/local/bin/jwm-remote ]] ||
+    fail "managed install unexpectedly created a stable jwm-remote path"
 [[ $(stat -c '%a' "$DESTDIR/usr/local/lib/jwm/versions/1.0.0/bin/jwm") == 755 ]] ||
     fail "installed executable mode was not normalized"
 [[ $(stat -c '%a' "$DESTDIR/usr/local/lib/jwm/versions/1.0.0/share/xsessions/jwm-x11rb.desktop") == 644 ]] ||
@@ -149,10 +159,15 @@ done < "$MANIFEST"
 bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR"
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/2.0.0 ]] || fail "v2 did not become current"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v2:jwm
+assert_file_contains "$DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote" release-v2:jwm-remote
+[[ ! -e $DESTDIR/usr/local/bin/jwm-remote && ! -L $DESTDIR/usr/local/bin/jwm-remote ]] ||
+    fail "v2 created an upgrade-incompatible stable jwm-remote path"
 
 bash "$BUNDLE_V2/install-release.sh" rollback --destdir "$DESTDIR"
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "rollback did not reactivate v1"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
+[[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
+    fail "rollback to pre-remote v1 left jwm-remote active"
 [[ -d $DESTDIR/usr/local/lib/jwm/versions/2.0.0 ]] || fail "rollback unexpectedly deleted v2"
 
 # Exercise both version-selective branches: removing an inactive version must
@@ -164,9 +179,12 @@ bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR" --version 2.
 
 bash "$BUNDLE_V2/install-release.sh" install --destdir "$DESTDIR"
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/2.0.0 ]] || fail "reinstalled v2 did not become current"
+assert_file_contains "$DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote" release-v2:jwm-remote
 bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR" --version 2.0.0
 [[ $(readlink -- "$DESTDIR/usr/local/lib/jwm/current") == versions/1.0.0 ]] || fail "removing active v2 did not reactivate v1"
 assert_file_contains "$DESTDIR/usr/local/bin/jwm" release-v1:jwm
+[[ ! -e $DESTDIR/usr/local/lib/jwm/current/bin/jwm-remote ]] ||
+    fail "removing v2 left its versioned-only jwm-remote active"
 
 bash "$BUNDLE_V2/install-release.sh" uninstall --destdir "$DESTDIR"
 [[ -f $DESTDIR/usr/local/bin/jwm && ! -L $DESTDIR/usr/local/bin/jwm ]] || fail "legacy jwm was not restored"
@@ -224,6 +242,7 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-tool \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-support \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-remote \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-bridge \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/xsessions/jwm-x11rb.desktop \
@@ -232,7 +251,8 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/README.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/CHANGELOG.md \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/LICENSE \
-    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/docs/architecture.md; do
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/docs/architecture.md \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/doc/jwm/docs/remote-control.md; do
     grep -Fxq -- "$BUNDLE_NAME/$required_path" "$TMP_ROOT/archive-contents.txt" ||
         fail "release archive omits $required_path"
 done

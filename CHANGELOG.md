@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- `jwm-remote` provides an authenticated JWM-to-JWM remote desktop MVP for
+  x11rb/xcb X11 sessions. It captures the shared Composite overlay out of
+  process, sends bounded JPEG frames, maps a native X11 viewer back into host
+  coordinates, and uses XTEST for explicitly enabled input. The direct LAN
+  mode is authenticated but deliberately documented as unencrypted/trusted-LAN
+  only; loopback plus SSH is the confidential deployment path.
 - `behavior.recording_max_height` caps the encoded height, scaling the capture
   down to fit and preserving aspect ratio. Every downstream cost scales with the
   pixel count, so capping a 4K display to 1080p cuts the readback, the pipe and

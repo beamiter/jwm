@@ -117,6 +117,7 @@ pub struct PropertyKindAtoms<A> {
     pub motif_wm_hints: A,
     pub gtk_frame_extents: A,
     pub net_wm_bypass_compositor: A,
+    pub jwm_remote_capture_owner: A,
     pub net_wm_opaque_region: A,
     pub net_wm_icon: A,
     pub net_wm_user_time: A,
@@ -347,6 +348,8 @@ pub fn property_kind_from_atom<A: Copy + Eq>(atom: A, atoms: PropertyKindAtoms<A
         PropertyKind::GtkFrameExtents
     } else if atom == atoms.net_wm_bypass_compositor {
         PropertyKind::BypassCompositor
+    } else if atom == atoms.jwm_remote_capture_owner {
+        PropertyKind::RemoteCapture
     } else if atom == atoms.net_wm_opaque_region {
         PropertyKind::OpaqueRegion
     } else if atom == atoms.net_wm_icon {

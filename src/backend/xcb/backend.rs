@@ -136,6 +136,7 @@ struct XcbAtoms {
     net_wm_user_time_window: x::Atom,
     net_wm_icon: x::Atom,
     net_wm_bypass_compositor: x::Atom,
+    jwm_remote_capture_owner: x::Atom,
     net_wm_opaque_region: x::Atom,
     net_wm_strut: x::Atom,
     net_wm_strut_partial: x::Atom,
@@ -246,6 +247,7 @@ impl XcbAtoms {
             net_wm_user_time_window: Self::intern(conn, b"_NET_WM_USER_TIME_WINDOW")?,
             net_wm_icon: Self::intern(conn, b"_NET_WM_ICON")?,
             net_wm_bypass_compositor: Self::intern(conn, b"_NET_WM_BYPASS_COMPOSITOR")?,
+            jwm_remote_capture_owner: Self::intern(conn, b"_JWM_REMOTE_CAPTURE_OWNER")?,
             net_wm_opaque_region: Self::intern(conn, b"_NET_WM_OPAQUE_REGION")?,
             net_wm_strut: Self::intern(conn, b"_NET_WM_STRUT")?,
             net_wm_strut_partial: Self::intern(conn, b"_NET_WM_STRUT_PARTIAL")?,
@@ -384,6 +386,7 @@ impl XcbAtoms {
             motif_wm_hints: self.motif_wm_hints,
             gtk_frame_extents: self.gtk_frame_extents,
             net_wm_bypass_compositor: self.net_wm_bypass_compositor,
+            jwm_remote_capture_owner: self.jwm_remote_capture_owner,
             net_wm_opaque_region: self.net_wm_opaque_region,
             net_wm_icon: self.net_wm_icon,
             net_wm_user_time: self.net_wm_user_time,
@@ -1594,6 +1597,17 @@ impl XcbBackend {
         {
             self.compositor_desired.retire_window(*window);
         }
+        let remote_conn = Arc::clone(&self.conn);
+        let remote_root = self.root;
+        let remote_atom = self.atoms.jwm_remote_capture_owner;
+        let remote_capture_owner = || {
+            let owner =
+                *get_u32s(&remote_conn, remote_root, remote_atom, x::ATOM_WINDOW).first()?;
+            if owner == x::WINDOW_NONE.resource_id() {
+                return None;
+            }
+            Some(owner)
+        };
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -1618,6 +1632,7 @@ impl XcbBackend {
             },
             bypass_compositor: &|win| property_ops.get_bypass_compositor(win).unwrap_or(0),
             fullscreen: &|win| property_ops.is_fullscreen(win),
+            remote_capture_owner: &remote_capture_owner,
         };
         for op in compositor_event_ops(event, root, overlay, &sources) {
             compositor.apply_event_op(root, op);
@@ -1755,7 +1770,12 @@ impl XcbBackend {
                 let kind = self.property_kind(ev.atom());
                 // A deleted bypass hint means "no preference" and must reach
                 // the compositor so it can leave direct presentation safely.
-                if ev.state() == x::Property::Delete && kind != PropertyKind::BypassCompositor {
+                if ev.state() == x::Property::Delete
+                    && !matches!(
+                        kind,
+                        PropertyKind::BypassCompositor | PropertyKind::RemoteCapture
+                    )
+                {
                     return None;
                 }
                 Some(BackendEvent::PropertyChanged {

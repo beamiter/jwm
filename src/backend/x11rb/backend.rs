@@ -508,6 +508,22 @@ impl X11rbBackend {
         {
             self.compositor_desired.retire_window(*window);
         }
+        let remote_conn = Arc::clone(&self.conn);
+        let remote_root = self.root_x11;
+        let remote_atom = self.atoms._JWM_REMOTE_CAPTURE_OWNER;
+        let remote_capture_owner = || {
+            use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+            let reply = remote_conn
+                .get_property(false, remote_root, remote_atom, AtomEnum::WINDOW, 0, 1)
+                .ok()?
+                .reply()
+                .ok()?;
+            let owner = reply
+                .value32()?
+                .next()
+                .filter(|owner| *owner != x11rb::NONE)?;
+            Some(owner)
+        };
         let Some(compositor) = self.compositor.as_mut() else {
             return;
         };
@@ -531,6 +547,7 @@ impl X11rbBackend {
             },
             bypass_compositor: &|win| property_ops.get_bypass_compositor(win).unwrap_or(0),
             fullscreen: &|win| property_ops.is_fullscreen(win),
+            remote_capture_owner: &remote_capture_owner,
         };
         for op in compositor_event_ops(event, self.root_x11, overlay, &sources) {
             compositor.apply_event_op(self.root_x11, op);
@@ -2541,6 +2558,7 @@ mod event_source {
                 motif_wm_hints: self.atoms._MOTIF_WM_HINTS,
                 gtk_frame_extents: self.atoms._GTK_FRAME_EXTENTS,
                 net_wm_bypass_compositor: self.atoms._NET_WM_BYPASS_COMPOSITOR,
+                jwm_remote_capture_owner: self.atoms._JWM_REMOTE_CAPTURE_OWNER,
                 net_wm_opaque_region: self.atoms._NET_WM_OPAQUE_REGION,
                 net_wm_icon: self.atoms._NET_WM_ICON,
                 net_wm_user_time: self.atoms._NET_WM_USER_TIME,
@@ -2744,7 +2762,10 @@ mod event_source {
                     // but a bypass request must be reset immediately or a
                     // client can remain unredirected after withdrawing it.
                     if e.state == xproto::Property::DELETE.into()
-                        && kind != PropertyKind::BypassCompositor
+                        && !matches!(
+                            kind,
+                            PropertyKind::BypassCompositor | PropertyKind::RemoteCapture
+                        )
                     {
                         return None;
                     }

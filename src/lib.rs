@@ -17,6 +17,8 @@ pub mod doctor;
 pub mod ipc;
 pub mod ipc_server;
 pub mod jwm;
+#[cfg(feature = "remote-x11")]
+pub mod remote;
 pub mod renderer;
 pub mod sync_ext;
 pub mod terminal_prober;

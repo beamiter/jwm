@@ -109,7 +109,7 @@ usage() {
   - 真正会被安装的 bar 只有 JWM_BAR_NAME（即 -b 的第一个参数，或脚本顶部默认值）。
   - 原生 Rust bar 使用 cargo install --path ... 安装到 cargo bin 目录（通常是 ~/.cargo/bin）。
     dioxus_bar 使用 dx；Tauri bar 会同时构建前端与 src-tauri 后端，再把可执行文件安装到同一目录。
-  - jwm / jwm-tool / jwm-support 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
+  - jwm / jwm-tool / jwm-support / jwm-remote 只通过 cargo build 构建，并安装到 /usr/local/bin，不会安装到 cargo bin。
   - jwm 通过 ~/.config/jwm/config_x11.toml 和 config_wayland.toml 的 status_bar.name
     在运行时选择 bar，切换 bar 不需要重编 jwm。
   - 安装完成后，脚本会把选中的 bar 同步写入 config_x11.toml 和 config_wayland.toml；
@@ -297,7 +297,7 @@ remove_jwm_cargo_bins() {
     local binary
 
     # JWM 不再安装到 cargo bin；清理历史版本遗留的 JWM 二进制。
-    for binary in jwm jwm-tool jwm-support; do
+    for binary in jwm jwm-tool jwm-support jwm-remote; do
         if [[ -e "$bin_dir/$binary" ]]; then
             info "清理旧的 cargo bin/$binary ..."
             rm -f -- "$bin_dir/$binary"
@@ -592,7 +592,7 @@ build_and_install_jwm() {
 
     cd "$PROJECT_ROOT"
 
-    # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support 写入 cargo bin。
+    # JWM 不使用 cargo install，避免把 jwm/jwm-tool/jwm-support/jwm-remote 写入 cargo bin。
     # shellcheck disable=SC2086
     cargo build --locked $CARGO_BUILD_MODE_FLAG $CARGO_JOBS
 
@@ -603,12 +603,13 @@ build_and_install_jwm() {
         target_dir="$target_dir/debug"
     fi
 
-    info "同步 jwm, jwm-tool, jwm-support 到 /usr/local/bin ..."
+    info "同步 jwm, jwm-tool, jwm-support, jwm-remote 到 /usr/local/bin ..."
     install_system_binary "$target_dir/jwm" /usr/local/bin
     install_system_binary "$target_dir/jwm-tool" /usr/local/bin
     install_system_binary "$target_dir/jwm-support" /usr/local/bin
+    install_system_binary "$target_dir/jwm-remote" /usr/local/bin
 
-    ok "jwm, jwm-tool, jwm-support 安装完成: /usr/local/bin（未安装到 cargo bin）"
+    ok "jwm, jwm-tool, jwm-support, jwm-remote 安装完成: /usr/local/bin（未安装到 cargo bin）"
 
     build_and_install_bridge
 

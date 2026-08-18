@@ -954,6 +954,7 @@ impl<C: CompositorConnection> Compositor<C> {
             detect_client_opacity: behavior.detect_client_opacity,
             fullscreen_unredirect: behavior.fullscreen_unredirect,
             unredirected_window: None,
+            remote_capture_active: false,
             vsync_method,
             oml,
             audio_sync: audio_sync::AudioSyncManager::new(),

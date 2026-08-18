@@ -8,8 +8,8 @@ equal the root `jwm` version in `Cargo.toml`. Components elsewhere in the
 monorepo retain independent SemVer versions.
 
 The job runs on x86_64 Ubuntu 22.04, the binary bundle's Linux ABI baseline. It
-checks formatting and shell syntax, compiles all root targets and six backend
-feature profiles, runs Clippy and tests with required headless EGL coverage,
+checks formatting and shell syntax, compiles all root targets and eight feature
+profiles, runs Clippy and tests with required headless EGL coverage,
 tests the shared protocol, provider adapters, bundled bar, and install
 lifecycle, then runs:
 

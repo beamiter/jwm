@@ -382,6 +382,8 @@ where
     fullscreen_unredirect: bool,
     /// Currently unredirected fullscreen window (if any)
     unredirected_window: Option<u32>,
+    /// An external `jwm-remote` capture client needs the overlay kept current.
+    remote_capture_active: bool,
 
     // --- VSync method ---
     vsync_method: VsyncMethod,

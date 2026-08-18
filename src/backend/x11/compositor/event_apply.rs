@@ -45,6 +45,12 @@ impl<C: CompositorConnection> Compositor<C> {
             CompositorEventOp::SetBypassCompositor { window, value } => {
                 self.set_window_bypass_compositor(window, value);
             }
+            CompositorEventOp::SetRemoteCaptureActive { active } => {
+                if self.remote_capture_active != active {
+                    self.remote_capture_active = active;
+                    self.needs_render = true;
+                }
+            }
             CompositorEventOp::MarkDamaged { window } => self.mark_damaged(window),
             CompositorEventOp::PresentComplete {
                 window,

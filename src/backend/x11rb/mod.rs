@@ -17,6 +17,7 @@ x11rb::atom_manager! {
         WM_DELETE_WINDOW,
         WM_STATE,
         _JWM_MINIMIZED_RESTORE_V1,
+        _JWM_REMOTE_CAPTURE_OWNER,
         WM_TAKE_FOCUS,
         WM_TRANSIENT_FOR,
 

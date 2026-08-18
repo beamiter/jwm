@@ -84,13 +84,15 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 
-      - name: Check every backend feature profile
+      - name: Check every feature profile
         shell: bash
         run: |
           set -euo pipefail
           profiles=(
             backend-x11rb
             backend-xcb
+            remote-x11
+            backend-xcb,remote-x11
             backend-wayland-udev
             backend-wayland-nested
             backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter

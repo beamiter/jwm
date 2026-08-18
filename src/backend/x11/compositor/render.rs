@@ -2679,6 +2679,7 @@ impl<C: CompositorConnection> Compositor<C> {
             || self.system_ui.is_some()
             || self.debug_hud
             || self.recording_active
+            || self.remote_capture_active
             || self.recording_region_overlay.is_some()
             || self.waterlily_visible()
             || self.waterlily_layer_dirty

@@ -83,6 +83,7 @@ default = [
     "backend-wayland-udev",
     "backend-wayland-nested",
     "media-audio",
+    "remote-x11",
 ]
 # Internal: shared X11 transport helpers and the GLX/EGL compositor.
 # Enabled through the per-transport features; not selected directly.
@@ -92,6 +93,10 @@ x11-backends = ["dep:x11", "dep:x11rb-protocol"]
 wayland-backends = ["dep:smithay"]
 # X11RB transport + shared X11 compositor.
 backend-x11rb = ["x11-backends", "dep:x11rb"]
+# JWM-to-JWM remote viewing/control for X11 sessions.  The helper opens an
+# independent x11rb connection, so it works while JWM itself uses either the
+# x11rb or xcb backend.
+remote-x11 = ["dep:x11rb", "x11rb/image", "dep:sha2"]
 # XCB transport + shared X11 compositor.
 backend-xcb = ["x11-backends", "dep:xcb"]
 # Direct Wayland DRM/KMS session backend.
@@ -134,6 +139,11 @@ path = "tools/jwm_tool.rs"
 name = "jwm-support"
 path = "tools/jwm_support.rs"
 
+[[bin]]
+name = "jwm-remote"
+path = "tools/jwm_remote.rs"
+required-features = ["remote-x11"]
+
 [dependencies]
 clap = { version = "4.6.2", features = ["derive", "env"] }
 dirs = "6.0.0"
@@ -161,6 +171,7 @@ arc-swap = "1"
 alsa = { version = "0.12", optional = true }
 ab_glyph = "0.2.32"
 rand = "0.10.2"
+sha2 = { version = "0.10", optional = true }
 xkbcommon = "0.9.0"
 bitflags = "2.13.1"
 smithay = { git = "https://github.com/Smithay/smithay.git", rev = "e76f1af1418e9cdf012da9020c2f1ecc0fe020fa", default-features = false, optional = true, features = [

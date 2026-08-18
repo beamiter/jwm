@@ -25,6 +25,8 @@ development backends.
   produced externally on CPU, CUDA, or ROCm.
 - Live configuration reload and a newline-delimited JSON IPC API exposed through
   `jwm-tool`.
+- Authenticated JWM-to-JWM remote viewing and XTEST control for trusted X11
+  LANs, through `jwm-remote` (x11rb and xcb sessions).
 - Read-only startup health checks, semantic configuration diagnostics, and
   privacy-aware support bundles.
 
@@ -56,8 +58,8 @@ cargo build --locked --release
 cargo test --locked --lib --bins --tests
 ```
 
-The release build produces `jwm`, `jwm-tool`, and `jwm-support`. Before starting
-a display backend, inspect the environment and configuration:
+The release build produces `jwm`, `jwm-tool`, `jwm-support`, and `jwm-remote`.
+Before starting a display backend, inspect the environment and configuration:
 
 ```bash
 target/release/jwm --backend x11rb --doctor
@@ -145,6 +147,27 @@ and IPC error details; it excludes HOME, PATH, D-Bus addresses, process command
 lines, window titles, and arbitrary environment variables. Review
 [support bundles](docs/support-bundles.md) before attaching a
 report to a public issue.
+
+## Remote control between JWM X11 sessions
+
+Generate and securely copy one private key, explicitly expose the host on the
+trusted LAN, then connect from the other JWM machine:
+
+```bash
+# Managed release bundle only; source installs already use /usr/local/bin.
+export PATH="/usr/local/lib/jwm/current/bin:$PATH"
+
+jwm-remote keygen --output ~/.config/jwm/remote.key
+jwm-remote host --listen 0.0.0.0:48221 --allow-lan --allow-input \
+  --key-file ~/.config/jwm/remote.key
+jwm-remote connect 192.168.1.50:48221 --grab-input \
+  --key-file ~/.config/jwm/remote.key
+```
+
+Direct LAN traffic is authenticated but not encrypted; the safer option is the
+default loopback listener carried through SSH. See the complete setup,
+security boundary, tuning, and current limits in
+[JWM remote control](docs/remote-control.md).
 
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 

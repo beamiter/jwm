@@ -52,6 +52,9 @@ pub enum CompositorEventOp {
         window: u32,
         value: u32,
     },
+    SetRemoteCaptureActive {
+        active: bool,
+    },
     MarkDamaged {
         window: u32,
     },
@@ -95,6 +98,8 @@ pub struct CompositorEventSources<'a> {
     pub bypass_compositor: &'a dyn Fn(WindowId) -> u32,
     /// Whether `_NET_WM_STATE_FULLSCREEN` is currently present.
     pub fullscreen: &'a dyn Fn(WindowId) -> bool,
+    /// Live owner window named by JWM's private root capture marker.
+    pub remote_capture_owner: &'a dyn Fn() -> Option<u32>,
 }
 
 /// Plan the compositor-facing effects of one backend event.
@@ -160,6 +165,11 @@ pub fn compositor_event_ops(
         | BackendEvent::WindowDestroyed(window) => {
             if let Some(x11w) = (sources.resolve)(*window) {
                 ops.push(CompositorEventOp::RemoveWindow { window: x11w });
+                if matches!(event, BackendEvent::WindowDestroyed(_))
+                    && (sources.remote_capture_owner)() == Some(x11w)
+                {
+                    ops.push(CompositorEventOp::SetRemoteCaptureActive { active: false });
+                }
             }
         }
         BackendEvent::WindowUnmapped {
@@ -233,7 +243,11 @@ pub fn compositor_event_ops(
         }
         BackendEvent::PropertyChanged { window, kind } => {
             if let Some(x11w) = (sources.resolve)(*window) {
-                if matches!(kind, PropertyKind::Class) {
+                if x11w == root && matches!(kind, PropertyKind::RemoteCapture) {
+                    ops.push(CompositorEventOp::SetRemoteCaptureActive {
+                        active: (sources.remote_capture_owner)().is_some(),
+                    });
+                } else if matches!(kind, PropertyKind::Class) {
                     let class = (sources.class)(*window);
                     if !class.is_empty() {
                         ops.push(CompositorEventOp::SetWindowClass {
@@ -339,6 +353,7 @@ mod tests {
             override_redirect,
             bypass_compositor: &|_| 0,
             fullscreen: &|_| false,
+            remote_capture_owner: &|| None,
         }
     }
 
@@ -376,6 +391,7 @@ mod tests {
             override_redirect: &|_| false,
             bypass_compositor: &|_| 1,
             fullscreen: &|_| false,
+            remote_capture_owner: &|| None,
         };
         let ops = compositor_event_ops(&BackendEvent::WindowMapped(win(7)), ROOT, OVERLAY, &s);
         assert_eq!(
@@ -392,6 +408,44 @@ mod tests {
                     window: 7,
                     value: 1,
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_capture_marker_and_owner_destruction_toggle_the_inhibitor() {
+        let owner = 77;
+        let s = CompositorEventSources {
+            resolve: &|w| Some(w.raw() as u32),
+            geometry: &|_| Some((0, 0, 1, 1)),
+            class: &|_| String::new(),
+            override_redirect: &|_| false,
+            bypass_compositor: &|_| 0,
+            fullscreen: &|_| false,
+            remote_capture_owner: &|| Some(owner),
+        };
+        assert_eq!(
+            compositor_event_ops(
+                &BackendEvent::PropertyChanged {
+                    window: win(u64::from(ROOT)),
+                    kind: PropertyKind::RemoteCapture,
+                },
+                ROOT,
+                OVERLAY,
+                &s,
+            ),
+            vec![CompositorEventOp::SetRemoteCaptureActive { active: true }]
+        );
+        assert_eq!(
+            compositor_event_ops(
+                &BackendEvent::WindowDestroyed(win(u64::from(owner))),
+                ROOT,
+                OVERLAY,
+                &s,
+            ),
+            vec![
+                CompositorEventOp::RemoveWindow { window: owner },
+                CompositorEventOp::SetRemoteCaptureActive { active: false },
             ]
         );
     }
@@ -562,6 +616,7 @@ mod tests {
             override_redirect: &|_| false,
             bypass_compositor: &|_| 0,
             fullscreen: &|_| true,
+            remote_capture_owner: &|| None,
         };
         let ops = compositor_event_ops(
             &BackendEvent::WindowStateRequest {
@@ -622,6 +677,7 @@ mod tests {
                 override_redirect: &|_| false,
                 bypass_compositor: &|_| value,
                 fullscreen: &|_| false,
+                remote_capture_owner: &|| None,
             };
             assert_eq!(
                 compositor_event_ops(&event, ROOT, OVERLAY, &s),

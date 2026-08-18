@@ -70,6 +70,13 @@ Particular care is required around:
 - unsafe FFI and driver-facing resource lifetime;
 - logs and diagnostics that may expose desktop content.
 
+`jwm-remote` is disabled unless its separate host process is started. Its
+direct-LAN MVP authenticates peers and every ordered message but does not
+encrypt screen or input payloads; non-loopback binding and XTEST control each
+require an explicit flag. Treat direct mode as trusted-LAN-only, or carry the
+default loopback listener through SSH. See
+[`docs/remote-control.md`](docs/remote-control.md).
+
 JWM cannot make untrusted X11 clients mutually isolated; the X11 security model
 allows clients to observe and influence other clients in the same display
 session. Reports should distinguish a JWM implementation flaw from behavior

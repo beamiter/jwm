@@ -61,7 +61,7 @@ usage() {
   forge, frost     后端 (nix / cargo) 由脚本自己按 --backend auto 挑，二进制默认装到
                    ~/.cargo/bin，装在 $HOME 下，不需要 sudo。
   jwm              scripts/install_jwm_scripts.sh —— jwm 没有只编不装的中间态：
-                   裸 cargo build 只出根 package 的三个二进制，不编 bar 和
+                   裸 cargo build 只出根 package 的四个二进制，不编 bar 和
                    jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
   jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
@@ -467,7 +467,7 @@ build_cmd() {
             printf '%s\n' ./scripts/install.sh $(install_args_for "$name")
             ;;
         # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
-        # jwm/jwm-tool/jwm-support，bar 和 jwm-bridge 都不在里面，产物也不会
+        # jwm/jwm-tool/jwm-support/jwm-remote，bar 和 jwm-bridge 都不在里面，产物也不会
         # 进 /usr/local/bin，编完了跑的还是旧的那份。所以直接跑安装脚本，
         # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
         jwm)

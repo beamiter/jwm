@@ -21,6 +21,12 @@ src/backend/api.rs          platform boundary
     |
     +-- x11rb / xcb / X11 compositor
     +-- Wayland udev / X11 / winit
+
+tools/jwm_remote.rs         separate trusted-LAN X11 helper
+    |
+    +-------> src/remote/   authenticated transport, JPEG viewer, XTEST
+                    |
+                    +-----> X Composite overlay shared by x11rb / xcb JWM
 ```
 
 ## Dependency rules
@@ -37,6 +43,11 @@ src/backend/api.rs          platform boundary
 5. Backend implementations may depend on `core` and compositor-common code,
    but must not call JWM feature modules directly. Events cross the boundary
    through the backend event-handler interfaces.
+6. `remote` is an out-of-process X11 client, not part of local IPC. Its only
+   narrow compositor coupling is an X11 capture-owner lease observed by both
+   backends to inhibit fullscreen unredirect while the Composite overlay is
+   being read. Network messages must remain a closed screen/input protocol and
+   must never forward arbitrary `jwm-tool` commands into the compositor.
 
 ## Current hotspots
 

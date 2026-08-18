@@ -114,7 +114,7 @@ jobs:
           JWM_REQUIRE_HEADLESS_GL: 1
 
   feature-profiles:
-    name: Backend feature profile (${{ matrix.profile.name }})
+    name: Feature profile (${{ matrix.profile.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -125,6 +125,10 @@ jobs:
             features: backend-x11rb
           - name: xcb
             features: backend-xcb
+          - name: remote-x11
+            features: remote-x11
+          - name: xcb-remote
+            features: backend-xcb,remote-x11
           - name: wayland-udev
             features: backend-wayland-udev
           - name: wayland-nested
