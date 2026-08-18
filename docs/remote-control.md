@@ -167,6 +167,12 @@ pipeline with one queued latest frame. The host permits at most two frames
 beyond the latest one actually drawn by the viewer; while that credit is
 exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
+The X11 viewer reuses its native upload allocation for unchanged display
+geometry. On the usual depth-24, 32-bits-per-pixel little-endian TrueColor
+visual it writes decoded RGB directly into the verified native layout;
+nonstandard visuals use the general mask-based conversion. Expose events copy
+the last completely uploaded backing image, and resize event bursts redraw only
+their final size.
 Root compatibility capture and older XRender servers retain the
 full-resolution readback plus CPU-resize fallback; for those paths, lower
 `--fps` as well as `--max-width` on very large combined multi-monitor roots.

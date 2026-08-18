@@ -13,11 +13,11 @@ use image::RgbImage;
 use x11rb::CURRENT_TIME;
 use x11rb::connection::Connection;
 use x11rb::errors::ReplyError;
-use x11rb::image::{Image as XImage, PixelLayout};
+use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Gcontext,
-    GrabMode, GrabStatus, Mapping, NotifyMode, Pixmap, PropMode, Rectangle, Screen, VisualClass,
-    Visualtype, Window, WindowClass,
+    Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Format,
+    Gcontext, GrabMode, GrabStatus, ImageOrder as X11ImageOrder, Mapping, NotifyMode, Pixmap,
+    PropMode, Rectangle, Screen, Setup, VisualClass, Visualtype, Window, WindowClass,
 };
 use x11rb::protocol::{ErrorKind, Event};
 use x11rb::rust_connection::RustConnection;
@@ -69,6 +69,20 @@ struct PendingKeyRelease {
     queued_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePixelWriter {
+    /// Native depth-24 pixels stored as little-endian 0x00RRGGBB words.
+    Bgrx32,
+    /// Any valid but less common TrueColor layout handled through PixelLayout.
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackingWork {
+    PopulateAndCopy,
+    CopyOnly,
+}
+
 /// Plain X11 window that displays decoded remote frames and collects input.
 pub struct Viewer {
     conn: RustConnection,
@@ -80,8 +94,11 @@ pub struct Viewer {
     wm_delete_window: Atom,
     depth: u8,
     pixel_layout: PixelLayout,
+    native_pixel_writer: NativePixelWriter,
+    native_image: Option<XImage<'static>>,
     width: u16,
     height: u16,
+    backing_valid: bool,
     grab_input: bool,
     forward_input: bool,
     forward_keyboard: bool,
@@ -121,7 +138,7 @@ impl Viewer {
                 .into());
             }
         }
-        let (root, root_depth, root_visual, black_pixel, pixel_layout) = {
+        let (root, root_depth, root_visual, black_pixel, pixel_layout, native_pixel_writer) = {
             let screen = conn
                 .setup()
                 .roots
@@ -138,6 +155,7 @@ impl Viewer {
                 screen.root_visual,
                 screen.black_pixel,
                 PixelLayout::from_visual_type(visual)?,
+                select_native_pixel_writer(conn.setup(), depth, visual),
             )
         };
 
@@ -237,8 +255,11 @@ impl Viewer {
             wm_delete_window,
             depth: root_depth,
             pixel_layout,
+            native_pixel_writer,
+            native_image: None,
             width: initial_width,
             height: initial_height,
+            backing_valid: false,
             grab_input,
             forward_input,
             forward_keyboard,
@@ -265,6 +286,7 @@ impl Viewer {
             return Ok(result);
         }
         let mut redraw = false;
+        let backing_dimensions = (self.width, self.height);
 
         while let Some(event) = self.conn.poll_for_event()? {
             if let Event::KeyPress(key) = &event
@@ -289,7 +311,6 @@ impl Viewer {
                     if (new_width, new_height) != (self.width, self.height) {
                         self.width = new_width;
                         self.height = new_height;
-                        self.resize_backing()?;
                         redraw = true;
                     }
                 }
@@ -426,6 +447,11 @@ impl Viewer {
             self.flush_pending_key_release(&mut result);
         }
 
+        if (self.width, self.height) != backing_dimensions && !self.closed {
+            // ConfigureNotify commonly arrives as a burst during interactive
+            // resize. Drain the burst first and allocate only its final size.
+            self.resize_backing()?;
+        }
         if redraw && !self.closed {
             self.redraw()?;
         }
@@ -448,6 +474,7 @@ impl Viewer {
             source_height: frame.source_height,
             image: frame.image,
         });
+        self.backing_valid = false;
         self.redraw()?;
         Ok(!self.closed)
     }
@@ -597,6 +624,7 @@ impl Viewer {
             return Ok(());
         }
         let previous = std::mem::replace(&mut self.backing, replacement);
+        self.backing_valid = false;
         self.conn.free_pixmap(previous)?.check()?;
         Ok(())
     }
@@ -605,72 +633,53 @@ impl Viewer {
         if self.closed {
             return Ok(());
         }
-        let Some(frame) = self.last_frame.as_ref() else {
-            let fill = self.conn.poly_fill_rectangle(
-                self.backing,
-                self.gc,
-                &[Rectangle {
-                    x: 0,
-                    y: 0,
-                    width: self.width,
-                    height: self.height,
-                }],
-            )?;
-            let copy = self.conn.copy_area(
-                self.backing,
-                self.window,
-                self.gc,
-                0,
-                0,
-                0,
-                0,
-                self.width,
-                self.height,
-            )?;
-            fill.check()?;
-            self.finish_window_request(copy.check())?;
-            if self.closed {
-                return Ok(());
-            }
-            self.conn.flush()?;
-            return Ok(());
-        };
-        let image_width = u16::try_from(frame.image.width())
-            .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
-        let image_height = u16::try_from(frame.image.height())
-            .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
-        let geometry = letterbox(self.width, self.height, image_width, image_height)
-            .ok_or_else(|| invalid_data("cannot draw an empty remote frame"))?;
-
-        let resized = if (geometry.width, geometry.height) == (image_width, image_height) {
-            Cow::Borrowed(&frame.image)
-        } else {
-            Cow::Owned(image::imageops::resize(
-                &frame.image,
-                u32::from(geometry.width),
-                u32::from(geometry.height),
-                image::imageops::FilterType::Triangle,
-            ))
-        };
-        let mut image = XImage::allocate_native(
-            geometry.width,
-            geometry.height,
-            self.depth,
-            self.conn.setup(),
-        )?;
-        for (x, y, rgb) in resized.enumerate_pixels() {
-            let pixel = self.pixel_layout.encode((
-                u16::from(rgb[0]) * 257,
-                u16::from(rgb[1]) * 257,
-                u16::from(rgb[2]) * 257,
-            ));
-            image.put_pixel(x as u16, y as u16, pixel);
+        if backing_work(self.backing_valid) == BackingWork::CopyOnly {
+            return self.copy_backing();
         }
 
-        let dst_x = i16::try_from(geometry.x)
-            .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
-        let dst_y = i16::try_from(geometry.y)
-            .map_err(|_| invalid_data("letterbox Y offset exceeds the X11 coordinate range"))?;
+        self.populate_backing()?;
+        self.copy_backing()
+    }
+
+    fn populate_backing(&mut self) -> RemoteResult<()> {
+        let upload = if let Some(frame) = self.last_frame.as_ref() {
+            let image_width = u16::try_from(frame.image.width())
+                .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
+            let image_height = u16::try_from(frame.image.height())
+                .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
+            let geometry = letterbox(self.width, self.height, image_width, image_height)
+                .ok_or_else(|| invalid_data("cannot draw an empty remote frame"))?;
+            let resized = if (geometry.width, geometry.height) == (image_width, image_height) {
+                Cow::Borrowed(&frame.image)
+            } else {
+                Cow::Owned(image::imageops::resize(
+                    &frame.image,
+                    u32::from(geometry.width),
+                    u32::from(geometry.height),
+                    image::imageops::FilterType::Triangle,
+                ))
+            };
+            let image = ensure_native_image(
+                &mut self.native_image,
+                geometry.width,
+                geometry.height,
+                self.depth,
+                self.conn.setup(),
+            )?;
+            write_native_pixels(
+                image,
+                resized.as_ref(),
+                self.pixel_layout,
+                self.native_pixel_writer,
+            )?;
+            let dst_x = i16::try_from(geometry.x)
+                .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
+            let dst_y = i16::try_from(geometry.y)
+                .map_err(|_| invalid_data("letterbox Y offset exceeds the X11 coordinate range"))?;
+            Some((dst_x, dst_y))
+        } else {
+            None
+        };
         let fill = self.conn.poly_fill_rectangle(
             self.backing,
             self.gc,
@@ -681,7 +690,27 @@ impl Viewer {
                 height: self.height,
             }],
         )?;
-        let image_cookies = image.put(&self.conn, self.backing, self.gc, dst_x, dst_y)?;
+        let image_cookies = if let Some((dst_x, dst_y)) = upload {
+            self.native_image
+                .as_ref()
+                .ok_or_else(|| invalid_data("native X11 image buffer was not allocated"))?
+                .put(&self.conn, self.backing, self.gc, dst_x, dst_y)?
+        } else {
+            Vec::new()
+        };
+        // Populate the retained pixmap completely before presenting it. If any
+        // chunk fails, no CopyArea has been queued and the previous window
+        // contents remain visible rather than a partially uploaded frame.
+        fill.check()?;
+        for cookie in image_cookies {
+            cookie.check()?;
+        }
+        self.conn.flush()?;
+        self.backing_valid = true;
+        Ok(())
+    }
+
+    fn copy_backing(&mut self) -> RemoteResult<()> {
         let copy = self.conn.copy_area(
             self.backing,
             self.window,
@@ -693,10 +722,6 @@ impl Viewer {
             self.width,
             self.height,
         )?;
-        fill.check()?;
-        for cookie in image_cookies {
-            cookie.check()?;
-        }
         self.finish_window_request(copy.check())?;
         if self.closed {
             return Ok(());
@@ -736,6 +761,125 @@ impl Drop for Viewer {
         let _ = self.conn.free_cursor(self.blank_cursor);
         let _ = self.conn.flush();
     }
+}
+
+fn select_native_pixel_writer(setup: &Setup, depth: u8, visual: Visualtype) -> NativePixelWriter {
+    let format = setup
+        .pixmap_formats
+        .iter()
+        .find(|format| format.depth == depth)
+        .copied();
+    select_native_pixel_writer_from_format(depth, visual, format, setup.image_byte_order)
+}
+
+fn backing_work(valid: bool) -> BackingWork {
+    if valid {
+        BackingWork::CopyOnly
+    } else {
+        BackingWork::PopulateAndCopy
+    }
+}
+
+fn select_native_pixel_writer_from_format(
+    depth: u8,
+    visual: Visualtype,
+    format: Option<Format>,
+    image_byte_order: X11ImageOrder,
+) -> NativePixelWriter {
+    let standard_format = format.is_some_and(|format| {
+        format.depth == 24 && format.bits_per_pixel == 32 && format.scanline_pad == 32
+    });
+    if depth == 24
+        && visual.class == VisualClass::TRUE_COLOR
+        && visual.bits_per_rgb_value == 8
+        && visual.colormap_entries == 256
+        && visual.red_mask == 0x00ff_0000
+        && visual.green_mask == 0x0000_ff00
+        && visual.blue_mask == 0x0000_00ff
+        && standard_format
+        && image_byte_order == X11ImageOrder::LSB_FIRST
+    {
+        NativePixelWriter::Bgrx32
+    } else {
+        NativePixelWriter::Generic
+    }
+}
+
+fn ensure_native_image<'a>(
+    image: &'a mut Option<XImage<'static>>,
+    width: u16,
+    height: u16,
+    depth: u8,
+    setup: &Setup,
+) -> RemoteResult<&'a mut XImage<'static>> {
+    let needs_replacement = image.as_ref().is_none_or(|image| {
+        (image.width(), image.height(), image.depth()) != (width, height, depth)
+    });
+    if needs_replacement {
+        // Allocate first so a local allocation/format error leaves the previous
+        // reusable buffer intact.
+        let replacement = XImage::allocate_native(width, height, depth, setup)?;
+        *image = Some(replacement);
+    }
+    image
+        .as_mut()
+        .ok_or_else(|| invalid_data("native X11 image buffer was not allocated").into())
+}
+
+fn write_native_pixels(
+    image: &mut XImage<'_>,
+    rgb: &RgbImage,
+    pixel_layout: PixelLayout,
+    writer: NativePixelWriter,
+) -> RemoteResult<()> {
+    let width = u16::try_from(rgb.width())
+        .map_err(|_| invalid_data("viewer image width exceeds the X11 protocol range"))?;
+    let height = u16::try_from(rgb.height())
+        .map_err(|_| invalid_data("viewer image height exceeds the X11 protocol range"))?;
+    if (image.width(), image.height()) != (width, height) {
+        return Err(
+            invalid_data("native X11 buffer dimensions do not match the viewer image").into(),
+        );
+    }
+
+    if writer == NativePixelWriter::Bgrx32
+        && image.depth() == 24
+        && image.bits_per_pixel() == BitsPerPixel::B32
+        && image.scanline_pad() == ScanlinePad::Pad32
+        && image.byte_order() == ImageOrder::LsbFirst
+    {
+        let source = rgb.as_raw();
+        let expected_source = usize::from(width)
+            .checked_mul(usize::from(height))
+            .and_then(|pixels| pixels.checked_mul(3))
+            .ok_or_else(|| invalid_data("viewer RGB buffer size overflow"))?;
+        let expected_native = usize::from(width)
+            .checked_mul(usize::from(height))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| invalid_data("viewer native buffer size overflow"))?;
+        if source.len() == expected_source && image.data().len() == expected_native {
+            for (source, destination) in source
+                .chunks_exact(3)
+                .zip(image.data_mut().chunks_exact_mut(4))
+            {
+                destination[0] = source[2];
+                destination[1] = source[1];
+                destination[2] = source[0];
+                destination[3] = 0;
+            }
+            return Ok(());
+        }
+    }
+
+    for (x, y, rgb) in rgb.enumerate_pixels() {
+        let pixel = pixel_layout.encode((
+            u16::from(rgb[0]) * 257,
+            u16::from(rgb[1]) * 257,
+            u16::from(rgb[2]) * 257,
+        ));
+        image.put_pixel(x as u16, y as u16, pixel);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -918,6 +1062,26 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 mod tests {
     use super::*;
 
+    fn standard_visual() -> Visualtype {
+        Visualtype {
+            visual_id: 7,
+            class: VisualClass::TRUE_COLOR,
+            bits_per_rgb_value: 8,
+            colormap_entries: 256,
+            red_mask: 0x00ff_0000,
+            green_mask: 0x0000_ff00,
+            blue_mask: 0x0000_00ff,
+        }
+    }
+
+    fn standard_format() -> Format {
+        Format {
+            depth: 24,
+            bits_per_pixel: 32,
+            scanline_pad: 32,
+        }
+    }
+
     #[test]
     fn letterbox_preserves_aspect_ratio_in_both_directions() {
         assert_eq!(
@@ -1004,5 +1168,118 @@ mod tests {
         assert!(is_closed_window_error(&error(ErrorKind::Window, 42), 42));
         assert!(!is_closed_window_error(&error(ErrorKind::Drawable, 7), 42));
         assert!(!is_closed_window_error(&error(ErrorKind::Alloc, 42), 42));
+    }
+
+    #[test]
+    fn bgrx_fast_path_requires_the_exact_native_visual_and_format() {
+        assert_eq!(
+            select_native_pixel_writer_from_format(
+                24,
+                standard_visual(),
+                Some(standard_format()),
+                X11ImageOrder::LSB_FIRST,
+            ),
+            NativePixelWriter::Bgrx32
+        );
+
+        let mut unusual_visual = standard_visual();
+        unusual_visual.red_mask = 0x0000_00ff;
+        unusual_visual.blue_mask = 0x00ff_0000;
+        assert_eq!(
+            select_native_pixel_writer_from_format(
+                24,
+                unusual_visual,
+                Some(standard_format()),
+                X11ImageOrder::LSB_FIRST,
+            ),
+            NativePixelWriter::Generic
+        );
+        assert_eq!(
+            select_native_pixel_writer_from_format(
+                24,
+                standard_visual(),
+                Some(standard_format()),
+                X11ImageOrder::MSB_FIRST,
+            ),
+            NativePixelWriter::Generic
+        );
+        assert_eq!(
+            select_native_pixel_writer_from_format(
+                24,
+                standard_visual(),
+                Some(Format {
+                    bits_per_pixel: 24,
+                    ..standard_format()
+                }),
+                X11ImageOrder::LSB_FIRST,
+            ),
+            NativePixelWriter::Generic
+        );
+        assert_eq!(
+            select_native_pixel_writer_from_format(
+                32,
+                standard_visual(),
+                None,
+                X11ImageOrder::LSB_FIRST,
+            ),
+            NativePixelWriter::Generic
+        );
+    }
+
+    #[test]
+    fn bgrx_fast_path_is_byte_exact_with_pixel_layout_encoding() {
+        let rgb = RgbImage::from_raw(
+            3,
+            2,
+            vec![
+                0, 0, 0, 255, 255, 255, 17, 34, 51, 99, 1, 240, 128, 64, 32, 7, 201, 42,
+            ],
+        )
+        .unwrap();
+        let layout = PixelLayout::from_visual_type(standard_visual()).unwrap();
+        let mut fast = XImage::allocate(
+            3,
+            2,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+        );
+        let mut generic = fast.clone();
+        write_native_pixels(&mut fast, &rgb, layout, NativePixelWriter::Bgrx32).unwrap();
+        write_native_pixels(&mut generic, &rgb, layout, NativePixelWriter::Generic).unwrap();
+
+        assert_eq!(fast.data(), generic.data());
+        assert_eq!(&fast.data()[8..12], &[51, 34, 17, 0]);
+        assert_eq!(&fast.data()[12..16], &[240, 1, 99, 0]);
+    }
+
+    #[test]
+    fn native_image_storage_is_reused_only_for_matching_geometry() {
+        let setup = Setup {
+            image_byte_order: X11ImageOrder::LSB_FIRST,
+            pixmap_formats: vec![standard_format()],
+            ..Default::default()
+        };
+        let mut image = None;
+        ensure_native_image(&mut image, 3, 2, 24, &setup)
+            .unwrap()
+            .data_mut()[0] = 91;
+        assert_eq!(
+            ensure_native_image(&mut image, 3, 2, 24, &setup)
+                .unwrap()
+                .data()[0],
+            91
+        );
+
+        let replacement = ensure_native_image(&mut image, 2, 2, 24, &setup).unwrap();
+        assert_eq!((replacement.width(), replacement.height()), (2, 2));
+        assert_eq!(replacement.data()[0], 0);
+    }
+
+    #[test]
+    fn expose_copies_valid_backing_while_new_frames_and_resizes_repopulate() {
+        assert_eq!(backing_work(true), BackingWork::CopyOnly);
+        assert_eq!(backing_work(false), BackingWork::PopulateAndCopy);
     }
 }

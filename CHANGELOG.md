@@ -55,6 +55,10 @@ monorepo use independent Semantic Versions.
   sender alive indefinitely by slowly draining bytes and restarting the
   per-system-call timeout; any incomplete record fails closed and triggers the
   existing session/input cleanup path.
+- The X11 remote viewer reuses its native upload buffer, writes the common
+  depth-24/32-bpp little-endian TrueColor layout directly, and retains a fully
+  presented backing pixmap for Expose events. Nonstandard visuals keep the
+  generic conversion path, and resize bursts allocate only their final size.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,
