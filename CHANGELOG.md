@@ -50,6 +50,11 @@ monorepo use independent Semantic Versions.
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if
   shared-memory setup or capture fails.
+- Host video records now have one absolute 10-second budget across every
+  partial socket write and the final flush. A peer can no longer keep a frame
+  sender alive indefinitely by slowly draining bytes and restarting the
+  per-system-call timeout; any incomplete record fails closed and triggers the
+  existing session/input cleanup path.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,

@@ -32,7 +32,11 @@ increasing record sequence numbers, and a MAC on every frame/input message.
 The key is never sent over the network. Key files must be owned by the current
 user, must not be symlinks, and must have no group/other permission bits.
 Both peers enforce a total negotiation deadline, so slowly dripping handshake
-or capability bytes cannot hold a connection open indefinitely.
+or capability bytes cannot hold a connection open indefinitely. The host also
+gives each complete authenticated video record, including its final flush, one
+10-second write budget. Reading a few bytes at a time cannot restart that
+budget; a partial or timed-out record closes the whole session so its wire
+sequence can never be retried out of sync.
 
 The current application protocol is version 2. Update `jwm-remote` on both
 machines together; negotiation rejects older peers before screen or input data
@@ -166,6 +170,9 @@ exhausted, redundant X11 readback is automatically reduced to a periodic
 Root compatibility capture and older XRender servers retain the
 full-resolution readback plus CPU-resize fallback; for those paths, lower
 `--fps` as well as `--max-width` on very large combined multi-monitor roots.
+Every frame write has a 10-second absolute deadline across its header, JPEG,
+authenticator, and flush. If it expires, the host tears down that session and
+the normal cleanup path releases any keys or buttons held by its controller.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

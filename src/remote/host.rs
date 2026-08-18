@@ -5,7 +5,7 @@ use super::deadline::TcpStreamDeadline;
 use super::frame::encode_frame;
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input};
-use super::protocol::{MessageKind, SessionReader, SessionWriter, server_handshake};
+use super::protocol::{MessageKind, ProtocolError, SessionReader, SessionWriter, server_handshake};
 use super::x11_capture::{CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const FRAME_WRITE_DEADLINE: Duration = Duration::from_secs(10);
 // The client cannot enter its heartbeat loop until the first frame is received,
 // decoded and drawn.  Do not apply the held-input safety timeout before then.
 const INITIAL_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,6 +29,194 @@ const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTSTANDING_FRAMES: u64 = 2;
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
+
+trait SetWriteTimeout {
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()>;
+}
+
+impl SetWriteTimeout for TcpStream {
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        TcpStream::set_write_timeout(self, timeout)
+    }
+}
+
+/// Applies one absolute deadline to all writes and the flush for a record.
+///
+/// `SO_SNDTIMEO` alone restarts for every partial `write(2)`. Replacing it
+/// with the time remaining before each call prevents a peer that reads a few
+/// bytes at a time from extending a record indefinitely. A failed record
+/// permanently poisons the writer because retrying after a partial record
+/// would corrupt the authenticated stream.
+struct DeadlineWriter<W> {
+    inner: W,
+    fallback_timeout: Duration,
+    deadline: Option<Instant>,
+    failed: bool,
+}
+
+impl<W> DeadlineWriter<W> {
+    fn new(inner: W, fallback_timeout: Duration) -> Self {
+        Self {
+            inner,
+            fallback_timeout,
+            deadline: None,
+            failed: false,
+        }
+    }
+
+    fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
+    fn begin_record(&mut self, timeout: Duration) -> io::Result<()> {
+        if self.failed {
+            return Err(poisoned_writer());
+        }
+        if self.deadline.is_some() {
+            self.failed = true;
+            return Err(io::Error::other(
+                "remote record writer already has an active deadline",
+            ));
+        }
+        if timeout.is_zero() {
+            self.failed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote video record write deadline expired",
+            ));
+        }
+        self.deadline = Instant::now().checked_add(timeout);
+        if self.deadline.is_none() {
+            self.failed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "remote video record write deadline is too large",
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_record(&mut self) -> io::Result<()>
+    where
+        W: SetWriteTimeout,
+    {
+        if self.failed {
+            return Err(poisoned_writer());
+        }
+        if self.deadline.take().is_none() {
+            self.failed = true;
+            return Err(io::Error::other(
+                "remote record writer has no active deadline",
+            ));
+        }
+        if let Err(error) = self.inner.set_write_timeout(Some(self.fallback_timeout)) {
+            self.failed = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn poison_record(&mut self) {
+        self.failed = true;
+        self.deadline = None;
+    }
+}
+
+impl<W: std::io::Write + SetWriteTimeout> DeadlineWriter<W> {
+    fn prepare_call(&mut self) -> io::Result<()> {
+        if self.failed {
+            return Err(poisoned_writer());
+        }
+        let timeout = match self.deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| {
+                    self.failed = true;
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "remote video record write deadline expired",
+                    )
+                })?,
+            None => self.fallback_timeout,
+        };
+        if timeout.is_zero() {
+            self.failed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote video record write deadline expired",
+            ));
+        }
+        if let Err(error) = self.inner.set_write_timeout(Some(timeout)) {
+            self.failed = true;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn complete_call<T>(&mut self, result: io::Result<T>) -> io::Result<T> {
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.failed = true;
+                return Err(
+                    if self.deadline.is_some()
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                        )
+                    {
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "remote video record write deadline expired",
+                        )
+                    } else {
+                        error
+                    },
+                );
+            }
+        };
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.failed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "remote video record write deadline expired",
+            ));
+        }
+        Ok(value)
+    }
+}
+
+impl<W: std::io::Write + SetWriteTimeout> std::io::Write for DeadlineWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.prepare_call()?;
+        let result = self.inner.write(buffer);
+        let written = self.complete_call(result)?;
+        if written == 0 && !buffer.is_empty() {
+            self.failed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "remote record writer made no progress",
+            ));
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.prepare_call()?;
+        let result = self.inner.flush();
+        self.complete_call(result)
+    }
+}
+
+fn poisoned_writer() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "remote record writer is unusable after a failed record",
+    )
+}
 
 struct PendingFrame {
     frame: CapturedFrame,
@@ -438,8 +627,7 @@ fn serve_client(
     reader_stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (receive_key, send_key) = session_keys.into_server();
     let mut reader = SessionReader::new(reader_stream, receive_key);
-    let mut writer = SessionWriter::new(stream, send_key);
-    writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
+    let mut writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
 
     let (kind, hello_payload) = reader.read_message()?;
     if kind != MessageKind::Hello {
@@ -506,7 +694,7 @@ fn serve_client(
         }
     );
 
-    let control = writer.get_ref().try_clone()?;
+    let control = writer.get_ref().get_ref().try_clone()?;
     let running = Arc::new(AtomicBool::new(true));
     let first_stop = Arc::new(FirstStop::new());
     let credits = Arc::new(FrameCredits::new());
@@ -565,7 +753,7 @@ fn serve_client(
 
 fn stream_frames(
     capture: &mut X11Capture,
-    writer: SessionWriter<TcpStream>,
+    writer: SessionWriter<DeadlineWriter<TcpStream>>,
     control: &TcpStream,
     running: &Arc<AtomicBool>,
     first_stop: &Arc<FirstStop>,
@@ -681,9 +869,9 @@ fn backpressure_refresh_interval(frame_interval: Duration) -> Duration {
         .clamp(MIN_BACKPRESSURE_REFRESH, MAX_BACKPRESSURE_REFRESH)
 }
 
-fn send_frames<W: std::io::Write>(
+fn send_frames<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
-    mut writer: SessionWriter<W>,
+    mut writer: SessionWriter<DeadlineWriter<W>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     jpeg_quality: u8,
@@ -716,8 +904,7 @@ fn send_frames<W: std::io::Write>(
         // an immediate cumulative ACK can never race ahead of host state.
         credits.mark_sent(sequence)?;
         let write_started = Instant::now();
-        writer.write_message(MessageKind::Frame, &payload)?;
-        writer.flush()?;
+        write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)?;
         report_write += write_started.elapsed();
         sequence = sequence
             .checked_add(1)
@@ -749,6 +936,27 @@ fn send_frames<W: std::io::Write>(
             report_write = Duration::ZERO;
         }
     }
+    Ok(())
+}
+
+fn write_frame_record<W: std::io::Write + SetWriteTimeout>(
+    writer: &mut SessionWriter<DeadlineWriter<W>>,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<(), ProtocolError> {
+    writer.get_mut().begin_record(timeout)?;
+    let result = writer
+        .write_message(MessageKind::Frame, payload)
+        .and_then(|()| writer.flush());
+    if let Err(error) = result {
+        // A transport error may follow a partial header, payload, or MAC. The
+        // authenticated record stream cannot be resynchronised, so make any
+        // accidental retry fail closed and let the sender tear down both
+        // halves of the session through its existing FirstStop path.
+        writer.get_mut().poison_record();
+        return Err(error);
+    }
+    writer.get_mut().finish_record()?;
     Ok(())
 }
 
@@ -895,6 +1103,12 @@ mod tests {
     #[derive(Clone)]
     struct GateWriter(Arc<(Mutex<GateState>, Condvar)>);
 
+    impl SetWriteTimeout for GateWriter {
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl Write for GateWriter {
         fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
             let (lock, ready) = &*self.0;
@@ -913,6 +1127,35 @@ mod tests {
             let mut state = lock.lock().unwrap();
             state.flushes += 1;
             ready.notify_all();
+            Ok(())
+        }
+    }
+
+    struct DripWriter {
+        bytes: Vec<u8>,
+        max_chunk: usize,
+        write_delay: Duration,
+        flush_delay: Duration,
+        flushes: usize,
+    }
+
+    impl SetWriteTimeout for DripWriter {
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for DripWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            thread::sleep(self.write_delay);
+            let written = buffer.len().min(self.max_chunk);
+            self.bytes.extend_from_slice(&buffer[..written]);
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            thread::sleep(self.flush_delay);
             Ok(())
         }
     }
@@ -1115,7 +1358,10 @@ mod tests {
         let sender_mailbox = Arc::clone(&mailbox);
         let sender_running = Arc::clone(&running);
         let sender_credits = Arc::clone(&credits);
-        let writer = SessionWriter::new(GateWriter(Arc::clone(&gate)), [0x5a; 32]);
+        let writer = SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0x5a; 32],
+        );
         let sender = thread::spawn(move || {
             send_frames(
                 sender_mailbox,
@@ -1196,6 +1442,82 @@ mod tests {
         let third = decode_frame(&third_payload).unwrap();
         assert_eq!(third.sequence, 2);
         assert!(third.image.get_pixel(0, 0).0[0].abs_diff(70) <= 2);
+    }
+
+    #[test]
+    fn absolute_record_deadline_stops_a_slow_drip_and_poison_prevents_retry() {
+        let drip = DripWriter {
+            bytes: Vec::new(),
+            max_chunk: 1,
+            write_delay: Duration::from_millis(8),
+            flush_delay: Duration::ZERO,
+            flushes: 0,
+        };
+        let mut writer = SessionWriter::new(
+            DeadlineWriter::new(drip, Duration::from_secs(1)),
+            [0x6b; 32],
+        );
+        let started = Instant::now();
+        let error = write_frame_record(&mut writer, b"slow", Duration::from_millis(35))
+            .expect_err("slow-drip record must exceed its absolute deadline");
+        assert!(matches!(
+            error,
+            ProtocolError::Io(ref error) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert_eq!(writer.next_sequence(), 0);
+        let partial_len = writer.get_ref().get_ref().bytes.len();
+        assert!(partial_len > 0);
+        assert!(partial_len < 13 + b"slow".len() + 32);
+
+        let retry = write_frame_record(&mut writer, b"retry", Duration::from_secs(1))
+            .expect_err("a partial authenticated record must never be retried");
+        assert!(matches!(
+            retry,
+            ProtocolError::Io(ref error) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(writer.get_ref().get_ref().bytes.len(), partial_len);
+    }
+
+    #[test]
+    fn absolute_record_deadline_includes_flush_after_all_record_writes() {
+        let drip = DripWriter {
+            bytes: Vec::new(),
+            max_chunk: usize::MAX,
+            write_delay: Duration::from_millis(8),
+            flush_delay: Duration::from_millis(30),
+            flushes: 0,
+        };
+        let mut writer = SessionWriter::new(
+            DeadlineWriter::new(drip, Duration::from_secs(1)),
+            [0x7c; 32],
+        );
+        let error = write_frame_record(&mut writer, b"frame", Duration::from_millis(40))
+            .expect_err("flush must share the record's absolute deadline");
+        assert!(matches!(
+            error,
+            ProtocolError::Io(ref error) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert_eq!(writer.get_ref().get_ref().flushes, 1);
+        assert_eq!(writer.next_sequence(), 1);
+    }
+
+    #[test]
+    fn absolute_deadline_interrupts_a_blocked_loopback_write() {
+        let (stream, _peer) = loopback_pair();
+        let mut writer = DeadlineWriter::new(stream, Duration::from_secs(1));
+        writer.begin_record(Duration::from_millis(60)).unwrap();
+        // This is intentionally larger than loopback's bounded socket queues.
+        // The peer keeps the connection open without reading, so the write
+        // eventually blocks in the kernel and must use the remaining record
+        // budget rather than a fresh timeout for every partial write.
+        let payload = vec![0x5a; 16 * 1024 * 1024];
+        let started = Instant::now();
+        let error = writer
+            .write_all(&payload)
+            .expect_err("an unread loopback peer must hit the absolute deadline");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
