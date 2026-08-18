@@ -153,16 +153,19 @@ jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
 `--max-width 0` keeps the native root width. Higher resolution, quality, and
 frame rate increase CPU and bandwidth together. With overlay capture and
 XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
-path prints its active source/output dimensions, and long-running sessions
-report rolling capture/queue/ack/encode/write latency plus captured, skipped,
-replaced, and outstanding frame counts. Capture and JPEG/network sending run as a
-two-stage pipeline with one queued latest frame. The host permits at most two
-frames beyond the latest one actually drawn by the viewer; while that credit is
+path prints its active source/output dimensions. MIT-SHM 1.2 file-descriptor
+segments avoid copying image payloads through the X11 socket when the local X
+server and transport support them; setup or runtime failure falls back to core
+`GetImage` on the same frame and drawable. Long-running sessions report rolling
+capture/queue/ack/encode/write latency plus captured, skipped, replaced, and
+outstanding frame counts. Capture and JPEG/network sending run as a two-stage
+pipeline with one queued latest frame. The host permits at most two frames
+beyond the latest one actually drawn by the viewer; while that credit is
 exhausted, redundant X11 readback is automatically reduced to a periodic
 250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
-Root compatibility capture and older XRender servers retain the full-resolution
-readback plus CPU-resize fallback; for those paths, lower `--fps` as well as
-`--max-width` on very large combined multi-monitor roots.
+Root compatibility capture and older XRender servers retain the
+full-resolution readback plus CPU-resize fallback; for those paths, lower
+`--fps` as well as `--max-width` on very large combined multi-monitor roots.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

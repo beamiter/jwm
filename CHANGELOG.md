@@ -46,6 +46,10 @@ monorepo use independent Semantic Versions.
   drawn; sustained backpressure also throttles redundant X11 captures while a
   periodically refreshed latest frame waits. Host telemetry distinguishes
   captured, skipped, replaced, outstanding, and acknowledgement-wait work.
+- `jwm-remote` uses MIT-SHM 1.2 file-descriptor segments for local X11 image
+  readback when the server and transport support them. It reuses a bounded
+  mapping and falls back to core `GetImage` on the same drawable and frame if
+  shared-memory setup or capture fails.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,

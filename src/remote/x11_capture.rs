@@ -7,23 +7,29 @@
 
 use super::RemoteResult;
 use image::{RgbImage, RgbaImage, imageops::FilterType};
+use std::borrow::Cow;
+use std::fs::File;
 use std::io;
-use x11rb::connection::Connection;
-use x11rb::image::{Image as XImage, PixelLayout};
+use std::os::fd::AsRawFd;
+use std::ptr::{self, NonNull};
+use x11rb::connection::{Connection, RequestConnection};
+use x11rb::image::{BitsPerPixel, Image as XImage, PixelLayout, ScanlinePad};
 use x11rb::protocol::render::{CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, ImageFormat, Pixmap, PropMode, Screen,
-    VisualClass, Visualid, Visualtype, Window, WindowClass,
+    Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, Format, ImageFormat, Pixmap, PropMode,
+    Screen, VisualClass, Visualid, Visualtype, Window, WindowClass,
 };
-use x11rb::protocol::{composite, render, xfixes};
+use x11rb::protocol::{composite, render, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
+use x11rb::x11_utils::TryParseFd;
 
 const COMPOSITE_CLIENT_VERSION: (u32, u32) = (0, 4);
 const COMPOSITE_OVERLAY_VERSION: (u32, u32) = (0, 3);
 const XFIXES_CLIENT_VERSION: (u32, u32) = (5, 0);
 const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
 const RENDER_TRANSFORM_VERSION: (u32, u32) = (0, 10);
+const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const REMOTE_CAPTURE_OWNER: &[u8] = b"_JWM_REMOTE_CAPTURE_OWNER";
 
 /// Which X drawable supplies the remote desktop image.
@@ -79,6 +85,7 @@ pub struct X11Capture {
     requested_source: CaptureSource,
     max_width: u16,
     render_scaler: Option<RenderScaler>,
+    shm_readback: ShmReadback,
 }
 
 impl X11Capture {
@@ -94,6 +101,10 @@ impl X11Capture {
             .get(screen_num)
             .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?;
         let root = screen.root;
+        // MIT-SHM requires QueryVersion to complete before any other request
+        // from the extension. Segment allocation remains lazy until the first
+        // frame establishes the exact native image size.
+        let shm_readback = ShmReadback::connect(&conn, screen.root_depth);
 
         let compositor_selection = compositor_selection(&conn, screen_num)?;
         let compositor_owner = conn
@@ -173,6 +184,7 @@ impl X11Capture {
             requested_source,
             max_width,
             render_scaler,
+            shm_readback,
         })
     }
 
@@ -218,6 +230,7 @@ impl X11Capture {
             let render_result = self.render_scaler.as_mut().map(|scaler| {
                 scaler.capture(
                     &self.conn,
+                    &mut self.shm_readback,
                     drawable,
                     source_width,
                     source_height,
@@ -245,16 +258,17 @@ impl X11Capture {
             }
         }
 
-        let (ximage, visual_id) =
-            XImage::get(&self.conn, drawable, 0, 0, source_width, source_height)?;
-        let screen = self.screen()?;
-        let visual = find_visual(screen, visual_id)
-            .ok_or_else(|| invalid_data("X11 capture visual is not described by the screen"))?;
-        if visual.class != VisualClass::TRUE_COLOR {
-            return Err(invalid_data("remote capture requires an X11 TrueColor visual").into());
-        }
-        let layout = PixelLayout::from_visual_type(visual)?;
-        let mut image = decode_ximage(&ximage, source_width, source_height, layout)?;
+        let root_depth = self.screen()?.root_depth;
+        let mut image = self.shm_readback.capture_rgb(
+            &self.conn,
+            drawable,
+            source_width,
+            source_height,
+            ReadbackLayout::ReplyVisual {
+                screen_num: self.screen_num,
+                expected_depth: root_depth,
+            },
+        )?;
         self.composite_cursor(&mut image, source_width, source_height)?;
         let image = if output_width == source_width && output_height == source_height {
             image
@@ -378,6 +392,515 @@ impl X11Capture {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReadbackLayout {
+    /// Windows report their visual in GetImage/ShmGetImage. Keep validating
+    /// it instead of assuming that every capture drawable uses the root masks.
+    ReplyVisual {
+        screen_num: usize,
+        expected_depth: u8,
+    },
+    /// Pixmap GetImage replies have visual NONE. XRender's target pixmap was
+    /// explicitly created with the root format, so its layout is already known.
+    Known {
+        expected_depth: u8,
+        layout: PixelLayout,
+    },
+}
+
+impl ReadbackLayout {
+    fn expected_depth(self) -> u8 {
+        match self {
+            Self::ReplyVisual { expected_depth, .. } | Self::Known { expected_depth, .. } => {
+                expected_depth
+            }
+        }
+    }
+}
+
+enum ShmReadback {
+    Disabled,
+    Enabled(EnabledShmReadback),
+}
+
+impl ShmReadback {
+    fn connect(conn: &RustConnection, depth: u8) -> Self {
+        match Self::try_connect(conn, depth) {
+            Ok(Some(readback)) => Self::Enabled(readback),
+            Ok(None) => Self::Disabled,
+            Err(error) => {
+                eprintln!(
+                    "jwm-remote: MIT-SHM FD readback unavailable ({error}); using core GetImage"
+                );
+                Self::Disabled
+            }
+        }
+    }
+
+    fn try_connect(conn: &RustConnection, depth: u8) -> RemoteResult<Option<EnabledShmReadback>> {
+        if conn
+            .extension_information(shm::X11_EXTENSION_NAME)?
+            .is_none()
+        {
+            eprintln!("jwm-remote: MIT-SHM unavailable; using core GetImage");
+            return Ok(None);
+        }
+
+        // The protocol requires this reply before any other MIT-SHM request.
+        let version = shm::query_version(conn)?.reply()?;
+        let negotiated = (version.major_version, version.minor_version);
+        if !supports_shm_fd_version(version.major_version, version.minor_version) {
+            eprintln!(
+                "jwm-remote: MIT-SHM {}.{} lacks 1.2 FD segments; using core GetImage",
+                version.major_version, version.minor_version
+            );
+            return Ok(None);
+        }
+        let format = conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == depth)
+            .copied()
+            .ok_or_else(|| invalid_data(format!("X11 has no pixmap format for depth {depth}")))?;
+        // Validate the native format before announcing SHM as available.
+        shm_buffer_size(1, 1, format)?;
+        Ok(Some(EnabledShmReadback {
+            format,
+            version: negotiated,
+            segment: None,
+            reported_active: false,
+        }))
+    }
+
+    fn capture_rgb(
+        &mut self,
+        conn: &RustConnection,
+        drawable: u32,
+        width: u16,
+        height: u16,
+        layout: ReadbackLayout,
+    ) -> RemoteResult<RgbImage> {
+        let shm_result = match self {
+            Self::Disabled => None,
+            Self::Enabled(readback) => {
+                Some(readback.capture_rgb(conn, drawable, width, height, layout))
+            }
+        };
+        match resolve_readback(shm_result, || {
+            core_capture_rgb(conn, drawable, width, height, layout)
+        }) {
+            ReadbackOutcome::Image(image) => Ok(image),
+            ReadbackOutcome::CoreFallback { image, shm_error } => {
+                self.disable(conn);
+                eprintln!(
+                    "jwm-remote: MIT-SHM FD readback stopped ({shm_error}); using core GetImage"
+                );
+                Ok(image)
+            }
+            ReadbackOutcome::Error(error) => Err(error),
+        }
+    }
+
+    fn disable(&mut self, conn: &RustConnection) {
+        if let Self::Enabled(mut readback) = std::mem::replace(self, Self::Disabled) {
+            readback.release(conn);
+        }
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        self.disable(conn);
+    }
+}
+
+struct EnabledShmReadback {
+    format: Format,
+    version: (u16, u16),
+    segment: Option<ShmSegment>,
+    reported_active: bool,
+}
+
+impl EnabledShmReadback {
+    fn capture_rgb(
+        &mut self,
+        conn: &RustConnection,
+        drawable: u32,
+        width: u16,
+        height: u16,
+        layout: ReadbackLayout,
+    ) -> RemoteResult<RgbImage> {
+        let expected_size = shm_buffer_size(width, height, self.format)?;
+        self.ensure_capacity(conn, expected_size)?;
+        let (image, capacity) = {
+            let segment = self
+                .segment
+                .as_ref()
+                .ok_or_else(|| invalid_data("MIT-SHM segment was not created"))?;
+            let reply = shm::get_image(
+                conn,
+                drawable,
+                0,
+                0,
+                width,
+                height,
+                u32::MAX,
+                u8::from(ImageFormat::Z_PIXMAP),
+                segment.id,
+                0,
+            )?
+            .reply()?;
+            let image_size = validate_shm_reply(
+                self.format.depth,
+                expected_size,
+                segment.mapping.len(),
+                reply.depth,
+                reply.size,
+            )?;
+            let bytes = segment.mapping.bytes(image_size)?;
+            let ximage = XImage::new(
+                width,
+                height,
+                self.format.scanline_pad.try_into()?,
+                reply.depth,
+                self.format.bits_per_pixel.try_into()?,
+                conn.setup().image_byte_order.try_into()?,
+                Cow::Borrowed(bytes),
+            )?;
+            (
+                decode_readback_image(conn, &ximage, width, height, reply.visual, layout)?,
+                segment.mapping.len(),
+            )
+        };
+        if !self.reported_active {
+            eprintln!(
+                "jwm-remote: MIT-SHM {}.{} FD readback active ({capacity} bytes)",
+                self.version.0, self.version.1
+            );
+            self.reported_active = true;
+        }
+        Ok(image)
+    }
+
+    fn ensure_capacity(&mut self, conn: &RustConnection, required: usize) -> RemoteResult<()> {
+        let current_capacity = self.segment.as_ref().map(|segment| segment.mapping.len());
+        if !shm_needs_growth(current_capacity, required) {
+            return Ok(());
+        }
+
+        // Build the replacement completely before releasing the old segment.
+        // A failed RandR growth therefore leaves the previous resource valid.
+        let replacement = ShmSegment::create(conn, required)?;
+        let old = self.segment.replace(replacement);
+        if let Some(old) = old {
+            old.release(conn);
+        }
+        Ok(())
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        if let Some(segment) = self.segment.take() {
+            segment.release(conn);
+        }
+    }
+}
+
+struct ShmSegment {
+    id: shm::Seg,
+    mapping: MappedRegion,
+    // Keeping the owned descriptor makes close ordering explicit. It is
+    // closed after the mapping is unmapped when this struct is dropped.
+    _file: File,
+}
+
+impl ShmSegment {
+    fn create(conn: &RustConnection, capacity: usize) -> RemoteResult<Self> {
+        let size = u32::try_from(capacity)
+            .map_err(|_| invalid_data("MIT-SHM image buffer exceeds the protocol size limit"))?;
+        if size == 0 {
+            return Err(invalid_data("MIT-SHM image buffer is empty").into());
+        }
+        let id = conn.generate_id()?;
+        // `false` is required: the server writes captured pixels into the segment.
+        let cookie = shm::create_segment(conn, id, size, false)?;
+        // Split waiting from parsing. An X11/raw transport error does not prove
+        // that the server created the resource, so do not detach an uncreated
+        // XID. Once a success reply exists, any malformed/missing FD path must
+        // detach because the server-side segment is already live.
+        let (buffer, mut fds) = cookie.raw_reply()?;
+        let reply = match shm::CreateSegmentReply::try_parse_fd(buffer.as_ref(), &mut fds) {
+            Ok((reply, _)) => reply,
+            Err(error) => {
+                detach_shm_segment(conn, id);
+                return Err(error.into());
+            }
+        };
+        let result = (|| -> RemoteResult<Self> {
+            if reply.nfd != 1 {
+                return Err(invalid_data(format!(
+                    "MIT-SHM CreateSegment returned {} file descriptors",
+                    reply.nfd
+                ))
+                .into());
+            }
+            let file = File::from(reply.shm_fd);
+            let file_size = file.metadata()?.len();
+            if file_size < u64::from(size) {
+                return Err(invalid_data(format!(
+                    "MIT-SHM segment is shorter than requested: {file_size} < {size}"
+                ))
+                .into());
+            }
+            let mapping = MappedRegion::new(&file, capacity)?;
+            Ok(Self {
+                id,
+                mapping,
+                _file: file,
+            })
+        })();
+        match result {
+            Ok(segment) => Ok(segment),
+            Err(error) => {
+                // A parsed success reply makes this XID a live server resource.
+                detach_shm_segment(conn, id);
+                Err(error)
+            }
+        }
+    }
+
+    fn release(self, conn: &RustConnection) {
+        // ShmGetImage is synchronous, so no server write is outstanding here.
+        // Check Detach before dropping the local mapping and descriptor.
+        detach_shm_segment(conn, self.id);
+        drop(self);
+    }
+}
+
+fn detach_shm_segment(conn: &RustConnection, segment: shm::Seg) {
+    if let Ok(cookie) = shm::detach(conn, segment) {
+        let _ = cookie.check();
+    }
+}
+
+struct MappedRegion {
+    address: NonNull<u8>,
+    length: usize,
+}
+
+impl MappedRegion {
+    fn new(file: &File, length: usize) -> io::Result<Self> {
+        if length == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot mmap an empty MIT-SHM segment",
+            ));
+        }
+        // SAFETY: `file` is a live CreateSegment descriptor, `length` was
+        // checked against fstat, and the mapping is owned until munmap in Drop.
+        // The client only reads; CreateSegment(false) gives the server write access.
+        let mapped = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                length,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        let Some(address) = NonNull::new(mapped.cast::<u8>()) else {
+            // SAFETY: mmap succeeded and returned this exact address/length.
+            unsafe {
+                libc::munmap(mapped, length);
+            }
+            return Err(io::Error::other("MIT-SHM mmap returned a null address"));
+        };
+        Ok(Self { address, length })
+    }
+
+    fn len(&self) -> usize {
+        self.length
+    }
+
+    fn bytes(&self, length: usize) -> io::Result<&[u8]> {
+        if length > self.length {
+            return Err(invalid_data(format!(
+                "MIT-SHM reply exceeds its mapping: {length} > {}",
+                self.length
+            )));
+        }
+        // SAFETY: the mapping is valid for `self.length`, the preceding
+        // ShmGetImage reply guarantees the server finished writing, and the
+        // returned borrow cannot outlive `self` or overlap the next capture.
+        Ok(unsafe { std::slice::from_raw_parts(self.address.as_ptr(), length) })
+    }
+}
+
+impl Drop for MappedRegion {
+    fn drop(&mut self) {
+        // SAFETY: this exact address/length pair came from the successful mmap
+        // in `new` and is unmapped exactly once here.
+        unsafe {
+            libc::munmap(self.address.as_ptr().cast(), self.length);
+        }
+    }
+}
+
+enum ReadbackOutcome<T, E> {
+    Image(T),
+    CoreFallback { image: T, shm_error: E },
+    Error(E),
+}
+
+fn resolve_readback<T, E>(
+    shm_result: Option<Result<T, E>>,
+    core: impl FnOnce() -> Result<T, E>,
+) -> ReadbackOutcome<T, E> {
+    match shm_result {
+        None => match core() {
+            Ok(image) => ReadbackOutcome::Image(image),
+            Err(error) => ReadbackOutcome::Error(error),
+        },
+        Some(Ok(image)) => ReadbackOutcome::Image(image),
+        Some(Err(shm_error)) => match core() {
+            Ok(image) => ReadbackOutcome::CoreFallback { image, shm_error },
+            // When both paths reject the same drawable, preserve the core
+            // error and let the existing overlay/Render lifecycle handle it.
+            // Do not globally disable SHM for a transient BadDrawable.
+            Err(error) => ReadbackOutcome::Error(error),
+        },
+    }
+}
+
+fn supports_shm_fd_version(major: u16, minor: u16) -> bool {
+    (major, minor) >= SHM_FD_VERSION
+}
+
+fn shm_needs_growth(current_capacity: Option<usize>, required: usize) -> bool {
+    current_capacity.is_none_or(|capacity| capacity < required)
+}
+
+fn core_capture_rgb(
+    conn: &RustConnection,
+    drawable: u32,
+    width: u16,
+    height: u16,
+    layout: ReadbackLayout,
+) -> RemoteResult<RgbImage> {
+    let reply = conn
+        .get_image(
+            ImageFormat::Z_PIXMAP,
+            drawable,
+            0,
+            0,
+            width,
+            height,
+            u32::MAX,
+        )?
+        .reply()?;
+    let visual = reply.visual;
+    let image = XImage::get_from_reply(conn.setup(), width, height, reply)?;
+    decode_readback_image(conn, &image, width, height, visual, layout)
+}
+
+fn decode_readback_image(
+    conn: &RustConnection,
+    image: &XImage<'_>,
+    width: u16,
+    height: u16,
+    visual_id: Visualid,
+    layout: ReadbackLayout,
+) -> RemoteResult<RgbImage> {
+    if image.depth() != layout.expected_depth() {
+        return Err(invalid_data(format!(
+            "X11 capture depth changed from {} to {}",
+            layout.expected_depth(),
+            image.depth()
+        ))
+        .into());
+    }
+    let pixel_layout = match layout {
+        ReadbackLayout::ReplyVisual { screen_num, .. } => {
+            let screen = conn
+                .setup()
+                .roots
+                .get(screen_num)
+                .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?;
+            let visual = find_visual(screen, visual_id)
+                .ok_or_else(|| invalid_data("X11 capture visual is not described by the screen"))?;
+            if visual.class != VisualClass::TRUE_COLOR {
+                return Err(invalid_data("remote capture requires an X11 TrueColor visual").into());
+            }
+            PixelLayout::from_visual_type(visual)?
+        }
+        ReadbackLayout::Known { layout, .. } => layout,
+    };
+    decode_ximage(image, width, height, pixel_layout)
+}
+
+fn shm_buffer_size(width: u16, height: u16, format: Format) -> RemoteResult<usize> {
+    if width == 0 || height == 0 {
+        return Err(invalid_data("MIT-SHM image dimensions must be nonzero").into());
+    }
+    let bits_per_pixel = usize::from(
+        BitsPerPixel::try_from(format.bits_per_pixel)
+            .map_err(|_| invalid_data("X11 reported invalid native bits-per-pixel"))?,
+    );
+    let scanline_pad = usize::from(
+        ScanlinePad::try_from(format.scanline_pad)
+            .map_err(|_| invalid_data("X11 reported invalid native scanline padding"))?,
+    );
+    let row_bits = usize::from(width)
+        .checked_mul(bits_per_pixel)
+        .ok_or_else(|| invalid_data("MIT-SHM scanline size overflow"))?;
+    let padded_units = row_bits
+        .checked_add(scanline_pad - 1)
+        .ok_or_else(|| invalid_data("MIT-SHM scanline padding overflow"))?
+        / scanline_pad;
+    let padded_bits = padded_units
+        .checked_mul(scanline_pad)
+        .ok_or_else(|| invalid_data("MIT-SHM padded scanline size overflow"))?;
+    let stride = padded_bits / 8;
+    let size = stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| invalid_data("MIT-SHM image size overflow"))?;
+    u32::try_from(size)
+        .map_err(|_| invalid_data("MIT-SHM image exceeds the protocol size limit"))?;
+    Ok(size)
+}
+
+fn validate_shm_reply(
+    expected_depth: u8,
+    expected_size: usize,
+    mapped_size: usize,
+    reply_depth: u8,
+    reply_size: u32,
+) -> RemoteResult<usize> {
+    if reply_depth != expected_depth {
+        return Err(invalid_data(format!(
+            "MIT-SHM capture depth changed from {expected_depth} to {reply_depth}"
+        ))
+        .into());
+    }
+    let reply_size = usize::try_from(reply_size)
+        .map_err(|_| invalid_data("MIT-SHM reply size exceeds this platform"))?;
+    if reply_size != expected_size {
+        return Err(invalid_data(format!(
+            "MIT-SHM returned {reply_size} bytes; expected {expected_size}"
+        ))
+        .into());
+    }
+    if reply_size > mapped_size {
+        return Err(invalid_data(format!(
+            "MIT-SHM reply exceeds its mapping: {reply_size} > {mapped_size}"
+        ))
+        .into());
+    }
+    Ok(reply_size)
+}
+
 struct RenderSource {
     drawable: Window,
     picture: Picture,
@@ -456,6 +979,7 @@ impl RenderScaler {
     fn capture(
         &mut self,
         conn: &RustConnection,
+        readback: &mut ShmReadback,
         drawable: Window,
         source_width: u16,
         source_height: u16,
@@ -497,30 +1021,20 @@ impl RenderScaler {
             output_width,
             output_height,
         )?;
-        let reply = conn
-            .get_image(
-                ImageFormat::Z_PIXMAP,
-                target.pixmap,
-                0,
-                0,
-                output_width,
-                output_height,
-                u32::MAX,
-            )?
-            .reply()?;
-        // Waiting for GetImage also advances the connection beyond the
+        let image = readback.capture_rgb(
+            conn,
+            target.pixmap,
+            output_width,
+            output_height,
+            ReadbackLayout::Known {
+                expected_depth: self.root_depth,
+                layout: self.root_layout,
+            },
+        )?;
+        // Waiting for ShmGetImage or core GetImage also advances the connection beyond the
         // preceding Composite request. Checking its cookie now reports a
         // precise Render error without adding another round trip normally.
         composite.check()?;
-        if reply.depth != self.root_depth {
-            return Err(invalid_data(format!(
-                "XRender target depth changed from {} to {}",
-                self.root_depth, reply.depth
-            ))
-            .into());
-        }
-        let image = XImage::get_from_reply(conn.setup(), output_width, output_height, reply)?;
-        let image = decode_ximage(&image, output_width, output_height, self.root_layout)?;
         if self.reported_dimensions != Some(dimensions) {
             eprintln!(
                 "jwm-remote: XRender downscale {}x{} -> {}x{}",
@@ -901,6 +1415,7 @@ impl Drop for X11Capture {
     fn drop(&mut self) {
         self.release_overlay();
         self.release_render_scaler();
+        self.shm_readback.release(&self.conn);
         if let Ok(cookie) = self.conn.get_property(
             false,
             self.root,
@@ -948,6 +1463,7 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     #[test]
     fn downscale_preserves_aspect_ratio_without_upscaling() {
@@ -1022,5 +1538,113 @@ mod tests {
         composite_scaled_cursor(&mut image, &cursor, 4, 2);
         assert_eq!(image.get_pixel(0, 0).0, [255, 255, 255]);
         assert_eq!(image.get_pixel(1, 0).0, [255, 0, 0]);
+    }
+
+    #[test]
+    fn shm_fd_requires_protocol_version_one_two() {
+        assert!(!supports_shm_fd_version(0, 99));
+        assert!(!supports_shm_fd_version(1, 1));
+        assert!(supports_shm_fd_version(1, 2));
+        assert!(supports_shm_fd_version(1, 3));
+        assert!(supports_shm_fd_version(2, 0));
+    }
+
+    #[test]
+    fn shm_buffer_size_uses_native_bits_and_scanline_padding() {
+        let depth_24_in_32 = Format {
+            depth: 24,
+            bits_per_pixel: 32,
+            scanline_pad: 32,
+        };
+        assert_eq!(
+            shm_buffer_size(1280, 536, depth_24_in_32).unwrap(),
+            2_744_320
+        );
+        assert_eq!(shm_buffer_size(1, 1, depth_24_in_32).unwrap(), 4);
+        assert_eq!(shm_buffer_size(3, 1, depth_24_in_32).unwrap(), 12);
+
+        let padded_16 = Format {
+            depth: 16,
+            bits_per_pixel: 16,
+            scanline_pad: 32,
+        };
+        // Three 16-bit pixels occupy 48 bits and round up to an 8-byte row.
+        assert_eq!(shm_buffer_size(3, 2, padded_16).unwrap(), 16);
+        assert!(shm_buffer_size(0, 2, padded_16).is_err());
+        assert!(shm_buffer_size(2, 0, padded_16).is_err());
+
+        let invalid = Format {
+            depth: 24,
+            bits_per_pixel: 32,
+            scanline_pad: 24,
+        };
+        assert!(shm_buffer_size(1, 1, invalid).is_err());
+        let invalid = Format {
+            depth: 24,
+            bits_per_pixel: 12,
+            scanline_pad: 32,
+        };
+        assert!(shm_buffer_size(1, 1, invalid).is_err());
+
+        // Valid X11 dimensions can still exceed MIT-SHM's CARD32 size.
+        assert!(shm_buffer_size(u16::MAX, u16::MAX, depth_24_in_32).is_err());
+    }
+
+    #[test]
+    fn shm_reply_must_exactly_match_native_image_and_mapping() {
+        assert_eq!(validate_shm_reply(24, 64, 128, 24, 64).unwrap(), 64);
+        assert!(validate_shm_reply(24, 64, 128, 16, 64).is_err());
+        assert!(validate_shm_reply(24, 64, 128, 24, 60).is_err());
+        assert!(validate_shm_reply(24, 64, 128, 24, 68).is_err());
+        assert!(validate_shm_reply(24, 64, 63, 24, 64).is_err());
+    }
+
+    #[test]
+    fn shm_capacity_is_reused_and_only_grows() {
+        assert!(shm_needs_growth(None, 64));
+        assert!(!shm_needs_growth(Some(64), 64));
+        assert!(!shm_needs_growth(Some(128), 64));
+        assert!(shm_needs_growth(Some(63), 64));
+    }
+
+    #[test]
+    fn shm_failure_uses_same_frame_core_before_disabling() {
+        let calls = Cell::new(0);
+        let outcome = resolve_readback(None, || {
+            calls.set(calls.get() + 1);
+            Ok::<_, &'static str>(5)
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(outcome, ReadbackOutcome::Image(5)));
+
+        let calls = Cell::new(0);
+        let outcome = resolve_readback(Some(Err("shm")), || {
+            calls.set(calls.get() + 1);
+            Ok::<_, &'static str>(7)
+        });
+        assert_eq!(calls.get(), 1);
+        match outcome {
+            ReadbackOutcome::CoreFallback { image, shm_error } => {
+                assert_eq!(image, 7);
+                assert_eq!(shm_error, "shm");
+            }
+            _ => panic!("SHM failure with a valid drawable must use core fallback"),
+        }
+
+        let calls = Cell::new(0);
+        let outcome = resolve_readback(Some(Ok::<_, &'static str>(9)), || {
+            calls.set(calls.get() + 1);
+            Ok(10)
+        });
+        assert_eq!(calls.get(), 0);
+        assert!(matches!(outcome, ReadbackOutcome::Image(9)));
+
+        let calls = Cell::new(0);
+        let outcome = resolve_readback(Some(Err("shm")), || {
+            calls.set(calls.get() + 1);
+            Err::<u8, _>("core")
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(outcome, ReadbackOutcome::Error("core")));
     }
 }
