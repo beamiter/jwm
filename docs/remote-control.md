@@ -34,6 +34,11 @@ user, must not be symlinks, and must have no group/other permission bits.
 Both peers enforce a total negotiation deadline, so slowly dripping handshake
 or capability bytes cannot hold a connection open indefinitely.
 
+The current application protocol is version 2. Update `jwm-remote` on both
+machines together; negotiation rejects older peers before screen or input data
+is exchanged. Version 2 acknowledges only frames successfully drawn by the
+viewer, which bounds host work and end-to-end video backlog.
+
 The LAN MVP authenticates traffic and rejects modification/replay, but **does
 not encrypt screen images or input**. Use it only on a trusted, isolated LAN.
 For confidentiality, keep the default loopback listener and carry it over SSH:
@@ -137,8 +142,9 @@ jwm-remote connect 192.168.1.50:48221 \
 
 ## Tuning and troubleshooting
 
-The LAN defaults are 12 FPS, JPEG quality 70, and a maximum encoded width of
-1280 pixels. They favor a reliable first connection over maximum fidelity:
+The LAN defaults are a 12 FPS upper limit, JPEG quality 70, and a maximum
+encoded width of 1280 pixels. They favor a reliable first connection over
+maximum fidelity:
 
 ```bash
 jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
@@ -147,10 +153,13 @@ jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
 `--max-width 0` keeps the native root width. Higher resolution, quality, and
 frame rate increase CPU and bandwidth together. With overlay capture and
 XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
-path prints its active source/output dimensions, and every session reports
-rolling capture/queue/encode/write latency and the number of stale frames it
-dropped. Capture and JPEG/network sending run as a two-stage pipeline with one
-queued latest frame, so a slow send cannot build an ever-older video backlog.
+path prints its active source/output dimensions, and long-running sessions
+report rolling capture/queue/ack/encode/write latency plus captured, skipped,
+replaced, and outstanding frame counts. Capture and JPEG/network sending run as a
+two-stage pipeline with one queued latest frame. The host permits at most two
+frames beyond the latest one actually drawn by the viewer; while that credit is
+exhausted, redundant X11 readback is automatically reduced to a periodic
+250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
 Root compatibility capture and older XRender servers retain the full-resolution
 readback plus CPU-resize fallback; for those paths, lower `--fps` as well as
 `--max-width` on very large combined multi-monitor roots.
@@ -175,9 +184,9 @@ readback plus CPU-resize fallback; for those paths, lower `--fps` as well as
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
 - JPEG video only: no audio, clipboard, file transfer, or adaptive codec yet;
-- video backpressure keeps one latest queued frame and drops older unsent
-  frames; it does not adapt the requested capture rate to a persistently slow
-  peer yet;
+- video uses cumulative display acknowledgements, at most two unacknowledged
+  frames, and one latest queued frame; persistently slow viewers therefore
+  reduce capture/encode/network work instead of accumulating stale video;
 - authenticated but unencrypted direct-LAN transport;
 - X11 `x11rb`/`xcb` JWM sessions only.
 

@@ -7,7 +7,7 @@ use super::x11_input::InputEvent;
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-const APPLICATION_VERSION: u16 = 1;
+const APPLICATION_VERSION: u16 = 2;
 const SERVER_HELLO_LEN: usize = 11;
 const CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + 32;
 const FLAG_POINTER: u8 = 1 << 0;
@@ -96,6 +96,20 @@ fn decode_hello(payload: &[u8]) -> RemoteResult<u8> {
     Ok(payload[10])
 }
 
+/// Encode a cumulative acknowledgement for the latest frame drawn by the client.
+#[must_use]
+pub fn encode_frame_ack(sequence: u64) -> [u8; 8] {
+    sequence.to_be_bytes()
+}
+
+/// Decode a frame acknowledgement, rejecting anything other than one `u64`.
+pub fn decode_frame_ack(payload: &[u8]) -> RemoteResult<u64> {
+    let sequence = payload
+        .try_into()
+        .map_err(|_| invalid_data("frame acknowledgement has an invalid length"))?;
+    Ok(u64::from_be_bytes(sequence))
+}
+
 #[must_use]
 pub fn encode_input(event: InputEvent) -> (MessageKind, Vec<u8>) {
     match event {
@@ -158,6 +172,37 @@ mod tests {
         let mut future = payload;
         future[10] |= 0x80;
         assert!(ClientHello::decode(&future).is_err());
+    }
+
+    #[test]
+    fn hello_uses_version_two_and_rejects_version_one() {
+        let payload = ServerHello {
+            pointer_enabled: false,
+            keyboard_enabled: false,
+        }
+        .encode();
+        assert_eq!(&payload[8..10], &2_u16.to_be_bytes());
+
+        let mut version_one = payload;
+        version_one[8..10].copy_from_slice(&1_u16.to_be_bytes());
+        let error = ServerHello::decode(&version_one).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("application version 1; expected 2")
+        );
+    }
+
+    #[test]
+    fn frame_ack_round_trips_and_requires_exact_length() {
+        for sequence in [0, 1, u64::MAX] {
+            let payload = encode_frame_ack(sequence);
+            assert_eq!(payload, sequence.to_be_bytes());
+            assert_eq!(decode_frame_ack(&payload).unwrap(), sequence);
+        }
+
+        assert!(decode_frame_ack(&[0; 7]).is_err());
+        assert!(decode_frame_ack(&[0; 9]).is_err());
     }
 
     #[test]

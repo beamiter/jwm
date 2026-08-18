@@ -435,11 +435,12 @@ impl Viewer {
         Ok(result)
     }
 
-    /// Draw and retain a decoded frame.  The retained copy is used for Expose
-    /// events and for rescaling after the window is resized.
-    pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<()> {
+    /// Draw and retain a decoded frame. The retained copy is used for Expose
+    /// events and for rescaling after the window is resized. Returns `false`
+    /// when the target window closed before the frame could be presented.
+    pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<bool> {
         if self.closed {
-            return Ok(());
+            return Ok(false);
         }
         validate_frame(&frame)?;
         self.last_frame = Some(StoredFrame {
@@ -447,7 +448,8 @@ impl Viewer {
             source_height: frame.source_height,
             image: frame.image,
         });
-        self.redraw()
+        self.redraw()?;
+        Ok(!self.closed)
     }
 
     /// Whether `keycode` currently resolves to the F12 keysym on this X server.

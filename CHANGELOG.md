@@ -41,6 +41,11 @@ monorepo use independent Semantic Versions.
   latest-wins queue, reports stage latency and dropped stale frames, and
   enforces an absolute negotiation deadline on both peers. Full-resolution root
   readback remains a compatibility fallback.
+- The JWM remote application protocol is now version 2. Cumulative frame
+  acknowledgements cap video at two frames beyond what the viewer has actually
+  drawn; sustained backpressure also throttles redundant X11 captures while a
+  periodically refreshed latest frame waits. Host telemetry distinguishes
+  captured, skipped, replaced, outstanding, and acknowledgement-wait work.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,

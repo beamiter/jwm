@@ -4,7 +4,7 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::frame::{DecodedFrame, decode_frame};
 use super::key::load_key_file;
-use super::messages::{ClientHello, ServerHello, encode_input};
+use super::messages::{ClientHello, ServerHello, encode_frame_ack, encode_input};
 use super::protocol::{MessageKind, SessionReader, SessionWriter, client_handshake};
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
@@ -76,7 +76,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         hello.keyboard_enabled.then_some(keymap_fingerprint),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
     )?;
-    viewer.draw(first_frame)?;
+    draw_and_ack(&mut writer, first_frame, |frame| viewer.draw(frame))?;
 
     let state = Arc::new(ReceiveState::new());
     let receive_state = Arc::clone(&state);
@@ -206,7 +206,7 @@ fn viewer_loop(
         }
 
         if let Some(frame) = take_latest(state) {
-            viewer.draw(frame)?;
+            draw_and_ack(writer, frame, |frame| viewer.draw(frame))?;
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -223,6 +223,20 @@ fn viewer_loop(
         }
         thread::sleep(Duration::from_millis(4));
     }
+}
+
+fn draw_and_ack<W: std::io::Write>(
+    writer: &mut SessionWriter<W>,
+    frame: DecodedFrame,
+    draw: impl FnOnce(DecodedFrame) -> RemoteResult<bool>,
+) -> RemoteResult<()> {
+    let sequence = frame.sequence;
+    if !draw(frame)? {
+        return Ok(());
+    }
+    writer.write_message(MessageKind::FrameAck, &encode_frame_ack(sequence))?;
+    writer.flush()?;
+    Ok(())
 }
 
 struct ReceiveState {
@@ -257,7 +271,9 @@ fn receive_frames(
         match kind {
             MessageKind::Frame => {
                 let frame = decode_frame(&payload)?;
-                let expected = last_sequence.wrapping_add(1);
+                let expected = last_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
                 if frame.sequence != expected {
                     return Err(invalid_data(format!(
                         "video frame sequence mismatch: expected {expected}, got {}",
@@ -269,6 +285,9 @@ fn receive_frames(
                 *state.latest.lock().unwrap() = Some(frame);
             }
             MessageKind::Close => break Ok(()),
+            MessageKind::FrameAck => {
+                return Err(invalid_data("host sent an unexpected frame acknowledgement").into());
+            }
             MessageKind::Hello
             | MessageKind::HelloAck
             | MessageKind::Pointer
@@ -298,11 +317,45 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::messages::decode_frame_ack;
     use crate::remote::protocol::{PSK_LEN, server_handshake};
+    use image::RgbImage;
+    use std::io::Cursor;
     use std::io::Write;
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    fn decoded_test_frame(sequence: u64) -> DecodedFrame {
+        DecodedFrame {
+            sequence,
+            source_width: 1,
+            source_height: 1,
+            image: RgbImage::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn frame_is_acknowledged_only_after_a_successful_draw() {
+        let key = [0x31; 32];
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        draw_and_ack(&mut writer, decoded_test_frame(9), |_| Ok(true)).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(writer.into_inner()), key);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::FrameAck);
+        assert_eq!(decode_frame_ack(&payload).unwrap(), 9);
+
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        let result = draw_and_ack(&mut writer, decoded_test_frame(10), |_| {
+            Err(io::Error::other("synthetic draw failure").into())
+        });
+        assert!(result.is_err());
+        assert!(writer.into_inner().is_empty());
+
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        draw_and_ack(&mut writer, decoded_test_frame(11), |_| Ok(false)).unwrap();
+        assert!(writer.into_inner().is_empty());
+    }
 
     #[test]
     fn negotiation_deadline_cannot_be_extended_by_a_slow_nonce() {

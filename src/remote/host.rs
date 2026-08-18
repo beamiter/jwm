@@ -4,7 +4,7 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::frame::encode_frame;
 use super::key::load_key_file;
-use super::messages::{ClientHello, ServerHello, decode_input};
+use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input};
 use super::protocol::{MessageKind, SessionReader, SessionWriter, server_handshake};
 use super::x11_capture::{CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
@@ -13,7 +13,7 @@ use signal_hook::flag;
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,16 +24,36 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 // decoded and drawn.  Do not apply the held-input safety timeout before then.
 const INITIAL_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
+const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_OUTSTANDING_FRAMES: u64 = 2;
+const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
+const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
 
 struct PendingFrame {
     frame: CapturedFrame,
-    capture_elapsed: Duration,
     captured_at: Instant,
+}
+
+#[derive(Default)]
+struct MailboxTelemetry {
+    captured: u64,
+    capture_elapsed: Duration,
+    skipped: u64,
+    replaced: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CaptureDecision {
+    Capture,
+    Skip,
+    Closed,
 }
 
 struct MailboxState<T> {
     latest: Option<T>,
+    queued_at: Option<Instant>,
     closed: bool,
+    telemetry: MailboxTelemetry,
 }
 
 /// A one-slot mailbox whose producer never waits for a slow consumer.
@@ -43,7 +63,6 @@ struct MailboxState<T> {
 struct LatestMailbox<T> {
     state: Mutex<MailboxState<T>>,
     ready: Condvar,
-    dropped: AtomicU64,
 }
 
 impl<T> LatestMailbox<T> {
@@ -51,27 +70,53 @@ impl<T> LatestMailbox<T> {
         Self {
             state: Mutex::new(MailboxState {
                 latest: None,
+                queued_at: None,
                 closed: false,
+                telemetry: MailboxTelemetry::default(),
             }),
             ready: Condvar::new(),
-            dropped: AtomicU64::new(0),
         }
     }
 
-    fn publish(&self, item: T) -> bool {
+    fn publish(&self, item: T, capture_elapsed: Duration) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
+        state.telemetry.captured = state.telemetry.captured.saturating_add(1);
+        state.telemetry.capture_elapsed += capture_elapsed;
         if state.closed {
             return false;
         }
         let replaced = state.latest.replace(item);
+        state.queued_at = Some(Instant::now());
+        if replaced.is_some() {
+            state.telemetry.replaced = state.telemetry.replaced.saturating_add(1);
+        }
         self.ready.notify_one();
         drop(state);
-        if replaced.is_some() {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-        }
+        // Dropping a full-resolution RGB frame can release a large allocation;
+        // do it after unlocking so the sender never waits on the allocator.
+        drop(replaced);
         true
+    }
+
+    fn capture_decision(&self, refresh_after: Duration) -> io::Result<CaptureDecision> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame mailbox lock was poisoned"))?;
+        if state.closed {
+            return Ok(CaptureDecision::Closed);
+        }
+        let capture = state.latest.is_none()
+            || state
+                .queued_at
+                .is_none_or(|queued_at| queued_at.elapsed() >= refresh_after);
+        if capture {
+            return Ok(CaptureDecision::Capture);
+        }
+        state.telemetry.skipped = state.telemetry.skipped.saturating_add(1);
+        Ok(CaptureDecision::Skip)
     }
 
     fn receive(&self) -> io::Result<Option<T>> {
@@ -84,6 +129,7 @@ impl<T> LatestMailbox<T> {
                 return Ok(None);
             }
             if let Some(item) = state.latest.take() {
+                state.queued_at = None;
                 return Ok(Some(item));
             }
             state = self
@@ -100,13 +146,158 @@ impl<T> LatestMailbox<T> {
         };
         state.closed = true;
         let pending = state.latest.take();
+        state.queued_at = None;
         self.ready.notify_all();
         drop(state);
         drop(pending);
     }
 
-    fn take_dropped(&self) -> u64 {
-        self.dropped.swap(0, Ordering::AcqRel)
+    fn take_telemetry(&self) -> MailboxTelemetry {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        std::mem::take(&mut state.telemetry)
+    }
+}
+
+struct FrameCreditState {
+    last_sent: Option<u64>,
+    last_acked: Option<u64>,
+    closed: bool,
+}
+
+/// Cumulative display acknowledgements bound video work beyond the frame the
+/// viewer has actually drawn, rather than merely what its TCP stack accepted.
+struct FrameCredits {
+    state: Mutex<FrameCreditState>,
+    available: Condvar,
+}
+
+impl FrameCredits {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(FrameCreditState {
+                last_sent: None,
+                last_acked: None,
+                closed: false,
+            }),
+            available: Condvar::new(),
+        }
+    }
+
+    fn wait_for_credit(
+        &self,
+        running: &AtomicBool,
+        timeout: Duration,
+    ) -> io::Result<Option<Duration>> {
+        let started = Instant::now();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame credit lock was poisoned"))?;
+        loop {
+            if state.closed || !running.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            if outstanding_frames(&state) < MAX_OUTSTANDING_FRAMES {
+                return Ok(Some(started.elapsed()));
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "remote viewer stopped acknowledging displayed frames",
+                ));
+            }
+            let (next_state, wait) = self
+                .available
+                .wait_timeout(state, remaining)
+                .map_err(|_| io::Error::other("remote frame credit lock was poisoned"))?;
+            state = next_state;
+            if wait.timed_out()
+                && !state.closed
+                && running.load(Ordering::Acquire)
+                && outstanding_frames(&state) >= MAX_OUTSTANDING_FRAMES
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "remote viewer stopped acknowledging displayed frames",
+                ));
+            }
+        }
+    }
+
+    fn mark_sent(&self, sequence: u64) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame credit lock was poisoned"))?;
+        if state.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "remote frame credits are closed",
+            ));
+        }
+        let expected = state
+            .last_sent
+            .map_or(Some(0), |last| last.checked_add(1))
+            .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
+        if sequence != expected {
+            return Err(io::Error::other(format!(
+                "remote frame sender sequence mismatch: expected {expected}, got {sequence}"
+            )));
+        }
+        state.last_sent = Some(sequence);
+        Ok(())
+    }
+
+    fn acknowledge(&self, sequence: u64) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("remote frame credit lock was poisoned"))?;
+        let last_sent = state.last_sent.ok_or_else(|| {
+            invalid_data("remote viewer acknowledged a frame before one was sent")
+        })?;
+        if sequence > last_sent {
+            return Err(invalid_data(format!(
+                "remote viewer acknowledged future frame {sequence}; last sent was {last_sent}"
+            )));
+        }
+        if state.last_acked.is_some_and(|last| sequence <= last) {
+            return Ok(());
+        }
+        state.last_acked = Some(sequence);
+        self.available.notify_all();
+        Ok(())
+    }
+
+    fn outstanding(&self) -> u64 {
+        let state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        outstanding_frames(&state)
+    }
+
+    fn close(&self) {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.closed = true;
+        self.available.notify_all();
+    }
+}
+
+fn outstanding_frames(state: &FrameCreditState) -> u64 {
+    let Some(last_sent) = state.last_sent else {
+        return 0;
+    };
+    match state.last_acked {
+        Some(last_acked) => last_sent.saturating_sub(last_acked),
+        None => last_sent.saturating_add(1),
     }
 }
 
@@ -318,8 +509,10 @@ fn serve_client(
     let control = writer.get_ref().try_clone()?;
     let running = Arc::new(AtomicBool::new(true));
     let first_stop = Arc::new(FirstStop::new());
+    let credits = Arc::new(FrameCredits::new());
     let input_running = Arc::clone(&running);
     let input_stop = Arc::clone(&first_stop);
+    let input_credits = Arc::clone(&credits);
     let input_thread = thread::Builder::new()
         .name("jwm-remote-input".into())
         .spawn(move || {
@@ -333,6 +526,7 @@ fn serve_client(
                 SESSION_IDLE_TIMEOUT,
                 &input_running,
                 &input_stop,
+                &input_credits,
             )
         })?;
 
@@ -342,6 +536,7 @@ fn serve_client(
         &control,
         &running,
         &first_stop,
+        &credits,
         shutdown,
         options,
     );
@@ -374,6 +569,7 @@ fn stream_frames(
     control: &TcpStream,
     running: &Arc<AtomicBool>,
     first_stop: &Arc<FirstStop>,
+    credits: &Arc<FrameCredits>,
     shutdown: &AtomicBool,
     options: &HostOptions,
 ) -> RemoteResult<()> {
@@ -381,6 +577,7 @@ fn stream_frames(
     let sender_mailbox = Arc::clone(&mailbox);
     let sender_running = Arc::clone(running);
     let sender_stop = Arc::clone(first_stop);
+    let sender_credits = Arc::clone(credits);
     let sender_control = match control.try_clone() {
         Ok(control) => control,
         Err(error) => {
@@ -393,7 +590,13 @@ fn stream_frames(
         .name("jwm-remote-video".into())
         .spawn(move || {
             let _stop_on_exit = StopSessionOnDrop(Arc::clone(&sender_running));
-            let result = send_frames(sender_mailbox, writer, &sender_running, jpeg_quality);
+            let result = send_frames(
+                sender_mailbox,
+                writer,
+                &sender_running,
+                &sender_credits,
+                jpeg_quality,
+            );
             if result.is_err() {
                 sender_stop.record(StopCause::Sender);
                 sender_running.store(false, Ordering::Release);
@@ -409,6 +612,7 @@ fn stream_frames(
     };
 
     let interval = Duration::from_secs_f64(1.0 / f64::from(options.fps.clamp(1, 60)));
+    let backpressure_refresh = backpressure_refresh_interval(interval);
     let mut next_frame = Instant::now();
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
@@ -422,14 +626,18 @@ fn stream_frames(
                 next_frame = now + interval;
             }
 
+            match mailbox.capture_decision(backpressure_refresh)? {
+                CaptureDecision::Capture => {}
+                CaptureDecision::Skip => continue,
+                CaptureDecision::Closed => break,
+            }
             let capture_started = Instant::now();
             let frame = capture.frame()?;
             let pending = PendingFrame {
                 frame,
-                capture_elapsed: capture_started.elapsed(),
                 captured_at: Instant::now(),
             };
-            if !mailbox.publish(pending) {
+            if !mailbox.publish(pending, capture_started.elapsed()) {
                 if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
                     break;
                 }
@@ -446,6 +654,7 @@ fn stream_frames(
     }
     running.store(false, Ordering::Release);
     mailbox.close();
+    credits.close();
     // Interrupt a send that is blocked behind a dead or very slow peer. This
     // also wakes the input reader so held input can be released promptly.
     let _ = control.shutdown(Shutdown::Both);
@@ -466,56 +675,76 @@ fn stream_frames(
     }
 }
 
+fn backpressure_refresh_interval(frame_interval: Duration) -> Duration {
+    frame_interval
+        .saturating_mul(3)
+        .clamp(MIN_BACKPRESSURE_REFRESH, MAX_BACKPRESSURE_REFRESH)
+}
+
 fn send_frames<W: std::io::Write>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     mut writer: SessionWriter<W>,
     running: &AtomicBool,
+    credits: &FrameCredits,
     jpeg_quality: u8,
 ) -> RemoteResult<()> {
     let mut report_started = Instant::now();
     let mut report_frames = 0_u64;
-    let mut report_capture = Duration::ZERO;
     let mut report_queue = Duration::ZERO;
+    let mut report_ack_wait = Duration::ZERO;
     let mut report_encode = Duration::ZERO;
     let mut report_write = Duration::ZERO;
     let mut sequence = 0_u64;
 
     while running.load(Ordering::Acquire) {
+        let Some(ack_wait) = credits.wait_for_credit(running, FRAME_ACK_TIMEOUT)? else {
+            break;
+        };
+        report_ack_wait += ack_wait;
         let Some(pending) = mailbox.receive()? else {
             break;
         };
         if !running.load(Ordering::Acquire) {
             break;
         }
-        report_capture += pending.capture_elapsed;
         report_queue += pending.captured_at.elapsed();
 
         let encode_started = Instant::now();
         let payload = encode_frame(sequence, &pending.frame, jpeg_quality)?;
         report_encode += encode_started.elapsed();
+        // Publish the application sequence before the bytes reach the peer so
+        // an immediate cumulative ACK can never race ahead of host state.
+        credits.mark_sent(sequence)?;
         let write_started = Instant::now();
         writer.write_message(MessageKind::Frame, &payload)?;
         writer.flush()?;
         report_write += write_started.elapsed();
-        sequence = sequence.wrapping_add(1);
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
         report_frames += 1;
 
         let report_elapsed = report_started.elapsed();
         if report_elapsed >= Duration::from_secs(5) {
+            let telemetry = mailbox.take_telemetry();
             eprintln!(
-                "jwm-remote: sent {:.1} fps, dropped {}, latest JPEG {} KiB, capture/queue/encode/write {:.1}/{:.1}/{:.1}/{:.1} ms",
+                "jwm-remote: sent {:.1} fps, captured {}, skipped {}, replaced {}, outstanding {}, latest JPEG {} KiB, capture/queue/ack/encode/write {:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms",
                 report_frames as f64 / report_elapsed.as_secs_f64(),
-                mailbox.take_dropped(),
+                telemetry.captured,
+                telemetry.skipped,
+                telemetry.replaced,
+                credits.outstanding(),
                 payload.len().div_ceil(1024),
-                average_millis(report_capture, report_frames),
+                average_millis(telemetry.capture_elapsed, telemetry.captured),
                 average_millis(report_queue, report_frames),
+                average_millis(report_ack_wait, report_frames),
                 average_millis(report_encode, report_frames),
                 average_millis(report_write, report_frames),
             );
             report_started = Instant::now();
             report_frames = 0;
-            report_capture = Duration::ZERO;
             report_queue = Duration::ZERO;
+            report_ack_wait = Duration::ZERO;
             report_encode = Duration::ZERO;
             report_write = Duration::ZERO;
         }
@@ -540,6 +769,7 @@ fn receive_input(
     session_idle_timeout: Duration,
     running: &AtomicBool,
     first_stop: &FirstStop,
+    credits: &FrameCredits,
 ) -> RemoteResult<()> {
     let session_result = (|| -> RemoteResult<()> {
         reader
@@ -581,6 +811,9 @@ fn receive_input(
                 MessageKind::Heartbeat => {
                     return Err(invalid_data("client heartbeat payload must be empty").into());
                 }
+                MessageKind::FrameAck => {
+                    credits.acknowledge(decode_frame_ack(&payload)?)?;
+                }
                 MessageKind::Hello | MessageKind::HelloAck | MessageKind::Frame => {
                     return Err(invalid_data(format!("unexpected client message: {kind:?}")).into());
                 }
@@ -596,6 +829,7 @@ fn receive_input(
         StopCause::Graceful
     });
     running.store(false, Ordering::Release);
+    credits.close();
 
     let release_result = match injector.as_mut() {
         Some(injector) => injector.release_all(),
@@ -690,7 +924,6 @@ mod tests {
                 source_width: 2,
                 source_height: 2,
             },
-            capture_elapsed: Duration::from_millis(1),
             captured_at: Instant::now(),
         }
     }
@@ -724,20 +957,75 @@ mod tests {
     #[test]
     fn latest_mailbox_replaces_stale_items_without_blocking() {
         let mailbox = LatestMailbox::new();
-        assert!(mailbox.publish(1_u64));
-        assert!(mailbox.publish(2_u64));
-        assert_eq!(mailbox.take_dropped(), 1);
+        assert!(mailbox.publish(1_u64, Duration::from_millis(2)));
+        assert!(mailbox.publish(2_u64, Duration::from_millis(3)));
+        let telemetry = mailbox.take_telemetry();
+        assert_eq!(telemetry.captured, 2);
+        assert_eq!(telemetry.capture_elapsed, Duration::from_millis(5));
+        assert_eq!(telemetry.replaced, 1);
         assert_eq!(mailbox.receive().unwrap(), Some(2));
-        assert_eq!(mailbox.take_dropped(), 0);
+        assert_eq!(mailbox.take_telemetry().replaced, 0);
+    }
+
+    #[test]
+    fn fresh_pending_frame_throttles_capture_until_the_sender_consumes_it() {
+        let mailbox = LatestMailbox::new();
+        assert_eq!(
+            mailbox.capture_decision(Duration::from_secs(1)).unwrap(),
+            CaptureDecision::Capture
+        );
+        assert!(mailbox.publish(1_u64, Duration::from_millis(4)));
+        assert_eq!(
+            mailbox.capture_decision(Duration::from_secs(1)).unwrap(),
+            CaptureDecision::Skip
+        );
+        assert_eq!(
+            mailbox.capture_decision(Duration::ZERO).unwrap(),
+            CaptureDecision::Capture
+        );
+        assert_eq!(mailbox.receive().unwrap(), Some(1));
+        assert_eq!(
+            mailbox.capture_decision(Duration::from_secs(1)).unwrap(),
+            CaptureDecision::Capture
+        );
+        assert_eq!(mailbox.take_telemetry().skipped, 1);
+    }
+
+    #[test]
+    fn backpressure_refresh_scales_with_requested_frame_interval() {
+        assert_eq!(
+            backpressure_refresh_interval(Duration::from_secs(1)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backpressure_refresh_interval(Duration::from_millis(500)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            backpressure_refresh_interval(Duration::from_millis(125)),
+            Duration::from_millis(375)
+        );
+        assert_eq!(
+            backpressure_refresh_interval(Duration::from_millis(83)),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            backpressure_refresh_interval(Duration::from_millis(16)),
+            Duration::from_millis(250)
+        );
     }
 
     #[test]
     fn closing_mailbox_discards_pending_and_wakes_receiver() {
         let mailbox = Arc::new(LatestMailbox::new());
-        assert!(mailbox.publish(7_u64));
+        assert!(mailbox.publish(7_u64, Duration::ZERO));
         mailbox.close();
+        assert_eq!(
+            mailbox.capture_decision(Duration::ZERO).unwrap(),
+            CaptureDecision::Closed
+        );
         assert_eq!(mailbox.receive().unwrap(), None);
-        assert!(!mailbox.publish(8));
+        assert!(!mailbox.publish(8, Duration::ZERO));
 
         let waiting_mailbox = Arc::new(LatestMailbox::<u64>::new());
         let waiter_mailbox = Arc::clone(&waiting_mailbox);
@@ -772,16 +1060,71 @@ mod tests {
     }
 
     #[test]
-    fn dropped_frames_do_not_create_wire_sequence_gaps() {
+    fn frame_credits_are_cumulative_bounded_and_validate_future_acks() {
+        let credits = FrameCredits::new();
+        let running = AtomicBool::new(true);
+        assert_eq!(credits.outstanding(), 0);
+        credits.mark_sent(0).unwrap();
+        credits.mark_sent(1).unwrap();
+        assert_eq!(credits.outstanding(), MAX_OUTSTANDING_FRAMES);
+        let error = credits
+            .wait_for_credit(&running, Duration::from_millis(20))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        credits.acknowledge(0).unwrap();
+        assert!(
+            credits
+                .wait_for_credit(&running, Duration::from_millis(20))
+                .unwrap()
+                .is_some()
+        );
+        credits.mark_sent(2).unwrap();
+        credits.acknowledge(0).unwrap();
+        assert_eq!(credits.outstanding(), 2);
+        assert!(credits.acknowledge(3).is_err());
+        credits.acknowledge(2).unwrap();
+        assert_eq!(credits.outstanding(), 0);
+    }
+
+    #[test]
+    fn closing_frame_credits_wakes_a_waiting_sender() {
+        let credits = Arc::new(FrameCredits::new());
+        credits.mark_sent(0).unwrap();
+        credits.mark_sent(1).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let waiting_credits = Arc::clone(&credits);
+        let waiting_running = Arc::clone(&running);
+        let waiter = thread::spawn(move || {
+            waiting_credits
+                .wait_for_credit(&waiting_running, Duration::from_secs(1))
+                .unwrap()
+        });
+        thread::sleep(Duration::from_millis(20));
+        credits.close();
+        assert_eq!(waiter.join().unwrap(), None);
+    }
+
+    #[test]
+    fn display_credits_bound_wire_frames_and_keep_latest_sequence_continuous() {
         let mailbox = Arc::new(LatestMailbox::new());
-        assert!(mailbox.publish(test_pending_frame(10)));
+        assert!(mailbox.publish(test_pending_frame(10), Duration::from_millis(1)));
         let gate = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
         let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
         let sender_mailbox = Arc::clone(&mailbox);
         let sender_running = Arc::clone(&running);
+        let sender_credits = Arc::clone(&credits);
         let writer = SessionWriter::new(GateWriter(Arc::clone(&gate)), [0x5a; 32]);
-        let sender =
-            thread::spawn(move || send_frames(sender_mailbox, writer, &sender_running, 100));
+        let sender = thread::spawn(move || {
+            send_frames(
+                sender_mailbox,
+                writer,
+                &sender_running,
+                &sender_credits,
+                100,
+            )
+        });
 
         let (lock, ready) = &*gate;
         let state = lock.lock().unwrap();
@@ -796,10 +1139,10 @@ mod tests {
         );
         drop(state);
 
-        assert!(mailbox.publish(test_pending_frame(20)));
-        assert!(mailbox.publish(test_pending_frame(30)));
-        assert!(mailbox.publish(test_pending_frame(40)));
-        assert_eq!(mailbox.take_dropped(), 2);
+        assert!(mailbox.publish(test_pending_frame(20), Duration::from_millis(1)));
+        assert!(mailbox.publish(test_pending_frame(30), Duration::from_millis(1)));
+        assert!(mailbox.publish(test_pending_frame(40), Duration::from_millis(1)));
+        assert_eq!(mailbox.take_telemetry().replaced, 2);
 
         let mut state = lock.lock().unwrap();
         state.open = true;
@@ -811,20 +1154,48 @@ mod tests {
             !timeout.timed_out(),
             "sender did not flush both selected frames"
         );
+        drop(state);
+
+        assert!(mailbox.publish(test_pending_frame(50), Duration::from_millis(1)));
+        assert!(mailbox.publish(test_pending_frame(60), Duration::from_millis(1)));
+        assert!(mailbox.publish(test_pending_frame(70), Duration::from_millis(1)));
+        let state = lock.lock().unwrap();
+        let (state, timeout) = ready
+            .wait_timeout_while(state, Duration::from_millis(60), |state| state.flushes < 3)
+            .unwrap();
+        assert!(timeout.timed_out());
+        assert_eq!(state.flushes, 2, "sender exceeded its display credits");
+        drop(state);
+
+        credits.acknowledge(1).unwrap();
+        let state = lock.lock().unwrap();
+        let (state, timeout) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| state.flushes < 3)
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "sender did not resume after frame ACK"
+        );
         let wire = state.bytes.clone();
         drop(state);
 
         running.store(false, Ordering::Release);
         mailbox.close();
+        credits.close();
         sender.join().unwrap().unwrap();
 
         let mut reader = SessionReader::new(Cursor::new(wire), [0x5a; 32]);
         let (first_kind, first_payload) = reader.read_message().unwrap();
         let (second_kind, second_payload) = reader.read_message().unwrap();
+        let (third_kind, third_payload) = reader.read_message().unwrap();
         assert_eq!(first_kind, MessageKind::Frame);
         assert_eq!(second_kind, MessageKind::Frame);
+        assert_eq!(third_kind, MessageKind::Frame);
         assert_eq!(decode_frame(&first_payload).unwrap().sequence, 0);
         assert_eq!(decode_frame(&second_payload).unwrap().sequence, 1);
+        let third = decode_frame(&third_payload).unwrap();
+        assert_eq!(third.sequence, 2);
+        assert!(third.image.get_pixel(0, 0).0[0].abs_diff(70) <= 2);
     }
 
     #[test]
@@ -837,6 +1208,8 @@ mod tests {
         let receiver_running = Arc::clone(&running);
         let first_stop = Arc::new(FirstStop::new());
         let receiver_stop = Arc::clone(&first_stop);
+        let credits = Arc::new(FrameCredits::new());
+        let receiver_credits = Arc::clone(&credits);
         let receiver = thread::spawn(move || {
             receive_input(
                 reader,
@@ -847,6 +1220,7 @@ mod tests {
                 Duration::from_millis(60),
                 &receiver_running,
                 &receiver_stop,
+                &receiver_credits,
             )
         });
 

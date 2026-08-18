@@ -74,6 +74,8 @@ pub enum MessageKind {
     Close = 8,
     /// Client activity heartbeat; video frames provide the reverse heartbeat.
     Heartbeat = 9,
+    /// Cumulative acknowledgement of the latest frame drawn by the client.
+    FrameAck = 10,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -90,6 +92,7 @@ impl TryFrom<u8> for MessageKind {
             7 => Ok(Self::ReleaseAll),
             8 => Ok(Self::Close),
             9 => Ok(Self::Heartbeat),
+            10 => Ok(Self::FrameAck),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }
@@ -704,6 +707,12 @@ mod tests {
             }
             other => panic!("expected truncated-record I/O error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn frame_ack_message_kind_has_stable_wire_value() {
+        assert_eq!(u8::from(MessageKind::FrameAck), 10);
+        assert_eq!(MessageKind::try_from(10).unwrap(), MessageKind::FrameAck);
     }
 
     #[test]
