@@ -1,6 +1,7 @@
 //! Remote desktop viewer/client orchestration.
 
 use super::RemoteResult;
+use super::deadline::TcpStreamDeadline;
 use super::frame::{DecodedFrame, decode_frame};
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, encode_input};
@@ -39,33 +40,14 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     } else {
         [0; 32]
     };
-    let mut stream = TcpStream::connect(&options.address)?;
-    stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let session_keys = client_handshake(&mut stream, &key, rand::random())?;
-
-    stream.set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
-    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-    let reader_stream = stream.try_clone()?;
-    let (receive_key, send_key) = session_keys.into_client();
-    let mut reader = SessionReader::new(reader_stream, receive_key);
-    let mut writer = SessionWriter::new(stream, send_key);
-
-    writer.write_message(
-        MessageKind::Hello,
-        &ClientHello {
-            request_input,
-            keymap_fingerprint,
-        }
-        .encode(),
+    let stream = TcpStream::connect(&options.address)?;
+    let (mut reader, mut writer, hello) = negotiate_session(
+        stream,
+        &key,
+        request_input,
+        keymap_fingerprint,
+        HANDSHAKE_TIMEOUT,
     )?;
-    writer.flush()?;
-    let (kind, payload) = reader.read_message()?;
-    if kind != MessageKind::HelloAck {
-        return Err(invalid_data("host did not acknowledge remote session negotiation").into());
-    }
-    let hello = ServerHello::decode(&payload)?;
     if request_input && !hello.pointer_enabled {
         eprintln!("jwm-remote: host accepted a view-only session; input will not be forwarded");
     } else if request_input && !hello.keyboard_enabled {
@@ -129,6 +111,51 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         Err(_) => {}
     }
     loop_result
+}
+
+fn negotiate_session(
+    mut stream: TcpStream,
+    key: &[u8],
+    request_input: bool,
+    keymap_fingerprint: [u8; 32],
+    negotiation_timeout: Duration,
+) -> RemoteResult<(
+    SessionReader<TcpStream>,
+    SessionWriter<TcpStream>,
+    ServerHello,
+)> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(negotiation_timeout))?;
+    stream.set_write_timeout(Some(negotiation_timeout))?;
+    // Per-call socket timeouts can be extended indefinitely by a peer that
+    // drips bytes.  Bound authentication and the versioned HelloAck together.
+    let mut negotiation_deadline = TcpStreamDeadline::arm(&stream, negotiation_timeout)?;
+    let session_keys = client_handshake(&mut stream, key, rand::random())?;
+
+    let reader_stream = stream.try_clone()?;
+    let (receive_key, send_key) = session_keys.into_client();
+    let mut reader = SessionReader::new(reader_stream, receive_key);
+    let mut writer = SessionWriter::new(stream, send_key);
+    writer.write_message(
+        MessageKind::Hello,
+        &ClientHello {
+            request_input,
+            keymap_fingerprint,
+        }
+        .encode(),
+    )?;
+    writer.flush()?;
+    let (kind, payload) = reader.read_message()?;
+    if kind != MessageKind::HelloAck {
+        return Err(invalid_data("host did not acknowledge remote session negotiation").into());
+    }
+    let hello = ServerHello::decode(&payload)?;
+    negotiation_deadline.cancel();
+    reader
+        .get_ref()
+        .set_read_timeout(Some(FIRST_FRAME_TIMEOUT))?;
+    writer.get_ref().set_write_timeout(Some(WRITE_TIMEOUT))?;
+    Ok((reader, writer, hello))
 }
 
 fn viewer_loop(
@@ -266,4 +293,126 @@ fn receive_frames(
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::protocol::{PSK_LEN, server_handshake};
+    use std::io::Write;
+    use std::net::TcpListener;
+
+    const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    #[test]
+    fn negotiation_deadline_cannot_be_extended_by_a_slow_nonce() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for byte in 0_u8..32 {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        let result =
+            negotiate_session(stream, &TEST_PSK, false, [0; 32], Duration::from_millis(80));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn negotiation_deadline_also_covers_a_slow_hello_ack() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let keys = server_handshake(&mut stream, &TEST_PSK, [0x24; 32]).unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let (receive_key, send_key) = keys.into_server();
+            let mut reader = SessionReader::new(reader_stream, receive_key);
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Hello);
+            ClientHello::decode(&payload).unwrap();
+
+            let mut encoded = SessionWriter::new(Vec::new(), send_key);
+            encoded
+                .write_message(
+                    MessageKind::HelloAck,
+                    &ServerHello {
+                        pointer_enabled: false,
+                        keyboard_enabled: false,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            for byte in encoded.into_inner() {
+                if stream.write_all(&[byte]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let started = Instant::now();
+        let result = negotiate_session(
+            stream,
+            &TEST_PSK,
+            false,
+            [0; 32],
+            Duration::from_millis(100),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_millis(500));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn successful_negotiation_cancels_its_absolute_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let keys = server_handshake(&mut stream, &TEST_PSK, [0x33; 32]).unwrap();
+            let reader_stream = stream.try_clone().unwrap();
+            let (receive_key, send_key) = keys.into_server();
+            let mut reader = SessionReader::new(reader_stream, receive_key);
+            let mut writer = SessionWriter::new(stream, send_key);
+            let (kind, payload) = reader.read_message().unwrap();
+            assert_eq!(kind, MessageKind::Hello);
+            ClientHello::decode(&payload).unwrap();
+            writer
+                .write_message(
+                    MessageKind::HelloAck,
+                    &ServerHello {
+                        pointer_enabled: false,
+                        keyboard_enabled: false,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            writer.flush().unwrap();
+            thread::sleep(Duration::from_millis(160));
+            writer.write_message(MessageKind::Close, &[]).unwrap();
+            writer.flush().unwrap();
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let (mut reader, _writer, hello) =
+            negotiate_session(stream, &TEST_PSK, false, [0; 32], Duration::from_millis(80))
+                .unwrap();
+        assert!(!hello.pointer_enabled);
+        assert!(!hello.keyboard_enabled);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Close);
+        assert!(payload.is_empty());
+        server.join().unwrap();
+    }
 }

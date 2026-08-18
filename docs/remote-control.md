@@ -5,12 +5,12 @@ implemented once for the X Composite surface used by both the `x11rb` and
 `xcb` backends. Windows/macOS, Wayland sessions, and other Linux window
 managers are outside this first compatibility target.
 
-The helper is a separate process: synchronous X11 readback, JPEG encoding, a
-slow peer, and a broken network stay outside JWM's compositor/event loop.
-Synchronous readback can still contend with the shared X server on large
-roots. The host captures the final Composite overlay (including JWM effects
-and system UI), while an independent XTEST connection injects authenticated
-input.
+The helper is a separate process: X11 readback, JPEG encoding, a slow peer,
+and a broken network stay outside JWM's compositor event loop. With
+XRender 0.10+ and the Composite overlay, the host downsizes the final desktop
+in the X server and reads back only the encoded dimensions. This keeps large
+roots from dominating the capture path. The host includes JWM effects and
+system UI, while an independent XTEST connection injects authenticated input.
 
 Managed release bundles keep the helper in their versioned `current` tree.
 Add that directory before using the commands below (source installs already
@@ -31,6 +31,8 @@ role-separated HMAC-SHA256 proofs, independent traffic keys, strictly
 increasing record sequence numbers, and a MAC on every frame/input message.
 The key is never sent over the network. Key files must be owned by the current
 user, must not be symlinks, and must have no group/other permission bits.
+Both peers enforce a total negotiation deadline, so slowly dripping handshake
+or capability bytes cannot hold a connection open indefinitely.
 
 The LAN MVP authenticates traffic and rejects modification/replay, but **does
 not encrypt screen images or input**. Use it only on a trusted, isolated LAN.
@@ -143,11 +145,13 @@ jwm-remote host ... --fps 24 --jpeg-quality 80 --max-width 1920
 ```
 
 `--max-width 0` keeps the native root width. Higher resolution, quality, and
-frame rate increase CPU and bandwidth together. The MVP still reads the full
-root before downscaling; on very large combined multi-monitor roots, lower
-`--fps` as well as `--max-width` because synchronous X11 readback can contend
-with the display server even though JPEG and networking stay out of JWM's
-event-loop thread.
+frame rate increase CPU and bandwidth together. With overlay capture and
+XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
+path prints its active source/output dimensions, and every session reports
+rolling capture/encode/write latency, which makes it clear which stage needs
+tuning. Root compatibility capture and older XRender servers retain the
+full-resolution readback plus CPU-resize fallback; for those paths, lower
+`--fps` as well as `--max-width` on very large combined multi-monitor roots.
 
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may

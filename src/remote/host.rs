@@ -1,6 +1,7 @@
 //! Trusted-LAN remote desktop host.
 
 use super::RemoteResult;
+use super::deadline::TcpStreamDeadline;
 use super::frame::encode_frame;
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, decode_input};
@@ -12,66 +13,17 @@ use signal_hook::flag;
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+// The client cannot enter its heartbeat loop until the first frame is received,
+// decoded and drawn.  Do not apply the held-input safety timeout before then.
+const INITIAL_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
-
-struct HandshakeDeadline {
-    cancelled: Arc<(Mutex<bool>, Condvar)>,
-    worker: Option<thread::JoinHandle<()>>,
-}
-
-impl HandshakeDeadline {
-    fn arm(stream: &TcpStream) -> io::Result<Self> {
-        let deadline_stream = stream.try_clone()?;
-        let cancelled = Arc::new((Mutex::new(false), Condvar::new()));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let worker = thread::Builder::new()
-            .name("jwm-remote-handshake-deadline".into())
-            .spawn(move || {
-                let (lock, wake) = &*worker_cancelled;
-                let Ok(guard) = lock.lock() else {
-                    let _ = deadline_stream.shutdown(Shutdown::Both);
-                    return;
-                };
-                let Ok((cancelled, timeout)) =
-                    wake.wait_timeout_while(guard, HANDSHAKE_TIMEOUT, |cancelled| !*cancelled)
-                else {
-                    let _ = deadline_stream.shutdown(Shutdown::Both);
-                    return;
-                };
-                if !*cancelled && timeout.timed_out() {
-                    let _ = deadline_stream.shutdown(Shutdown::Both);
-                }
-            })?;
-        Ok(Self {
-            cancelled,
-            worker: Some(worker),
-        })
-    }
-
-    fn cancel(&mut self) {
-        let (lock, wake) = &*self.cancelled;
-        if let Ok(mut cancelled) = lock.lock() {
-            *cancelled = true;
-            wake.notify_all();
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl Drop for HandshakeDeadline {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct HostOptions {
@@ -142,7 +94,7 @@ fn serve_client(
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
-    let mut handshake_deadline = HandshakeDeadline::arm(&stream)?;
+    let mut handshake_deadline = TcpStreamDeadline::arm(&stream, HANDSHAKE_TIMEOUT)?;
     let session_keys = server_handshake(&mut stream, key, rand::random())?;
     let reader_stream = stream.try_clone()?;
     reader_stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
@@ -159,10 +111,6 @@ fn serve_client(
     }
     let hello = ClientHello::decode(&hello_payload)?;
     handshake_deadline.cancel();
-    reader
-        .get_ref()
-        .set_read_timeout(Some(SESSION_IDLE_TIMEOUT))?;
-
     let mut capture = X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
@@ -231,6 +179,8 @@ fn serve_client(
                 injector,
                 keyboard_enabled,
                 verified_keymap,
+                INITIAL_ACTIVITY_TIMEOUT,
+                SESSION_IDLE_TIMEOUT,
                 &input_running,
             );
             input_running.store(false, Ordering::Release);
@@ -260,6 +210,9 @@ fn stream_frames(
     let mut next_frame = Instant::now();
     let mut report_started = Instant::now();
     let mut report_frames = 0_u64;
+    let mut report_capture = Duration::ZERO;
+    let mut report_encode = Duration::ZERO;
+    let mut report_write = Duration::ZERO;
     let mut sequence = 0_u64;
 
     while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
@@ -273,25 +226,45 @@ fn stream_frames(
             next_frame = now + interval;
         }
 
+        let capture_started = Instant::now();
         let frame = capture.frame()?;
+        report_capture += capture_started.elapsed();
+        let encode_started = Instant::now();
         let payload = encode_frame(sequence, &frame, options.jpeg_quality)?;
+        report_encode += encode_started.elapsed();
+        let write_started = Instant::now();
         writer.write_message(MessageKind::Frame, &payload)?;
         writer.flush()?;
+        report_write += write_started.elapsed();
         sequence = sequence.wrapping_add(1);
         report_frames += 1;
 
         let report_elapsed = report_started.elapsed();
         if report_elapsed >= Duration::from_secs(5) {
             eprintln!(
-                "jwm-remote: sent {:.1} fps, latest JPEG {} KiB",
+                "jwm-remote: sent {:.1} fps, latest JPEG {} KiB, capture/encode/write {:.1}/{:.1}/{:.1} ms",
                 report_frames as f64 / report_elapsed.as_secs_f64(),
-                payload.len().div_ceil(1024)
+                payload.len().div_ceil(1024),
+                average_millis(report_capture, report_frames),
+                average_millis(report_encode, report_frames),
+                average_millis(report_write, report_frames),
             );
             report_started = Instant::now();
             report_frames = 0;
+            report_capture = Duration::ZERO;
+            report_encode = Duration::ZERO;
+            report_write = Duration::ZERO;
         }
     }
     Ok(())
+}
+
+fn average_millis(duration: Duration, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        duration.as_secs_f64() * 1000.0 / count as f64
+    }
 }
 
 fn receive_input(
@@ -299,11 +272,23 @@ fn receive_input(
     mut injector: Option<InputInjector>,
     keyboard_enabled: bool,
     verified_keymap: Option<[u8; 32]>,
+    initial_activity_timeout: Duration,
+    session_idle_timeout: Duration,
     running: &AtomicBool,
 ) -> RemoteResult<()> {
     let session_result = (|| -> RemoteResult<()> {
+        reader
+            .get_ref()
+            .set_read_timeout(Some(initial_activity_timeout))?;
+        let mut awaiting_first_activity = true;
         while running.load(Ordering::Acquire) {
             let (kind, payload) = reader.read_message()?;
+            if awaiting_first_activity {
+                reader
+                    .get_ref()
+                    .set_read_timeout(Some(session_idle_timeout))?;
+                awaiting_first_activity = false;
+            }
             match kind {
                 MessageKind::Pointer
                 | MessageKind::Key
@@ -384,6 +369,15 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let connector = thread::spawn(move || TcpStream::connect(address).unwrap());
+        let (accepted, _) = listener.accept().unwrap();
+        (connector.join().unwrap(), accepted)
+    }
 
     #[test]
     fn defaults_must_explicitly_opt_into_lan_and_input() {
@@ -401,5 +395,36 @@ mod tests {
         };
         assert!(!options.allow_lan);
         assert!(!options.allow_input);
+    }
+
+    #[test]
+    fn first_activity_gets_a_grace_period_then_switches_to_steady_idle() {
+        let (client_stream, server_stream) = loopback_pair();
+        let key = [0x47; 32];
+        let reader = SessionReader::new(server_stream, key);
+        let mut writer = SessionWriter::new(client_stream, key);
+        let running = Arc::new(AtomicBool::new(true));
+        let receiver_running = Arc::clone(&running);
+        let receiver = thread::spawn(move || {
+            receive_input(
+                reader,
+                None,
+                false,
+                None,
+                Duration::from_millis(600),
+                Duration::from_millis(60),
+                &receiver_running,
+            )
+        });
+
+        thread::sleep(Duration::from_millis(120));
+        assert!(running.load(Ordering::Acquire));
+        writer.write_message(MessageKind::Heartbeat, &[]).unwrap();
+        writer.flush().unwrap();
+        let steady_started = Instant::now();
+        let result = receiver.join().unwrap();
+        assert!(result.is_err());
+        assert!(steady_started.elapsed() < Duration::from_millis(400));
+        assert!(!running.load(Ordering::Acquire));
     }
 }

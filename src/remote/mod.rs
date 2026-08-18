@@ -11,6 +11,7 @@ pub type RemoteError = Box<dyn Error + Send + Sync>;
 pub type RemoteResult<T> = Result<T, RemoteError>;
 
 pub mod client;
+mod deadline;
 pub mod frame;
 pub mod host;
 pub mod key;
