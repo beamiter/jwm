@@ -13,12 +13,16 @@ use super::protocol::{
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
-use std::io;
+use nix::errno::Errno;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
+use std::io::{self, Read as _};
 use std::net::{Shutdown, TcpStream};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +32,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
+const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 pub struct ClientOptions {
@@ -89,14 +94,16 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         viewer.draw(frame)
     })?;
 
-    let receive_state = Arc::clone(&state);
     let control = writer.get_ref().try_clone()?;
-    let receiver = thread::Builder::new()
-        .name("jwm-remote-video".into())
+    let mut cancel = SessionCancel::new(control, Arc::clone(&state));
+    let (mut wake_receiver, wake_sender) = wake_pair()?;
+    let receive_state = Arc::clone(&state);
+    let receiver = ReceiverThread::spawn(move || {
         // Move the authenticated first-frame allocation into the receiver
         // thread. It remains thread-local while avoiding a second large
         // allocation for the next frame.
-        .spawn(move || receive_frames(reader, receive_state, last_sequence, payload))?;
+        receive_frames(reader, receive_state, last_sequence, payload, wake_sender);
+    })?;
 
     let pointer_enabled = hello.pointer_enabled && !options.view_only;
     let keyboard_enabled = hello.keyboard_enabled && !options.view_only;
@@ -107,26 +114,31 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         pointer_enabled,
         keyboard_enabled,
         &mut telemetry_reporter,
+        &mut wake_receiver,
     );
-    state.stopping.store(true, Ordering::Release);
-    if pointer_enabled || keyboard_enabled {
-        let mut payload = Vec::new();
-        let _ = write_input_batch(&mut writer, &[InputEvent::ReleaseAll], &mut payload);
-    }
-    let _ = writer.write_message(MessageKind::Close, &[]);
-    let _ = writer.flush();
-    let _ = control.shutdown(Shutdown::Both);
-
-    let receiver_result = receiver.join();
+    let graceful_close = matches!(
+        &loop_result,
+        Ok(ViewerLoopExit {
+            close_release_flushed: true
+        })
+    );
+    let cancel_result = cancel.cancel(&mut writer, graceful_close);
+    let receiver_exit = receiver.join_timeout(RECEIVER_JOIN_TIMEOUT);
     telemetry_reporter.force_report();
-    match receiver_result {
-        Ok(()) => {}
-        Err(_) if loop_result.is_ok() => {
-            return Err(io::Error::other("remote video thread panicked").into());
-        }
-        Err(_) => {}
+    // Preserve the foreground/X11 first cause. Receiver cleanup failures only
+    // replace a successful viewer-close result, matching the old precedence.
+    loop_result?;
+    if receiver_exit == ReceiverExit::Panicked {
+        return Err(io::Error::other("remote video thread panicked").into());
     }
-    loop_result
+    if receiver_exit == ReceiverExit::TimedOut {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "remote video thread did not stop after session cancellation",
+        )
+        .into());
+    }
+    cancel_result
 }
 
 fn negotiate_session(
@@ -181,11 +193,13 @@ fn viewer_loop(
     pointer_enabled: bool,
     keyboard_enabled: bool,
     telemetry_reporter: &mut ClientTelemetryReporter<'_>,
-) -> RemoteResult<()> {
+    wake: &mut WakeReceiver,
+) -> RemoteResult<ViewerLoopExit> {
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
     let mut input_payload = Vec::new();
     loop {
+        wake.drain()?;
         let events = viewer.poll_events()?;
         let outcome = for_each_input_batch(
             events,
@@ -204,7 +218,16 @@ fn viewer_loop(
             writer.flush()?;
         }
         if outcome.close {
-            return Ok(());
+            let input_enabled = pointer_enabled || keyboard_enabled;
+            if input_enabled && !outcome.wrote_release_all {
+                return Err(invalid_data(
+                    "viewer closed without flushing the required ReleaseAll edge",
+                )
+                .into());
+            }
+            return Ok(ViewerLoopExit {
+                close_release_flushed: true,
+            });
         }
 
         if let Some(frame) = take_latest(state) {
@@ -212,9 +235,6 @@ fn viewer_loop(
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
-            if state.stopping.load(Ordering::Acquire) {
-                return Ok(());
-            }
             let message = state
                 .error
                 .lock()
@@ -224,13 +244,35 @@ fn viewer_loop(
             return Err(io::Error::new(io::ErrorKind::ConnectionAborted, message).into());
         }
         telemetry_reporter.maybe_report();
-        thread::sleep(Duration::from_millis(4));
+        viewer.prepare_wait()?;
+        if viewer.has_pending_events()? {
+            continue;
+        }
+        let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
+        if let Some(viewer_deadline) = viewer.next_event_deadline() {
+            deadline = deadline.min(viewer_deadline);
+        }
+        if wait_for_activity(viewer.connection_fd(), wake.as_fd(), deadline)?
+            == WaitOutcome::X11Hangup
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "local X11 viewer connection closed",
+            )
+            .into());
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ViewerLoopExit {
+    close_release_flushed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct InputPollOutcome {
     wrote_input: bool,
+    wrote_release_all: bool,
     close: bool,
 }
 
@@ -284,6 +326,7 @@ fn for_each_input_batch(
         if batch.len() == MAX_INPUT_BATCH_EVENTS {
             emit(batch)?;
             outcome.wrote_input = true;
+            outcome.wrote_release_all |= batch.contains(&InputEvent::ReleaseAll);
             batch.clear();
         }
         batch.push(input);
@@ -293,6 +336,7 @@ fn for_each_input_batch(
     if !batch.is_empty() {
         emit(batch)?;
         outcome.wrote_input = true;
+        outcome.wrote_release_all |= batch.contains(&InputEvent::ReleaseAll);
         batch.clear();
     }
     Ok(outcome)
@@ -473,6 +517,10 @@ impl<'a> ClientTelemetryReporter<'a> {
         self.finished = true;
     }
 
+    fn next_deadline(&self) -> Instant {
+        self.window_started + TELEMETRY_INTERVAL
+    }
+
     fn maybe_report_at(&mut self, now: Instant, force: bool) -> Option<ClientTelemetryReport> {
         let elapsed = now.saturating_duration_since(self.window_started);
         if !force && elapsed < TELEMETRY_INTERVAL {
@@ -490,6 +538,247 @@ impl Drop for ClientTelemetryReporter<'_> {
         // flush a partial window, while an empty/already-finished window is a
         // no-op and can never change the session result.
         self.force_report();
+    }
+}
+
+struct WakeSender {
+    stream: UnixStream,
+}
+
+impl WakeSender {
+    fn signal(&self) -> io::Result<()> {
+        loop {
+            match (&self.stream).write(&[1]) {
+                Ok(1) => return Ok(()),
+                Ok(_) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // A full wake socket already represents a pending wakeup.
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+struct WakeReceiver {
+    stream: UnixStream,
+}
+
+impl WakeReceiver {
+    fn drain(&mut self) -> io::Result<()> {
+        let mut buffer = [0_u8; 64];
+        loop {
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.stream.as_fd()
+    }
+}
+
+fn wake_pair() -> io::Result<(WakeReceiver, WakeSender)> {
+    let (receiver, sender) = UnixStream::pair()?;
+    receiver.set_nonblocking(true)?;
+    sender.set_nonblocking(true)?;
+    Ok((
+        WakeReceiver { stream: receiver },
+        WakeSender { stream: sender },
+    ))
+}
+
+fn wait_for_activity(
+    x11_fd: BorrowedFd<'_>,
+    wake_fd: BorrowedFd<'_>,
+    deadline: Instant,
+) -> io::Result<WaitOutcome> {
+    loop {
+        let interests = PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP;
+        let mut descriptors = [
+            PollFd::new(x11_fd, interests),
+            PollFd::new(wake_fd, interests),
+        ];
+        match poll(
+            &mut descriptors,
+            poll_timeout_until(Instant::now(), deadline),
+        ) {
+            Ok(_) => {
+                if descriptors.iter().any(|descriptor| {
+                    descriptor
+                        .revents()
+                        .is_some_and(|events| events.contains(PollFlags::POLLNVAL))
+                }) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "remote viewer poll received an invalid file descriptor",
+                    ));
+                }
+                if descriptors[0].revents().is_some_and(|events| {
+                    events.intersects(PollFlags::POLLERR | PollFlags::POLLHUP)
+                }) {
+                    return Ok(WaitOutcome::X11Hangup);
+                }
+                return Ok(WaitOutcome::Activity);
+            }
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(io::Error::from_raw_os_error(error as i32)),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaitOutcome {
+    Activity,
+    X11Hangup,
+}
+
+fn poll_timeout_until(now: Instant, deadline: Instant) -> PollTimeout {
+    let remaining = deadline.saturating_duration_since(now);
+    if remaining.is_zero() {
+        return PollTimeout::ZERO;
+    }
+    // poll(2) takes whole milliseconds. Round up so a sub-millisecond
+    // remainder cannot turn into an immediate busy loop.
+    let millis = remaining.as_nanos().div_ceil(1_000_000);
+    PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX)
+}
+
+struct SessionCancel {
+    control: TcpStream,
+    state: Arc<ReceiveState>,
+    cancelled: bool,
+    close_attempted: bool,
+    shutdown: bool,
+}
+
+impl SessionCancel {
+    fn new(control: TcpStream, state: Arc<ReceiveState>) -> Self {
+        Self {
+            control,
+            state,
+            cancelled: false,
+            close_attempted: false,
+            shutdown: false,
+        }
+    }
+
+    fn cancel(
+        &mut self,
+        writer: &mut SessionWriter<TcpStream>,
+        graceful_close: bool,
+    ) -> RemoteResult<()> {
+        if self.cancelled {
+            return Ok(());
+        }
+        self.cancelled = true;
+        self.state.stopping.store(true, Ordering::Release);
+
+        let mut first_error = None;
+        if graceful_close && !self.close_attempted {
+            self.close_attempted = true;
+            let close_result: RemoteResult<()> = (|| {
+                writer.write_message(MessageKind::Close, &[])?;
+                writer.flush()?;
+                Ok(())
+            })();
+            if let Err(error) = close_result {
+                first_error = Some(error);
+            }
+        }
+        if let Err(error) = self.shutdown_once()
+            && first_error.is_none()
+        {
+            first_error = Some(error.into());
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn shutdown_once(&mut self) -> io::Result<()> {
+        if self.shutdown {
+            return Ok(());
+        }
+        self.shutdown = true;
+        match self.control.shutdown(Shutdown::Both) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotConnected => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for SessionCancel {
+    fn drop(&mut self) {
+        self.state.stopping.store(true, Ordering::Release);
+        let _ = self.shutdown_once();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiverExit {
+    Completed,
+    Panicked,
+    TimedOut,
+}
+
+struct ReceiverThread {
+    handle: Option<thread::JoinHandle<()>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl ReceiverThread {
+    fn spawn(task: impl FnOnce() + Send + 'static) -> io::Result<Self> {
+        let (done_tx, done) = mpsc::channel();
+        let handle = thread::Builder::new()
+            .name("jwm-remote-video".into())
+            .spawn(move || {
+                let _done = ThreadDone(Some(done_tx));
+                task();
+            })?;
+        Ok(Self {
+            handle: Some(handle),
+            done,
+        })
+    }
+
+    fn join_timeout(mut self, timeout: Duration) -> ReceiverExit {
+        match self.done.recv_timeout(timeout) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if self
+                    .handle
+                    .take()
+                    .is_some_and(|handle| handle.join().is_err())
+                {
+                    ReceiverExit::Panicked
+                } else {
+                    ReceiverExit::Completed
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Dropping JoinHandle detaches the thread; the session socket
+                // was already shut down, so a well-behaved receiver exits.
+                self.handle.take();
+                ReceiverExit::TimedOut
+            }
+        }
+    }
+}
+
+struct ThreadDone(Option<mpsc::Sender<()>>);
+
+impl Drop for ThreadDone {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
     }
 }
 
@@ -546,12 +835,67 @@ fn decode_queued_frame(payload: &[u8], telemetry: &ClientTelemetry) -> RemoteRes
     Ok(QueuedFrame { frame, ready_at })
 }
 
+struct ReceiveCompletion {
+    state: Arc<ReceiveState>,
+    wake: WakeSender,
+    finished: bool,
+}
+
+impl ReceiveCompletion {
+    fn new(state: Arc<ReceiveState>, wake: WakeSender) -> Self {
+        Self {
+            state,
+            wake,
+            finished: false,
+        }
+    }
+
+    fn signal(&self) -> io::Result<()> {
+        self.wake.signal()
+    }
+
+    fn finish(&mut self, result: RemoteResult<()>) {
+        let error = result.err().map(|error| error.to_string());
+        self.publish_terminal(error);
+    }
+
+    fn publish_terminal(&mut self, error: Option<String>) {
+        if self.finished {
+            return;
+        }
+        // Mark first so even a poisoned diagnostic lock cannot recurse into
+        // terminal publication while unwinding.
+        self.finished = true;
+        if let Some(error) = error
+            && !self.state.stopping.load(Ordering::Acquire)
+        {
+            let mut slot = match self.state.error.lock() {
+                Ok(slot) => slot,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *slot = Some(error);
+        }
+        self.state.alive.store(false, Ordering::Release);
+        let _ = self.wake.signal();
+    }
+}
+
+impl Drop for ReceiveCompletion {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.publish_terminal(Some("remote video thread panicked".to_string()));
+        }
+    }
+}
+
 fn receive_frames(
     mut reader: SessionReader<TcpStream>,
     state: Arc<ReceiveState>,
     mut last_sequence: u64,
     mut payload: Vec<u8>,
+    wake: WakeSender,
 ) {
+    let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
     let result: RemoteResult<()> = (|| loop {
         let kind = reader.read_message_into(&mut payload)?;
@@ -574,6 +918,7 @@ fn receive_frames(
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
                 }
+                completion.signal()?;
                 // A decoded RGB frame can own a large allocation. The latest
                 // slot is unlocked before the stale frame reaches Drop.
                 drop(replaced);
@@ -598,12 +943,7 @@ fn receive_frames(
         payload_retention.observe(&mut payload);
     })();
 
-    if let Err(error) = result
-        && !state.stopping.load(Ordering::Acquire)
-    {
-        *state.error.lock().unwrap() = Some(error.to_string());
-    }
-    state.alive.store(false, Ordering::Release);
+    completion.finish(result);
 }
 
 fn invalid_data(message: impl Into<String>) -> io::Error {
@@ -617,6 +957,7 @@ mod tests {
     use crate::remote::protocol::{PSK_LEN, server_handshake};
     use image::RgbImage;
     use std::io::Cursor;
+    use std::io::Read;
     use std::io::Write;
     use std::net::TcpListener;
 
@@ -730,6 +1071,7 @@ mod tests {
             outcome,
             InputPollOutcome {
                 wrote_input: true,
+                wrote_release_all: false,
                 close: false,
             }
         );
@@ -914,6 +1256,7 @@ mod tests {
         assert_eq!(batches, [vec![input_pointer(51), InputEvent::ReleaseAll]]);
         assert!(outcome.close);
         assert!(outcome.wrote_input);
+        assert!(outcome.wrote_release_all);
     }
 
     #[test]
@@ -1056,6 +1399,178 @@ mod tests {
         assert_eq!(current.as_ref().map(Vec::len), Some(2048));
         drop(current);
         drop(stale);
+    }
+
+    #[test]
+    fn poll_timeout_rounds_up_and_never_sleeps_past_due() {
+        let now = Instant::now();
+        assert_eq!(poll_timeout_until(now, now), PollTimeout::ZERO);
+        assert_eq!(
+            poll_timeout_until(now, now + Duration::from_nanos(1)).as_millis(),
+            Some(1)
+        );
+        assert_eq!(
+            poll_timeout_until(now, now + Duration::from_millis(1)).as_millis(),
+            Some(1)
+        );
+        assert_eq!(
+            poll_timeout_until(
+                now,
+                now + Duration::from_millis(1) + Duration::from_nanos(1)
+            )
+            .as_millis(),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn receiver_wake_is_coalesced_and_visible_to_poll() {
+        let (mut receiver, sender) = wake_pair().unwrap();
+        let (x11_reader, _x11_writer) = UnixStream::pair().unwrap();
+        sender.signal().unwrap();
+        sender.signal().unwrap();
+        assert_eq!(
+            wait_for_activity(
+                x11_reader.as_fd(),
+                receiver.as_fd(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap(),
+            WaitOutcome::Activity
+        );
+        receiver.drain().unwrap();
+    }
+
+    #[test]
+    fn publication_after_a_drain_cannot_lose_its_wake() {
+        let (mut receiver, sender) = wake_pair().unwrap();
+        let (x11_reader, _x11_writer) = UnixStream::pair().unwrap();
+        receiver.drain().unwrap();
+        let published = Arc::new(AtomicBool::new(false));
+        let worker_published = Arc::clone(&published);
+        let (start_tx, start_rx) = mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            start_rx.recv().unwrap();
+            worker_published.store(true, Ordering::Release);
+            sender.signal().unwrap();
+        });
+
+        start_tx.send(()).unwrap();
+        assert_eq!(
+            wait_for_activity(
+                x11_reader.as_fd(),
+                receiver.as_fd(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap(),
+            WaitOutcome::Activity
+        );
+        assert!(published.load(Ordering::Acquire));
+        worker.join().unwrap();
+        receiver.drain().unwrap();
+    }
+
+    #[test]
+    fn x11_poll_hangup_is_terminal_instead_of_spinning() {
+        let (x11_reader, x11_writer) = UnixStream::pair().unwrap();
+        let (wake_receiver, _wake_sender) = wake_pair().unwrap();
+        drop(x11_writer);
+        assert_eq!(
+            wait_for_activity(
+                x11_reader.as_fd(),
+                wake_receiver.as_fd(),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap(),
+            WaitOutcome::X11Hangup
+        );
+    }
+
+    #[test]
+    fn receiver_completion_publishes_terminal_state_before_wake() {
+        let state = Arc::new(ReceiveState::new());
+        let (mut wake_receiver, wake_sender) = wake_pair().unwrap();
+        {
+            // Dropping an unfinished completion guard models stack unwinding
+            // from a panic in the receiver body.
+            let _completion = ReceiveCompletion::new(Arc::clone(&state), wake_sender);
+        }
+        let (x11_reader, _x11_writer) = UnixStream::pair().unwrap();
+        wait_for_activity(
+            x11_reader.as_fd(),
+            wake_receiver.as_fd(),
+            Instant::now() + Duration::from_secs(1),
+        )
+        .unwrap();
+        wake_receiver.drain().unwrap();
+        assert!(!state.alive.load(Ordering::Acquire));
+        assert_eq!(
+            state.error.lock().unwrap().as_deref(),
+            Some("remote video thread panicked")
+        );
+    }
+
+    #[test]
+    fn receiver_join_reports_completion_panic_and_timeout() {
+        let completed = ReceiverThread::spawn(|| {}).unwrap();
+        assert_eq!(
+            completed.join_timeout(Duration::from_secs(1)),
+            ReceiverExit::Completed
+        );
+
+        let panicked = ReceiverThread::spawn(|| panic!("synthetic receiver panic")).unwrap();
+        assert_eq!(
+            panicked.join_timeout(Duration::from_secs(1)),
+            ReceiverExit::Panicked
+        );
+
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocked = ReceiverThread::spawn(move || {
+            let _ = release_rx.recv();
+        })
+        .unwrap();
+        assert_eq!(blocked.join_timeout(Duration::ZERO), ReceiverExit::TimedOut);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn session_cancel_sends_close_once_only_on_graceful_exit() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let control = client.try_clone().unwrap();
+        let state = Arc::new(ReceiveState::new());
+        let mut writer = SessionWriter::new(client, TEST_PSK);
+        let mut cancel = SessionCancel::new(control, Arc::clone(&state));
+
+        cancel.cancel(&mut writer, true).unwrap();
+        cancel.cancel(&mut writer, true).unwrap();
+        let mut wire = Vec::new();
+        server.read_to_end(&mut wire).unwrap();
+        let mut reader = SessionReader::new(Cursor::new(wire), TEST_PSK);
+        let (kind, payload) = reader.read_message().unwrap();
+        assert_eq!(kind, MessageKind::Close);
+        assert!(payload.is_empty());
+        assert!(reader.read_message().is_err());
+        assert!(state.stopping.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn fatal_session_cancel_only_shuts_down_transport() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        let control = client.try_clone().unwrap();
+        let state = Arc::new(ReceiveState::new());
+        let mut writer = SessionWriter::new(client, TEST_PSK);
+        let mut cancel = SessionCancel::new(control, Arc::clone(&state));
+
+        cancel.cancel(&mut writer, false).unwrap();
+        cancel.cancel(&mut writer, true).unwrap();
+        let mut wire = Vec::new();
+        server.read_to_end(&mut wire).unwrap();
+        assert!(wire.is_empty());
+        assert!(state.stopping.load(Ordering::Acquire));
     }
 
     #[test]

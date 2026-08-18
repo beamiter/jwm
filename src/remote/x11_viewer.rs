@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 
@@ -482,6 +482,47 @@ impl Viewer {
             self.report_close(&mut result)?;
         }
         Ok(result)
+    }
+
+    /// Flush requests that can cause X11 events before the caller blocks on
+    /// the connection file descriptor.
+    pub fn prepare_wait(&self) -> RemoteResult<()> {
+        self.conn.flush()?;
+        Ok(())
+    }
+
+    /// Return whether an X11 event is already available without blocking.
+    ///
+    /// x11rb can read events into its internal queue while waiting for a
+    /// checked request or an MIT-SHM completion. In that case the raw socket
+    /// is no longer readable, so an external poller must inspect the library
+    /// queue before sleeping. The event is put back into our FIFO so the
+    /// normal event path (including asynchronous X11 errors) still owns it.
+    pub fn has_pending_events(&mut self) -> RemoteResult<bool> {
+        if self.closed || !self.deferred_events.is_empty() {
+            return Ok(true);
+        }
+        if let Some(event) = self.conn.poll_for_event()? {
+            self.deferred_events.push_back(event);
+            return Ok(true);
+        }
+        Ok(self
+            .pending_key_release
+            .is_some_and(|release| release.queued_at.elapsed() >= KEY_RELEASE_DEFER))
+    }
+
+    /// File descriptor used by the event-driven client loop.
+    #[must_use]
+    pub fn connection_fd(&self) -> BorrowedFd<'_> {
+        self.conn.stream().as_fd()
+    }
+
+    /// Earliest local input deadline that must wake the event loop even when
+    /// the X server has no new event (currently the autorepeat release filter).
+    #[must_use]
+    pub fn next_event_deadline(&self) -> Option<Instant> {
+        self.pending_key_release
+            .and_then(|release| release.queued_at.checked_add(KEY_RELEASE_DEFER))
     }
 
     /// Draw and retain a decoded frame. The retained copy is used for Expose

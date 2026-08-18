@@ -92,6 +92,14 @@ monorepo use independent Semantic Versions.
   retains a fully presented backing pixmap for Expose events; nonstandard
   visuals keep the generic/core path, and resize bursts allocate only their
   final size.
+- The remote viewer no longer wakes every four milliseconds while idle. It
+  blocks on the X11 connection, a video-receiver wake descriptor, and the next
+  heartbeat, telemetry or deferred-key deadline, while checking x11rb's
+  already-buffered event queue before sleeping. With input negotiated, normal
+  window close flushes `ReleaseAll` before one authenticated `Close`;
+  X11/network failures shut the transport down directly so host cleanup
+  releases input. Session cancellation is idempotent and receiver-thread
+  joining has a bounded wait.
 - Remote JPEG encoding and authenticated record reads now reuse bounded
   per-thread payload buffers. JPEG bytes are written directly behind the frame
   header without an intermediate allocation, receive buffers are exposed only

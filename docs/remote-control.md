@@ -250,6 +250,15 @@ event; setup or rejected-upload failures retry the same frame with core
 `PutImage`. Nonstandard visuals use the general mask-based conversion and core
 upload. Expose events copy the last completely uploaded backing image, and
 resize event bursts redraw only their final size.
+When idle, the viewer blocks on its X11 connection, the video receiver's wake
+descriptor, and the nearest heartbeat, telemetry or deferred-key deadline; it
+also checks x11rb's internal and MIT-SHM-deferred event queues before sleeping.
+With input negotiated, closing the viewer flushes the close-time `ReleaseAll`
+batch before sending one authenticated `Close`; view-only close sends only the
+`Close`. If X11 drawing or network I/O has already failed, the client instead
+shuts the session transport down immediately and lets the host's disconnect
+cleanup release injected input. Cancellation and shutdown are idempotent, and
+the blocking receiver thread gets a bounded join window.
 Root compatibility capture and older XRender servers retain the
 full-resolution readback plus CPU-resize fallback; for those paths, lower
 `--fps` as well as `--max-width` on very large combined multi-monitor roots.
