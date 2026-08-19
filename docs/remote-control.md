@@ -182,11 +182,15 @@ XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
 path prints its active source/output dimensions. MIT-SHM 1.2 file-descriptor
 segments avoid copying image payloads through the X11 socket when the local X
 server and transport support them; setup or runtime failure falls back to core
-`GetImage` on the same frame and drawable. Capture and JPEG/network sending run
-as a two-stage pipeline with one queued latest frame. The host permits at most
-two frames beyond the latest one actually drawn by the viewer; while that credit
-is exhausted, redundant X11 readback is automatically reduced to a periodic
-250–1000 ms refresh. An empty queue resumes the requested rate on its next tick.
+`GetImage` on the same frame and drawable. Standard depth-24, 32-bpp
+little-endian TrueColor images are converted directly from native BGRX rows to
+owned RGB storage; the host validates the current visual masks, byte order and
+row layout before using that path, while all other formats keep the generic
+pixel decoder. Capture and JPEG/network sending run as a two-stage pipeline
+with one queued latest frame. The host permits at most two frames beyond the
+latest one actually drawn by the viewer; while that credit is exhausted,
+redundant X11 readback is automatically reduced to a periodic 250–1000 ms
+refresh. An empty queue resumes the requested rate on its next tick.
 
 The host caches the root geometry, compositor owner and XFixes cursor shape.
 Checked core/RandR and XFixes notifications invalidate those caches, after

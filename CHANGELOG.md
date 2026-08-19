@@ -70,6 +70,11 @@ monorepo use independent Semantic Versions.
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if
   shared-memory setup or capture fails.
+- Host capture converts the common depth-24, 32-bpp little-endian TrueColor
+  readback directly from native BGRX rows into owned RGB frame storage. The
+  fast path checks the current image format and visual masks on every eligible
+  window readback and respects native row stride; nonstandard visuals and
+  formats retain the generic `PixelLayout` decoder.
 - Remote X11 capture now caches the root geometry, compositor owner and XFixes
   cursor shape behind checked Core/RandR and XFixes notifications. Stable
   frames reuse cursor pixels and their scaled image while querying only pointer

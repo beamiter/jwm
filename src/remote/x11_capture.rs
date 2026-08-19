@@ -15,7 +15,7 @@ use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::cookie::Cookie;
-use x11rb::image::{BitsPerPixel, Image as XImage, PixelLayout, ScanlinePad};
+use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::render::{CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
@@ -1131,6 +1131,7 @@ enum ReadbackLayout {
     Known {
         expected_depth: u8,
         layout: PixelLayout,
+        standard_bgrx_visual: bool,
     },
 }
 
@@ -1547,7 +1548,7 @@ fn decode_readback_image(
         ))
         .into());
     }
-    let pixel_layout = match layout {
+    let (pixel_layout, standard_bgrx_visual) = match layout {
         ReadbackLayout::ReplyVisual { screen_num, .. } => {
             let screen = conn
                 .setup()
@@ -1559,11 +1560,18 @@ fn decode_readback_image(
             if visual.class != VisualClass::TRUE_COLOR {
                 return Err(invalid_data("remote capture requires an X11 TrueColor visual").into());
             }
-            PixelLayout::from_visual_type(visual)?
+            (
+                PixelLayout::from_visual_type(visual)?,
+                is_standard_bgrx_visual(visual),
+            )
         }
-        ReadbackLayout::Known { layout, .. } => layout,
+        ReadbackLayout::Known {
+            layout,
+            standard_bgrx_visual,
+            ..
+        } => (layout, standard_bgrx_visual),
     };
-    decode_ximage(image, width, height, pixel_layout)
+    decode_ximage(image, width, height, pixel_layout, standard_bgrx_visual)
 }
 
 fn shm_buffer_size(width: u16, height: u16, format: Format) -> RemoteResult<usize> {
@@ -1646,6 +1654,7 @@ struct RenderScaler {
     root_depth: u8,
     root_format: Pictformat,
     root_layout: PixelLayout,
+    root_standard_bgrx_visual: bool,
     source: Option<RenderSource>,
     target: Option<RenderTarget>,
     reported_dimensions: Option<(u16, u16, u16, u16)>,
@@ -1696,6 +1705,7 @@ impl RenderScaler {
             root_depth: screen.root_depth,
             root_format,
             root_layout: PixelLayout::from_visual_type(root_visual)?,
+            root_standard_bgrx_visual: is_standard_bgrx_visual(root_visual),
             source: None,
             target: None,
             reported_dimensions: None,
@@ -1755,6 +1765,7 @@ impl RenderScaler {
             ReadbackLayout::Known {
                 expected_depth: self.root_depth,
                 layout: self.root_layout,
+                standard_bgrx_visual: self.root_standard_bgrx_visual,
             },
         )?;
         // Waiting for ShmGetImage or core GetImage also advances the connection beyond the
@@ -1901,7 +1912,132 @@ fn scale_transform(
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadbackDecoder {
+    Bgrx32,
+    Generic,
+}
+
+fn is_standard_bgrx_visual(visual: Visualtype) -> bool {
+    visual.class == VisualClass::TRUE_COLOR
+        && visual.bits_per_rgb_value == 8
+        && visual.red_mask == 0x00ff_0000
+        && visual.green_mask == 0x0000_ff00
+        && visual.blue_mask == 0x0000_00ff
+}
+
+fn select_readback_decoder(ximage: &XImage<'_>, standard_bgrx_visual: bool) -> ReadbackDecoder {
+    if standard_bgrx_visual
+        && ximage.depth() == 24
+        && ximage.bits_per_pixel() == BitsPerPixel::B32
+        && ximage.scanline_pad() == ScanlinePad::Pad32
+        && ximage.byte_order() == ImageOrder::LsbFirst
+    {
+        ReadbackDecoder::Bgrx32
+    } else {
+        ReadbackDecoder::Generic
+    }
+}
+
 fn decode_ximage(
+    ximage: &XImage<'_>,
+    width: u16,
+    height: u16,
+    layout: PixelLayout,
+    standard_bgrx_visual: bool,
+) -> RemoteResult<RgbImage> {
+    if width == 0 || height == 0 {
+        return Err(invalid_data("X11 capture dimensions must be nonzero").into());
+    }
+    if (ximage.width(), ximage.height()) != (width, height) {
+        return Err(invalid_data(format!(
+            "X11 capture image geometry changed from {width}x{height} to {}x{}",
+            ximage.width(),
+            ximage.height()
+        ))
+        .into());
+    }
+    if select_readback_decoder(ximage, standard_bgrx_visual) == ReadbackDecoder::Bgrx32 {
+        let stride = native_scanline_stride(width, ximage.bits_per_pixel(), ximage.scanline_pad())?;
+        return decode_bgrx32_rows(ximage.data(), width, height, stride);
+    }
+    decode_ximage_generic(ximage, width, height, layout)
+}
+
+fn native_scanline_stride(
+    width: u16,
+    bits_per_pixel: BitsPerPixel,
+    scanline_pad: ScanlinePad,
+) -> RemoteResult<usize> {
+    let bits_per_pixel = usize::from(bits_per_pixel);
+    let scanline_pad = usize::from(scanline_pad);
+    let row_bits = usize::from(width)
+        .checked_mul(bits_per_pixel)
+        .ok_or_else(|| invalid_data("X11 capture scanline size overflow"))?;
+    let padded_units = row_bits
+        .checked_add(scanline_pad - 1)
+        .ok_or_else(|| invalid_data("X11 capture scanline padding overflow"))?
+        / scanline_pad;
+    let padded_bits = padded_units
+        .checked_mul(scanline_pad)
+        .ok_or_else(|| invalid_data("X11 capture padded scanline size overflow"))?;
+    Ok(padded_bits / 8)
+}
+
+fn decode_bgrx32_rows(
+    source: &[u8],
+    width: u16,
+    height: u16,
+    stride: usize,
+) -> RemoteResult<RgbImage> {
+    if width == 0 || height == 0 {
+        return Err(invalid_data("X11 capture dimensions must be nonzero").into());
+    }
+    let source_row_bytes = usize::from(width)
+        .checked_mul(4)
+        .ok_or_else(|| invalid_data("X11 BGRX scanline size overflow"))?;
+    if stride < source_row_bytes {
+        return Err(invalid_data(format!(
+            "X11 BGRX stride is too short: {stride} < {source_row_bytes}"
+        ))
+        .into());
+    }
+    let source_bytes = stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| invalid_data("X11 BGRX image size overflow"))?;
+    if source.len() < source_bytes {
+        return Err(invalid_data(format!(
+            "X11 BGRX image is truncated: {} < {source_bytes}",
+            source.len()
+        ))
+        .into());
+    }
+    let rgb_row_bytes = usize::from(width)
+        .checked_mul(3)
+        .ok_or_else(|| invalid_data("X11 RGB scanline size overflow"))?;
+    let rgb_bytes = rgb_row_bytes
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| invalid_data("X11 capture buffer size overflow"))?;
+    let mut rgb = Vec::new();
+    rgb.try_reserve_exact(rgb_bytes)
+        .map_err(|_| invalid_data("could not allocate the X11 capture buffer"))?;
+    rgb.resize(rgb_bytes, 0);
+
+    for row in 0..usize::from(height) {
+        let source_start = row * stride;
+        let source_row = &source[source_start..source_start + source_row_bytes];
+        let rgb_start = row * rgb_row_bytes;
+        let rgb_row = &mut rgb[rgb_start..rgb_start + rgb_row_bytes];
+        for (pixel, output) in source_row.chunks_exact(4).zip(rgb_row.chunks_exact_mut(3)) {
+            output.copy_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+        }
+    }
+
+    RgbImage::from_raw(u32::from(width), u32::from(height), rgb)
+        .ok_or_else(|| invalid_data("X11 capture returned an invalid pixel buffer").into())
+}
+
+fn decode_ximage_generic(
     ximage: &XImage<'_>,
     width: u16,
     height: u16,
@@ -2197,6 +2333,18 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
+    fn standard_bgrx_visual() -> Visualtype {
+        Visualtype {
+            visual_id: 7,
+            class: VisualClass::TRUE_COLOR,
+            bits_per_rgb_value: 8,
+            colormap_entries: 256,
+            red_mask: 0x00ff_0000,
+            green_mask: 0x0000_ff00,
+            blue_mask: 0x0000_00ff,
+        }
+    }
+
     #[test]
     fn downscale_preserves_aspect_ratio_without_upscaling() {
         assert_eq!(scaled_dimensions(1920, 1080, 1280), (1280, 720));
@@ -2218,6 +2366,177 @@ mod tests {
         assert_eq!(transform.matrix33, 65_536);
         assert_eq!(transform.matrix12, 0);
         assert_eq!(transform.matrix21, 0);
+    }
+
+    #[test]
+    fn bgrx_readback_selector_requires_the_exact_native_format_and_visual() {
+        let image = |depth, bits_per_pixel, scanline_pad, byte_order, bytes: usize| {
+            XImage::new(
+                1,
+                1,
+                scanline_pad,
+                depth,
+                bits_per_pixel,
+                byte_order,
+                Cow::Owned(vec![0; bytes]),
+            )
+            .unwrap()
+        };
+        let native = image(
+            24,
+            BitsPerPixel::B32,
+            ScanlinePad::Pad32,
+            ImageOrder::LsbFirst,
+            4,
+        );
+        assert!(is_standard_bgrx_visual(standard_bgrx_visual()));
+        assert_eq!(
+            select_readback_decoder(&native, true),
+            ReadbackDecoder::Bgrx32
+        );
+        assert_eq!(
+            select_readback_decoder(&native, false),
+            ReadbackDecoder::Generic
+        );
+
+        let mut nonstandard = standard_bgrx_visual();
+        nonstandard.red_mask = 0x0000_00ff;
+        nonstandard.blue_mask = 0x00ff_0000;
+        assert!(!is_standard_bgrx_visual(nonstandard));
+        let mut direct_color = standard_bgrx_visual();
+        direct_color.class = VisualClass::DIRECT_COLOR;
+        assert!(!is_standard_bgrx_visual(direct_color));
+
+        for ineligible in [
+            image(
+                32,
+                BitsPerPixel::B32,
+                ScanlinePad::Pad32,
+                ImageOrder::LsbFirst,
+                4,
+            ),
+            image(
+                24,
+                BitsPerPixel::B32,
+                ScanlinePad::Pad16,
+                ImageOrder::LsbFirst,
+                4,
+            ),
+            image(
+                24,
+                BitsPerPixel::B32,
+                ScanlinePad::Pad32,
+                ImageOrder::MsbFirst,
+                4,
+            ),
+            image(
+                24,
+                BitsPerPixel::B24,
+                ScanlinePad::Pad32,
+                ImageOrder::LsbFirst,
+                4,
+            ),
+            image(
+                16,
+                BitsPerPixel::B16,
+                ScanlinePad::Pad32,
+                ImageOrder::LsbFirst,
+                4,
+            ),
+        ] {
+            assert_eq!(
+                select_readback_decoder(&ineligible, true),
+                ReadbackDecoder::Generic
+            );
+        }
+    }
+
+    #[test]
+    fn bgrx_readback_matches_generic_decoder_for_random_odd_sized_images() {
+        let layout = PixelLayout::from_visual_type(standard_bgrx_visual()).unwrap();
+        let mut state = 0x8bad_f00du32;
+        for (width, height) in [(1, 1), (3, 5), (17, 4)] {
+            let stride = usize::from(width) * 4;
+            let mut bytes = vec![0; stride * usize::from(height)];
+            for pixel in bytes.chunks_exact_mut(4) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                pixel.copy_from_slice(&state.to_le_bytes());
+                // The unused X byte is deliberately nonzero.
+                pixel[3] |= 0x80;
+            }
+            let image = XImage::new(
+                width,
+                height,
+                ScanlinePad::Pad32,
+                24,
+                BitsPerPixel::B32,
+                ImageOrder::LsbFirst,
+                Cow::Owned(bytes),
+            )
+            .unwrap();
+            let fast = decode_ximage(&image, width, height, layout, true).unwrap();
+            let generic = decode_ximage_generic(&image, width, height, layout).unwrap();
+            assert_eq!(fast, generic, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn bgrx_rows_ignore_explicit_scanline_padding() {
+        let mut bytes = vec![0xee; 32];
+        bytes[0..12].copy_from_slice(&[3, 2, 1, 0xa1, 6, 5, 4, 0xa2, 9, 8, 7, 0xa3]);
+        bytes[16..28].copy_from_slice(&[12, 11, 10, 0xb1, 15, 14, 13, 0xb2, 18, 17, 16, 0xb3]);
+        let image = decode_bgrx32_rows(&bytes, 3, 2, 16).unwrap();
+        assert_eq!(
+            image.into_raw(),
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            ]
+        );
+    }
+
+    #[test]
+    fn nonstandard_visual_uses_generic_pixel_layout() {
+        let mut visual = standard_bgrx_visual();
+        visual.red_mask = 0x0000_00ff;
+        visual.blue_mask = 0x00ff_0000;
+        let layout = PixelLayout::from_visual_type(visual).unwrap();
+        let image = XImage::new(
+            1,
+            1,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+            Cow::Owned(vec![0x11, 0x22, 0x33, 0x99]),
+        )
+        .unwrap();
+        assert_eq!(
+            decode_ximage(&image, 1, 1, layout, is_standard_bgrx_visual(visual))
+                .unwrap()
+                .into_raw(),
+            vec![0x11, 0x22, 0x33]
+        );
+    }
+
+    #[test]
+    fn bgrx_readback_rejects_bad_dimensions_stride_and_lengths() {
+        assert!(decode_bgrx32_rows(&[], 0, 1, 0).is_err());
+        assert!(decode_bgrx32_rows(&[0; 24], 3, 2, 11).is_err());
+        assert!(decode_bgrx32_rows(&[0; 23], 3, 2, 12).is_err());
+        assert!(decode_bgrx32_rows(&[0; 16], 1, 2, usize::MAX).is_err());
+
+        let image = XImage::new(
+            2,
+            1,
+            ScanlinePad::Pad32,
+            24,
+            BitsPerPixel::B32,
+            ImageOrder::LsbFirst,
+            Cow::Owned(vec![0; 8]),
+        )
+        .unwrap();
+        let layout = PixelLayout::from_visual_type(standard_bgrx_visual()).unwrap();
+        assert!(decode_ximage(&image, 1, 1, layout, true).is_err());
     }
 
     #[test]
