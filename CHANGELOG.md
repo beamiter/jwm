@@ -36,11 +36,16 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
-- `jwm-remote` now downsizes Composite-overlay frames with XRender before
-  readback, overlaps capture with JPEG/network sending through a one-frame
-  latest-wins queue, reports stage latency and dropped stale frames, and
-  enforces an absolute negotiation deadline on both peers. Full-resolution root
-  readback remains a compatibility fallback.
+- `jwm-remote` now downsizes both Composite-overlay and root-fallback frames
+  with XRender before readback, overlaps capture with JPEG/network sending
+  through a one-frame latest-wins queue, reports stage latency and dropped
+  stale frames, and enforces an absolute negotiation deadline on both peers.
+  Root capture first uses `IncludeInferiors` to copy the root and its same-depth
+  children into a full-size staging pixmap, then scales into the small readback
+  target; it never creates a Render Picture directly from the root window.
+  Staging is capped at 64 MiB, resize/topology races retry once, and allocation,
+  request or extension failures retain the same-frame full-resolution readback
+  plus CPU resize.
 - The JWM remote application protocol is now version 3 and deliberately rejects
   version 2, so both endpoints must be upgraded together. Cumulative frame
   acknowledgements still cap video at two frames beyond what the viewer has

@@ -177,9 +177,17 @@ quality (it conflicts with an explicit floor). Encoder quality changes do not
 change the remote wire protocol.
 
 `--max-width 0` keeps the native root width. Higher resolution, quality, and
-frame rate increase CPU and bandwidth together. With overlay capture and
-XRender 0.10+, `--max-width` also limits the X11 readback size. The accelerated
-path prints its active source/output dimensions. MIT-SHM 1.2 file-descriptor
+frame rate increase CPU and bandwidth together. With XRender 0.10+,
+`--max-width` also limits the X11 readback size for both overlay and root
+capture. Root mode uses an `IncludeInferiors` graphics context to copy the root
+and its same-depth children into a full-size staging pixmap, and creates a
+Picture only for that pixmap, never for the root Window. It then scales into the
+small target used by MIT-SHM or core readback. Core X11 does not guarantee the
+result for inferiors at a different depth; a rejected request uses the CPU
+path. The staging pixmap is limited to 64 MiB,
+including the peak during geometry replacement; an oversized root uses the
+existing full-size readback plus CPU resize. The accelerated path prints its
+active source/output dimensions. MIT-SHM 1.2 file-descriptor
 segments avoid copying image payloads through the X11 socket when the local X
 server and transport support them; setup or runtime failure falls back to core
 `GetImage` on the same frame and drawable. Standard depth-24, 32-bpp
@@ -205,7 +213,11 @@ that selection, and Root mode never acquires the overlay. If an individual
 notification facility is unavailable, only that cache returns to its reliable
 polling path. RandR resize or compositor-owner races are reconciled and retried
 once before XRender is disabled or Auto capture falls back to root; a transient
-overlay-acquire failure is retried with a bounded delay.
+overlay-acquire failure is retried with a bounded delay. A staged root capture
+also records the geometry epoch before `CopyArea` and validates it after the
+small readback drains notifications. One changed epoch retries from an
+authoritative geometry; repeated churn uses CPU for that frame. Polling mode
+performs the same post-readback check with `GetGeometry`.
 
 When the Composite overlay and XDamage are available, the host also avoids a
 full drawable readback on a completely unchanged tick. It captures the first
@@ -316,9 +328,13 @@ batch before sending one authenticated `Close`; view-only close sends only the
 shuts the session transport down immediately and lets the host's disconnect
 cleanup release injected input. Cancellation and shutdown are idempotent, and
 the blocking receiver thread gets a bounded join window.
-Root compatibility capture and older XRender servers retain the
-full-resolution readback plus CPU-resize fallback; for those paths, lower
-`--fps` as well as `--max-width` on very large combined multi-monitor roots.
+Root capture queues its `IncludeInferiors` `CopyArea` and XRender Composite
+before the synchronous small-target readback, then checks both requests against
+that ordering barrier. A rejected request cannot publish an older target image.
+Older or unusable XRender servers, staging roots above 64 MiB, and per-frame
+staging failures retain the full-resolution readback plus CPU-resize fallback;
+for those paths, lower `--fps` as well as `--max-width` on very large combined
+multi-monitor roots.
 Every frame write has a 10-second absolute deadline across its header, JPEG,
 authenticator, and flush. If it expires, the host tears down that session and
 the normal cleanup path releases any keys or buttons held by its controller.

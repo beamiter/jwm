@@ -1,9 +1,10 @@
-//! Read the final X11 compositor surface through the Composite overlay.
+//! Read the X11 desktop through the Composite overlay or a staged root snapshot.
 //!
 //! This is intentionally kept in the out-of-process LAN MVP.  A slow encoder
 //! or peer can therefore never stall JWM's display event loop.  Both the
-//! x11rb and xcb JWM backends render into the same X Composite overlay, so one
-//! small X11 client covers both transports.
+//! x11rb and xcb JWM backends share one X server, so one small X11 client covers
+//! both transports. Root downscaling snapshots children into a pixmap before
+//! XRender; the root Window itself is never used as a Picture.
 
 use super::{RemoteError, RemoteResult};
 use image::{RgbImage, RgbaImage, imageops::FilterType};
@@ -19,9 +20,9 @@ use x11rb::errors::{ConnectionError, ReplyError, ReplyOrIdError};
 use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::render::{CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform};
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
-    Format, ImageFormat, Pixmap, PropMode, QueryPointerReply, Screen, VisualClass, Visualid,
-    Visualtype, Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateGCAux, CreateWindowAux,
+    EventMask, Format, Gcontext, ImageFormat, Pixmap, PropMode, QueryPointerReply, Screen,
+    SubwindowMode, VisualClass, Visualid, Visualtype, Window, WindowClass,
 };
 use x11rb::protocol::{Event, composite, damage, randr, render, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
@@ -39,6 +40,7 @@ const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const REMOTE_CAPTURE_OWNER: &[u8] = b"_JWM_REMOTE_CAPTURE_OWNER";
 const OVERLAY_RETRY_DELAY: Duration = Duration::from_secs(1);
 pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
+const ROOT_STAGING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -97,6 +99,28 @@ enum CaptureFailureKind {
 struct CaptureFailure {
     kind: CaptureFailureKind,
     error: RemoteError,
+}
+
+enum CaptureDrawableOutcome {
+    Frame(CapturedDrawable),
+    RootGeometryChanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootSnapshotRaceAction {
+    Retry,
+    CpuFallback,
+}
+
+fn root_snapshot_race_action(
+    retry_available: bool,
+    source_changed: bool,
+) -> RootSnapshotRaceAction {
+    if retry_available || source_changed {
+        RootSnapshotRaceAction::Retry
+    } else {
+        RootSnapshotRaceAction::CpuFallback
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -815,7 +839,7 @@ impl X11Capture {
                 return Err(error);
             }
         };
-        let render_scaler = if max_width == 0 || requested_source == CaptureSource::Root {
+        let render_scaler = if max_width == 0 {
             None
         } else {
             match RenderScaler::connect(&conn, screen_num, screen) {
@@ -879,6 +903,7 @@ impl X11Capture {
         let (mut source_width, mut source_height) =
             self.root_geometry.dimensions(&self.conn, self.root)?;
         validate_root_geometry(source_width, source_height)?;
+        let mut source_geometry_epoch = self.root_geometry.epoch();
 
         if self.damage.is_active() {
             let decision = match self.damage.decide_with_cursor_probe(
@@ -906,19 +931,55 @@ impl X11Capture {
         let mut drawable = self.drawable;
         let mut allow_render = true;
         let mut dynamic_retry_available = true;
+        let mut root_staging_retry_available = true;
         loop {
             // Subtract only after this tick has committed to a fresh readback.
             // A concurrent notify is drained by finish_cursor and re-dirties
             // the gate before the successful baseline is committed.
             self.damage.prepare_capture(&self.conn)?;
-            match self.capture_drawable(drawable, source_width, source_height, allow_render) {
-                Ok(captured) => {
+            match self.capture_drawable(
+                drawable,
+                source_width,
+                source_height,
+                source_geometry_epoch,
+                allow_render,
+            ) {
+                Ok(CaptureDrawableOutcome::Frame(captured)) => {
                     self.damage.capture_succeeded(
                         Instant::now(),
                         (source_width, source_height),
                         captured.cursor,
                     );
                     return Ok(CaptureOutcome::Frame(captured.frame));
+                }
+                Ok(CaptureDrawableOutcome::RootGeometryChanged) => {
+                    self.damage.capture_failed();
+                    let attempted_drawable = drawable;
+                    self.sync_overlay_source_with_force(true)?;
+                    let (width, height) = self
+                        .root_geometry
+                        .refresh_authoritative(&self.conn, self.root)?;
+                    validate_root_geometry(width, height)?;
+                    drawable = self.drawable;
+                    source_width = width;
+                    source_height = height;
+                    source_geometry_epoch = self.root_geometry.epoch();
+                    match root_snapshot_race_action(
+                        root_staging_retry_available,
+                        drawable != attempted_drawable,
+                    ) {
+                        RootSnapshotRaceAction::Retry => {
+                            root_staging_retry_available = false;
+                            continue;
+                        }
+                        RootSnapshotRaceAction::CpuFallback => {
+                            // Repeated resize/topology churn must remain
+                            // bounded. A direct readback is slower but gives
+                            // this tick a final compatibility path without
+                            // discarding the scaler for later stable frames.
+                            allow_render = false;
+                        }
+                    }
                 }
                 Err(failure) if failure.kind == CaptureFailureKind::Fatal => {
                     self.damage.capture_failed();
@@ -931,11 +992,13 @@ impl X11Capture {
                             drawable,
                             source_width,
                             source_height,
+                            source_geometry_epoch,
                         )? {
                             dynamic_retry_available = false;
                             drawable = reconciled.drawable;
                             source_width = reconciled.width;
                             source_height = reconciled.height;
+                            source_geometry_epoch = self.root_geometry.epoch();
                             validate_root_geometry(source_width, source_height)?;
                             continue;
                         }
@@ -975,18 +1038,20 @@ impl X11Capture {
         drawable: Window,
         source_width: u16,
         source_height: u16,
+        source_geometry_epoch: u64,
         allow_render: bool,
-    ) -> Result<CapturedDrawable, CaptureFailure> {
+    ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
         let (output_width, output_height) =
             scaled_dimensions(source_width, source_height, self.max_width);
-        // A Window used directly as an XRender source does not reliably
-        // include its child windows. The Composite overlay has the final
-        // composited pixels, while root fallback deliberately keeps the
-        // proven GetImage + CPU resize path.
-        if drawable != self.root
-            && (output_width != source_width || output_height != source_height)
+        let render_source = render_capture_source(self.root, drawable);
+        let render_allowed_for_source = self
+            .render_scaler
+            .as_ref()
+            .is_some_and(|scaler| scaler.can_capture(render_source, source_width, source_height));
+        if (output_width != source_width || output_height != source_height)
             && self.render_scaler.is_some()
             && allow_render
+            && render_allowed_for_source
         {
             let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
             let render_result = self
@@ -996,7 +1061,7 @@ impl X11Capture {
                 .capture(
                     &self.conn,
                     &mut self.shm_readback,
-                    drawable,
+                    render_source,
                     source_width,
                     source_height,
                     output_width,
@@ -1012,14 +1077,27 @@ impl X11Capture {
                     )?;
                     self.finish_cursor(position, &mut image, source_width, source_height)
                         .map_err(CaptureFailure::fatal)?;
-                    return Ok(CapturedDrawable {
+                    if render_source == RenderCaptureSource::RootSnapshot
+                        && !self
+                            .root_geometry
+                            .root_snapshot_is_current(
+                                &self.conn,
+                                self.root,
+                                source_geometry_epoch,
+                                (source_width, source_height),
+                            )
+                            .map_err(CaptureFailure::fatal)?
+                    {
+                        return Ok(CaptureDrawableOutcome::RootGeometryChanged);
+                    }
+                    return Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
                         cursor: captured_cursor_snapshot(&self.cursor, position),
                         frame: CapturedFrame {
                             image,
                             source_width,
                             source_height,
                         },
-                    });
+                    }));
                 }
                 Err(error) => {
                     pending_cursor.discard();
@@ -1062,14 +1140,14 @@ impl X11Capture {
             )
         };
 
-        Ok(CapturedDrawable {
+        Ok(CaptureDrawableOutcome::Frame(CapturedDrawable {
             cursor: captured_cursor_snapshot(&self.cursor, position),
             frame: CapturedFrame {
                 image,
                 source_width,
                 source_height,
             },
-        })
+        }))
     }
 
     fn finish_cursor(
@@ -1159,6 +1237,7 @@ impl X11Capture {
         attempted_drawable: Window,
         attempted_width: u16,
         attempted_height: u16,
+        attempted_geometry_epoch: u64,
     ) -> RemoteResult<Option<ReconciledCapture>> {
         self.drain_dynamic_events()?;
         let source_transition = self.sync_overlay_source_with_force(true)?;
@@ -1168,7 +1247,8 @@ impl X11Capture {
         let changed = source_transition
             || self.drawable != attempted_drawable
             || width != attempted_width
-            || height != attempted_height;
+            || height != attempted_height
+            || self.root_geometry.epoch() != attempted_geometry_epoch;
         Ok(changed.then_some(ReconciledCapture {
             drawable: self.drawable,
             width,
@@ -1394,6 +1474,7 @@ struct RootGeometryCache {
     height: u16,
     event_driven: bool,
     dirty: bool,
+    epoch: u64,
 }
 
 impl RootGeometryCache {
@@ -1403,11 +1484,13 @@ impl RootGeometryCache {
             height,
             event_driven,
             dirty: false,
+            epoch: 0,
         }
     }
 
     fn invalidate(&mut self) {
         self.dirty = true;
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     fn fall_back_to_polling(&mut self) -> bool {
@@ -1415,8 +1498,20 @@ impl RootGeometryCache {
             return false;
         }
         self.event_driven = false;
-        self.dirty = true;
+        self.invalidate();
         true
+    }
+
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn event_snapshot_is_current(&self, captured_epoch: u64) -> bool {
+        !self.dirty && self.epoch == captured_epoch
+    }
+
+    fn needs_post_capture_query(&self) -> bool {
+        !self.event_driven
     }
 
     fn dimensions(&mut self, conn: &RustConnection, root: Window) -> RemoteResult<(u16, u16)> {
@@ -1432,10 +1527,31 @@ impl RootGeometryCache {
         root: Window,
     ) -> RemoteResult<(u16, u16)> {
         let geometry = conn.get_geometry(root)?.reply()?;
+        if (geometry.width, geometry.height) != (self.width, self.height) {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
         self.width = geometry.width;
         self.height = geometry.height;
         self.dirty = false;
         Ok((self.width, self.height))
+    }
+
+    fn root_snapshot_is_current(
+        &mut self,
+        conn: &RustConnection,
+        root: Window,
+        captured_epoch: u64,
+        captured_dimensions: (u16, u16),
+    ) -> RemoteResult<bool> {
+        if !self.needs_post_capture_query() {
+            return Ok(self.event_snapshot_is_current(captured_epoch));
+        }
+
+        // Polling is the conservative fallback when neither core nor RandR
+        // notifications can be trusted. Query after the synchronous small
+        // readback so a resize during CopyArea cannot publish stale edges.
+        let dimensions = self.refresh_authoritative(conn, root)?;
+        Ok(self.epoch == captured_epoch && dimensions == captured_dimensions)
     }
 }
 
@@ -2334,8 +2450,66 @@ fn validate_shm_reply(
     Ok(reply_size)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderCaptureSource {
+    Overlay(Window),
+    RootSnapshot,
+}
+
+fn render_capture_source(root: Window, drawable: Window) -> RenderCaptureSource {
+    if drawable == root {
+        RenderCaptureSource::RootSnapshot
+    } else {
+        RenderCaptureSource::Overlay(drawable)
+    }
+}
+
+fn root_staging_bytes(width: u16, height: u16, format: Format) -> Option<usize> {
+    shm_buffer_size(width, height, format)
+        .ok()
+        .filter(|size| *size <= ROOT_STAGING_MAX_BYTES)
+}
+
+fn resolve_render_readback<T, E>(
+    image: Result<T, E>,
+    copy: Result<(), E>,
+    composite: Result<(), E>,
+) -> Result<T, E> {
+    copy?;
+    composite?;
+    image
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootStagingReplacement {
+    PreserveOld,
+    ReleaseOld,
+}
+
+fn root_staging_replacement(old_bytes: Option<usize>, new_bytes: usize) -> RootStagingReplacement {
+    if old_bytes.is_some_and(|old| old.saturating_add(new_bytes) > ROOT_STAGING_MAX_BYTES) {
+        RootStagingReplacement::ReleaseOld
+    } else {
+        RootStagingReplacement::PreserveOld
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenderSourceBacking {
+    Overlay {
+        drawable: Window,
+    },
+    RootSnapshot {
+        pixmap: Pixmap,
+        gc: Gcontext,
+        width: u16,
+        height: u16,
+        bytes: usize,
+    },
+}
+
 struct RenderSource {
-    drawable: Window,
+    backing: RenderSourceBacking,
     picture: Picture,
     transform: Option<(u16, u16, u16, u16)>,
 }
@@ -2352,6 +2526,7 @@ struct RenderScaler {
     root: Window,
     root_depth: u8,
     root_format: Pictformat,
+    root_pixmap_format: Format,
     root_layout: PixelLayout,
     root_standard_bgrx_visual: bool,
     source: Option<RenderSource>,
@@ -2397,12 +2572,26 @@ impl RenderScaler {
                 invalid_data("remote capture requires an X11 TrueColor root visual").into(),
             );
         }
+        let root_pixmap_format = conn
+            .setup()
+            .pixmap_formats
+            .iter()
+            .find(|format| format.depth == screen.root_depth)
+            .copied()
+            .ok_or_else(|| {
+                invalid_data(format!(
+                    "X11 has no pixmap format for root depth {}",
+                    screen.root_depth
+                ))
+            })?;
+        shm_buffer_size(1, 1, root_pixmap_format)?;
 
         Ok(Self {
             visual_formats,
             root: screen.root,
             root_depth: screen.root_depth,
             root_format,
+            root_pixmap_format,
             root_layout: PixelLayout::from_visual_type(root_visual)?,
             root_standard_bgrx_visual: is_standard_bgrx_visual(root_visual),
             source: None,
@@ -2411,18 +2600,32 @@ impl RenderScaler {
         })
     }
 
+    fn can_capture(
+        &self,
+        source: RenderCaptureSource,
+        source_width: u16,
+        source_height: u16,
+    ) -> bool {
+        match source {
+            RenderCaptureSource::Overlay(_) => true,
+            RenderCaptureSource::RootSnapshot => {
+                root_staging_bytes(source_width, source_height, self.root_pixmap_format).is_some()
+            }
+        }
+    }
+
     fn capture(
         &mut self,
         conn: &RustConnection,
         readback: &mut ShmReadback,
-        drawable: Window,
+        capture_source: RenderCaptureSource,
         source_width: u16,
         source_height: u16,
         output_width: u16,
         output_height: u16,
     ) -> RemoteResult<RgbImage> {
         self.ensure_target(conn, output_width, output_height)?;
-        self.ensure_source(conn, drawable)?;
+        self.ensure_source(conn, capture_source, source_width, source_height)?;
         let dimensions = (source_width, source_height, output_width, output_height);
         let source = self
             .source
@@ -2437,14 +2640,33 @@ impl RenderScaler {
             .check()?;
             source.transform = Some(dimensions);
         }
+        let copy_source = match source.backing {
+            RenderSourceBacking::Overlay { .. } => None,
+            RenderSourceBacking::RootSnapshot { pixmap, gc, .. } => Some((pixmap, gc)),
+        };
+        let source_picture = source.picture;
         let target = self
             .target
             .as_ref()
             .ok_or_else(|| invalid_data("XRender target picture was not created"))?;
-        let composite = render::composite(
+        let copy = match copy_source {
+            Some((pixmap, gc)) => Some(conn.copy_area(
+                self.root,
+                pixmap,
+                gc,
+                0,
+                0,
+                0,
+                0,
+                source_width,
+                source_height,
+            )?),
+            None => None,
+        };
+        let composite = match render::composite(
             conn,
             PictOp::SRC,
-            source.picture,
+            source_picture,
             x11rb::NONE,
             target.picture,
             0,
@@ -2455,7 +2677,15 @@ impl RenderScaler {
             0,
             output_width,
             output_height,
-        )?;
+        ) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                if let Some(cookie) = copy {
+                    let _ = cookie.check();
+                }
+                return Err(error.into());
+            }
+        };
         let image = readback.capture_rgb(
             conn,
             target.pixmap,
@@ -2466,11 +2696,16 @@ impl RenderScaler {
                 layout: self.root_layout,
                 standard_bgrx_visual: self.root_standard_bgrx_visual,
             },
-        )?;
-        // Waiting for ShmGetImage or core GetImage also advances the connection beyond the
-        // preceding Composite request. Checking its cookie now reports a
-        // precise Render error without adding another round trip normally.
-        composite.check()?;
+        );
+        // The small ShmGetImage/core GetImage reply is an ordering barrier for
+        // both queued requests. Consume both VoidCookies afterwards: precise
+        // CopyArea/Render errors are retained without a steady-state RTT, and
+        // a stale target is never published if either request was rejected.
+        let copy_result: RemoteResult<()> = copy
+            .map(|cookie| cookie.check().map_err(Into::into))
+            .unwrap_or(Ok(()));
+        let composite_result = composite.check().map_err(Into::into);
+        let image = resolve_render_readback(image, copy_result, composite_result)?;
         if self.reported_dimensions != Some(dimensions) {
             eprintln!(
                 "jwm-remote: XRender downscale {}x{} -> {}x{}",
@@ -2481,12 +2716,38 @@ impl RenderScaler {
         Ok(image)
     }
 
-    fn ensure_source(&mut self, conn: &RustConnection, drawable: Window) -> RemoteResult<()> {
-        if self
-            .source
-            .as_ref()
-            .is_some_and(|source| source.drawable == drawable)
-        {
+    fn ensure_source(
+        &mut self,
+        conn: &RustConnection,
+        source: RenderCaptureSource,
+        width: u16,
+        height: u16,
+    ) -> RemoteResult<()> {
+        match source {
+            RenderCaptureSource::Overlay(drawable) => self.ensure_overlay_source(conn, drawable),
+            RenderCaptureSource::RootSnapshot => self.ensure_root_snapshot(conn, width, height),
+        }
+    }
+
+    fn ensure_overlay_source(
+        &mut self,
+        conn: &RustConnection,
+        drawable: Window,
+    ) -> RemoteResult<()> {
+        if drawable == self.root {
+            return Err(invalid_data(
+                "the X11 root window must be copied into a staging pixmap before XRender",
+            )
+            .into());
+        }
+        if self.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.backing,
+                RenderSourceBacking::Overlay {
+                    drawable: current
+                } if current == drawable
+            )
+        }) {
             return Ok(());
         }
         let visual = conn.get_window_attributes(drawable)?.reply()?.visual;
@@ -2507,18 +2768,131 @@ impl RenderScaler {
         if let Err(error) = create {
             return Err(error.into());
         }
-        if let Err(error) = render::set_picture_filter(conn, picture, b"bilinear", &[])?.check() {
-            let _ = render::free_picture(conn, picture);
+        let filter = match render::set_picture_filter(conn, picture, b"bilinear", &[]) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                free_picture_checked(conn, picture);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = filter.check() {
+            free_picture_checked(conn, picture);
             return Err(error.into());
         }
 
         let old = self.source.replace(RenderSource {
-            drawable,
+            backing: RenderSourceBacking::Overlay { drawable },
             picture,
             transform: None,
         });
         if let Some(old) = old {
-            let _ = render::free_picture(conn, old.picture);
+            release_render_source(conn, old);
+        }
+        Ok(())
+    }
+
+    fn ensure_root_snapshot(
+        &mut self,
+        conn: &RustConnection,
+        width: u16,
+        height: u16,
+    ) -> RemoteResult<()> {
+        if self.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.backing,
+                RenderSourceBacking::RootSnapshot {
+                    width: current_width,
+                    height: current_height,
+                    ..
+                } if (current_width, current_height) == (width, height)
+            )
+        }) {
+            return Ok(());
+        }
+        let bytes = root_staging_bytes(width, height, self.root_pixmap_format)
+            .ok_or_else(|| invalid_data("XRender root staging pixmap exceeds the 64 MiB limit"))?;
+
+        // Preserve the old usable source transactionally whenever doing so
+        // stays inside the hard staging budget. A resize whose two pixmaps
+        // would exceed 64 MiB first releases the obsolete snapshot; failure
+        // then cleanly takes the existing same-frame CPU fallback.
+        let old_root_bytes = self
+            .source
+            .as_ref()
+            .and_then(|source| match source.backing {
+                RenderSourceBacking::RootSnapshot { bytes, .. } => Some(bytes),
+                RenderSourceBacking::Overlay { .. } => None,
+            });
+        if root_staging_replacement(old_root_bytes, bytes) == RootStagingReplacement::ReleaseOld
+            && let Some(old) = self.source.take()
+        {
+            release_render_source(conn, old);
+        }
+
+        let pixmap = conn.generate_id()?;
+        let gc = conn.generate_id()?;
+        let picture = conn.generate_id()?;
+        conn.create_pixmap(self.root_depth, pixmap, self.root, width, height)?
+            .check()?;
+        let create_gc = match conn.create_gc(
+            gc,
+            pixmap,
+            &CreateGCAux::new()
+                .subwindow_mode(SubwindowMode::INCLUDE_INFERIORS)
+                .graphics_exposures(0_u32),
+        ) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                free_pixmap_checked(conn, pixmap);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = create_gc.check() {
+            free_pixmap_checked(conn, pixmap);
+            return Err(error.into());
+        }
+        let create_picture = match render::create_picture(
+            conn,
+            picture,
+            pixmap,
+            self.root_format,
+            &CreatePictureAux::new().repeat(Repeat::PAD),
+        ) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                free_gc_and_pixmap_checked(conn, gc, pixmap);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = create_picture.check() {
+            free_gc_and_pixmap_checked(conn, gc, pixmap);
+            return Err(error.into());
+        }
+        let filter = match render::set_picture_filter(conn, picture, b"bilinear", &[]) {
+            Ok(cookie) => cookie,
+            Err(error) => {
+                release_root_snapshot_ids(conn, picture, gc, pixmap);
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = filter.check() {
+            release_root_snapshot_ids(conn, picture, gc, pixmap);
+            return Err(error.into());
+        }
+
+        let old = self.source.replace(RenderSource {
+            backing: RenderSourceBacking::RootSnapshot {
+                pixmap,
+                gc,
+                width,
+                height,
+                bytes,
+            },
+            picture,
+            transform: None,
+        });
+        if let Some(old) = old {
+            release_render_source(conn, old);
         }
         Ok(())
     }
@@ -2538,19 +2912,24 @@ impl RenderScaler {
         }
 
         let pixmap = conn.generate_id()?;
+        let picture = conn.generate_id()?;
         conn.create_pixmap(self.root_depth, pixmap, self.root, width, height)?
             .check()?;
-        let picture = conn.generate_id()?;
-        let create = render::create_picture(
+        let create = match render::create_picture(
             conn,
             picture,
             pixmap,
             self.root_format,
             &CreatePictureAux::new(),
-        )?
-        .check();
+        ) {
+            Ok(cookie) => cookie.check(),
+            Err(error) => {
+                free_pixmap_checked(conn, pixmap);
+                return Err(error.into());
+            }
+        };
         if let Err(error) = create {
-            let _ = conn.free_pixmap(pixmap);
+            free_pixmap_checked(conn, pixmap);
             return Err(error.into());
         }
 
@@ -2561,25 +2940,112 @@ impl RenderScaler {
             height,
         });
         if let Some(old) = old {
-            let _ = render::free_picture(conn, old.picture);
-            let _ = conn.free_pixmap(old.pixmap);
+            release_render_target(conn, old);
         }
         Ok(())
     }
 
     fn release_source(&mut self, conn: &RustConnection) {
         if let Some(source) = self.source.take() {
-            let _ = render::free_picture(conn, source.picture);
+            release_render_source(conn, source);
         }
     }
 
     fn release(&mut self, conn: &RustConnection) {
         self.release_source(conn);
         if let Some(target) = self.target.take() {
-            let _ = render::free_picture(conn, target.picture);
-            let _ = conn.free_pixmap(target.pixmap);
+            release_render_target(conn, target);
         }
     }
+}
+
+fn release_render_source(conn: &RustConnection, source: RenderSource) {
+    match source.backing {
+        RenderSourceBacking::Overlay { .. } => free_picture_checked(conn, source.picture),
+        RenderSourceBacking::RootSnapshot { pixmap, gc, .. } => {
+            release_root_snapshot_ids(conn, source.picture, gc, pixmap);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootSnapshotResource {
+    Picture(Picture),
+    Gc(Gcontext),
+    Pixmap(Pixmap),
+}
+
+fn root_snapshot_release_plan(
+    picture: Option<Picture>,
+    gc: Option<Gcontext>,
+    pixmap: Option<Pixmap>,
+) -> [Option<RootSnapshotResource>; 3] {
+    [
+        picture.map(RootSnapshotResource::Picture),
+        gc.map(RootSnapshotResource::Gc),
+        pixmap.map(RootSnapshotResource::Pixmap),
+    ]
+}
+
+fn release_root_snapshot_resources(
+    conn: &RustConnection,
+    resources: [Option<RootSnapshotResource>; 3],
+) {
+    let cookies = resources.map(|resource| {
+        resource.and_then(|resource| match resource {
+            RootSnapshotResource::Picture(picture) => render::free_picture(conn, picture).ok(),
+            RootSnapshotResource::Gc(gc) => conn.free_gc(gc).ok(),
+            RootSnapshotResource::Pixmap(pixmap) => conn.free_pixmap(pixmap).ok(),
+        })
+    });
+    for cookie in cookies.into_iter().flatten() {
+        let _ = cookie.check();
+    }
+}
+
+fn release_root_snapshot_ids(
+    conn: &RustConnection,
+    picture: Picture,
+    gc: Gcontext,
+    pixmap: Pixmap,
+) {
+    // Queue the reverse-order destruction first. Checking the earliest cookie
+    // then uses the later queued requests as part of the same synchronization,
+    // and every cookie is consumed before the next event drain.
+    release_root_snapshot_resources(
+        conn,
+        root_snapshot_release_plan(Some(picture), Some(gc), Some(pixmap)),
+    );
+}
+
+fn release_render_target(conn: &RustConnection, target: RenderTarget) {
+    let picture_cookie = render::free_picture(conn, target.picture).ok();
+    let pixmap_cookie = conn.free_pixmap(target.pixmap).ok();
+    if let Some(cookie) = picture_cookie {
+        let _ = cookie.check();
+    }
+    if let Some(cookie) = pixmap_cookie {
+        let _ = cookie.check();
+    }
+}
+
+fn free_picture_checked(conn: &RustConnection, picture: Picture) {
+    if let Ok(cookie) = render::free_picture(conn, picture) {
+        let _ = cookie.check();
+    }
+}
+
+fn free_pixmap_checked(conn: &RustConnection, pixmap: Pixmap) {
+    if let Ok(cookie) = conn.free_pixmap(pixmap) {
+        let _ = cookie.check();
+    }
+}
+
+fn free_gc_and_pixmap_checked(conn: &RustConnection, gc: Gcontext, pixmap: Pixmap) {
+    release_root_snapshot_resources(
+        conn,
+        root_snapshot_release_plan(None, Some(gc), Some(pixmap)),
+    );
 }
 
 fn scale_transform(
@@ -3065,6 +3531,140 @@ mod tests {
         assert_eq!(transform.matrix33, 65_536);
         assert_eq!(transform.matrix12, 0);
         assert_eq!(transform.matrix21, 0);
+    }
+
+    #[test]
+    fn root_and_overlay_have_distinct_xrender_source_types() {
+        let root = 41;
+        assert_eq!(
+            render_capture_source(root, root),
+            RenderCaptureSource::RootSnapshot
+        );
+        assert_eq!(
+            render_capture_source(root, 42),
+            RenderCaptureSource::Overlay(42)
+        );
+    }
+
+    #[test]
+    fn root_staging_native_size_has_a_hard_64_mib_limit() {
+        let depth_24_in_32 = Format {
+            depth: 24,
+            bits_per_pixel: 32,
+            scanline_pad: 32,
+        };
+        assert_eq!(
+            root_staging_bytes(4096, 4096, depth_24_in_32),
+            Some(ROOT_STAGING_MAX_BYTES)
+        );
+        assert_eq!(root_staging_bytes(4097, 4096, depth_24_in_32), None);
+        assert_eq!(
+            root_staging_bytes(u16::MAX, u16::MAX, depth_24_in_32),
+            None,
+            "protocol overflow is also ineligible instead of allocating"
+        );
+
+        let padded_16 = Format {
+            depth: 16,
+            bits_per_pixel: 16,
+            scanline_pad: 32,
+        };
+        assert_eq!(root_staging_bytes(3, 2, padded_16), Some(16));
+    }
+
+    #[test]
+    fn root_staging_replacement_never_exceeds_its_total_budget() {
+        assert_eq!(
+            root_staging_replacement(None, ROOT_STAGING_MAX_BYTES),
+            RootStagingReplacement::PreserveOld
+        );
+        assert_eq!(
+            root_staging_replacement(Some(ROOT_STAGING_MAX_BYTES / 2), ROOT_STAGING_MAX_BYTES / 2),
+            RootStagingReplacement::PreserveOld
+        );
+        assert_eq!(
+            root_staging_replacement(Some(1), ROOT_STAGING_MAX_BYTES),
+            RootStagingReplacement::ReleaseOld
+        );
+        assert_eq!(
+            root_staging_replacement(Some(usize::MAX), 1),
+            RootStagingReplacement::ReleaseOld,
+            "overflow cannot bypass the cap"
+        );
+    }
+
+    #[test]
+    fn render_request_errors_never_publish_the_small_readback() {
+        assert_eq!(
+            resolve_render_readback(Ok::<_, &str>(7), Ok(()), Ok(())),
+            Ok(7)
+        );
+        assert_eq!(
+            resolve_render_readback(Ok(7), Err("copy"), Err("composite")),
+            Err("copy")
+        );
+        assert_eq!(
+            resolve_render_readback(Ok(7), Ok(()), Err("composite")),
+            Err("composite")
+        );
+        assert_eq!(
+            resolve_render_readback(Err::<u8, _>("readback"), Ok(()), Ok(())),
+            Err("readback")
+        );
+    }
+
+    #[test]
+    fn root_snapshot_cleanup_is_reverse_order_and_consumed_once() {
+        assert_eq!(
+            root_snapshot_release_plan(Some(1), Some(2), Some(3)),
+            [
+                Some(RootSnapshotResource::Picture(1)),
+                Some(RootSnapshotResource::Gc(2)),
+                Some(RootSnapshotResource::Pixmap(3)),
+            ]
+        );
+        assert_eq!(
+            root_snapshot_release_plan(None, Some(2), Some(3)),
+            [
+                None,
+                Some(RootSnapshotResource::Gc(2)),
+                Some(RootSnapshotResource::Pixmap(3)),
+            ]
+        );
+        assert_eq!(
+            root_snapshot_release_plan(None, None, Some(3)),
+            [None, None, Some(RootSnapshotResource::Pixmap(3))]
+        );
+        assert_eq!(root_snapshot_release_plan(None, None, None), [None; 3]);
+    }
+
+    #[test]
+    fn root_geometry_epoch_retries_once_then_uses_cpu() {
+        let mut geometry = RootGeometryCache::new(1920, 1080, true);
+        let captured_epoch = geometry.epoch();
+        assert!(geometry.event_snapshot_is_current(captured_epoch));
+
+        // A same-WxH ConfigureNotify or RandR epoch is still a new desktop
+        // topology and must invalidate the staged image.
+        geometry.invalidate();
+        assert_eq!((geometry.width, geometry.height), (1920, 1080));
+        assert!(!geometry.event_snapshot_is_current(captured_epoch));
+        assert_eq!(
+            root_snapshot_race_action(true, false),
+            RootSnapshotRaceAction::Retry
+        );
+        assert_eq!(
+            root_snapshot_race_action(false, false),
+            RootSnapshotRaceAction::CpuFallback
+        );
+        assert_eq!(
+            root_snapshot_race_action(false, true),
+            RootSnapshotRaceAction::Retry,
+            "a root-to-overlay transition gets the newly authoritative source"
+        );
+
+        assert!(geometry.fall_back_to_polling());
+        assert!(geometry.needs_post_capture_query());
     }
 
     #[test]
