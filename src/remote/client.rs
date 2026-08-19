@@ -1,6 +1,5 @@
 //! Remote desktop viewer/client orchestration.
 
-use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::frame::{DecodedFrame, decode_frame};
 use super::key::load_key_file;
@@ -13,6 +12,7 @@ use super::protocol::{
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
+use super::{RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
@@ -29,7 +29,6 @@ use std::time::{Duration, Instant};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
-const FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -75,7 +74,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     let first_frame = decode_queued_frame(&payload, &state.telemetry)?;
     reader
         .get_ref()
-        .set_read_timeout(Some(FRAME_IDLE_TIMEOUT))?;
+        .set_read_timeout(Some(VIDEO_FRAME_IDLE_TIMEOUT))?;
     let initial_width = u16::try_from(first_frame.frame.image.width())
         .map_err(|_| invalid_data("initial frame is wider than an X11 window"))?;
     let initial_height = u16::try_from(first_frame.frame.image.height())

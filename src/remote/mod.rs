@@ -6,6 +6,12 @@
 //! outside the window manager's latency-sensitive event loop.
 
 use std::error::Error;
+use std::time::Duration;
+
+/// Maximum gap between authenticated video frames once streaming has begun.
+/// The host's unchanged-frame keepalive cadence is tested against this shared
+/// value so the two sides cannot silently drift apart.
+pub(super) const VIDEO_FRAME_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub type RemoteError = Box<dyn Error + Send + Sync>;
 pub type RemoteResult<T> = Result<T, RemoteError>;

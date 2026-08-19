@@ -66,6 +66,13 @@ monorepo use independent Semantic Versions.
   constant quality. In-flight quality epochs prevent late old-setting ACKs from
   causing a second decrease, and payload size remains diagnostic rather than a
   discrete threshold.
+- The remote host suppresses an exactly unchanged captured frame before JPEG
+  encoding. It compares source and image geometry plus every RGB byte against
+  the last fully written wire frame; suppressed samples consume no frame
+  sequence, display credit or quality decision. A successful unchanged frame
+  is still sent every four seconds, safely inside the viewer's shared video
+  idle timeout, and telemetry separates `unchanged-suppressed` from successful
+  `unchanged-keepalive` frames.
 - `jwm-remote` uses MIT-SHM 1.2 file-descriptor segments for local X11 image
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if

@@ -239,6 +239,19 @@ arbitrary byte boundary. The ACK thread queues only bounded scalar feedback;
 the video sender alone updates and reads quality immediately before encoding,
 with encoding, logging and frame destruction outside the controller lock.
 
+Before requesting a quality setting or encoding, the video sender compares a
+dequeued capture with the last frame whose complete authenticated record and
+flush succeeded. Equality includes the source dimensions, encoded image
+dimensions and all RGB bytes. An exact duplicate less than four seconds later
+is discarded without consuming an application/wire frame sequence, display
+credit or quality decision. Suppression never advances that four-second clock;
+at the boundary an unchanged keepalive is sent, keeping static sessions inside
+the viewer's shared eight-second video idle timeout. A failed write or flush
+does not update the comparison baseline. Host telemetry reports discarded
+samples as `unchanged-suppressed` and successful periodic frames as
+`unchanged-keepalive`; both are subsets of `dequeued`, while only the latter is
+also `encoded` and `sent`.
+
 The sender writes each JPEG directly behind its frame header in one reusable
 allocation while hard-bounding the total payload length, and the viewer's
 receiver likewise reuses one authenticated record allocation. After 32

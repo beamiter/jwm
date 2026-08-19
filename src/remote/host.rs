@@ -31,6 +31,7 @@ const INITIAL_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTSTANDING_FRAMES: u64 = 2;
+const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -238,6 +239,51 @@ struct PendingFrame {
     captured_at: Instant,
 }
 
+struct SuccessfulWireFrame {
+    frame: CapturedFrame,
+    committed_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameDedupDecision {
+    SendChanged,
+    SendKeepalive,
+    Suppress,
+}
+
+#[derive(Default)]
+struct FrameDeduplicator {
+    last: Option<SuccessfulWireFrame>,
+}
+
+impl FrameDeduplicator {
+    fn decide_at(&self, frame: &CapturedFrame, now: Instant) -> FrameDedupDecision {
+        let Some(last) = self.last.as_ref() else {
+            return FrameDedupDecision::SendChanged;
+        };
+        if !captured_frames_equal(&last.frame, frame) {
+            return FrameDedupDecision::SendChanged;
+        }
+        if now.saturating_duration_since(last.committed_at) >= UNCHANGED_FRAME_KEEPALIVE {
+            return FrameDedupDecision::SendKeepalive;
+        }
+        FrameDedupDecision::Suppress
+    }
+
+    fn commit_at(&mut self, frame: CapturedFrame, committed_at: Instant) {
+        self.last = Some(SuccessfulWireFrame {
+            frame,
+            committed_at,
+        });
+    }
+}
+
+fn captured_frames_equal(left: &CapturedFrame, right: &CapturedFrame) -> bool {
+    (left.source_width, left.source_height) == (right.source_width, right.source_height)
+        && left.image.dimensions() == right.image.dimensions()
+        && left.image.as_raw() == right.image.as_raw()
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct HostTelemetryWindow {
     scheduled: u64,
@@ -246,6 +292,8 @@ struct HostTelemetryWindow {
     published: u64,
     replaced: u64,
     dequeued: u64,
+    unchanged_suppressed: u64,
+    unchanged_keepalive: u64,
     encoded: u64,
     sent: u64,
     bytes: u64,
@@ -272,6 +320,8 @@ impl HostTelemetryWindow {
             || self.published != 0
             || self.replaced != 0
             || self.dequeued != 0
+            || self.unchanged_suppressed != 0
+            || self.unchanged_keepalive != 0
             || self.encoded != 0
             || self.sent != 0
             || self.bytes != 0
@@ -349,6 +399,18 @@ impl HostTelemetry {
             window.queue_elapsed = window.queue_elapsed.saturating_add(queue_age);
             window.credit_wait_elapsed = window.credit_wait_elapsed.saturating_add(credit_wait);
             window.max_queue_age = window.max_queue_age.max(queue_age);
+        });
+    }
+
+    fn record_unchanged_suppressed(&self) {
+        self.update(|window| {
+            window.unchanged_suppressed = window.unchanged_suppressed.saturating_add(1);
+        });
+    }
+
+    fn record_unchanged_keepalive(&self) {
+        self.update(|window| {
+            window.unchanged_keepalive = window.unchanged_keepalive.saturating_add(1);
         });
     }
 
@@ -1432,11 +1494,32 @@ fn target_frame_interval(fps: u16) -> Duration {
 
 fn send_frames<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
+    writer: SessionWriter<DeadlineWriter<W>>,
+    running: &AtomicBool,
+    credits: &FrameCredits,
+    telemetry: &HostTelemetry,
+    jpeg_quality: &JpegQualityController,
+) -> RemoteResult<()> {
+    let mut deduplicator = FrameDeduplicator::default();
+    send_frames_with_deduplicator(
+        mailbox,
+        writer,
+        running,
+        credits,
+        telemetry,
+        jpeg_quality,
+        &mut deduplicator,
+    )
+}
+
+fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
+    mailbox: Arc<LatestMailbox<PendingFrame>>,
     mut writer: SessionWriter<DeadlineWriter<W>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
+    deduplicator: &mut FrameDeduplicator,
 ) -> RemoteResult<()> {
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
@@ -1453,6 +1536,14 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
         if !running.load(Ordering::Acquire) {
             break;
         }
+        let unchanged_keepalive = match deduplicator.decide_at(&pending.frame, Instant::now()) {
+            FrameDedupDecision::Suppress => {
+                telemetry.record_unchanged_suppressed();
+                continue;
+            }
+            FrameDedupDecision::SendKeepalive => true,
+            FrameDedupDecision::SendChanged => false,
+        };
 
         let quality = jpeg_quality.quality_before_encode_at(Instant::now());
         if let Some(adjustment) = quality.adjustment {
@@ -1490,6 +1581,13 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
         let write_started = Instant::now();
         write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)?;
         telemetry.record_sent(payload.len(), write_started.elapsed());
+        if unchanged_keepalive {
+            telemetry.record_unchanged_keepalive();
+        }
+        // Commit by move only after the complete authenticated record and its
+        // flush succeeded. A partial/failed write therefore cannot suppress a
+        // future frame in a replacement session or test harness.
+        deduplicator.commit_at(pending.frame, Instant::now());
         sequence = sequence
             .checked_add(1)
             .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
@@ -1557,7 +1655,7 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.bytes as f64 * 8.0 / seconds / 1_000_000.0
     };
     eprintln!(
-        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} published {} replaced {} dequeued {} encoded {} sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
+        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
         seconds,
         window.scheduled,
         window.captured,
@@ -1565,6 +1663,8 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.published,
         window.replaced,
         window.dequeued,
+        window.unchanged_suppressed,
+        window.unchanged_keepalive,
         window.encoded,
         window.sent,
         window.bytes,
@@ -1796,13 +1896,63 @@ mod tests {
         }
     }
 
+    struct FailingWriter;
+
+    impl SetWriteTimeout for FailingWriter {
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected record failure",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FlushFailWriter {
+        bytes: Vec<u8>,
+    }
+
+    impl SetWriteTimeout for FlushFailWriter {
+        fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Write for FlushFailWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "injected flush failure",
+            ))
+        }
+    }
+
+    fn test_captured_frame(red: u8) -> CapturedFrame {
+        CapturedFrame {
+            image: RgbImage::from_pixel(2, 2, Rgb([red, 0, 0])),
+            source_width: 2,
+            source_height: 2,
+        }
+    }
+
     fn test_pending_frame(red: u8) -> PendingFrame {
         PendingFrame {
-            frame: CapturedFrame {
-                image: RgbImage::from_pixel(2, 2, Rgb([red, 0, 0])),
-                source_width: 2,
-                source_height: 2,
-            },
+            frame: test_captured_frame(red),
             captured_at: Instant::now(),
         }
     }
@@ -1833,6 +1983,109 @@ mod tests {
         };
         assert!(!options.allow_lan);
         assert!(!options.allow_input);
+    }
+
+    #[test]
+    fn frame_dedup_is_exact_and_suppression_never_refreshes_keepalive() {
+        let base = Instant::now();
+        let first = test_captured_frame(10);
+        let first_pixels = first.image.as_raw().as_ptr();
+        let mut deduplicator = FrameDeduplicator::default();
+        assert_eq!(
+            deduplicator.decide_at(&first, base),
+            FrameDedupDecision::SendChanged
+        );
+        deduplicator.commit_at(first, base);
+        assert_eq!(
+            deduplicator
+                .last
+                .as_ref()
+                .unwrap()
+                .frame
+                .image
+                .as_raw()
+                .as_ptr(),
+            first_pixels,
+            "the successful frame must move into the cache without cloning"
+        );
+
+        for elapsed in [
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            UNCHANGED_FRAME_KEEPALIVE - Duration::from_millis(1),
+        ] {
+            assert_eq!(
+                deduplicator.decide_at(&test_captured_frame(10), base + elapsed),
+                FrameDedupDecision::Suppress
+            );
+            assert_eq!(deduplicator.last.as_ref().unwrap().committed_at, base);
+        }
+        assert_eq!(
+            deduplicator.decide_at(&test_captured_frame(10), base + UNCHANGED_FRAME_KEEPALIVE),
+            FrameDedupDecision::SendKeepalive
+        );
+
+        let mut raw_changed = test_captured_frame(10);
+        raw_changed.image.as_mut()[0] ^= 1;
+        assert_eq!(
+            deduplicator.decide_at(&raw_changed, base + Duration::from_secs(1)),
+            FrameDedupDecision::SendChanged
+        );
+        let mut source_changed = test_captured_frame(10);
+        source_changed.source_width = 3;
+        assert_eq!(
+            deduplicator.decide_at(&source_changed, base + Duration::from_secs(1)),
+            FrameDedupDecision::SendChanged
+        );
+        let image_geometry_changed = CapturedFrame {
+            image: RgbImage::from_pixel(1, 4, Rgb([10, 0, 0])),
+            source_width: 2,
+            source_height: 2,
+        };
+        assert_eq!(
+            deduplicator.decide_at(&image_geometry_changed, base + Duration::from_secs(1)),
+            FrameDedupDecision::SendChanged
+        );
+    }
+
+    #[test]
+    fn uncommitted_send_attempt_cannot_change_the_dedup_baseline() {
+        let base = Instant::now();
+        let mut deduplicator = FrameDeduplicator::default();
+        let first = test_captured_frame(10);
+        assert_eq!(
+            deduplicator.decide_at(&first, base),
+            FrameDedupDecision::SendChanged
+        );
+        // A failed first wire attempt never calls commit_at.
+        assert_eq!(
+            deduplicator.decide_at(&first, base + Duration::from_secs(1)),
+            FrameDedupDecision::SendChanged
+        );
+
+        deduplicator.commit_at(first, base);
+        let changed = test_captured_frame(20);
+        assert_eq!(
+            deduplicator.decide_at(&changed, base + Duration::from_secs(1)),
+            FrameDedupDecision::SendChanged
+        );
+        // Simulate a failed changed-frame write: the old successful frame is
+        // still the comparison baseline.
+        assert_eq!(
+            deduplicator.decide_at(&test_captured_frame(10), base + Duration::from_secs(2)),
+            FrameDedupDecision::Suppress
+        );
+        assert_eq!(
+            deduplicator.decide_at(&changed, base + Duration::from_secs(2)),
+            FrameDedupDecision::SendChanged
+        );
+    }
+
+    #[test]
+    fn unchanged_keepalive_cadence_stays_inside_viewer_frame_idle_budget() {
+        assert!(
+            UNCHANGED_FRAME_KEEPALIVE.saturating_mul(2) <= crate::remote::VIDEO_FRAME_IDLE_TIMEOUT
+        );
     }
 
     #[test]
@@ -2397,6 +2650,8 @@ mod tests {
         telemetry.record_published(false);
         telemetry.record_dequeued(Duration::from_millis(10), Duration::from_millis(1));
         telemetry.record_dequeued(Duration::from_millis(20), Duration::from_millis(2));
+        telemetry.record_unchanged_suppressed();
+        telemetry.record_unchanged_keepalive();
         telemetry.record_encoded(Duration::from_millis(6));
         telemetry.record_encoded(Duration::from_millis(7));
 
@@ -2435,6 +2690,8 @@ mod tests {
         assert_eq!(sent_window.published, 3);
         assert_eq!(sent_window.replaced, 1);
         assert_eq!(sent_window.dequeued, 2);
+        assert_eq!(sent_window.unchanged_suppressed, 1);
+        assert_eq!(sent_window.unchanged_keepalive, 1);
         assert_eq!(sent_window.encoded, 2);
         assert_eq!(sent_window.sent, 2);
         assert_eq!(sent_window.bytes, 300);
@@ -2643,6 +2900,221 @@ mod tests {
         let third = decode_frame(&third_payload).unwrap();
         assert_eq!(third.sequence, 2);
         assert!(third.image.get_pixel(0, 0).0[0].abs_diff(70) <= 2);
+    }
+
+    #[test]
+    fn unchanged_sender_frames_skip_quality_encoding_credit_and_sequence() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let gate = Arc::new((
+            Mutex::new(GateState {
+                open: true,
+                ..GateState::default()
+            }),
+            Condvar::new(),
+        ));
+        let running = Arc::new(AtomicBool::new(true));
+        let credits = Arc::new(FrameCredits::new());
+        let telemetry = Arc::new(HostTelemetry::new());
+        let base = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the monotonic clock must cover the quality interval");
+        let jpeg_quality = Arc::new(
+            JpegQualityController::new_at(70, 40, true, Duration::from_millis(100), base).unwrap(),
+        );
+        let sender_mailbox = Arc::clone(&mailbox);
+        let sender_running = Arc::clone(&running);
+        let sender_credits = Arc::clone(&credits);
+        let sender_telemetry = Arc::clone(&telemetry);
+        let sender_quality = Arc::clone(&jpeg_quality);
+        let writer = SessionWriter::new(
+            DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
+            [0x6b; 32],
+        );
+        let sender = thread::spawn(move || {
+            send_frames(
+                sender_mailbox,
+                writer,
+                &sender_running,
+                &sender_credits,
+                &sender_telemetry,
+                &sender_quality,
+            )
+        });
+
+        let (lock, ready) = &*gate;
+        let state = lock.lock().unwrap();
+        let (state, timeout) = ready
+            .wait_timeout_while(state, Duration::from_secs(2), |state| state.flushes < 1)
+            .unwrap();
+        assert!(!timeout.timed_out(), "first frame did not reach the wire");
+        drop(state);
+        credits.acknowledge(0).unwrap().unwrap();
+
+        // If quality_before_encode_at runs, these two hard samples are removed
+        // from the pending queue and cross the controller's pressure threshold.
+        let observed_at = Instant::now();
+        for _ in 0..2 {
+            jpeg_quality.observe_ack_at(
+                quality_ack(Duration::from_millis(800), 100, 1, 1, 70, 0),
+                observed_at,
+            );
+        }
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let suppressed = telemetry.state.lock().unwrap().window.unchanged_suppressed;
+            if suppressed == 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "duplicate frame was not suppressed"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(lock.lock().unwrap().flushes, 1);
+        assert_eq!(credits.outstanding(), 0);
+        {
+            let mut state = jpeg_quality.state.lock().unwrap();
+            assert_eq!(state.current, 70);
+            assert_eq!(state.pending_acks.len(), 2);
+            // Keep this test about whether the quality lease was read, not
+            // about the controller's separately-tested evaluation cadence.
+            state.last_evaluated_at = Instant::now() + Duration::from_secs(60);
+        }
+
+        assert_eq!(mailbox.publish(test_pending_frame(20)), Some(false));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if telemetry.state.lock().unwrap().window.sent == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "changed frame did not reach the wire"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        {
+            let state = credits.state.lock().unwrap();
+            assert_eq!(state.in_flight.len(), 1);
+            assert_eq!(state.in_flight[0].sequence, 1);
+            assert_eq!(state.in_flight[0].jpeg_quality, 70);
+        }
+        {
+            let state = jpeg_quality.state.lock().unwrap();
+            assert!(state.pending_acks.is_empty());
+            assert_eq!(state.pressure, JPEG_QUALITY_PRESSURE_THRESHOLD);
+        }
+
+        let wire = lock.lock().unwrap().bytes.clone();
+        running.store(false, Ordering::Release);
+        mailbox.close();
+        credits.close();
+        sender.join().unwrap().unwrap();
+
+        let mut reader = SessionReader::new(Cursor::new(wire), [0x6b; 32]);
+        let (_, first_payload) = reader.read_message().unwrap();
+        let (_, second_payload) = reader.read_message().unwrap();
+        assert_eq!(decode_frame(&first_payload).unwrap().sequence, 0);
+        let second = decode_frame(&second_payload).unwrap();
+        assert_eq!(second.sequence, 1);
+        assert!(second.image.get_pixel(0, 0).0[0].abs_diff(20) <= 2);
+        let window = telemetry.state.lock().unwrap().window;
+        assert_eq!(window.dequeued, 3);
+        assert_eq!(window.unchanged_suppressed, 1);
+        assert_eq!(window.encoded, 2);
+        assert_eq!(window.sent, 2);
+    }
+
+    #[test]
+    fn flush_failure_does_not_commit_keepalive_or_dedup_cache() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let running = AtomicBool::new(true);
+        let credits = FrameCredits::new();
+        let telemetry = HostTelemetry::new();
+        let jpeg_quality = JpegQualityController::new_at(
+            70,
+            70,
+            false,
+            Duration::from_millis(100),
+            Instant::now(),
+        )
+        .unwrap();
+        let committed_at = Instant::now()
+            .checked_sub(UNCHANGED_FRAME_KEEPALIVE + Duration::from_millis(1))
+            .expect("the monotonic clock must cover the keepalive interval");
+        let mut deduplicator = FrameDeduplicator::default();
+        deduplicator.commit_at(test_captured_frame(10), committed_at);
+        let writer = SessionWriter::new(
+            DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
+            [0x7c; 32],
+        );
+
+        assert!(
+            send_frames_with_deduplicator(
+                mailbox,
+                writer,
+                &running,
+                &credits,
+                &telemetry,
+                &jpeg_quality,
+                &mut deduplicator,
+            )
+            .is_err()
+        );
+        let last = deduplicator.last.as_ref().unwrap();
+        assert_eq!(last.committed_at, committed_at);
+        assert!(captured_frames_equal(&last.frame, &test_captured_frame(10)));
+        let window = telemetry.state.lock().unwrap().window;
+        assert_eq!(window.encoded, 1);
+        assert_eq!(window.sent, 0);
+        assert_eq!(window.unchanged_keepalive, 0);
+        assert_eq!(window.unchanged_suppressed, 0);
+        assert_eq!(credits.outstanding(), 1);
+    }
+
+    #[test]
+    fn write_failure_does_not_create_a_dedup_baseline() {
+        let mailbox = Arc::new(LatestMailbox::new());
+        assert_eq!(mailbox.publish(test_pending_frame(10)), Some(false));
+        let running = AtomicBool::new(true);
+        let credits = FrameCredits::new();
+        let telemetry = HostTelemetry::new();
+        let jpeg_quality = JpegQualityController::new_at(
+            70,
+            70,
+            false,
+            Duration::from_millis(100),
+            Instant::now(),
+        )
+        .unwrap();
+        let writer = SessionWriter::new(
+            DeadlineWriter::new(FailingWriter, WRITE_TIMEOUT),
+            [0x8d; 32],
+        );
+        let mut deduplicator = FrameDeduplicator::default();
+
+        assert!(
+            send_frames_with_deduplicator(
+                mailbox,
+                writer,
+                &running,
+                &credits,
+                &telemetry,
+                &jpeg_quality,
+                &mut deduplicator,
+            )
+            .is_err()
+        );
+        assert!(deduplicator.last.is_none());
+        let window = telemetry.state.lock().unwrap().window;
+        assert_eq!(window.encoded, 1);
+        assert_eq!(window.sent, 0);
+        assert_eq!(window.unchanged_keepalive, 0);
+        assert_eq!(window.unchanged_suppressed, 0);
     }
 
     #[test]
