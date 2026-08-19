@@ -15,6 +15,7 @@ use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::cookie::Cookie;
+use x11rb::errors::{ConnectionError, ReplyError, ReplyOrIdError};
 use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
 use x11rb::protocol::render::{CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform};
 use x11rb::protocol::xproto::{
@@ -22,7 +23,7 @@ use x11rb::protocol::xproto::{
     Format, ImageFormat, Pixmap, PropMode, QueryPointerReply, Screen, VisualClass, Visualid,
     Visualtype, Window, WindowClass,
 };
-use x11rb::protocol::{Event, composite, randr, render, shm, xfixes};
+use x11rb::protocol::{Event, composite, damage, randr, render, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::TryParseFd;
@@ -33,9 +34,11 @@ const XFIXES_CLIENT_VERSION: (u32, u32) = (5, 0);
 const RANDR_CLIENT_VERSION: (u32, u32) = (1, 6);
 const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
 const RENDER_TRANSFORM_VERSION: (u32, u32) = (0, 10);
+const DAMAGE_CLIENT_VERSION: (u32, u32) = (1, 1);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const REMOTE_CAPTURE_OWNER: &[u8] = b"_JWM_REMOTE_CAPTURE_OWNER";
 const OVERLAY_RETRY_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
 
 /// Which X drawable supplies the remote desktop image.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +78,15 @@ pub struct CapturedFrame {
     pub source_height: u16,
 }
 
+/// Result of one scheduled capture attempt.
+#[derive(Debug)]
+pub enum CaptureOutcome {
+    /// A fresh drawable readback, ready for the host mailbox.
+    Frame(CapturedFrame),
+    /// The overlay, geometry and software-composited cursor are unchanged.
+    NoChange,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureFailureKind {
     Render,
@@ -105,6 +117,545 @@ enum OverlaySyncAction {
 struct OverlaySyncDecision {
     publish_inhibitor: bool,
     action: OverlaySyncAction,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DamageObject {
+    id: damage::Damage,
+    drawable: Window,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DamageMode {
+    Disabled,
+    Ready,
+    Active(DamageObject),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DamageSyncAction {
+    None,
+    Attach(Window),
+    Detach,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DamageSubtractQueueAction {
+    Fatal,
+}
+
+fn damage_subtract_queue_action(_error: &ConnectionError) -> DamageSubtractQueueAction {
+    // Failure to queue a request means the connection itself is unusable; X11
+    // request rejections arrive later as Event::Error and take the fallback.
+    DamageSubtractQueueAction::Fatal
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AsyncX11ErrorAction {
+    DisableDamage,
+    Fatal,
+}
+
+fn async_x11_error_action(extension_name: Option<&str>) -> AsyncX11ErrorAction {
+    if extension_name == Some(damage::X11_EXTENSION_NAME) {
+        AsyncX11ErrorAction::DisableDamage
+    } else {
+        AsyncX11ErrorAction::Fatal
+    }
+}
+
+fn damage_sync_action(mode: DamageMode, target: Option<Window>) -> DamageSyncAction {
+    match (mode, target) {
+        (DamageMode::Disabled, _) | (DamageMode::Ready, None) => DamageSyncAction::None,
+        (DamageMode::Ready, Some(drawable)) => DamageSyncAction::Attach(drawable),
+        (DamageMode::Active(_), None) => DamageSyncAction::Detach,
+        (DamageMode::Active(active), Some(drawable)) if active.drawable == drawable => {
+            DamageSyncAction::None
+        }
+        (DamageMode::Active(_), Some(drawable)) => DamageSyncAction::Attach(drawable),
+    }
+}
+
+fn damage_requested(source: CaptureSource) -> bool {
+    source != CaptureSource::Root
+}
+
+fn supports_damage_version(major: u32, minor: u32) -> bool {
+    (major, minor) >= (1, 0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorSnapshot {
+    Disabled,
+    Position(Option<(i32, i32)>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DamageGateDecision {
+    Capture,
+    NoChange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DamageGatePrecheck {
+    Capture,
+    ProbeCursor,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DamageGateState {
+    dirty: bool,
+    last_capture: Option<Instant>,
+    last_geometry: Option<(u16, u16)>,
+    last_cursor: Option<CursorSnapshot>,
+}
+
+impl DamageGateState {
+    fn new() -> Self {
+        Self {
+            dirty: true,
+            last_capture: None,
+            last_geometry: None,
+            last_cursor: None,
+        }
+    }
+
+    fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    fn precheck(
+        &self,
+        now: Instant,
+        geometry: (u16, u16),
+        cursor_shape_dirty: bool,
+    ) -> DamageGatePrecheck {
+        let force_due = self.last_capture.is_some_and(|captured| {
+            now.saturating_duration_since(captured) >= DAMAGE_FORCE_REFRESH
+        });
+        if self.dirty
+            || self.last_capture.is_none()
+            || self.last_geometry != Some(geometry)
+            || self.last_cursor.is_none()
+            || cursor_shape_dirty
+            || force_due
+        {
+            DamageGatePrecheck::Capture
+        } else {
+            DamageGatePrecheck::ProbeCursor
+        }
+    }
+
+    fn decide_cursor(&self, cursor: CursorSnapshot) -> DamageGateDecision {
+        if self.last_cursor == Some(cursor) {
+            DamageGateDecision::NoChange
+        } else {
+            DamageGateDecision::Capture
+        }
+    }
+
+    fn decide_with_cursor_probe<E>(
+        &self,
+        now: Instant,
+        geometry: (u16, u16),
+        cursor_shape_dirty: bool,
+        probe: impl FnOnce() -> Result<Option<CursorSnapshot>, E>,
+    ) -> Result<DamageGateDecision, E> {
+        if self.precheck(now, geometry, cursor_shape_dirty) == DamageGatePrecheck::Capture {
+            return Ok(DamageGateDecision::Capture);
+        }
+        Ok(probe()?.map_or(DamageGateDecision::Capture, |cursor| {
+            self.decide_cursor(cursor)
+        }))
+    }
+
+    #[cfg(test)]
+    fn decide(
+        &self,
+        now: Instant,
+        geometry: (u16, u16),
+        cursor: CursorSnapshot,
+        cursor_shape_dirty: bool,
+    ) -> DamageGateDecision {
+        self.decide_with_cursor_probe(now, geometry, cursor_shape_dirty, || {
+            Ok::<_, std::convert::Infallible>(Some(cursor))
+        })
+        .expect("an infallible cursor probe cannot fail")
+    }
+
+    fn subtract_queued(&mut self) {
+        self.dirty = false;
+    }
+
+    fn capture_failed(&mut self) {
+        self.dirty = true;
+    }
+
+    fn capture_succeeded(&mut self, now: Instant, geometry: (u16, u16), cursor: CursorSnapshot) {
+        // Do not clear dirty here: a DamageNotify drained while readback was
+        // in flight must force the following scheduled capture.
+        self.last_capture = Some(now);
+        self.last_geometry = Some(geometry);
+        self.last_cursor = Some(cursor);
+    }
+}
+
+struct DamageTracker {
+    mode: DamageMode,
+    gate: DamageGateState,
+}
+
+impl DamageTracker {
+    fn connect(conn: &RustConnection) -> RemoteResult<Self> {
+        let available = match conn.extension_information(damage::X11_EXTENSION_NAME) {
+            Ok(available) => available,
+            Err(ConnectionError::UnsupportedExtension) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if available.is_none() {
+            eprintln!("remote: XDamage unavailable; capturing the overlay every scheduled tick");
+            return Ok(Self::disabled());
+        }
+
+        let version = match damage::query_version(
+            conn,
+            DAMAGE_CLIENT_VERSION.0,
+            DAMAGE_CLIENT_VERSION.1,
+        ) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(version) => version,
+                Err(ReplyError::X11Error(error)) => {
+                    eprintln!(
+                        "remote: XDamage negotiation failed ({error:?}); capturing the overlay every scheduled tick"
+                    );
+                    return Ok(Self::disabled());
+                }
+                Err(ReplyError::ConnectionError(ConnectionError::UnsupportedExtension)) => {
+                    eprintln!(
+                        "remote: XDamage became unavailable; capturing the overlay every scheduled tick"
+                    );
+                    return Ok(Self::disabled());
+                }
+                Err(ReplyError::ConnectionError(error)) => return Err(error.into()),
+            },
+            Err(ConnectionError::UnsupportedExtension) => {
+                eprintln!(
+                    "remote: XDamage became unavailable; capturing the overlay every scheduled tick"
+                );
+                return Ok(Self::disabled());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !supports_damage_version(version.major_version, version.minor_version) {
+            eprintln!(
+                "remote: XDamage {}.{} is too old; capturing the overlay every scheduled tick",
+                version.major_version, version.minor_version
+            );
+            return Ok(Self::disabled());
+        }
+        Ok(Self {
+            mode: DamageMode::Ready,
+            gate: DamageGateState::new(),
+        })
+    }
+
+    fn disabled() -> Self {
+        Self {
+            mode: DamageMode::Disabled,
+            gate: DamageGateState::new(),
+        }
+    }
+
+    fn active(&self) -> Option<DamageObject> {
+        match self.mode {
+            DamageMode::Active(active) => Some(active),
+            DamageMode::Disabled | DamageMode::Ready => None,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active().is_some()
+    }
+
+    fn invalidate(&mut self) {
+        self.gate.invalidate();
+    }
+
+    fn notification_matches(&self, event: &damage::NotifyEvent) -> bool {
+        self.active()
+            .is_some_and(|active| event.damage == active.id && event.drawable == active.drawable)
+    }
+
+    fn observe_notification(&mut self, event: &damage::NotifyEvent) {
+        if self.notification_matches(event) {
+            self.gate.invalidate();
+        }
+    }
+
+    fn decide_with_cursor_probe<E>(
+        &self,
+        now: Instant,
+        geometry: (u16, u16),
+        cursor_shape_dirty: bool,
+        probe: impl FnOnce() -> Result<Option<CursorSnapshot>, E>,
+    ) -> Result<DamageGateDecision, E> {
+        self.gate
+            .decide_with_cursor_probe(now, geometry, cursor_shape_dirty, probe)
+    }
+
+    fn sync_target(&mut self, conn: &RustConnection, target: Option<Window>) -> RemoteResult<()> {
+        match damage_sync_action(self.mode, target) {
+            DamageSyncAction::None => Ok(()),
+            DamageSyncAction::Detach => self.detach_checked(conn),
+            DamageSyncAction::Attach(drawable) => self.attach_checked(conn, drawable),
+        }
+    }
+
+    fn attach_checked(&mut self, conn: &RustConnection, drawable: Window) -> RemoteResult<()> {
+        let id = match conn.generate_id() {
+            Ok(id) => id,
+            Err(ReplyOrIdError::ConnectionError(ConnectionError::UnsupportedExtension))
+            | Err(ReplyOrIdError::IdsExhausted) => {
+                self.disable_recoverable(conn, "could not allocate an XDamage resource")?;
+                return Ok(());
+            }
+            Err(ReplyOrIdError::X11Error(error)) => {
+                let message = format!("XDamage resource allocation failed: {error:?}");
+                self.disable_recoverable(conn, &message)?;
+                return Ok(());
+            }
+            Err(ReplyOrIdError::ConnectionError(error)) => return Err(error.into()),
+        };
+        let create = match damage::create(conn, id, drawable, damage::ReportLevel::NON_EMPTY) {
+            Ok(create) => create,
+            Err(ConnectionError::UnsupportedExtension) => {
+                self.disable_recoverable(conn, "XDamage became unavailable while attaching")?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        match create.check() {
+            Ok(()) => {}
+            Err(ReplyError::X11Error(error)) => {
+                let message = format!("XDamage attach request failed: {error:?}");
+                self.disable_recoverable(conn, &message)?;
+                return Ok(());
+            }
+            Err(ReplyError::ConnectionError(ConnectionError::UnsupportedExtension)) => {
+                self.disable_recoverable(conn, "XDamage became unavailable while attaching")?;
+                return Ok(());
+            }
+            Err(ReplyError::ConnectionError(error)) => return Err(error.into()),
+        }
+
+        let previous = std::mem::replace(
+            &mut self.mode,
+            DamageMode::Active(DamageObject { id, drawable }),
+        );
+        self.gate = DamageGateState::new();
+        if let DamageMode::Active(previous) = previous {
+            match destroy_damage_checked(conn, previous.id) {
+                Ok(()) => {}
+                Err(DamageDestroyError::Recoverable(message)) => {
+                    self.disable_recoverable(conn, &message)?;
+                }
+                Err(DamageDestroyError::Fatal(error)) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn detach_checked(&mut self, conn: &RustConnection) -> RemoteResult<()> {
+        let previous = std::mem::replace(&mut self.mode, DamageMode::Ready);
+        self.gate = DamageGateState::new();
+        let DamageMode::Active(previous) = previous else {
+            return Ok(());
+        };
+        match destroy_damage_checked(conn, previous.id) {
+            Ok(()) => Ok(()),
+            Err(DamageDestroyError::Recoverable(message)) => {
+                self.mode = DamageMode::Disabled;
+                eprintln!(
+                    "remote: XDamage stopped ({message}); capturing the overlay every scheduled tick"
+                );
+                Ok(())
+            }
+            Err(DamageDestroyError::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn prepare_capture(&mut self, conn: &RustConnection) -> RemoteResult<()> {
+        let Some(active) = self.active() else {
+            return Ok(());
+        };
+        let subtract = match damage::subtract(conn, active.id, x11rb::NONE, x11rb::NONE) {
+            Ok(subtract) => subtract,
+            Err(error) => match damage_subtract_queue_action(&error) {
+                DamageSubtractQueueAction::Fatal => return Err(error.into()),
+            },
+        };
+        // Ordinary cookie drop keeps request errors in the connection's event
+        // stream; never call ignore_error here. The later synchronous image
+        // reply is an ordering barrier, and finish_cursor drains any Damage
+        // rejection before this frame can be published.
+        drop(subtract);
+        self.gate.subtract_queued();
+        Ok(())
+    }
+
+    fn capture_failed(&mut self) {
+        if self.is_active() {
+            self.gate.capture_failed();
+        }
+    }
+
+    fn capture_succeeded(&mut self, now: Instant, geometry: (u16, u16), cursor: CursorSnapshot) {
+        if self.is_active() {
+            self.gate.capture_succeeded(now, geometry, cursor);
+        }
+    }
+
+    fn disable_recoverable(&mut self, conn: &RustConnection, reason: &str) -> RemoteResult<()> {
+        if self.mode == DamageMode::Disabled {
+            return Ok(());
+        }
+        let active = self.take_active_for_cleanup();
+        self.gate = DamageGateState::new();
+        if let Some(active) = active {
+            match destroy_damage_checked(conn, active.id) {
+                Ok(()) | Err(DamageDestroyError::Recoverable(_)) => {}
+                Err(DamageDestroyError::Fatal(error)) => return Err(error),
+            }
+        }
+        eprintln!("remote: XDamage stopped ({reason}); capturing the overlay every scheduled tick");
+        Ok(())
+    }
+
+    fn release_best_effort(&mut self, conn: &RustConnection) {
+        if let Some(active) = self.take_active_for_cleanup() {
+            destroy_damage_best_effort(conn, active.id);
+        }
+    }
+
+    fn take_active_for_cleanup(&mut self) -> Option<DamageObject> {
+        match std::mem::replace(&mut self.mode, DamageMode::Disabled) {
+            DamageMode::Active(active) => Some(active),
+            DamageMode::Disabled | DamageMode::Ready => None,
+        }
+    }
+}
+
+enum DamageDestroyError {
+    Recoverable(String),
+    Fatal(RemoteError),
+}
+
+fn destroy_damage_checked(
+    conn: &RustConnection,
+    damage_id: damage::Damage,
+) -> Result<(), DamageDestroyError> {
+    let destroy = match damage::destroy(conn, damage_id) {
+        Ok(destroy) => destroy,
+        Err(ConnectionError::UnsupportedExtension) => {
+            return Err(DamageDestroyError::Recoverable(
+                "XDamage became unavailable while detaching".into(),
+            ));
+        }
+        Err(error) => return Err(DamageDestroyError::Fatal(error.into())),
+    };
+    match destroy.check() {
+        Ok(()) => Ok(()),
+        Err(ReplyError::X11Error(error)) => Err(DamageDestroyError::Recoverable(format!(
+            "XDamage detach request failed: {error:?}"
+        ))),
+        Err(ReplyError::ConnectionError(ConnectionError::UnsupportedExtension)) => Err(
+            DamageDestroyError::Recoverable("XDamage became unavailable while detaching".into()),
+        ),
+        Err(ReplyError::ConnectionError(error)) => Err(DamageDestroyError::Fatal(error.into())),
+    }
+}
+
+fn destroy_damage_best_effort(conn: &RustConnection, damage_id: damage::Damage) {
+    if let Ok(cookie) = damage::destroy(conn, damage_id) {
+        let _ = cookie.check();
+    }
+}
+
+struct CapturedDrawable {
+    frame: CapturedFrame,
+    cursor: CursorSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorFailureKind {
+    Recoverable,
+    Fatal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorProbeFailureAction {
+    DisableAndCapture,
+    Fatal,
+}
+
+fn cursor_probe_failure_action(kind: CursorFailureKind) -> CursorProbeFailureAction {
+    match kind {
+        CursorFailureKind::Recoverable => CursorProbeFailureAction::DisableAndCapture,
+        CursorFailureKind::Fatal => CursorProbeFailureAction::Fatal,
+    }
+}
+
+struct CursorFailure {
+    kind: CursorFailureKind,
+    error: RemoteError,
+}
+
+impl CursorFailure {
+    fn extension_connection(error: ConnectionError) -> Self {
+        let kind = if matches!(error, ConnectionError::UnsupportedExtension) {
+            CursorFailureKind::Recoverable
+        } else {
+            CursorFailureKind::Fatal
+        };
+        Self {
+            kind,
+            error: error.into(),
+        }
+    }
+
+    fn core_connection(error: ConnectionError) -> Self {
+        Self {
+            kind: CursorFailureKind::Fatal,
+            error: error.into(),
+        }
+    }
+
+    fn core_reply(error: ReplyError) -> Self {
+        match error {
+            ReplyError::X11Error(error) => Self {
+                kind: CursorFailureKind::Recoverable,
+                error: io::Error::other(format!("X11 cursor request failed: {error:?}")).into(),
+            },
+            ReplyError::ConnectionError(error) => Self::core_connection(error),
+        }
+    }
+
+    fn extension_reply(error: ReplyError) -> Self {
+        match error {
+            ReplyError::X11Error(error) => Self {
+                kind: CursorFailureKind::Recoverable,
+                error: io::Error::other(format!("X11 cursor request failed: {error:?}")).into(),
+            },
+            ReplyError::ConnectionError(error) => Self::extension_connection(error),
+        }
+    }
+
+    fn data(error: RemoteError) -> Self {
+        Self {
+            kind: CursorFailureKind::Recoverable,
+            error,
+        }
+    }
 }
 
 impl CaptureFailure {
@@ -162,6 +713,7 @@ pub struct X11Capture {
     next_overlay_retry: Option<Instant>,
     compositor: CompositorTracker,
     composite_ready: bool,
+    damage: DamageTracker,
     cursor: CursorCapture,
     root_geometry: RootGeometryCache,
     inhibitor_atom: Atom,
@@ -276,6 +828,13 @@ impl X11Capture {
                 }
             }
         };
+        let damage = if !damage_requested(requested_source) {
+            // Root capture cannot use drawable Damage reliably and must not
+            // make an unused optional extension part of session setup.
+            DamageTracker::disabled()
+        } else {
+            DamageTracker::connect(&conn)?
+        };
 
         let mut capture = Self {
             conn,
@@ -286,6 +845,7 @@ impl X11Capture {
             next_overlay_retry,
             compositor,
             composite_ready,
+            damage,
             cursor,
             root_geometry,
             inhibitor_atom,
@@ -299,6 +859,8 @@ impl X11Capture {
         // No pixels are captured until all three caches have been reconciled.
         capture.drain_dynamic_events()?;
         capture.sync_overlay_source()?;
+        let damage_target = capture.damage_target();
+        capture.damage.sync_target(&capture.conn, damage_target)?;
         Ok(capture)
     }
 
@@ -309,23 +871,61 @@ impl X11Capture {
     /// network I/O. The synchronous server readback can still contend with
     /// the compositor on very large roots, which is why the MVP exposes a
     /// conservative frame-rate default.
-    pub fn frame(&mut self) -> RemoteResult<CapturedFrame> {
+    pub fn frame(&mut self) -> RemoteResult<CaptureOutcome> {
         self.drain_dynamic_events()?;
-        self.sync_overlay_source()?;
+        if self.sync_overlay_source()? {
+            self.damage.invalidate();
+        }
         let (mut source_width, mut source_height) =
             self.root_geometry.dimensions(&self.conn, self.root)?;
         validate_root_geometry(source_width, source_height)?;
+
+        if self.damage.is_active() {
+            let decision = match self.damage.decide_with_cursor_probe(
+                Instant::now(),
+                (source_width, source_height),
+                self.cursor.needs_shape(),
+                || self.cursor.gate_snapshot(&self.conn, self.root),
+            ) {
+                Ok(decision) => decision,
+                Err(failure) => match cursor_probe_failure_action(failure.kind) {
+                    CursorProbeFailureAction::DisableAndCapture => {
+                        eprintln!("remote: cursor capture stopped: {}", failure.error);
+                        self.cursor.disable();
+                        self.damage.invalidate();
+                        DamageGateDecision::Capture
+                    }
+                    CursorProbeFailureAction::Fatal => return Err(failure.error),
+                },
+            };
+            if decision == DamageGateDecision::NoChange {
+                return Ok(CaptureOutcome::NoChange);
+            }
+        }
 
         let mut drawable = self.drawable;
         let mut allow_render = true;
         let mut dynamic_retry_available = true;
         loop {
+            // Subtract only after this tick has committed to a fresh readback.
+            // A concurrent notify is drained by finish_cursor and re-dirties
+            // the gate before the successful baseline is committed.
+            self.damage.prepare_capture(&self.conn)?;
             match self.capture_drawable(drawable, source_width, source_height, allow_render) {
-                Ok(frame) => return Ok(frame),
+                Ok(captured) => {
+                    self.damage.capture_succeeded(
+                        Instant::now(),
+                        (source_width, source_height),
+                        captured.cursor,
+                    );
+                    return Ok(CaptureOutcome::Frame(captured.frame));
+                }
                 Err(failure) if failure.kind == CaptureFailureKind::Fatal => {
+                    self.damage.capture_failed();
                     return Err(failure.error);
                 }
                 Err(failure) => {
+                    self.damage.capture_failed();
                     if dynamic_retry_available {
                         if let Some(reconciled) = self.reconcile_after_capture_failure(
                             drawable,
@@ -358,7 +958,7 @@ impl X11Capture {
                                 "remote: compositor overlay readback failed ({}); switching to root capture",
                                 failure.error
                             );
-                            self.release_overlay();
+                            self.release_overlay_runtime()?;
                             drawable = self.root;
                             allow_render = false;
                         }
@@ -376,7 +976,7 @@ impl X11Capture {
         source_width: u16,
         source_height: u16,
         allow_render: bool,
-    ) -> Result<CapturedFrame, CaptureFailure> {
+    ) -> Result<CapturedDrawable, CaptureFailure> {
         let (output_width, output_height) =
             scaled_dimensions(source_width, source_height, self.max_width);
         // A Window used directly as an XRender source does not reliably
@@ -388,10 +988,7 @@ impl X11Capture {
             && self.render_scaler.is_some()
             && allow_render
         {
-            let pending_cursor = self
-                .cursor
-                .prepare(&self.conn, self.root)
-                .map_err(CaptureFailure::fatal)?;
+            let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
             let render_result = self
                 .render_scaler
                 .as_mut()
@@ -407,18 +1004,21 @@ impl X11Capture {
                 );
             match render_result {
                 Ok(mut image) => {
-                    let position = resolve_pending_cursor(
+                    let position = resolve_cursor_for_frame(
                         &self.conn,
                         self.root,
                         &mut self.cursor,
                         pending_cursor,
-                    );
+                    )?;
                     self.finish_cursor(position, &mut image, source_width, source_height)
                         .map_err(CaptureFailure::fatal)?;
-                    return Ok(CapturedFrame {
-                        image,
-                        source_width,
-                        source_height,
+                    return Ok(CapturedDrawable {
+                        cursor: captured_cursor_snapshot(&self.cursor, position),
+                        frame: CapturedFrame {
+                            image,
+                            source_width,
+                            source_height,
+                        },
                     });
                 }
                 Err(error) => {
@@ -429,10 +1029,7 @@ impl X11Capture {
         }
 
         let root_depth = self.screen().map_err(CaptureFailure::fatal)?.root_depth;
-        let pending_cursor = self
-            .cursor
-            .prepare(&self.conn, self.root)
-            .map_err(CaptureFailure::fatal)?;
+        let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
         let image_result = self.shm_readback.capture_rgb(
             &self.conn,
             drawable,
@@ -451,7 +1048,7 @@ impl X11Capture {
             }
         };
         let position =
-            resolve_pending_cursor(&self.conn, self.root, &mut self.cursor, pending_cursor);
+            resolve_cursor_for_frame(&self.conn, self.root, &mut self.cursor, pending_cursor)?;
         self.finish_cursor(position, &mut image, source_width, source_height)
             .map_err(CaptureFailure::fatal)?;
         let image = if output_width == source_width && output_height == source_height {
@@ -465,10 +1062,13 @@ impl X11Capture {
             )
         };
 
-        Ok(CapturedFrame {
-            image,
-            source_width,
-            source_height,
+        Ok(CapturedDrawable {
+            cursor: captured_cursor_snapshot(&self.cursor, position),
+            frame: CapturedFrame {
+                image,
+                source_width,
+                source_height,
+            },
         })
     }
 
@@ -498,8 +1098,8 @@ impl X11Capture {
             .ok_or_else(|| invalid_data("X11 screen disappeared").into())
     }
 
-    fn sync_overlay_source(&mut self) -> RemoteResult<()> {
-        self.sync_overlay_source_with_force(false).map(|_| ())
+    fn sync_overlay_source(&mut self) -> RemoteResult<bool> {
+        self.sync_overlay_source_with_force(false)
     }
 
     fn sync_overlay_source_with_force(&mut self, force: bool) -> RemoteResult<bool> {
@@ -529,7 +1129,7 @@ impl X11Capture {
             OverlaySyncAction::None => {}
             OverlaySyncAction::Release => {
                 self.next_overlay_retry = None;
-                self.release_overlay();
+                self.release_overlay_runtime()?;
                 if self.requested_source == CaptureSource::Overlay {
                     return Err(invalid_data("X11 compositor stopped during remote capture").into());
                 }
@@ -539,6 +1139,7 @@ impl X11Capture {
                     self.drawable = overlay;
                     self.overlay_acquired = true;
                     self.next_overlay_retry = None;
+                    self.damage.sync_target(&self.conn, Some(overlay))?;
                 }
                 Err(error) if self.requested_source == CaptureSource::Auto => {
                     eprintln!(
@@ -582,11 +1183,14 @@ impl X11Capture {
                     if event.event == self.root && event.window == self.root =>
                 {
                     self.root_geometry.invalidate();
+                    // A rotation/topology epoch may retain the same WxH.
+                    self.damage.invalidate();
                 }
                 Event::RandrScreenChangeNotify(event) if event.root == self.root => {
                     // RandR reports the unrotated screen size in this event.
                     // Treat it only as an invalidator and query root geometry.
                     self.root_geometry.invalidate();
+                    self.damage.invalidate();
                 }
                 Event::XfixesCursorNotify(event) if event.window == self.root => {
                     self.cursor.observe_serial(event.cursor_serial);
@@ -596,13 +1200,26 @@ impl X11Capture {
                         self.compositor.invalidate();
                     }
                 }
+                Event::DamageNotify(event) => self.damage.observe_notification(&event),
                 Event::Error(error) => {
-                    return Err(io::Error::other(format!(
-                        "asynchronous X11 error while capturing: {error:?}"
-                    ))
-                    .into());
+                    match async_x11_error_action(error.extension_name.as_deref()) {
+                        AsyncX11ErrorAction::DisableDamage => {
+                            let message = format!("asynchronous XDamage request failed: {error:?}");
+                            self.damage.disable_recoverable(&self.conn, &message)?;
+                        }
+                        AsyncX11ErrorAction::Fatal => {
+                            return Err(io::Error::other(format!(
+                                "asynchronous X11 error while capturing: {error:?}"
+                            ))
+                            .into());
+                        }
+                    }
                 }
                 Event::Unknown(_) => {
+                    self.damage.disable_recoverable(
+                        &self.conn,
+                        "an unrecognized extension event made damage tracking unreliable",
+                    )?;
                     let geometry = self.root_geometry.fall_back_to_polling();
                     let cursor = self.cursor.fall_back_to_polling();
                     let compositor = self.compositor.fall_back_to_polling();
@@ -618,7 +1235,28 @@ impl X11Capture {
         Ok(())
     }
 
-    fn release_overlay(&mut self) {
+    fn damage_target(&self) -> Option<Window> {
+        self.overlay_acquired.then_some(self.drawable)
+    }
+
+    fn release_overlay_runtime(&mut self) -> RemoteResult<()> {
+        // Stop Damage notifications while the overlay drawable is still
+        // owned. Composite ReleaseOverlayWindow always comes afterwards.
+        self.damage.sync_target(&self.conn, None)?;
+        if let Some(scaler) = self.render_scaler.as_mut() {
+            scaler.release_source(&self.conn);
+        }
+        if self.overlay_acquired {
+            let _ = composite::release_overlay_window(&self.conn, self.root);
+            let _ = self.conn.flush();
+            self.overlay_acquired = false;
+        }
+        self.drawable = self.root;
+        Ok(())
+    }
+
+    fn release_overlay_cleanup(&mut self) {
+        self.damage.release_best_effort(&self.conn);
         if let Some(scaler) = self.render_scaler.as_mut() {
             scaler.release_source(&self.conn);
         }
@@ -652,19 +1290,47 @@ impl X11Capture {
     }
 }
 
-fn resolve_pending_cursor(
+fn prepare_cursor_for_frame<'a>(
+    conn: &'a RustConnection,
+    root: Window,
+    cursor: &mut CursorCapture,
+) -> Result<PendingCursor<'a>, CaptureFailure> {
+    match cursor.prepare(conn, root) {
+        Ok(pending) => Ok(pending),
+        Err(failure) if failure.kind == CursorFailureKind::Recoverable => {
+            eprintln!("remote: cursor capture stopped: {}", failure.error);
+            cursor.disable();
+            Ok(PendingCursor::Disabled)
+        }
+        Err(failure) => Err(CaptureFailure::fatal(failure.error)),
+    }
+}
+
+fn resolve_cursor_for_frame(
     conn: &RustConnection,
     root: Window,
     cursor: &mut CursorCapture,
     pending: PendingCursor<'_>,
-) -> Option<(i32, i32)> {
+) -> Result<Option<(i32, i32)>, CaptureFailure> {
     match cursor.resolve(conn, root, pending) {
-        Ok(position) => position,
-        Err(error) => {
-            eprintln!("remote: cursor capture stopped: {error}");
+        Ok(position) => Ok(position),
+        Err(failure) if failure.kind == CursorFailureKind::Recoverable => {
+            eprintln!("remote: cursor capture stopped: {}", failure.error);
             cursor.disable();
-            None
+            Ok(None)
         }
+        Err(failure) => Err(CaptureFailure::fatal(failure.error)),
+    }
+}
+
+fn captured_cursor_snapshot(
+    cursor: &CursorCapture,
+    position: Option<(i32, i32)>,
+) -> CursorSnapshot {
+    if cursor.mode == CursorMode::Disabled {
+        CursorSnapshot::Disabled
+    } else {
+        CursorSnapshot::Position(position)
     }
 }
 
@@ -839,7 +1505,34 @@ impl CursorCapture {
     }
 
     fn needs_shape(&self) -> bool {
-        self.mode == CursorMode::Polling || self.dirty || self.shape.is_none()
+        match self.mode {
+            CursorMode::Disabled => false,
+            CursorMode::Polling => true,
+            CursorMode::EventDriven => self.dirty || self.shape.is_none(),
+        }
+    }
+
+    fn gate_snapshot(
+        &self,
+        conn: &RustConnection,
+        root: Window,
+    ) -> Result<Option<CursorSnapshot>, CursorFailure> {
+        match self.mode {
+            CursorMode::Disabled => Ok(Some(CursorSnapshot::Disabled)),
+            // Polling mode needs a post-readback shape and position query on
+            // every frame, so it deliberately keeps the legacy per-tick path.
+            CursorMode::Polling => Ok(None),
+            CursorMode::EventDriven => {
+                let pointer = conn
+                    .query_pointer(root)
+                    .map_err(CursorFailure::core_connection)?
+                    .reply()
+                    .map_err(CursorFailure::core_reply)?;
+                Ok(Some(CursorSnapshot::Position(pointer_position(
+                    root, &pointer,
+                ))))
+            }
+        }
     }
 
     fn update_shape(&mut self, reply: &xfixes::GetCursorImageReply) -> RemoteResult<()> {
@@ -860,20 +1553,22 @@ impl CursorCapture {
         &self,
         conn: &'a RustConnection,
         root: Window,
-    ) -> RemoteResult<PendingCursor<'a>> {
+    ) -> Result<PendingCursor<'a>, CursorFailure> {
         match self.mode {
             CursorMode::Disabled => Ok(PendingCursor::Disabled),
             // Without cursor notifications, fetch both position and pixels
             // after readback to preserve the reliable legacy snapshot path.
             CursorMode::Polling => Ok(PendingCursor::Polling),
             CursorMode::EventDriven => {
-                let pointer = conn.query_pointer(root)?;
+                let pointer = conn
+                    .query_pointer(root)
+                    .map_err(CursorFailure::core_connection)?;
                 let shape = if self.needs_shape() {
                     match xfixes::get_cursor_image(conn) {
                         Ok(shape) => Some(shape),
                         Err(error) => {
                             pointer.discard_reply_and_errors();
-                            return Err(error.into());
+                            return Err(CursorFailure::extension_connection(error));
                         }
                     }
                 } else {
@@ -889,26 +1584,29 @@ impl CursorCapture {
         conn: &RustConnection,
         root: Window,
         pending: PendingCursor<'_>,
-    ) -> RemoteResult<Option<(i32, i32)>> {
+    ) -> Result<Option<(i32, i32)>, CursorFailure> {
         let pointer = match pending {
             PendingCursor::Disabled => return Ok(None),
             PendingCursor::Polling => {
-                let pointer = conn.query_pointer(root)?;
+                let pointer = conn
+                    .query_pointer(root)
+                    .map_err(CursorFailure::core_connection)?;
                 let shape = match xfixes::get_cursor_image(conn) {
                     Ok(shape) => shape,
                     Err(error) => {
                         pointer.discard_reply_and_errors();
-                        return Err(error.into());
+                        return Err(CursorFailure::extension_connection(error));
                     }
                 };
                 let pointer = match pointer.reply() {
                     Ok(pointer) => pointer,
                     Err(error) => {
                         shape.discard_reply_and_errors();
-                        return Err(error.into());
+                        return Err(CursorFailure::core_reply(error));
                     }
                 };
-                self.update_shape(&shape.reply()?)?;
+                let shape = shape.reply().map_err(CursorFailure::extension_reply)?;
+                self.update_shape(&shape).map_err(CursorFailure::data)?;
                 pointer
             }
             PendingCursor::EventDriven { pointer, shape } => {
@@ -918,11 +1616,12 @@ impl CursorCapture {
                         if let Some(shape) = shape {
                             shape.discard_reply_and_errors();
                         }
-                        return Err(error.into());
+                        return Err(CursorFailure::core_reply(error));
                     }
                 };
                 if let Some(shape) = shape {
-                    self.update_shape(&shape.reply()?)?;
+                    let shape = shape.reply().map_err(CursorFailure::extension_reply)?;
+                    self.update_shape(&shape).map_err(CursorFailure::data)?;
                 }
                 pointer
             }
@@ -2274,7 +2973,7 @@ fn scale_coordinate(value: i32, output: u32, source: u16) -> i32 {
 
 impl Drop for X11Capture {
     fn drop(&mut self) {
-        self.release_overlay();
+        self.release_overlay_cleanup();
         self.release_render_scaler();
         self.shm_readback.release(&self.conn);
         if let Ok(cookie) = self.conn.get_property(
@@ -2546,6 +3245,379 @@ mod tests {
         assert!("window".parse::<CaptureSource>().is_err());
     }
 
+    fn clean_damage_gate(
+        captured_at: Instant,
+        geometry: (u16, u16),
+        cursor: CursorSnapshot,
+    ) -> DamageGateState {
+        let mut gate = DamageGateState::new();
+        gate.subtract_queued();
+        gate.capture_succeeded(captured_at, geometry, cursor);
+        assert!(!gate.dirty);
+        gate
+    }
+
+    #[test]
+    fn damage_gate_skips_stable_frames_without_advancing_force_deadline() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorSnapshot::Position(Some((20, 30)));
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+
+        assert_eq!(
+            gate.decide(base + Duration::from_secs(1), geometry, cursor, false),
+            DamageGateDecision::NoChange
+        );
+        assert_eq!(gate.last_capture, Some(base));
+        assert_eq!(
+            gate.decide(base + DAMAGE_FORCE_REFRESH, geometry, cursor, false),
+            DamageGateDecision::Capture
+        );
+        // Merely deciding to capture (or a later mailbox/session failure) does
+        // not postpone the forced-refresh deadline.
+        assert_eq!(
+            gate.decide(base + Duration::from_secs(3), geometry, cursor, false),
+            DamageGateDecision::Capture
+        );
+
+        gate.subtract_queued();
+        gate.capture_succeeded(base + Duration::from_secs(3), geometry, cursor);
+        assert_eq!(
+            gate.decide(base + Duration::from_secs(4), geometry, cursor, false),
+            DamageGateDecision::NoChange
+        );
+    }
+
+    #[test]
+    fn dirty_animation_short_circuits_the_gate_probe_and_queries_only_for_capture() {
+        let gate = DamageGateState::new();
+        let gate_queries = Cell::new(0_u32);
+        let decision = gate
+            .decide_with_cursor_probe(Instant::now(), (1920, 1080), false, || {
+                gate_queries.set(gate_queries.get() + 1);
+                Ok::<_, ()>(Some(CursorSnapshot::Position(Some((1, 2)))))
+            })
+            .unwrap();
+        assert_eq!(decision, DamageGateDecision::Capture);
+        assert_eq!(
+            gate_queries.get(),
+            0,
+            "Damage already made capture mandatory"
+        );
+
+        // capture_drawable performs the one authoritative QueryPointer whose
+        // result is actually composited into the frame.
+        let capture_queries = Cell::new(0_u32);
+        if decision == DamageGateDecision::Capture {
+            capture_queries.set(capture_queries.get() + 1);
+        }
+        assert_eq!(capture_queries.get(), 1);
+    }
+
+    #[test]
+    fn only_a_clean_gate_probes_pointer_position() {
+        let base = Instant::now();
+        let geometry = (1280, 720);
+        let cursor = CursorSnapshot::Position(Some((10, 20)));
+        let gate = clean_damage_gate(base, geometry, cursor);
+        let probes = Cell::new(0_u32);
+        let stable = gate
+            .decide_with_cursor_probe(base + Duration::from_secs(1), geometry, false, || {
+                probes.set(probes.get() + 1);
+                Ok::<_, ()>(Some(cursor))
+            })
+            .unwrap();
+        assert_eq!(stable, DamageGateDecision::NoChange);
+        assert_eq!(probes.get(), 1);
+
+        for (now, candidate_geometry, shape_dirty) in [
+            (base, (640, 480), false),
+            (base, geometry, true),
+            (base + DAMAGE_FORCE_REFRESH, geometry, false),
+        ] {
+            let decision = gate
+                .decide_with_cursor_probe(now, candidate_geometry, shape_dirty, || {
+                    probes.set(probes.get() + 1);
+                    Ok::<_, ()>(Some(cursor))
+                })
+                .unwrap();
+            assert_eq!(decision, DamageGateDecision::Capture);
+        }
+        assert_eq!(probes.get(), 1, "mandatory captures must not probe again");
+    }
+
+    #[test]
+    fn cursor_probe_is_never_committed_in_place_of_the_captured_position() {
+        let base = Instant::now();
+        let geometry = (1024, 768);
+        let actual_a = CursorSnapshot::Position(Some((10, 10)));
+        let probe_b = CursorSnapshot::Position(Some((20, 20)));
+        let mut gate = clean_damage_gate(base, geometry, actual_a);
+
+        assert_eq!(
+            gate.decide_with_cursor_probe(
+                base + Duration::from_millis(1),
+                geometry,
+                false,
+                || Ok::<_, ()>(Some(probe_b)),
+            )
+            .unwrap(),
+            DamageGateDecision::Capture
+        );
+        gate.subtract_queued();
+        // The cursor moved back while capture was beginning; this is the
+        // position actually queried and composited by capture_drawable.
+        gate.capture_succeeded(base + Duration::from_millis(2), geometry, actual_a);
+        assert_eq!(gate.last_cursor, Some(actual_a));
+        assert_eq!(
+            gate.decide_with_cursor_probe(
+                base + Duration::from_millis(3),
+                geometry,
+                false,
+                || Ok::<_, ()>(Some(actual_a)),
+            )
+            .unwrap(),
+            DamageGateDecision::NoChange
+        );
+    }
+
+    #[test]
+    fn cursor_probe_failures_preserve_recoverable_and_fatal_session_policies() {
+        assert_eq!(
+            cursor_probe_failure_action(CursorFailureKind::Recoverable),
+            CursorProbeFailureAction::DisableAndCapture
+        );
+        assert_eq!(
+            cursor_probe_failure_action(CursorFailureKind::Fatal),
+            CursorProbeFailureAction::Fatal
+        );
+
+        let cursor = CursorCapture::disabled();
+        assert!(!cursor.needs_shape());
+        assert_eq!(
+            captured_cursor_snapshot(&cursor, None),
+            CursorSnapshot::Disabled,
+            "the recoverable path publishes a full frame with cursor disabled"
+        );
+    }
+
+    #[test]
+    fn xfixes_off_static_desktop_can_still_use_the_damage_gate() {
+        let base = Instant::now();
+        let geometry = (1920, 1080);
+        let cursor = CursorCapture::disabled();
+        let gate = clean_damage_gate(base, geometry, CursorSnapshot::Disabled);
+        let probes = Cell::new(0_u32);
+        let decision = gate
+            .decide_with_cursor_probe(
+                base + Duration::from_secs(1),
+                geometry,
+                cursor.needs_shape(),
+                || {
+                    probes.set(probes.get() + 1);
+                    Ok::<_, ()>(Some(CursorSnapshot::Disabled))
+                },
+            )
+            .unwrap();
+        assert_eq!(decision, DamageGateDecision::NoChange);
+        assert_eq!(probes.get(), 1);
+    }
+
+    #[test]
+    fn damage_gate_honors_all_visual_invalidators_including_same_size_epochs() {
+        let base = Instant::now();
+        let geometry = (1280, 720);
+        let cursor = CursorSnapshot::Position(Some((4, 5)));
+        let gate = clean_damage_gate(base, geometry, cursor);
+
+        assert_eq!(
+            gate.decide(base, (720, 1280), cursor, false),
+            DamageGateDecision::Capture
+        );
+        assert_eq!(
+            gate.decide(
+                base,
+                geometry,
+                CursorSnapshot::Position(Some((5, 4))),
+                false
+            ),
+            DamageGateDecision::Capture
+        );
+        assert_eq!(
+            gate.decide(base, geometry, cursor, true),
+            DamageGateDecision::Capture
+        );
+
+        // ConfigureNotify/RandR epochs explicitly invalidate Damage even if
+        // the authoritative geometry query returns the same dimensions.
+        let mut same_size_epoch = gate;
+        same_size_epoch.invalidate();
+        assert_eq!(
+            same_size_epoch.decide(base, geometry, cursor, false),
+            DamageGateDecision::Capture
+        );
+    }
+
+    #[test]
+    fn subtract_races_and_failed_readbacks_leave_damage_dirty() {
+        let base = Instant::now();
+        let geometry = (800, 600);
+        let cursor = CursorSnapshot::Disabled;
+        let mut gate = clean_damage_gate(base, geometry, cursor);
+
+        gate.subtract_queued();
+        assert!(!gate.dirty);
+        gate.invalidate();
+        gate.capture_succeeded(base + Duration::from_secs(1), geometry, cursor);
+        assert!(
+            gate.dirty,
+            "a notify drained during readback must survive commit"
+        );
+
+        gate.subtract_queued();
+        gate.capture_failed();
+        assert!(gate.dirty);
+        assert_eq!(
+            gate.last_capture,
+            Some(base + Duration::from_secs(1)),
+            "a failed readback must not advance the force-refresh baseline"
+        );
+    }
+
+    #[test]
+    fn successful_frame_commits_the_cursor_it_composited_not_the_gate_probe() {
+        let base = Instant::now();
+        let geometry = (1024, 768);
+        let probe_a = CursorSnapshot::Position(Some((10, 10)));
+        let captured_b = CursorSnapshot::Position(Some((20, 20)));
+        let mut gate = DamageGateState::new();
+        assert_eq!(
+            gate.decide(base, geometry, probe_a, false),
+            DamageGateDecision::Capture
+        );
+
+        gate.subtract_queued();
+        gate.capture_succeeded(base, geometry, captured_b);
+        assert_eq!(gate.last_cursor, Some(captured_b));
+        // A -> B during capture -> A afterwards must capture again; recording
+        // the probe A here would incorrectly suppress the frame containing B.
+        assert_eq!(
+            gate.decide(base + Duration::from_millis(1), geometry, probe_a, false),
+            DamageGateDecision::Capture
+        );
+    }
+
+    #[test]
+    fn damage_notifications_require_both_active_id_and_drawable() {
+        let base = Instant::now();
+        let active = DamageObject {
+            id: 41,
+            drawable: 42,
+        };
+        let mut tracker = DamageTracker {
+            mode: DamageMode::Active(active),
+            gate: clean_damage_gate(base, (640, 480), CursorSnapshot::Disabled),
+        };
+        let notify = |damage_id, drawable| damage::NotifyEvent {
+            damage: damage_id,
+            drawable,
+            ..Default::default()
+        };
+
+        tracker.observe_notification(&notify(40, active.drawable));
+        tracker.observe_notification(&notify(active.id, 43));
+        assert!(
+            !tracker.gate.dirty,
+            "stale and unrelated events are ignored"
+        );
+        tracker.observe_notification(&notify(active.id, active.drawable));
+        tracker.observe_notification(&notify(active.id, active.drawable));
+        assert!(
+            tracker.gate.dirty,
+            "duplicate matching events are idempotent"
+        );
+    }
+
+    #[test]
+    fn damage_lifecycle_rebinds_and_cleanup_consumes_one_active_resource() {
+        let first = DamageObject { id: 7, drawable: 8 };
+        assert_eq!(
+            damage_sync_action(DamageMode::Ready, Some(first.drawable)),
+            DamageSyncAction::Attach(first.drawable)
+        );
+        assert_eq!(
+            damage_sync_action(DamageMode::Active(first), Some(first.drawable)),
+            DamageSyncAction::None
+        );
+        assert_eq!(
+            damage_sync_action(DamageMode::Active(first), Some(9)),
+            DamageSyncAction::Attach(9)
+        );
+        assert_eq!(
+            damage_sync_action(DamageMode::Active(first), None),
+            DamageSyncAction::Detach
+        );
+
+        let mut tracker = DamageTracker {
+            mode: DamageMode::Active(first),
+            gate: DamageGateState::new(),
+        };
+        assert_eq!(tracker.take_active_for_cleanup(), Some(first));
+        assert_eq!(tracker.take_active_for_cleanup(), None);
+        assert_eq!(tracker.mode, DamageMode::Disabled);
+    }
+
+    #[test]
+    fn damage_setup_and_cursor_failure_policies_are_fail_safe() {
+        assert!(!damage_requested(CaptureSource::Root));
+        assert!(damage_requested(CaptureSource::Auto));
+        assert!(damage_requested(CaptureSource::Overlay));
+        assert!(!supports_damage_version(0, 9));
+        assert!(supports_damage_version(1, 0));
+
+        assert_eq!(
+            CursorFailure::extension_connection(ConnectionError::UnsupportedExtension).kind,
+            CursorFailureKind::Recoverable
+        );
+        assert_eq!(
+            CursorFailure::extension_reply(ReplyError::ConnectionError(
+                ConnectionError::UnsupportedExtension
+            ))
+            .kind,
+            CursorFailureKind::Recoverable
+        );
+        assert_eq!(
+            CursorFailure::core_connection(ConnectionError::UnsupportedExtension).kind,
+            CursorFailureKind::Fatal
+        );
+        assert_eq!(
+            CursorFailure::core_connection(ConnectionError::IoError(io::Error::other("closed")))
+                .kind,
+            CursorFailureKind::Fatal
+        );
+    }
+
+    #[test]
+    fn subtract_queue_and_async_rejection_have_distinct_failure_policies() {
+        assert_eq!(
+            damage_subtract_queue_action(&ConnectionError::UnsupportedExtension),
+            DamageSubtractQueueAction::Fatal
+        );
+        assert_eq!(
+            damage_subtract_queue_action(&ConnectionError::IoError(io::Error::other("closed"))),
+            DamageSubtractQueueAction::Fatal
+        );
+        assert_eq!(
+            async_x11_error_action(Some(damage::X11_EXTENSION_NAME)),
+            AsyncX11ErrorAction::DisableDamage
+        );
+        assert_eq!(
+            async_x11_error_action(Some(render::X11_EXTENSION_NAME)),
+            AsyncX11ErrorAction::Fatal
+        );
+        assert_eq!(async_x11_error_action(None), AsyncX11ErrorAction::Fatal);
+    }
+
     #[test]
     fn premultiplied_cursor_pixels_blend_and_clip() {
         let mut image = RgbImage::from_pixel(2, 1, image::Rgb([255, 255, 255]));
@@ -2700,7 +3772,11 @@ mod tests {
         let mut cursor = CursorCapture::new(true);
         assert!(cursor.fall_back_to_polling());
         assert_eq!(cursor.mode, CursorMode::Polling);
+        assert!(cursor.needs_shape());
         assert!(!cursor.fall_back_to_polling());
+
+        let disabled = CursorCapture::disabled();
+        assert!(!disabled.needs_shape());
     }
 
     #[test]

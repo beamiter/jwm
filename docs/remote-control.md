@@ -207,13 +207,34 @@ polling path. RandR resize or compositor-owner races are reconciled and retried
 once before XRender is disabled or Auto capture falls back to root; a transient
 overlay-acquire failure is retried with a bounded delay.
 
+When the Composite overlay and XDamage are available, the host also avoids a
+full drawable readback on a completely unchanged tick. It captures the first
+frame and then whenever the active overlay reports Damage, the compositor owner
+or root geometry changes, the cursor shape or pointer position changes, or a
+two-second forced-refresh deadline expires. A Damage subtract request is queued
+only after a tick commits to capture and before the synchronous drawable
+readback on the same connection. That reply is the ordering barrier; an
+asynchronous Damage rejection is drained before publication and permanently
+disables Damage gating. A notification arriving during readback remains dirty
+for the next tick, and failed readback never advances the deadline. The cursor
+baseline records the position actually composited into the successful frame,
+not an earlier gate probe. Root capture never negotiates XDamage. If the
+extension is absent or a Damage request is rejected, overlay capture
+permanently returns to the existing per-tick path for that session; X11
+transport failures still end the broken session instead of pretending to fall
+back.
+
 The host emits rolling pipeline telemetry every five seconds, including an
 explicit zero-send window while the sender is blocked on display credit or a
 socket write. The viewer emits each non-empty five-second activity window. Both
 peers emit one final non-empty partial snapshot during cleanup. Host counters
-cover scheduled, captured, skipped, published, dequeued, encoded and sent work,
+cover scheduled, captured, skipped, `damage-skipped`, published, dequeued,
+encoded and sent work,
 payload bytes, current/maximum outstanding credit and maximum queue age; its
-stage averages cover capture, queue, credit wait, encode and write time. Host
+stage averages cover capture, queue, credit wait, encode and write time.
+`skipped` is capture-mailbox backpressure, while `damage-skipped` means XDamage,
+geometry and cursor state proved that no readback was needed; those ticks do not
+re-submit an old image to unchanged-frame comparison. Host
 `replaced` means that a newer captured frame overwrote the one-slot
 capture-to-sender mailbox before encoding. Viewer `replaced` instead means that
 a newer decoded frame overwrote the viewer's one-slot latest-frame queue before
@@ -246,7 +267,10 @@ dimensions and all RGB bytes. An exact duplicate less than four seconds later
 is discarded without consuming an application/wire frame sequence, display
 credit or quality decision. Suppression never advances that four-second clock;
 at the boundary an unchanged keepalive is sent, keeping static sessions inside
-the viewer's shared eight-second video idle timeout. A failed write or flush
+the viewer's shared eight-second video idle timeout. The conservative timing
+budget is four seconds of unchanged keepalive plus the two-second forced
+XDamage refresh and one second of scheduling margin, still strictly below that
+eight-second timeout. A failed write or flush
 does not update the comparison baseline. Host telemetry reports discarded
 samples as `unchanged-suppressed` and successful periodic frames as
 `unchanged-keepalive`; both are subsets of `dequeued`, while only the latter is

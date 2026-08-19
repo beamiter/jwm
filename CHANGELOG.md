@@ -73,6 +73,18 @@ monorepo use independent Semantic Versions.
   is still sent every four seconds, safely inside the viewer's shared video
   idle timeout, and telemetry separates `unchanged-suppressed` from successful
   `unchanged-keepalive` frames.
+- Composite-overlay capture now uses XDamage notifications to avoid
+  reading back an entirely static desktop on every scheduled tick. Damage,
+  compositor-owner, geometry, cursor-shape and pointer-position changes still
+  capture immediately, while a two-second forced refresh feeds the existing
+  four-second unchanged-frame keepalive. Root mode does not negotiate XDamage,
+  and unavailable or rejected Damage requests permanently retain the proven
+  per-tick capture path without ending the session. Damage object creation and
+  destruction remain checked; per-frame Subtract is queued before the
+  synchronous readback ordering barrier, and a server rejection is drained as
+  an asynchronous Damage error in the same frame to disable gating. Host
+  telemetry reports event-suppressed ticks separately as `damage-skipped`
+  rather than conflating them with capture-mailbox backpressure.
 - `jwm-remote` uses MIT-SHM 1.2 file-descriptor segments for local X11 image
   readback when the server and transport support them. It reuses a bounded
   mapping and falls back to core `GetImage` on the same drawable and frame if

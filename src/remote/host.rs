@@ -9,7 +9,7 @@ use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
 };
-use super::x11_capture::{CaptureSource, CapturedFrame, X11Capture};
+use super::x11_capture::{CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -289,6 +289,7 @@ struct HostTelemetryWindow {
     scheduled: u64,
     captured: u64,
     skipped: u64,
+    damage_skipped: u64,
     published: u64,
     replaced: u64,
     dequeued: u64,
@@ -317,6 +318,7 @@ impl HostTelemetryWindow {
         self.scheduled != 0
             || self.captured != 0
             || self.skipped != 0
+            || self.damage_skipped != 0
             || self.published != 0
             || self.replaced != 0
             || self.dequeued != 0
@@ -375,6 +377,12 @@ impl HostTelemetry {
 
     fn record_skipped(&self) {
         self.update(|window| window.skipped = window.skipped.saturating_add(1));
+    }
+
+    fn record_damage_skipped(&self) {
+        self.update(|window| {
+            window.damage_skipped = window.damage_skipped.saturating_add(1);
+        });
     }
 
     fn record_captured(&self, elapsed: Duration) {
@@ -1437,7 +1445,10 @@ fn stream_frames(
                 CaptureDecision::Closed => break,
             }
             let capture_started = Instant::now();
-            let frame = capture.frame()?;
+            let Some(frame) = captured_frame_from_outcome(capture.frame()?) else {
+                telemetry.record_damage_skipped();
+                continue;
+            };
             telemetry.record_captured(capture_started.elapsed());
             let pending = PendingFrame {
                 frame,
@@ -1479,6 +1490,13 @@ fn stream_frames(
         StopCause::Input | StopCause::Graceful => Ok(()),
         StopCause::ThreadPanic => sender_result,
         StopCause::None => capture_result.and(sender_result),
+    }
+}
+
+fn captured_frame_from_outcome(outcome: CaptureOutcome) -> Option<CapturedFrame> {
+    match outcome {
+        CaptureOutcome::Frame(frame) => Some(frame),
+        CaptureOutcome::NoChange => None,
     }
 }
 
@@ -1655,11 +1673,12 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.bytes as f64 * 8.0 / seconds / 1_000_000.0
     };
     eprintln!(
-        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
+        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
         seconds,
         window.scheduled,
         window.captured,
         window.skipped,
+        window.damage_skipped,
         window.published,
         window.replaced,
         window.dequeued,
@@ -2083,9 +2102,41 @@ mod tests {
 
     #[test]
     fn unchanged_keepalive_cadence_stays_inside_viewer_frame_idle_budget() {
+        let scheduling_margin = Duration::from_secs(1);
         assert!(
-            UNCHANGED_FRAME_KEEPALIVE.saturating_mul(2) <= crate::remote::VIDEO_FRAME_IDLE_TIMEOUT
+            UNCHANGED_FRAME_KEEPALIVE
+                + crate::remote::x11_capture::DAMAGE_FORCE_REFRESH
+                + scheduling_margin
+                < crate::remote::VIDEO_FRAME_IDLE_TIMEOUT
         );
+    }
+
+    #[test]
+    fn damage_no_change_never_requeues_the_previous_image() {
+        assert!(captured_frame_from_outcome(CaptureOutcome::NoChange).is_none());
+        let frame = test_captured_frame(17);
+        assert_eq!(
+            captured_frame_from_outcome(CaptureOutcome::Frame(frame))
+                .unwrap()
+                .image
+                .get_pixel(0, 0)
+                .0,
+            [17, 0, 0]
+        );
+    }
+
+    #[test]
+    fn damage_skips_are_activity_but_not_mailbox_skips() {
+        let base = Instant::now();
+        let telemetry = HostTelemetry::new_at(base);
+        telemetry.record_damage_skipped();
+        let window = telemetry
+            .take_final_at(base + Duration::from_millis(1))
+            .unwrap()
+            .window;
+        assert_eq!(window.damage_skipped, 1);
+        assert_eq!(window.skipped, 0);
+        assert_eq!(window.captured, 0);
     }
 
     #[test]
@@ -2642,6 +2693,7 @@ mod tests {
             telemetry.record_scheduled();
         }
         telemetry.record_skipped();
+        telemetry.record_damage_skipped();
         for elapsed in [3, 4, 5] {
             telemetry.record_captured(Duration::from_millis(elapsed));
         }
@@ -2687,6 +2739,7 @@ mod tests {
         assert_eq!(sent_window.scheduled, 4);
         assert_eq!(sent_window.captured, 3);
         assert_eq!(sent_window.skipped, 1);
+        assert_eq!(sent_window.damage_skipped, 1);
         assert_eq!(sent_window.published, 3);
         assert_eq!(sent_window.replaced, 1);
         assert_eq!(sent_window.dequeued, 2);
