@@ -92,6 +92,13 @@ monorepo use independent Semantic Versions.
   retains a fully presented backing pixmap for Expose events; nonstandard
   visuals keep the generic/core path, and resize bursts allocate only their
   final size.
+- Enlarging the remote viewer no longer makes the client resample and upload a
+  window-sized image for every frame. When both fitted dimensions upscale the
+  encoded image, XRender 0.10+ retains and scales a source-sized server pixmap
+  into the letterboxed backing pixmap. This improves large-window presentation
+  without increasing the host's encoded resolution or network traffic;
+  one-to-one/downscaled presentation and unavailable XRender retain the
+  existing CPU upload path.
 - The remote viewer no longer wakes every four milliseconds while idle. It
   blocks on the X11 connection, a video-receiver wake descriptor, and the next
   heartbeat, telemetry or deferred-key deadline, while checking x11rb's

@@ -15,8 +15,11 @@ use std::time::{Duration, Instant};
 use image::RgbImage;
 use x11rb::CURRENT_TIME;
 use x11rb::connection::{Connection, RequestConnection};
-use x11rb::errors::ReplyError;
+use x11rb::errors::{ConnectionError, ReplyError, ReplyOrIdError};
 use x11rb::image::{BitsPerPixel, Image as XImage, ImageOrder, PixelLayout, ScanlinePad};
+use x11rb::protocol::render::{
+    self, CreatePictureAux, PictOp, Pictformat, Picture, Repeat, Transform,
+};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ConnectionExt as _, CreateGCAux, CreateWindowAux, Cursor, EventMask, Format,
     Gcontext, GrabMode, GrabStatus, ImageFormat, ImageOrder as X11ImageOrder, Mapping, NotifyMode,
@@ -35,6 +38,10 @@ const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
 const XK_F12: u32 = 0xffc9;
 const KEY_RELEASE_DEFER: Duration = Duration::from_millis(8);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
+const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
+const RENDER_MIN_VERSION: (u32, u32) = (0, 10);
+const XFIXED_ONE: i32 = 1 << 16;
+const RENDER_FILTER_BILINEAR: &[u8] = b"bilinear";
 
 /// One local viewer operation for the remote-control client to send upstream.
 ///
@@ -61,6 +68,7 @@ pub enum ViewerEvent {
 
 #[derive(Clone, Debug)]
 struct StoredFrame {
+    sequence: u64,
     source_width: u16,
     source_height: u16,
     image: RgbImage,
@@ -101,6 +109,7 @@ pub struct Viewer {
     native_pixel_writer: NativePixelWriter,
     native_image: Option<XImage<'static>>,
     shm_upload: ShmUpload,
+    render_upscale: RenderUpscale,
     width: u16,
     height: u16,
     backing_valid: bool,
@@ -172,6 +181,8 @@ impl Viewer {
         } else {
             ShmUpload::Disabled
         };
+        let mut render_upscale =
+            RenderUpscale::connect(&conn, screen_num, root, root_depth, root_visual)?;
 
         let wm_protocols = intern_atom(&conn, b"WM_PROTOCOLS")?;
         let wm_delete_window = intern_atom(&conn, b"WM_DELETE_WINDOW")?;
@@ -222,6 +233,7 @@ impl Viewer {
         let backing = conn.generate_id()?;
         conn.create_pixmap(root_depth, backing, window, initial_width, initial_height)?
             .check()?;
+        render_upscale.attach_backing(&conn, backing)?;
 
         conn.change_property8(
             PropMode::REPLACE,
@@ -272,6 +284,7 @@ impl Viewer {
             native_pixel_writer,
             native_image: None,
             shm_upload,
+            render_upscale,
             width: initial_width,
             height: initial_height,
             backing_valid: false,
@@ -534,6 +547,7 @@ impl Viewer {
         }
         validate_frame(&frame)?;
         self.last_frame = Some(StoredFrame {
+            sequence: frame.sequence,
             source_width: frame.source_width,
             source_height: frame.source_height,
             image: frame.image,
@@ -687,8 +701,15 @@ impl Viewer {
         if self.closed {
             return Ok(());
         }
+        if let Err(error) = self.render_upscale.replace_backing(&self.conn, replacement) {
+            // A fatal connection error leaves it unknowable whether a new
+            // Picture wraps `replacement`; connection teardown owns cleanup.
+            return Err(error);
+        }
         let previous = std::mem::replace(&mut self.backing, replacement);
         self.backing_valid = false;
+        // RenderUpscale::replace_backing has already freed the Picture that
+        // wrapped `previous`, so the drawable can now be released safely.
         self.conn.free_pixmap(previous)?.check()?;
         Ok(())
     }
@@ -706,13 +727,72 @@ impl Viewer {
     }
 
     fn populate_backing(&mut self) -> RemoteResult<()> {
-        let upload = if let Some(frame) = self.last_frame.as_ref() {
+        if let Some(frame) = self.last_frame.as_ref() {
             let image_width = u16::try_from(frame.image.width())
                 .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
             let image_height = u16::try_from(frame.image.height())
                 .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
             let geometry = letterbox(self.width, self.height, image_width, image_height)
                 .ok_or_else(|| invalid_data("cannot draw an empty remote frame"))?;
+            let mut render_failure = None;
+
+            if should_use_render_upscale(geometry, image_width, image_height) {
+                let image = if self.render_upscale.source_needs_upload(
+                    frame.sequence,
+                    image_width,
+                    image_height,
+                ) {
+                    let image = ensure_native_image(
+                        &mut self.native_image,
+                        image_width,
+                        image_height,
+                        self.depth,
+                        self.conn.setup(),
+                    )?;
+                    write_native_pixels(
+                        image,
+                        &frame.image,
+                        self.pixel_layout,
+                        self.native_pixel_writer,
+                    )?;
+                    Some(&*image)
+                } else {
+                    None
+                };
+                match self.render_upscale.prepare_source(
+                    &self.conn,
+                    &mut self.shm_upload,
+                    image,
+                    self.gc,
+                    frame.sequence,
+                    image_width,
+                    image_height,
+                    &mut self.deferred_events,
+                )? {
+                    RenderProgress::Ready => {
+                        fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
+                        match self.render_upscale.composite(
+                            &self.conn,
+                            geometry,
+                            image_width,
+                            image_height,
+                        )? {
+                            RenderProgress::Ready => {
+                                self.conn.flush()?;
+                                self.backing_valid = true;
+                                return Ok(());
+                            }
+                            RenderProgress::Recoverable(error) => {
+                                render_failure = Some(error);
+                            }
+                            RenderProgress::Unavailable => {}
+                        }
+                    }
+                    RenderProgress::Recoverable(error) => render_failure = Some(error),
+                    RenderProgress::Unavailable => {}
+                }
+            }
+
             let resized = if (geometry.width, geometry.height) == (image_width, image_height) {
                 Cow::Borrowed(&frame.image)
             } else {
@@ -740,30 +820,8 @@ impl Viewer {
                 .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
             let dst_y = i16::try_from(geometry.y)
                 .map_err(|_| invalid_data("letterbox Y offset exceeds the X11 coordinate range"))?;
-            Some((dst_x, dst_y))
-        } else {
-            None
-        };
-        let fill = self.conn.poly_fill_rectangle(
-            self.backing,
-            self.gc,
-            &[Rectangle {
-                x: 0,
-                y: 0,
-                width: self.width,
-                height: self.height,
-            }],
-        )?;
-        // Consume the fill's checked result before waiting for an SHM
-        // Completion. Otherwise wait_for_event could dequeue this request's
-        // X11 error and turn it into an unrelated deferred event.
-        fill.check()?;
-        if let Some((dst_x, dst_y)) = upload {
-            let image = self
-                .native_image
-                .as_ref()
-                .ok_or_else(|| invalid_data("native X11 image buffer was not allocated"))?;
-            self.shm_upload.upload_or_core(
+            fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
+            let cpu_result = self.shm_upload.upload_or_core(
                 &self.conn,
                 image,
                 self.backing,
@@ -771,7 +829,15 @@ impl Viewer {
                 dst_x,
                 dst_y,
                 &mut self.deferred_events,
-            )?;
+            );
+            // Commit the same-frame CPU fallback before disabling Render. If
+            // core presentation fails, preserve Render state and report the
+            // core error instead of misdiagnosing the connection.
+            finish_render_fallback(cpu_result, render_failure, |error| {
+                self.render_upscale.disable(&self.conn, error);
+            })?;
+        } else {
+            fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
         }
         // Populate the retained pixmap completely before presenting it. If any
         // fill/upload fails, no CopyArea has been queued and the previous
@@ -825,6 +891,7 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
+        self.render_upscale.release(&self.conn);
         self.shm_upload.release(&self.conn);
         if self.grabbed {
             let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
@@ -833,6 +900,556 @@ impl Drop for Viewer {
         let _ = self.conn.free_cursor(self.blank_cursor);
         let _ = self.conn.flush();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RenderSourceKey {
+    sequence: u64,
+    width: u16,
+    height: u16,
+}
+
+struct RenderSource {
+    key: RenderSourceKey,
+    pixmap: Pixmap,
+    picture: Picture,
+    transform: Option<(u16, u16)>,
+}
+
+struct EnabledRenderUpscale {
+    root: Window,
+    depth: u8,
+    format: Pictformat,
+    target: Option<Picture>,
+    source: Option<RenderSource>,
+    reported_active: bool,
+}
+
+enum RenderUpscale {
+    Disabled,
+    Enabled(EnabledRenderUpscale),
+}
+
+enum RenderFailure {
+    Recoverable(RemoteError),
+    Fatal(RemoteError),
+}
+
+enum RenderProgress {
+    Ready,
+    Unavailable,
+    Recoverable(RemoteError),
+}
+
+impl RenderFailure {
+    fn from_connection(error: ConnectionError) -> Self {
+        Self::Fatal(error.into())
+    }
+
+    fn from_reply(error: ReplyError) -> Self {
+        match error {
+            ReplyError::X11Error(error) => Self::Recoverable(ReplyError::X11Error(error).into()),
+            ReplyError::ConnectionError(error) => Self::Fatal(error.into()),
+        }
+    }
+
+    fn from_id(error: ReplyOrIdError) -> Self {
+        match error {
+            ReplyOrIdError::IdsExhausted => Self::Recoverable(error.into()),
+            ReplyOrIdError::X11Error(error) => {
+                Self::Recoverable(ReplyOrIdError::X11Error(error).into())
+            }
+            ReplyOrIdError::ConnectionError(error) => Self::Fatal(error.into()),
+        }
+    }
+
+    fn from_remote(error: RemoteError) -> Self {
+        let error = match error.downcast::<ReplyError>() {
+            Ok(error) => return Self::from_reply(*error),
+            Err(error) => error,
+        };
+        let error = match error.downcast::<ReplyOrIdError>() {
+            Ok(error) => return Self::from_id(*error),
+            Err(error) => error,
+        };
+        match error.downcast::<ConnectionError>() {
+            Ok(error) => Self::from_connection(*error),
+            Err(error) => Self::Recoverable(error),
+        }
+    }
+}
+
+impl RenderUpscale {
+    fn connect(
+        conn: &RustConnection,
+        screen_num: usize,
+        root: Window,
+        depth: u8,
+        root_visual: u32,
+    ) -> RemoteResult<Self> {
+        if conn
+            .extension_information(render::X11_EXTENSION_NAME)?
+            .is_none()
+        {
+            eprintln!("jwm-remote: XRender unavailable for viewer upscaling; using CPU scaling");
+            return Ok(Self::Disabled);
+        }
+
+        let version =
+            match render::query_version(conn, RENDER_CLIENT_VERSION.0, RENDER_CLIENT_VERSION.1)?
+                .reply()
+            {
+                Ok(version) => version,
+                Err(ReplyError::X11Error(error)) => {
+                    eprintln!(
+                        "jwm-remote: XRender version query rejected ({error:?}); using CPU scaling"
+                    );
+                    return Ok(Self::Disabled);
+                }
+                Err(ReplyError::ConnectionError(error)) => return Err(error.into()),
+            };
+        if !supports_render_version(version.major_version, version.minor_version) {
+            eprintln!(
+                "jwm-remote: XRender {}.{} lacks 0.10 picture transforms; using CPU scaling",
+                version.major_version, version.minor_version
+            );
+            return Ok(Self::Disabled);
+        }
+
+        let formats = match render::query_pict_formats(conn)?.reply() {
+            Ok(formats) => formats,
+            Err(ReplyError::X11Error(error)) => {
+                eprintln!(
+                    "jwm-remote: XRender format query rejected ({error:?}); using CPU scaling"
+                );
+                return Ok(Self::Disabled);
+            }
+            Err(ReplyError::ConnectionError(error)) => return Err(error.into()),
+        };
+        let format = formats.screens.get(screen_num).and_then(|screen| {
+            screen
+                .depths
+                .iter()
+                .filter(|candidate| candidate.depth == depth)
+                .flat_map(|candidate| candidate.visuals.iter())
+                .find_map(|candidate| (candidate.visual == root_visual).then_some(candidate.format))
+        });
+        let Some(format) = format else {
+            eprintln!("jwm-remote: XRender has no root visual format; using CPU scaling");
+            return Ok(Self::Disabled);
+        };
+
+        Ok(Self::Enabled(EnabledRenderUpscale {
+            root,
+            depth,
+            format,
+            target: None,
+            source: None,
+            reported_active: false,
+        }))
+    }
+
+    fn attach_backing(&mut self, conn: &RustConnection, backing: Pixmap) -> RemoteResult<()> {
+        let attempt = match self {
+            Self::Disabled => return Ok(()),
+            Self::Enabled(upscale) => upscale.create_target(conn, backing),
+        };
+        match attempt {
+            Ok(target) => {
+                if let Self::Enabled(upscale) = self {
+                    upscale.target = Some(target);
+                }
+                Ok(())
+            }
+            Err(RenderFailure::Recoverable(error)) => {
+                self.disable(conn, &error);
+                Ok(())
+            }
+            Err(RenderFailure::Fatal(error)) => Err(error),
+        }
+    }
+
+    /// Point the destination picture at `backing`, releasing the picture for
+    /// the old Viewer backing before its pixmap can be freed by the caller.
+    fn replace_backing(&mut self, conn: &RustConnection, backing: Pixmap) -> RemoteResult<()> {
+        let attempt = match self {
+            Self::Disabled => return Ok(()),
+            Self::Enabled(upscale) => upscale.create_target(conn, backing),
+        };
+        let target = match attempt {
+            Ok(target) => target,
+            Err(RenderFailure::Recoverable(error)) => {
+                self.disable(conn, &error);
+                return Ok(());
+            }
+            Err(RenderFailure::Fatal(error)) => return Err(error),
+        };
+
+        let old = match self {
+            Self::Disabled => return Ok(()),
+            Self::Enabled(upscale) => upscale.target.replace(target),
+        };
+        if let Some(old) = old
+            && let Err(error) = free_render_picture(conn, old)
+        {
+            return self.recover_or_fail(conn, error);
+        }
+        Ok(())
+    }
+
+    fn source_needs_upload(&self, sequence: u64, width: u16, height: u16) -> bool {
+        let key = RenderSourceKey {
+            sequence,
+            width,
+            height,
+        };
+        match self {
+            Self::Disabled => false,
+            Self::Enabled(upscale) => {
+                render_source_needs_upload(upscale.source.as_ref().map(|source| source.key), key)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_source(
+        &mut self,
+        conn: &RustConnection,
+        upload: &mut ShmUpload,
+        image: Option<&XImage<'_>>,
+        gc: Gcontext,
+        sequence: u64,
+        width: u16,
+        height: u16,
+        deferred_events: &mut VecDeque<Event>,
+    ) -> RemoteResult<RenderProgress> {
+        let key = RenderSourceKey {
+            sequence,
+            width,
+            height,
+        };
+        let attempt = match self {
+            Self::Disabled => return Ok(RenderProgress::Unavailable),
+            Self::Enabled(upscale) => {
+                upscale.ensure_source(conn, upload, image, gc, key, deferred_events)
+            }
+        };
+        match attempt {
+            Ok(()) => Ok(RenderProgress::Ready),
+            Err(RenderFailure::Recoverable(error)) => Ok(RenderProgress::Recoverable(error)),
+            Err(RenderFailure::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn composite(
+        &mut self,
+        conn: &RustConnection,
+        geometry: Letterbox,
+        source_width: u16,
+        source_height: u16,
+    ) -> RemoteResult<RenderProgress> {
+        let attempt = match self {
+            Self::Disabled => return Ok(RenderProgress::Unavailable),
+            Self::Enabled(upscale) => {
+                upscale.composite(conn, geometry, source_width, source_height)
+            }
+        };
+        match attempt {
+            Ok(()) => Ok(RenderProgress::Ready),
+            Err(RenderFailure::Recoverable(error)) => Ok(RenderProgress::Recoverable(error)),
+            Err(RenderFailure::Fatal(error)) => Err(error),
+        }
+    }
+
+    fn recover_or_fail(&mut self, conn: &RustConnection, error: RenderFailure) -> RemoteResult<()> {
+        match error {
+            RenderFailure::Recoverable(error) => {
+                self.disable(conn, &error);
+                Ok(())
+            }
+            RenderFailure::Fatal(error) => Err(error),
+        }
+    }
+
+    fn disable(&mut self, conn: &RustConnection, error: &RemoteError) {
+        eprintln!("jwm-remote: XRender viewer upscaling stopped ({error}); using CPU scaling");
+        self.release(conn);
+        *self = Self::Disabled;
+    }
+
+    fn release(&mut self, conn: &RustConnection) {
+        if let Self::Enabled(upscale) = self {
+            if let Some(target) = upscale.target.take() {
+                free_render_picture_unchecked(conn, target);
+            }
+            if let Some(source) = upscale.source.take() {
+                free_render_source_unchecked(conn, source);
+            }
+        }
+    }
+}
+
+impl EnabledRenderUpscale {
+    fn create_target(
+        &self,
+        conn: &RustConnection,
+        backing: Pixmap,
+    ) -> Result<Picture, RenderFailure> {
+        let picture = conn.generate_id().map_err(RenderFailure::from_id)?;
+        render::create_picture(
+            conn,
+            picture,
+            backing,
+            self.format,
+            &CreatePictureAux::new(),
+        )
+        .map_err(RenderFailure::from_connection)?
+        .check()
+        .map_err(RenderFailure::from_reply)?;
+        Ok(picture)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_source(
+        &mut self,
+        conn: &RustConnection,
+        upload: &mut ShmUpload,
+        image: Option<&XImage<'_>>,
+        gc: Gcontext,
+        key: RenderSourceKey,
+        deferred_events: &mut VecDeque<Event>,
+    ) -> Result<(), RenderFailure> {
+        if !render_source_needs_upload(self.source.as_ref().map(|source| source.key), key) {
+            return Ok(());
+        }
+        let image = image.ok_or_else(|| {
+            RenderFailure::Recoverable(
+                invalid_data("XRender source upload buffer is missing").into(),
+            )
+        })?;
+        if let Some(source) = self.source.as_mut()
+            && !render_source_needs_replacement(Some(source.key), key)
+        {
+            upload
+                .upload_or_core(conn, image, source.pixmap, gc, 0, 0, deferred_events)
+                .map_err(RenderFailure::from_remote)?;
+            // Commit the sequence only after the complete SHM/core upload.
+            // A failed partial core upload is retried on the next redraw.
+            source.key = key;
+            return Ok(());
+        }
+
+        let pixmap = conn.generate_id().map_err(RenderFailure::from_id)?;
+        conn.create_pixmap(self.depth, pixmap, self.root, key.width, key.height)
+            .map_err(RenderFailure::from_connection)?
+            .check()
+            .map_err(RenderFailure::from_reply)?;
+        let picture = match conn.generate_id().map_err(RenderFailure::from_id) {
+            Ok(picture) => picture,
+            Err(error) => {
+                free_render_pixmap_unchecked(conn, pixmap);
+                return Err(error);
+            }
+        };
+        let create = render::create_picture(
+            conn,
+            picture,
+            pixmap,
+            self.format,
+            &CreatePictureAux::new().repeat(Repeat::PAD),
+        )
+        .map_err(RenderFailure::from_connection)
+        .and_then(|cookie| cookie.check().map_err(RenderFailure::from_reply));
+        if let Err(error) = create {
+            free_render_pixmap_unchecked(conn, pixmap);
+            return Err(error);
+        }
+        let filter = render::set_picture_filter(conn, picture, RENDER_FILTER_BILINEAR, &[])
+            .map_err(RenderFailure::from_connection)
+            .and_then(|cookie| cookie.check().map_err(RenderFailure::from_reply));
+        if let Err(error) = filter {
+            free_render_picture_unchecked(conn, picture);
+            free_render_pixmap_unchecked(conn, pixmap);
+            return Err(error);
+        }
+        if let Err(error) = upload.upload_or_core(conn, image, pixmap, gc, 0, 0, deferred_events) {
+            free_render_picture_unchecked(conn, picture);
+            free_render_pixmap_unchecked(conn, pixmap);
+            return Err(RenderFailure::from_remote(error));
+        }
+
+        let old = self.source.replace(RenderSource {
+            key,
+            pixmap,
+            picture,
+            transform: None,
+        });
+        if let Some(old) = old {
+            free_render_source(conn, old)?;
+        }
+        Ok(())
+    }
+
+    fn composite(
+        &mut self,
+        conn: &RustConnection,
+        geometry: Letterbox,
+        source_width: u16,
+        source_height: u16,
+    ) -> Result<(), RenderFailure> {
+        let source = self.source.as_mut().ok_or_else(|| {
+            RenderFailure::Recoverable(invalid_data("XRender source picture is missing").into())
+        })?;
+        let target = self.target.ok_or_else(|| {
+            RenderFailure::Recoverable(invalid_data("XRender target picture is missing").into())
+        })?;
+        let transform_key = (geometry.width, geometry.height);
+        if render_transform_needs_update(source.transform, transform_key) {
+            let transform =
+                scale_transform(source_width, source_height, geometry.width, geometry.height)
+                    .map_err(RenderFailure::Recoverable)?;
+            render::set_picture_transform(conn, source.picture, transform)
+                .map_err(RenderFailure::from_connection)?
+                .check()
+                .map_err(RenderFailure::from_reply)?;
+            source.transform = Some(transform_key);
+        }
+        render::composite(
+            conn,
+            PictOp::SRC,
+            source.picture,
+            x11rb::NONE,
+            target,
+            0,
+            0,
+            0,
+            0,
+            i16::try_from(geometry.x).map_err(|_| {
+                RenderFailure::Recoverable(
+                    invalid_data("XRender letterbox X offset exceeds protocol range").into(),
+                )
+            })?,
+            i16::try_from(geometry.y).map_err(|_| {
+                RenderFailure::Recoverable(
+                    invalid_data("XRender letterbox Y offset exceeds protocol range").into(),
+                )
+            })?,
+            geometry.width,
+            geometry.height,
+        )
+        .map_err(RenderFailure::from_connection)?
+        .check()
+        .map_err(RenderFailure::from_reply)?;
+        if !self.reported_active {
+            eprintln!(
+                "jwm-remote: XRender viewer upscale {}x{} -> {}x{} active",
+                source_width, source_height, geometry.width, geometry.height
+            );
+            self.reported_active = true;
+        }
+        Ok(())
+    }
+}
+
+fn free_render_picture(conn: &RustConnection, picture: Picture) -> Result<(), RenderFailure> {
+    render::free_picture(conn, picture)
+        .map_err(RenderFailure::from_connection)?
+        .check()
+        .map_err(RenderFailure::from_reply)
+}
+
+fn free_render_source(conn: &RustConnection, source: RenderSource) -> Result<(), RenderFailure> {
+    let picture_result = free_render_picture(conn, source.picture);
+    let pixmap_result = conn
+        .free_pixmap(source.pixmap)
+        .map_err(RenderFailure::from_connection)
+        .and_then(|cookie| cookie.check().map_err(RenderFailure::from_reply));
+    match (picture_result, pixmap_result) {
+        (Err(RenderFailure::Fatal(error)), _) | (_, Err(RenderFailure::Fatal(error))) => {
+            Err(RenderFailure::Fatal(error))
+        }
+        (Err(RenderFailure::Recoverable(error)), _)
+        | (_, Err(RenderFailure::Recoverable(error))) => Err(RenderFailure::Recoverable(error)),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn free_render_picture_unchecked(conn: &RustConnection, picture: Picture) {
+    if let Ok(cookie) = render::free_picture(conn, picture) {
+        let _ = cookie.check();
+    }
+}
+
+fn free_render_pixmap_unchecked(conn: &RustConnection, pixmap: Pixmap) {
+    if let Ok(cookie) = conn.free_pixmap(pixmap) {
+        let _ = cookie.check();
+    }
+}
+
+fn free_render_source_unchecked(conn: &RustConnection, source: RenderSource) {
+    free_render_picture_unchecked(conn, source.picture);
+    free_render_pixmap_unchecked(conn, source.pixmap);
+}
+
+fn supports_render_version(major: u32, minor: u32) -> bool {
+    (major, minor) >= RENDER_MIN_VERSION
+}
+
+fn render_source_needs_upload(current: Option<RenderSourceKey>, incoming: RenderSourceKey) -> bool {
+    current != Some(incoming)
+}
+
+fn render_source_needs_replacement(
+    current: Option<RenderSourceKey>,
+    incoming: RenderSourceKey,
+) -> bool {
+    current
+        .is_none_or(|current| (current.width, current.height) != (incoming.width, incoming.height))
+}
+
+fn render_transform_needs_update(current: Option<(u16, u16)>, incoming: (u16, u16)) -> bool {
+    current != Some(incoming)
+}
+
+fn finish_render_fallback<E>(
+    cpu_result: Result<(), E>,
+    render_error: Option<E>,
+    disable: impl FnOnce(&E),
+) -> Result<(), E> {
+    cpu_result?;
+    if let Some(error) = render_error.as_ref() {
+        disable(error);
+    }
+    Ok(())
+}
+
+fn scale_transform(
+    source_width: u16,
+    source_height: u16,
+    output_width: u16,
+    output_height: u16,
+) -> RemoteResult<Transform> {
+    fn fixed_ratio(source: u16, output: u16) -> RemoteResult<i32> {
+        if output == 0 {
+            return Err(invalid_data("XRender output dimension is zero").into());
+        }
+        let denominator = i64::from(output);
+        let fixed = ((i64::from(source) << 16) + denominator / 2) / denominator;
+        i32::try_from(fixed)
+            .map_err(|_| invalid_data("XRender scale transform exceeds 16.16 range").into())
+    }
+
+    Ok(Transform {
+        matrix11: fixed_ratio(source_width, output_width)?,
+        matrix12: 0,
+        matrix13: 0,
+        matrix21: 0,
+        matrix22: fixed_ratio(source_height, output_height)?,
+        matrix23: 0,
+        matrix31: 0,
+        matrix32: 0,
+        matrix33: XFIXED_ONE,
+    })
 }
 
 enum ShmUpload {
@@ -1365,6 +1982,30 @@ fn backing_work(valid: bool) -> BackingWork {
     }
 }
 
+fn fill_backing(
+    conn: &RustConnection,
+    backing: Pixmap,
+    gc: Gcontext,
+    width: u16,
+    height: u16,
+) -> RemoteResult<()> {
+    let fill = conn.poly_fill_rectangle(
+        backing,
+        gc,
+        &[Rectangle {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }],
+    )?;
+    // Consume the fill's checked result before waiting for an SHM Completion.
+    // Otherwise wait_for_event could dequeue this request's X11 error and turn
+    // it into an unrelated deferred event.
+    fill.check()?;
+    Ok(())
+}
+
 fn select_native_pixel_writer_from_format(
     depth: u8,
     visual: Visualtype,
@@ -1473,6 +2114,10 @@ struct Letterbox {
     y: u16,
     width: u16,
     height: u16,
+}
+
+fn should_use_render_upscale(geometry: Letterbox, image_width: u16, image_height: u16) -> bool {
+    geometry.width > image_width && geometry.height > image_height
 }
 
 fn letterbox(
@@ -1867,6 +2512,95 @@ mod tests {
     fn expose_copies_valid_backing_while_new_frames_and_resizes_repopulate() {
         assert_eq!(backing_work(true), BackingWork::CopyOnly);
         assert_eq!(backing_work(false), BackingWork::PopulateAndCopy);
+    }
+
+    #[test]
+    fn render_upscale_requires_strict_growth_on_both_axes() {
+        let geometry = |width, height| Letterbox {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+        assert!(should_use_render_upscale(geometry(1920, 1080), 1280, 720));
+        assert!(!should_use_render_upscale(geometry(1280, 720), 1280, 720));
+        assert!(!should_use_render_upscale(geometry(1920, 720), 1280, 720));
+        assert!(!should_use_render_upscale(geometry(640, 360), 1280, 720));
+    }
+
+    #[test]
+    fn render_requires_version_zero_ten_or_newer() {
+        assert!(!supports_render_version(0, 9));
+        assert!(supports_render_version(0, 10));
+        assert!(supports_render_version(0, 11));
+        assert!(supports_render_version(1, 0));
+    }
+
+    #[test]
+    fn render_source_cache_reuploads_frames_but_replaces_only_for_geometry() {
+        let first = RenderSourceKey {
+            sequence: 7,
+            width: 1280,
+            height: 720,
+        };
+        assert!(render_source_needs_upload(None, first));
+        assert!(render_source_needs_replacement(None, first));
+        assert!(!render_source_needs_upload(Some(first), first));
+        assert!(!render_source_needs_replacement(Some(first), first));
+
+        let next_frame = RenderSourceKey {
+            sequence: 8,
+            ..first
+        };
+        assert!(render_source_needs_upload(Some(first), next_frame));
+        assert!(!render_source_needs_replacement(Some(first), next_frame));
+
+        let resized_source = RenderSourceKey {
+            width: 960,
+            height: 540,
+            ..next_frame
+        };
+        assert!(render_source_needs_upload(Some(next_frame), resized_source));
+        assert!(render_source_needs_replacement(
+            Some(next_frame),
+            resized_source
+        ));
+    }
+
+    #[test]
+    fn render_transform_maps_destination_back_to_encoded_source() {
+        let transform = scale_transform(1280, 720, 1920, 1080).unwrap();
+        assert_eq!(transform.matrix11, 43_691);
+        assert_eq!(transform.matrix22, 43_691);
+        assert_eq!(transform.matrix33, XFIXED_ONE);
+        assert_eq!(transform.matrix12, 0);
+        assert_eq!(transform.matrix21, 0);
+
+        assert!(render_transform_needs_update(None, (1920, 1080)));
+        assert!(!render_transform_needs_update(
+            Some((1920, 1080)),
+            (1920, 1080)
+        ));
+        assert!(render_transform_needs_update(
+            Some((1920, 1080)),
+            (2560, 1440)
+        ));
+    }
+
+    #[test]
+    fn render_is_disabled_only_after_same_frame_cpu_fallback_succeeds() {
+        let disables = Cell::new(0);
+        finish_render_fallback(Ok::<_, &'static str>(()), Some("render"), |_| {
+            disables.set(disables.get() + 1);
+        })
+        .unwrap();
+        assert_eq!(disables.get(), 1);
+
+        let result = finish_render_fallback(Err("core"), Some("render"), |_| {
+            disables.set(disables.get() + 1);
+        });
+        assert_eq!(result, Err("core"));
+        assert_eq!(disables.get(), 1);
     }
 
     #[test]

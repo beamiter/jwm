@@ -250,6 +250,15 @@ event; setup or rejected-upload failures retry the same frame with core
 `PutImage`. Nonstandard visuals use the general mask-based conversion and core
 upload. Expose events copy the last completely uploaded backing image, and
 resize event bursts redraw only their final size.
+When a large viewer window displays the encoded image at more than its native
+width and height, XRender 0.10+ keeps the uploaded image in a source-sized
+server pixmap and scales it into the letterboxed backing pixmap. The client no
+longer constructs or uploads a window-sized image on every new frame, so a
+bandwidth-friendly host `--max-width` can still be viewed fullscreen without
+moving the corresponding upscale work through CPU memory. This changes only
+local presentation: it does not increase the encoded resolution or network
+traffic. One-to-one presentation and downscaling keep the existing CPU path;
+an unavailable or unusable XRender path falls back there as well.
 When idle, the viewer blocks on its X11 connection, the video receiver's wake
 descriptor, and the nearest heartbeat, telemetry or deferred-key deadline; it
 also checks x11rb's internal and MIT-SHM-deferred event queues before sleeping.
