@@ -124,6 +124,12 @@ monorepo use independent Semantic Versions.
   header without an intermediate allocation, receive buffers are exposed only
   after their MAC succeeds, and sustained use of much smaller frames releases
   capacity retained by an earlier extreme frame.
+- Remote JPEG decoding now writes ordinary RGB frames directly into a reusable
+  client allocation instead of allocating a new decoded image on every frame.
+  The viewer retains that lease only while it is the Expose/resize source; old,
+  superseded, failed and closed-window frames return it to a best-fit pool of at
+  most two free buffers. Each retained buffer is capped at 32 MiB and the pool
+  at 64 MiB, while grayscale JPEGs keep their compatible conversion path.
 - The shared-memory protocol is v14. JWM and every bar must be rebuilt and
   restarted together, which the existing layout/version validation enforces.
 - `display::CANONICAL_LAYOUTS` is now the single source for JWM's layout ids,

@@ -30,7 +30,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::x11_utils::{TryParseFd, X11Error};
 
-use super::frame::DecodedFrame;
+use super::frame::{DecodedFrame, RecyclableDecodedFrame};
 use super::{RemoteError, RemoteResult};
 
 const TITLE: &[u8] = b"JWM Remote";
@@ -66,12 +66,45 @@ pub enum ViewerEvent {
     ReleaseAll,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct StoredFrame {
     sequence: u64,
     source_width: u16,
     source_height: u16,
-    image: RgbImage,
+    image: StoredImage,
+}
+
+#[derive(Debug)]
+enum StoredImage {
+    Owned(RgbImage),
+    Recyclable(RecyclableDecodedFrame),
+}
+
+impl StoredFrame {
+    fn from_decoded(frame: DecodedFrame) -> Self {
+        Self {
+            sequence: frame.sequence,
+            source_width: frame.source_width,
+            source_height: frame.source_height,
+            image: StoredImage::Owned(frame.image),
+        }
+    }
+
+    fn from_recyclable(frame: RecyclableDecodedFrame) -> Self {
+        Self {
+            sequence: frame.sequence(),
+            source_width: frame.source_width(),
+            source_height: frame.source_height(),
+            image: StoredImage::Recyclable(frame),
+        }
+    }
+
+    fn image(&self) -> &RgbImage {
+        match &self.image {
+            StoredImage::Owned(image) => image,
+            StoredImage::Recyclable(frame) => frame.image(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -542,18 +575,30 @@ impl Viewer {
     /// events and for rescaling after the window is resized. Returns `false`
     /// when the target window closed before the frame could be presented.
     pub fn draw(&mut self, frame: DecodedFrame) -> RemoteResult<bool> {
+        self.draw_stored(StoredFrame::from_decoded(frame))
+    }
+
+    /// Internal client path that keeps the decoded RGB allocation leased while
+    /// the frame remains the viewer's Expose/resize source.
+    pub(crate) fn draw_recyclable(&mut self, frame: RecyclableDecodedFrame) -> RemoteResult<bool> {
+        self.draw_stored(StoredFrame::from_recyclable(frame))
+    }
+
+    fn draw_stored(&mut self, frame: StoredFrame) -> RemoteResult<bool> {
         if self.closed {
+            clear_stored_frame(&mut self.last_frame);
             return Ok(false);
         }
         validate_frame(&frame)?;
-        self.last_frame = Some(StoredFrame {
-            sequence: frame.sequence,
-            source_width: frame.source_width,
-            source_height: frame.source_height,
-            image: frame.image,
-        });
+        replace_stored_frame(&mut self.last_frame, frame);
         self.backing_valid = false;
-        self.redraw()?;
+        if let Err(error) = self.redraw() {
+            clear_stored_frame(&mut self.last_frame);
+            return Err(error);
+        }
+        if self.closed {
+            clear_stored_frame(&mut self.last_frame);
+        }
         Ok(!self.closed)
     }
 
@@ -671,8 +716,8 @@ impl Viewer {
 
     fn map_pointer(&self, x: i16, y: i16) -> Option<(u16, u16)> {
         let frame = self.last_frame.as_ref()?;
-        let image_width = u16::try_from(frame.image.width()).ok()?;
-        let image_height = u16::try_from(frame.image.height()).ok()?;
+        let image_width = u16::try_from(frame.image().width()).ok()?;
+        let image_height = u16::try_from(frame.image().height()).ok()?;
         map_pointer_to_source(
             x,
             y,
@@ -728,9 +773,9 @@ impl Viewer {
 
     fn populate_backing(&mut self) -> RemoteResult<()> {
         if let Some(frame) = self.last_frame.as_ref() {
-            let image_width = u16::try_from(frame.image.width())
+            let image_width = u16::try_from(frame.image().width())
                 .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
-            let image_height = u16::try_from(frame.image.height())
+            let image_height = u16::try_from(frame.image().height())
                 .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
             let geometry = letterbox(self.width, self.height, image_width, image_height)
                 .ok_or_else(|| invalid_data("cannot draw an empty remote frame"))?;
@@ -751,7 +796,7 @@ impl Viewer {
                     )?;
                     write_native_pixels(
                         image,
-                        &frame.image,
+                        frame.image(),
                         self.pixel_layout,
                         self.native_pixel_writer,
                     )?;
@@ -794,10 +839,10 @@ impl Viewer {
             }
 
             let resized = if (geometry.width, geometry.height) == (image_width, image_height) {
-                Cow::Borrowed(&frame.image)
+                Cow::Borrowed(frame.image())
             } else {
                 Cow::Owned(image::imageops::resize(
-                    &frame.image,
+                    frame.image(),
                     u32::from(geometry.width),
                     u32::from(geometry.height),
                     image::imageops::FilterType::Triangle,
@@ -879,6 +924,9 @@ impl Viewer {
     }
 
     fn report_close(&mut self, events: &mut Vec<ViewerEvent>) -> RemoteResult<()> {
+        // The closed window can no longer need its Expose source. Return a
+        // recyclable RGB allocation even if input-release cleanup then fails.
+        clear_stored_frame(&mut self.last_frame);
         if self.close_reported {
             return Ok(());
         }
@@ -2266,18 +2314,29 @@ fn load_f12_keycodes(conn: &RustConnection) -> RemoteResult<Vec<u8>> {
         .collect())
 }
 
-fn validate_frame(frame: &DecodedFrame) -> RemoteResult<()> {
+fn validate_frame(frame: &StoredFrame) -> RemoteResult<()> {
     if frame.source_width == 0 || frame.source_height == 0 {
         return Err(invalid_data("remote frame has an empty source geometry").into());
     }
-    if frame.image.width() == 0 || frame.image.height() == 0 {
+    if frame.image().width() == 0 || frame.image().height() == 0 {
         return Err(invalid_data("remote frame has an empty image").into());
     }
-    u16::try_from(frame.image.width())
+    u16::try_from(frame.image().width())
         .map_err(|_| invalid_data("decoded frame width exceeds the X11 protocol range"))?;
-    u16::try_from(frame.image.height())
+    u16::try_from(frame.image().height())
         .map_err(|_| invalid_data("decoded frame height exceeds the X11 protocol range"))?;
     Ok(())
+}
+
+fn replace_stored_frame(slot: &mut Option<StoredFrame>, next: StoredFrame) {
+    let previous = slot.replace(next);
+    // In the recyclable path this may take the decode-pool mutex. Callers do
+    // not hold the receiver's latest-frame mutex while retiring this value.
+    drop(previous);
+}
+
+fn clear_stored_frame(slot: &mut Option<StoredFrame>) {
+    drop(slot.take());
 }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
@@ -2291,7 +2350,11 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::frame::{
+        DecodedFrame, RecyclableDecodedFrame, decode_pool_snapshot, new_decode_buffer_pool,
+    };
     use std::cell::Cell;
+    use std::sync::Arc;
 
     fn standard_visual() -> Visualtype {
         Visualtype {
@@ -2512,6 +2575,39 @@ mod tests {
     fn expose_copies_valid_backing_while_new_frames_and_resizes_repopulate() {
         assert_eq!(backing_work(true), BackingWork::CopyOnly);
         assert_eq!(backing_work(false), BackingWork::PopulateAndCopy);
+    }
+
+    #[test]
+    fn expose_source_lease_survives_until_viewer_replacement_and_close() {
+        let pool = new_decode_buffer_pool();
+        let recyclable = |sequence, value| {
+            RecyclableDecodedFrame::from_decoded(
+                DecodedFrame {
+                    sequence,
+                    source_width: 2,
+                    source_height: 1,
+                    image: RgbImage::from_pixel(2, 1, image::Rgb([value, 2, 3])),
+                },
+                Arc::clone(&pool),
+            )
+        };
+        let mut slot = Some(StoredFrame::from_recyclable(recyclable(1, 10)));
+
+        // Expose copies the retained backing, and a resize can still inspect
+        // the last RGB frame. Neither operation returns its lease early.
+        assert_eq!(backing_work(true), BackingWork::CopyOnly);
+        assert_eq!(slot.as_ref().unwrap().image().get_pixel(0, 0).0[0], 10);
+        assert_eq!(decode_pool_snapshot(&pool).0, 0);
+
+        replace_stored_frame(&mut slot, StoredFrame::from_recyclable(recyclable(2, 20)));
+        assert_eq!(slot.as_ref().unwrap().sequence, 2);
+        assert_eq!(decode_pool_snapshot(&pool).0, 1);
+
+        // report_close uses this same helper before emitting Close, returning
+        // the retained allocation even if subsequent input cleanup fails.
+        clear_stored_frame(&mut slot);
+        assert!(slot.is_none());
+        assert_eq!(decode_pool_snapshot(&pool).0, 2);
     }
 
     #[test]

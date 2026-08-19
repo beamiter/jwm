@@ -258,6 +258,13 @@ receiver likewise reuses one authenticated record allocation. After 32
 substantially smaller payloads, an allocation retained by an exceptional frame
 shrinks toward an 8 MiB ceiling; normal steady frame sizes do not churn
 allocations.
+After authentication and header validation, an ordinary RGB JPEG is decoded
+directly into a reusable RGB allocation. The allocation stays leased while the
+frame is queued or retained by the X11 viewer for Expose and resize, then
+returns only after replacement, draw failure, or window close; two concurrently
+live frames therefore never alias. The best-fit free list keeps at most two
+buffers, rejects any slot above 32 MiB, and retains at most 64 MiB total.
+Uncommon grayscale JPEGs retain the compatible bounded conversion path.
 The X11 viewer reuses its native upload allocation for unchanged display
 geometry. On the usual depth-24, 32-bits-per-pixel little-endian TrueColor
 visual it writes decoded RGB directly into the verified native layout and uses

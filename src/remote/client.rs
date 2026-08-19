@@ -1,7 +1,9 @@
 //! Remote desktop viewer/client orchestration.
 
 use super::deadline::TcpStreamDeadline;
-use super::frame::{DecodedFrame, decode_frame};
+use super::frame::{
+    RecyclableDecodedFrame, SharedDecodeBufferPool, decode_frame_recyclable, new_decode_buffer_pool,
+};
 use super::key::load_key_file;
 use super::messages::{
     ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
@@ -71,15 +73,17 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         return Err(invalid_data("host did not send an initial video frame").into());
     }
     state.telemetry.record_received();
-    let first_frame = decode_queued_frame(&payload, &state.telemetry)?;
+    // SessionReader exposes this payload only after its record MAC succeeds;
+    // no decoded-image allocation is checked out before authentication.
+    let first_frame = decode_queued_frame(&payload, &state.telemetry, &state.decode_pool)?;
     reader
         .get_ref()
         .set_read_timeout(Some(VIDEO_FRAME_IDLE_TIMEOUT))?;
-    let initial_width = u16::try_from(first_frame.frame.image.width())
+    let initial_width = u16::try_from(first_frame.frame.image().width())
         .map_err(|_| invalid_data("initial frame is wider than an X11 window"))?;
-    let initial_height = u16::try_from(first_frame.frame.image.height())
+    let initial_height = u16::try_from(first_frame.frame.image().height())
         .map_err(|_| invalid_data("initial frame is taller than an X11 window"))?;
-    let last_sequence = first_frame.frame.sequence;
+    let last_sequence = first_frame.frame.sequence();
     let mut viewer = Viewer::connect(
         options.display.as_deref(),
         initial_width,
@@ -90,7 +94,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
     )?;
     draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
-        viewer.draw(frame)
+        viewer.draw_recyclable(frame)
     })?;
 
     let control = writer.get_ref().try_clone()?;
@@ -230,7 +234,9 @@ fn viewer_loop(
         }
 
         if let Some(frame) = take_latest(state) {
-            draw_and_ack(writer, frame, &state.telemetry, |frame| viewer.draw(frame))?;
+            draw_and_ack(writer, frame, &state.telemetry, |frame| {
+                viewer.draw_recyclable(frame)
+            })?;
         }
 
         if !state.alive.load(Ordering::Acquire) && state.latest.lock().unwrap().is_none() {
@@ -355,9 +361,9 @@ fn draw_and_ack<W: std::io::Write>(
     writer: &mut SessionWriter<W>,
     queued: QueuedFrame,
     telemetry: &ClientTelemetry,
-    draw: impl FnOnce(DecodedFrame) -> RemoteResult<bool>,
+    draw: impl FnOnce(RecyclableDecodedFrame) -> RemoteResult<bool>,
 ) -> RemoteResult<()> {
-    let sequence = queued.frame.sequence;
+    let sequence = queued.frame.sequence();
     let draw_started = Instant::now();
     let draw_result = draw(queued.frame);
     let draw_finished = Instant::now();
@@ -372,7 +378,7 @@ fn draw_and_ack<W: std::io::Write>(
 }
 
 struct QueuedFrame {
-    frame: DecodedFrame,
+    frame: RecyclableDecodedFrame,
     ready_at: Instant,
 }
 
@@ -803,6 +809,7 @@ struct ReceiveState {
     alive: AtomicBool,
     stopping: AtomicBool,
     telemetry: ClientTelemetry,
+    decode_pool: SharedDecodeBufferPool,
 }
 
 impl ReceiveState {
@@ -813,6 +820,7 @@ impl ReceiveState {
             alive: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             telemetry: ClientTelemetry::default(),
+            decode_pool: new_decode_buffer_pool(),
         }
     }
 }
@@ -826,9 +834,13 @@ fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
     latest.replace(next)
 }
 
-fn decode_queued_frame(payload: &[u8], telemetry: &ClientTelemetry) -> RemoteResult<QueuedFrame> {
+fn decode_queued_frame(
+    payload: &[u8],
+    telemetry: &ClientTelemetry,
+    pool: &SharedDecodeBufferPool,
+) -> RemoteResult<QueuedFrame> {
     let decode_started = Instant::now();
-    let frame = decode_frame(payload)?;
+    let frame = decode_frame_recyclable(payload, Arc::clone(pool))?;
     let ready_at = Instant::now();
     telemetry.record_decoded_at(decode_started, ready_at);
     Ok(QueuedFrame { frame, ready_at })
@@ -900,19 +912,22 @@ fn receive_frames(
         let kind = reader.read_message_into(&mut payload)?;
         match kind {
             MessageKind::Frame => {
+                // read_message_into authenticated the complete record before
+                // returning Frame, so pool checkout starts only on trusted
+                // header/JPEG bytes.
                 state.telemetry.record_received();
-                let queued = decode_queued_frame(&payload, &state.telemetry)?;
+                let queued = decode_queued_frame(&payload, &state.telemetry, &state.decode_pool)?;
                 let expected = last_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
-                if queued.frame.sequence != expected {
+                if queued.frame.sequence() != expected {
                     return Err(invalid_data(format!(
                         "video frame sequence mismatch: expected {expected}, got {}",
-                        queued.frame.sequence
+                        queued.frame.sequence()
                     ))
                     .into());
                 }
-                last_sequence = queued.frame.sequence;
+                last_sequence = queued.frame.sequence();
                 let replaced = replace_latest(&state.latest, queued);
                 if replaced.is_some() {
                     state.telemetry.record_replaced();
@@ -952,8 +967,11 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::frame::{DecodedFrame, decode_pool_snapshot, encode_frame};
     use crate::remote::messages::decode_frame_ack;
     use crate::remote::protocol::{PSK_LEN, server_handshake};
+    use crate::remote::x11_capture::CapturedFrame;
+    use image::Rgb;
     use image::RgbImage;
     use std::io::Cursor;
     use std::io::Read;
@@ -962,13 +980,23 @@ mod tests {
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
 
-    fn decoded_test_frame(sequence: u64) -> DecodedFrame {
-        DecodedFrame {
-            sequence,
-            source_width: 1,
-            source_height: 1,
-            image: RgbImage::new(1, 1),
-        }
+    fn decoded_test_frame(sequence: u64) -> RecyclableDecodedFrame {
+        decoded_test_frame_in_pool(sequence, new_decode_buffer_pool())
+    }
+
+    fn decoded_test_frame_in_pool(
+        sequence: u64,
+        pool: SharedDecodeBufferPool,
+    ) -> RecyclableDecodedFrame {
+        RecyclableDecodedFrame::from_decoded(
+            DecodedFrame {
+                sequence,
+                source_width: 1,
+                source_height: 1,
+                image: RgbImage::new(1, 1),
+            },
+            pool,
+        )
     }
 
     fn queued_test_frame(sequence: u64) -> QueuedFrame {
@@ -1322,6 +1350,36 @@ mod tests {
     }
 
     #[test]
+    fn closed_or_failed_draw_returns_recyclable_frame_without_ack() {
+        let key = [0x37; 32];
+        let telemetry = ClientTelemetry::default();
+        let pool = new_decode_buffer_pool();
+        let queued = QueuedFrame {
+            frame: decoded_test_frame_in_pool(20, Arc::clone(&pool)),
+            ready_at: Instant::now(),
+        };
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        draw_and_ack(&mut writer, queued, &telemetry, |_| Ok(false)).unwrap();
+        assert!(writer.into_inner().is_empty());
+        assert_eq!(decode_pool_snapshot(&pool).0, 1);
+
+        let queued = QueuedFrame {
+            frame: decoded_test_frame_in_pool(21, Arc::clone(&pool)),
+            ready_at: Instant::now(),
+        };
+        let mut writer = SessionWriter::new(Vec::new(), key);
+        assert!(
+            draw_and_ack(&mut writer, queued, &telemetry, |_| {
+                Err(io::Error::other("synthetic viewer error").into())
+            })
+            .is_err()
+        );
+        assert!(writer.into_inner().is_empty());
+        assert_eq!(decode_pool_snapshot(&pool).0, 2);
+        assert!(telemetry.take_window().is_empty());
+    }
+
+    #[test]
     fn telemetry_windows_use_exact_stage_times_and_skip_empty_final_reports() {
         let telemetry = ClientTelemetry::default();
         let started = Instant::now();
@@ -1378,7 +1436,9 @@ mod tests {
     fn authenticated_frame_is_received_even_when_jpeg_decode_fails() {
         let telemetry = ClientTelemetry::default();
         telemetry.record_received();
-        assert!(decode_queued_frame(b"not a frame", &telemetry).is_err());
+        assert!(
+            decode_queued_frame(b"not a frame", &telemetry, &new_decode_buffer_pool()).is_err()
+        );
 
         let window = telemetry.take_window();
         assert_eq!(window.received, 1);
@@ -1398,6 +1458,83 @@ mod tests {
         assert_eq!(current.as_ref().map(Vec::len), Some(2048));
         drop(current);
         drop(stale);
+    }
+
+    #[test]
+    fn receiver_sequence_error_recycles_frame_without_publishing_latest() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (receiver, _) = listener.accept().unwrap();
+        let mut writer = SessionWriter::new(sender, TEST_PSK);
+        let payload = encode_frame(
+            2,
+            &CapturedFrame {
+                image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
+                source_width: 32,
+                source_height: 18,
+            },
+            80,
+        )
+        .unwrap();
+        writer.write_message(MessageKind::Frame, &payload).unwrap();
+        writer.flush().unwrap();
+
+        let state = Arc::new(ReceiveState::new());
+        let (_wake_receiver, wake_sender) = wake_pair().unwrap();
+        receive_frames(
+            SessionReader::new(receiver, TEST_PSK),
+            Arc::clone(&state),
+            0,
+            Vec::new(),
+            wake_sender,
+        );
+
+        assert!(!state.alive.load(Ordering::Acquire));
+        assert!(state.latest.lock().unwrap().is_none());
+        assert!(
+            state
+                .error
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|error| error.contains("expected 1, got 2"))
+        );
+        assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 1);
+    }
+
+    #[test]
+    fn receiver_authentication_failure_never_checks_out_a_decode_buffer() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (receiver, _) = listener.accept().unwrap();
+        let mut writer = SessionWriter::new(sender, [0x91; PSK_LEN]);
+        let payload = encode_frame(
+            1,
+            &CapturedFrame {
+                image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
+                source_width: 32,
+                source_height: 18,
+            },
+            80,
+        )
+        .unwrap();
+        writer.write_message(MessageKind::Frame, &payload).unwrap();
+        writer.flush().unwrap();
+
+        let state = Arc::new(ReceiveState::new());
+        let (_wake_receiver, wake_sender) = wake_pair().unwrap();
+        receive_frames(
+            SessionReader::new(receiver, TEST_PSK),
+            Arc::clone(&state),
+            0,
+            Vec::new(),
+            wake_sender,
+        );
+
+        assert!(!state.alive.load(Ordering::Acquire));
+        assert!(state.latest.lock().unwrap().is_none());
+        assert_eq!(decode_pool_snapshot(&state.decode_pool).0, 0);
+        assert_eq!(state.telemetry.take_window().received, 0);
     }
 
     #[test]
