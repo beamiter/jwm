@@ -508,6 +508,7 @@ fn color_session_policy_json(
     render_path_enabled: bool,
     scene_linear_enabled: bool,
     advanced_enabled: bool,
+    delivery_observation_available: bool,
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
 
@@ -567,9 +568,9 @@ fn color_session_policy_json(
         blockers.push("hdr_signalling_enable_unavailable_until_external_elements_adapted");
     }
 
-    // This status endpoint has no last-frame delivery snapshot. Report the
-    // implemented policy and its eligibility constraints, not an invented
-    // claim that software regions or KMS properties are active right now.
+    // This object remains the static policy/capability view. The sibling
+    // `color_delivery` object carries the separately versioned, vblank-backed
+    // attempt and last-success observations.
     let per_output_delivery_available = render_path_enabled && scene_linear_enabled;
 
     serde_json::json!({
@@ -613,7 +614,11 @@ fn color_session_policy_json(
         "fallback_policy": {
             "route": "global_srgb",
             "selection": "per_frame",
-            "route_observation": "last_frame_not_exposed",
+            "route_observation": if delivery_observation_available {
+                "see_color_delivery_last_success"
+            } else {
+                "unavailable_on_backend"
+            },
             "triggers": [
                 "encoded_late_overlay",
                 "kms_external_cursor",
@@ -642,6 +647,7 @@ fn output_color_policy_json(
     kms_color: Option<&serde_json::Value>,
     render_path_enabled: bool,
     advanced_enabled: bool,
+    delivery_observation_available: bool,
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
 
@@ -696,7 +702,11 @@ fn output_color_policy_json(
         "shader_fallback_required": shader_fallback_required,
         "shader_fallback_semantics": "static_non_srgb_profile_hint_not_active_route",
         "selected_profile_semantics": "active_fail_closed_output_target",
-        "delivery_route_observation": "last_frame_not_exposed",
+        "delivery_route_observation": if delivery_observation_available {
+            "see_color_delivery_last_success"
+        } else {
+            "unavailable_on_backend"
+        },
     })
 }
 
@@ -704,6 +714,7 @@ fn render_decisions_json(
     direct_scanout: Option<&serde_json::Value>,
     blur: Option<&serde_json::Value>,
     outputs: &[serde_json::Value],
+    color_delivery: Option<&serde_json::Value>,
     tearing_hint_count: usize,
     hdr_config_enabled: bool,
     blur_config_enabled: bool,
@@ -823,16 +834,77 @@ fn render_decisions_json(
         .filter(|output| output.get("hdr_capable").and_then(|value| value.as_bool()) == Some(true))
         .count();
     let hdr_requested_on_capable_output = hdr_config_enabled && hdr_capable_output_count > 0;
+    let participating_delivery_outputs = color_delivery
+        .and_then(|status| status.get("outputs"))
+        .and_then(|value| value.as_array())
+        .map(|outputs| {
+            outputs
+                .iter()
+                .filter(|output| {
+                    output
+                        .get("participating")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let current_policy_sequence = color_delivery
+        .and_then(|status| status.get("last_policy_decision"))
+        .and_then(|decision| decision.get("sequence"))
+        .and_then(|value| value.as_u64());
+    let delivery_output_count = participating_delivery_outputs.len();
+    let successful_deliveries = participating_delivery_outputs
+        .iter()
+        .filter_map(|output| output.get("last_success"))
+        .filter(|success| !success.is_null())
+        .collect::<Vec<_>>();
+    let observed_policy_sequences = successful_deliveries
+        .iter()
+        .filter_map(|success| {
+            success
+                .get("policy_sequence")
+                .and_then(|value| value.as_u64())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let delivery_observed = !successful_deliveries.is_empty();
+    let delivery_observation_complete =
+        delivery_output_count > 0 && successful_deliveries.len() == delivery_output_count;
+    let observed_hdr_active = successful_deliveries.iter().any(|success| {
+        success
+            .get("hdr_metadata_active")
+            .and_then(|value| value.as_bool())
+            == Some(true)
+    });
     let hdr_decision = serde_json::json!({
         "configured": hdr_config_enabled,
-        // The diagnostics backend currently exposes target allocation, but
-        // not the actual per-frame output delivery route. Do not report a
-        // configuration/capability conjunction as observed HDR scanout.
-        "active": serde_json::Value::Null,
-        "active_observation": "last_frame_not_exposed",
+        "active": if observed_hdr_active {
+            Some(true)
+        } else if delivery_observation_complete {
+            Some(false)
+        } else {
+            None
+        },
+        "active_observation": if observed_hdr_active || delivery_observation_complete {
+            "last_successful_presentation"
+        } else if delivery_observed {
+            "partial_last_successful_presentation"
+        } else {
+            "no_successful_presentation_observed"
+        },
+        "observed_output_count": successful_deliveries.len(),
+        "expected_output_count": delivery_output_count,
+        "policy_sequence": current_policy_sequence,
+        "observed_policy_sequences": &observed_policy_sequences,
         "requested_on_capable_output": hdr_requested_on_capable_output,
-        "reason": if hdr_requested_on_capable_output {
-            "last_frame_not_exposed"
+        "reason": if observed_hdr_active {
+            "presented_with_kms_hdr_metadata"
+        } else if delivery_observation_complete {
+            "presented_without_kms_hdr_metadata"
+        } else if delivery_observed {
+            "partial_output_observation"
+        } else if hdr_requested_on_capable_output {
+            "no_successful_presentation_observed"
         } else if hdr_config_enabled {
             "no_hdr_capable_outputs"
         } else {
@@ -855,12 +927,41 @@ fn render_decisions_json(
                 == Some(true)
         })
         .count();
+    let mut observed_routes = std::collections::BTreeMap::<String, usize>::new();
+    for success in &successful_deliveries {
+        let route = success
+            .get("route")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown");
+        *observed_routes.entry(route.to_string()).or_default() += 1;
+    }
+    let observed_color_pipeline_active = successful_deliveries.iter().any(|success| {
+        matches!(
+            success.get("route").and_then(|value| value.as_str()),
+            Some("software_per_output_regions" | "kms_ctm_gamma_lut")
+        )
+    });
     let color_pipeline_decision = serde_json::json!({
         "configured": color_render_path_enabled,
-        // Kept for schema compatibility. No last-frame route snapshot exists,
-        // so a boolean here would conflate configured intent with runtime use.
-        "active": serde_json::Value::Null,
-        "active_observation": "last_frame_not_exposed",
+        "active": if observed_color_pipeline_active {
+            Some(true)
+        } else if delivery_observation_complete {
+            Some(false)
+        } else {
+            None
+        },
+        "active_observation": if observed_color_pipeline_active || delivery_observation_complete {
+            "last_successful_presentation"
+        } else if delivery_observed {
+            "partial_last_successful_presentation"
+        } else {
+            "no_successful_presentation_observed"
+        },
+        "observed_output_count": successful_deliveries.len(),
+        "expected_output_count": delivery_output_count,
+        "policy_sequence": current_policy_sequence,
+        "observed_policy_sequences": &observed_policy_sequences,
+        "observed_routes": observed_routes,
         "scene_linear_target_active": scene_linear_target_active,
         "capability": if color_render_path_enabled && scene_linear_target_active {
             "normalized_linear_srgb_per_output_delivery"
@@ -878,12 +979,16 @@ fn render_decisions_json(
             "render_path_disabled_by_config"
         } else if !scene_linear_target_active {
             "scene_linear_target_inactive"
+        } else if delivery_observed {
+            "last_successful_presentation_observed"
         } else {
-            "last_frame_route_not_exposed"
+            "no_successful_presentation_observed"
         },
     });
 
     serde_json::json!({
+        "schema_version": 1,
+        "observation_semantics": "tri_state_last_successful_presentation",
         "direct_scanout": direct_scanout_decision,
         "blur": blur_decision,
         "hdr": hdr_decision,
@@ -1736,10 +1841,14 @@ impl Jwm {
                         })
                     })
                     .collect();
+                let color_delivery = backend
+                    .compositor_color_delivery_status()
+                    .and_then(|status| serde_json::to_value(status).ok());
                 IpcResponse::ok(Some(serde_json::json!({
                     "config_enabled": cfg.behavior().hdr_enabled,
                     "config_peak_nits": cfg.behavior().hdr_peak_nits,
                     "outputs": outputs,
+                    "color_delivery": color_delivery,
                 })))
             }
             "get_tearing_hints" => IpcResponse::ok(Some(serde_json::json!({
@@ -1754,6 +1863,9 @@ impl Jwm {
                 let detail: Vec<serde_json::Value> =
                     surfaces.iter().map(color_managed_surface_json).collect();
                 let summary = color_surface_summary_json(&surfaces);
+                let color_delivery = backend
+                    .compositor_color_delivery_status()
+                    .and_then(|status| serde_json::to_value(status).ok());
                 IpcResponse::ok(Some(serde_json::json!({
                     "summary": summary,
                     "surface_count": surfaces.len(),
@@ -1765,6 +1877,7 @@ impl Jwm {
                     "primaries": summary.get("primaries").cloned().unwrap_or_default(),
                     "max_luminance_peak": summary.get("max_luminance_peak").cloned().unwrap_or(serde_json::Value::Null),
                     "surfaces": detail,
+                    "color_delivery": color_delivery,
                 })))
             }
             "get_xwayland_status" => {
@@ -1890,6 +2003,9 @@ impl Jwm {
         let color_render_path_enabled = cfg.behavior().color_management_render_path;
         let color_advanced_enabled =
             crate::backend::color_policy::advanced_color_management_enabled();
+        let color_delivery = backend
+            .compositor_color_delivery_status()
+            .and_then(|status| serde_json::to_value(status).ok());
         let output_details: Vec<serde_json::Value> = outputs
             .iter()
             .map(|o| {
@@ -1915,6 +2031,7 @@ impl Jwm {
                     kms_color.as_ref(),
                     color_render_path_enabled,
                     color_advanced_enabled,
+                    color_delivery.is_some(),
                 );
                 let hdr_metadata = o.hdr_metadata.as_ref().map(|m| {
                     serde_json::json!({
@@ -2004,6 +2121,7 @@ impl Jwm {
             color_render_path_enabled,
             scene_linear_enabled,
             color_advanced_enabled,
+            color_delivery.is_some(),
         );
         let color_surface_samples = color_surfaces
             .iter()
@@ -2034,6 +2152,7 @@ impl Jwm {
             direct_scanout.as_ref(),
             blur.as_ref(),
             &output_details,
+            color_delivery.as_ref(),
             tearing_hint_count,
             cfg.behavior().hdr_enabled,
             cfg.behavior().blur_enabled,
@@ -2090,6 +2209,7 @@ impl Jwm {
             "metrics": metrics,
             "direct_scanout": direct_scanout,
             "presentation_timing": presentation_timing,
+            "color_delivery": color_delivery,
             "output_management": output_management,
             "capture": capture,
             "xwayland": xwayland,
@@ -3115,6 +3235,7 @@ mod tests {
             None,
             true,
             false,
+            true,
         );
 
         assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
@@ -3136,6 +3257,7 @@ mod tests {
             None,
             true,
             true,
+            true,
         );
 
         assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
@@ -3155,7 +3277,7 @@ mod tests {
         );
         assert_eq!(
             value["delivery_route_observation"],
-            "last_frame_not_exposed"
+            "see_color_delivery_last_success"
         );
     }
 
@@ -3228,7 +3350,8 @@ mod tests {
         sdr.name = "DP-1".into();
         sdr.identity = OutputIdentity::connector_only("DP-1");
 
-        let full = color_session_policy_json(&[hdr.clone(), sdr.clone()], true, true, true, true);
+        let full =
+            color_session_policy_json(&[hdr.clone(), sdr.clone()], true, true, true, true, true);
         assert_eq!(full["mixed_hdr_outputs"], true);
         assert_eq!(full["heterogeneous_output_profiles"], true);
         assert_eq!(
@@ -3269,7 +3392,7 @@ mod tests {
         assert_eq!(full["fallback_policy"]["route"], "global_srgb");
         assert_eq!(
             full["fallback_policy"]["route_observation"],
-            "last_frame_not_exposed"
+            "see_color_delivery_last_success"
         );
         assert_eq!(
             full["fallback_policy"]["normal_desktop_cursor_effect"],
@@ -3287,7 +3410,19 @@ mod tests {
             ])
         );
 
-        let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false);
+        let unavailable =
+            color_session_policy_json(std::slice::from_ref(&hdr), true, true, true, true, false);
+        assert_eq!(
+            unavailable["fallback_policy"]["route_observation"],
+            "unavailable_on_backend"
+        );
+        let output_unavailable = output_color_policy_json(&hdr, None, true, true, false);
+        assert_eq!(
+            output_unavailable["delivery_route_observation"],
+            "unavailable_on_backend"
+        );
+
+        let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false, true);
         assert_eq!(
             legacy["sdr_on_hdr_policy"],
             "legacy_sdr_passthrough_on_hdr_output"
@@ -3309,6 +3444,7 @@ mod tests {
             false,
             crate::config::scene_linear_render_path_requested(false, true),
             false,
+            true,
         );
         assert_eq!(
             configured_without_render_path["scene_linear_enabled"],
@@ -3340,7 +3476,7 @@ mod tests {
         hlg.id = OutputId(3);
         hlg.name = "HDMI-A-2".into();
         hlg.identity = OutputIdentity::connector_only("HDMI-A-2");
-        let pq_hlg = color_session_policy_json(&[pq, hlg], true, true, false, true);
+        let pq_hlg = color_session_policy_json(&[pq, hlg], true, true, false, true, true);
         assert_eq!(pq_hlg["mixed_hdr_outputs"], false);
         assert_eq!(pq_hlg["heterogeneous_output_profiles"], true);
         assert_eq!(
@@ -3535,6 +3671,7 @@ mod tests {
             })),
             None,
             &[],
+            None,
             0,
             false,
             false,
@@ -3565,6 +3702,7 @@ mod tests {
                 "temporal_reuse_rate_pct": 80.0
             })),
             &[serde_json::json!({"hdr_capable": false})],
+            None,
             1,
             true,
             true,
@@ -3578,7 +3716,7 @@ mod tests {
         assert_eq!(decisions["hdr"]["active"], serde_json::Value::Null);
         assert_eq!(
             decisions["hdr"]["active_observation"],
-            "last_frame_not_exposed"
+            "no_successful_presentation_observed"
         );
         assert_eq!(decisions["hdr"]["requested_on_capable_output"], false);
         assert_eq!(decisions["hdr"]["reason"], "no_hdr_capable_outputs");
@@ -3589,7 +3727,7 @@ mod tests {
         );
         assert_eq!(
             decisions["color_pipeline"]["active_observation"],
-            "last_frame_not_exposed"
+            "no_successful_presentation_observed"
         );
         assert_eq!(
             decisions["color_pipeline"]["scene_linear_target_active"],
@@ -3599,5 +3737,139 @@ mod tests {
             decisions["color_pipeline"]["capability"],
             "normalized_linear_srgb_per_output_delivery"
         );
+    }
+
+    #[test]
+    fn render_decisions_use_last_successful_color_delivery() {
+        let delivery = serde_json::json!({
+            "schema_version": 1,
+            "last_policy_decision": {
+                "sequence": 9,
+                "composited_route": "software_per_output_regions"
+            },
+            "outputs": [{
+                "output_name": "DP-1",
+                "participating": true,
+                "last_success": {
+                    "policy_sequence": 9,
+                    "route": "software_per_output_regions",
+                    "hdr_metadata_active": false
+                }
+            }]
+        });
+        let decisions = render_decisions_json(
+            None,
+            None,
+            &[serde_json::json!({"hdr_capable": true})],
+            Some(&delivery),
+            0,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+        );
+
+        assert_eq!(decisions["hdr"]["active"], false);
+        assert_eq!(
+            decisions["hdr"]["active_observation"],
+            "last_successful_presentation"
+        );
+        assert_eq!(
+            decisions["hdr"]["reason"],
+            "presented_without_kms_hdr_metadata"
+        );
+        assert_eq!(decisions["color_pipeline"]["active"], true);
+        assert_eq!(
+            decisions["color_pipeline"]["observed_routes"]["software_per_output_regions"],
+            1
+        );
+    }
+
+    #[test]
+    fn render_decisions_require_success_from_every_participating_output() {
+        let delivery = serde_json::json!({
+            "schema_version": 1,
+            "last_policy_decision": {
+                "sequence": 12,
+                "composited_route": "kms_ctm_gamma_lut"
+            },
+            "outputs": [
+                {
+                    "output_name": "DP-1",
+                    "participating": true,
+                    "last_success": {
+                        "policy_sequence": 12,
+                        "route": "kms_ctm_gamma_lut",
+                        "hdr_metadata_active": true
+                    }
+                },
+                {
+                    "output_name": "HDMI-A-1",
+                    "participating": true,
+                    "last_success": {
+                        "policy_sequence": 11,
+                        "route": "software_per_output_regions",
+                        "hdr_metadata_active": false
+                    }
+                },
+                {
+                    "output_name": "DP-2",
+                    "participating": false,
+                    "last_success": {
+                        "policy_sequence": 12,
+                        "route": "kms_ctm_gamma_lut",
+                        "hdr_metadata_active": true
+                    }
+                }
+            ]
+        });
+        let decisions = render_decisions_json(
+            None,
+            None,
+            &[serde_json::json!({"hdr_capable": true})],
+            Some(&delivery),
+            0,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+        );
+
+        assert_eq!(decisions["hdr"]["active"], true);
+        assert_eq!(
+            decisions["hdr"]["active_observation"], "last_successful_presentation",
+            "a positive observation is conclusive across the physically visible cohort"
+        );
+        assert_eq!(decisions["hdr"]["observed_output_count"], 2);
+        assert_eq!(decisions["hdr"]["expected_output_count"], 2);
+        assert_eq!(
+            decisions["hdr"]["observed_policy_sequences"],
+            serde_json::json!([11, 12]),
+            "an older cohort can still be the latest frame physically visible on an output"
+        );
+        assert_eq!(decisions["color_pipeline"]["active"], true);
+
+        let mut sdr_partial = delivery;
+        sdr_partial["outputs"][0]["last_success"]["hdr_metadata_active"] = serde_json::json!(false);
+        sdr_partial["outputs"][1]["last_success"] = serde_json::Value::Null;
+        let decisions = render_decisions_json(
+            None,
+            None,
+            &[serde_json::json!({"hdr_capable": true})],
+            Some(&sdr_partial),
+            0,
+            true,
+            false,
+            true,
+            true,
+            true,
+            true,
+        );
+        assert_eq!(decisions["hdr"]["active"], serde_json::Value::Null);
+        assert_eq!(decisions["hdr"]["reason"], "partial_output_observation");
     }
 }

@@ -268,6 +268,67 @@ pub struct PresentationTimingStatus {
     pub outputs: Vec<PresentationTimingOutputStatus>,
 }
 
+/// Latest color-delivery policy decision and the last presentation that was
+/// actually observed for each output.
+///
+/// The policy decision is intentionally separate from `last_success`:
+/// configuring a profile, installing KMS properties, or even queueing a
+/// framebuffer does not prove that the display presented it. The actual route
+/// may also become direct scanout on an individual output. Backends update
+/// `last_success` only at their presentation-completion boundary (a DRM
+/// page-flip/vblank for udev).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColorDeliveryStatus {
+    pub schema_version: u32,
+    pub observation: String,
+    /// Monotonic count of output presentations promoted into `last_success`;
+    /// policy evaluation, queue failure, and participation changes do not
+    /// increment it.
+    pub generation: u64,
+    pub last_policy_decision: Option<ColorDeliveryPolicyDecisionStatus>,
+    pub outputs: Vec<ColorDeliveryOutputStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColorDeliveryPolicyDecisionStatus {
+    pub sequence: u64,
+    pub composited_route: String,
+    pub blocked: bool,
+    pub reason: Option<String>,
+    pub scene_linear_active: bool,
+    pub linear_tail_safe: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColorDeliveryOutputStatus {
+    pub output_name: String,
+    /// Whether the output currently participates in presentation (not DPMS
+    /// off or soft-disabled). Aggregate diagnostics ignore inactive outputs;
+    /// the udev backend also invalidates their success record across a
+    /// participation epoch so re-enable starts unknown until its first vblank.
+    pub participating: bool,
+    pub last_success: Option<ColorDeliveryPresentationStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ColorDeliveryPresentationStatus {
+    pub generation: u64,
+    /// Policy decision under which this framebuffer was queued. Consumers can
+    /// use the observed sequence set to distinguish a stable cohort from a
+    /// multi-output transition; an older sequence may still be the latest
+    /// framebuffer physically visible on that output.
+    pub policy_sequence: u64,
+    pub route: String,
+    pub working_space: String,
+    pub target_transfer_function: String,
+    pub target_primaries: String,
+    pub hdr_metadata_active: bool,
+    pub colorspace_signal: String,
+    pub fallback_reason: Option<String>,
+    pub presented_at_monotonic_ms: Option<u64>,
+    pub presented_ago_ms: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ScreenInfo {
     pub width: i32,
@@ -1466,6 +1527,10 @@ pub trait BackendDiagnostics: Send {
     }
 
     fn compositor_presentation_timing_status(&self) -> Option<PresentationTimingStatus> {
+        None
+    }
+
+    fn compositor_color_delivery_status(&self) -> Option<ColorDeliveryStatus> {
         None
     }
 

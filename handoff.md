@@ -6,6 +6,17 @@
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-08-20）：P0 last-success 诊断已完成
+
+`get_wayland_status`、`get_hdr_status` 和 `get_color_management_status` 现在共享
+schema v1 `color_delivery`：`last_policy_decision` 独立记录合成路线选择/阻塞原因，
+每个输出的 `last_success` 只在对应 DRM page-flip/vblank 后递增 generation，并带上
+queue 时的 policy sequence 与实际逐输出路线。`queue_frame`/render 失败、DPMS 取消和
+frame-pending watchdog 都会丢弃 pending 计划，不会覆盖最后成功快照；DPMS 或
+disable_head 参与周期变化会使旧快照失效。无成功帧时明确返回 `last_success: null`。
+快照报告 route、working space、目标 TF/primaries、HDR metadata/Colorspace signal 和
+fallback reason。下面第 1 项已落地，后续从第 2 项继续。
+
 **现状**
 
 `01b41a8` 已建立 normalized linear-sRGB 工作空间、逐输出软件交付区域，以及成对安装/
@@ -26,9 +37,9 @@ exact-sRGB fallback。
 
 **缺口**
 
-1. **没有 last-success 交付快照。** IPC 当前只能报告能力/配置，不能回答最后一次成功呈现
-   实际走了 global-sRGB、software region 还是 KMS CTM+LUT，也不能可靠报告逐输出 TF、
-   primaries、HDR/Colorspace signal 与 fallback reason。
+1. **[已完成] last-success 交付快照。** IPC 已能区分能力/配置、最近 policy decision 和
+   逐输出最后成功呈现，实际报告 global-sRGB、software region、KMS CTM+LUT 或
+   direct-scanout 路线，以及 TF、primaries、HDR/Colorspace signal 与 fallback reason。
 2. **外部元素没有统一颜色所有权。** 需要把 cursor、DnD、lock、top/overlay 全部
    internalize 到 common-linear compositor pass，或提供数学等价的 per-element adapter；
    不能只修 cursor，否则剩余元素仍会触发同一个 fallback。
@@ -49,10 +60,11 @@ exact-sRGB fallback。
 
 **落点与顺序**
 
-1. **P0：last-success 诊断** — `src/backend/udev_kms.rs`、
+1. **P0：[已完成] last-success 诊断** — `src/backend/udev_kms.rs`、
    `src/backend/wayland_udev/backend.rs`、`src/jwm/ipc_handler.rs`
-   - 只在 framebuffer/属性成功提交并进入可呈现状态后更新 generation、逐输出 route/target、
-     active signal 和 blocker；失败或 blocked attempt 不得覆盖上一份成功快照。
+   - 只在 framebuffer 对应 page-flip/vblank 到达后更新 generation、逐输出 route/target、
+     tracked signal 和 blocker；失败或 blocked decision 不得覆盖上一份成功快照，独立属性
+     transition 则先使旧证据失效，直到替换帧成功。
    - IPC 明确区分 EDID capability、用户 request、attempt 与实际 scanout，不再从配置静态推断
      active HDR；尚无成功快照时返回 null/unknown。
 2. **P0：KMS 外部元素颜色计划** — `src/backend/udev_kms.rs`

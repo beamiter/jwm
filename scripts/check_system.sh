@@ -1,9 +1,11 @@
 #!/bin/bash
 # 系统诊断脚本 - 检查运行 JWM 的系统条件
 
-echo "🔍 JWM Wayland udev Backend - System Diagnostic"
-echo "================================================="
+echo "🔍 JWM System Diagnostic"
+echo "========================"
 echo ""
+
+diagnostic_user=${USER:-$(id -un)}
 
 # 1. 系统信息
 echo "📋 System Information:"
@@ -12,7 +14,7 @@ echo ""
 
 # 2. 用户权限
 echo "👤 User Groups:"
-groups $USER
+groups "$diagnostic_user"
 echo ""
 
 # 3. DRM 设备
@@ -24,7 +26,9 @@ if [ -d /dev/dri ]; then
     echo "DRM Status:"
     for card in /sys/class/drm/card*/status; do
         if [ -f "$card" ]; then
-            echo "  $(basename $(dirname $card)): $(cat $card)"
+            connector=$(basename "$(dirname "$card")")
+            status=$(<"$card")
+            echo "  $connector: $status"
         fi
     done
 else
@@ -38,7 +42,11 @@ if command -v libinput &> /dev/null; then
     libinput list-devices 2>/dev/null | head -30
 else
     echo "  ⚠️  libinput command not found"
-    ls /dev/input/ | head -10
+    if [ -d /dev/input ]; then
+        find /dev/input -mindepth 1 -maxdepth 1 -printf '  %f\n' | head -10
+    else
+        echo "  ❌ /dev/input not found"
+    fi
 fi
 echo ""
 
@@ -63,10 +71,21 @@ done
 echo ""
 
 # 7. 环境变量
-echo "🌍 Environment:"
-env | grep -E "XDG_|WAYLAND|DISPLAY" || echo "  No relevant env vars"
+echo "🌍 Display/session environment allowlist:"
+for variable in DISPLAY WAYLAND_DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP DESKTOP_SESSION; do
+    if [ -n "${!variable+x}" ]; then
+        echo "  $variable=${!variable}"
+    else
+        echo "  $variable=<unset>"
+    fi
+done
 echo "  JWM_BACKEND=${JWM_BACKEND:-<unset>}"
-echo "  JWM_DRM_DEVICE=${JWM_DRM_DEVICE:-<unset>}"
+if [ -n "${JWM_DRM_DEVICE+x}" ]; then
+    echo "  JWM_DRM_DEVICE=<set; value omitted>"
+else
+    echo "  JWM_DRM_DEVICE=<unset>"
+fi
+echo "  XDG_RUNTIME_DIR=<omitted; doctor checks it without printing it here>"
 echo ""
 
 # 8. Rust 工具链
@@ -81,7 +100,7 @@ echo ""
 
 # 9. JWM 编译状态
 echo "🏗️  JWM Build Status:"
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 if [ -f Cargo.toml ]; then
     echo "  Project: $(grep '^name' Cargo.toml | head -1)"
     echo "  Version: $(grep '^version' Cargo.toml | head -1)"
@@ -102,21 +121,48 @@ else
 fi
 echo ""
 
-# 10. 权限建议
+# 10. JWM 原生启动诊断
+echo "🩺 JWM Startup Doctor:"
+selected_backend=${JWM_BACKEND:-wayland-udev}
+doctor_binary=""
+if [ -x target/release/jwm ]; then
+    doctor_binary=target/release/jwm
+elif [ -x target/debug/jwm ]; then
+    doctor_binary=target/debug/jwm
+elif command -v jwm &> /dev/null; then
+    doctor_binary=$(command -v jwm)
+fi
+
+if [ -n "$doctor_binary" ]; then
+    echo "  Binary: $doctor_binary"
+    echo "  Backend: $selected_backend"
+    if "$doctor_binary" --backend "$selected_backend" --doctor; then
+        echo "  ✅ Native startup checks completed without blocking errors"
+    else
+        echo "  ❌ Native startup checks found a blocking error"
+    fi
+else
+    echo "  ⚠️  No jwm binary found; build JWM to run configuration and socket checks"
+fi
+echo ""
+
+# 11. 权限建议
 echo "💡 Recommendations:"
-if ! groups $USER | grep -q video; then
+user_groups=$(id -nG "$diagnostic_user")
+if [[ " $user_groups " != *" video "* ]]; then
     echo "  ⚠️  User not in 'video' group. Run:"
-    echo "     sudo usermod -aG video $USER"
+    echo "     sudo usermod -aG video $diagnostic_user"
     echo "     (then log out and back in)"
 fi
 
-if ! groups $USER | grep -q input; then
+if [[ " $user_groups " != *" input "* ]]; then
     echo "  ⚠️  User not in 'input' group. Run:"
-    echo "     sudo usermod -aG input $USER"
+    echo "     sudo usermod -aG input $diagnostic_user"
 fi
 
 echo ""
 echo "✅ Diagnostic complete!"
 echo ""
-echo "📄 To save this report:"
-echo "   ./scripts/check_system.sh > system_report.txt 2>&1"
+echo "📄 For a privacy-aware report suitable for sharing:"
+echo "   jwm-support --backend $selected_backend --offline --output jwm-support.json"
+echo "   (This verbose system report is intended for local troubleshooting.)"

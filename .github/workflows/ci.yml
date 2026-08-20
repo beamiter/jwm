@@ -34,16 +34,16 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check bootstrap, packaging, and installer shell syntax
-        run: |
-          bash -n scripts/bootstrap_deps.sh
-          bash -n scripts/install_jwm_scripts.sh
-          bash -n scripts/package-release.sh
-          bash -n scripts/install-release.sh
-          bash -n scripts/test-install-lifecycle.sh
+      - name: Lint executable Bash scripts
+        run: bash scripts/lint-shell.sh
 
       - name: Exercise release install lifecycle
         run: bash scripts/test-install-lifecycle.sh

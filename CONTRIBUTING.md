@@ -30,10 +30,16 @@ forced the increase.
 ```bash
 cargo build --locked
 cargo fmt --all -- --check
+scripts/lint-shell.sh
 cargo check --locked --all-targets
 cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings
 cargo test --locked --lib --bins --tests
 ```
+
+The shell gate requires `shellcheck` (CI installs the distribution package)
+and discovers executable Bash helpers automatically. It rejects
+ShellCheck warning-level findings in every discovered script, so newly added
+helpers cannot silently fall outside the CI list.
 
 Those commands validate the main `jwm` package. The workspace also contains
 the shared protocol and bar adapters; changes below `crates/xbar_core` must run:

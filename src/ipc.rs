@@ -8,12 +8,99 @@ use crate::jwm::{Jwm, WMArgEnum, WMFuncType};
 // Wire protocol types (newline-delimited JSON)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug)]
 pub enum IpcMessage {
     Command(IpcCommand),
     Query(IpcQuery),
     Subscribe(IpcSubscribe),
+}
+
+impl<'de> Deserialize<'de> for IpcMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct MessageVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for MessageVisitor {
+            type Value = IpcMessage;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an IPC message object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut command = None;
+                let mut query = None;
+                let mut subscribe = None;
+                let mut args = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "command" => {
+                            if command.is_some() {
+                                return Err(serde::de::Error::duplicate_field("command"));
+                            }
+                            command = Some(map.next_value::<String>()?);
+                        }
+                        "query" => {
+                            if query.is_some() {
+                                return Err(serde::de::Error::duplicate_field("query"));
+                            }
+                            query = Some(map.next_value::<String>()?);
+                        }
+                        "subscribe" => {
+                            if subscribe.is_some() {
+                                return Err(serde::de::Error::duplicate_field("subscribe"));
+                            }
+                            subscribe = Some(map.next_value::<Vec<String>>()?);
+                        }
+                        "args" => {
+                            if args.is_some() {
+                                return Err(serde::de::Error::duplicate_field("args"));
+                            }
+                            args = Some(map.next_value::<Value>()?);
+                        }
+                        // Extension fields are deliberately accepted for
+                        // compatibility with clients carrying correlation or
+                        // tracing metadata.
+                        _ => {
+                            map.next_value::<serde::de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                // `#[serde(untagged)]` accepted an object containing more than
+                // one discriminator as the first matching variant. In
+                // particular, `{ "command": ..., "query": ... }` silently
+                // executed the command. Require a single unambiguous intent.
+                let discriminator_count = usize::from(command.is_some())
+                    + usize::from(query.is_some())
+                    + usize::from(subscribe.is_some());
+                if discriminator_count != 1 {
+                    return Err(serde::de::Error::custom(
+                        "IPC message must contain exactly one of 'command', 'query', or 'subscribe'",
+                    ));
+                }
+
+                let args = args.unwrap_or(Value::Null);
+                if let Some(command) = command {
+                    Ok(IpcMessage::Command(IpcCommand { command, args }))
+                } else if let Some(query) = query {
+                    Ok(IpcMessage::Query(IpcQuery { query, args }))
+                } else {
+                    Ok(IpcMessage::Subscribe(IpcSubscribe {
+                        subscribe: subscribe.unwrap_or_default(),
+                    }))
+                }
+            }
+        }
+
+        deserializer.deserialize_map(MessageVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -763,6 +850,49 @@ mod tests {
         let json = r#"{"query": "get_windows"}"#;
         let msg: IpcMessage = serde_json::from_str(json).unwrap();
         assert!(matches!(msg, IpcMessage::Query(IpcQuery { query, .. }) if query == "get_windows"));
+    }
+
+    #[test]
+    fn parse_rejects_ambiguous_or_untyped_messages() {
+        for json in [
+            r#"{"command":"quit","query":"get_version"}"#,
+            r#"{"query":"get_version","subscribe":["window"]}"#,
+            r#"{"command":"quit","subscribe":["window"]}"#,
+            r#"{"command":"quit","query":"get_version","subscribe":[]}"#,
+            r#"{"args":null}"#,
+        ] {
+            let error = serde_json::from_str::<IpcMessage>(json).unwrap_err();
+            assert!(
+                error.to_string().contains("exactly one"),
+                "unexpected error for {json}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_protocol_fields() {
+        for json in [
+            r#"{"command":"quit","command":"view"}"#,
+            r#"{"query":"get_version","args":null,"args":{}}"#,
+            r#"{"subscribe":["window"],"subscribe":["tag"]}"#,
+        ] {
+            let error = serde_json::from_str::<IpcMessage>(json).unwrap_err();
+            assert!(
+                error.to_string().contains("duplicate field"),
+                "unexpected error for {json}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_keeps_extension_fields_backwards_compatible() {
+        let msg: IpcMessage = serde_json::from_str(
+            r#"{"command":"view","args":{"tag":2},"request_id":"legacy-client-1"}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(msg, IpcMessage::Command(IpcCommand { command, .. }) if command == "view")
+        );
     }
 
     #[test]

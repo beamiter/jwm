@@ -12,7 +12,7 @@ use serde::Serialize;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Severity of one doctor check or of the report as a whole.
@@ -130,6 +130,7 @@ struct DoctorInputs {
     terminal: Option<OsString>,
     scratchpad_terminal: Option<OsString>,
     dri_dir: PathBuf,
+    x11_socket_dir: PathBuf,
     effective_uid: u32,
 }
 
@@ -146,6 +147,7 @@ impl DoctorInputs {
             terminal: env::var_os("JWM_TERMINAL"),
             scratchpad_terminal: env::var_os("JWM_SCRATCHPAD_TERMINAL"),
             dri_dir: PathBuf::from("/dev/dri"),
+            x11_socket_dir: PathBuf::from("/tmp/.X11-unix"),
             effective_uid: current_effective_uid(),
         }
     }
@@ -159,7 +161,8 @@ fn current_effective_uid() -> u32 {
 /// Inspect whether the selected backend has the prerequisites needed to start.
 ///
 /// This function only reads environment variables, file metadata and directory
-/// entries. It does not construct a display backend, open DRM devices, write a
+/// entries. It may inspect display-socket metadata, but it does not connect to
+/// a display server, construct a display backend, open DRM devices, write a
 /// file, or mutate the process environment.
 #[must_use]
 pub fn diagnose(choice: BackendChoice) -> DoctorReport {
@@ -180,7 +183,7 @@ fn diagnose_with_inputs(choice: BackendChoice, inputs: &DoctorInputs) -> DoctorR
         inputs.effective_uid,
         choice.family() == crate::config::BackendFamily::Wayland,
     ));
-    checks.push(check_backend_requirements(choice, inputs));
+    checks.extend(check_backend_requirements(choice, inputs));
     checks.push(check_dbus(inputs.dbus_session_bus_address.as_deref()));
     checks.push(check_jwm_tool(inputs.path.as_deref()));
     DoctorReport::from_checks(choice, checks)
@@ -406,24 +409,27 @@ fn display_value(name: &str, value: &OsStr) -> String {
     format!("{name}={}", value.to_string_lossy())
 }
 
-fn check_backend_requirements(choice: BackendChoice, inputs: &DoctorInputs) -> DoctorCheck {
+fn check_backend_requirements(choice: BackendChoice, inputs: &DoctorInputs) -> Vec<DoctorCheck> {
     match choice {
         BackendChoice::X11rb | BackendChoice::Xcb | BackendChoice::WaylandX11 => {
             match inputs.display.as_deref().filter(|value| !value.is_empty()) {
-                Some(display) => DoctorCheck::new(
-                    DoctorStatus::Pass,
-                    "backend.display",
-                    "An X11 host display is configured",
-                    Some(display_value("DISPLAY", display)),
-                    None,
-                ),
-                None => DoctorCheck::new(
+                Some(display) => vec![
+                    DoctorCheck::new(
+                        DoctorStatus::Pass,
+                        "backend.display",
+                        "An X11 host display is configured",
+                        Some(display_value("DISPLAY", display)),
+                        None,
+                    ),
+                    check_x11_socket(display, &inputs.x11_socket_dir),
+                ],
+                None => vec![DoctorCheck::new(
                     DoctorStatus::Error,
                     "backend.display",
                     "The selected backend requires DISPLAY",
                     Some(format!("backend={}", choice.as_str())),
                     Some("Run JWM from an X11 session or select a different backend".into()),
-                ),
+                )],
             }
         }
         BackendChoice::WaylandWinit => {
@@ -433,13 +439,13 @@ fn check_backend_requirements(choice: BackendChoice, inputs: &DoctorInputs) -> D
                 .filter(|value| !value.is_empty());
             let x11 = inputs.display.as_deref().filter(|value| !value.is_empty());
             if wayland.is_none() && x11.is_none() {
-                DoctorCheck::new(
+                vec![DoctorCheck::new(
                     DoctorStatus::Error,
                     "backend.host_display",
                     "The winit backend needs a Wayland or X11 host display",
                     Some("Neither WAYLAND_DISPLAY nor DISPLAY is set".into()),
                     Some("Run it inside an existing graphical session".into()),
-                )
+                )]
             } else {
                 let detail = [
                     wayland.map(|value| display_value("WAYLAND_DISPLAY", value)),
@@ -449,16 +455,155 @@ fn check_backend_requirements(choice: BackendChoice, inputs: &DoctorInputs) -> D
                 .flatten()
                 .collect::<Vec<_>>()
                 .join(", ");
-                DoctorCheck::new(
+                let mut checks = vec![DoctorCheck::new(
                     DoctorStatus::Pass,
                     "backend.host_display",
                     "A graphical host display is configured for winit",
                     Some(detail),
                     None,
-                )
+                )];
+                if let Some(display) = wayland {
+                    checks.push(check_wayland_socket(
+                        display,
+                        inputs.xdg_runtime_dir.as_deref(),
+                    ));
+                } else if let Some(display) = x11 {
+                    checks.push(check_x11_socket(display, &inputs.x11_socket_dir));
+                }
+                checks
             }
         }
-        BackendChoice::WaylandUdev => check_dri(&inputs.dri_dir),
+        BackendChoice::WaylandUdev => vec![check_dri(&inputs.dri_dir)],
+    }
+}
+
+fn check_x11_socket(display: &OsStr, socket_dir: &Path) -> DoctorCheck {
+    let Some(display) = display.to_str() else {
+        return DoctorCheck::new(
+            DoctorStatus::Error,
+            "backend.display_socket",
+            "The X11 socket cannot be derived from a non-UTF-8 DISPLAY value",
+            None,
+            Some("Set DISPLAY to the value exported by the graphical login session".into()),
+        );
+    };
+    let Some((host, display_and_screen)) = display.rsplit_once(':') else {
+        return DoctorCheck::new(
+            DoctorStatus::Error,
+            "backend.display_socket",
+            "DISPLAY does not contain an X11 display number",
+            None,
+            Some("Use an X11 display value such as :0 or hostname:0".into()),
+        );
+    };
+    let (display_number, screen) = display_and_screen
+        .split_once('.')
+        .map_or((display_and_screen, None), |(display, screen)| {
+            (display, Some(screen))
+        });
+    if display_number.is_empty()
+        || !display_number.bytes().all(|byte| byte.is_ascii_digit())
+        || screen.is_some_and(|screen| {
+            screen.is_empty() || !screen.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return DoctorCheck::new(
+            DoctorStatus::Error,
+            "backend.display_socket",
+            "DISPLAY has an invalid local display or screen number",
+            None,
+            Some("Use the DISPLAY value exported by the active X11 session".into()),
+        );
+    }
+
+    let local = host.is_empty() || matches!(host, "unix" | "unix/" | "local" | "local/");
+    if !local {
+        return DoctorCheck::new(
+            DoctorStatus::Pass,
+            "backend.display_socket",
+            "DISPLAY uses a non-local X11 transport",
+            Some("Filesystem socket inspection is not applicable".into()),
+            None,
+        );
+    }
+
+    check_display_socket(
+        "backend.display_socket",
+        "X11",
+        &socket_dir.join(format!("X{display_number}")),
+        "The local X11 filesystem socket is present",
+        "The local X11 filesystem socket is missing",
+        "Confirm the X server is running and DISPLAY is current; an abstract-only X11 socket may not appear on the filesystem",
+        DoctorStatus::Warning,
+    )
+}
+
+fn check_wayland_socket(display: &OsStr, runtime_dir: Option<&Path>) -> DoctorCheck {
+    let display_path = Path::new(display);
+    let socket = if display_path.is_absolute() {
+        display_path.to_path_buf()
+    } else {
+        let Some(runtime_dir) = runtime_dir.filter(|path| !path.as_os_str().is_empty()) else {
+            return DoctorCheck::new(
+                DoctorStatus::Error,
+                "backend.host_socket",
+                "The Wayland host socket path cannot be resolved without XDG_RUNTIME_DIR",
+                None,
+                Some("Use WAYLAND_DISPLAY and XDG_RUNTIME_DIR from the same login session".into()),
+            );
+        };
+        runtime_dir.join(display_path)
+    };
+
+    check_display_socket(
+        "backend.host_socket",
+        "Wayland",
+        &socket,
+        "The Wayland host filesystem socket is present",
+        "The Wayland host filesystem socket is missing",
+        "Confirm the host compositor is running and WAYLAND_DISPLAY belongs to this login session",
+        DoctorStatus::Error,
+    )
+}
+
+fn check_display_socket(
+    id: &str,
+    protocol: &str,
+    path: &Path,
+    present_summary: &str,
+    missing_summary: &str,
+    missing_hint: &str,
+    failure_status: DoctorStatus,
+) -> DoctorCheck {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => DoctorCheck::new(
+            DoctorStatus::Pass,
+            id,
+            present_summary,
+            Some(format!("{protocol} socket node type verified")),
+            None,
+        ),
+        Ok(_) => DoctorCheck::new(
+            failure_status,
+            id,
+            format!("The configured {protocol} endpoint is not a Unix socket"),
+            Some("A filesystem node exists at the expected endpoint".into()),
+            Some(missing_hint.into()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DoctorCheck::new(
+            failure_status,
+            id,
+            missing_summary,
+            Some("No filesystem node exists at the expected endpoint".into()),
+            Some(missing_hint.into()),
+        ),
+        Err(error) => DoctorCheck::new(
+            failure_status,
+            id,
+            format!("The configured {protocol} socket cannot be inspected"),
+            Some(error.to_string()),
+            Some(missing_hint.into()),
+        ),
     }
 }
 
@@ -834,6 +979,7 @@ mod tests {
             terminal: None,
             scratchpad_terminal: None,
             dri_dir: root.join("dri"),
+            x11_socket_dir: root.join("x11-sockets"),
             effective_uid: current_effective_uid(),
         }
     }
@@ -926,30 +1072,93 @@ mod tests {
 
         inputs.display = None;
         assert_eq!(
-            check_backend_requirements(BackendChoice::X11rb, &inputs).status,
+            check_backend_requirements(BackendChoice::X11rb, &inputs)[0].status,
             DoctorStatus::Error
         );
         inputs.display = Some(OsString::from(":1"));
         assert_eq!(
-            check_backend_requirements(BackendChoice::WaylandX11, &inputs).status,
+            check_backend_requirements(BackendChoice::WaylandX11, &inputs)[0].status,
             DoctorStatus::Pass
         );
         inputs.display = None;
         inputs.wayland_display = Some(OsString::from("wayland-1"));
         assert_eq!(
-            check_backend_requirements(BackendChoice::WaylandWinit, &inputs).status,
+            check_backend_requirements(BackendChoice::WaylandWinit, &inputs)[0].status,
             DoctorStatus::Pass
         );
 
         fs::create_dir(&inputs.dri_dir).unwrap();
         assert_eq!(
-            check_backend_requirements(BackendChoice::WaylandUdev, &inputs).status,
+            check_backend_requirements(BackendChoice::WaylandUdev, &inputs)[0].status,
             DoctorStatus::Error
         );
         fs::write(inputs.dri_dir.join("card0"), []).unwrap();
         assert_eq!(
-            check_backend_requirements(BackendChoice::WaylandUdev, &inputs).status,
+            check_backend_requirements(BackendChoice::WaylandUdev, &inputs)[0].status,
             DoctorStatus::Pass
+        );
+    }
+
+    #[test]
+    fn local_x11_socket_check_reports_stale_and_malformed_displays() {
+        use std::os::unix::net::UnixListener;
+
+        let root = TestDir::new();
+        let sockets = root.path().join("x11");
+        fs::create_dir(&sockets).unwrap();
+
+        let missing = check_x11_socket(OsStr::new(":7"), &sockets);
+        assert_eq!(missing.status, DoctorStatus::Warning);
+        assert_eq!(missing.id, "backend.display_socket");
+        assert!(missing.summary.contains("missing"));
+
+        let _listener = UnixListener::bind(sockets.join("X7")).unwrap();
+        assert_eq!(
+            check_x11_socket(OsStr::new("unix/:7.0"), &sockets).status,
+            DoctorStatus::Pass
+        );
+
+        let remote = check_x11_socket(OsStr::new("host.example:7"), &sockets);
+        assert_eq!(remote.status, DoctorStatus::Pass);
+        assert!(remote.summary.contains("non-local"));
+
+        assert_eq!(
+            check_x11_socket(OsStr::new("host.example:not-a-number"), &sockets).status,
+            DoctorStatus::Error
+        );
+
+        assert_eq!(
+            check_x11_socket(OsStr::new(":not-a-number"), &sockets).status,
+            DoctorStatus::Error
+        );
+    }
+
+    #[test]
+    fn wayland_socket_check_requires_a_socket_node_in_the_runtime_dir() {
+        use std::os::unix::net::UnixListener;
+
+        let root = TestDir::new();
+        let runtime = root.path().join("runtime");
+        fs::create_dir(&runtime).unwrap();
+
+        assert_eq!(
+            check_wayland_socket(OsStr::new("wayland-9"), Some(&runtime)).status,
+            DoctorStatus::Error
+        );
+        fs::write(runtime.join("wayland-9"), b"not a socket").unwrap();
+        let regular_file = check_wayland_socket(OsStr::new("wayland-9"), Some(&runtime));
+        assert_eq!(regular_file.status, DoctorStatus::Error);
+        assert!(regular_file.summary.contains("not a Unix socket"));
+        fs::remove_file(runtime.join("wayland-9")).unwrap();
+
+        let _listener = UnixListener::bind(runtime.join("wayland-9")).unwrap();
+        assert_eq!(
+            check_wayland_socket(OsStr::new("wayland-9"), Some(&runtime)).status,
+            DoctorStatus::Pass
+        );
+        assert_eq!(
+            check_wayland_socket(OsStr::new("wayland-9"), None).status,
+            DoctorStatus::Error
         );
     }
 
@@ -1053,11 +1262,28 @@ mod tests {
             fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         }
         inputs.path = Some(root.path().as_os_str().to_owned());
+        fs::create_dir(&inputs.x11_socket_dir).unwrap();
+        let _x11_listener =
+            std::os::unix::net::UnixListener::bind(inputs.x11_socket_dir.join("X99")).unwrap();
 
-        let report = diagnose_with_inputs(BackendChoice::X11rb, &inputs);
-        assert_eq!(report.status, DoctorStatus::Pass);
-        assert_eq!(report.summary.errors, 0);
+        let choice = BackendChoice::X11rb;
+        let report = diagnose_with_inputs(choice, &inputs);
+        let compiled_status = if choice.is_compiled() {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Error
+        };
+        assert_eq!(report.status, compiled_status);
+        assert_eq!(report.summary.errors, usize::from(!choice.is_compiled()));
         assert_eq!(report.summary.warnings, 0);
+        assert_eq!(report.checks[0].status, compiled_status);
+        assert!(
+            report.checks[1..]
+                .iter()
+                .all(|check| check.status == DoctorStatus::Pass),
+            "injected prerequisites should pass independently of Cargo features: {:#?}",
+            report.checks
+        );
         assert_eq!(
             report
                 .checks
@@ -1074,6 +1300,7 @@ mod tests {
                 "command.scratchpad_terminal",
                 "runtime.xdg_runtime_dir",
                 "backend.display",
+                "backend.display_socket",
                 "session.dbus",
                 "command.jwm_tool",
             ]

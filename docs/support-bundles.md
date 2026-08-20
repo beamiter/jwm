@@ -36,6 +36,13 @@ Schema version 1 contains:
 - a support-safe projection of the versioned startup doctor report;
 - optional, redacted `get_status` data and the `get_capabilities` catalog.
 
+For local X11 and Wayland host displays, the embedded doctor also verifies
+that the expected filesystem endpoint exists and is a Unix socket. This catches
+stale `DISPLAY` and `WAYLAND_DISPLAY` values without connecting to the display
+server. Remote X11 transports are reported as uninspectable; a missing local
+X11 filesystem endpoint is only a warning because Linux can use an
+abstract-only socket.
+
 The live queries have a two-second read/write timeout and a four-megabyte
 response limit. A stopped compositor therefore produces a useful report rather
 than leaving the command blocked indefinitely.
@@ -70,3 +77,8 @@ The selected `/etc/os-release` keys are `NAME`, `PRETTY_NAME`, `ID`, `ID_LIKE`,
 A support bundle is still diagnostic data. Review it before publishing it in a
 public issue, especially on machines with unusual display names or custom
 desktop-session identifiers.
+
+`scripts/check_system.sh` is a more verbose, local troubleshooting aid. It runs
+the same startup doctor when a built or installed `jwm` binary is available,
+but its device, kernel, and group listings are not intended to replace the
+privacy-aware support bundle for public issues.

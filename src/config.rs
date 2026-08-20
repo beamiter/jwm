@@ -3594,13 +3594,55 @@ impl Config {
         original_path: P,
     ) -> Result<std::path::PathBuf, ConfigError> {
         let original = original_path.as_ref();
-        let backup_path = original.with_extension("toml.backup");
+        let first_backup = original.with_extension("toml.backup");
 
-        if original.exists() {
-            fs::copy(original, &backup_path)?;
+        // Keep the historical return value when there is nothing to back up.
+        // Existing callers already guard this case, but changing it to an
+        // error would be an unnecessary API incompatibility.
+        if !original.exists() {
+            return Ok(first_backup);
         }
 
-        Ok(backup_path)
+        let mut source = fs::File::open(original)?;
+        let permissions = source.metadata()?.permissions();
+
+        // Never truncate an earlier recovery point. `create_new` also closes
+        // the check-then-create race when two invocations run concurrently.
+        for suffix in 0u64.. {
+            let backup_path = if suffix == 0 {
+                first_backup.clone()
+            } else {
+                let mut name = first_backup.as_os_str().to_os_string();
+                name.push(format!(".{suffix}"));
+                std::path::PathBuf::from(name)
+            };
+            let mut backup = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&backup_path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            };
+
+            let copy_result = (|| {
+                std::io::copy(&mut source, &mut backup)?;
+                backup.set_permissions(permissions.clone())?;
+                backup.sync_all()
+            })();
+            if let Err(error) = copy_result {
+                // A failed copy is not a usable recovery point and should not
+                // consume a numbered slot on the next attempt.
+                drop(backup);
+                let _ = fs::remove_file(&backup_path);
+                return Err(error.into());
+            }
+            return Ok(backup_path);
+        }
+
+        unreachable!("u64 backup suffix space exhausted")
     }
 
     pub fn restore_from_backup<P: AsRef<Path>>(
@@ -4724,6 +4766,34 @@ border_px = 3
             );
         }
         assert_eq!(Config::load_from_file(&target).unwrap().gap_px(), 29);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repeated_backups_never_overwrite_an_earlier_recovery_point() {
+        let directory = temporary_config_path("numbered-config-backups");
+        std::fs::create_dir(&directory).unwrap();
+        let original = directory.join("config.toml");
+        std::fs::write(&original, "generation = 1\n").unwrap();
+
+        let first = Config::backup_config(&original).unwrap();
+        std::fs::write(&original, "generation = 2\n").unwrap();
+        let second = Config::backup_config(&original).unwrap();
+        std::fs::write(&original, "generation = 3\n").unwrap();
+        let third = Config::backup_config(&original).unwrap();
+
+        assert_eq!(first, original.with_extension("toml.backup"));
+        assert_eq!(
+            second,
+            std::path::PathBuf::from(format!("{}.1", first.display()))
+        );
+        assert_eq!(
+            third,
+            std::path::PathBuf::from(format!("{}.2", first.display()))
+        );
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "generation = 1\n");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "generation = 2\n");
+        assert_eq!(std::fs::read_to_string(third).unwrap(), "generation = 3\n");
         std::fs::remove_dir_all(directory).unwrap();
     }
 

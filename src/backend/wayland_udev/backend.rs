@@ -207,6 +207,27 @@ fn render_work_is_pending(
         && (handler_needs_tick || kms_pending || state_needs_redraw || compositor_pending)
 }
 
+fn event_loop_timeout(
+    has_pending_events: bool,
+    poll_session_activation: bool,
+    render_work_pending: bool,
+    handler_wakeup: Option<Duration>,
+    compositor_wakeup: Option<Duration>,
+    frame_watchdog_wakeup: Option<Duration>,
+) -> Option<Duration> {
+    [
+        has_pending_events.then_some(Duration::ZERO),
+        poll_session_activation.then_some(Duration::from_millis(100)),
+        render_work_pending.then_some(Duration::from_millis(16)),
+        handler_wakeup,
+        compositor_wakeup,
+        frame_watchdog_wakeup,
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+}
+
 #[derive(Clone, Copy, Debug)]
 struct RepeatState {
     keycode: u8,
@@ -3312,6 +3333,13 @@ impl BackendDiagnostics for UdevBackend {
             .map(|kms| kms.borrow().presentation_timing_status())
     }
 
+    fn compositor_color_delivery_status(&self) -> Option<crate::backend::api::ColorDeliveryStatus> {
+        self.kms.as_ref().map(|kms| {
+            kms.borrow()
+                .color_delivery_status(&self.state.soft_disabled_outputs)
+        })
+    }
+
     fn compositor_output_management_status(
         &self,
     ) -> Option<crate::backend::api::OutputManagementStatus> {
@@ -5195,6 +5223,11 @@ impl Backend for UdevBackend {
                     linear_tail_safe,
                     scene_linear_color_path,
                 );
+                kms.borrow_mut().record_color_delivery_attempt(
+                    &decision,
+                    linear_tail_safe,
+                    scene_linear_color_path,
+                );
                 if decision.delivery_blocked {
                     // Keep the last known-good scanout visible while KMS retries a
                     // failed LUT/CTM transition. Rendering a new software-encoded
@@ -5757,6 +5790,13 @@ impl Backend for UdevBackend {
                 self.request_flush();
             }
 
+            // Lost page-flip events must be retired before `can_present` is
+            // computed. Otherwise the pending flag suppresses the very render
+            // method that previously contained the recovery path.
+            if let Some(kms) = &self.kms {
+                kms.borrow_mut().recover_stale_frames();
+            }
+
             // Only run compositor + animation work when KMS can actually
             // accept a new frame. This prevents the GPU from doing expensive
             // rendering that will be discarded because the previous page-flip
@@ -5851,16 +5891,18 @@ impl Backend for UdevBackend {
                         .and_then(|compositor| compositor.next_wakeup())
                 })
                 .flatten();
-            let timeout = [
-                has_pending_events.then_some(std::time::Duration::ZERO),
-                poll_session_activation.then_some(std::time::Duration::from_millis(100)),
-                render_work_pending.then_some(std::time::Duration::from_millis(16)),
+            let frame_watchdog_wakeup = self
+                .kms
+                .as_ref()
+                .and_then(|kms| kms.borrow().next_frame_watchdog_wakeup());
+            let timeout = event_loop_timeout(
+                has_pending_events,
+                poll_session_activation,
+                render_work_pending,
                 handler_wakeup,
                 compositor_wakeup,
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+                frame_watchdog_wakeup,
+            );
             self.event_loop
                 .dispatch(timeout, &mut *self.state)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -6175,6 +6217,21 @@ mod udev_backend_selection_tests {
     fn compositor_only_animation_keeps_the_frame_wakeup_armed() {
         assert!(render_work_is_pending(true, false, false, false, true));
         assert!(!render_work_is_pending(false, false, false, false, true));
+    }
+
+    #[test]
+    fn lost_page_flip_keeps_the_event_loop_watchdog_armed() {
+        let watchdog = Duration::from_millis(73);
+        assert_eq!(
+            event_loop_timeout(false, false, false, None, None, Some(watchdog)),
+            Some(watchdog),
+            "a pending frame needs its own wakeup even when presentation blocks all other work"
+        );
+        assert_eq!(
+            event_loop_timeout(false, false, true, None, None, Some(watchdog)),
+            Some(Duration::from_millis(16)),
+            "normal render cadence may wake the loop sooner"
+        );
     }
 
     fn test_output(id: OutputId, name: &str) -> OutputInfo {

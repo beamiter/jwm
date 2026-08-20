@@ -12,7 +12,7 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
-use smithay::backend::drm::compositor::FrameFlags;
+use smithay::backend::drm::compositor::{FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::exporter::gbm::NodeFilter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
@@ -46,7 +46,7 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Buffer as BufferCoord, Monotonic, Size, Time};
+use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size, Time};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
@@ -107,10 +107,26 @@ struct KmsOutputState {
     drm_mode_uncertain: bool,
 
     output: Output,
-    drm_output:
-        DrmOutput<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>,
+    drm_output: DrmOutput<
+        GbmAllocator<DrmDeviceFd>,
+        GbmFramebufferExporter<DrmDeviceFd>,
+        QueuedFrameData,
+        DrmDeviceFd,
+    >,
 
     frame_pending: bool,
+    frame_pending_boundary: Option<FrameQueueBoundary>,
+    /// A watchdog/DPMS cancellation can race a late page-flip event. The first
+    /// subsequent event re-establishes ordering but is not trusted as a color
+    /// delivery observation.
+    color_delivery_observation_uncertain: bool,
+    /// Keep forcing a damaged replacement buffer until a post-cancellation or
+    /// post-reactivation frame reaches a trustworthy vblank. This prevents a
+    /// static, no-damage desktop from leaving diagnostics unknown forever.
+    color_delivery_retry_required: bool,
+    /// Color-domain plan paired with the queued framebuffer plus the most
+    /// recent plan confirmed by a page-flip/vblank.
+    color_delivery: OutputColorDeliveryTracker,
     /// When `frame_pending` was last set. If a queued page flip never produces a
     /// vblank (driver hiccup, dropped flip), `frame_pending` would otherwise stay
     /// true forever and the output stops rendering. The watchdog in `render` uses
@@ -363,6 +379,229 @@ pub(super) struct ColorPipelineDecision {
         Option<Vec<crate::backend::wayland_udev::color_pipeline::OutputColorRegion>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PreparedColorDelivery {
+    route: &'static str,
+    working_space: &'static str,
+    targets_output_profile: bool,
+    fallback_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ColorDeliveryPlan {
+    policy_sequence: u64,
+    route: String,
+    working_space: String,
+    target_transfer_function: String,
+    target_primaries: String,
+    hdr_metadata_active: bool,
+    colorspace_signal: String,
+    fallback_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct QueuedFrameData {
+    color_delivery: Option<ColorDeliveryPlan>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FrameQueueBoundary {
+    monotonic: std::time::Duration,
+    realtime: std::time::SystemTime,
+}
+
+impl FrameQueueBoundary {
+    fn now() -> Self {
+        Self {
+            monotonic: Clock::<Monotonic>::new().now().into(),
+            realtime: std::time::SystemTime::now(),
+        }
+    }
+}
+
+fn vblank_is_not_older_than_queue(
+    metadata: Option<&DrmEventMetadata>,
+    boundary: FrameQueueBoundary,
+) -> bool {
+    metadata.is_some_and(|metadata| match metadata.time {
+        smithay::backend::drm::DrmEventTime::Monotonic(time) => time >= boundary.monotonic,
+        smithay::backend::drm::DrmEventTime::Realtime(time) => time >= boundary.realtime,
+    })
+}
+
+fn frame_watchdog_timeout(refresh_interval: std::time::Duration) -> std::time::Duration {
+    (refresh_interval * 5).max(std::time::Duration::from_millis(100))
+}
+
+fn frame_watchdog_remaining(
+    refresh_interval: std::time::Duration,
+    pending_for: std::time::Duration,
+) -> std::time::Duration {
+    frame_watchdog_timeout(refresh_interval).saturating_sub(pending_for)
+}
+
+fn submitted_color_delivery_observation(
+    submitted: Option<QueuedFrameData>,
+    observation_uncertain: bool,
+) -> (Option<ColorDeliveryPlan>, bool) {
+    match submitted {
+        Some(frame) if !observation_uncertain => (frame.color_delivery, false),
+        // A cancellation may consume Smithay's queued data before a late DRM
+        // event arrives. If no such event arrives, the first real new vblank is
+        // deliberately fail-closed; request one more frame so a static desktop
+        // still converges on a trustworthy observation.
+        Some(_) | None => (None, true),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LastColorDelivery {
+    presentation: crate::backend::api::ColorDeliveryPresentationStatus,
+    received_at: std::time::Instant,
+}
+
+#[derive(Clone, Debug, Default)]
+struct OutputColorDeliveryTracker {
+    last_success: Option<LastColorDelivery>,
+}
+
+impl OutputColorDeliveryTracker {
+    fn invalidate(&mut self) {
+        self.last_success = None;
+    }
+
+    /// Promote user data returned by Smithay for the frame acknowledged at the
+    /// backend's presentation-completion boundary.
+    fn present(
+        &mut self,
+        plan: Option<ColorDeliveryPlan>,
+        generation: &mut u64,
+        presented_at: Option<std::time::Duration>,
+        received_at: std::time::Instant,
+    ) -> bool {
+        let Some(plan) = plan else {
+            return false;
+        };
+        *generation = generation.saturating_add(1);
+        self.last_success = Some(LastColorDelivery {
+            presentation: crate::backend::api::ColorDeliveryPresentationStatus {
+                generation: *generation,
+                policy_sequence: plan.policy_sequence,
+                route: plan.route,
+                working_space: plan.working_space,
+                target_transfer_function: plan.target_transfer_function,
+                target_primaries: plan.target_primaries,
+                hdr_metadata_active: plan.hdr_metadata_active,
+                colorspace_signal: plan.colorspace_signal,
+                fallback_reason: plan.fallback_reason,
+                presented_at_monotonic_ms: presented_at
+                    .map(|time| time.as_millis().min(u128::from(u64::MAX)) as u64),
+                presented_ago_ms: Some(0),
+            },
+            received_at,
+        });
+        true
+    }
+
+    fn last_success_status(
+        &self,
+        now: std::time::Instant,
+    ) -> Option<crate::backend::api::ColorDeliveryPresentationStatus> {
+        self.last_success.as_ref().map(|last| {
+            let mut presentation = last.presentation.clone();
+            presentation.presented_ago_ms = Some(
+                now.duration_since(last.received_at)
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+            presentation
+        })
+    }
+}
+
+fn prepared_color_delivery(
+    decision: &ColorPipelineDecision,
+    linear_tail_safe: bool,
+    scene_linear_active: bool,
+) -> PreparedColorDelivery {
+    if decision.delivery_blocked {
+        return PreparedColorDelivery {
+            route: "hold_last_success",
+            working_space: "unknown",
+            targets_output_profile: false,
+            fallback_reason: Some("kms_color_state_unresolved"),
+        };
+    }
+    if !scene_linear_active {
+        return PreparedColorDelivery {
+            route: "legacy_encoded_srgb",
+            working_space: "legacy_encoded_srgb",
+            targets_output_profile: false,
+            fallback_reason: Some("scene_linear_target_inactive"),
+        };
+    }
+    if !linear_tail_safe {
+        return PreparedColorDelivery {
+            route: "global_srgb_fallback",
+            working_space: "encoded_srgb",
+            targets_output_profile: false,
+            fallback_reason: Some("linear_tail_unsafe"),
+        };
+    }
+    if decision.hw_encode_active && decision.hw_ctm_active {
+        return PreparedColorDelivery {
+            route: "kms_ctm_gamma_lut",
+            working_space: "normalized_linear_srgb",
+            targets_output_profile: true,
+            fallback_reason: None,
+        };
+    }
+    if decision.software_regions.is_some() {
+        return PreparedColorDelivery {
+            route: "software_per_output_regions",
+            working_space: "normalized_linear_srgb",
+            targets_output_profile: true,
+            fallback_reason: None,
+        };
+    }
+    PreparedColorDelivery {
+        route: "global_srgb_fallback",
+        working_space: "encoded_srgb",
+        targets_output_profile: false,
+        fallback_reason: Some("unsupported_output_topology"),
+    }
+}
+
+fn legacy_color_delivery_attempt_needed(current: Option<&PreparedColorDelivery>) -> bool {
+    !current.is_some_and(|prepared| prepared.route == "legacy_encoded_srgb")
+}
+
+fn transfer_kind_name(
+    transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+) -> String {
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    match transfer {
+        TransferKind::Linear => "linear".into(),
+        TransferKind::Power { gamma_x10000 } => format!("power_{gamma_x10000}"),
+        TransferKind::Bt1886 => "bt1886".into(),
+        TransferKind::Gamma22 => "gamma22".into(),
+        TransferKind::St2084Pq => "st2084_pq".into(),
+        TransferKind::Hlg => "hlg".into(),
+        TransferKind::Srgb => "srgb".into(),
+    }
+}
+
+fn output_primaries_name(output: &Output) -> String {
+    let params = crate::backend::wayland_udev::color_management::params_for_output(output);
+    match params.primaries_named {
+        Some(1) => "srgb".into(),
+        Some(6) => "bt2020".into(),
+        Some(value) => format!("named_{value}"),
+        None if params.primaries.is_some() => "custom".into(),
+        None => "srgb".into(),
+    }
+}
+
 /// A CRTC CTM operates on linear light. It is therefore only valid when the
 /// output OETF has also moved into the CRTC GAMMA_LUT and the compositor is
 /// leaving scene-linear pixels for scanout.
@@ -372,6 +611,41 @@ const fn ctm_offload_allowed(
     any_participating: bool,
 ) -> bool {
     gate_on && hw_encode_active && any_participating
+}
+
+const fn client_direct_scanout_presented(
+    direct_scanout_eligible: bool,
+    primary_plane_is_element: bool,
+) -> bool {
+    // A policy candidate is not an observation. Smithay may still fall back to
+    // a swapchain composition when KMS rejects the client buffer.
+    direct_scanout_eligible && primary_plane_is_element
+}
+
+const fn direct_scanout_allowed_for_color_retry(
+    policy_eligible: bool,
+    color_delivery_retry_required: bool,
+) -> bool {
+    // Force one swapchain-backed frame after an uncertain observation. A
+    // static direct-scanout element may otherwise produce no new commit even
+    // when the swapchain damage history is reset.
+    policy_eligible && !color_delivery_retry_required
+}
+
+fn frame_flags_for_color_delivery(
+    color_delivery_retry_required: bool,
+    manual_surface_path: bool,
+    direct_scanout_eligible: bool,
+) -> FrameFlags {
+    if color_delivery_retry_required || (manual_surface_path && !direct_scanout_eligible) {
+        // With no effects compositor, the render list contains raw client
+        // surfaces. Disallow Smithay plane assignment unless the same policy
+        // that labels the route approved it; retries also need a guaranteed
+        // swapchain commit even for an unchanged fullscreen client buffer.
+        FrameFlags::empty()
+    } else {
+        FrameFlags::DEFAULT
+    }
 }
 
 pub(super) struct KmsState {
@@ -388,7 +662,7 @@ pub(super) struct KmsState {
     drm_output_manager: DrmOutputManager<
         GbmAllocator<DrmDeviceFd>,
         GbmFramebufferExporter<DrmDeviceFd>,
-        (),
+        QueuedFrameData,
         DrmDeviceFd,
     >,
     #[allow(dead_code)]
@@ -459,6 +733,10 @@ pub(super) struct KmsState {
     /// `render_if_needed` cannot submit an incompatible framebuffer after a
     /// failed LUT/CTM teardown.
     color_pipeline_delivery_blocked: bool,
+    prepared_color_delivery: Option<PreparedColorDelivery>,
+    color_delivery_policy_sequence: u64,
+    color_delivery_generation: u64,
+    last_color_delivery_policy: Option<crate::backend::api::ColorDeliveryPolicyDecisionStatus>,
     /// Set only after the constructor's final all-CRTC neutral-color commit.
     /// A failed/incomplete reinit must not run the Drop reset: the previous
     /// `KmsState` still owns and tracks those live properties.
@@ -724,8 +1002,86 @@ impl KmsState {
         self.needs_render = true;
     }
 
+    fn invalidate_color_delivery_after_hardware_change(&mut self, output_idx: usize) {
+        let Some(out) = self.outputs.get_mut(output_idx) else {
+            return;
+        };
+        out.color_delivery.invalidate();
+        if !out.dpms_off {
+            if out.frame_pending {
+                out.color_delivery_observation_uncertain = true;
+            }
+            out.color_delivery_retry_required = true;
+            self.needs_render = true;
+        }
+    }
+
     pub(super) fn any_frame_pending(&self) -> bool {
         self.outputs.iter().any(|o| !o.dpms_off && o.frame_pending)
+    }
+
+    /// Return the nearest deadline at which a queued frame must be retired if
+    /// its page-flip event never arrives. Keeping this deadline in the outer
+    /// event-loop timeout is essential: after a successful queue there may be
+    /// no animation, client, or handler work left to wake the loop again.
+    pub(super) fn next_frame_watchdog_wakeup(&self) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        self.outputs
+            .iter()
+            .filter(|out| !out.dpms_off && out.frame_pending)
+            .map(|out| {
+                out.frame_pending_since
+                    .map_or(std::time::Duration::ZERO, |since| {
+                        let pending_for = now.checked_duration_since(since).unwrap_or_default();
+                        frame_watchdog_remaining(out.refresh_interval, pending_for)
+                    })
+            })
+            .min()
+    }
+
+    /// Retire page flips that exceeded their refresh-derived deadline before
+    /// the scheduler decides whether KMS can accept another frame. This cannot
+    /// live in `render_if_needed`: the outer loop deliberately suppresses that
+    /// call while any frame is pending.
+    pub(super) fn recover_stale_frames(&mut self) -> usize {
+        let now = std::time::Instant::now();
+        let mut recovered = 0;
+
+        for out in &mut self.outputs {
+            if out.dpms_off || !out.frame_pending {
+                continue;
+            }
+            let timeout = frame_watchdog_timeout(out.refresh_interval);
+            let stale = out.frame_pending_since.is_none_or(|since| {
+                now.checked_duration_since(since).unwrap_or_default() >= timeout
+            });
+            if !stale {
+                continue;
+            }
+
+            log::warn!(
+                "{}: output {} missed its {:?} page-flip deadline; force-clearing to recover",
+                renderer_ctx("await page-flip vblank"),
+                out.output.name(),
+                timeout,
+            );
+            // Retire Smithay's queued user data together with the local flag.
+            // A late kernel event is rejected by the queue boundary in
+            // `on_vblank`, and the next accepted observation is fail-closed.
+            let _ = out.drm_output.frame_submitted();
+            out.frame_pending = false;
+            out.frame_pending_since = None;
+            out.frame_pending_boundary = None;
+            out.color_delivery_observation_uncertain = true;
+            out.color_delivery_retry_required = true;
+            out.color_delivery.invalidate();
+            recovered += 1;
+        }
+
+        if recovered > 0 {
+            self.needs_render = true;
+        }
+        recovered
     }
 
     /// Set the shared pending screencopy queue (called once after initialization).
@@ -1044,6 +1400,105 @@ impl KmsState {
         true
     }
 
+    /// Record the current frame's color-delivery decision without claiming it
+    /// reached the display. `render_if_needed` attaches the prepared plan to a
+    /// successfully queued framebuffer; `on_vblank` is the only promotion
+    /// point into the last-success snapshot.
+    pub(super) fn record_color_delivery_attempt(
+        &mut self,
+        decision: &ColorPipelineDecision,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
+    ) {
+        let prepared = prepared_color_delivery(decision, linear_tail_safe, scene_linear_active);
+        self.color_delivery_policy_sequence = self.color_delivery_policy_sequence.saturating_add(1);
+        self.last_color_delivery_policy =
+            Some(crate::backend::api::ColorDeliveryPolicyDecisionStatus {
+                sequence: self.color_delivery_policy_sequence,
+                composited_route: prepared.route.into(),
+                blocked: decision.delivery_blocked,
+                reason: prepared.fallback_reason.map(str::to_owned),
+                scene_linear_active,
+                linear_tail_safe,
+            });
+        self.prepared_color_delivery = (!decision.delivery_blocked).then_some(prepared);
+    }
+
+    fn ensure_legacy_color_delivery_attempt(&mut self) {
+        if !legacy_color_delivery_attempt_needed(self.prepared_color_delivery.as_ref()) {
+            return;
+        }
+        let prepared = PreparedColorDelivery {
+            route: "legacy_encoded_srgb",
+            working_space: "legacy_encoded_srgb",
+            targets_output_profile: false,
+            fallback_reason: Some("effects_compositor_inactive"),
+        };
+        self.color_delivery_policy_sequence = self.color_delivery_policy_sequence.saturating_add(1);
+        self.last_color_delivery_policy =
+            Some(crate::backend::api::ColorDeliveryPolicyDecisionStatus {
+                sequence: self.color_delivery_policy_sequence,
+                composited_route: prepared.route.into(),
+                blocked: false,
+                reason: prepared.fallback_reason.map(str::to_owned),
+                scene_linear_active: false,
+                linear_tail_safe: false,
+            });
+        self.prepared_color_delivery = Some(prepared);
+    }
+
+    fn color_delivery_plan_for_output(
+        &self,
+        output_idx: usize,
+        direct_scanout: bool,
+    ) -> Option<ColorDeliveryPlan> {
+        let output = self.outputs.get(output_idx)?;
+        let hdr_metadata_active =
+            crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                &output.output,
+            );
+        if direct_scanout {
+            return Some(ColorDeliveryPlan {
+                policy_sequence: self.color_delivery_policy_sequence,
+                route: "direct_scanout".into(),
+                working_space: "client_buffer".into(),
+                target_transfer_function: "source_buffer_unknown".into(),
+                target_primaries: "source_buffer_unknown".into(),
+                hdr_metadata_active,
+                colorspace_signal: if hdr_metadata_active {
+                    "hdr_metadata_unspecified_colorspace".into()
+                } else {
+                    "default_sdr".into()
+                },
+                fallback_reason: None,
+            });
+        }
+
+        let prepared = self.prepared_color_delivery.as_ref()?;
+        let (target_transfer_function, target_primaries) = if prepared.targets_output_profile {
+            (
+                transfer_kind_name(output.output_tf),
+                output_primaries_name(&output.output),
+            )
+        } else {
+            ("srgb".into(), "srgb".into())
+        };
+        Some(ColorDeliveryPlan {
+            policy_sequence: self.color_delivery_policy_sequence,
+            route: prepared.route.into(),
+            working_space: prepared.working_space.into(),
+            target_transfer_function,
+            target_primaries,
+            hdr_metadata_active,
+            colorspace_signal: if hdr_metadata_active {
+                "hdr_metadata_unspecified_colorspace".into()
+            } else {
+                "default_sdr".into()
+            },
+            fallback_reason: prepared.fallback_reason.map(str::to_owned),
+        })
+    }
+
     /// Rebuild output transfer/gamut targets after the backend has attached
     /// EDID capabilities to each Smithay `Output`.
     ///
@@ -1321,6 +1776,7 @@ impl KmsState {
             &smithay_output,
             blob.is_some(),
         );
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         if !self.refresh_output_color_targets() {
             self.color_pipeline_delivery_blocked = true;
         }
@@ -1364,7 +1820,14 @@ impl KmsState {
         // here on a failed set, the next refresh would either re-install the
         // LUT on a powered-down CRTC or skip a still-powered-on one.
         if result.is_ok() {
+            let participation_changed = self.outputs[output_idx].dpms_off == on;
             self.outputs[output_idx].dpms_off = !on;
+            if participation_changed {
+                // A presentation observed before a power/participation epoch
+                // cannot describe the first frame after re-enable. Keep the
+                // aggregate unknown until that frame reaches vblank.
+                self.invalidate_color_delivery_after_hardware_change(output_idx);
+            }
             if !on && self.outputs[output_idx].frame_pending {
                 // A powered-down connector may never emit the vblank for an
                 // already queued flip. Retire the DrmOutput bookkeeping now so
@@ -1373,6 +1836,8 @@ impl KmsState {
                 let _ = self.outputs[output_idx].drm_output.frame_submitted();
                 self.outputs[output_idx].frame_pending = false;
                 self.outputs[output_idx].frame_pending_since = None;
+                self.outputs[output_idx].frame_pending_boundary = None;
+                self.outputs[output_idx].color_delivery_observation_uncertain = true;
             }
             // Change the connector power state first. If that write fails the
             // still-visible scanout must retain its matching LUT/CTM instead
@@ -1433,6 +1898,7 @@ impl KmsState {
             }
         }
         self.color_pipeline_delivery_blocked = false;
+        self.prepared_color_delivery = None;
         self.needs_render = true;
         Ok(())
     }
@@ -1515,6 +1981,7 @@ impl KmsState {
         drop(mgr);
 
         self.outputs[output_idx].installed_gamma_lut = Some((new_blob_id, tf));
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         log::info!(
             "[kms-cm] installed GAMMA_LUT on {} (size={size}, tf={tf:?})",
             self.outputs[output_idx].output_name,
@@ -1559,6 +2026,7 @@ impl KmsState {
         drop(mgr);
 
         self.outputs[output_idx].installed_gamma_lut = None;
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         log::info!(
             "[kms-cm] uninstalled GAMMA_LUT on {}",
             self.outputs[output_idx].output_name
@@ -1629,6 +2097,7 @@ impl KmsState {
         drop(mgr);
 
         self.outputs[output_idx].installed_ctm = Some(new_blob_id);
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         log::info!(
             "[kms-cm] installed CTM on {}",
             self.outputs[output_idx].output_name,
@@ -1667,6 +2136,7 @@ impl KmsState {
         drop(mgr);
 
         self.outputs[output_idx].installed_ctm = None;
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         log::info!(
             "[kms-cm] uninstalled CTM on {}",
             self.outputs[output_idx].output_name
@@ -2015,7 +2485,7 @@ impl KmsState {
                 .map_err(|e| format!("DRM set_gamma failed: {e:?}"))
         };
         self.outputs[output_idx].legacy_gamma_override = result.is_err() || !identity;
-        self.needs_render = true;
+        self.invalidate_color_delivery_after_hardware_change(output_idx);
         result
     }
 
@@ -3374,8 +3844,7 @@ impl KmsState {
                 .outputs
                 .iter()
                 .map(|o| {
-                    let watchdog =
-                        (o.refresh_interval * 5).max(std::time::Duration::from_millis(100));
+                    let watchdog = frame_watchdog_timeout(o.refresh_interval);
                     crate::backend::api::PresentationTimingOutputStatus {
                         output_name: o.output_name.clone(),
                         refresh_interval_ms: o.refresh_interval.as_secs_f64() * 1000.0,
@@ -3393,6 +3862,32 @@ impl KmsState {
                         frame_callback_roots: o.frame_callback_roots.len(),
                         visible_surface_count: o.frame_callback_visible.len(),
                         send_frame_callbacks: o.send_frame_callbacks,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub(super) fn color_delivery_status(
+        &self,
+        soft_disabled_outputs: &HashSet<String>,
+    ) -> crate::backend::api::ColorDeliveryStatus {
+        let now = std::time::Instant::now();
+        crate::backend::api::ColorDeliveryStatus {
+            schema_version: 1,
+            observation: "last_successful_presentation".into(),
+            generation: self.color_delivery_generation,
+            last_policy_decision: self.last_color_delivery_policy.clone(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|output| {
+                    let last_success = output.color_delivery.last_success_status(now);
+                    crate::backend::api::ColorDeliveryOutputStatus {
+                        output_name: output.output_name.clone(),
+                        participating: !output.dpms_off
+                            && !soft_disabled_outputs.contains(&output.output_name),
+                        last_success,
                     }
                 })
                 .collect(),
@@ -3653,6 +4148,10 @@ impl KmsState {
                 output: p.output,
                 drm_output,
                 frame_pending: false,
+                frame_pending_boundary: None,
+                color_delivery_observation_uncertain: false,
+                color_delivery_retry_required: false,
+                color_delivery: OutputColorDeliveryTracker::default(),
                 frame_pending_since: None,
                 send_frame_callbacks: false,
                 frame_callback_roots: Vec::new(),
@@ -3721,6 +4220,10 @@ impl KmsState {
             // yet. Even though the event loop cannot dispatch this handle until
             // `new` returns, keep the invariant explicit in the state itself.
             color_pipeline_delivery_blocked: true,
+            prepared_color_delivery: None,
+            color_delivery_policy_sequence: 0,
+            color_delivery_generation: 0,
+            last_color_delivery_policy: None,
             owns_scanout_color_state: false,
         }));
 
@@ -3799,6 +4302,13 @@ impl KmsState {
             return;
         }
 
+        // A disabled effects compositor still has a concrete, diagnosable
+        // encoded-sRGB delivery path even though no color-policy refresh ran.
+        // Force replacement of a plan retained from the last composited frame.
+        if compositor.is_none() {
+            self.ensure_legacy_color_delivery_attempt();
+        }
+
         self.last_direct_scanout_outputs.clear();
         let mut any_skipped = false;
         let mut any_failed = false;
@@ -3815,33 +4325,11 @@ impl KmsState {
             }
             let frame_pending = self.outputs[out_idx].frame_pending;
             if frame_pending {
-                // Watchdog: a queued page flip should produce a vblank within one
-                // refresh interval. If it hasn't after several intervals (clamped
-                // to a sane floor), assume the flip was dropped and force-clear so
-                // the output doesn't stall permanently.
-                let out = &self.outputs[out_idx];
-                let timeout = (out.refresh_interval * 5).max(std::time::Duration::from_millis(100));
-                let stale = out
-                    .frame_pending_since
-                    .map(|t| t.elapsed() >= timeout)
-                    .unwrap_or(false);
-                if stale {
-                    log::warn!(
-                        "{}: output {} frame_pending for >{:?} without vblank; \
-                         force-clearing to recover",
-                        renderer_ctx("await page-flip vblank"),
-                        out.output.name(),
-                        timeout,
-                    );
-                    let out = &mut self.outputs[out_idx];
-                    out.frame_pending = false;
-                    out.frame_pending_since = None;
-                    let _ = out.drm_output.frame_submitted();
-                } else {
-                    any_skipped = true;
-                    continue;
-                }
+                any_skipped = true;
+                continue;
             }
+            let color_delivery_retry_required = self.outputs[out_idx].color_delivery_retry_required;
+            let manual_surface_path = compositor.is_none();
 
             let scale: Scale<f64> = self.outputs[out_idx]
                 .output
@@ -4091,50 +4579,59 @@ impl KmsState {
             let compositor_effect_reason = compositor
                 .as_ref()
                 .and_then(|c| c.direct_scanout_block_reason(output_rect_global_physical));
-            let (direct_scanout_eligible, direct_scanout_reason) = if compositor.is_none() {
-                (false, "compositor disabled".to_string())
-            } else if recording_requires_composition {
-                (
-                    false,
-                    "recording or recording-region overlay requires composition".to_string(),
-                )
-            } else if system_ui_active {
-                (false, "JWM system UI requires composition".to_string())
-            } else if !direct_scanout_enabled {
-                (false, "direct_scanout_enabled disabled".to_string())
-            } else if !fullscreen_unredirect {
-                (false, "fullscreen_unredirect disabled".to_string())
-            } else if let Some(reason) = compositor_effect_reason {
-                (false, reason.to_string())
-            } else if !elements.is_empty() {
-                (
-                    false,
-                    "cursor or overlay/layer surface requires composition".to_string(),
-                )
-            } else if state.window_stack.len() != 1 {
-                (
-                    false,
-                    format!(
-                        "expected exactly 1 stacked window, got {}",
-                        state.window_stack.len()
-                    ),
-                )
-            } else {
-                let win = state.window_stack[0];
-                let fullscreen = state
-                    .window_is_fullscreen
-                    .get(&win)
-                    .copied()
-                    .unwrap_or(false);
-                let mapped = state.mapped_windows.contains(&win);
-                if fullscreen && mapped {
-                    (true, "eligible".to_string())
-                } else if !mapped {
-                    (false, format!("window {:?} is not mapped", win))
+            let (direct_scanout_policy_eligible, direct_scanout_policy_reason) =
+                if recording_requires_composition {
+                    (
+                        false,
+                        "recording or recording-region overlay requires composition".to_string(),
+                    )
+                } else if system_ui_active {
+                    (false, "JWM system UI requires composition".to_string())
+                } else if !direct_scanout_enabled {
+                    (false, "direct_scanout_enabled disabled".to_string())
+                } else if !fullscreen_unredirect {
+                    (false, "fullscreen_unredirect disabled".to_string())
+                } else if let Some(reason) = compositor_effect_reason {
+                    (false, reason.to_string())
+                } else if !elements.is_empty() {
+                    (
+                        false,
+                        "cursor or overlay/layer surface requires composition".to_string(),
+                    )
+                } else if state.window_stack.len() != 1 {
+                    (
+                        false,
+                        format!(
+                            "expected exactly 1 stacked window, got {}",
+                            state.window_stack.len()
+                        ),
+                    )
                 } else {
-                    (false, format!("window {:?} is not fullscreen", win))
-                }
-            };
+                    let win = state.window_stack[0];
+                    let fullscreen = state
+                        .window_is_fullscreen
+                        .get(&win)
+                        .copied()
+                        .unwrap_or(false);
+                    let mapped = state.mapped_windows.contains(&win);
+                    if fullscreen && mapped {
+                        (true, "eligible".to_string())
+                    } else if !mapped {
+                        (false, format!("window {:?} is not mapped", win))
+                    } else {
+                        (false, format!("window {:?} is not fullscreen", win))
+                    }
+                };
+            let direct_scanout_eligible = direct_scanout_allowed_for_color_retry(
+                direct_scanout_policy_eligible,
+                color_delivery_retry_required,
+            );
+            let direct_scanout_reason =
+                if direct_scanout_policy_eligible && !direct_scanout_eligible {
+                    "color-delivery observation retry requires one composited frame".to_string()
+                } else {
+                    direct_scanout_policy_reason
+                };
             self.last_direct_scanout_outputs
                 .push(crate::backend::api::DirectScanoutOutputStatus {
                     output_name: out.output_name.clone(),
@@ -4649,16 +5146,44 @@ impl KmsState {
             // Re-borrow for render_frame + queue_frame.
             let flush_tx = self.flush_tx.clone();
             let flush_pending = self.flush_pending.clone();
+            let composited_color_delivery = self.color_delivery_plan_for_output(out_idx, false);
+            let direct_color_delivery = self.color_delivery_plan_for_output(out_idx, true);
             let out = &mut self.outputs[out_idx];
+
+            if out.color_delivery_retry_required {
+                // `needs_render` alone is insufficient on a static desktop:
+                // Smithay will return an empty frame when its damage history
+                // still matches the current buffer. Resetting the swapchain
+                // guarantees a real replacement queue/vblank observation.
+                out.drm_output.reset_buffers();
+            }
+            let frame_flags = frame_flags_for_color_delivery(
+                color_delivery_retry_required,
+                manual_surface_path,
+                direct_scanout_eligible,
+            );
 
             match out.drm_output.render_frame(
                 &mut self.renderer,
                 &elements,
                 smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 1.0),
-                FrameFlags::DEFAULT,
+                frame_flags,
             ) {
                 Ok(res) => {
+                    let client_direct_scanout = client_direct_scanout_presented(
+                        direct_scanout_eligible,
+                        matches!(
+                            &res.primary_element,
+                            PrimaryPlaneElement::Element(KmsRenderElement::Surface(_))
+                        ),
+                    );
                     if res.is_empty {
+                        if out.color_delivery_retry_required {
+                            // Keep the outer render wakeup armed and try again
+                            // after resetting damage/buffer history.
+                            out.drm_output.reset_buffers();
+                            any_failed = true;
+                        }
                         out.send_frame_callbacks = true;
                         out.frame_callback_roots = frame_roots;
                         out.frame_callback_visible = visible_surfaces;
@@ -4666,7 +5191,17 @@ impl KmsState {
                         continue;
                     }
 
-                    if let Err(err) = out.drm_output.queue_frame(()) {
+                    let frame_data = QueuedFrameData {
+                        color_delivery: if client_direct_scanout {
+                            direct_color_delivery
+                        } else {
+                            composited_color_delivery
+                        },
+                    };
+                    // Sample both DRM timestamp domains before submitting: a
+                    // flip can happen immediately after the ioctl returns.
+                    let queue_boundary = FrameQueueBoundary::now();
+                    if let Err(err) = out.drm_output.queue_frame(frame_data) {
                         any_failed = true;
                         log::warn!("{}: {err:?}", renderer_ctx("queue DRM frame"));
 
@@ -4692,6 +5227,7 @@ impl KmsState {
                     } else {
                         out.frame_pending = true;
                         out.frame_pending_since = Some(std::time::Instant::now());
+                        out.frame_pending_boundary = Some(queue_boundary);
                         out.send_frame_callbacks = true;
                         out.frame_callback_roots = frame_roots;
                         out.frame_callback_visible = visible_surfaces;
@@ -4748,15 +5284,33 @@ impl KmsState {
     ) {
         let flush_tx = self.flush_tx.clone();
         let flush_pending = self.flush_pending.clone();
-        let Some(out) = self.outputs.iter_mut().find(|o| o.crtc == crtc) else {
+        let Some(output_idx) = self.outputs.iter().position(|output| output.crtc == crtc) else {
             return;
         };
 
-        if let Err(err) = out.drm_output.frame_submitted() {
-            log::debug!("drm frame_submitted error: {err:?}");
+        // A watchdog or DPMS cancellation may leave its page-flip event in the
+        // DRM fd. Never let that late event acknowledge user data belonging to
+        // a newer queue. Timestamp comparison handles the common case; the
+        // uncertainty flag makes the first post-cancellation observation
+        // fail-closed when event timing cannot disambiguate it.
+        {
+            let out = &mut self.outputs[output_idx];
+            if !out.frame_pending {
+                out.color_delivery_observation_uncertain = false;
+                return;
+            }
+            let matches_queue = out.frame_pending_boundary.is_some_and(|boundary| {
+                vblank_is_not_older_than_queue(metadata.as_ref(), boundary)
+            });
+            if !matches_queue {
+                out.color_delivery_observation_uncertain = false;
+                log::debug!(
+                    "[kms-cm] ignored a page-flip event older than the queued frame on {}",
+                    out.output_name
+                );
+                return;
+            }
         }
-        out.frame_pending = false;
-        out.frame_pending_since = None;
 
         // Extract precise flip timestamp from DRM metadata for presentation feedback
         let presentation_time = metadata.as_ref().and_then(|m| match m.time {
@@ -4764,12 +5318,49 @@ impl KmsState {
             smithay::backend::drm::DrmEventTime::Realtime(_) => None,
         });
 
-        if let Some(vblank_time) = presentation_time {
-            out.last_vblank = Some(vblank_time);
-            out.last_vblank_received_at = Some(std::time::Instant::now());
-            self.last_presentation_time = Some(std::time::Instant::now());
+        let received_at = std::time::Instant::now();
+        let (submitted_color_delivery, retry_color_delivery_observation) = {
+            let out = &mut self.outputs[output_idx];
+            let uncertain = out.color_delivery_observation_uncertain;
+            let submitted_frame = match out.drm_output.frame_submitted() {
+                Ok(frame) => frame,
+                Err(err) => {
+                    log::debug!("drm frame_submitted error: {err:?}");
+                    None
+                }
+            };
+            let observation = submitted_color_delivery_observation(submitted_frame, uncertain);
+            out.frame_pending = false;
+            out.frame_pending_since = None;
+            out.frame_pending_boundary = None;
+            out.color_delivery_observation_uncertain = false;
+            if let Some(vblank_time) = presentation_time {
+                out.last_vblank = Some(vblank_time);
+                out.last_vblank_received_at = Some(received_at);
+            }
+            observation
+        };
+
+        if presentation_time.is_some() {
+            self.last_presentation_time = Some(received_at);
+        }
+        let promoted = self.outputs[output_idx].color_delivery.present(
+            submitted_color_delivery,
+            &mut self.color_delivery_generation,
+            presentation_time,
+            received_at,
+        );
+        if promoted {
+            self.outputs[output_idx].color_delivery_retry_required = false;
+        }
+        if retry_color_delivery_observation
+            || self.outputs[output_idx].color_delivery_retry_required
+        {
+            self.outputs[output_idx].drm_output.reset_buffers();
+            self.needs_render = true;
         }
 
+        let out = &mut self.outputs[output_idx];
         Self::deliver_frame_callbacks(out, &flush_tx, &flush_pending, presentation_time);
     }
 }
@@ -4923,14 +5514,21 @@ fn spawn_screenshot_png_write(
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
     use super::{
-        CrtcColorProperty, OutputColorRegionCandidate, compositor_output_texture_identity_matches,
+        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, FrameQueueBoundary,
+        OutputColorDeliveryTracker, OutputColorRegionCandidate, QueuedFrameData,
+        client_direct_scanout_presented, compositor_output_texture_identity_matches,
         connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
-        gamma_ramp_is_identity, output_color_target, plan_output_configuration_rollback,
-        plan_software_color_regions, rollback_mode_requires_restore, smithay_transform_to_wl,
+        direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
+        frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
+        legacy_color_delivery_attempt_needed, output_color_target,
+        plan_output_configuration_rollback, plan_software_color_regions, prepared_color_delivery,
+        rollback_mode_requires_restore, smithay_transform_to_wl,
+        submitted_color_delivery_observation, vblank_is_not_older_than_queue,
         wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+    use smithay::backend::drm::compositor::FrameFlags;
     use smithay::utils::Transform;
 
     fn color_region_candidate(
@@ -4961,6 +5559,288 @@ mod compositor_texture_ownership_tests {
         assert!(!ctm_offload_allowed(false, true, true));
         assert!(!ctm_offload_allowed(true, false, true));
         assert!(!ctm_offload_allowed(true, true, false));
+    }
+
+    #[test]
+    fn direct_scanout_requires_an_actual_primary_plane_assignment() {
+        assert!(client_direct_scanout_presented(true, true));
+        assert!(!client_direct_scanout_presented(true, false));
+        assert!(!client_direct_scanout_presented(false, true));
+        assert!(!client_direct_scanout_presented(false, false));
+    }
+
+    #[test]
+    fn trustworthy_retry_temporarily_forces_a_composited_frame() {
+        assert!(direct_scanout_allowed_for_color_retry(true, false));
+        assert!(!direct_scanout_allowed_for_color_retry(true, true));
+        assert!(!direct_scanout_allowed_for_color_retry(false, false));
+
+        assert_eq!(
+            frame_flags_for_color_delivery(true, false, true),
+            FrameFlags::empty(),
+            "retry must disable every KMS plane fast path"
+        );
+        assert_eq!(
+            frame_flags_for_color_delivery(false, true, false),
+            FrameFlags::empty(),
+            "manual surfaces must not bypass a rejected direct-scanout policy"
+        );
+        assert_eq!(
+            frame_flags_for_color_delivery(false, true, true),
+            FrameFlags::DEFAULT
+        );
+    }
+
+    #[test]
+    fn late_vblank_timestamp_cannot_acknowledge_a_newer_queue() {
+        let boundary = FrameQueueBoundary {
+            monotonic: std::time::Duration::from_secs(20),
+            realtime: std::time::UNIX_EPOCH + std::time::Duration::from_secs(40),
+        };
+        let monotonic = |seconds| smithay::backend::drm::DrmEventMetadata {
+            time: smithay::backend::drm::DrmEventTime::Monotonic(std::time::Duration::from_secs(
+                seconds,
+            )),
+            sequence: seconds as u32,
+        };
+        assert!(!vblank_is_not_older_than_queue(
+            Some(&monotonic(19)),
+            boundary
+        ));
+        assert!(vblank_is_not_older_than_queue(
+            Some(&monotonic(20)),
+            boundary
+        ));
+        assert!(!vblank_is_not_older_than_queue(None, boundary));
+
+        let old_realtime = smithay::backend::drm::DrmEventMetadata {
+            time: smithay::backend::drm::DrmEventTime::Realtime(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(39),
+            ),
+            sequence: 1,
+        };
+        assert!(!vblank_is_not_older_than_queue(
+            Some(&old_realtime),
+            boundary
+        ));
+    }
+
+    #[test]
+    fn frame_watchdog_has_a_floor_and_becomes_immediately_due() {
+        let fast_refresh = std::time::Duration::from_millis(8);
+        let slow_refresh = std::time::Duration::from_millis(25);
+        assert_eq!(
+            frame_watchdog_timeout(fast_refresh),
+            std::time::Duration::from_millis(100)
+        );
+        assert_eq!(
+            frame_watchdog_timeout(slow_refresh),
+            std::time::Duration::from_millis(125)
+        );
+        assert_eq!(
+            frame_watchdog_remaining(slow_refresh, std::time::Duration::from_millis(80)),
+            std::time::Duration::from_millis(45)
+        );
+        assert_eq!(
+            frame_watchdog_remaining(slow_refresh, std::time::Duration::from_millis(130)),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn color_delivery_attempt_route_matches_the_frame_domain() {
+        let mut decision = ColorPipelineDecision {
+            hw_encode_active: false,
+            hw_ctm_active: false,
+            delivery_blocked: false,
+            software_regions: Some(Vec::new()),
+        };
+
+        assert_eq!(
+            prepared_color_delivery(&decision, true, false).route,
+            "legacy_encoded_srgb"
+        );
+        assert_eq!(
+            prepared_color_delivery(&decision, false, true).route,
+            "global_srgb_fallback"
+        );
+        assert_eq!(
+            prepared_color_delivery(&decision, true, true).route,
+            "software_per_output_regions"
+        );
+
+        decision.software_regions = None;
+        assert_eq!(
+            prepared_color_delivery(&decision, true, true).fallback_reason,
+            Some("unsupported_output_topology")
+        );
+
+        decision.hw_encode_active = true;
+        decision.hw_ctm_active = true;
+        assert_eq!(
+            prepared_color_delivery(&decision, true, true).route,
+            "kms_ctm_gamma_lut"
+        );
+
+        decision.delivery_blocked = true;
+        let blocked = prepared_color_delivery(&decision, true, true);
+        assert_eq!(blocked.route, "hold_last_success");
+        assert_eq!(blocked.fallback_reason, Some("kms_color_state_unresolved"));
+    }
+
+    #[test]
+    fn compositor_disable_replaces_a_stale_deferred_delivery_plan() {
+        let deferred = super::PreparedColorDelivery {
+            route: "kms_ctm_gamma_lut",
+            working_space: "normalized_linear_srgb",
+            targets_output_profile: true,
+            fallback_reason: None,
+        };
+        let legacy = super::PreparedColorDelivery {
+            route: "legacy_encoded_srgb",
+            working_space: "legacy_encoded_srgb",
+            targets_output_profile: false,
+            fallback_reason: Some("effects_compositor_inactive"),
+        };
+
+        assert!(legacy_color_delivery_attempt_needed(None));
+        assert!(legacy_color_delivery_attempt_needed(Some(&deferred)));
+        assert!(!legacy_color_delivery_attempt_needed(Some(&legacy)));
+    }
+
+    #[test]
+    fn color_delivery_tracker_promotes_only_queued_vblank_plans() {
+        let plan = |route: &str| ColorDeliveryPlan {
+            policy_sequence: 7,
+            route: route.into(),
+            working_space: "normalized_linear_srgb".into(),
+            target_transfer_function: "srgb".into(),
+            target_primaries: "srgb".into(),
+            hdr_metadata_active: false,
+            colorspace_signal: "default_sdr".into(),
+            fallback_reason: None,
+        };
+        let mut tracker = OutputColorDeliveryTracker::default();
+        let mut generation = 0;
+        let now = std::time::Instant::now();
+
+        assert!(tracker.present(
+            Some(plan("software_per_output_regions")),
+            &mut generation,
+            Some(std::time::Duration::from_millis(100)),
+            now,
+        ));
+        assert_eq!(generation, 1);
+        assert_eq!(
+            tracker.last_success.as_ref().unwrap().presentation.route,
+            "software_per_output_regions"
+        );
+        assert_eq!(
+            tracker
+                .last_success
+                .as_ref()
+                .unwrap()
+                .presentation
+                .policy_sequence,
+            7
+        );
+
+        assert!(!tracker.present(
+            None,
+            &mut generation,
+            Some(std::time::Duration::from_millis(116)),
+            now,
+        ));
+        assert_eq!(generation, 1);
+        assert_eq!(
+            tracker.last_success.as_ref().unwrap().presentation.route,
+            "software_per_output_regions",
+            "a cancelled/failed attempt must not overwrite last success"
+        );
+
+        assert!(tracker.present(
+            Some(plan("kms_ctm_gamma_lut")),
+            &mut generation,
+            Some(std::time::Duration::from_millis(132)),
+            now,
+        ));
+        assert_eq!(generation, 2);
+        assert_eq!(
+            tracker.last_success.as_ref().unwrap().presentation.route,
+            "kms_ctm_gamma_lut"
+        );
+    }
+
+    #[test]
+    fn participation_epoch_invalidates_pre_disable_delivery() {
+        let plan = ColorDeliveryPlan {
+            policy_sequence: 11,
+            route: "kms_ctm_gamma_lut".into(),
+            working_space: "normalized_linear_srgb".into(),
+            target_transfer_function: "st2084_pq".into(),
+            target_primaries: "bt2020".into(),
+            hdr_metadata_active: true,
+            colorspace_signal: "hdr_metadata_unspecified_colorspace".into(),
+            fallback_reason: None,
+        };
+        let mut tracker = OutputColorDeliveryTracker::default();
+        let mut generation = 0;
+        assert!(tracker.present(
+            Some(plan),
+            &mut generation,
+            Some(std::time::Duration::from_secs(1)),
+            std::time::Instant::now(),
+        ));
+
+        // Both a direct DPMS off→on cycle and output-management's
+        // disable_head→enable_head cycle pass through the same successful DPMS
+        // transition and therefore this invalidation boundary.
+        tracker.invalidate();
+        assert!(tracker.last_success.is_none());
+        assert_eq!(generation, 1, "the global generation stays monotonic");
+    }
+
+    #[test]
+    fn uncertain_first_vblank_requests_retry_then_second_vblank_promotes() {
+        let plan = ColorDeliveryPlan {
+            policy_sequence: 14,
+            route: "software_per_output_regions".into(),
+            working_space: "normalized_linear_srgb".into(),
+            target_transfer_function: "srgb".into(),
+            target_primaries: "srgb".into(),
+            hdr_metadata_active: false,
+            colorspace_signal: "default_sdr".into(),
+            fallback_reason: None,
+        };
+        let mut tracker = OutputColorDeliveryTracker::default();
+        let mut generation = 0;
+        let now = std::time::Instant::now();
+
+        // Model watchdog cancellation followed by no late old event: the
+        // first event belongs to the new frame, but uncertainty must still be
+        // fail-closed and arm a replacement frame.
+        let (first, retry) = submitted_color_delivery_observation(
+            Some(QueuedFrameData {
+                color_delivery: Some(plan.clone()),
+            }),
+            true,
+        );
+        assert!(retry);
+        assert!(!tracker.present(first, &mut generation, None, now));
+
+        let (second, retry) = submitted_color_delivery_observation(
+            Some(QueuedFrameData {
+                color_delivery: Some(plan),
+            }),
+            false,
+        );
+        assert!(!retry);
+        assert!(tracker.present(second, &mut generation, None, now));
+        assert_eq!(generation, 1);
+        assert_eq!(
+            tracker.last_success.unwrap().presentation.policy_sequence,
+            14
+        );
     }
 
     #[test]

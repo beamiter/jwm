@@ -60,7 +60,8 @@ jobs:
             libxxf86vm-dev libxcb1-dev libxcb-composite0-dev \
             libxcb-damage0-dev libxcb-present-dev libxcb-randr0-dev \
             libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev \
-            libxfixes-dev libxi-dev libxrandr-dev libxrender-dev
+            libxfixes-dev libxi-dev libxrandr-dev libxrender-dev \
+            shellcheck
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -73,10 +74,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Check release shell syntax
-        run: >-
-          bash -n scripts/package-release.sh scripts/install-release.sh
-          scripts/test-install-lifecycle.sh
+      - name: Lint executable Bash scripts
+        run: bash scripts/lint-shell.sh
 
       - name: Check all targets
         run: cargo check --locked --all-targets

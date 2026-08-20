@@ -1138,6 +1138,24 @@ mod tests {
     }
 
     #[test]
+    fn ambiguous_wire_message_is_rejected_without_dispatching_a_command() {
+        let mut server = make_test_server();
+        let mut peer = attach_test_client(&mut server, 7);
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        peer.write_all(b"{\"command\":\"quit\",\"query\":\"get_version\"}\n")
+            .unwrap();
+
+        assert!(server.poll_clients().is_empty());
+
+        let mut response = [0u8; 512];
+        let read = std::io::Read::read(&mut peer, &mut response).unwrap();
+        let response = std::str::from_utf8(&response[..read]).unwrap();
+        assert!(response.contains("\"success\":false"), "{response}");
+        assert!(response.contains("exactly one"), "{response}");
+    }
+
+    #[test]
     fn respond_to_client() {
         let mut server = make_test_server();
         let path = server.socket_path.clone();

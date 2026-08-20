@@ -649,7 +649,7 @@ final_uninstall() {
         [[ $VERSIONS/$version == "$BASE/versions/$version" ]] || die "unsafe version removal path"
         if [[ -e $VERSIONS/$version || -L $VERSIONS/$version ]]; then
             [[ -d $VERSIONS/$version && ! -L $VERSIONS/$version ]] || die "installed version path was changed: $version"
-            rm -rf -- "$VERSIONS/$version"
+            rm -rf -- "${VERSIONS:?}/$version"
         fi
     done
     restore_backups
@@ -700,7 +700,7 @@ uninstall_one() {
     fi
     [[ $VERSIONS/$requested == "$BASE/versions/$requested" ]] || die "unsafe version removal path"
     [[ -d $VERSIONS/$requested && ! -L $VERSIONS/$requested ]] || die "installed version path was changed: $requested"
-    rm -rf -- "$VERSIONS/$requested"
+    rm -rf -- "${VERSIONS:?}/$requested"
     atomic_lines "$STATE/installed" "${kept_installed[@]}"
     atomic_lines "$STATE/history" "${kept_history[@]}"
     printf 'Uninstalled JWM %s\n' "$requested"

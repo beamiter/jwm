@@ -291,6 +291,17 @@ compositor-owned hover preview; the cross-process lifecycle is documented in
 [the minimized-window Dock](docs/minimized-dock.md).
 The compositor's live counters are on `Alt+Shift+F12`; see
 [the debug HUD](docs/debug-hud.md).
+On direct DRM/KMS sessions, `jwm-tool msg get_wayland_status` now exposes a
+versioned `color_delivery` snapshot. Its `last_policy_decision` describes the
+most recent composited-route selection, while each output's `last_success`
+records its actual route only after a page-flip/vblank confirms presentation.
+Every success carries the policy sequence it was queued under, so partial or
+mixed multi-output cohorts remain auditable. Hardware color-property and
+participation transitions invalidate prior evidence until a replacement frame
+reaches vblank. This keeps configured HDR intent, EDID capability, blocked
+decisions, and JWM's KMS-tracked presentation state distinct without claiming
+to measure the downstream link or panel; `get_hdr_status` and
+`get_color_management_status` include the same snapshot.
 Additional operational tools are documented in [tools/README.md](tools/README.md).
 The external Julia simulation worker and frame protocol are documented in
 [docs/waterlily.md](docs/waterlily.md).

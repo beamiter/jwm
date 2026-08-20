@@ -198,18 +198,17 @@ worker_pids() { pgrep -f "julia.*waterlily/runner" || true; }
 # TERM first, KILL after a grace period: a worker stuck in shutdown (blocked
 # exit-time task) would otherwise linger for hours and shadow future runs.
 kill_workers() {
-    local pids elapsed
-    pids="$(worker_pids)"
-    [[ -z "$pids" ]] && return
-    # shellcheck disable=SC2086
-    kill $pids 2>/dev/null || true
-    for elapsed in {1..10}; do
+    local -a pids=()
+    mapfile -t pids < <(worker_pids)
+    ((${#pids[@]} == 0)) && return
+    kill -- "${pids[@]}" 2>/dev/null || true
+    for _ in {1..10}; do
         sleep 0.5
-        [[ -z "$(worker_pids)" ]] && return
+        mapfile -t pids < <(worker_pids)
+        ((${#pids[@]} == 0)) && return
     done
     log "worker ignored SIGTERM; escalating to SIGKILL"
-    # shellcheck disable=SC2086
-    kill -9 $(worker_pids) 2>/dev/null || true
+    kill -9 -- "${pids[@]}" 2>/dev/null || true
 }
 
 # 唯一可信的健康信号是压缩器视角的 worker_connected;pgrep 只能证明有进程,

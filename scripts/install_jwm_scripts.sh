@@ -78,7 +78,7 @@ ALL_BARS=(
 # 默认值
 # ============================================================
 BUILD_MODE="release"
-JWM_BAR_NAME="tao_glow_bar"
+JWM_BAR_NAME="tao_pixels_bar"
 JWM_BAR_SET_BY_ARGS=false
 SKIP_BAR=false
 SKIP_JWM=false
@@ -94,7 +94,7 @@ usage() {
 
 选项:
   -m, --mode <debug|release>  构建模式（默认: release）
-  -b, --bar <bar_name>        指定要构建的 bar（bars/ 目录内的 crate，monorepo 自带全部源码）。
+  -b, --bar <bar_name>        指定要构建的 bar（默认: $JWM_BAR_NAME；bars/ 目录内的 crate，monorepo 自带全部源码）。
                               jwm 启动时通过 config_x11.toml/config_wayland.toml 的 status_bar.name 选择 bar，
                               不再使用 cargo feature。
   -l, --list-bars             列出所有可用的 bar
