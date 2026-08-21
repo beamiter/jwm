@@ -65,6 +65,15 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- A second `jwm-remote` viewer is told why it was refused instead of waiting
+  out a timeout. The session ran inline in the accept loop, so a second
+  connect completed into the backlog and then heard nothing at all: it waited
+  five seconds and reported a bare end-of-file, indistinguishable from a wrong
+  address, a firewall, or a dead host. The session now runs on its own thread
+  and an extra peer is authenticated, sent `another viewer is already
+  connected to this host`, and disconnected — measured at 16 ms. Authenticating
+  first is deliberate: only a peer holding the key learns a session is in
+  progress.
 - The `jwm-remote` viewer forwards a single press of its grab-release key
   instead of swallowing it, releasing only on a second press within half a
   second. With `--grab-input` that key could previously never reach the remote

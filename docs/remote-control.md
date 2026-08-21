@@ -439,6 +439,19 @@ Every frame write has a 10-second absolute deadline across its header, JPEG,
 authenticator, and flush. If it expires, the host tears down that session and
 the normal cleanup path releases any keys or buttons held by its controller.
 
+### A second viewer
+
+Only one controller at a time. A second viewer used to complete its TCP
+connect into the listen backlog and then hear nothing until its handshake
+timeout expired, reporting a bare end-of-file — indistinguishable from a wrong
+address, a firewall, or a host that had died. It is now authenticated, told
+`another viewer is already connected to this host`, and disconnected in
+milliseconds.
+
+Authentication comes first deliberately: only a peer holding the key learns
+that a session is in progress. The active session runs on its own thread, so
+refusing a second peer never interrupts the first.
+
 ### Session resilience
 
 The listener survives everything that concerns a single connection. An
@@ -643,7 +656,8 @@ once, by a line that had long since scrolled away.
 
 ## MVP limits
 
-- one connected controller at a time;
+- one connected controller at a time: a second viewer is authenticated,
+  told so, and disconnected immediately rather than left waiting;
 - one region, one RandR monitor, or the combined X root (the default), with
   the host XFixes cursor
   included in video; the viewer cursor is transparent during ordinary input

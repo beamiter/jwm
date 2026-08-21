@@ -232,6 +232,18 @@ fn negotiate_session(
     )?;
     writer.flush()?;
     let (kind, payload) = reader.read_message()?;
+    if kind == MessageKind::Close {
+        // The host declined the session and said why. Surfacing its reason is
+        // the difference between "another viewer is already connected" and a
+        // bare timeout that looks like a wrong address or a firewall.
+        let reason = String::from_utf8_lossy(&payload);
+        let reason = if reason.trim().is_empty() {
+            "host declined the session without a reason".to_string()
+        } else {
+            reason.into_owned()
+        };
+        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, reason).into());
+    }
     if kind != MessageKind::HelloAck {
         return Err(invalid_data("host did not acknowledge remote session negotiation").into());
     }

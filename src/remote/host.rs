@@ -60,6 +60,8 @@ const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
 const MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN: usize = MAX_CLIPBOARD_BYTES + 1024;
 /// How long the clipboard forwarder waits before re-checking for shutdown.
 const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Reason sent to a second viewer while one is already connected.
+const BUSY_REASON: &str = "another viewer is already connected to this host";
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Longest single sleep while rate limited, so shutdown stays responsive.
 const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
@@ -1289,6 +1291,16 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         eprintln!("jwm-remote: input control is disabled (view-only host)");
     }
 
+    // The session runs on its own thread so the listener stays responsive.
+    // Serving inline meant a second viewer's connect completed into the
+    // backlog and then heard nothing at all: it waited out its handshake
+    // timeout and reported a bare end-of-file, indistinguishable from a wrong
+    // address, a firewall, or a host that had died.
+    let key = Arc::new(key);
+    let options = Arc::new(options);
+    let session_active = Arc::new(AtomicBool::new(false));
+    let mut session: Option<thread::JoinHandle<RemoteResult<()>>> = None;
+
     while !shutdown.load(Ordering::Acquire) {
         // Take the address `accept` already resolved. Calling `peer_addr` on
         // the accepted socket instead is a liveness question, not a naming
@@ -1314,16 +1326,90 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
             Err(error) => return Err(error.into()),
         };
         eprintln!("jwm-remote: connection from {peer}");
-        let outcome = serve_client(stream, &key, &options, &shutdown);
-        if let Err(error) = &outcome {
-            eprintln!("jwm-remote: session with {peer} ended: {error}");
+        if session_active.load(Ordering::Acquire) {
+            // Rejecting inline is safe now that the session has its own
+            // thread, and it is bounded by the handshake timeout. The peer is
+            // authenticated first: only someone holding the key learns that a
+            // session is in progress.
+            if let Err(error) = reject_busy_peer(stream, &key) {
+                eprintln!("jwm-remote: refused {peer}: {error}");
+            } else {
+                eprintln!("jwm-remote: refused {peer}: a viewer is already connected");
+            }
+            continue;
         }
+
+        // Reap the previous session before starting another, so its result is
+        // reported and its thread is never left dangling.
+        if let Some(finished) = session.take() {
+            report_session_result(finished.join());
+        }
+
+        session_active.store(true, Ordering::Release);
+        let session_key = Arc::clone(&key);
+        let session_options = Arc::clone(&options);
+        let session_shutdown = Arc::clone(&shutdown);
+        let finished = Arc::clone(&session_active);
+        let handle = thread::Builder::new()
+            .name("jwm-remote-session".into())
+            .spawn(move || {
+                let outcome =
+                    serve_client(stream, &session_key, &session_options, &session_shutdown);
+                if let Err(error) = &outcome {
+                    eprintln!("jwm-remote: session with {peer} ended: {error}");
+                }
+                finished.store(false, Ordering::Release);
+                outcome
+            })?;
         if options.once {
             // `--once` is documented for tests and scripts, so a failed
             // session has to be distinguishable from a clean one by exit code.
-            return outcome;
+            return join_session(handle);
         }
+        session = Some(handle);
     }
+    // A signal during a session still waits for it to unwind: the session owns
+    // releasing any input it injected. Its result is reported but not
+    // propagated -- the operator asked the host to stop, so stopping is a
+    // success, and a long-running host must not start exiting nonzero just
+    // because whatever session happened to be open was cut short.
+    if let Some(running) = session {
+        report_session_result(running.join());
+    }
+    Ok(())
+}
+
+fn join_session(handle: thread::JoinHandle<RemoteResult<()>>) -> RemoteResult<()> {
+    match handle.join() {
+        Ok(outcome) => outcome,
+        Err(_) => Err(io::Error::other("remote session thread panicked").into()),
+    }
+}
+
+fn report_session_result(joined: thread::Result<RemoteResult<()>>) {
+    match joined {
+        Ok(Err(error)) => eprintln!("jwm-remote: session ended: {error}"),
+        Ok(Ok(())) => {}
+        Err(_) => eprintln!("jwm-remote: session thread panicked"),
+    }
+}
+
+/// Tell an authenticated peer that the host already has a viewer.
+///
+/// Authentication comes first so an unauthenticated scanner learns nothing,
+/// and the reason travels in the `Close` payload so the viewer can print
+/// something better than a timeout.
+fn reject_busy_peer(mut stream: TcpStream, key: &[u8]) -> RemoteResult<()> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+    let mut deadline = TcpStreamDeadline::arm(&stream, HANDSHAKE_TIMEOUT)?;
+    let session_keys = server_handshake(&mut stream, key, rand::random())?;
+    let (_, send_key) = session_keys.into_server();
+    let mut writer = SessionWriter::new(stream, send_key);
+    writer.write_message(MessageKind::Close, BUSY_REASON.as_bytes())?;
+    writer.flush()?;
+    deadline.cancel();
     Ok(())
 }
 
