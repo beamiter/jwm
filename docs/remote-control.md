@@ -487,6 +487,37 @@ belonging to no extension this connection selected cannot have cost a
 notification it depends on, so those are tolerated in a run of eight before the
 session distrusts its caches wholesale.
 
+### Clipboard sharing
+
+Off unless **both** sides ask for it: the host needs `--allow-clipboard` and
+the viewer needs `--clipboard`. The host's flag is policy and the client's is
+consent; if either is missing the capability is simply absent from the
+negotiated session and no clipboard record is ever sent.
+
+```bash
+jwm-remote host ... --allow-clipboard
+jwm-remote connect ... --clipboard
+```
+
+Text copied on either desktop appears on the other, as UTF-8 text only. Each
+side watches CLIPBOARD on **its own X connection and thread**: a selection
+conversion blocks until the current owner answers, and a slow or hostile
+clipboard owner must never be able to delay a frame or an input event.
+
+Two limits are deliberate. Text marked secret by a password manager — the
+`x-kde-passwordManagerHint` convention and its variants — is never shared, the
+same rule JWM's local clipboard history already applies. And payloads are
+capped at 256 KiB, matching that history's own ceiling, so a copied image or a
+multi-megabyte log is refused rather than streamed; the cap is enforced before
+the text is examined on receipt, and a payload that is not valid UTF-8 is
+rejected before it is handed to the local X server to hold as a selection.
+
+**Understand what this shares.** With clipboard sharing on, everything you copy
+on either machine crosses the network to the other, for as long as the session
+lasts. That is the point of the feature, but it is a much broader grant than
+screen sharing alone, so it stays opt-in on both ends rather than following
+from `--allow-input`.
+
 ### Viewport negotiation
 
 The viewer reports its window size, and the host stops encoding pixels that
@@ -574,8 +605,8 @@ once, by a line that had long since scrolled away.
   included in video; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- JPEG tile video only: no audio, clipboard, file transfer, or inter-frame
-  codec yet;
+- JPEG tile video plus UTF-8 clipboard text: no audio, file transfer, non-text
+  clipboard targets, or inter-frame codec yet;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;

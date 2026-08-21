@@ -4,8 +4,8 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::key::load_key_file;
 use super::messages::{
-    ClientHello, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello, decode_frame_ack,
-    decode_input_batch, decode_viewport,
+    ClientHello, MAX_CLIPBOARD_BYTES, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello,
+    decode_clipboard, decode_frame_ack, decode_input_batch, decode_viewport, encode_clipboard,
 };
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
@@ -14,6 +14,7 @@ use super::protocol::{
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::x11_capture::{CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
+use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
@@ -49,6 +50,13 @@ const MAX_OUTSTANDING_FRAMES: u64 = 2;
 /// 641-byte batch. Declaring that here stops an unauthenticated length field
 /// from making the host reserve up to the global 32 MiB frame limit.
 const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
+/// Inbound ceiling once clipboard sharing is enabled.
+///
+/// Kept separate so a session without `--allow-clipboard` still refuses
+/// anything larger than an input batch before allocating for it.
+const MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN: usize = MAX_CLIPBOARD_BYTES + 1024;
+/// How long the clipboard forwarder waits before re-checking for shutdown.
+const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Longest single sleep while rate limited, so shutdown stays responsive.
 const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
@@ -1239,6 +1247,7 @@ pub struct HostOptions {
     pub capture_source: CaptureSource,
     pub allow_lan: bool,
     pub allow_input: bool,
+    pub allow_clipboard: bool,
     pub once: bool,
 }
 
@@ -1357,6 +1366,10 @@ fn serve_client(
     }
     let hello = ClientHello::decode(&hello_payload)?;
     handshake_deadline.cancel();
+    // Both sides must have opted in: the host's flag is policy, the client's
+    // request is consent. Sending clipboard records to a peer that asked for
+    // none would be a protocol violation on arrival.
+    let clipboard_enabled = options.allow_clipboard && hello.request_clipboard;
     let mut capture = X11Capture::connect(
         options.display.as_deref(),
         options.capture_source,
@@ -1399,6 +1412,7 @@ fn serve_client(
         &ServerHello {
             pointer_enabled,
             keyboard_enabled,
+            clipboard_enabled,
         }
         .encode(),
     )?;
@@ -1434,6 +1448,30 @@ fn serve_client(
             options.jpeg_quality_floor, options.jpeg_quality
         );
     }
+    // Clipboard sharing needs its own X connection and thread; the watcher
+    // must not be able to delay a frame, and a conversion blocks until the
+    // current selection owner answers.
+    let (clipboard_captures, clipboard_setter) = if clipboard_enabled {
+        match Clipboard::start(options.display.as_deref()) {
+            Ok(clipboard) => {
+                let (captures, setter) = clipboard.split();
+                eprintln!("jwm-remote: clipboard sharing enabled");
+                (Some(captures), Some(setter))
+            }
+            Err(error) => {
+                eprintln!(
+                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
+                );
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
+    if clipboard_setter.is_some() {
+        reader.set_max_payload_len(MAX_INBOUND_CLIPBOARD_PAYLOAD_LEN);
+    }
+
     let input_running = Arc::clone(&running);
     let input_stop = Arc::clone(&first_stop);
     let input_credits = Arc::clone(&credits);
@@ -1458,11 +1496,13 @@ fn serve_client(
                 &input_telemetry,
                 &input_jpeg_quality,
                 &input_viewport,
+                clipboard_setter.as_ref(),
             )
         })?;
 
     let stream_result = stream_frames(
         &viewport,
+        clipboard_captures,
         &mut capture,
         writer,
         &control,
@@ -1499,8 +1539,17 @@ fn serve_client(
     }
 }
 
+/// The session's single wire writer.
+///
+/// Records must not interleave and sequence numbers come from one writer, so
+/// clipboard traffic shares the video sender's writer under a mutex rather
+/// than opening a second one. The lock is held for exactly one record, and
+/// clipboard records are rare and tiny.
+type SharedWriter = Arc<Mutex<SessionWriter<DeadlineWriter<TcpStream>>>>;
+
 fn stream_frames(
     viewport: &ViewportRequest,
+    clipboard_captures: Option<ClipboardCaptures>,
     capture: &mut X11Capture,
     writer: SessionWriter<DeadlineWriter<TcpStream>>,
     control: &TcpStream,
@@ -1512,6 +1561,8 @@ fn stream_frames(
     shutdown: &AtomicBool,
     options: &HostOptions,
 ) -> RemoteResult<()> {
+    let writer: SharedWriter = Arc::new(Mutex::new(writer));
+    let sender_writer = Arc::clone(&writer);
     let mailbox = Arc::new(LatestMailbox::new());
     let sender_mailbox = Arc::clone(&mailbox);
     let sender_running = Arc::clone(running);
@@ -1532,7 +1583,7 @@ fn stream_frames(
             let _stop_on_exit = StopSessionOnDrop(Arc::clone(&sender_running));
             let result = send_frames(
                 sender_mailbox,
-                writer,
+                sender_writer,
                 &sender_running,
                 &sender_credits,
                 &sender_telemetry,
@@ -1551,6 +1602,15 @@ fn stream_frames(
             return Err(error.into());
         }
     };
+
+    let clipboard_thread: Option<std::io::Result<thread::JoinHandle<()>>> =
+        clipboard_captures.map(|captures| {
+            let writer = Arc::clone(&writer);
+            let running = Arc::clone(running);
+            thread::Builder::new()
+                .name("jwm-remote-clipboard".into())
+                .spawn(move || forward_clipboard(&captures, &writer, &running))
+        });
 
     let interval = target_frame_interval(options.fps);
     let backpressure_refresh = backpressure_refresh_interval(interval);
@@ -1650,6 +1710,11 @@ fn stream_frames(
             Err(io::Error::other("remote video sender thread panicked").into())
         }
     };
+    // The forwarder holds a reference to the shared writer, so it must not
+    // outlive the session. It notices `running` within one poll interval.
+    if let Some(Ok(clipboard_thread)) = clipboard_thread {
+        let _ = clipboard_thread.join();
+    }
 
     match first_stop.cause() {
         StopCause::Capture => capture_result,
@@ -1683,7 +1748,7 @@ fn target_frame_interval(fps: u16) -> Duration {
 
 fn send_frames<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
-    writer: SessionWriter<DeadlineWriter<W>>,
+    writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
@@ -1703,7 +1768,7 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
 
 fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
-    mut writer: SessionWriter<DeadlineWriter<W>>,
+    writer: Arc<Mutex<SessionWriter<DeadlineWriter<W>>>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
@@ -1768,7 +1833,13 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
         )?;
         telemetry.record_outstanding(outstanding);
         let write_started = Instant::now();
-        if let Err(error) = write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE) {
+        // Held for exactly one record: interleaving would desynchronise the
+        // authenticated stream, and clipboard traffic shares this writer.
+        let write_result = {
+            let mut writer = lock_writer(&writer);
+            write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)
+        };
+        if let Err(error) = write_result {
             // The viewer never applied these tiles, so the encoder's model of
             // its canvas must not advance past them.
             sender.discard();
@@ -1790,14 +1861,74 @@ fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
     Ok(())
 }
 
+/// Lock the shared writer, tolerating a poisoned mutex.
+///
+/// A panicking writer thread already tears the session down through its own
+/// stop path; refusing to write here as well would only turn one failure into
+/// two different ones.
+/// Forward locally copied text to the peer until the session ends.
+///
+/// Runs on its own thread because the video sender parks on display credit and
+/// on its capture mailbox, either of which can be seconds long on an idle
+/// desktop; queueing clipboard text behind that would make copy-paste feel
+/// broken rather than merely delayed.
+fn forward_clipboard<W: std::io::Write + SetWriteTimeout>(
+    captures: &ClipboardCaptures,
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+    running: &AtomicBool,
+) {
+    while running.load(Ordering::Acquire) {
+        let Some(text) = captures.recv_timeout(CLIPBOARD_POLL_INTERVAL) else {
+            continue;
+        };
+        let Ok(payload) = encode_clipboard(&text) else {
+            eprintln!("jwm-remote: local clipboard text is too large to share; skipping it");
+            continue;
+        };
+        let result = {
+            let mut writer = lock_writer(writer);
+            write_session_record(
+                &mut writer,
+                MessageKind::Clipboard,
+                payload,
+                FRAME_WRITE_DEADLINE,
+            )
+        };
+        if let Err(error) = result {
+            // The session owns teardown; stopping here is enough.
+            eprintln!("jwm-remote: clipboard send failed: {error}");
+            return;
+        }
+    }
+}
+
+fn lock_writer<W>(
+    writer: &Mutex<SessionWriter<DeadlineWriter<W>>>,
+) -> std::sync::MutexGuard<'_, SessionWriter<DeadlineWriter<W>>> {
+    match writer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 fn write_frame_record<W: std::io::Write + SetWriteTimeout>(
     writer: &mut SessionWriter<DeadlineWriter<W>>,
     payload: &[u8],
     timeout: Duration,
 ) -> Result<(), ProtocolError> {
+    write_session_record(writer, MessageKind::Frame, payload, timeout)
+}
+
+/// Write one complete authenticated record under an absolute deadline.
+fn write_session_record<W: std::io::Write + SetWriteTimeout>(
+    writer: &mut SessionWriter<DeadlineWriter<W>>,
+    kind: MessageKind,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<(), ProtocolError> {
     writer.get_mut().begin_record(timeout)?;
     let result = writer
-        .write_message(MessageKind::Frame, payload)
+        .write_message(kind, payload)
         .and_then(|()| writer.flush());
     if let Err(error) = result {
         // A transport error may follow a partial header, payload, or MAC. The
@@ -1901,6 +2032,7 @@ fn receive_input(
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
     viewport: &ViewportRequest,
+    clipboard: Option<&ClipboardSetter>,
 ) -> RemoteResult<()> {
     let mut payload = Vec::new();
     let session_result = (|| -> RemoteResult<()> {
@@ -1971,6 +2103,20 @@ fn receive_input(
                 }
                 MessageKind::Heartbeat => {
                     return Err(invalid_data("client heartbeat payload must be empty").into());
+                }
+                MessageKind::Clipboard => {
+                    let text = decode_clipboard(&payload)?;
+                    match clipboard.as_ref() {
+                        Some(clipboard) => {
+                            clipboard.set_text(&text);
+                        }
+                        // Negotiation already told the peer clipboard sharing
+                        // is off; a record arriving anyway is a protocol
+                        // violation, not something to silently absorb.
+                        None => {
+                            return Err(invalid_data("clipboard sharing was not negotiated").into());
+                        }
+                    }
                 }
                 MessageKind::Viewport => {
                     let (width, height) = decode_viewport(&payload)?;
@@ -2347,6 +2493,7 @@ mod tests {
             capture_source: CaptureSource::Auto,
             allow_lan: false,
             allow_input: false,
+            allow_clipboard: false,
             once: false,
         };
         assert!(!options.allow_lan);
@@ -3251,10 +3398,10 @@ mod tests {
             .unwrap(),
         );
         let sender_jpeg_quality = Arc::clone(&jpeg_quality);
-        let writer = SessionWriter::new(
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
             DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
             [0x5a; 32],
-        );
+        )));
         let sender = thread::spawn(move || {
             send_frames(
                 sender_mailbox,
@@ -3363,10 +3510,10 @@ mod tests {
         let sender_credits = Arc::clone(&credits);
         let sender_telemetry = Arc::clone(&telemetry);
         let sender_quality = Arc::clone(&jpeg_quality);
-        let writer = SessionWriter::new(
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
             DeadlineWriter::new(GateWriter(Arc::clone(&gate)), WRITE_TIMEOUT),
             [0x6b; 32],
-        );
+        )));
         let sender = thread::spawn(move || {
             send_frames(
                 sender_mailbox,
@@ -3486,10 +3633,10 @@ mod tests {
         let mut sender = FrameSender::new();
         let baseline = test_captured_frame(10);
         accept_frame(&mut sender, &baseline, committed_at);
-        let writer = SessionWriter::new(
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
             DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
             [0x7c; 32],
-        );
+        )));
 
         assert!(
             send_frames_with_encoder(
@@ -3534,10 +3681,10 @@ mod tests {
             Instant::now(),
         )
         .unwrap();
-        let writer = SessionWriter::new(
+        let writer = Arc::new(Mutex::new(SessionWriter::new(
             DeadlineWriter::new(FailingWriter, WRITE_TIMEOUT),
             [0x8d; 32],
-        );
+        )));
         let mut sender = FrameSender::new();
 
         assert!(
@@ -3687,6 +3834,7 @@ mod tests {
                 &receiver_telemetry,
                 &receiver_jpeg_quality,
                 &ViewportRequest::new(),
+                None,
             )
         });
 

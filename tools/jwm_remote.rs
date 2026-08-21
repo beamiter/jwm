@@ -80,6 +80,12 @@ enum Command {
         #[arg(long)]
         allow_input: bool,
 
+        /// Share the clipboard with the authenticated peer, both directions.
+        ///
+        /// Text marked secret by a password manager is never shared.
+        #[arg(long)]
+        allow_clipboard: bool,
+
         /// Exit after the first connection ends (useful for tests/scripts).
         #[arg(long)]
         once: bool,
@@ -103,6 +109,12 @@ enum Command {
         /// Click the viewer to grab local input; F12 releases the grab.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
+
+        /// Share the clipboard with the host, both directions.
+        ///
+        /// The host must also be started with --allow-clipboard.
+        #[arg(long)]
+        clipboard: bool,
     },
 }
 
@@ -125,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             capture_source,
             allow_lan,
             allow_input,
+            allow_clipboard,
             once,
         } => {
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
@@ -140,6 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 capture_source,
                 allow_lan,
                 allow_input,
+                allow_clipboard,
                 once,
             })
         }
@@ -149,12 +163,14 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             display,
             view_only,
             grab_input,
+            clipboard,
         } => run_client(ClientOptions {
             address,
             key_file,
             display,
             view_only,
             grab_input,
+            clipboard,
         }),
     }
 }

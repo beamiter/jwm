@@ -153,6 +153,8 @@ pub enum MessageKind {
     /// Client's current viewable size, so the host stops encoding pixels the
     /// viewer cannot display.
     Viewport = 12,
+    /// UTF-8 clipboard text. Travels in both directions.
+    Clipboard = 13,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -172,6 +174,7 @@ impl TryFrom<u8> for MessageKind {
             10 => Ok(Self::FrameAck),
             11 => Ok(Self::InputBatch),
             12 => Ok(Self::Viewport),
+            13 => Ok(Self::Clipboard),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }

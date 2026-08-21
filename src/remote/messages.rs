@@ -12,7 +12,9 @@ const SERVER_HELLO_LEN: usize = 11;
 const CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + 32;
 const FLAG_POINTER: u8 = 1 << 0;
 const FLAG_KEYBOARD: u8 = 1 << 1;
-const KNOWN_FLAGS: u8 = FLAG_POINTER | FLAG_KEYBOARD;
+const FLAG_CLIPBOARD: u8 = 1 << 2;
+const INPUT_FLAGS: u8 = FLAG_POINTER | FLAG_KEYBOARD;
+const KNOWN_FLAGS: u8 = INPUT_FLAGS | FLAG_CLIPBOARD;
 const INPUT_TAG_POINTER: u8 = 1;
 const INPUT_TAG_KEY: u8 = 2;
 const INPUT_TAG_BUTTON: u8 = 3;
@@ -32,6 +34,7 @@ pub const MAX_INPUT_BATCH_PAYLOAD_LEN: usize = 1 + MAX_INPUT_BATCH_EVENTS * POIN
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientHello {
     pub request_input: bool,
+    pub request_clipboard: bool,
     pub keymap_fingerprint: [u8; 32],
 }
 
@@ -39,13 +42,17 @@ pub struct ClientHello {
 pub struct ServerHello {
     pub pointer_enabled: bool,
     pub keyboard_enabled: bool,
+    pub clipboard_enabled: bool,
 }
 
 impl ClientHello {
     #[must_use]
     pub fn encode(self) -> [u8; CLIENT_HELLO_LEN] {
         let mut payload = [0_u8; CLIENT_HELLO_LEN];
-        let flags = if self.request_input { KNOWN_FLAGS } else { 0 };
+        let mut flags = if self.request_input { INPUT_FLAGS } else { 0 };
+        if self.request_clipboard {
+            flags |= FLAG_CLIPBOARD;
+        }
         payload[..SERVER_HELLO_LEN].copy_from_slice(&encode_hello(flags));
         payload[SERVER_HELLO_LEN..].copy_from_slice(&self.keymap_fingerprint);
         payload
@@ -55,10 +62,11 @@ impl ClientHello {
         if payload.len() != CLIENT_HELLO_LEN {
             return Err(invalid_data("client hello has an invalid length").into());
         }
-        let request_input = decode_hello(&payload[..SERVER_HELLO_LEN])? != 0;
+        let flags = decode_hello(&payload[..SERVER_HELLO_LEN])?;
         let keymap_fingerprint = payload[SERVER_HELLO_LEN..].try_into().unwrap();
         Ok(Self {
-            request_input,
+            request_input: flags & INPUT_FLAGS != 0,
+            request_clipboard: flags & FLAG_CLIPBOARD != 0,
             keymap_fingerprint,
         })
     }
@@ -74,6 +82,9 @@ impl ServerHello {
         if self.keyboard_enabled {
             flags |= FLAG_KEYBOARD;
         }
+        if self.clipboard_enabled {
+            flags |= FLAG_CLIPBOARD;
+        }
         encode_hello(flags)
     }
 
@@ -82,6 +93,7 @@ impl ServerHello {
         Ok(Self {
             pointer_enabled: flags & FLAG_POINTER != 0,
             keyboard_enabled: flags & FLAG_KEYBOARD != 0,
+            clipboard_enabled: flags & FLAG_CLIPBOARD != 0,
         })
     }
 }
@@ -142,6 +154,41 @@ pub fn decode_viewport(payload: &[u8]) -> RemoteResult<(u16, u16)> {
         return Err(invalid_data("viewport has an empty dimension").into());
     }
     Ok((width, height))
+}
+
+/// Largest clipboard payload carried in one record.
+///
+/// Matches the local clipboard history's own ceiling, so a selection this
+/// helper refuses is exactly one the rest of JWM would refuse too.
+pub const MAX_CLIPBOARD_BYTES: usize = crate::backend::clipboard_offer::MAX_TEXT_BYTES;
+
+/// Validate a clipboard payload for the wire.
+pub fn encode_clipboard(text: &str) -> RemoteResult<&[u8]> {
+    if text.len() > MAX_CLIPBOARD_BYTES {
+        return Err(invalid_data(format!(
+            "clipboard text is {} bytes; maximum is {MAX_CLIPBOARD_BYTES}",
+            text.len()
+        ))
+        .into());
+    }
+    Ok(text.as_bytes())
+}
+
+/// Decode a clipboard payload.
+///
+/// The length is bounded before the text is examined, and the bytes must be
+/// valid UTF-8: a peer does not get to hand the local X server arbitrary
+/// bytes to hold as a text selection.
+pub fn decode_clipboard(payload: &[u8]) -> RemoteResult<String> {
+    if payload.len() > MAX_CLIPBOARD_BYTES {
+        return Err(invalid_data(format!(
+            "clipboard payload is {} bytes; maximum is {MAX_CLIPBOARD_BYTES}",
+            payload.len()
+        ))
+        .into());
+    }
+    String::from_utf8(payload.to_vec())
+        .map_err(|_| invalid_data("clipboard payload is not valid UTF-8").into())
 }
 
 /// Encode a cumulative acknowledgement for the latest frame drawn by the client.
@@ -383,11 +430,13 @@ mod tests {
     fn hello_is_versioned_and_rejects_unknown_flags() {
         let payload = ClientHello {
             request_input: true,
+            request_clipboard: false,
             keymap_fingerprint: [7; 32],
         }
         .encode();
         let decoded = ClientHello::decode(&payload).unwrap();
         assert!(decoded.request_input);
+        assert!(!decoded.request_clipboard);
         assert_eq!(decoded.keymap_fingerprint, [7; 32]);
 
         let mut future = payload;
@@ -396,10 +445,52 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_capability_is_independent_of_input() {
+        // A view-only viewer may still share a clipboard, and an input-capable
+        // one may decline to. Neither implies the other.
+        for (request_input, request_clipboard) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let decoded = ClientHello::decode(
+                &ClientHello {
+                    request_input,
+                    request_clipboard,
+                    keymap_fingerprint: [0; 32],
+                }
+                .encode(),
+            )
+            .unwrap();
+            assert_eq!(decoded.request_input, request_input);
+            assert_eq!(decoded.request_clipboard, request_clipboard);
+        }
+
+        for (pointer, keyboard, clipboard) in [
+            (false, false, true),
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+        ] {
+            let decoded = ServerHello::decode(
+                &ServerHello {
+                    pointer_enabled: pointer,
+                    keyboard_enabled: keyboard,
+                    clipboard_enabled: clipboard,
+                }
+                .encode(),
+            )
+            .unwrap();
+            assert_eq!(decoded.pointer_enabled, pointer);
+            assert_eq!(decoded.keyboard_enabled, keyboard);
+            assert_eq!(decoded.clipboard_enabled, clipboard);
+        }
+    }
+
+    #[test]
     fn hello_uses_version_four_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             pointer_enabled: false,
             keyboard_enabled: false,
+            clipboard_enabled: false,
         }
         .encode();
         assert_eq!(&payload[8..10], &4_u16.to_be_bytes());
@@ -424,6 +515,41 @@ mod tests {
                 "version {rejected} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn clipboard_payloads_round_trip_and_stay_bounded() {
+        for text in ["", "hello", "\u{4f60}\u{597d}", "line\nbreak\ttab"] {
+            let payload = encode_clipboard(text).unwrap();
+            assert_eq!(decode_clipboard(payload).unwrap(), text);
+        }
+
+        let oversized = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert!(
+            encode_clipboard(&oversized).is_err(),
+            "an oversized selection must be refused before it reaches the wire"
+        );
+        assert!(
+            decode_clipboard(oversized.as_bytes()).is_err(),
+            "and refused again on arrival, before it is handed to the X server"
+        );
+
+        // At the limit exactly, both directions still work.
+        let exact = "y".repeat(MAX_CLIPBOARD_BYTES);
+        let payload = encode_clipboard(&exact).unwrap();
+        assert_eq!(
+            decode_clipboard(payload).unwrap().len(),
+            MAX_CLIPBOARD_BYTES
+        );
+    }
+
+    #[test]
+    fn a_peer_cannot_hand_the_local_x_server_arbitrary_bytes() {
+        // The local side takes CLIPBOARD ownership and serves this as text,
+        // so it has to be text.
+        assert!(decode_clipboard(&[0xff, 0xfe, 0xfd]).is_err());
+        assert!(decode_clipboard(&[b'o', b'k', 0x80]).is_err());
+        assert_eq!(decode_clipboard(b"plain ascii").unwrap(), "plain ascii");
     }
 
     #[test]
@@ -682,6 +808,7 @@ mod tests {
         let payload = ServerHello {
             pointer_enabled: true,
             keyboard_enabled: false,
+            clipboard_enabled: false,
         }
         .encode();
         let decoded = ServerHello::decode(&payload).unwrap();

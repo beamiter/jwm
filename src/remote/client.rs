@@ -4,8 +4,8 @@ use super::deadline::TcpStreamDeadline;
 use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 use super::key::load_key_file;
 use super::messages::{
-    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
-    encode_viewport,
+    ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, decode_clipboard, encode_clipboard,
+    encode_frame_ack, encode_input_batch_into, encode_viewport,
 };
 use super::protocol::{
     MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
@@ -15,6 +15,7 @@ use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
 use super::{RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
+use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
@@ -33,6 +34,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+/// How often the viewer loop looks for newly copied local text.
+///
+/// The loop otherwise parks until its next heartbeat, and a quarter second of
+/// copy-paste latency is imperceptible next to that.
+const CLIPBOARD_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TELEMETRY_INTERVAL: Duration = Duration::from_secs(5);
 const RECEIVER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -43,6 +49,7 @@ pub struct ClientOptions {
     pub display: Option<String>,
     pub view_only: bool,
     pub grab_input: bool,
+    pub clipboard: bool,
 }
 
 pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
@@ -58,6 +65,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         stream,
         &key,
         request_input,
+        options.clipboard,
         keymap_fingerprint,
         HANDSHAKE_TIMEOUT,
     )?;
@@ -66,6 +74,31 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     } else if request_input && !hello.keyboard_enabled {
         eprintln!("jwm-remote: X11 keymaps differ; pointer works but keyboard is disabled");
     }
+
+    // Its own X connection and thread, so a slow selection owner on either
+    // desktop can never delay a frame or an input event.
+    if options.clipboard && !hello.clipboard_enabled {
+        eprintln!(
+            "jwm-remote: host did not enable clipboard sharing; start it with --allow-clipboard"
+        );
+    }
+    let (clipboard_captures, receiver_clipboard) = if hello.clipboard_enabled {
+        match Clipboard::start(options.display.as_deref()) {
+            Ok(clipboard) => {
+                let (captures, setter) = clipboard.split();
+                eprintln!("jwm-remote: clipboard sharing enabled");
+                (Some(captures), Some(setter))
+            }
+            Err(error) => {
+                eprintln!(
+                    "jwm-remote: clipboard sharing unavailable ({error}); continuing without it"
+                );
+                (None, None)
+            }
+        }
+    } else {
+        (None, None)
+    };
 
     let state = Arc::new(ReceiveState::new());
     let mut telemetry_reporter = ClientTelemetryReporter::new(&state.telemetry);
@@ -119,6 +152,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
             payload,
             wake_sender,
             tile_decoder,
+            receiver_clipboard,
         );
     })?;
 
@@ -132,6 +166,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         keyboard_enabled,
         &mut telemetry_reporter,
         &mut wake_receiver,
+        clipboard_captures.as_ref(),
     );
     let graceful_close = matches!(
         &loop_result,
@@ -162,6 +197,7 @@ fn negotiate_session(
     mut stream: TcpStream,
     key: &[u8],
     request_input: bool,
+    request_clipboard: bool,
     keymap_fingerprint: [u8; 32],
     negotiation_timeout: Duration,
 ) -> RemoteResult<(
@@ -185,6 +221,7 @@ fn negotiate_session(
         MessageKind::Hello,
         &ClientHello {
             request_input,
+            request_clipboard,
             keymap_fingerprint,
         }
         .encode(),
@@ -211,6 +248,7 @@ fn viewer_loop(
     keyboard_enabled: bool,
     telemetry_reporter: &mut ClientTelemetryReporter<'_>,
     wake: &mut WakeReceiver,
+    clipboard: Option<&ClipboardCaptures>,
 ) -> RemoteResult<ViewerLoopExit> {
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
@@ -239,6 +277,20 @@ fn viewer_loop(
             writer.write_message(MessageKind::Viewport, &encode_viewport(width, height))?;
             reported_viewport = Some(viewport);
             wrote = true;
+        }
+        if let Some(clipboard) = clipboard {
+            // Non-blocking: this loop must stay responsive to input and frames.
+            while let Some(text) = clipboard.recv_timeout(Duration::ZERO) {
+                match encode_clipboard(&text) {
+                    Ok(payload) => {
+                        writer.write_message(MessageKind::Clipboard, payload)?;
+                        wrote = true;
+                    }
+                    Err(_) => eprintln!(
+                        "jwm-remote: local clipboard text is too large to share; skipping it"
+                    ),
+                }
+            }
         }
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
@@ -282,6 +334,9 @@ fn viewer_loop(
             continue;
         }
         let mut deadline = next_heartbeat.min(telemetry_reporter.next_deadline());
+        if clipboard.is_some() {
+            deadline = deadline.min(Instant::now() + CLIPBOARD_POLL_INTERVAL);
+        }
         if let Some(viewer_deadline) = viewer.next_event_deadline() {
             deadline = deadline.min(viewer_deadline);
         }
@@ -938,6 +993,7 @@ fn receive_frames(
     mut payload: Vec<u8>,
     wake: WakeSender,
     mut tile_decoder: TileDecoder,
+    clipboard_setter: Option<ClipboardSetter>,
 ) {
     let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
@@ -988,6 +1044,17 @@ fn receive_frames(
             | MessageKind::InputBatch
             | MessageKind::Viewport => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
+            }
+            MessageKind::Clipboard => {
+                let text = decode_clipboard(&payload)?;
+                match clipboard_setter.as_ref() {
+                    Some(setter) => {
+                        setter.set_text(&text);
+                    }
+                    None => {
+                        return Err(invalid_data("clipboard sharing was not negotiated").into());
+                    }
+                }
             }
             MessageKind::Heartbeat => {
                 return Err(invalid_data("host sent an unexpected heartbeat").into());
@@ -1580,6 +1647,7 @@ mod tests {
             Vec::new(),
             wake_sender,
             TileDecoder::new(),
+            None,
         );
 
         assert!(!state.alive.load(Ordering::Acquire));
@@ -1622,6 +1690,7 @@ mod tests {
             Vec::new(),
             wake_sender,
             TileDecoder::new(),
+            None,
         );
 
         assert!(!state.alive.load(Ordering::Acquire));
@@ -1818,8 +1887,14 @@ mod tests {
 
         let stream = TcpStream::connect(address).unwrap();
         let started = Instant::now();
-        let result =
-            negotiate_session(stream, &TEST_PSK, false, [0; 32], Duration::from_millis(80));
+        let result = negotiate_session(
+            stream,
+            &TEST_PSK,
+            false,
+            false,
+            [0; 32],
+            Duration::from_millis(80),
+        );
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_millis(500));
         server.join().unwrap();
@@ -1846,6 +1921,7 @@ mod tests {
                     &ServerHello {
                         pointer_enabled: false,
                         keyboard_enabled: false,
+                        clipboard_enabled: false,
                     }
                     .encode(),
                 )
@@ -1863,6 +1939,7 @@ mod tests {
         let result = negotiate_session(
             stream,
             &TEST_PSK,
+            false,
             false,
             [0; 32],
             Duration::from_millis(100),
@@ -1892,6 +1969,7 @@ mod tests {
                     &ServerHello {
                         pointer_enabled: false,
                         keyboard_enabled: false,
+                        clipboard_enabled: false,
                     }
                     .encode(),
                 )
@@ -1903,9 +1981,15 @@ mod tests {
         });
 
         let stream = TcpStream::connect(address).unwrap();
-        let (mut reader, _writer, hello) =
-            negotiate_session(stream, &TEST_PSK, false, [0; 32], Duration::from_millis(80))
-                .unwrap();
+        let (mut reader, _writer, hello) = negotiate_session(
+            stream,
+            &TEST_PSK,
+            false,
+            false,
+            [0; 32],
+            Duration::from_millis(80),
+        )
+        .unwrap();
         assert!(!hello.pointer_enabled);
         assert!(!hello.keyboard_enabled);
         let (kind, payload) = reader.read_message().unwrap();

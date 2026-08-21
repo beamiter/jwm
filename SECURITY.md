@@ -74,7 +74,10 @@ Particular care is required around:
 authenticates peers and encrypts every ordered message with
 ChaCha20-Poly1305, binding both peers' advertised transport version into key
 derivation so a downgrade fails closed; non-loopback binding and XTEST control
-each require an explicit flag. It does not provide forward secrecy — traffic
+each require an explicit flag, as does clipboard sharing — which is off unless
+*both* peers ask for it, never shares text a password manager marked secret,
+and should be understood as granting the peer everything you copy for the life
+of the session. It does not provide forward secrecy — traffic
 keys derive from the pre-shared key, so a leaked key file decrypts recorded
 sessions — and it does not hide inter-keystroke timing. Rotate the key file, or
 carry the default loopback listener through SSH, when either matters. See

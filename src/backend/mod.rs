@@ -5,6 +5,12 @@ pub mod color_policy;
 // MIME-level clipboard judgments shared by every backend that captures a
 // selection; see the module for why they sit below the history.
 pub mod clipboard_offer;
+
+// X11 CLIPBOARD mechanics, shared by the x11rb backend and the remote helper.
+// Gated on x11rb being present rather than on a backend, because a slim
+// `backend-xcb,remote-x11` build has the helper without the x11rb backend.
+#[cfg(any(feature = "backend-x11rb", feature = "remote-x11"))]
+pub mod clipboard_x11;
 pub mod common_define;
 pub mod edid;
 pub mod error;

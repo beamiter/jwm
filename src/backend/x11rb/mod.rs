@@ -1,6 +1,5 @@
 pub mod backend;
 pub mod batch;
-pub mod clipboard;
 pub mod compositor;
 pub mod edid;
 mod error_adapters;

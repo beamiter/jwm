@@ -84,7 +84,12 @@ pub(crate) struct Clipboard {
 
 impl Clipboard {
     /// Start watching CLIPBOARD on a dedicated connection and thread.
-    pub(crate) fn start() -> Result<Self, String> {
+    ///
+    /// `display` selects the X server, so the remote helper can watch the
+    /// display it is actually sharing or presenting rather than whatever
+    /// `$DISPLAY` happens to say.
+    pub(crate) fn start(display: Option<&str>) -> Result<Self, String> {
+        let display = display.map(str::to_string);
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
         // Build the watcher on the thread that will own it: RustConnection is
@@ -92,7 +97,7 @@ impl Clipboard {
         let (ready_tx, ready) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("jwm-clipboard".to_string())
-            .spawn(move || match Watcher::new() {
+            .spawn(move || match Watcher::new(display.as_deref()) {
                 Ok(mut watcher) => {
                     let _ = ready_tx.send(Ok(()));
                     watcher.run(&captured_tx, &serve_rx);
@@ -118,6 +123,40 @@ impl Clipboard {
     pub(crate) fn set_text(&self, text: &str) -> bool {
         self.serve.send(text.to_string()).is_ok()
     }
+
+    /// Split into halves that can live on different threads.
+    ///
+    /// The remote helper watches captures on one thread and serves incoming
+    /// text from another, and neither may block the other.
+    pub(crate) fn split(self) -> (ClipboardCaptures, ClipboardSetter) {
+        (
+            ClipboardCaptures(self.captured),
+            ClipboardSetter(self.serve),
+        )
+    }
+}
+
+/// Receiving half: text copied on this display.
+pub(crate) struct ClipboardCaptures(std::sync::mpsc::Receiver<String>);
+
+impl ClipboardCaptures {
+    /// Block for the next captured text, giving up after `timeout`.
+    ///
+    /// Returning on a timeout rather than parking forever lets the caller
+    /// notice session shutdown without a second wake channel.
+    pub(crate) fn recv_timeout(&self, timeout: std::time::Duration) -> Option<String> {
+        self.0.recv_timeout(timeout).ok()
+    }
+}
+
+/// Sending half: text to offer to other applications on this display.
+#[derive(Clone)]
+pub(crate) struct ClipboardSetter(std::sync::mpsc::Sender<String>);
+
+impl ClipboardSetter {
+    pub(crate) fn set_text(&self, text: &str) -> bool {
+        self.0.send(text.to_string()).is_ok()
+    }
 }
 
 fn intern(conn: &RustConnection, name: &str) -> Result<Atom, String> {
@@ -131,9 +170,9 @@ fn intern(conn: &RustConnection, name: &str) -> Result<Atom, String> {
 impl Watcher {
     /// Open a private connection, create the owner window, and start
     /// watching CLIPBOARD.
-    fn new() -> Result<Self, String> {
+    fn new(display: Option<&str>) -> Result<Self, String> {
         let (conn, screen_num) =
-            x11rb::connect(None).map_err(|error| format!("clipboard connect: {error}"))?;
+            x11rb::connect(display).map_err(|error| format!("clipboard connect: {error}"))?;
         let root = conn
             .setup()
             .roots

@@ -65,6 +65,15 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` can share the clipboard in both directions, off unless the host
+  passes `--allow-clipboard` *and* the viewer passes `--clipboard`: the host's
+  flag is policy and the client's is consent, and a session where either is
+  missing never sends a clipboard record. UTF-8 text only, capped at 256 KiB,
+  and text a password manager marked secret is never shared — the same rules
+  JWM's local clipboard history already applies, because this reuses that
+  implementation rather than growing a second one. Each side watches CLIPBOARD
+  on its own X connection and thread, so a slow or hostile selection owner
+  cannot delay a frame or an input event.
 - `jwm-remote` viewers report their window size and the host stops encoding
   pixels the window cannot show. A 640-wide viewer previously received a
   1280-wide image and discarded half of it on arrival. `--max-width` becomes a

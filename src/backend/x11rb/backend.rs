@@ -85,7 +85,7 @@ pub struct X11rbBackend {
     compositor_loop_signal: Option<calloop::LoopSignal>,
 
     systray: Option<super::systray::SystemTray<RustConnection>>,
-    clipboard: Option<super::clipboard::Clipboard>,
+    clipboard: Option<crate::backend::clipboard_x11::Clipboard>,
 
     benchmark_auto_exit: bool,
 
@@ -464,7 +464,7 @@ impl X11rbBackend {
 
         // Watch CLIPBOARD on its own connection and thread. Failing here
         // costs the clipboard history, not the session.
-        match super::clipboard::Clipboard::start() {
+        match crate::backend::clipboard_x11::Clipboard::start(None) {
             Ok(clipboard) => backend.clipboard = Some(clipboard),
             Err(error) => log::warn!("clipboard: history unavailable: {error}"),
         }
@@ -795,7 +795,7 @@ impl Backend for X11rbBackend {
     fn drain_clipboard(&mut self) -> Vec<String> {
         self.clipboard
             .as_ref()
-            .map(super::clipboard::Clipboard::drain_captured)
+            .map(crate::backend::clipboard_x11::Clipboard::drain_captured)
             .unwrap_or_default()
     }
 
