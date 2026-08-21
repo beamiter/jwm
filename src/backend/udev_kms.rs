@@ -4316,9 +4316,11 @@ impl KmsState {
             // Outputs marked soft-disabled by wlr-output-management
             // `disable_head` Apply stop receiving frames but keep their
             // DrmOutput alive so a later `enable_head` Apply can resume.
+            // Use the cached name throughout this per-output/per-frame path:
+            // Smithay's `Output::name()` returns a newly allocated `String`.
             if state
                 .soft_disabled_outputs
-                .contains(&self.outputs[out_idx].output.name())
+                .contains(&self.outputs[out_idx].output_name)
                 || self.outputs[out_idx].dpms_off
             {
                 continue;
@@ -4424,7 +4426,7 @@ impl KmsState {
             let mut frame_roots: Vec<WlSurface> = Vec::new();
 
             if state.session_locked {
-                if let Some(lock_surface) = state.lock_surfaces.get(&out.output.name()) {
+                if let Some(lock_surface) = state.lock_surfaces.get(&out.output_name) {
                     let surface = lock_surface.wl_surface().clone();
                     frame_roots.push(surface.clone());
 
@@ -5551,6 +5553,25 @@ mod compositor_texture_ownership_tests {
         assert!(compositor_output_texture_identity_matches(17, 4, 17, 4));
         assert!(!compositor_output_texture_identity_matches(17, 4, 17, 3));
         assert!(!compositor_output_texture_identity_matches(17, 4, 18, 4));
+    }
+
+    #[test]
+    fn render_hot_path_reuses_cached_output_names() {
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let render = SOURCE
+            .split_once("pub(super) fn render_if_needed(")
+            .expect("render_if_needed exists")
+            .1
+            .split_once("pub(super) fn on_vblank(")
+            .expect("on_vblank follows render_if_needed")
+            .0;
+
+        assert!(
+            !render.contains(".output.name()"),
+            "the per-frame render path must not allocate output names"
+        );
+        assert!(render.contains("contains(&self.outputs[out_idx].output_name)"));
+        assert!(render.contains("state.lock_surfaces.get(&out.output_name)"));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fmt;
 use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use super::Jwm;
 
@@ -16,6 +17,18 @@ pub(crate) const TRANSIENT_CHILD_HANDOFF_ENV: &str = "JWM_TRANSIENT_CHILD_HANDOF
 const TRANSIENT_CHILD_HANDOFF_VERSION: u32 = 1;
 const MAX_TRANSIENT_CHILD_HANDOFF_BYTES: usize = 16 * 1024;
 const MAX_TRANSIENT_CHILDREN: usize = 1024;
+/// Backends without a SIGCHLD source still need to reap exact child handles,
+/// but checking every live application on every animation/update tick turns
+/// into `children * frame_rate` wait syscalls. One second keeps the fallback
+/// bounded without making frame production the polling clock.
+const TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+fn transient_child_reap_is_due(force: bool, last_reap_at: Option<Instant>, now: Instant) -> bool {
+    force
+        || last_reap_at.is_none_or(|last| {
+            now.saturating_duration_since(last) >= TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL
+        })
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -177,10 +190,18 @@ pub(crate) struct TransientChildSupervisor {
     /// Children inherited across `exec`. They remain exact children of the
     /// unchanged JWM process PID, but stable Rust cannot reconstruct `Child`.
     inherited_pids: Vec<u32>,
+    /// Last exact-PID reap pass. SIGCHLD bypasses this throttle; it only limits
+    /// the backend-neutral insurance poll used by ordinary update ticks.
+    last_reap_at: Option<Instant>,
 }
 
 impl TransientChildSupervisor {
     fn supervise(&mut self, child: Child) {
+        if self.children.is_empty() && self.inherited_pids.is_empty() {
+            // A newly non-empty supervisor gets one prompt insurance poll even
+            // if it was empty for less than the fallback interval.
+            self.last_reap_at = None;
+        }
         self.children.push(child);
     }
 
@@ -215,7 +236,35 @@ impl TransientChildSupervisor {
                 self.inherited_pids.push(pid);
             }
         }
+        if !self.inherited_pids.is_empty() && self.children.is_empty() {
+            self.last_reap_at = None;
+        }
         Ok(())
+    }
+
+    fn reap_exited_if_due(&mut self, now: Instant) -> Vec<u32> {
+        self.reap_exited_at(now, false)
+    }
+
+    fn reap_exited_immediately(&mut self) -> Vec<u32> {
+        self.reap_exited_at(Instant::now(), true)
+    }
+
+    fn reap_exited_at(&mut self, now: Instant, force: bool) -> Vec<u32> {
+        if self.children.is_empty() && self.inherited_pids.is_empty() {
+            self.last_reap_at = None;
+            return Vec::new();
+        }
+        if !transient_child_reap_is_due(force, self.last_reap_at, now) {
+            return Vec::new();
+        }
+
+        self.last_reap_at = Some(now);
+        let retired = self.reap_exited();
+        if self.children.is_empty() && self.inherited_pids.is_empty() {
+            self.last_reap_at = None;
+        }
+        retired
     }
 
     /// Reap exited children through their owning handles and return every PID
@@ -480,7 +529,7 @@ impl Jwm {
     pub(crate) fn capture_transient_child_restart_handoff(
         &mut self,
     ) -> Result<TransientChildRestartHandoff, TransientChildHandoffError> {
-        self.reap_transient_children();
+        self.reap_transient_children_immediately();
         self.transient_children.restart_handoff(std::process::id())
     }
 
@@ -494,14 +543,25 @@ impl Jwm {
             .install_restart_handoff(handoff, std::process::id())
     }
 
-    /// Poll only JWM-owned transient children. This is safe to call both from
-    /// the common update loop and as an optional SIGCHLD fast path.
-    pub(super) fn reap_transient_children(&mut self) {
-        for pid in self.transient_children.reap_exited() {
+    fn retire_exited_transient_children(&mut self, exited: Vec<u32>) {
+        for pid in exited {
             // Scratchpad spawns share this supervisor. If one dies before its
             // window maps, release the pending-name gate immediately.
             self.remove_exited_pending_scratchpad(pid);
         }
+    }
+
+    /// Backend-neutral insurance poll. Ordinary update ticks may call this as
+    /// often as they like; exact child status is queried at most once a second.
+    pub(super) fn poll_transient_children(&mut self, now: Instant) {
+        let exited = self.transient_children.reap_exited_if_due(now);
+        self.retire_exited_transient_children(exited);
+    }
+
+    /// Immediate exact-PID reap for SIGCHLD and restart handoff boundaries.
+    pub(super) fn reap_transient_children_immediately(&mut self) {
+        let exited = self.transient_children.reap_exited_immediately();
+        self.retire_exited_transient_children(exited);
     }
 }
 
@@ -509,7 +569,6 @@ impl Jwm {
 mod tests {
     use super::*;
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
 
     fn wait_until_reaped(supervisor: &mut TransientChildSupervisor) {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -536,6 +595,65 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("child {pid} did not become a zombie before the deadline");
+    }
+
+    #[test]
+    fn fallback_reap_is_rate_limited_but_a_signal_forces_an_immediate_pass() {
+        let start = Instant::now();
+        assert!(transient_child_reap_is_due(false, None, start));
+        assert!(!transient_child_reap_is_due(
+            false,
+            Some(start),
+            start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL - Duration::from_millis(1),
+        ));
+        assert!(transient_child_reap_is_due(
+            false,
+            Some(start),
+            start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL,
+        ));
+        assert!(transient_child_reap_is_due(
+            true,
+            Some(start),
+            start + Duration::from_millis(1),
+        ));
+        assert!(!transient_child_reap_is_due(
+            false,
+            Some(start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL),
+            start,
+        ));
+    }
+
+    #[test]
+    fn fallback_reap_retires_an_exit_at_the_next_one_second_boundary() {
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let child_stdin = child.stdin.take().unwrap();
+        let mut supervisor = TransientChildSupervisor::default();
+        supervisor.supervise(child);
+
+        let start = Instant::now();
+        assert!(supervisor.reap_exited_if_due(start).is_empty());
+        drop(child_stdin);
+        wait_until_zombie(pid);
+
+        let just_before = start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL - Duration::from_millis(1);
+        assert!(supervisor.reap_exited_if_due(just_before).is_empty());
+        assert!(!supervisor.is_empty());
+
+        assert_eq!(
+            supervisor.reap_exited_if_due(start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL),
+            [pid]
+        );
+        assert!(supervisor.is_empty());
+        assert_eq!(
+            waitpid(Pid::from_raw(pid as i32), Some(WaitPidFlag::WNOHANG)),
+            Err(Errno::ECHILD)
+        );
     }
 
     #[test]

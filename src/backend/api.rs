@@ -335,7 +335,50 @@ pub struct ScreenInfo {
     pub height: i32,
 }
 
-/// Backend-neutral compositor UI drawn above every client.  Input and policy
+/// Global output rectangle targeted by a non-locking system-UI surface.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SystemUiViewport {
+    /// Global compositor coordinates. Origins are signed because outputs may
+    /// sit left of or above the primary output.
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl SystemUiViewport {
+    #[must_use]
+    pub fn new(x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+        (width > 0 && height > 0).then_some(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    #[must_use]
+    pub fn fullscreen(width: i32, height: i32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+
+    #[must_use]
+    pub fn rect(self) -> [f32; 4] {
+        [
+            self.x as f32,
+            self.y as f32,
+            self.width as f32,
+            self.height as f32,
+        ]
+    }
+}
+
+/// Backend-neutral compositor UI drawn above every client. Input and policy
 /// live in JWM; backends only present this snapshot as a styled panel:
 /// headline, optional search field, list rows (one optionally highlighted),
 /// and a footer hint.
@@ -354,9 +397,64 @@ pub struct SystemUiOverlay {
     pub scroll: Option<ScrollWindow>,
     /// A lock overlay is opaque; other system UI dims the current desktop.
     pub locked: bool,
+    /// Global rectangle of the output this non-locking panel belongs to.
+    /// Invalid/default rectangles safely fall back to the compositor's full
+    /// virtual screen. Locked overlays always ignore this field and use the
+    /// full screen, preserving the lock's security boundary.
+    pub viewport: SystemUiViewport,
     /// Set by the layout picker, which is drawn as a film strip of layout
     /// thumbnails instead of the list card.
     pub filmstrip: Option<LayoutFilmstrip>,
+}
+
+impl SystemUiOverlay {
+    /// Viewport a renderer must use. Keeping the lock override here makes it
+    /// impossible for either backend to accidentally weaken the lock screen
+    /// by trusting a monitor-local rectangle.
+    #[must_use]
+    pub fn effective_viewport(&self, screen_width: i32, screen_height: i32) -> [f32; 4] {
+        let fullscreen = SystemUiViewport::fullscreen(screen_width, screen_height);
+        if self.locked || self.viewport.width <= 0 || self.viewport.height <= 0 {
+            fullscreen.rect()
+        } else {
+            self.viewport.rect()
+        }
+    }
+}
+
+#[cfg(test)]
+mod system_ui_viewport_tests {
+    use super::{SystemUiOverlay, SystemUiViewport};
+
+    #[test]
+    fn a_monitor_viewport_preserves_its_signed_global_origin() {
+        let overlay = SystemUiOverlay {
+            viewport: SystemUiViewport::new(-1920, 180, 1920, 1080).unwrap(),
+            ..SystemUiOverlay::default()
+        };
+        assert_eq!(
+            overlay.effective_viewport(3840, 1440),
+            [-1920.0, 180.0, 1920.0, 1080.0]
+        );
+    }
+
+    #[test]
+    fn a_lock_and_an_invalid_viewport_both_fall_back_to_the_full_screen() {
+        let locked = SystemUiOverlay {
+            locked: true,
+            viewport: SystemUiViewport::new(-1920, 180, 1920, 1080).unwrap(),
+            ..SystemUiOverlay::default()
+        };
+        assert_eq!(
+            locked.effective_viewport(3840, 1440),
+            [0.0, 0.0, 3840.0, 1440.0]
+        );
+
+        assert_eq!(
+            SystemUiOverlay::default().effective_viewport(3840, 1440),
+            [0.0, 0.0, 3840.0, 1440.0]
+        );
+    }
 }
 
 /// The slice of a longer list that [`SystemUiOverlay::items`] is showing.

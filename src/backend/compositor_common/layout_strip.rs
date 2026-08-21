@@ -82,8 +82,32 @@ const CELL_W_MAX: f32 = 148.0;
 /// Exposed frame aspect: a 16:10 screen.
 const FRAME_ASPECT: f32 = 0.625;
 
-/// Lay out a picker for `count` layouts on a `screen_w` x `screen_h` screen.
-pub fn strip_geometry(screen_w: f32, screen_h: f32, count: usize) -> StripGeometry {
+/// Lay out a picker for `count` layouts inside a global output `viewport`.
+/// The returned rectangles remain in global compositor coordinates, so the WM
+/// hit-test and both renderers can consume this exact geometry even when an
+/// output has a negative or non-zero origin.
+pub fn strip_geometry(viewport: Rect, count: usize) -> StripGeometry {
+    let [viewport_x, viewport_y, screen_w, screen_h] = viewport;
+    let viewport_x = if viewport_x.is_finite() {
+        viewport_x
+    } else {
+        0.0
+    };
+    let viewport_y = if viewport_y.is_finite() {
+        viewport_y
+    } else {
+        0.0
+    };
+    let screen_w = if screen_w.is_finite() && screen_w > 0.0 {
+        screen_w
+    } else {
+        1.0
+    };
+    let screen_h = if screen_h.is_finite() && screen_h > 0.0 {
+        screen_h
+    } else {
+        1.0
+    };
     let count = count.max(1);
     let n = count as f32;
 
@@ -103,10 +127,10 @@ pub fn strip_geometry(screen_w: f32, screen_h: f32, count: usize) -> StripGeomet
     let panel_h =
         2.0 * PAD + TITLE_H + GAP_Y + cell_h + GAP_Y + CAPTION_H + COUNTDOWN_H + GAP_Y + HINT_H;
 
-    let panel_x = ((screen_w - panel_w) * 0.5).round();
+    let panel_x = viewport_x + ((screen_w - panel_w) * 0.5).round();
     // Slightly above centre: the strip is about the desktop behind it, and the
     // eye reads a floating band better a little high.
-    let panel_y = ((screen_h - panel_h) * 0.42).round().max(16.0);
+    let panel_y = viewport_y + ((screen_h - panel_h) * 0.42).round().max(16.0);
 
     let strip_x = panel_x + PAD;
     let strip_y = panel_y + PAD + TITLE_H + GAP_Y;
@@ -203,7 +227,7 @@ mod tests {
     use super::*;
 
     fn geom(count: usize) -> StripGeometry {
-        strip_geometry(1920.0, 1080.0, count)
+        strip_geometry([0.0, 0.0, 1920.0, 1080.0], count)
     }
 
     #[test]
@@ -242,7 +266,7 @@ mod tests {
             (1920.0, 1080.0),
             (3840.0, 2160.0),
         ] {
-            let g = strip_geometry(w, h, 13);
+            let g = strip_geometry([0.0, 0.0, w, h], 13);
             assert!(g.panel[0] >= 0.0, "{w}x{h}: panel starts off-screen");
             assert!(
                 g.panel[0] + g.panel[2] <= w + 0.5,
@@ -267,6 +291,25 @@ mod tests {
             cell_at(&g, px + 1.0, py + 1.0),
             None,
             "the title band is not a cell"
+        );
+    }
+
+    #[test]
+    fn negative_and_nonzero_origins_offset_render_and_hit_test_together() {
+        let viewport = [-1920.0, 180.0, 1920.0, 1080.0];
+        let g = strip_geometry(viewport, 7);
+        let [px, py, pw, ph] = g.panel;
+        assert!(px >= viewport[0]);
+        assert!(py >= viewport[1]);
+        assert!(px + pw <= viewport[0] + viewport[2] + 0.5);
+        assert!(py + ph <= viewport[1] + viewport[3] + 0.5);
+
+        let [x, y] = center(g.cells[3].cell);
+        assert_eq!(cell_at(&g, x, y), Some(3));
+        assert_eq!(
+            cell_at(&g, x - viewport[0], y - viewport[1]),
+            None,
+            "monitor-local coordinates must not hit global film geometry"
         );
     }
 

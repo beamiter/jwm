@@ -1,12 +1,21 @@
 # Application launcher
 
 `Alt+R` (`app_launcher`) opens the launcher. Type to filter, `Up`/`Down` (or
-`Tab`) to move, `Enter` to launch, `Esc` — or `Alt+R` again — to close.
+`Tab`/`Shift+Tab`) to move, `Page Up`/`Page Down` to move a screen at a time,
+`Home`/`End` to jump, `Enter` to launch, and `Esc` — or `Alt+R` again — to
+close. Direct Unicode keysyms are accepted, so an international keyboard can
+search with the characters it produces.
 
 Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 `$XDG_DATA_DIRS`, plus every executable on `PATH` that no desktop entry already
 named. Entries marked `Hidden=true` or `NoDisplay=true` are left out, because
 their author asked for that.
+
+Directory and `PATH` discovery runs on a worker rather than the compositor
+event loop. The first opening appears immediately with an indexing row; later
+openings reuse an immutable catalog. A five-minute stale catalog stays usable
+while its replacement is built, so installing an application never turns the
+next launcher key press into a filesystem pause.
 
 ## The list is ordered by what you actually run
 

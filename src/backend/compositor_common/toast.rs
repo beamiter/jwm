@@ -19,6 +19,10 @@ pub(crate) const TOAST_FADE_OUT: f32 = 0.30;
 const MAX_LINE_CHARS: usize = 80;
 /// Body lines kept after sanitation.
 const MAX_BODY_LINES: usize = 3;
+/// Widest rasterized title/body line. The card renderer uses the same ceiling;
+/// fitting before upload avoids allocating a giant texture only to draw it
+/// outside a 440 px card.
+pub(crate) const MAX_TEXT_WIDTH_PX: u32 = 440;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(4000);
 const MIN_TIMEOUT: Duration = Duration::from_millis(800);

@@ -67,6 +67,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -1275,7 +1276,9 @@ pub(crate) struct WaylandCompositor {
     hud_textures: [Option<(u32, u32, u32)>; 4],
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(u32, u32, u32)>; 4],
-    sysui_cache: String,
+    /// Text/font/theme or screen-width changes require a new raster. Geometry
+    /// changes such as selection motion deliberately do not.
+    sysui_text_dirty: bool,
 
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
@@ -1287,7 +1290,9 @@ pub(crate) struct WaylandCompositor {
     /// on the next frame while a GL context is current.
     toast_retired: Vec<u64>,
     hud_text_cache: String,
-    system_ui: Option<crate::backend::api::SystemUiOverlay>,
+    /// Cheap render snapshot; cloning the owned overlay used to duplicate
+    /// every visible row on each animation frame.
+    system_ui: Option<Arc<crate::backend::api::SystemUiOverlay>>,
     /// Open/morph spring for the docked system-UI card.
     system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     /// Slide of the selection pill between rows of the open list.
@@ -2599,7 +2604,7 @@ impl WaylandCompositor {
                 debug_hud_extended: false,
                 hud_textures: [None; 4],
                 sysui_textures: [None; 4],
-                sysui_cache: String::new(),
+                sysui_text_dirty: true,
                 toast_stack: Default::default(),
                 toast_textures: HashMap::new(),
                 toast_retired: Vec::new(),
@@ -4045,6 +4050,7 @@ impl WaylandCompositor {
 
             self.screen_w = w;
             self.screen_h = h;
+            self.sysui_text_dirty = true;
             self.output_texture_generation = next_output_texture_generation();
             self.glass_backdrop = None;
             self.last_output_color_frame_state = None;

@@ -368,6 +368,9 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Re-sync all cached compositor fields from the current config.
     /// Called on config file hot-reload so users don't need to restart.
     pub(crate) fn apply_config(&mut self) {
+        // Font, theme and screen-independent ink can all change on a reload.
+        // Selection-only overlay updates leave this false in set_system_ui.
+        self.sysui_text_dirty = true;
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
         let anim_speed = cfg.animation_speed();

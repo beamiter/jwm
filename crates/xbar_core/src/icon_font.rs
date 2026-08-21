@@ -72,6 +72,35 @@ where
         .map(str::to_owned)
 }
 
+/// Choose a Nerd Font family only when that family is actually installed.
+///
+/// [`select_icon_family`] deliberately treats an explicit configuration value
+/// as authoritative, even when the caller's font map cannot currently see it.
+/// That is useful for renderers which want to leave fontconfig substitution to
+/// the user, but it is not a sufficient gate for switching a presentation from
+/// portable emoji to private-use Nerd Font codepoints: without the requested
+/// font those codepoints can resolve to unrelated glyphs.  This stricter helper
+/// returns the canonical installed family name, or `None` when the selected
+/// family is absent or is not a Nerd Font family.
+#[must_use]
+pub fn select_installed_nerd_font_family<'a, I>(
+    available: I,
+    configured: Option<&str>,
+) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let available: Vec<&str> = available.into_iter().collect();
+    let selected = select_icon_family(available.iter().copied(), configured)?;
+    if !selected.to_lowercase().contains(NERD_FONT_MARKER) {
+        return None;
+    }
+    available
+        .into_iter()
+        .find(|family| family.eq_ignore_ascii_case(&selected))
+        .map(str::to_owned)
+}
+
 /// Append `icon` to a Pango family list, keeping `base` in front.
 ///
 /// A family already present anywhere in `base` is not repeated, so re-applying
@@ -189,6 +218,34 @@ mod tests {
     fn a_desktop_without_a_patched_font_reports_nothing_to_point_glyphs_at() {
         assert_eq!(select_icon_family(["Lato", "Arial"], None), None);
         assert_eq!(select_icon_family([], None), None);
+    }
+
+    #[test]
+    fn installed_selection_rejects_an_unavailable_explicit_family() {
+        assert_eq!(
+            select_installed_nerd_font_family(INSTALLED, Some("Iosevka Nerd Font")),
+            None
+        );
+    }
+
+    #[test]
+    fn installed_selection_rejects_a_non_nerd_explicit_family() {
+        assert_eq!(
+            select_installed_nerd_font_family(INSTALLED, Some("Lato")),
+            None
+        );
+    }
+
+    #[test]
+    fn installed_selection_returns_the_font_maps_canonical_spelling() {
+        assert_eq!(
+            select_installed_nerd_font_family(INSTALLED, Some("symbols nerd font mono")),
+            Some("Symbols Nerd Font Mono".to_owned())
+        );
+        assert_eq!(
+            select_installed_nerd_font_family(INSTALLED, None),
+            Some("Symbols Nerd Font Mono".to_owned())
+        );
     }
 
     #[test]

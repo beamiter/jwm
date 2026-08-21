@@ -1029,7 +1029,7 @@ impl<C: CompositorConnection> Compositor<C> {
             annotation_line_uniforms,
             hud_textures: [None; 4],
             sysui_textures: [None; 4],
-            sysui_cache: String::new(),
+            sysui_text_dirty: true,
             toast_stack: Default::default(),
             toast_textures: HashMap::new(),
             osd_slot: Default::default(),

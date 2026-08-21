@@ -2,8 +2,8 @@
 
 use crate::Jwm;
 use crate::backend::api::{
-    AllowMode, Backend, HitTarget, LayoutFilmCell, LayoutFilmstrip, SystemUiOverlay, WindowChanges,
-    WindowType,
+    AllowMode, Backend, HitTarget, LayoutFilmCell, LayoutFilmstrip, SystemUiOverlay,
+    SystemUiViewport, WindowChanges, WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
@@ -129,6 +129,20 @@ fn direct_command_from_launcher(
     })
 }
 
+fn choose_system_ui_viewport(
+    locked: bool,
+    selected_monitor: Option<(i32, i32, i32, i32)>,
+    screen: (i32, i32),
+) -> SystemUiViewport {
+    let fullscreen = SystemUiViewport::fullscreen(screen.0, screen.1);
+    if locked {
+        return fullscreen;
+    }
+    selected_monitor
+        .and_then(|(x, y, width, height)| SystemUiViewport::new(x, y, width, height))
+        .unwrap_or(fullscreen)
+}
+
 impl Jwm {
     /// Note that a panel changed in memory. The frame tick pushes it.
     ///
@@ -163,6 +177,7 @@ impl Jwm {
     pub(crate) fn sync_system_ui(&mut self, backend: &mut dyn Backend) {
         self.system_ui_dirty = false;
         let active = self.features.system_ui.is_active();
+        let viewport = self.system_ui_viewport();
         backend.compositor_set_system_ui(active.then(|| {
             let mut parts = self.features.system_ui.overlay_parts();
             if direct_command_from_launcher(&self.features.system_ui).is_some() {
@@ -188,6 +203,7 @@ impl Jwm {
                 hint: parts.hint,
                 scroll: parts.scroll,
                 locked: self.features.system_ui.is_locked(),
+                viewport,
                 filmstrip: self.features.system_ui.layout_picker().map(|picker| {
                     let now = std::time::Instant::now();
                     LayoutFilmstrip {
@@ -209,6 +225,23 @@ impl Jwm {
             }
         }));
         backend.compositor_force_full_redraw();
+    }
+
+    /// Global output rectangle for ordinary system UI. The lock screen is a
+    /// separate security surface and always returns the full virtual desktop;
+    /// missing or invalid selected-monitor state safely falls back there too.
+    pub(crate) fn system_ui_viewport(&self) -> SystemUiViewport {
+        let selected_monitor = self.state.sel_mon.and_then(|key| {
+            self.state.monitors.get(key).map(|monitor| {
+                let geometry = &monitor.geometry;
+                (geometry.m_x, geometry.m_y, geometry.m_w, geometry.m_h)
+            })
+        });
+        choose_system_ui_viewport(
+            self.features.system_ui.is_locked(),
+            selected_monitor,
+            (self.s_w, self.s_h),
+        )
     }
 
     fn system_ui_char(keysym: u32, mods: Mods) -> Option<char> {
@@ -251,7 +284,11 @@ impl Jwm {
                 other => other,
             };
         }
-        (!ch.is_control() && ch.is_ascii()).then_some(ch)
+        // XKB Unicode keysyms already identify the character selected by an
+        // international layout. Restricting this to ASCII made launcher
+        // searches and Wi-Fi passphrases reject accented and CJK input even
+        // though the font/raster path is UTF-8 throughout.
+        (!ch.is_control()).then_some(ch)
     }
 
     pub(crate) fn sync_screenshot_annotation_style(&self, backend: &mut dyn Backend) {
@@ -1073,6 +1110,9 @@ impl Jwm {
                     keys::KEY_Left | keys::KEY_Up | keys::KEY_ISO_Left_Tab => {
                         self.layout_picker(backend, &WMArgEnum::Int(-1))?
                     }
+                    keys::KEY_Tab if clean_state.contains(Mods::SHIFT) => {
+                        self.layout_picker(backend, &WMArgEnum::Int(-1))?
+                    }
                     keys::KEY_Right | keys::KEY_Down | keys::KEY_Tab => {
                         self.layout_picker(backend, &WMArgEnum::Int(1))?
                     }
@@ -1112,6 +1152,11 @@ impl Jwm {
                     }
                     return Ok(());
                 }
+            }
+            if keysym == keys::KEY_Escape && locked {
+                self.features.system_ui.clear_lock_password();
+                self.sync_system_ui(backend);
+                return Ok(());
             }
             if keysym == keys::KEY_Escape && !locked {
                 if self.features.system_ui_return_to_hub {
@@ -1196,6 +1241,31 @@ impl Jwm {
                 }
                 self.sync_system_ui(backend);
                 return Ok(());
+            }
+            // Common list navigation works the same in the launcher, Shell
+            // Hub, notification history and every picker. Handle it once
+            // before their action-specific keys so long lists remain fast to
+            // traverse and Shift+Tab never accidentally moves forward.
+            if !self.features.system_ui.is_prompting_wifi_passphrase() {
+                let navigated = match keysym {
+                    keys::KEY_Home => self.features.system_ui.jump_selection(false),
+                    keys::KEY_End => self.features.system_ui.jump_selection(true),
+                    keys::KEY_Page_Up => self.features.system_ui.page_selection(-1),
+                    keys::KEY_Page_Down => self.features.system_ui.page_selection(1),
+                    keys::KEY_ISO_Left_Tab => {
+                        self.features.system_ui.move_selection(-1);
+                        true
+                    }
+                    keys::KEY_Tab if clean_state.contains(Mods::SHIFT) => {
+                        self.features.system_ui.move_selection(-1);
+                        true
+                    }
+                    _ => false,
+                };
+                if navigated {
+                    self.sync_system_ui(backend);
+                    return Ok(());
+                }
             }
             if let Some(control) = self.features.system_ui.selected_control() {
                 self.handle_control_center_key(backend, control, keysym, clean_state);
@@ -2362,7 +2432,7 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_direct_launcher_command;
+    use super::{choose_system_ui_viewport, parse_direct_launcher_command};
     use crate::Jwm;
     use crate::backend::api::{
         Backend, BackendDiagnostics, Capabilities, CloseResult, ColorAllocator,
@@ -2380,6 +2450,40 @@ mod tests {
     use crate::core::types::Rect;
     use std::any::Any;
     use std::sync::Mutex;
+
+    #[test]
+    fn ordinary_system_ui_targets_the_selected_monitor_in_global_coordinates() {
+        let viewport =
+            choose_system_ui_viewport(false, Some((-1920, 160, 1920, 1080)), (3840, 1440));
+        assert_eq!(viewport.rect(), [-1920.0, 160.0, 1920.0, 1080.0]);
+    }
+
+    #[test]
+    fn lock_and_missing_selection_keep_the_full_virtual_desktop() {
+        let selected = Some((1920, 0, 1920, 1080));
+        assert_eq!(
+            choose_system_ui_viewport(true, selected, (3840, 1440)).rect(),
+            [0.0, 0.0, 3840.0, 1440.0]
+        );
+        assert_eq!(
+            choose_system_ui_viewport(false, None, (3840, 1440)).rect(),
+            [0.0, 0.0, 3840.0, 1440.0]
+        );
+    }
+
+    #[test]
+    fn system_ui_text_accepts_unicode_keysyms() {
+        use crate::backend::common_define::Mods;
+
+        // XKB's encoded-Unicode keysym for U+4E2D and the legacy Latin-1
+        // keysym for e-acute both resolve through keysym_to_utf32.
+        assert_eq!(Jwm::system_ui_char(0x0100_4e2d, Mods::empty()), Some('中'));
+        assert_eq!(Jwm::system_ui_char(0x00e9, Mods::empty()), Some('é'));
+        assert_eq!(
+            Jwm::system_ui_char(crate::backend::common_define::keys::KEY_1, Mods::SHIFT,),
+            Some('!')
+        );
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     struct ConfigureReply {

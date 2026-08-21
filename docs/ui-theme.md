@@ -99,8 +99,10 @@ Four things it does that are worth knowing as a user:
 | --- | --- |
 | **The card never narrows while a panel is up** | The launcher re-measures its match list on every keystroke. A card that tracked that width would breathe in and out under your typing, so the width only grows, and it grows in fixed steps rather than by single pixels. Closing the panel — or replacing it with another one — starts the width over |
 | **The selection slides between rows** | The highlight springs from the row it was on to the row it is going to, so a list reads as one object you move through. It is *placed*, not slid, on the first row of a freshly opened panel and after a panel swap: sliding in from a row of a different list would be motion describing nothing |
+| **The global animation switch is respected** | With `[animation] enabled = false`, `speed = "instant"`, or a zero duration, the shell card, selection, OSD, toasts and HUD snap to their target geometry and request no hidden spring frames |
 | **A windowed list shows a scroll indicator** | The launcher, the notification centre, the pickers and the Hub all send the compositor a slice of a longer list. A slim capsule in the right-hand margin shows how much of the list you are looking at and where |
 | **A hairline separates the list from the footer** | The footer hint names the keys that work on the panel. It is drawn one step quieter than the rows, and the rule is what keeps it from reading as one more row |
+| **Long text is fitted before upload** | Every row is ellipsized against the real font metrics before its CPU/GL texture is allocated. Queries retain the caret end, and a narrow nested output wins over the normal desktop width floor |
 
 Every theme's footer hint is held to WCAG's 3:1 contrast floor against its own
 panel over the worst-case desktop, and the typed query line to the 4.5:1 body

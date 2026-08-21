@@ -62,6 +62,8 @@ pub(crate) struct IslandDock {
     /// directly above for it to merge into. Hanging a flat-topped card in open
     /// space just looks like a card with a bug in its corner radius.
     merges_with_bar: bool,
+    /// Output bounds used for the no-bar fallback and final containment.
+    viewport: [f32; 4],
 }
 
 impl IslandDock {
@@ -72,18 +74,31 @@ impl IslandDock {
     /// inset from the edges, and a panel centred on the screen under a bar that
     /// is not would visibly fail to line up with it.
     #[must_use]
-    pub(crate) fn for_bar(bar: Option<[f32; 4]>, screen_w: f32) -> Self {
-        let screen_w = finite_clamp(screen_w, 1.0, f32::MAX, 1.0);
-        match bar {
+    pub(crate) fn for_bar(bar: Option<[f32; 4]>, viewport: [f32; 4]) -> Self {
+        let viewport = normalized_viewport(viewport);
+        let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
+        match bar.and_then(|bar| clip_bar_to_viewport(bar, viewport)) {
             Some([x, y, w, h]) if w > 0.0 && h > 0.0 => Self {
-                centre_x: finite_clamp(x + w * 0.5, 0.0, screen_w, screen_w * 0.5),
-                top_y: finite_clamp(y + h + DOCK_GAP, 0.0, f32::MAX, NO_BAR_TOP_MARGIN),
+                centre_x: finite_clamp(
+                    x + w * 0.5,
+                    viewport_x,
+                    viewport_x + viewport_w,
+                    viewport_x + viewport_w * 0.5,
+                ),
+                top_y: finite_clamp(
+                    y + h + DOCK_GAP,
+                    viewport_y,
+                    viewport_y + viewport_h,
+                    viewport_y + NO_BAR_TOP_MARGIN,
+                ),
                 merges_with_bar: true,
+                viewport,
             },
             _ => Self {
-                centre_x: screen_w * 0.5,
-                top_y: NO_BAR_TOP_MARGIN,
+                centre_x: viewport_x + viewport_w * 0.5,
+                top_y: (viewport_y + NO_BAR_TOP_MARGIN).min(viewport_y + viewport_h),
                 merges_with_bar: false,
+                viewport,
             },
         }
     }
@@ -94,6 +109,24 @@ impl IslandDock {
         [
             self.centre_x - width * 0.5,
             self.top_y + y_offset,
+            width,
+            height,
+        ]
+    }
+
+    /// As [`Self::rect`], constrained to the output this dock belongs to.
+    /// Modal system UI uses this path; transient OSD/toast stacks retain their
+    /// existing placement semantics through [`Self::rect`].
+    #[must_use]
+    pub(crate) fn contained_rect(&self, width: f32, height: f32, y_offset: f32) -> [f32; 4] {
+        let [viewport_x, viewport_y, viewport_w, viewport_h] = self.viewport;
+        let width = finite_clamp(width, 0.0, f32::MAX, 0.0);
+        let height = finite_clamp(height, 0.0, f32::MAX, 0.0);
+        let max_x = (viewport_x + viewport_w - width).max(viewport_x);
+        let max_y = (viewport_y + viewport_h - height).max(viewport_y);
+        [
+            (self.centre_x - width * 0.5).clamp(viewport_x, max_x),
+            (self.top_y + y_offset).clamp(viewport_y, max_y),
             width,
             height,
         ]
@@ -115,6 +148,33 @@ impl IslandDock {
             (r, r)
         }
     }
+}
+
+fn normalized_viewport(viewport: [f32; 4]) -> [f32; 4] {
+    let [x, y, width, height] = viewport;
+    [
+        if x.is_finite() { x } else { 0.0 },
+        if y.is_finite() { y } else { 0.0 },
+        finite_clamp(width, 1.0, f32::MAX, 1.0),
+        finite_clamp(height, 1.0, f32::MAX, 1.0),
+    ]
+}
+
+/// Portion of a bar belonging to `viewport`. Clipping rather than merely
+/// testing the centre also supports one bar spanning the whole virtual
+/// desktop: each monitor docks to the segment actually above it.
+#[must_use]
+pub(crate) fn clip_bar_to_viewport(bar: [f32; 4], viewport: [f32; 4]) -> Option<[f32; 4]> {
+    let [bx, by, bw, bh] = bar;
+    if !bar.into_iter().all(f32::is_finite) || bw <= 0.0 || bh <= 0.0 {
+        return None;
+    }
+    let [vx, vy, vw, vh] = normalized_viewport(viewport);
+    let left = bx.max(vx);
+    let top = by.max(vy);
+    let right = (bx + bw).min(vx + vw);
+    let bottom = (by + bh).min(vy + vh);
+    (right > left && bottom > top).then_some([left, top, right - left, bottom - top])
 }
 
 /// One spring, integrated with the same discipline as the wobbly grid: a
@@ -196,14 +256,41 @@ impl IslandMotion {
     /// compositor can have been idle for minutes before an OSD event, and
     /// handing the spring that interval would finish the animation before its
     /// first draw.
+    #[cfg(test)]
     pub(crate) fn advance(
         &mut self,
         now: Instant,
         target_width: f32,
         target_height: f32,
     ) -> (f32, f32) {
+        self.advance_with_motion(now, target_width, target_height, true)
+    }
+
+    /// Advance the spring, or place the panel directly at its target when
+    /// motion is disabled.
+    ///
+    /// JWM's global animation switch applies to compositor-owned UI as well as
+    /// client geometry.  Snapping the spring's internal state (rather than
+    /// merely returning the target) also makes [`Self::animating`] false, so a
+    /// reduced-motion panel does not keep requesting invisible follow-up
+    /// frames.
+    pub(crate) fn advance_with_motion(
+        &mut self,
+        now: Instant,
+        target_width: f32,
+        target_height: f32,
+        motion_enabled: bool,
+    ) -> (f32, f32) {
         let target_width = finite_clamp(target_width, 0.0, f32::MAX, 0.0);
         let target_height = finite_clamp(target_height, 0.0, f32::MAX, 0.0);
+
+        if !motion_enabled {
+            self.open = true;
+            self.width = Spring::at(target_width);
+            self.height = Spring::at(target_height);
+            self.last_tick = Some(now);
+            return (target_width, target_height);
+        }
 
         if !self.open {
             self.open = true;
@@ -256,10 +343,32 @@ impl RowHighlight {
     /// (`[x, y, w, h]`). Only the vertical axis moves: the pill always spans
     /// the card's content width, so animating x or width would be motion the
     /// user cannot see.
+    #[cfg(test)]
     pub(crate) fn advance(&mut self, now: Instant, target: [f32; 4]) -> [f32; 4] {
+        self.advance_with_motion(now, target, true)
+    }
+
+    /// Advance the highlight, or place it immediately when motion is
+    /// disabled. As with [`IslandMotion::advance_with_motion`], snapping the
+    /// stored springs prevents needless animation frames after the global
+    /// animation switch is turned off at runtime.
+    pub(crate) fn advance_with_motion(
+        &mut self,
+        now: Instant,
+        target: [f32; 4],
+        motion_enabled: bool,
+    ) -> [f32; 4] {
         let [x, y, w, h] = target;
         let y = finite_clamp(y, f32::MIN, f32::MAX, 0.0);
         let h = finite_clamp(h, 0.0, f32::MAX, 0.0);
+
+        if !motion_enabled {
+            self.shown = true;
+            self.y = Spring::at(y);
+            self.height = Spring::at(h);
+            self.last_tick = Some(now);
+            return [x, y, w, h];
+        }
 
         if !self.shown {
             self.shown = true;
@@ -316,7 +425,7 @@ mod tests {
     fn a_panel_docks_on_the_bar_not_the_screen() {
         // An inset bar: centring on the screen would leave the panel visibly
         // off from the strip it is supposed to grow out of.
-        let dock = IslandDock::for_bar(Some([40.0, 5.0, 2400.0, 42.0]), 2560.0);
+        let dock = IslandDock::for_bar(Some([40.0, 5.0, 2400.0, 42.0]), [0.0, 0.0, 2560.0, 1440.0]);
         assert_eq!(dock.centre_x, 1240.0);
         assert_eq!(dock.top_y, 47.0);
 
@@ -331,10 +440,39 @@ mod tests {
             Some([0.0, 0.0, 0.0, 0.0]),
             Some([0.0, 0.0, 100.0, 0.0]),
         ] {
-            let dock = IslandDock::for_bar(bar, 1600.0);
+            let dock = IslandDock::for_bar(bar, [0.0, 0.0, 1600.0, 900.0]);
             assert_eq!(dock.centre_x, 800.0);
             assert_eq!(dock.top_y, NO_BAR_TOP_MARGIN);
         }
+    }
+
+    #[test]
+    fn a_negative_origin_viewport_uses_only_its_bar_and_fallback_space() {
+        let viewport = [-1920.0, 120.0, 1920.0, 1080.0];
+        let spanning = [-1920.0, 120.0, 3840.0, 40.0];
+        assert_eq!(
+            clip_bar_to_viewport(spanning, viewport),
+            Some([-1920.0, 120.0, 1920.0, 40.0])
+        );
+        assert_eq!(
+            clip_bar_to_viewport([0.0, 0.0, 1920.0, 40.0], viewport),
+            None,
+            "the other monitor's bar must not become this monitor's dock"
+        );
+
+        let dock = IslandDock::for_bar(Some(spanning), viewport);
+        assert_eq!(dock.centre_x, -960.0);
+        assert_eq!(dock.top_y, 160.0);
+        assert_eq!(
+            dock.contained_rect(480.0, 120.0, 0.0),
+            [-1200.0, 160.0, 480.0, 120.0]
+        );
+
+        let fallback = IslandDock::for_bar(None, viewport);
+        assert_eq!(fallback.centre_x, -960.0);
+        assert_eq!(fallback.top_y, 132.0);
+        let bounded = fallback.contained_rect(600.0, 200.0, 5000.0);
+        assert_eq!(bounded, [-1260.0, 1000.0, 600.0, 200.0]);
     }
 
     #[test]
@@ -406,6 +544,27 @@ mod tests {
     }
 
     #[test]
+    fn disabled_motion_places_a_panel_without_requesting_more_frames() {
+        let mut motion = IslandMotion::default();
+        let now = Instant::now();
+        assert_eq!(
+            motion.advance_with_motion(now, 360.0, 64.0, false),
+            (360.0, 64.0)
+        );
+        assert!(!motion.animating(360.0, 64.0));
+
+        // Turning motion off while a spring is already travelling also snaps
+        // its stored state, rather than hiding an animation that keeps ticking.
+        motion.advance_with_motion(now + FRAME, 520.0, 80.0, true);
+        assert!(motion.animating(520.0, 80.0));
+        assert_eq!(
+            motion.advance_with_motion(now + FRAME * 2, 520.0, 80.0, false),
+            (520.0, 80.0)
+        );
+        assert!(!motion.animating(520.0, 80.0));
+    }
+
+    #[test]
     fn a_long_idle_gap_does_not_finish_the_animation_before_it_is_drawn() {
         let mut motion = IslandMotion::default();
         let start = Instant::now();
@@ -419,7 +578,8 @@ mod tests {
 
     #[test]
     fn only_a_panel_that_touches_the_bar_squares_off_against_it() {
-        let docked = IslandDock::for_bar(Some([0.0, 0.0, 1600.0, 40.0]), 1600.0);
+        let viewport = [0.0, 0.0, 1600.0, 900.0];
+        let docked = IslandDock::for_bar(Some([0.0, 0.0, 1600.0, 40.0]), viewport);
         // Touching the bar: flat above, curved below.
         assert_eq!(docked.radii(64.0, 24.0, 0.0), (0.0, 24.0));
         // Stacked below another card: nothing above to merge with.
@@ -427,7 +587,7 @@ mod tests {
 
         // No bar at all: a flat-topped card hanging in open space would just
         // look like a corner-radius bug.
-        let floating = IslandDock::for_bar(None, 1600.0);
+        let floating = IslandDock::for_bar(None, viewport);
         assert_eq!(floating.radii(64.0, 24.0, 0.0), (24.0, 24.0));
         // Still capped so a card mid-open stays a capsule.
         assert_eq!(floating.radii(20.0, 24.0, 0.0), (10.0, 10.0));
@@ -461,6 +621,18 @@ mod tests {
     }
 
     #[test]
+    fn disabled_motion_places_the_selection_without_a_follow_up_frame() {
+        let mut pill = RowHighlight::default();
+        let now = Instant::now();
+        let first = [100.0, 200.0, 400.0, 24.0];
+        let target = [100.0, 480.0, 400.0, 30.0];
+        pill.advance(now, first);
+
+        assert_eq!(pill.advance_with_motion(now + FRAME, target, false), target);
+        assert!(!pill.animating(target));
+    }
+
+    #[test]
     fn the_selection_pill_keeps_the_cards_own_x_and_width() {
         // Only the vertical axis is sprung; the pill always spans the card.
         let mut pill = RowHighlight::default();
@@ -479,7 +651,10 @@ mod tests {
         pill.advance(t, [0.0, 900.0, 400.0, 24.0]);
         pill.reset();
         t += FRAME;
-        assert_eq!(pill.advance(t, [0.0, 120.0, 400.0, 24.0]), [0.0, 120.0, 400.0, 24.0]);
+        assert_eq!(
+            pill.advance(t, [0.0, 120.0, 400.0, 24.0]),
+            [0.0, 120.0, 400.0, 24.0]
+        );
     }
 
     #[test]

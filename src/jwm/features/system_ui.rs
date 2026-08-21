@@ -1,5 +1,6 @@
 //! Backend-independent modal system UI state.
 
+use crate::jwm::features::connectivity::BackgroundJob;
 use crate::jwm::features::launcher::LauncherRow;
 use crate::jwm::features::shell_hub::ShellHubRoute;
 use std::cmp::Reverse;
@@ -8,6 +9,14 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Application menus change infrequently, but the directories behind them can
+/// be large (and PATH can contain slow mounts). Re-openings inside this window
+/// reuse the last complete catalog; once it expires, the old catalog remains
+/// visible while a worker builds its replacement.
+pub(crate) const APPLICATION_CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchEntry {
@@ -17,6 +26,23 @@ pub struct LaunchEntry {
     /// its own and has to be given one.
     pub terminal: bool,
     search: String,
+    /// Lowercased display name retained beside the catalog entry so every
+    /// query can use it as a sort tie-breaker without allocating in the
+    /// comparator.
+    sort_key: String,
+}
+
+impl LaunchEntry {
+    fn new(name: String, command: Vec<String>, terminal: bool, search: String) -> Self {
+        let sort_key = name.to_lowercase();
+        Self {
+            name,
+            command,
+            terminal,
+            search,
+            sort_key,
+        }
+    }
 }
 
 /// What activating a launcher row asks for.
@@ -76,7 +102,7 @@ pub enum SystemUiState {
     Inactive,
     Launcher {
         query: String,
-        entries: Vec<LaunchEntry>,
+        entries: Arc<[LaunchEntry]>,
         /// Windows open when the panel was opened. A snapshot: a window can
         /// close while the panel is up, which the focus path treats as a
         /// quiet no-op.
@@ -87,6 +113,9 @@ pub enum SystemUiState {
         usage: crate::jwm::features::launcher::UsageStore,
         /// The query's value when it is arithmetic rather than a search.
         computed: Option<String>,
+        /// No complete catalog exists yet and the first background scan is in
+        /// flight. A stale refresh never sets this: its old rows stay usable.
+        indexing: bool,
     },
     Info {
         title: String,
@@ -492,14 +521,16 @@ impl Clone for SystemUiState {
                 selected,
                 usage,
                 computed,
+                indexing,
             } => Self::Launcher {
                 query: query.clone(),
-                entries: entries.clone(),
+                entries: Arc::clone(entries),
                 windows: windows.clone(),
                 matches: matches.clone(),
                 selected: *selected,
                 usage: usage.clone(),
                 computed: computed.clone(),
+                indexing: *indexing,
             },
             Self::Info {
                 title,
@@ -617,8 +648,11 @@ impl SystemUiState {
         *self = Self::Inactive;
     }
 
-    pub fn open_launcher(windows: Vec<crate::jwm::features::launcher::WindowEntry>) -> Self {
-        let entries = discover_applications();
+    pub fn open_launcher(
+        entries: Arc<[LaunchEntry]>,
+        windows: Vec<crate::jwm::features::launcher::WindowEntry>,
+        indexing: bool,
+    ) -> Self {
         let usage = crate::jwm::features::launcher::UsageStore::load();
         let mut state = Self::Launcher {
             query: String::new(),
@@ -628,11 +662,79 @@ impl SystemUiState {
             selected: 0,
             usage,
             computed: None,
+            indexing,
         };
         // An empty query is not "no ranking": it is the moment the ranking
         // matters most, because the top row is one keystroke from launching.
         state.refresh_matches();
         state
+    }
+
+    /// Replace the catalog used by an open launcher and re-run its current
+    /// query. This is the hand-off from the background scanner to the event
+    /// loop; a closed launcher simply leaves the cache ready for next time.
+    ///
+    /// Preserve the highlighted application/window when it still exists so a
+    /// TTL refresh cannot make Enter target a different row under the user's
+    /// fingers.
+    pub fn set_launcher_entries(&mut self, new_entries: Arc<[LaunchEntry]>) -> bool {
+        enum Selection {
+            Application(String),
+            Window(u64),
+        }
+
+        let selection = match self {
+            Self::Launcher {
+                entries,
+                windows,
+                matches,
+                selected,
+                ..
+            } => matches.get(*selected).and_then(|row| match *row {
+                LauncherRow::App(index) => entries
+                    .get(index)
+                    .map(|entry| Selection::Application(entry.name.clone())),
+                LauncherRow::Window(index) => {
+                    windows.get(index).map(|entry| Selection::Window(entry.id))
+                }
+            }),
+            _ => return false,
+        };
+
+        let Self::Launcher {
+            entries, indexing, ..
+        } = self
+        else {
+            unreachable!("launcher was matched above");
+        };
+        *entries = new_entries;
+        *indexing = false;
+        self.refresh_matches();
+
+        let Self::Launcher {
+            entries,
+            windows,
+            matches,
+            selected,
+            ..
+        } = self
+        else {
+            unreachable!("refreshing matches cannot change the panel kind");
+        };
+        if let Some(selection) = selection {
+            if let Some(position) = matches.iter().position(|row| match (&selection, *row) {
+                (Selection::Application(name), LauncherRow::App(index)) => {
+                    entries.get(index).is_some_and(|entry| entry.name == *name)
+                }
+                (Selection::Window(id), LauncherRow::Window(index)) => {
+                    windows.get(index).is_some_and(|entry| entry.id == *id)
+                }
+                _ => false,
+            }) {
+                *selected = position;
+            }
+        }
+        true
     }
 
     pub fn is_launcher(&self) -> bool {
@@ -1933,6 +2035,114 @@ impl SystemUiState {
         }
     }
 
+    /// Jump to the first or last selectable row. Returns false for panels
+    /// whose arrows mean something else (calendar/display layout) or which do
+    /// not carry a selection.
+    pub fn jump_selection(&mut self, to_end: bool) -> bool {
+        let edge = |len: usize| if to_end { len.saturating_sub(1) } else { 0 };
+        match self {
+            Self::Launcher {
+                matches, selected, ..
+            } => *selected = edge(matches.len()),
+            Self::Info {
+                matches, offset, ..
+            } => {
+                *offset = if to_end {
+                    matches.len().saturating_sub(28)
+                } else {
+                    0
+                }
+            }
+            Self::ControlCenter {
+                entries,
+                selected,
+                armed,
+                ..
+            } => {
+                *armed = false;
+                *selected = edge(entries.len());
+            }
+            Self::ListPanel { rows, selected, .. } => *selected = edge(rows.len()),
+            Self::SessionMenu {
+                entries,
+                selected,
+                armed,
+            } => {
+                *armed = false;
+                *selected = edge(entries.len());
+            }
+            Self::Inactive
+            | Self::LayoutPicker(_)
+            | Self::MonitorLayout { .. }
+            | Self::Locked { .. }
+            | Self::Calendar { .. } => return false,
+        }
+        true
+    }
+
+    /// Move by one visible page without wrapping at the ends. Arrow navigation
+    /// intentionally wraps for fast repeated use; Page Up/Down should instead
+    /// make the first and last rows reliably reachable.
+    pub fn page_selection(&mut self, direction: isize) -> bool {
+        fn stepped(index: usize, len: usize, rows: usize, direction: isize) -> usize {
+            if direction < 0 {
+                index.saturating_sub(rows)
+            } else {
+                index.saturating_add(rows).min(len.saturating_sub(1))
+            }
+        }
+
+        match self {
+            Self::Launcher {
+                matches, selected, ..
+            } => *selected = stepped(*selected, matches.len(), 12, direction),
+            Self::Info {
+                matches, offset, ..
+            } => {
+                let max = matches.len().saturating_sub(28);
+                *offset = if direction < 0 {
+                    offset.saturating_sub(28)
+                } else {
+                    offset.saturating_add(28).min(max)
+                };
+            }
+            Self::ControlCenter {
+                entries,
+                selected,
+                armed,
+                shell_hub,
+            } => {
+                *armed = false;
+                let rows = if *shell_hub {
+                    SHELL_HUB_VISIBLE_LINES / 2
+                } else {
+                    entries.len().max(1)
+                };
+                *selected = stepped(*selected, entries.len(), rows, direction);
+            }
+            Self::ListPanel {
+                kind,
+                rows,
+                selected,
+                ..
+            } => *selected = stepped(*selected, rows.len(), kind.window(), direction),
+            Self::SessionMenu {
+                entries,
+                selected,
+                armed,
+            } => {
+                *armed = false;
+                *selected = stepped(*selected, entries.len(), entries.len().max(1), direction);
+            }
+            Self::Inactive
+            | Self::LayoutPicker(_)
+            | Self::MonitorLayout { .. }
+            | Self::Locked { .. }
+            | Self::Calendar { .. } => return false,
+        }
+        true
+    }
+
     /// What the highlighted row would launch, or `None` when it is a window.
     ///
     /// A window row must never produce a launch: spawning a second browser
@@ -2002,6 +2212,21 @@ impl SystemUiState {
         Some(std::mem::take(password))
     }
 
+    /// Clear the lock-screen secret in place, including an authentication
+    /// error. Returns false outside the lock screen.
+    ///
+    /// The footer advertises `Esc  clear`; overwriting before truncating keeps
+    /// that action from leaving the old password bytes in the allocation.
+    pub fn clear_lock_password(&mut self) -> bool {
+        let Self::Locked { password, message } = self else {
+            return false;
+        };
+        unsafe { password.as_bytes_mut().fill(0) };
+        password.clear();
+        message.clear();
+        true
+    }
+
     pub fn authentication_failed(&mut self) {
         if let Self::Locked { password, message } = self {
             unsafe { password.as_bytes_mut().fill(0) };
@@ -2058,6 +2283,7 @@ impl SystemUiState {
                 matches,
                 selected,
                 computed,
+                indexing,
                 ..
             } => {
                 if let Some(result) = computed {
@@ -2078,6 +2304,8 @@ impl SystemUiState {
                 let items: Vec<String> = if matches.is_empty() {
                     vec![if windows_only {
                         "  No matching windows".into()
+                    } else if *indexing {
+                        "  Indexing applications…".into()
                     } else {
                         "  No matching applications".into()
                     }]
@@ -2390,6 +2618,7 @@ impl SystemUiState {
                 selected,
                 usage,
                 computed,
+                ..
             } => {
                 use crate::jwm::features::launcher;
 
@@ -2408,7 +2637,7 @@ impl SystemUiState {
                     .iter()
                     .map(|entry| launcher::AppCandidate {
                         search: &entry.search,
-                        name: &entry.name,
+                        sort_key: &entry.sort_key,
                         usage: usage.score(&entry.name, now),
                     })
                     .collect();
@@ -2629,6 +2858,26 @@ fn scale_preview(value: i32, max: i32, extent: usize) -> usize {
     usize::try_from(value.saturating_mul(extent_max_u64) / max).unwrap_or(extent_max)
 }
 
+/// Whether opening the launcher should start a catalog refresh.
+///
+/// Passing `now` in keeps the policy deterministic in unit tests and avoids
+/// wall-clock jumps. A timestamp from the future is treated as fresh until the
+/// monotonic clock catches up.
+#[must_use]
+pub(crate) fn application_catalog_is_stale(refreshed_at: Option<Instant>, now: Instant) -> bool {
+    refreshed_at.is_none_or(|refreshed_at| {
+        now.saturating_duration_since(refreshed_at) >= APPLICATION_CATALOG_TTL
+    })
+}
+
+/// Scan desktop entries and PATH without holding up compositor input or a
+/// frame. The worker publishes one immutable, sorted snapshot; only the event
+/// loop installs it into [`crate::jwm::features::FeatureStates`].
+#[must_use]
+pub(crate) fn start_application_discovery() -> BackgroundJob<Arc<[LaunchEntry]>> {
+    BackgroundJob::spawn(|| Arc::<[LaunchEntry]>::from(discover_applications()))
+}
+
 fn discover_applications() -> Vec<LaunchEntry> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
@@ -2666,18 +2915,19 @@ fn discover_applications() -> Vec<LaunchEntry> {
                         continue;
                     }
                 }
-                entries.push(LaunchEntry {
-                    search: name.to_lowercase(),
-                    name: name.clone(),
-                    command: vec![name],
+                let search = name.to_lowercase();
+                entries.push(LaunchEntry::new(
+                    name.clone(),
+                    vec![name],
                     // A bare executable on PATH declares nothing, so it is
                     // launched as-is rather than guessed at.
-                    terminal: false,
-                });
+                    false,
+                    search,
+                ));
             }
         }
     }
-    entries.sort_by_key(|entry| entry.name.to_lowercase());
+    entries.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
     entries
 }
 
@@ -2733,12 +2983,8 @@ fn scan_desktop_dir(root: &Path, entries: &mut Vec<LaunchEntry>, seen: &mut Hash
         if command.is_empty() {
             continue;
         }
-        entries.push(LaunchEntry {
-            search: format!("{} {}", name.to_lowercase(), exec.to_lowercase()),
-            name,
-            command,
-            terminal,
-        });
+        let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
+        entries.push(LaunchEntry::new(name, command, terminal, search));
     }
 }
 
@@ -3648,24 +3894,53 @@ mod tests {
             ["foo", "--name", "two words"]
         );
     }
+
+    #[test]
+    fn application_catalog_refresh_uses_a_monotonic_ttl() {
+        let now = Instant::now();
+        assert!(application_catalog_is_stale(None, now));
+        assert!(!application_catalog_is_stale(Some(now), now));
+
+        let almost_expired = now
+            .checked_sub(APPLICATION_CATALOG_TTL - Duration::from_nanos(1))
+            .unwrap();
+        assert!(!application_catalog_is_stale(Some(almost_expired), now));
+
+        let expired = now.checked_sub(APPLICATION_CATALOG_TTL).unwrap();
+        assert!(application_catalog_is_stale(Some(expired), now));
+
+        let future = now.checked_add(Duration::from_secs(1)).unwrap();
+        assert!(!application_catalog_is_stale(Some(future), now));
+    }
+
+    #[test]
+    fn launch_entries_precompute_the_case_insensitive_name_sort_key() {
+        let entry = LaunchEntry::new(
+            "ÉDiteur".into(),
+            vec!["editor".into()],
+            false,
+            "éditeur editor".into(),
+        );
+        assert_eq!(entry.sort_key, "éditeur");
+    }
+
     #[test]
     fn launcher_overlay_parts_window_the_list_and_track_selection() {
         let entries: Vec<LaunchEntry> = (0..20)
-            .map(|i| LaunchEntry {
-                name: format!("app{i:02}"),
-                command: vec![format!("app{i:02}")],
-                terminal: false,
-                search: format!("app{i:02}"),
+            .map(|i| {
+                let name = format!("app{i:02}");
+                LaunchEntry::new(name.clone(), vec![name.clone()], false, name)
             })
             .collect();
         let mut state = SystemUiState::Launcher {
             query: String::new(),
-            entries,
+            entries: entries.into(),
             windows: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::default(),
             computed: None,
+            indexing: false,
         };
         state.refresh_matches();
 
@@ -3687,6 +3962,15 @@ mod tests {
         assert_eq!(parts.items[0], "app03");
         assert_eq!(parts.selected, Some(11));
         assert_eq!(parts.items[11], "app14");
+
+        assert!(state.page_selection(1));
+        assert_eq!(state.selected_launch().unwrap().id, "app19");
+        assert!(state.jump_selection(false));
+        assert_eq!(state.selected_launch().unwrap().id, "app00");
+        assert!(state.jump_selection(true));
+        assert_eq!(state.selected_launch().unwrap().id, "app19");
+        assert!(state.page_selection(-1));
+        assert_eq!(state.selected_launch().unwrap().id, "app07");
     }
 
     fn launcher_with(names: &[(&str, bool)], usage: &str) -> SystemUiState {
@@ -3700,24 +3984,106 @@ mod tests {
     ) -> SystemUiState {
         let entries: Vec<LaunchEntry> = names
             .iter()
-            .map(|(name, terminal)| LaunchEntry {
-                name: (*name).to_string(),
-                command: vec![(*name).to_string()],
-                terminal: *terminal,
-                search: name.to_lowercase(),
+            .map(|(name, terminal)| {
+                LaunchEntry::new(
+                    (*name).to_string(),
+                    vec![(*name).to_string()],
+                    *terminal,
+                    name.to_lowercase(),
+                )
             })
             .collect();
         let mut state = SystemUiState::Launcher {
             query: String::new(),
-            entries,
+            entries: entries.into(),
             windows: windows.to_vec(),
             matches: Vec::new(),
             selected: 0,
             usage: crate::jwm::features::launcher::UsageStore::parse(usage),
             computed: None,
+            indexing: false,
         };
         state.refresh_matches();
         state
+    }
+
+    #[test]
+    fn an_async_catalog_keeps_the_query_and_replaces_the_indexing_row() {
+        let mut state = launcher_with(&[], "");
+        let SystemUiState::Launcher { indexing, .. } = &mut state else {
+            unreachable!();
+        };
+        *indexing = true;
+        assert_eq!(state.overlay_parts().items, ["  Indexing applications…"]);
+
+        state.push_char('f');
+        let entries: Arc<[LaunchEntry]> = vec![LaunchEntry::new(
+            "firefox".into(),
+            vec!["firefox".into()],
+            false,
+            "firefox web browser".into(),
+        )]
+        .into();
+        assert!(state.set_launcher_entries(entries));
+
+        let parts = state.overlay_parts();
+        assert_eq!(parts.query.as_deref(), Some("f"));
+        assert_eq!(parts.items, ["firefox"]);
+        assert_eq!(
+            state.selected_launch().map(|choice| choice.id).as_deref(),
+            Some("firefox")
+        );
+    }
+
+    #[test]
+    fn a_stale_catalog_refresh_preserves_the_highlighted_row() {
+        let mut state = launcher_with(&[("alpha", false), ("beta", false), ("gamma", false)], "");
+        state.move_selection(1);
+        assert_eq!(
+            state.selected_launch().map(|choice| choice.id).as_deref(),
+            Some("beta")
+        );
+
+        let refreshed: Arc<[LaunchEntry]> = ["aardvark", "alpha", "beta", "gamma"]
+            .into_iter()
+            .map(|name| LaunchEntry::new(name.into(), vec![name.into()], false, name.into()))
+            .collect::<Vec<_>>()
+            .into();
+        assert!(state.set_launcher_entries(refreshed));
+
+        assert_eq!(
+            state.selected_launch().map(|choice| choice.id).as_deref(),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn launcher_clones_share_the_immutable_catalog() {
+        let state = launcher_with(&[("alpha", false), ("beta", false)], "");
+        let cloned = state.clone();
+        let SystemUiState::Launcher { entries: left, .. } = &state else {
+            unreachable!();
+        };
+        let SystemUiState::Launcher { entries: right, .. } = &cloned else {
+            unreachable!();
+        };
+        assert!(Arc::ptr_eq(left, right));
+    }
+
+    #[test]
+    fn replacing_applications_keeps_window_query_matching() {
+        let mut state = launcher_with_windows(
+            &[("firefox", false)],
+            &[test_window("GitHub", "firefox")],
+            "",
+        );
+        state.push_char('/');
+        state.push_char('g');
+        assert_eq!(state.selected_window(), Some(42));
+
+        assert!(state.set_launcher_entries(Arc::from(Vec::<LaunchEntry>::new())));
+        assert_eq!(state.selected_window(), Some(42));
+        assert!(state.overlay_parts().items[0].contains("GitHub"));
     }
 
     #[test]
@@ -3861,6 +4227,22 @@ mod tests {
         assert!(state.is_locked());
         assert!(parts.items.iter().any(|line| line.contains(&"*".repeat(7))));
         assert!(!parts.items.iter().any(|line| line.contains("hunter2")));
+    }
+
+    #[test]
+    fn clearing_the_lock_password_keeps_the_lock_and_removes_feedback() {
+        let mut state = SystemUiState::Locked {
+            password: "hunter2".into(),
+            message: "Authentication failed".into(),
+        };
+
+        assert!(state.clear_lock_password());
+        assert!(state.is_locked());
+        let parts = state.overlay_parts();
+        assert!(parts.items.iter().any(|line| line.contains("Password  ")));
+        assert!(!parts.items.iter().any(|line| line.contains('*')));
+        assert!(!parts.items.iter().any(|line| line.contains("failed")));
+        assert!(!SystemUiState::Inactive.clear_lock_password());
     }
 
     #[test]

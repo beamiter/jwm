@@ -5,6 +5,11 @@ follows the single-surface model popularised by modern Quickshell desktops,
 but the implementation stays inside JWM's Rust state machine and works on the
 same X11 and Wayland backends as every other system UI panel.
 
+The Hub and its child panels open on the selected monitor (including monitors
+with negative or non-zero desktop coordinates), dock to that monitor's bar,
+and dim that output rather than an unrelated one. The lock screen remains the
+exception: it always covers the complete virtual desktop.
+
 The first section routes to the shell's pages:
 
 | Key | Page | Live status |
@@ -15,8 +20,9 @@ The first section routes to the shell's pages:
 | `D` | Calendar | current month |
 | `W` | Wallpaper | current image name |
 
-`Up`/`Down` move between selectable rows, `Left`/`Right` adjust a setting,
-and `Enter` opens or toggles it. A page opened from the Hub keeps the modal
+`Up`/`Down` and `Tab`/`Shift+Tab` move between selectable rows,
+`Page Up`/`Page Down` move through a long page, `Home`/`End` jump to its edges,
+`Left`/`Right` adjust a setting, and `Enter` opens or toggles it. A page opened from the Hub keeps the modal
 grabs; `Esc` returns to the Hub, and a second `Esc` closes it. Directly opened
 pages still close with one `Esc`.
 

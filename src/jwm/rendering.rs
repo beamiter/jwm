@@ -141,6 +141,12 @@ impl Jwm {
             self.record_clipboard(&text);
         }
 
+        // Application discovery traverses desktop-entry trees and every PATH
+        // directory on a worker. Publish a completed immutable snapshot here;
+        // an open launcher keeps its query and is redrawn by the single flush
+        // at the end of this tick.
+        self.poll_launcher_catalog_job();
+
         // The Wi-Fi picker's scan and connect run on worker threads; adopt
         // their results here rather than blocking a frame on nmcli.
         if backend.has_compositor() {

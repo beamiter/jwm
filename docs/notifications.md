@@ -36,6 +36,9 @@ while notifications are muted.
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | move between notifications |
+| `Page Up` / `Page Down` | move one visible page without wrapping |
+| `Home` / `End` | jump to the newest / oldest notification |
+| `Tab` / `Shift+Tab` | move forward / backward between notifications |
 | `Left` / `Right` | move between the selected notification's buttons |
 | `1` - `6` | invoke that button directly |
 | `Enter` | invoke the button under the cursor, or dismiss when there is none |

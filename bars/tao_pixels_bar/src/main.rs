@@ -20,7 +20,7 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction},
+    presentation::{Point, PointerAction, PresentationConfig},
     render::cairo::{CairoBar, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -442,9 +442,7 @@ impl App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use tao::event::{ElementState, MouseButton};
-                let Some(point) = self.last_cursor_pos else {
-                    return None;
-                };
+                let point = self.last_cursor_pos?;
                 let button = match button {
                     MouseButton::Left => Some(PointerButton::Primary),
                     MouseButton::Right => Some(PointerButton::Secondary),
@@ -543,6 +541,27 @@ fn window_xid(window: &impl raw_window_handle::HasWindowHandle) -> Option<u32> {
     }
 }
 
+/// Select the private-use icon preset only when its backing font is installed.
+///
+/// The resolved family is written back into the presentation configuration so
+/// [`CairoBar`] appends exactly the family whose presence authorized the PUA
+/// labels. Without one, the stock emoji remain intact and the renderer is not
+/// pointed at an unavailable configured family.
+fn configure_icon_presentation(
+    presentation: &mut PresentationConfig,
+    installed_families: &[String],
+) -> Option<String> {
+    let selected = xbar_core::icon_font::select_installed_nerd_font_family(
+        installed_families.iter().map(String::as_str),
+        presentation.icon_font.as_deref(),
+    );
+    presentation.icon_font.clone_from(&selected);
+    if selected.is_some() {
+        presentation.apply_nerd_font_icons_if_stock();
+    }
+    selected
+}
+
 fn main() -> Result<()> {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     initialize_logging("tao_pixels_bar", &shared_path)?;
@@ -555,8 +574,16 @@ fn main() -> Result<()> {
         BarRuntime::with_managed_transport(app_config.model_config(), recovery)?
     };
     let mut presentation = app_config.presentation.clone();
-    // The macOS-style template icons every bar renders from.
-    presentation.apply_nerd_font_icons_if_stock();
+    // PUA labels are safe only when the font which defines them exists. Keep
+    // the portable emoji preset on a stock desktop instead of asking an
+    // arbitrary fontconfig fallback to interpret Nerd Font codepoints.
+    let installed_icon_fonts = xbar_core::icon_font::installed_families();
+    let icon_family = configure_icon_presentation(&mut presentation, &installed_icon_fonts);
+    if let Some(family) = &icon_family {
+        info!("icons: using {family}");
+    } else {
+        info!("icons: no installed Nerd Font selected; keeping stock emoji");
+    }
     let mut bar = CairoBar::new(
         runtime,
         presentation,
@@ -647,6 +674,57 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn families(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn no_nerd_font_keeps_the_stock_emoji_presentation() {
+        let stock = PresentationConfig::default();
+        let mut presentation = stock.clone();
+
+        assert_eq!(
+            configure_icon_presentation(&mut presentation, &families(&["Lato", "Noto Sans"])),
+            None
+        );
+        assert_eq!(presentation.labels, stock.labels);
+        assert_eq!(presentation.tag_labels, stock.tag_labels);
+        assert_eq!(presentation.icon_font, None);
+    }
+
+    #[test]
+    fn installed_nerd_font_drives_both_the_preset_and_renderer_configuration() {
+        let stock = PresentationConfig::default();
+        let mut presentation = stock.clone();
+        let selected = configure_icon_presentation(
+            &mut presentation,
+            &families(&["Lato", "Symbols Nerd Font Mono"]),
+        );
+
+        assert_eq!(selected.as_deref(), Some("Symbols Nerd Font Mono"));
+        assert_eq!(presentation.icon_font, selected);
+        assert_ne!(presentation.labels, stock.labels);
+        assert_ne!(presentation.tag_labels, stock.tag_labels);
+    }
+
+    #[test]
+    fn unavailable_configured_font_does_not_enable_private_use_icons() {
+        let stock = PresentationConfig::default();
+        let mut presentation = stock.clone();
+        presentation.icon_font = Some("Missing Nerd Font".to_owned());
+
+        assert_eq!(
+            configure_icon_presentation(
+                &mut presentation,
+                &families(&["Lato", "Symbols Nerd Font Mono"]),
+            ),
+            None
+        );
+        assert_eq!(presentation.labels, stock.labels);
+        assert_eq!(presentation.tag_labels, stock.tag_labels);
+        assert_eq!(presentation.icon_font, None);
+    }
 
     #[test]
     fn configured_window_height_becomes_the_bar_layout_height() {

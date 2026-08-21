@@ -177,9 +177,9 @@ impl WMController for Jwm {
     fn on_child_process_exited(&mut self, _backend: &mut dyn Backend) {
         debug!("Received SIGCHLD, polling JWM-owned transient children...");
         // SIGCHLD is only a latency optimization on backends that expose it.
-        // Every child is reaped by its owner; the common update path below is
-        // authoritative and covers backends without a signal source.
-        self.reap_transient_children();
+        // Bypass the one-second backend-neutral insurance poll so failed
+        // scratchpad launches release their pending-name gate immediately.
+        self.reap_transient_children_immediately();
     }
 
     // === 窗口生命周期 ===
@@ -1904,7 +1904,10 @@ mod tests {
 
         jwm.show_keybindings(&mut backend, &WMArgEnum::Int(0))
             .unwrap();
-        assert_eq!(backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst),
+            0
+        );
 
         jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(jwm.features.system_ui.is_calendar());
@@ -2840,7 +2843,34 @@ mod tests {
         let picker = jwm.features.system_ui.layout_picker().unwrap();
         let target = 4usize;
         let wanted = picker.layouts[target];
-        let geometry = layout_strip::strip_geometry(1920.0, 1080.0, picker.layouts.len());
+        let geometry =
+            layout_strip::strip_geometry([0.0, 0.0, 1920.0, 1080.0], picker.layouts.len());
+        let [x, y] = layout_strip::center(geometry.cells[target].cell);
+
+        jwm.click_layout_picker(&mut backend, x as f64, y as f64);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(&current_layout(&jwm), wanted);
+    }
+
+    #[test]
+    fn layout_picker_hit_test_uses_the_selected_monitors_global_origin() {
+        use crate::backend::compositor_common::layout_strip;
+
+        let mut jwm = jwm_with_monitor();
+        let monitor = jwm.state.sel_mon.unwrap();
+        jwm.state.monitors[monitor].geometry.m_x = -1600;
+        jwm.state.monitors[monitor].geometry.m_y = 120;
+        jwm.state.monitors[monitor].geometry.m_w = 1600;
+        jwm.state.monitors[monitor].geometry.m_h = 900;
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        let picker = jwm.features.system_ui.layout_picker().unwrap();
+        let target = 5usize;
+        let wanted = picker.layouts[target];
+        let geometry =
+            layout_strip::strip_geometry([-1600.0, 120.0, 1600.0, 900.0], picker.layouts.len());
         let [x, y] = layout_strip::center(geometry.cells[target].cell);
 
         jwm.click_layout_picker(&mut backend, x as f64, y as f64);
@@ -3271,13 +3301,13 @@ impl EventHandler for Jwm {
     }
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
-        // Reap explicitly owned fire-and-forget processes on every backend.
-        // Do this before other lifecycle polling so a failed scratchpad spawn
-        // releases its pending-name gate in the same update.
-        self.reap_transient_children();
+        let now = std::time::Instant::now();
+        // Backends without SIGCHLD still reap exact child handles, but the
+        // supervisor rate-limits this insurance path instead of issuing one
+        // wait syscall per live application on every frame/update tick.
+        self.poll_transient_children(now);
 
         // Ensure all monitor bars are running (sequential creation)
-        let now = std::time::Instant::now();
         self.expire_pending_scratchpads(now);
         self.tick_hidden_client_park_retries(backend, now);
         self.ensure_secondary_bars_running(backend, now);

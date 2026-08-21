@@ -158,6 +158,22 @@ fn advance_recording_deadline(
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        let viewport_changed = matches!(
+            (self.system_ui.as_deref(), overlay.as_ref()),
+            (Some(old), Some(new)) if old.viewport != new.viewport || old.locked != new.locked
+        );
+        let text_changed = match (self.system_ui.as_deref(), overlay.as_ref()) {
+            (Some(old), Some(new)) => {
+                old.title != new.title
+                    || old.query != new.query
+                    || old.items != new.items
+                    || old.hint != new.hint
+                    || viewport_changed
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        self.sysui_text_dirty |= text_changed;
         // Opening a panel springs it out of the bar; closing one forgets its
         // geometry so the next open springs again rather than resuming.
         if self.system_ui.is_none() || overlay.is_none() {
@@ -169,12 +185,12 @@ impl<C: CompositorConnection> Compositor<C> {
         // keystroke, a finished scan — keeps both, which is the whole point of
         // carrying them.
         let identity = overlay.as_ref().map_or("", |o| o.title.as_str());
-        if identity != self.system_ui_identity {
+        if identity != self.system_ui_identity || viewport_changed {
             self.system_ui_identity = identity.to_string();
             self.system_ui_width_floor = 0.0;
             self.system_ui_highlight.reset();
         }
-        self.system_ui = overlay;
+        self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
     }
 

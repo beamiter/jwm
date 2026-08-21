@@ -4,6 +4,10 @@ When nobody has touched the machine for a while, JWM dims the screen, and — if
 you ask it to — locks it and powers the displays down. Any input undoes the
 dim; only the password dismisses the lock.
 
+While locked, `Backspace` removes one character and `Esc` securely clears the
+whole entered password plus any previous authentication error; neither key
+unlocks or closes the surface.
+
 ```toml
 [behavior]
 idle_dim_secs = 120           # 0 switches the stage off

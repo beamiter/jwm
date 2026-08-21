@@ -66,6 +66,33 @@ const SCROLLBAR_MIN_THUMB: f32 = 20.0;
 /// Corner radius of the scroll track and thumb: a capsule.
 pub(crate) const SCROLLBAR_RADIUS: f32 = SCROLLBAR_W * 0.5;
 
+/// Widest a card may be on this screen.
+///
+/// The ordinary margin is a total inset (half on either side). On a very
+/// narrow nested output it wins over the usual content-width floor: keeping a
+/// 360 px minimum on a 320 px output made the close edge and the query caret
+/// unreachable.
+#[must_use]
+pub(crate) fn max_panel_width(screen_w: f32) -> f32 {
+    (screen_w.max(1.0) - SCREEN_MARGIN).max(1.0)
+}
+
+/// Pixel budget available to each rasterized text line inside a card.
+///
+/// Renderers fit before allocating CPU and GL textures; merely clipping at
+/// draw time would still allow an untrusted title or a long query to allocate
+/// a texture thousands of pixels wide.
+#[must_use]
+pub(crate) fn max_content_width(screen_w: f32) -> u32 {
+    (max_panel_width(screen_w) - 2.0 * PAD).max(0.0).floor() as u32
+}
+
+/// The query text sits inside the content column's own inset field.
+#[must_use]
+pub(crate) fn max_query_text_width(screen_w: f32) -> u32 {
+    max_content_width(screen_w).saturating_sub((2.0 * QUERY_PAD) as u32)
+}
+
 /// Where a windowed list currently sits, for the scroll indicator.
 ///
 /// The window manager does the windowing — it decides how many rows fit and
@@ -151,7 +178,7 @@ pub(crate) fn target_size(sizes: &SectionSizes, screen_w: f32, width_floor: f32)
     let content = (content / WIDTH_STEP).ceil() * WIDTH_STEP;
     let width = (content + 2.0 * PAD)
         .max(width_floor)
-        .min((screen_w - SCREEN_MARGIN).max(MIN_CONTENT_W));
+        .min(max_panel_width(screen_w));
 
     let mut height = 2.0 * PAD + sizes.title.1;
     let query_field_h = sizes.query_field_h();
@@ -266,7 +293,11 @@ mod tests {
 
     #[test]
     fn a_narrow_panel_still_gets_a_usable_column() {
-        let (w, _) = target_size(&sizes((40.0, 24.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)), SCREEN_W, 0.0);
+        let (w, _) = target_size(
+            &sizes((40.0, 24.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),
+            SCREEN_W,
+            0.0,
+        );
         assert_eq!(w, MIN_CONTENT_W + 2.0 * PAD);
     }
 
@@ -291,7 +322,12 @@ mod tests {
         // live launcher still; this is what keeps its first frames still.
         let widths: Vec<f32> = (0..=WIDTH_STEP as usize)
             .map(|i| {
-                let s = sizes((40.0, 24.0), (0.0, 0.0), (700.0 + i as f32, 300.0), (0.0, 0.0));
+                let s = sizes(
+                    (40.0, 24.0),
+                    (0.0, 0.0),
+                    (700.0 + i as f32, 300.0),
+                    (0.0, 0.0),
+                );
                 target_size(&s, SCREEN_W, 0.0).0
             })
             .collect();
@@ -299,7 +335,10 @@ mod tests {
             assert_eq!((w - 2.0 * PAD) % WIDTH_STEP, 0.0, "{w} is not a whole step");
         }
         let changes = widths.windows(2).filter(|pair| pair[0] != pair[1]).count();
-        assert!(changes <= 1, "a step of growth resized the card {changes} times");
+        assert!(
+            changes <= 1,
+            "a step of growth resized the card {changes} times"
+        );
     }
 
     #[test]
@@ -314,6 +353,32 @@ mod tests {
     }
 
     #[test]
+    fn a_narrow_output_wins_over_the_desktop_width_floor() {
+        let huge = sizes(
+            (4000.0, 24.0),
+            (4000.0, 22.0),
+            (4000.0, 300.0),
+            (4000.0, 20.0),
+        );
+        for screen_w in [240.0, 320.0, 800.0] {
+            let (w, _) = target_size(&huge, screen_w, 5000.0);
+            assert_eq!(w, max_panel_width(screen_w));
+            assert!(w <= screen_w, "{w} overflowed a {screen_w} px output");
+            assert_eq!(max_content_width(screen_w), (w - 2.0 * PAD).max(0.0) as u32);
+        }
+    }
+
+    #[test]
+    fn the_query_budget_accounts_for_both_field_insets() {
+        for screen_w in [240.0, 320.0, 800.0, SCREEN_W] {
+            assert_eq!(
+                max_query_text_width(screen_w),
+                max_content_width(screen_w).saturating_sub(24)
+            );
+        }
+    }
+
+    #[test]
     fn absent_sections_cost_no_height() {
         let full = sizes((40.0, 24.0), (200.0, 22.0), (300.0, 260.0), (300.0, 20.0));
         let (_, tall) = target_size(&full, SCREEN_W, 0.0);
@@ -321,7 +386,10 @@ mod tests {
         let (_, short) = target_size(&bare, SCREEN_W, 0.0);
 
         assert_eq!(short, 2.0 * PAD + 24.0);
-        assert_eq!(tall, short + GAP + (22.0 + QUERY_LEAD) + GAP + 260.0 + GAP + 20.0);
+        assert_eq!(
+            tall,
+            short + GAP + (22.0 + QUERY_LEAD) + GAP + 260.0 + GAP + 20.0
+        );
     }
 
     #[test]
@@ -358,8 +426,13 @@ mod tests {
         let row_h = (204.0 - 2.0 * TEXT_PAD) / rows as f32;
 
         for sel in 0..rows {
-            let pill = contents(panel, &s, rows, Some(sel), None).selection.unwrap();
-            assert!((pill[1] - (items_y + sel as f32 * row_h)).abs() < 0.001, "row {sel}");
+            let pill = contents(panel, &s, rows, Some(sel), None)
+                .selection
+                .unwrap();
+            assert!(
+                (pill[1] - (items_y + sel as f32 * row_h)).abs() < 0.001,
+                "row {sel}"
+            );
             assert!((pill[3] - (row_h + 2.0 * TEXT_PAD)).abs() < 0.001);
             // Wider than the text block on both sides, so the highlight reads
             // as a row of the card.
@@ -398,9 +471,21 @@ mod tests {
         let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
         let panel = [0.0, 0.0, 600.0, 400.0];
         for scroll in [
-            Scroll { first: 0, visible: 12, total: 12 },
-            Scroll { first: 0, visible: 12, total: 3 },
-            Scroll { first: 0, visible: 0, total: 40 },
+            Scroll {
+                first: 0,
+                visible: 12,
+                total: 12,
+            },
+            Scroll {
+                first: 0,
+                visible: 12,
+                total: 3,
+            },
+            Scroll {
+                first: 0,
+                visible: 0,
+                total: 40,
+            },
         ] {
             let c = contents(panel, &s, 12, None, Some(scroll));
             assert!(c.scroll_track.is_none(), "{scroll:?}");
@@ -418,7 +503,11 @@ mod tests {
                 &s,
                 12,
                 None,
-                Some(Scroll { first, visible: 12, total: 60 }),
+                Some(Scroll {
+                    first,
+                    visible: 12,
+                    total: 60,
+                }),
             )
         };
 
@@ -457,7 +546,11 @@ mod tests {
             &s,
             12,
             None,
-            Some(Scroll { first: 0, visible: 2, total: 4000 }),
+            Some(Scroll {
+                first: 0,
+                visible: 2,
+                total: 4000,
+            }),
         )
         .scroll_thumb
         .unwrap();
@@ -480,7 +573,17 @@ mod tests {
     #[test]
     fn a_card_narrower_than_its_own_padding_produces_no_negative_widths() {
         let s = sizes((40.0, 24.0), (200.0, 22.0), (300.0, 204.0), (300.0, 20.0));
-        let c = contents([0.0, 0.0, 4.0, 4.0], &s, 8, Some(1), Some(Scroll { first: 1, visible: 4, total: 40 }));
+        let c = contents(
+            [0.0, 0.0, 4.0, 4.0],
+            &s,
+            8,
+            Some(1),
+            Some(Scroll {
+                first: 1,
+                visible: 4,
+                total: 40,
+            }),
+        );
         assert_eq!(c.query_field.unwrap()[2], 0.0);
         assert!(c.selection.unwrap()[2] >= 0.0);
         assert!(c.divider.unwrap()[2] >= 0.0);

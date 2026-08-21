@@ -713,12 +713,7 @@ mod tests {
     fn worst_case_panel(palette: &UiPalette) -> [u8; 4] {
         let panel = palette.panel;
         let channel = |c: f32| (c * panel[3] * 255.0).clamp(0.0, 255.0) as u8;
-        [
-            channel(panel[0]),
-            channel(panel[1]),
-            channel(panel[2]),
-            255,
-        ]
+        [channel(panel[0]), channel(panel[1]), channel(panel[2]), 255]
     }
 
     fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {

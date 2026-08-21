@@ -434,6 +434,7 @@ impl<C: CompositorConnection> Compositor<C> {
         );
         self.screen_w = new_w;
         self.screen_h = new_h;
+        self.sysui_text_dirty = true;
         self.needs_render = true;
 
         // Resize damage tracker for new screen dimensions

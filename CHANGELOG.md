@@ -7,6 +7,11 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Long native-shell lists now share desktop-standard navigation: `Home`/`End`,
+  `Page Up`/`Page Down`, and backward `Shift+Tab`, including the launcher,
+  Shell Hub, notification history and device/content pickers. Direct Unicode
+  keysyms are accepted in text fields instead of being discarded at an ASCII
+  gate.
 - A windowed list in the shell — the launcher's matches, the notification
   history, the Wi-Fi/Bluetooth/clipboard/wallpaper pickers and the Hub itself —
   draws a scroll indicator in the card's right-hand margin. The window manager
@@ -43,6 +48,33 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Opening the application launcher no longer recursively reads every desktop
+  entry and executable on JWM's compositor/input thread. The catalog is built
+  on a worker, shared as an immutable snapshot, reused for five minutes, and
+  refreshed stale-while-revalidate; the first opening appears immediately with
+  an indexing row. Application name sort keys are also precomputed, removing
+  lowercase `String` allocations from every comparison on each keystroke.
+- Native shell panels and the layout filmstrip now target the selected
+  monitor's global viewport. Their card, scrim, bar dock and pointer hit-test
+  use the same offset-aware geometry, including negative monitor origins; the
+  lock screen deliberately remains full-virtual-desktop.
+- System-UI and toast text is pixel-fitted with the configured font before CPU
+  rasterization and GL upload. Long rows get an ellipsis, long queries retain
+  the caret end, and a narrow nested output now overrides the normal desktop
+  card-width floor instead of placing controls off-screen.
+- `animation.enabled = false`, `animation.speed = "instant"`, and a zero
+  duration now also snap compositor-owned shell cards, row highlights, toasts,
+  OSD and HUD geometry. Their springs settle internally, so reduced motion
+  does not keep requesting invisible follow-up frames.
+- The default `tao_pixels_bar` switches from portable emoji to private-use
+  Nerd Font icons only when the selected family is actually installed, and
+  passes that exact canonical family to Cairo. Missing or invalid icon fonts
+  now retain readable emoji instead of tofu or unrelated fallback glyphs.
+- Several steady-state hot paths now avoid work whose cost scaled with frames
+  or window count: KMS reuses cached output names; JWM-owned child status is an
+  immediate SIGCHLD path plus a one-second fallback rather than one `wait` per
+  child per update; missing `WM_NORMAL_HINTS` is negative-cached; and unchanged
+  system-UI frames share their overlay and skip text joining/cache-key builds.
 - The shell panels are mutually exclusive. `Alt+F10` pressed on top of
   `Alt+F9`'s calendar now closes the calendar and opens the Shell Hub in its
   place, instead of the press going nowhere; the same holds for every panel key,
@@ -290,6 +322,12 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- The lock card's advertised `Esc  clear` action now securely overwrites and
+  clears the entered password and authentication message while keeping the
+  session locked.
+- Deleting `WM_NORMAL_HINTS` no longer leaves stale fixed/min/max constraints
+  on an X11 client, and a client with no hints no longer incurs a synchronous
+  property query on every arrange.
 - The X11 backends no longer report a refused keyboard grab as a success. Both
   `grab_keyboard` implementations discarded the reply's `GrabStatus`, so the
   lock screen's "never display a pretend lock if the exclusive keyboard grab

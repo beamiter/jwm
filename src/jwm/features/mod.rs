@@ -125,6 +125,16 @@ pub struct FeatureStates {
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
+    /// Last complete application catalog. Immutable sharing makes opening the
+    /// launcher and cloning its render state independent of catalog size.
+    pub launcher_catalog: std::sync::Arc<[system_ui::LaunchEntry]>,
+    /// A desktop-entry/PATH scan in flight. It deliberately survives closing
+    /// the launcher so the completed catalog is ready on the next opening.
+    pub launcher_catalog_job:
+        Option<connectivity::BackgroundJob<std::sync::Arc<[system_ui::LaunchEntry]>>>,
+    /// Completion time of the last catalog scan, for the bounded stale-while-
+    /// revalidate policy in the launcher opener.
+    pub launcher_catalog_refreshed_at: Option<std::time::Instant>,
     /// A page opened from the Shell Hub returns there on Escape. Directly
     /// opened panels still close normally.
     pub system_ui_return_to_hub: bool,

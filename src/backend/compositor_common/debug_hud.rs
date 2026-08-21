@@ -299,7 +299,7 @@ mod tests {
         use crate::backend::compositor_common::ui_theme::MATERIAL;
 
         let sizes = ((120.0, 20.0), (48.0, 16.0), (140.0, 90.0), (70.0, 90.0));
-        let dock = IslandDock::for_bar(Some([40.0, 4.0, 1200.0, 36.0]), 1600.0);
+        let dock = IslandDock::for_bar(Some([40.0, 4.0, 1200.0, 36.0]), [0.0, 0.0, 1600.0, 900.0]);
         let card =
             HudLayout::docked(&MATERIAL, &dock, sizes.0, sizes.1, sizes.2, sizes.3, 1.0).card;
 

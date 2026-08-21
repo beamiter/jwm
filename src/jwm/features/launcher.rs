@@ -254,7 +254,9 @@ pub struct WindowEntry {
 pub struct AppCandidate<'a> {
     /// Lowercased name and command, the haystack the entry already keeps.
     pub search: &'a str,
-    pub name: &'a str,
+    /// Precomputed case-insensitive display-name key used only as the final
+    /// deterministic tie-breaker. Borrowing it keeps sorting allocation-free.
+    pub sort_key: &'a str,
     /// This entry's frecency, looked up by the caller.
     pub usage: u32,
 }
@@ -357,7 +359,7 @@ pub fn rank_rows(
         (
             Reverse(score),
             Reverse(apps[index].usage),
-            apps[index].name.to_lowercase(),
+            apps[index].sort_key,
         )
     });
 
@@ -802,10 +804,10 @@ mod tests {
         }
     }
 
-    fn app<'a>(search: &'a str, name: &'a str, usage: u32) -> AppCandidate<'a> {
+    fn app<'a>(search: &'a str, sort_key: &'a str, usage: u32) -> AppCandidate<'a> {
         AppCandidate {
             search,
-            name,
+            sort_key,
             usage,
         }
     }
@@ -817,7 +819,7 @@ mod tests {
         // that away.
         let rows = rank_rows(
             &parse_query(""),
-            &[app("firefox", "Firefox", 0)],
+            &[app("firefox", "firefox", 0)],
             &[window(1, "GitHub", "firefox")],
         );
         assert_eq!(rows, [LauncherRow::App(0)]);
@@ -827,7 +829,7 @@ mod tests {
     fn typing_brings_the_open_windows_in() {
         let rows = rank_rows(
             &parse_query("fire"),
-            &[app("firefox", "Firefox", 0)],
+            &[app("firefox", "firefox", 0)],
             &[window(1, "GitHub", "firefox")],
         );
         // Both match `fire` equally well through their class, and the window
@@ -841,10 +843,22 @@ mod tests {
         // subsequence; a worse-matching window must not jump the queue.
         let rows = rank_rows(
             &parse_query("gimp"),
-            &[app("gimp image editor", "GIMP", 0)],
+            &[app("gimp image editor", "gimp", 0)],
             &[window(1, "graphics import", "xterm")],
         );
         assert_eq!(rows.first(), Some(&LauncherRow::App(0)));
+    }
+
+    #[test]
+    fn equal_matches_and_usage_borrow_the_precomputed_name_sort_key() {
+        let apps = [
+            app("editor", "zeta editor", 0),
+            app("editor", "alpha editor", 0),
+        ];
+        assert_eq!(
+            rank_rows(&parse_query("editor"), &apps, &[]),
+            [LauncherRow::App(1), LauncherRow::App(0)]
+        );
     }
 
     #[test]
@@ -877,7 +891,7 @@ mod tests {
 
     #[test]
     fn a_leading_slash_asks_for_windows_and_nothing_else() {
-        let apps = [app("firefox", "Firefox", 99)];
+        let apps = [app("firefox", "firefox", 99)];
         let windows = [window(1, "GitHub", "firefox")];
         // Even with nothing after it: that is the on-demand window list.
         assert_eq!(parse_query("/"), QueryMode::Windows(String::new()));
@@ -902,7 +916,7 @@ mod tests {
         assert!(
             rank_rows(
                 &parse_query("1+1"),
-                &[app("firefox", "Firefox", 0)],
+                &[app("firefox", "firefox", 0)],
                 &[window(1, "GitHub", "firefox")]
             )
             .is_empty()

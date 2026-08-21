@@ -231,6 +231,59 @@ impl Jwm {
         )
     }
 
+    /// Adopt a completed application scan into the long-lived cache. If the
+    /// launcher is currently visible, replace its immutable snapshot and let
+    /// the frame tick redraw the current query once.
+    pub(crate) fn poll_launcher_catalog_job(&mut self) {
+        let Some(entries) = self
+            .features
+            .launcher_catalog_job
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        else {
+            return;
+        };
+
+        self.features.launcher_catalog_job = None;
+        self.features.launcher_catalog = entries;
+        self.features.launcher_catalog_refreshed_at = Some(std::time::Instant::now());
+        if self
+            .features
+            .system_ui
+            .set_launcher_entries(std::sync::Arc::clone(&self.features.launcher_catalog))
+        {
+            self.mark_system_ui_dirty();
+        }
+    }
+
+    /// Build a launcher panel from the last complete snapshot and kick off a
+    /// stale-while-revalidate scan when necessary. No directory traversal or
+    /// PATH inspection happens on this event-loop path.
+    fn cached_launcher_state(&mut self) -> SystemUiState {
+        // A worker may have finished between frame ticks. Taking its result is
+        // non-blocking and avoids showing the indexing row for an extra frame.
+        self.poll_launcher_catalog_job();
+
+        let now = std::time::Instant::now();
+        if self.features.launcher_catalog_job.is_none()
+            && crate::jwm::features::system_ui::application_catalog_is_stale(
+                self.features.launcher_catalog_refreshed_at,
+                now,
+            )
+        {
+            self.features.launcher_catalog_job =
+                Some(crate::jwm::features::system_ui::start_application_discovery());
+        }
+
+        let indexing = self.features.launcher_catalog.is_empty()
+            && self.features.launcher_catalog_job.is_some();
+        SystemUiState::open_launcher(
+            std::sync::Arc::clone(&self.features.launcher_catalog),
+            self.launcher_window_snapshot(),
+            indexing,
+        )
+    }
+
     /// Swap from the shell home page to one of its native child pages while
     /// retaining the keyboard/pointer grabs. Escape returns to the hub.
     pub(crate) fn open_shell_hub_route(
@@ -241,9 +294,7 @@ impl Jwm {
         use crate::jwm::features::ShellHubRoute;
 
         let next = match route {
-            ShellHubRoute::Applications => {
-                SystemUiState::open_launcher(self.launcher_window_snapshot())
-            }
+            ShellHubRoute::Applications => self.cached_launcher_state(),
             ShellHubRoute::Notifications => SystemUiState::notification_center(
                 &self.features.notifications,
                 crate::jwm::features::notifications::now_unix_ms(),
@@ -1251,8 +1302,7 @@ impl Jwm {
             return Ok(());
         }
         self.prepare_system_ui(backend, "application launcher", true)?;
-        self.features.system_ui =
-            crate::jwm::features::SystemUiState::open_launcher(self.launcher_window_snapshot());
+        self.features.system_ui = self.cached_launcher_state();
         self.sync_system_ui(backend);
         Ok(())
     }

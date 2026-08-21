@@ -165,8 +165,8 @@ fn command_to_shared(command: WmCommand) -> SharedCommand {
             wm_session_id,
             minimized_generation,
             monitor.0,
-            u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
-                | u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL,
+            (u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE)
+                | (u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL),
             geometry_to_shared(geometry),
         ),
         WmCommand::SetDockGeometry {
@@ -351,8 +351,8 @@ mod tests {
             assert_eq!(preview.anchor(), anchor);
             assert_eq!(
                 preview.get_flags(),
-                u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE
-                    | u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL
+                (u32::from(visible) * shared_structures::PREVIEW_MINIMIZED_FLAG_VISIBLE)
+                    | (u32::from(renewal) * shared_structures::PREVIEW_MINIMIZED_FLAG_RENEWAL)
             );
         }
 

@@ -252,8 +252,6 @@ pub(crate) fn fit_ui_text(
     pixel_size: f32,
     max_width: u32,
 ) -> String {
-    const ELLIPSIS: char = '…';
-
     let collapsed: String = {
         let mut out = String::with_capacity(text.len());
         let mut in_space = false;
@@ -270,7 +268,97 @@ pub(crate) fn fit_ui_text(
         }
         out
     };
-    let text = collapsed.as_str();
+    fit_ui_line(
+        collapsed.as_str(),
+        font_description,
+        pixel_size,
+        max_width,
+        false,
+    )
+}
+
+/// Fit a one-line input field while retaining the text nearest its caret.
+///
+/// A normal label keeps its beginning, but doing that to a query makes the
+/// characters currently being typed disappear as soon as the field fills.
+/// This variant puts the ellipsis at the leading edge and keeps the suffix.
+pub(crate) fn fit_ui_text_tail(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    max_width: u32,
+) -> String {
+    let collapsed: String = {
+        let mut out = String::with_capacity(text.len());
+        let mut in_space = false;
+        for ch in text.chars() {
+            if ch.is_whitespace() || ch.is_control() {
+                in_space = true;
+                continue;
+            }
+            if in_space && !out.is_empty() {
+                out.push(' ');
+            }
+            in_space = false;
+            out.push(ch);
+        }
+        out
+    };
+    fit_ui_line(
+        collapsed.as_str(),
+        font_description,
+        pixel_size,
+        max_width,
+        true,
+    )
+}
+
+/// Fit every line of a preformatted UI block independently while preserving
+/// its line count and leading alignment.
+///
+/// Panel lists are rasterized as one texture and their row highlight is
+/// derived from that texture's height. Wrapping or dropping an empty line
+/// would therefore make the visual row disagree with the action Enter invokes.
+pub(crate) fn fit_ui_text_lines(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    max_width: u32,
+) -> String {
+    let mut fitted = String::with_capacity(text.len().min(max_width as usize));
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            fitted.push('\n');
+        }
+        // Newlines were split above. Other controls are never useful in a
+        // panel row, but replacing them with a space retains column alignment.
+        let cleaned: String = line
+            .chars()
+            .map(|ch| if ch.is_control() { ' ' } else { ch })
+            .collect();
+        let cleaned = cleaned.trim_end();
+        fitted.push_str(&fit_ui_line(
+            cleaned,
+            font_description,
+            pixel_size,
+            max_width,
+            false,
+        ));
+    }
+    fitted
+}
+
+/// Pixel-fit an already normalized line. `keep_tail` selects which side sits
+/// next to the ellipsis.
+fn fit_ui_line(
+    text: &str,
+    font_description: &str,
+    pixel_size: f32,
+    max_width: u32,
+    keep_tail: bool,
+) -> String {
+    const ELLIPSIS: char = '…';
+
     if text.is_empty() || max_width == 0 {
         return String::new();
     }
@@ -278,26 +366,29 @@ pub(crate) fn fit_ui_text(
         return text.to_owned();
     }
 
-    let boundaries: Vec<usize> = text
-        .char_indices()
-        .map(|(index, _)| index)
-        .skip(1)
-        .chain(std::iter::once(text.len()))
-        .collect();
+    let starts: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    let characters = starts.len();
 
-    // Binary search the last prefix that still fits once the ellipsis is on
-    // it. `fits` is monotone in the prefix length, so this converges on the
-    // longest one in a handful of measurements.
+    // Binary search the longest side that still fits once the ellipsis is on
+    // it. `fits` is monotone in the number of retained characters, so this
+    // converges in a handful of measurements.
     let mut low = 0usize;
-    let mut high = boundaries.len();
+    let mut high = characters;
     let mut best = String::new();
     while low < high {
         let middle = (low + high).div_ceil(2);
         if middle == 0 {
             break;
         }
-        let mut candidate = text[..boundaries[middle - 1]].trim_end().to_owned();
-        candidate.push(ELLIPSIS);
+        let mut candidate = String::new();
+        if keep_tail {
+            candidate.push(ELLIPSIS);
+            candidate.push_str(&text[starts[characters - middle]..]);
+        } else {
+            let end = starts.get(middle).copied().unwrap_or(text.len());
+            candidate.push_str(text[..end].trim_end());
+            candidate.push(ELLIPSIS);
+        }
         if measure_ui_text_width(&candidate, font_description, pixel_size) <= max_width {
             best = candidate;
             low = middle;
@@ -701,6 +792,35 @@ mod tests {
             fit_ui_text("  two\n\tlines  ", FIT_FONT, 12.0, 100_000),
             "two lines"
         );
+    }
+
+    #[test]
+    fn a_query_fit_keeps_the_caret_end_visible() {
+        let text = "search for a very long application name_";
+        let full = measure_ui_text_width(text, FIT_FONT, 12.0);
+        let budget = full / 3;
+        let fitted = fit_ui_text_tail(text, FIT_FONT, 12.0, budget);
+        assert!(fitted.starts_with('…'), "{fitted:?}");
+        assert!(
+            fitted.ends_with('_'),
+            "the caret end disappeared: {fitted:?}"
+        );
+        assert!(measure_ui_text_width(&fitted, FIT_FONT, 12.0) <= budget);
+    }
+
+    #[test]
+    fn a_fitted_block_keeps_rows_and_leading_alignment() {
+        let text = "  first row that is deliberately much too long\n\n    indented second row";
+        let budget = measure_ui_text_width("  first row", FIT_FONT, 12.0);
+        let fitted = fit_ui_text_lines(text, FIT_FONT, 12.0, budget);
+        let rows: Vec<&str> = fitted.split('\n').collect();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].starts_with("  "), "alignment lost: {:?}", rows[0]);
+        assert!(rows[1].is_empty(), "empty row lost: {:?}", rows[1]);
+        assert!(rows[2].starts_with("    "), "alignment lost: {:?}", rows[2]);
+        for row in rows.into_iter().filter(|row| !row.is_empty()) {
+            assert!(measure_ui_text_width(row, FIT_FONT, 12.0) <= budget);
+        }
     }
 
     #[test]

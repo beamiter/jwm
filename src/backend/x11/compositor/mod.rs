@@ -467,7 +467,9 @@ where
     hud_textures: [Option<(glow::Texture, u32, u32)>; 4],
     /// Styled system-UI panel text sections: title, query, items, hint.
     sysui_textures: [Option<(glow::Texture, u32, u32)>; 4],
-    sysui_cache: String,
+    /// Text/font/theme or screen-width changes require a new raster. Geometry
+    /// changes such as selection motion deliberately do not.
+    sysui_text_dirty: bool,
 
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
@@ -476,7 +478,9 @@ where
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
     hud_text_cache: String,
-    system_ui: Option<crate::backend::api::SystemUiOverlay>,
+    /// An Arc makes the render snapshot cheap while input may replace the
+    /// owned overlay between frames; cloning the old value copied every row.
+    system_ui: Option<Arc<crate::backend::api::SystemUiOverlay>>,
     /// Open/morph spring for the docked system-UI card.
     system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     /// Slide of the selection pill between rows of the open list.

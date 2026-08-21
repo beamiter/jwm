@@ -8,7 +8,7 @@ use crate::backend::compositor_common::attention::{
     attention_border_style, attention_signal_active,
 };
 use crate::backend::compositor_common::debug_hud as hud;
-use crate::backend::compositor_common::dynamic_island::IslandDock;
+use crate::backend::compositor_common::dynamic_island::{IslandDock, clip_bar_to_viewport};
 use crate::backend::compositor_common::genie::{
     GenieDirection, dock_item_preview_target, output_bounds_for_anchor, preview_rect,
 };
@@ -1239,9 +1239,13 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         let dock = self.island_dock();
         let layout = hud::HudLayout::docked(ui, &dock, dims(0), dims(1), dims(2), dims(3), meter);
-        let (card_w, card_h) =
-            self.hud_island
-                .advance(std::time::Instant::now(), layout.card.2, layout.card.3);
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
+        let (card_w, card_h) = self.hud_island.advance_with_motion(
+            std::time::Instant::now(),
+            layout.card.2,
+            layout.card.3,
+            motion_enabled,
+        );
         // A static desktop produces no damage and therefore no frames, so the
         // spring has to keep asking for them until it settles — the HUD does
         // not redraw on its own just because it is on screen.
@@ -1375,30 +1379,49 @@ impl<C: CompositorConnection> Compositor<C> {
     /// line, list items, footer hint), each with its own tone so the styled
     /// card reads with clear hierarchy.
     fn update_system_ui_textures(&mut self, overlay: &crate::backend::api::SystemUiOverlay) {
+        if !self.sysui_text_dirty {
+            return;
+        }
         let config = crate::config::CONFIG.load();
         let description = config.system_ui_font();
         let size = crate::backend::compositor_font::ui_font_pixel_size(description);
         let ui = ui_theme::palette();
-        let query_text = overlay.query.as_ref().map(|q| format!("\u{f002}  {q}_"));
-        let items_text = overlay.items.join("\n");
-        let cache_key = format!(
-            "{description}\0{size}\0{:?}\0{}\0{}\0{}\0{}",
-            ui.panel_title_ink,
-            overlay.title,
-            query_text.as_deref().unwrap_or("\u{1}"),
-            items_text,
-            overlay.hint,
+        let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
+        let content_width = panel::max_content_width(viewport[2]);
+        let query_width = panel::max_query_text_width(viewport[2]);
+        let title_text = crate::backend::compositor_font::fit_ui_text_lines(
+            &overlay.title,
+            description,
+            size,
+            content_width,
         );
-        if cache_key == self.sysui_cache && self.sysui_textures.iter().any(Option::is_some) {
-            return;
-        }
+        let query_text = overlay.query.as_ref().map(|q| {
+            crate::backend::compositor_font::fit_ui_text_tail(
+                &format!("\u{f002}  {q}_"),
+                description,
+                size,
+                query_width,
+            )
+        });
+        let items_text = crate::backend::compositor_font::fit_ui_text_lines(
+            &overlay.items.join("\n"),
+            description,
+            size,
+            content_width,
+        );
+        let hint_text = crate::backend::compositor_font::fit_ui_text_lines(
+            &overlay.hint,
+            description,
+            size,
+            content_width,
+        );
         // Title, query, list body, footer hint — brightest first.
         let colors: [[u8; 4]; 4] = [ui.panel_title_ink, ui.query_ink, ui.item_ink, ui.hint_ink];
         let texts: [Option<&str>; 4] = [
-            (!overlay.title.is_empty()).then_some(overlay.title.as_str()),
+            (!title_text.is_empty()).then_some(title_text.as_str()),
             query_text.as_deref(),
             (!items_text.is_empty()).then_some(items_text.as_str()),
-            (!overlay.hint.is_empty()).then_some(overlay.hint.as_str()),
+            (!hint_text.is_empty()).then_some(hint_text.as_str()),
         ];
         for (slot, text) in texts.into_iter().enumerate() {
             unsafe {
@@ -1439,7 +1462,7 @@ impl<C: CompositorConnection> Compositor<C> {
                 }
             }
         }
-        self.sysui_cache = cache_key;
+        self.sysui_text_dirty = false;
     }
 
     /// Capture a blurred copy of the frame for the frosted-glass panels to
@@ -1619,6 +1642,10 @@ impl<C: CompositorConnection> Compositor<C> {
     /// it. A bar that is hidden, unmapped, or on another output leaves the
     /// panels hanging from the top of the screen instead.
     fn island_dock(&self) -> IslandDock {
+        self.island_dock_in([0.0, 0.0, self.screen_w as f32, self.screen_h as f32])
+    }
+
+    fn island_dock_in(&self, viewport: [f32; 4]) -> IslandDock {
         let cfg = crate::config::CONFIG.load();
         let bar_name = cfg.status_bar_name();
         let bar = self
@@ -1630,11 +1657,16 @@ impl<C: CompositorConnection> Compositor<C> {
                     && wt.w > 0
                     && wt.h > 0
             })
-            // Several outputs can each carry a bar; dock under the topmost,
-            // which is the one the panels are centred against.
-            .min_by_key(|wt| wt.y)
-            .map(|wt| [wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32]);
-        IslandDock::for_bar(bar, self.screen_w as f32)
+            .filter_map(|wt| {
+                clip_bar_to_viewport(
+                    [wt.x as f32, wt.y as f32, wt.w as f32, wt.h as f32],
+                    viewport,
+                )
+            })
+            // Only bars intersecting this output remain. Prefer its topmost
+            // segment if a client exposed more than one dock-like surface.
+            .min_by(|left, right| left[1].total_cmp(&right[1]));
+        IslandDock::for_bar(bar, viewport)
     }
 
     /// Set the gradient-ring program's corner radii, the top two separately,
@@ -1749,13 +1781,13 @@ impl<C: CompositorConnection> Compositor<C> {
         &mut self,
         proj: &[f32; 16],
         strip: &crate::backend::api::LayoutFilmstrip,
+        viewport: [f32; 4],
     ) {
         use crate::backend::compositor_common::layout_strip as film;
 
         let ui = ui_theme::palette();
-        let screen_w = self.screen_w as f32;
-        let screen_h = self.screen_h as f32;
-        let geometry = film::strip_geometry(screen_w, screen_h, strip.cells.len());
+        let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
+        let geometry = film::strip_geometry(viewport, strip.cells.len());
         let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
         let accent = self.border_gradient_color_a;
 
@@ -1774,13 +1806,13 @@ impl<C: CompositorConnection> Compositor<C> {
                 ui.scrim[3],
             );
             self.gl
-                .uniform_2_f32(self.hud_uniforms.size.as_ref(), screen_w, screen_h);
+                .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);
             self.gl.uniform_4_f32(
                 self.hud_uniforms.rect.as_ref(),
-                0.0,
-                0.0,
-                screen_w,
-                screen_h,
+                viewport_x,
+                viewport_y,
+                viewport_w,
+                viewport_h,
             );
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -1990,8 +2022,9 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         };
         self.update_system_ui_textures(&overlay);
+        let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
-            self.render_layout_filmstrip(proj, strip);
+            self.render_layout_filmstrip(proj, strip, viewport);
             return;
         }
         let dims = |slot: usize| -> (f32, f32) {
@@ -2006,8 +2039,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let ui = ui_theme::palette();
         let radius = ui.panel_radius;
-        let screen_w = self.screen_w as f32;
-        let screen_h = self.screen_h as f32;
+        let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
 
         let sizes = panel::SectionSizes {
             title: (title_w, title_h),
@@ -2022,20 +2054,24 @@ impl<C: CompositorConnection> Compositor<C> {
         } else {
             self.system_ui_width_floor
         };
-        let (panel_w, panel_h) = panel::target_size(&sizes, screen_w, width_floor);
+        let (panel_w, panel_h) = panel::target_size(&sizes, viewport_w, width_floor);
         if !overlay.locked {
             self.system_ui_width_floor = panel_w;
         }
 
         // The lock card owns the whole screen and centres on its own opaque
         // backdrop; every other panel drops out of the bar like the OSD.
-        let dock = self.island_dock();
+        let dock = self.island_dock_in(viewport);
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let (panel_w, panel_h, radius_top, radius, content_a) = if overlay.locked {
             (panel_w, panel_h, radius, radius, 1.0)
         } else {
-            let (w, h) = self
-                .system_ui_island
-                .advance(std::time::Instant::now(), panel_w, panel_h);
+            let (w, h) = self.system_ui_island.advance_with_motion(
+                std::time::Instant::now(),
+                panel_w,
+                panel_h,
+                motion_enabled,
+            );
             // Unlike the OSD, a modal panel only redraws when something asks
             // it to, so the spring has to keep asking until it settles.
             if self.system_ui_island.animating(panel_w, panel_h) {
@@ -2049,11 +2085,11 @@ impl<C: CompositorConnection> Compositor<C> {
         };
         let (x, y) = if overlay.locked {
             (
-                ((screen_w - panel_w) * 0.5).max(16.0),
-                ((screen_h - panel_h) * 0.5).max(16.0),
+                viewport_x + ((viewport_w - panel_w) * 0.5).max(16.0),
+                viewport_y + ((viewport_h - panel_h) * 0.5).max(16.0),
             )
         } else {
-            let [x, y, ..] = dock.rect(panel_w, panel_h, 0.0);
+            let [x, y, ..] = dock.contained_rect(panel_w, panel_h, 0.0);
             (x, y)
         };
 
@@ -2093,13 +2129,13 @@ impl<C: CompositorConnection> Compositor<C> {
                     ui.scrim[3],
                 );
                 self.gl
-                    .uniform_2_f32(self.hud_uniforms.size.as_ref(), screen_w, screen_h);
+                    .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);
                 self.gl.uniform_4_f32(
                     self.hud_uniforms.rect.as_ref(),
-                    0.0,
-                    0.0,
-                    screen_w,
-                    screen_h,
+                    viewport_x,
+                    viewport_y,
+                    viewport_w,
+                    viewport_h,
                 );
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             }
@@ -2180,9 +2216,11 @@ impl<C: CompositorConnection> Compositor<C> {
                 // The pill slides between rows rather than teleporting, so the
                 // list reads as one object being moved through. It only asks
                 // for another frame while it is actually travelling.
-                let pill = self
-                    .system_ui_highlight
-                    .advance(std::time::Instant::now(), target);
+                let pill = self.system_ui_highlight.advance_with_motion(
+                    std::time::Instant::now(),
+                    target,
+                    motion_enabled,
+                );
                 if self.system_ui_highlight.animating(target) {
                     self.needs_render = true;
                 }
@@ -2346,11 +2384,17 @@ impl<C: CompositorConnection> Compositor<C> {
         let colors: [[u8; 4]; 2] = [ui.value_ink, ui.label_ink];
         let mut slots = [None, None];
         for (slot, text) in [title, body].into_iter().enumerate() {
+            let text = crate::backend::compositor_font::fit_ui_text_lines(
+                text,
+                description,
+                size,
+                crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX,
+            );
             if text.is_empty() {
                 continue;
             }
             let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-                text,
+                &text,
                 description,
                 size,
                 colors[slot],
@@ -2414,6 +2458,7 @@ impl<C: CompositorConnection> Compositor<C> {
 
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
         let pad = 18.0;
         let pad_left = 30.0;
         let gap = 12.0;
@@ -2439,7 +2484,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 let (body_w, body_h) = slots[1]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
-                let content_w = title_w.max(body_w).clamp(220.0, 440.0);
+                let content_w = title_w.max(body_w).clamp(
+                    220.0,
+                    crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
+                );
                 let target_w = content_w + pad_left + pad;
                 let mut target_h = 2.0 * pad + title_h;
                 if body_h > 0.0 {
@@ -2450,7 +2498,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     .toast_stack
                     .motion_for(*id)
                     .map_or((target_w, target_h), |motion| {
-                        motion.advance(now, target_w, target_h)
+                        motion.advance_with_motion(now, target_w, target_h, motion_enabled)
                     });
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
                 // Only the card actually touching the bar squares off; the
@@ -2609,7 +2657,11 @@ impl<C: CompositorConnection> Compositor<C> {
         let accent = self.border_gradient_color_a;
 
         let dock = self.island_dock();
-        let (card_w, card_h) = self.osd_slot.motion_mut().advance(now, target_w, target_h);
+        let motion_enabled = crate::config::CONFIG.load().motion_enabled();
+        let (card_w, card_h) =
+            self.osd_slot
+                .motion_mut()
+                .advance_with_motion(now, target_w, target_h, motion_enabled);
         let [x, y, ..] = dock.rect(card_w, card_h, 0.0);
         let (radius_top, radius) = dock.radii(card_h, ui.osd_radius, 0.0);
         // Contents appear as the card makes room for them, rather than

@@ -2770,6 +2770,16 @@ impl Config {
         self.inner.animation.enabled
     }
 
+    /// Whether decorative geometry motion should run at all.
+    ///
+    /// `speed = "instant"` and a zero duration are both user-facing ways to
+    /// request an immediate transition. Compositor-owned surfaces (the shell,
+    /// OSD, toasts and debug HUD) use this alongside the ordinary window
+    /// animation paths so the global switch has one consistent meaning.
+    pub fn motion_enabled(&self) -> bool {
+        self.animation_enabled() && !self.animation_duration().is_zero()
+    }
+
     pub fn animation_speed(&self) -> AnimationSpeed {
         AnimationSpeed::from_str(&self.inner.animation.speed)
     }
@@ -5277,5 +5287,22 @@ border_px = 3
             cfg.set_value("appearance.cursor_size", &serde_json::json!(9999))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn decorative_motion_obeys_every_instant_animation_setting() {
+        let mut cfg = Config::default();
+        assert!(cfg.motion_enabled());
+
+        cfg.inner.animation.enabled = false;
+        assert!(!cfg.motion_enabled());
+        cfg.inner.animation.enabled = true;
+
+        cfg.inner.animation.speed = "instant".into();
+        assert!(!cfg.motion_enabled());
+        cfg.inner.animation.speed = "normal".into();
+
+        cfg.inner.animation.duration_ms = 0;
+        assert!(!cfg.motion_enabled());
     }
 }

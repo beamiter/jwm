@@ -208,7 +208,7 @@ impl Jwm {
     fn layout_picker_cell_at(&self, x: f64, y: f64) -> Option<usize> {
         let picker = self.features.system_ui.layout_picker()?;
         let geometry =
-            layout_strip::strip_geometry(self.s_w as f32, self.s_h as f32, picker.layouts.len());
+            layout_strip::strip_geometry(self.system_ui_viewport().rect(), picker.layouts.len());
         layout_strip::cell_at(&geometry, x as f32, y as f32)
     }
 
