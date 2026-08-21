@@ -143,9 +143,21 @@ impl Jwm {
     /// Push a panel that was rebuilt since the last frame. Costs a boolean
     /// test when nothing changed.
     pub(crate) fn flush_system_ui(&mut self, backend: &mut dyn Backend) {
-        if self.system_ui_dirty {
-            self.sync_system_ui(backend);
+        if !self.system_ui_dirty {
+            return;
         }
+        if self.features.system_ui.is_active() {
+            self.sync_system_ui(backend);
+            return;
+        }
+        // Dirty with nothing to draw is one thing: a hand-over whose incoming
+        // panel never arrived (see `Jwm::hand_over_system_ui`). The outgoing
+        // panel is gone but its grabs are not, and the compositor is still
+        // drawing it — so finish the close rather than leaving the session
+        // unable to type. Every other `mark_system_ui_dirty` caller rebuilds a
+        // panel that is still on screen.
+        self.system_ui_dirty = false;
+        self.close_system_ui(backend);
     }
 
     pub(crate) fn sync_system_ui(&mut self, backend: &mut dyn Backend) {
@@ -164,6 +176,9 @@ impl Jwm {
                 parts.items = vec![format!("\u{f120}  Run command  {typed}")];
                 parts.selected = Some(0);
                 parts.hint = "Enter  run command    Esc  close".into();
+                // One synthesised row replaces the match list, so whatever the
+                // launcher was scrolled to no longer describes what is drawn.
+                parts.scroll = None;
             }
             SystemUiOverlay {
                 title: parts.title,
@@ -171,6 +186,7 @@ impl Jwm {
                 items: parts.items,
                 selected: parts.selected,
                 hint: parts.hint,
+                scroll: parts.scroll,
                 locked: self.features.system_ui.is_locked(),
                 filmstrip: self.features.system_ui.layout_picker().map(|picker| {
                     let now = std::time::Instant::now();

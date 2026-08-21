@@ -24,6 +24,7 @@ pub mod recording_sink;
 pub mod rules;
 pub mod screenshot;
 pub mod screenshot_toolbar;
+pub(crate) mod system_ui_panel;
 pub(crate) mod toast;
 pub mod transitions;
 pub(crate) mod ui_theme;

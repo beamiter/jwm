@@ -1248,7 +1248,7 @@ mod tests {
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::wayland_dummy_ops::{
-        DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
+        DummyColorAllocator, DummyCursorProvider, DummyKeyOps, DummyOutputOps,
     };
     use crate::core::animation::AnimationManager;
     use crate::core::models::ClientKey;
@@ -1259,7 +1259,7 @@ mod tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering as AtomicOrdering};
     use xbar_core::shared_structures::SharedMessage;
 
     struct MapRestorePropertyOps {
@@ -1509,9 +1509,40 @@ mod tests {
         }
     }
 
+    /// `DummyInputOps` with a tally, so a test can ask whether a panel
+    /// actually took the pointer rather than assuming it did.
+    #[derive(Default)]
+    struct GrabSpyInputOps {
+        pointer_grabs: AtomicUsize,
+        pointer_ungrabs: AtomicUsize,
+    }
+
+    impl InputOps for GrabSpyInputOps {
+        fn set_cursor(
+            &self,
+            _kind: crate::backend::common_define::StdCursorKind,
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+        fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
+            Ok((0.0, 0.0))
+        }
+        fn grab_pointer(&self, _mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+            self.pointer_grabs.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(true)
+        }
+        fn ungrab_pointer(&self) -> Result<(), BackendError> {
+            self.pointer_ungrabs.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(())
+        }
+        fn query_pointer_root(&self) -> Result<(i32, i32, u16, u16), BackendError> {
+            Ok((0, 0, 0, 0))
+        }
+    }
+
     struct RenderSpyBackend {
         window_ops: MapRestoreWindowOps,
-        input_ops: DummyInputOps,
+        input_ops: GrabSpyInputOps,
         property_ops: MapRestorePropertyOps,
         output_ops: DummyOutputOps,
         key_ops: DummyKeyOps,
@@ -1534,7 +1565,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 window_ops: MapRestoreWindowOps::new(),
-                input_ops: DummyInputOps,
+                input_ops: GrabSpyInputOps::default(),
                 property_ops: MapRestorePropertyOps::new(),
                 output_ops: DummyOutputOps,
                 key_ops: DummyKeyOps,
@@ -1812,26 +1843,125 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_action_closes_the_panel_it_opened_and_leaves_someone_else_alone() {
+    fn a_ui_action_closes_the_panel_it_opened_and_replaces_anyone_else_s() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
 
         jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(jwm.features.system_ui.is_launcher());
 
-        // Another UI action does not swap panels — and grabs — out from
-        // under whoever is typing.
+        // The panels are mutually exclusive, so another panel's key takes the
+        // screen over rather than reading as a dropped keypress. This is
+        // Alt+F10 over Alt+F9's calendar.
         jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
-        assert!(jwm.features.system_ui.is_launcher());
+        assert!(jwm.features.system_ui.is_calendar());
 
-        // The action that opened it takes it back down.
+        // The action that opened it still takes it back down.
+        jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_launcher());
         jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn swapping_panels_keeps_the_compositor_the_first_one_leased() {
+        // A session running without compositing leases one for the lifetime of
+        // a panel. Handing the screen from one panel to the next must not
+        // release that lease and take it again: every hidden window would be
+        // parked and unparked mid-swap, for a transition the user reads as one
+        // motion.
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true]);
 
         jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(jwm.features.system_ui.is_calendar());
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true], "compositor flapped");
+
+        // The lease is still honoured when the last panel finally closes.
+        jwm.close_system_ui(&mut backend);
+        assert!(!backend.compositor_enabled);
+        assert!(!jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true, false]);
+    }
+
+    #[test]
+    fn taking_over_from_a_keyboard_only_panel_still_takes_the_pointer() {
+        // The keybinding viewer is the one panel opened without a pointer
+        // grab. A panel inheriting its grabs would be modal for the keyboard
+        // and transparent to the mouse, so clicks would land on the windows
+        // underneath it.
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.show_keybindings(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert_eq!(backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst), 0);
+
         jwm.calendar(&mut backend, &WMArgEnum::Int(0)).unwrap();
-        assert!(!jwm.features.system_ui.is_active());
+        assert!(jwm.features.system_ui.is_calendar());
+        assert_eq!(
+            backend.input_ops.pointer_grabs.load(AtomicOrdering::SeqCst),
+            1,
+            "the incoming panel never took the pointer"
+        );
+        // ... and it was taken without the screen ever being un-grabbed.
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::SeqCst),
+            0
+        );
+    }
+
+    #[test]
+    fn no_panel_takes_the_screen_from_the_lock_card() {
+        // Mutual exclusion stops at the lock screen. This covers more than the
+        // keyboard, which never reaches an opener while locked: `jwm_remote`
+        // can call any of these by name over the IPC socket.
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.lock_screen(&mut backend, &WMArgEnum::Int(0)).unwrap();
+        assert!(jwm.features.system_ui.is_locked());
+
+        let openers: [crate::jwm::types::WMFuncType; 5] = [
+            Jwm::app_launcher,
+            Jwm::calendar,
+            Jwm::notification_center,
+            Jwm::control_center,
+            Jwm::session_menu,
+        ];
+        for open in openers {
+            open(&mut jwm, &mut backend, &WMArgEnum::Int(0)).unwrap();
+            assert!(jwm.features.system_ui.is_locked());
+        }
+
+        // The layout picker and the keybinding viewer never ask
+        // `toggle_off_system_ui`; they go straight to `prepare_system_ui`, and
+        // the first of them is reachable over IPC (`jwm-tool msg
+        // layout_picker`). They have to be refused there instead — and loudly,
+        // because unlike a swallowed toggle this is somebody trying to get in.
+        for attempt in [
+            Jwm::layout_picker as crate::jwm::types::WMFuncType,
+            Jwm::show_keybindings,
+        ] {
+            assert!(attempt(&mut jwm, &mut backend, &WMArgEnum::Int(0)).is_err());
+            assert!(jwm.features.system_ui.is_locked());
+        }
+
+        // Still a lock, not a lock-shaped panel: the password buffer survived.
+        jwm.features.system_ui.push_char('x');
+        assert!(jwm.features.system_ui.overlay_text().contains("JWM LOCKED"));
     }
 
     #[test]

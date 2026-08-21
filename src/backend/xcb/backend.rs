@@ -4479,7 +4479,16 @@ impl KeyOps for XcbKeyOps {
             pointer_mode: x::GrabMode::Async,
             keyboard_mode: x::GrabMode::Async,
         });
-        let _ = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        let reply = self.conn.wait_for_reply(cookie).map_err(xcb_err)?;
+        // A refused grab replies successfully with a non-Success status.
+        // Reading it is what makes "never show a pretend lock the keyboard is
+        // not actually grabbed for" true rather than aspirational.
+        if reply.status() != x::GrabStatus::Success {
+            return Err(BackendError::Message(format!(
+                "keyboard grab refused: {:?}",
+                reply.status()
+            )));
+        }
         self.conn.flush().map_err(xcb_err)?;
         Ok(())
     }

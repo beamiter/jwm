@@ -23,9 +23,18 @@ pages still close with one `Esc`.
 Every panel key is a toggle: pressing the binding that opened a panel takes it
 back down, so `Alt+F10` both opens and dismisses the Hub — from any of its
 pages — and the same holds for `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest.
-While a panel is up, the *other* panel keys stay quiet rather than swapping
-surfaces (and grabs) mid-typing. The lock screen is the one exception: it comes
-off with the password, never with its own key.
+
+The panels are also mutually exclusive. Pressing a *different* panel's key
+hands the screen over: `Alt+F10` on top of `Alt+F9`'s calendar closes the
+calendar and opens the Hub in its place, in one motion. The grabs and, on a
+session running without compositing, the leased compositor carry straight
+across, so the swap costs a frame rather than a full close and reopen — and a
+panel that cannot open (no `nmcli` for the Wi-Fi picker, clipboard history
+switched off) leaves the panel you had on screen instead of a blank one.
+
+The lock screen is the one exception at both ends: nothing replaces it, from
+the keyboard or over IPC, and it comes off with the password rather than with
+its own key.
 
 The remaining rows are grouped into **Now Playing**, **Quick Settings**,
 **Sound & Display**, **System**, and **Session** sections. The viewport follows

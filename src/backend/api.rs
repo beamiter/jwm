@@ -348,11 +348,30 @@ pub struct SystemUiOverlay {
     /// Row in `items` the renderer highlights with a selection pill.
     pub selected: Option<usize>,
     pub hint: String,
+    /// Where `items` sits in a longer list, when the window manager is only
+    /// sending a slice of one. `None` means everything there is to show is on
+    /// screen.
+    pub scroll: Option<ScrollWindow>,
     /// A lock overlay is opaque; other system UI dims the current desktop.
     pub locked: bool,
     /// Set by the layout picker, which is drawn as a film strip of layout
     /// thumbnails instead of the list card.
     pub filmstrip: Option<LayoutFilmstrip>,
+}
+
+/// The slice of a longer list that [`SystemUiOverlay::items`] is showing.
+///
+/// The window manager decides how many rows fit and which ones to send, so
+/// without this the compositor cannot tell a complete list from the top of a
+/// long one — and the user cannot tell either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollWindow {
+    /// Index of the first row being shown.
+    pub first: usize,
+    /// How many rows are being shown.
+    pub visible: usize,
+    /// How many rows there are in total.
+    pub total: usize,
 }
 
 /// The layout picker's contents: one film cell per layout.

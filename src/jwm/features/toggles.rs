@@ -22,6 +22,42 @@ const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool 
     active || enabled
 }
 
+/// What a shell panel's opener should do about whatever is already on screen.
+///
+/// The panels are mutually exclusive and every one of them is bound to a
+/// toggle, so one press has to answer two questions at once: is this my own
+/// panel, and if not, may I have the screen?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShellEntry {
+    /// Nothing is on screen. Open normally.
+    Open,
+    /// The caller's own panel is up: the key that opened it takes it down.
+    Dismiss,
+    /// A different panel is up. Take the screen — and its grabs — over.
+    TakeOver,
+    /// The lock screen is up. A lock that any panel key could push aside is
+    /// not a lock, so the press goes nowhere.
+    Refuse,
+}
+
+/// The one rule every shell panel key follows.
+///
+/// `Alt+F10` pressed over `Alt+F9`'s calendar dismisses the calendar and opens
+/// the Shell Hub in its place, rather than doing nothing: the panels are one
+/// surface with several pages, and a key that silently did nothing read as a
+/// dropped keypress.
+const fn shell_entry(active: bool, locked: bool, mine: bool) -> ShellEntry {
+    if !active {
+        ShellEntry::Open
+    } else if locked {
+        ShellEntry::Refuse
+    } else if mine {
+        ShellEntry::Dismiss
+    } else {
+        ShellEntry::TakeOver
+    }
+}
+
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
     /// (percentage points) and show the OSD with the result.
@@ -384,6 +420,9 @@ impl Jwm {
         let command = match action {
             SessionAction::Lock => {
                 // Keep the grabs: the lock overlay wants them anyway.
+                // A lock is terminal, never a page the Hub can be backed out
+                // to, so the Escape target goes with the panel it belonged to.
+                self.features.system_ui_return_to_hub = false;
                 self.features.system_ui = crate::jwm::features::SystemUiState::lock();
                 self.sync_system_ui(backend);
                 return Ok(());
@@ -953,6 +992,58 @@ impl Jwm {
         label: &str,
         grab_pointer: bool,
     ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Never over the lock card. `toggle_off_system_ui` already refuses for
+        // every opener that asks it (`ShellEntry::Refuse`), but two openers
+        // reach here without asking — the layout picker and the keybinding
+        // viewer — and the layout picker is reachable over IPC. Refusing here
+        // makes "nothing replaces the lock screen" true of the one function
+        // every panel has to come through, rather than of a list that has to
+        // stay complete.
+        if self.features.system_ui.is_locked() {
+            return Err(format!("{label} cannot replace the lock screen").into());
+        }
+
+        // A drag in flight holds a real pointer grab that carries motion
+        // events; the grab a panel takes below silently replaces it and drops
+        // them. Both `on_motion_notify` and `on_button_release` then bail on
+        // `is_active()`, so the drag would be neither committed nor cancelled
+        // and would stay armed after the panel closed. Alt+drag leaves the
+        // keyboard free, so a panel key really is reachable mid-drag.
+        if self.drag_ctl.is_some() {
+            self.cancel_pointer_drag(backend);
+        }
+
+        // Any other panel still on screen at this point means a hand-over: one
+        // shell key pressed while another key's panel was up. The keyboard and
+        // the compositor are already ours, so inherit them rather than
+        // releasing and reacquiring, which would flap a temporarily leased
+        // compositor and open a window for the desktop to take the keyboard
+        // back mid-swap.
+        if self.features.system_ui.is_active() {
+            // The pointer is *not* guaranteed: the keybinding viewer opens
+            // keyboard-only, and a panel that inherited its grabs would let
+            // clicks through to the windows underneath. Re-grabbing costs a
+            // round-trip and always succeeds for the client that already holds
+            // it, so ask before anything is torn down — a refusal has to leave
+            // the panel on screen alone. (The reverse case is harmless: a
+            // keyboard-only panel taking over from one that held the pointer
+            // simply stays more modal than it asked to be, and
+            // `close_system_ui` hands both back.)
+            if grab_pointer
+                && !backend.input_ops().grab_pointer(
+                    (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
+                    None,
+                )?
+            {
+                // An error rather than `Ok(false)`: that reply promises the
+                // keyboard and any leased compositor have been handed back,
+                // which is exactly what a hand-over must never do.
+                return Err(format!("could not grab pointer for {label}").into());
+            }
+            log::info!("Shell: {label} takes over from the panel on screen");
+            self.hand_over_system_ui(backend);
+            return Ok(true);
+        }
         if !backend.has_compositor() {
             match backend.set_compositor_enabled(true) {
                 Ok(true) if backend.has_compositor() => {
@@ -1053,6 +1144,10 @@ impl Jwm {
     /// Drop the panel, release its grabs, and restore a temporarily enabled
     /// compositor to the user's previous off state.
     pub(crate) fn close_system_ui(&mut self, backend: &mut dyn Backend) {
+        // Whatever a rebuild had queued is moot, and leaving the flag set would
+        // send the next frame through `flush_system_ui`'s aborted-hand-over
+        // backstop for a panel that closed on purpose.
+        self.system_ui_dirty = false;
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
@@ -1062,27 +1157,70 @@ impl Jwm {
         self.release_temporary_system_ui_compositor(backend, "system UI");
     }
 
-    /// Every UI key binding is a toggle: the key that put a panel on screen
-    /// takes it away again, so nobody has to reach for Escape.
+    /// Every UI key binding is a toggle *and* the panels are mutually
+    /// exclusive: the key that put a panel on screen takes it away again, and
+    /// any other panel's key replaces it.
     ///
-    /// Returns `true` once the press has been dealt with and the opener
-    /// should return — either it dismissed the caller's own panel, or a
-    /// different panel owns the screen and the key stays quiet rather than
-    /// swapping surfaces (and grabs) out from under the user. `mine` decides
-    /// which of those it is; openers call this instead of a bare
-    /// `is_active()` guard.
+    /// Returns `true` once the press has been fully dealt with and the opener
+    /// should return: it dismissed the caller's own panel, or the lock screen
+    /// refused it. `false` means carry on and open — either onto an empty
+    /// screen or over another panel, which is handed over inside
+    /// [`Self::prepare_system_ui`] once the opener's own preconditions have
+    /// passed. `mine` decides which case this is; openers call this instead of
+    /// a bare `is_active()` guard.
+    ///
+    /// Note what is deliberately *not* done here: the outgoing panel is left
+    /// standing, all the way until [`Self::prepare_system_ui`]. That is where
+    /// every opener's own preconditions have already passed — no `nmcli` for
+    /// the Wi-Fi picker, clipboard history switched off, fewer than two
+    /// outputs for the display layout — so a refusal leaves the user with the
+    /// panel they had rather than a grabbed screen with nothing on it.
     pub(crate) fn toggle_off_system_ui(
         &mut self,
         backend: &mut dyn Backend,
         mine: impl FnOnce(&crate::jwm::features::SystemUiState) -> bool,
     ) -> bool {
-        if !self.features.system_ui.is_active() {
-            return false;
+        let state = &self.features.system_ui;
+        match shell_entry(state.is_active(), state.is_locked(), mine(state)) {
+            ShellEntry::Open | ShellEntry::TakeOver => false,
+            ShellEntry::Dismiss => {
+                self.close_system_ui(backend);
+                true
+            }
+            ShellEntry::Refuse => true,
         }
-        if mine(&self.features.system_ui) {
-            self.close_system_ui(backend);
-        }
-        true
+    }
+
+    /// Drop the panel being replaced, keeping the grabs and the compositor for
+    /// the one taking its place.
+    ///
+    /// Unlike [`Self::close_system_ui`] this hands nothing back: the incoming
+    /// panel wants the same keyboard and pointer grabs, and a temporarily
+    /// leased compositor released here would be switched straight back on —
+    /// parking every hidden window twice for a swap the user sees as one
+    /// motion. What it does still do is run the teardown each panel owns.
+    fn hand_over_system_ui(&mut self, backend: &mut dyn Backend) {
+        // The film strip applies each layout as it is browsed. Leaving through
+        // the side door must still put back the one the user started on.
+        self.restore_layout_picker_origin(backend);
+        // A child page's Escape target goes with the page.
+        self.features.system_ui_return_to_hub = false;
+        // `cancel` zeroes the lock password and any Wi-Fi passphrase before
+        // the string is dropped.
+        self.features.system_ui.cancel();
+        // Work started for the outgoing panel has nowhere to land, and a job
+        // that finished a frame later would otherwise be adopted by whatever
+        // opened next. Openers install their own jobs *after* this runs.
+        self.features.wifi_scan = None;
+        self.features.wifi_connect = None;
+        self.features.bluetooth_scan = None;
+        self.features.bluetooth_action = None;
+        // Arm the backstop in `flush_system_ui`. Between here and the opener's
+        // `sync_system_ui` the screen is grabbed with no panel behind it; no
+        // opener can fail in that window today (every one of them installs its
+        // state with no `?` in between), but nothing in the type system says
+        // so, and the cost of being wrong is a session that cannot type.
+        self.mark_system_ui_dirty();
     }
 
     /// Open the notification center: the bounded history JWM kept while
@@ -2503,5 +2641,42 @@ mod configured_feature_gate_tests {
         assert!(configured_feature_toggle_allowed(true, true));
         assert!(configured_feature_toggle_allowed(true, false));
         assert!(!configured_feature_toggle_allowed(false, false));
+    }
+}
+
+#[cfg(test)]
+mod shell_entry_tests {
+    use super::{ShellEntry, shell_entry};
+
+    #[test]
+    fn an_empty_screen_just_opens() {
+        for locked in [false, true] {
+            for mine in [false, true] {
+                assert_eq!(shell_entry(false, locked, mine), ShellEntry::Open);
+            }
+        }
+    }
+
+    #[test]
+    fn a_panel_key_pressed_over_its_own_panel_takes_it_down() {
+        assert_eq!(shell_entry(true, false, true), ShellEntry::Dismiss);
+    }
+
+    #[test]
+    fn a_panel_key_pressed_over_another_panel_takes_the_screen() {
+        // Alt+F10 over Alt+F9's calendar: the hub replaces it rather than the
+        // press going nowhere. This is what makes the panels read as one
+        // surface with several pages.
+        assert_eq!(shell_entry(true, false, false), ShellEntry::TakeOver);
+    }
+
+    #[test]
+    fn nothing_takes_the_screen_from_the_lock_card() {
+        // Not just the keyboard path: `jwm_remote` can call an opener by name
+        // while the session is locked, and a lock any of them could replace
+        // would not be a lock.
+        for mine in [false, true] {
+            assert_eq!(shell_entry(true, true, mine), ShellEntry::Refuse);
+        }
     }
 }

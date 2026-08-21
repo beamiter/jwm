@@ -281,7 +281,9 @@ feature. Every status bar in `bars/` carries an entry that opens the
 same [Shell Hub](docs/control-center.md#opening-the-shell-from-a-status-bar),
 so a pointer-driven session reaches it without `Alt+F10`. Every panel key is a
 toggle: `Alt+F10`, `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest each take their
-own surface back down, so nobody has to reach for `Esc`.
+own surface back down, so nobody has to reach for `Esc`. They are mutually
+exclusive too — one panel's key replaces whatever other panel is up, keeping
+the grabs — and none of them replaces the lock screen.
 The Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition are both
 the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
 Alt+Space cycles layouts over a film strip of live thumbnails; see

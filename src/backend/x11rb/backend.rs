@@ -3733,7 +3733,8 @@ mod key_ops {
 
         fn grab_keyboard(&self, root: WindowId) -> Result<(), BackendError> {
             let r = self.ids.x11(root)?;
-            self.conn
+            let reply = self
+                .conn
                 .grab_keyboard(
                     false,
                     r,
@@ -3742,6 +3743,15 @@ mod key_ops {
                     GrabMode::ASYNC,
                 )?
                 .reply()?;
+            // A refused grab replies successfully with a non-Success status.
+            // Reading it is what makes "never show a pretend lock the keyboard
+            // is not actually grabbed for" true rather than aspirational.
+            if reply.status != GrabStatus::SUCCESS {
+                return Err(BackendError::Message(format!(
+                    "keyboard grab refused: {:?}",
+                    reply.status
+                )));
+            }
             self.conn.flush()?;
             Ok(())
         }

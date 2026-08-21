@@ -42,6 +42,7 @@ while notifications are muted.
 | `d` / `Delete` | dismiss the selected notification |
 | `c` | clear the whole history |
 | `Esc` or `Alt+F11` | close the panel — the key that opened it also dismisses it |
+| another panel key | hand the screen to that panel, closing this one |
 
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.

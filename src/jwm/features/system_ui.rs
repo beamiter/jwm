@@ -40,6 +40,10 @@ pub struct OverlayParts {
     /// Row in `items` to highlight.
     pub selected: Option<usize>,
     pub hint: String,
+    /// Where `items` sits in a longer list, for panels that only send a slice
+    /// of one. The renderer draws a scroll indicator from it; without it a
+    /// windowed list looks exactly like a complete one.
+    pub scroll: Option<crate::backend::api::ScrollWindow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -384,13 +388,15 @@ fn control_section(kind: ControlKind) -> ControlSection {
     }
 }
 
-fn shell_hub_rows(
-    entries: &[ControlEntry],
-    selected: usize,
-    armed: bool,
-) -> (Vec<String>, Option<usize>) {
+type ShellHubRows = (
+    Vec<String>,
+    Option<usize>,
+    Option<crate::backend::api::ScrollWindow>,
+);
+
+fn shell_hub_rows(entries: &[ControlEntry], selected: usize, armed: bool) -> ShellHubRows {
     if entries.is_empty() {
-        return (Vec::new(), None);
+        return (Vec::new(), None, None);
     }
 
     let selected = selected.min(entries.len() - 1);
@@ -420,12 +426,18 @@ fn shell_hub_rows(
     let start = selected_visual
         .saturating_sub(SHELL_HUB_VISIBLE_LINES / 2)
         .min(max_start);
-    let items = all
+    let total = all.len();
+    let items: Vec<String> = all
         .into_iter()
         .skip(start)
         .take(SHELL_HUB_VISIBLE_LINES)
         .collect();
-    (items, Some(selected_visual - start))
+    let scroll = crate::backend::api::ScrollWindow {
+        first: start,
+        visible: items.len(),
+        total,
+    };
+    (items, Some(selected_visual - start), Some(scroll))
 }
 
 /// Whether activating this row needs a second Enter to confirm.
@@ -2015,6 +2027,7 @@ impl SystemUiState {
                     items: vec![format!("{}   {}", layout.symbol(), layout.label())],
                     selected: Some(0),
                     hint: "\u{f060}/\u{f061}  browse    Enter / click  apply    Esc  cancel".into(),
+                    scroll: None,
                 }
             }
             Self::Locked { password, message } => {
@@ -2035,6 +2048,7 @@ impl SystemUiState {
                     ],
                     selected: None,
                     hint: "Enter  unlock    Esc  clear".into(),
+                    scroll: None,
                 }
             }
             Self::Launcher {
@@ -2053,6 +2067,7 @@ impl SystemUiState {
                         selected: Some(0),
                         items: vec![format!("=  {result}")],
                         hint: "Enter  copy    Esc  close".into(),
+                        scroll: None,
                     };
                 }
                 let windows_only = matches!(
@@ -2086,6 +2101,11 @@ impl SystemUiState {
                         })
                         .collect()
                 };
+                let scroll = (!matches.is_empty()).then(|| crate::backend::api::ScrollWindow {
+                    first: start,
+                    visible: items.len(),
+                    total: matches.len(),
+                });
                 OverlayParts {
                     title: if windows_only {
                         "\u{f2d0}  WINDOWS".into()
@@ -2099,6 +2119,7 @@ impl SystemUiState {
                     // two modes never compete for the same query.
                     hint: "Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
                         .into(),
+                    scroll,
                 }
             }
             Self::Info {
@@ -2118,6 +2139,11 @@ impl SystemUiState {
                         .map(|&index| lines[index].clone())
                         .collect()
                 };
+                let scroll = (!matches.is_empty()).then(|| crate::backend::api::ScrollWindow {
+                    first: *offset,
+                    visible: items.len(),
+                    total: matches.len(),
+                });
                 OverlayParts {
                     title: title.clone(),
                     query: Some(query.clone()),
@@ -2126,6 +2152,7 @@ impl SystemUiState {
                     hint:
                         "Type  search    Backspace  erase    Esc  close    \u{f062}/\u{f063}  scroll"
                             .into(),
+                    scroll,
                 }
             }
             Self::ControlCenter {
@@ -2134,7 +2161,7 @@ impl SystemUiState {
                 armed,
                 shell_hub,
             } => {
-                let (items, visual_selection) = if *shell_hub {
+                let (items, visual_selection, scroll) = if *shell_hub {
                     shell_hub_rows(entries, *selected, *armed)
                 } else {
                     (
@@ -2151,6 +2178,7 @@ impl SystemUiState {
                             })
                             .collect(),
                         Some((*selected).min(entries.len().saturating_sub(1))),
+                        None,
                     )
                 };
                 OverlayParts {
@@ -2170,6 +2198,7 @@ impl SystemUiState {
                     } else {
                         "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into()
                     },
+                    scroll,
                 }
             }
             Self::ListPanel {
@@ -2185,6 +2214,15 @@ impl SystemUiState {
                 // line or the masked prompt underneath.
                 let window = kind.window();
                 let start = selected.saturating_sub(window.saturating_sub(1));
+                // Counted before the status line, the passphrase prompt and
+                // the action strip are appended: the indicator describes the
+                // *list*, not everything drawn under it.
+                let shown = rows.len().saturating_sub(start).min(window);
+                let scroll = (!rows.is_empty()).then(|| crate::backend::api::ScrollWindow {
+                    first: start,
+                    visible: shown,
+                    total: rows.len(),
+                });
                 let mut items: Vec<String> = if rows.is_empty() {
                     vec![format!(
                         "  {}",
@@ -2230,6 +2268,7 @@ impl SystemUiState {
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
                     hint: kind.hint(prompt.is_some()).to_string(),
+                    scroll,
                 }
             }
             Self::Calendar { view, clock } => {
@@ -2242,6 +2281,7 @@ impl SystemUiState {
                     selected: None,
                     hint: "\u{f060}/\u{f061}  month    \u{f062}/\u{f063}  year    t  today    Esc  close"
                         .into(),
+                    scroll: None,
                 }
             }
             Self::SessionMenu {
@@ -2270,6 +2310,7 @@ impl SystemUiState {
                     items,
                     selected: Some((*selected).min(entries.len().saturating_sub(1))),
                     hint,
+                    scroll: None,
                 }
             }
             Self::MonitorLayout {
@@ -2300,6 +2341,7 @@ impl SystemUiState {
                     items,
                     selected: None,
                     hint,
+                    scroll: None,
                 }
             }
         }

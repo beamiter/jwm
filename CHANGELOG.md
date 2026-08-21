@@ -7,6 +7,13 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- A windowed list in the shell — the launcher's matches, the notification
+  history, the Wi-Fi/Bluetooth/clipboard/wallpaper pickers and the Hub itself —
+  draws a scroll indicator in the card's right-hand margin. The window manager
+  sends the compositor a slice of a longer list, and until now nothing on the
+  card said so.
+- A hairline separates a shell panel's list from its footer hint, so the line
+  naming the keys stops reading as one more row.
 - `jwm-remote` provides an authenticated JWM-to-JWM remote desktop MVP for
   x11rb/xcb X11 sessions. It captures the shared Composite overlay out of
   process, sends bounded JPEG frames, maps a native X11 viewer back into host
@@ -36,6 +43,28 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- The shell panels are mutually exclusive. `Alt+F10` pressed on top of
+  `Alt+F9`'s calendar now closes the calendar and opens the Shell Hub in its
+  place, instead of the press going nowhere; the same holds for every panel key,
+  in both directions, and from the IPC socket. The keyboard and pointer grabs
+  and any temporarily leased compositor are handed straight over rather than
+  released and retaken, so the swap costs a frame instead of parking every
+  hidden window twice and resetting the compositor's runtime state. A panel that
+  cannot open — no `nmcli` for the Wi-Fi picker, clipboard history switched off,
+  one output for the display layout — leaves the panel you had on screen. Each
+  key still toggles its own panel off, and nothing at all replaces the lock
+  screen.
+- The modal shell card holds a stable width. The launcher re-measures its match
+  list on every keystroke, and the card used to resize under the typing; it now
+  only ever grows while a panel is open, in fixed steps, and starts over when
+  the panel is replaced or closed.
+- The shell card's selection highlight springs between rows instead of
+  teleporting, and is placed rather than slid on a freshly opened panel so it
+  never travels in from a row of the list it replaced.
+- Every theme's footer hint is now held to WCAG's 3:1 contrast floor and the
+  typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
+  hint at 1.6:1 — the least legible text on the panel was the line naming the
+  keys — and its `hint_ink` has been darkened accordingly.
 - `jwm-remote` now downsizes both Composite-overlay and root-fallback frames
   with XRender before readback, overlaps capture with JPEG/network sending
   through a one-frame latest-wins queue, reports stage latency and dropped
@@ -158,6 +187,16 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- The X11 backends no longer report a refused keyboard grab as a success. Both
+  `grab_keyboard` implementations discarded the reply's `GrabStatus`, so the
+  lock screen's "never display a pretend lock if the exclusive keyboard grab
+  failed" guard could not fire.
+- Opening a shell panel during a pointer drag cancels the drag instead of
+  silently stealing its grab and leaving it armed. The panel's grab replaces the
+  drag's and drops motion events, while the motion and button-release handlers
+  both bail while a panel is up, so the drag was never committed or cancelled.
+- Locking from the Shell Hub's session page no longer leaves the lock marked as
+  a page the Hub can be backed out to.
 - Screen recording no longer freezes the desktop. The compositor used to write
   each captured frame — 8 MB at 1080p — straight into ffmpeg's 64 KiB stdin pipe
   from its render loop, so whenever the encoder fell behind, the one thread that

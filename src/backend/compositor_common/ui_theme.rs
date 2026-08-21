@@ -358,7 +358,11 @@ pub(crate) const GLASS: UiPalette = UiPalette {
     panel_title_ink: [20, 24, 32, 255],
     query_ink: [12, 16, 24, 255],
     item_ink: [26, 30, 40, 255],
-    hint_ink: [96, 104, 120, 255],
+    // Dark enough to clear 3:1 against the veil over a black desktop, which
+    // the old [96, 104, 120] missed at 1.6:1 — the least legible text on the
+    // panel was the line naming the keys. Still well above the rows, so the
+    // footer stays a footer.
+    hint_ink: [52, 60, 76, 255],
     osd_ink: [16, 20, 28, 255],
     card_radius: 22.0,
     chip_radius: 11.0,
@@ -701,6 +705,76 @@ mod tests {
             }
         };
         0.2126 * channel(ink[0]) + 0.7152 * channel(ink[1]) + 0.0722 * channel(ink[2])
+    }
+
+    /// Worst-case panel surface for a theme: its tint composited over a black
+    /// desktop, which for straight alpha is just the tint scaled by coverage.
+    /// A flat opaque theme's own colour is already that worst case.
+    fn worst_case_panel(palette: &UiPalette) -> [u8; 4] {
+        let panel = palette.panel;
+        let channel = |c: f32| (c * panel[3] * 255.0).clamp(0.0, 255.0) as u8;
+        [
+            channel(panel[0]),
+            channel(panel[1]),
+            channel(panel[2]),
+            255,
+        ]
+    }
+
+    fn contrast(a: [u8; 4], b: [u8; 4]) -> f32 {
+        let (a, b) = (relative_luminance(a) + 0.05, relative_luminance(b) + 0.05);
+        if a > b { a / b } else { b / a }
+    }
+
+    /// The footer hint is the one line on the panel that tells a first-time
+    /// user which keys do anything, and it used to be the least legible thing
+    /// on screen — 1.6:1 under the default theme, against 4.7:1 for the rows
+    /// above it. It is deliberately quieter than body text, so it is held to
+    /// WCAG's 3:1 floor for large and incidental text rather than the 4.5:1
+    /// body ratio, but quieter is not the same as invisible.
+    #[test]
+    fn every_theme_keeps_its_footer_hint_readable() {
+        for theme in [
+            UiTheme::Glass,
+            UiTheme::GlassDark,
+            UiTheme::Aurora,
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            let palette = theme.palette();
+            let surface = worst_case_panel(palette);
+            let hint = contrast(surface, palette.hint_ink);
+            assert!(hint >= 3.0, "{theme:?} draws its hint at {hint:.1}:1");
+
+            // ... and still recessed relative to the rows it sits under, or it
+            // stops reading as a footer.
+            let item = contrast(surface, palette.item_ink);
+            assert!(
+                item > hint,
+                "{theme:?} hint ({hint:.1}:1) is not quieter than its rows ({item:.1}:1)"
+            );
+        }
+    }
+
+    /// The typed query is the opposite case: it is what the user is looking at
+    /// while they type, so it gets the body ratio.
+    #[test]
+    fn every_theme_keeps_its_query_line_readable() {
+        for theme in [
+            UiTheme::Glass,
+            UiTheme::GlassDark,
+            UiTheme::Aurora,
+            UiTheme::Material,
+            UiTheme::Nord,
+            UiTheme::TokyoNight,
+            UiTheme::Paper,
+        ] {
+            let palette = theme.palette();
+            let ratio = contrast(worst_case_panel(palette), palette.query_ink);
+            assert!(ratio >= 4.5, "{theme:?} draws its query at {ratio:.1}:1");
+        }
     }
 
     /// The light material only works if its veil is heavy enough that even a

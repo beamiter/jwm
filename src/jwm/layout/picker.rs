@@ -161,6 +161,18 @@ impl Jwm {
 
     /// Put back the layout that was current when the picker opened.
     pub(crate) fn cancel_layout_picker(&mut self, backend: &mut dyn Backend) {
+        self.restore_layout_picker_origin(backend);
+        self.close_system_ui(backend);
+    }
+
+    /// The half of a cancel that is not the panel: undo the preview.
+    ///
+    /// The strip applies each layout as it is browsed, so a picker that goes
+    /// away without being confirmed leaves the screen in a layout the user
+    /// only looked at. Split out from [`Self::cancel_layout_picker`] because a
+    /// hand-over to another shell panel has to undo the preview too, without
+    /// dropping the grabs the incoming panel is about to inherit.
+    pub(crate) fn restore_layout_picker_origin(&mut self, backend: &mut dyn Backend) {
         let restore =
             self.features.system_ui.layout_picker().and_then(|picker| {
                 (picker.selected != picker.origin).then(|| picker.origin_layout())
@@ -168,7 +180,6 @@ impl Jwm {
         if let Some(layout) = restore {
             self.apply_picked_layout(backend, layout);
         }
-        self.close_system_ui(backend);
     }
 
     /// Commit on the user's behalf once they stop interacting.

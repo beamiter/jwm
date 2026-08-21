@@ -151,6 +151,25 @@ impl Spring {
         self.velocity = finite_clamp(self.velocity, -1.0e6, 1.0e6, 0.0);
     }
 
+    /// As [`Self::advance`], but for a value that is allowed to be negative —
+    /// a screen coordinate rather than a size.
+    fn advance_signed(&mut self, target: f32, dt: f32) {
+        let dt = clamp_effect_dt(dt);
+        if dt <= f32::EPSILON {
+            return;
+        }
+        let substeps = ((dt / MAX_SPRING_STEP).ceil() as usize).clamp(1, MAX_SPRING_SUBSTEPS);
+        let step = dt / substeps as f32;
+        let decay = (-SPRING_DAMPING * step).exp();
+        for _ in 0..substeps {
+            self.velocity += (target - self.value) * SPRING_STIFFNESS * step;
+            self.value += self.velocity * step;
+            self.velocity *= decay;
+        }
+        self.value = finite_clamp(self.value, f32::MIN, f32::MAX, target);
+        self.velocity = finite_clamp(self.velocity, -1.0e6, 1.0e6, 0.0);
+    }
+
     fn settled(&self, target: f32) -> bool {
         (self.value - target).abs() < SETTLE_DISTANCE && self.velocity.abs() < SETTLE_VELOCITY
     }
@@ -211,6 +230,66 @@ impl IslandMotion {
     #[must_use]
     pub(crate) fn animating(&self, target_width: f32, target_height: f32) -> bool {
         self.open && !(self.width.settled(target_width) && self.height.settled(target_height))
+    }
+}
+
+/// The selection pill's travel between rows of a list panel.
+///
+/// The pill used to be placed straight from the selected index, so it
+/// teleported: press Down and it is simply somewhere else. Sliding it is what
+/// makes a list read as one object being moved through rather than a set of
+/// rows taking turns being lit.
+///
+/// It deliberately does *not* slide on its first appearance, or when the list
+/// underneath it changes identity — sliding in from a row of a different
+/// panel would be motion that describes nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RowHighlight {
+    y: Spring,
+    height: Spring,
+    shown: bool,
+    last_tick: Option<Instant>,
+}
+
+impl RowHighlight {
+    /// Advance to `now` and return the pill to draw for `target`
+    /// (`[x, y, w, h]`). Only the vertical axis moves: the pill always spans
+    /// the card's content width, so animating x or width would be motion the
+    /// user cannot see.
+    pub(crate) fn advance(&mut self, now: Instant, target: [f32; 4]) -> [f32; 4] {
+        let [x, y, w, h] = target;
+        let y = finite_clamp(y, f32::MIN, f32::MAX, 0.0);
+        let h = finite_clamp(h, 0.0, f32::MAX, 0.0);
+
+        if !self.shown {
+            self.shown = true;
+            self.y = Spring::at(y);
+            self.height = Spring::at(h);
+            self.last_tick = Some(now);
+            return [x, y, w, h];
+        }
+
+        let dt = self.last_tick.replace(now).map_or(0.0, |last| {
+            now.saturating_duration_since(last).as_secs_f32()
+        });
+        // The springs clamp their value at zero, which is right for a size but
+        // wrong for a screen coordinate, so y travels as an offset from the
+        // target and is added back.
+        self.y.advance_signed(y, dt);
+        self.height.advance(h, dt);
+        [x, self.y.value, w, self.height.value]
+    }
+
+    /// Whether the pill is still travelling toward `target`.
+    #[must_use]
+    pub(crate) fn animating(&self, target: [f32; 4]) -> bool {
+        self.shown && !(self.y.settled(target[1]) && self.height.settled(target[3]))
+    }
+
+    /// Forget where the pill was, so the next one appears where it belongs
+    /// instead of sliding in from another panel's row.
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -352,6 +431,83 @@ mod tests {
         assert_eq!(floating.radii(64.0, 24.0, 0.0), (24.0, 24.0));
         // Still capped so a card mid-open stays a capsule.
         assert_eq!(floating.radii(20.0, 24.0, 0.0), (10.0, 10.0));
+    }
+
+    #[test]
+    fn the_selection_pill_appears_where_it_belongs_and_then_slides() {
+        let mut pill = RowHighlight::default();
+        let mut t = Instant::now();
+        let row = |i: f32| [100.0, 200.0 + i * 24.0, 400.0, 24.0];
+
+        // First appearance is placed, not animated: there is nowhere to slide
+        // from.
+        assert_eq!(pill.advance(t, row(0.0)), row(0.0));
+        assert!(!pill.animating(row(0.0)));
+
+        // Moving down starts a travel that has not finished on the next frame.
+        t += FRAME;
+        let mid = pill.advance(t, row(4.0));
+        assert!(mid[1] > row(0.0)[1] && mid[1] < row(4.0)[1], "y {}", mid[1]);
+        assert!(pill.animating(row(4.0)));
+
+        let mut frames = 0;
+        while pill.animating(row(4.0)) && frames < 60 {
+            t += FRAME;
+            pill.advance(t, row(4.0));
+            frames += 1;
+        }
+        assert!(frames < 60, "still moving after {frames} frames");
+        assert!((pill.advance(t, row(4.0))[1] - row(4.0)[1]).abs() < SETTLE_DISTANCE);
+    }
+
+    #[test]
+    fn the_selection_pill_keeps_the_cards_own_x_and_width() {
+        // Only the vertical axis is sprung; the pill always spans the card.
+        let mut pill = RowHighlight::default();
+        let mut t = Instant::now();
+        pill.advance(t, [100.0, 200.0, 400.0, 24.0]);
+        t += FRAME;
+        let drawn = pill.advance(t, [140.0, 320.0, 520.0, 24.0]);
+        assert_eq!(drawn[0], 140.0);
+        assert_eq!(drawn[2], 520.0);
+    }
+
+    #[test]
+    fn a_reset_pill_does_not_slide_in_from_another_panels_row() {
+        let mut pill = RowHighlight::default();
+        let mut t = Instant::now();
+        pill.advance(t, [0.0, 900.0, 400.0, 24.0]);
+        pill.reset();
+        t += FRAME;
+        assert_eq!(pill.advance(t, [0.0, 120.0, 400.0, 24.0]), [0.0, 120.0, 400.0, 24.0]);
+    }
+
+    #[test]
+    fn the_selection_pill_travels_upward_too() {
+        // The springs used by the panel clamp at zero, which is right for a
+        // size and wrong for a coordinate. A pill moving to a smaller y must
+        // still arrive.
+        let mut pill = RowHighlight::default();
+        let mut t = Instant::now();
+        pill.advance(t, [0.0, 600.0, 400.0, 24.0]);
+        for _ in 0..60 {
+            t += FRAME;
+            pill.advance(t, [0.0, 40.0, 400.0, 24.0]);
+        }
+        assert!((pill.advance(t, [0.0, 40.0, 400.0, 24.0])[1] - 40.0).abs() < SETTLE_DISTANCE);
+    }
+
+    #[test]
+    fn an_extreme_selection_target_stays_finite() {
+        let mut pill = RowHighlight::default();
+        let mut t = Instant::now();
+        pill.advance(t, [0.0, f32::NAN, 400.0, f32::INFINITY]);
+        for _ in 0..200 {
+            t += FRAME;
+            let drawn = pill.advance(t, [0.0, 1.0e9, 400.0, -5.0]);
+            assert!(drawn[1].is_finite() && drawn[3].is_finite(), "{drawn:?}");
+            assert!(drawn[3] >= 0.0);
+        }
     }
 
     #[test]

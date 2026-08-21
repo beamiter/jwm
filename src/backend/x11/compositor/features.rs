@@ -163,6 +163,17 @@ impl<C: CompositorConnection> Compositor<C> {
         if self.system_ui.is_none() || overlay.is_none() {
             self.system_ui_island.close();
         }
+        // A different panel is a different surface: its width starts over, and
+        // its selection appears where it belongs instead of sliding in from a
+        // row of the panel it replaced. An update to the *same* panel — a
+        // keystroke, a finished scan — keeps both, which is the whole point of
+        // carrying them.
+        let identity = overlay.as_ref().map_or("", |o| o.title.as_str());
+        if identity != self.system_ui_identity {
+            self.system_ui_identity = identity.to_string();
+            self.system_ui_width_floor = 0.0;
+            self.system_ui_highlight.reset();
+        }
         self.system_ui = overlay;
         self.needs_render = true;
     }

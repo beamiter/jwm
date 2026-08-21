@@ -1290,6 +1290,15 @@ pub(crate) struct WaylandCompositor {
     system_ui: Option<crate::backend::api::SystemUiOverlay>,
     /// Open/morph spring for the docked system-UI card.
     system_ui_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
+    /// Slide of the selection pill between rows of the open list.
+    system_ui_highlight: crate::backend::compositor_common::dynamic_island::RowHighlight,
+    /// Widest the open panel has been. The card never narrows while it is up,
+    /// so a launcher list re-measured on every keystroke cannot resize it.
+    system_ui_width_floor: f32,
+    /// The open panel's title, which is what "a different panel" means to the
+    /// two pieces of state above: both have to forget what they knew when the
+    /// surface underneath them is replaced.
+    system_ui_identity: String,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     compositor_start_time: Instant,
@@ -2599,6 +2608,9 @@ impl WaylandCompositor {
                 hud_text_cache: String::new(),
                 system_ui: None,
                 system_ui_island: Default::default(),
+                system_ui_highlight: Default::default(),
+                system_ui_width_floor: 0.0,
+                system_ui_identity: String::new(),
                 hud_island: Default::default(),
                 compositor_start_time: now,
 

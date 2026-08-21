@@ -12,6 +12,7 @@ use crate::backend::compositor_common::genie::{
     dock_item_preview_target, genie_progress, output_bounds_for_anchor, preview_rect,
 };
 use crate::backend::compositor_common::minimized_thumbnail::ThumbnailPurpose;
+use crate::backend::compositor_common::system_ui_panel as panel;
 use crate::backend::compositor_common::ui_theme::{self, UiPalette};
 use crate::backend::compositor_common::window_glow::{WindowGlowSettings, WindowGlowTarget};
 use smithay::backend::renderer::gles::ffi;
@@ -4374,29 +4375,26 @@ impl WaylandCompositor {
         let (hint_w, hint_h) = dims(3);
 
         let ui = ui_theme::palette();
-        let pad = 30.0;
-        let gap = 16.0;
-        let qpad = 12.0;
         let radius = ui.panel_radius;
         let screen_w = self.screen_w as f32;
         let screen_h = self.screen_h as f32;
 
-        let query_bar_h = if query_h > 0.0 { query_h + 16.0 } else { 0.0 };
-        let content_w = title_w
-            .max(query_w + 2.0 * qpad)
-            .max(items_w)
-            .max(hint_w)
-            .max(360.0);
-        let panel_w = (content_w + 2.0 * pad).min(screen_w - 64.0);
-        let mut panel_h = 2.0 * pad + title_h;
-        if query_bar_h > 0.0 {
-            panel_h += gap + query_bar_h;
-        }
-        if items_h > 0.0 {
-            panel_h += gap + items_h;
-        }
-        if hint_h > 0.0 {
-            panel_h += gap + hint_h;
+        let sizes = panel::SectionSizes {
+            title: (title_w, title_h),
+            query: (query_w, query_h),
+            items: (items_w, items_h),
+            hint: (hint_w, hint_h),
+        };
+        // The lock card centres on its own backdrop and has nothing to jitter
+        // against, so it hugs its content instead of carrying a floor.
+        let width_floor = if overlay.locked {
+            0.0
+        } else {
+            self.system_ui_width_floor
+        };
+        let (panel_w, panel_h) = panel::target_size(&sizes, screen_w, width_floor);
+        if !overlay.locked {
+            self.system_ui_width_floor = panel_w;
         }
 
         // The lock card owns the whole screen and centres on its own opaque
@@ -4508,52 +4506,95 @@ impl WaylandCompositor {
                 gl, projection, ui, x, y, panel_w, panel_h, radius, radius_top, panel_fill, 1.0,
             );
 
-            let mut cy = y + pad + title_h;
-            let mut query_text_pos = None;
-            if query_bar_h > 0.0 {
-                cy += gap;
+            let layout = panel::contents(
+                [x, y, panel_w, panel_h],
+                &sizes,
+                overlay.items.len(),
+                overlay.selected,
+                overlay.scroll.map(|s| panel::Scroll {
+                    first: s.first,
+                    visible: s.visible,
+                    total: s.total,
+                }),
+            );
+
+            if let Some([fx, fy, fw, fh]) = layout.query_field {
                 self.sysui_fill_rounded(
                     gl,
-                    x + pad,
-                    cy,
-                    panel_w - 2.0 * pad,
-                    query_bar_h,
-                    10.0,
+                    fx,
+                    fy,
+                    fw,
+                    fh,
+                    panel::QUERY_RADIUS,
                     UiPalette::faded(ui.field, content_a),
                 );
-                query_text_pos = Some((x + pad + qpad, cy + 8.0));
-                cy += query_bar_h;
             }
-            let mut items_pos = None;
-            if items_h > 0.0 {
-                cy += gap;
-                items_pos = Some((x + pad, cy));
-                if let (Some(sel), rows) = (overlay.selected, overlay.items.len()) {
-                    if rows > 0 && sel < rows {
-                        let line_h = (items_h - 4.0) / rows as f32;
-                        self.sysui_fill_rounded(
-                            gl,
-                            x + pad - 8.0,
-                            cy + sel as f32 * line_h,
-                            panel_w - 2.0 * pad + 16.0,
-                            line_h + 4.0,
-                            8.0,
-                            [
-                                accent[0],
-                                accent[1],
-                                accent[2],
-                                ui.selection_alpha * content_a,
-                            ],
-                        );
-                    }
+            if let Some(target) = layout.selection {
+                // The pill slides between rows rather than teleporting, so the
+                // list reads as one object being moved through. It only asks
+                // for another frame while it is actually travelling.
+                let pill = self
+                    .system_ui_highlight
+                    .advance(std::time::Instant::now(), target);
+                if self.system_ui_highlight.animating(target) {
+                    self.needs_render = true;
                 }
-                cy += items_h;
+                self.sysui_fill_rounded(
+                    gl,
+                    pill[0],
+                    pill[1],
+                    pill[2],
+                    pill[3],
+                    panel::SELECTION_RADIUS,
+                    [
+                        accent[0],
+                        accent[1],
+                        accent[2],
+                        ui.selection_alpha * content_a,
+                    ],
+                );
             }
-            let mut hint_pos = None;
-            if hint_h > 0.0 {
-                cy += gap;
-                hint_pos = Some((x + pad, cy));
+            if let Some([dx, dy, dw, dh]) = layout.divider {
+                // A hairline is all the footer needs to stop reading as one
+                // more row of the list.
+                self.sysui_fill_rounded(
+                    gl,
+                    dx,
+                    dy,
+                    dw,
+                    dh,
+                    0.0,
+                    UiPalette::ink(ui.hint_ink, 0.35 * content_a),
+                );
             }
+            if let (Some([tx, ty, tw, th]), Some([hx, hy, hw, hh])) =
+                (layout.scroll_track, layout.scroll_thumb)
+            {
+                // Without this a windowed list looks exactly like a complete
+                // one: the window manager sends a slice, and nothing else on
+                // the card says so.
+                self.sysui_fill_rounded(
+                    gl,
+                    tx,
+                    ty,
+                    tw,
+                    th,
+                    panel::SCROLLBAR_RADIUS,
+                    UiPalette::faded(ui.track, content_a),
+                );
+                self.sysui_fill_rounded(
+                    gl,
+                    hx,
+                    hy,
+                    hw,
+                    hh,
+                    panel::SCROLLBAR_RADIUS,
+                    UiPalette::ink(ui.item_ink, 0.55 * content_a),
+                );
+            }
+            let query_text_pos = layout.query_text.map(|[qx, qy]| (qx, qy));
+            let items_pos = layout.items.map(|[ix, iy]| (ix, iy));
+            let hint_pos = layout.hint.map(|[hx, hy]| (hx, hy));
 
             // The ring is a circular rounded rect, so a theme whose surfaces are
             // squircles asks for none of it and relies on the shader's own rim.
@@ -4623,7 +4664,7 @@ impl WaylandCompositor {
             gl.Uniform1f(text_opacity, content_a);
             gl.ActiveTexture(ffi::TEXTURE0);
             let positions = [
-                Some((x + pad, y + pad)),
+                Some((layout.title[0], layout.title[1])),
                 query_text_pos,
                 items_pos,
                 hint_pos,
