@@ -65,6 +65,19 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` viewers report their window size and the host stops encoding
+  pixels the window cannot show. A 640-wide viewer previously received a
+  1280-wide image and discarded half of it on arrival. `--max-width` becomes a
+  ceiling rather than a target: a request may only narrow it, so a peer can
+  never make the host spend more readback, encode time or bandwidth than the
+  operator allowed. Measured on a 3440x1440 host as a viewer resized from 1280
+  to 640 wide: capture 18.3 -> 9.5 ms per frame, encode 2.2 -> 0.6 ms,
+  capture-to-ACK 4.9 -> 2.4 ms.
+- The `jwm-remote` viewer no longer clears its whole window before every frame.
+  The backing pixmap is retained between frames and an upload only touches the
+  image rectangle, so the bars around it stay correct until the letterbox
+  itself moves; the per-frame fill also blocked on a synchronous round trip.
+  Viewer draw time fell from 7.8-8.1 ms to 6.0-6.6 ms at native resolution.
 - `jwm-remote` captures when the X server reports a change rather than on a
   fixed timer; `--fps` became a rate limiter instead of a schedule. The loop
   slept blindly to its next grid point and never watched the X connection, so

@@ -111,6 +111,36 @@ fn decode_hello(payload: &[u8]) -> RemoteResult<u8> {
     Ok(payload[10])
 }
 
+/// Smallest viewport a client may request, matching the CLI's `--max-width`
+/// floor so a peer cannot drive the encoder below a supported size.
+pub const MIN_VIEWPORT_WIDTH: u16 = 320;
+
+/// Encode the client's current viewable size.
+#[must_use]
+pub fn encode_viewport(width: u16, height: u16) -> [u8; 4] {
+    let mut payload = [0_u8; 4];
+    payload[..2].copy_from_slice(&width.to_be_bytes());
+    payload[2..].copy_from_slice(&height.to_be_bytes());
+    payload
+}
+
+/// Decode a viewport request.
+///
+/// Only the shape is validated here. What the host is willing to *do* with the
+/// request stays a host policy decision, because the operator's `--max-width`
+/// remains the ceiling.
+pub fn decode_viewport(payload: &[u8]) -> RemoteResult<(u16, u16)> {
+    if payload.len() != 4 {
+        return Err(invalid_data("viewport payload must be exactly four bytes").into());
+    }
+    let width = u16::from_be_bytes(payload[..2].try_into().unwrap());
+    let height = u16::from_be_bytes(payload[2..].try_into().unwrap());
+    if width == 0 || height == 0 {
+        return Err(invalid_data("viewport has an empty dimension").into());
+    }
+    Ok((width, height))
+}
+
 /// Encode a cumulative acknowledgement for the latest frame drawn by the client.
 #[must_use]
 pub fn encode_frame_ack(sequence: u64) -> [u8; 8] {
@@ -391,6 +421,23 @@ mod tests {
                 "version {rejected} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn viewport_round_trips_and_rejects_malformed_payloads() {
+        for (width, height) in [(320_u16, 200_u16), (1280, 720), (u16::MAX, u16::MAX)] {
+            let payload = encode_viewport(width, height);
+            assert_eq!(decode_viewport(&payload).unwrap(), (width, height));
+        }
+
+        assert!(decode_viewport(&[]).is_err(), "empty payload");
+        assert!(decode_viewport(&[0; 3]).is_err(), "short payload");
+        assert!(decode_viewport(&[0; 5]).is_err(), "trailing bytes");
+        assert!(
+            decode_viewport(&encode_viewport(0, 100)).is_err(),
+            "an empty dimension is not a viewport"
+        );
+        assert!(decode_viewport(&encode_viewport(100, 0)).is_err());
     }
 
     #[test]

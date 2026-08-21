@@ -146,6 +146,14 @@ pub struct Viewer {
     width: u16,
     height: u16,
     backing_valid: bool,
+    /// Letterbox the retained backing pixmap was last cleared for.
+    ///
+    /// The pixmap survives between frames and an upload only ever touches the
+    /// image rectangle, so the bars around it stay correct until the
+    /// letterbox itself moves. Clearing the whole window every frame cost a
+    /// full-window fill plus a synchronous round trip for pixels the very next
+    /// upload overwrote.
+    backing_letterbox: Option<Letterbox>,
     grab_input: bool,
     forward_input: bool,
     forward_keyboard: bool,
@@ -321,6 +329,7 @@ impl Viewer {
             width: initial_width,
             height: initial_height,
             backing_valid: false,
+            backing_letterbox: None,
             grab_input,
             forward_input,
             forward_keyboard,
@@ -602,6 +611,14 @@ impl Viewer {
         Ok(!self.closed)
     }
 
+    /// Current viewable size in pixels.
+    ///
+    /// The host uses this to stop encoding detail the window cannot show.
+    #[must_use]
+    pub fn viewport(&self) -> (u16, u16) {
+        (self.width, self.height)
+    }
+
     /// Whether `keycode` currently resolves to the F12 keysym on this X server.
     #[must_use]
     pub fn is_f12(&self, keycode: u8) -> bool {
@@ -753,6 +770,8 @@ impl Viewer {
         }
         let previous = std::mem::replace(&mut self.backing, replacement);
         self.backing_valid = false;
+        // A fresh pixmap has undefined contents; the bars are no longer drawn.
+        self.backing_letterbox = None;
         // RenderUpscale::replace_backing has already freed the Picture that
         // wrapped `previous`, so the drawable can now be released safely.
         self.conn.free_pixmap(previous)?.check()?;
@@ -815,7 +834,15 @@ impl Viewer {
                     &mut self.deferred_events,
                 )? {
                     RenderProgress::Ready => {
-                        fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
+                        clear_backing_if_moved(
+                            &self.conn,
+                            self.backing,
+                            self.gc,
+                            self.width,
+                            self.height,
+                            &mut self.backing_letterbox,
+                            geometry,
+                        )?;
                         match self.render_upscale.composite(
                             &self.conn,
                             geometry,
@@ -865,7 +892,15 @@ impl Viewer {
                 .map_err(|_| invalid_data("letterbox X offset exceeds the X11 coordinate range"))?;
             let dst_y = i16::try_from(geometry.y)
                 .map_err(|_| invalid_data("letterbox Y offset exceeds the X11 coordinate range"))?;
-            fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
+            clear_backing_if_moved(
+                &self.conn,
+                self.backing,
+                self.gc,
+                self.width,
+                self.height,
+                &mut self.backing_letterbox,
+                geometry,
+            )?;
             let cpu_result = self.shm_upload.upload_or_core(
                 &self.conn,
                 image,
@@ -883,6 +918,7 @@ impl Viewer {
             })?;
         } else {
             fill_backing(&self.conn, self.backing, self.gc, self.width, self.height)?;
+            self.backing_letterbox = None;
         }
         // Populate the retained pixmap completely before presenting it. If any
         // fill/upload fails, no CopyArea has been queued and the previous
@@ -2030,6 +2066,36 @@ fn backing_work(valid: bool) -> BackingWork {
     }
 }
 
+/// Clear the retained backing only when the letterbox actually moved.
+///
+/// Steady-state frames therefore issue no fill request at all: the bars around
+/// the image are already correct, and the image rectangle is about to be
+/// overwritten in full. Taking the fields individually rather than `&mut self`
+/// keeps this callable while the frame and the native image are borrowed.
+fn clear_backing_if_moved(
+    conn: &RustConnection,
+    backing: Pixmap,
+    gc: Gcontext,
+    width: u16,
+    height: u16,
+    cleared: &mut Option<Letterbox>,
+    geometry: Letterbox,
+) -> RemoteResult<()> {
+    if !backing_needs_clear(*cleared, geometry) {
+        return Ok(());
+    }
+    fill_backing(conn, backing, gc, width, height)?;
+    // Record only after the fill succeeded, so a failure repeats it rather
+    // than leaving stale bars on screen forever.
+    *cleared = Some(geometry);
+    Ok(())
+}
+
+/// Whether the retained backing still has correct bars for `geometry`.
+fn backing_needs_clear(cleared: Option<Letterbox>, geometry: Letterbox) -> bool {
+    cleared != Some(geometry)
+}
+
 fn fill_backing(
     conn: &RustConnection,
     backing: Pixmap,
@@ -2373,6 +2439,41 @@ mod tests {
             depth: 24,
             bits_per_pixel: 32,
             scanline_pad: 32,
+        }
+    }
+
+    #[test]
+    fn the_backing_is_cleared_only_when_the_letterbox_moves() {
+        let geometry = Letterbox {
+            x: 4,
+            y: 8,
+            width: 100,
+            height: 50,
+        };
+
+        // A fresh or resized pixmap has undefined contents.
+        assert!(backing_needs_clear(None, geometry));
+        // Steady-state frames must issue no fill at all: the bars are already
+        // right and the image rectangle is about to be fully overwritten.
+        assert!(!backing_needs_clear(Some(geometry), geometry));
+
+        // Any movement of the image rectangle leaves stale pixels outside it.
+        for moved in [
+            Letterbox { x: 5, ..geometry },
+            Letterbox { y: 9, ..geometry },
+            Letterbox {
+                width: 99,
+                ..geometry
+            },
+            Letterbox {
+                height: 49,
+                ..geometry
+            },
+        ] {
+            assert!(
+                backing_needs_clear(Some(geometry), moved),
+                "{moved:?} must repaint the bars"
+            );
         }
     }
 

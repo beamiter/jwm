@@ -58,7 +58,10 @@ enum Command {
         #[arg(long)]
         fixed_jpeg_quality: bool,
 
-        /// Downscale wider frames; 0 keeps native width.
+        /// Ceiling on encoded width; 0 keeps native width.
+        ///
+        /// A viewer reports its window size and the host narrows below this
+        /// automatically. A peer can never raise it.
         #[arg(long, default_value = "1280", value_parser = parse_max_width)]
         max_width: u16,
 
@@ -66,7 +69,10 @@ enum Command {
         #[arg(long, default_value = "auto", value_parser = parse_capture_source)]
         capture_source: CaptureSource,
 
-        /// Permit binding beyond loopback. Traffic is authenticated, not encrypted.
+        /// Permit binding beyond loopback.
+        ///
+        /// Traffic is encrypted and authenticated, but without forward secrecy:
+        /// a leaked key file decrypts recorded sessions.
         #[arg(long)]
         allow_lan: bool,
 

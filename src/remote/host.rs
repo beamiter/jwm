@@ -3,7 +3,10 @@
 use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::key::load_key_file;
-use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input_batch};
+use super::messages::{
+    ClientHello, MIN_VIEWPORT_WIDTH, ServerHello, decode_frame_ack, decode_input_batch,
+    decode_viewport,
+};
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
@@ -19,7 +22,7 @@ use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,6 +52,50 @@ const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Longest single sleep while rate limited, so shutdown stays responsive.
 const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
+
+/// The encoded width the viewer has asked for, shared across session threads.
+///
+/// The input thread learns the viewer's size; the capture thread is what acts
+/// on it. A single relaxed integer is enough: the value is idempotent, a lost
+/// update is corrected by the next request, and neither side may block.
+#[derive(Debug)]
+struct ViewportRequest {
+    /// Requested width, or zero while the viewer has not asked for anything.
+    width: AtomicU32,
+}
+
+impl ViewportRequest {
+    fn new() -> Self {
+        Self {
+            width: AtomicU32::new(0),
+        }
+    }
+
+    fn request(&self, width: u16) {
+        self.width.store(u32::from(width), Ordering::Relaxed);
+    }
+
+    fn take(&self) -> Option<u16> {
+        match self.width.swap(0, Ordering::Relaxed) {
+            0 => None,
+            width => u16::try_from(width).ok(),
+        }
+    }
+}
+
+/// Resolve a viewer request against the operator's configured ceiling.
+///
+/// `--max-width` is a policy limit, so a request may only ever narrow it. A
+/// peer that asks for more pixels than the operator allowed gets the ceiling,
+/// not its request.
+fn effective_encoded_width(configured: u16, requested: u16) -> u16 {
+    let requested = requested.max(MIN_VIEWPORT_WIDTH);
+    if configured == 0 {
+        // Native capture: any request narrows it.
+        return requested;
+    }
+    requested.min(configured)
+}
 const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
@@ -1385,6 +1432,8 @@ fn serve_client(
     let input_credits = Arc::clone(&credits);
     let input_telemetry = Arc::clone(&telemetry);
     let input_jpeg_quality = Arc::clone(&jpeg_quality);
+    let viewport = Arc::new(ViewportRequest::new());
+    let input_viewport = Arc::clone(&viewport);
     let input_thread = thread::Builder::new()
         .name("jwm-remote-input".into())
         .spawn(move || {
@@ -1401,10 +1450,12 @@ fn serve_client(
                 &input_credits,
                 &input_telemetry,
                 &input_jpeg_quality,
+                &input_viewport,
             )
         })?;
 
     let stream_result = stream_frames(
+        &viewport,
         &mut capture,
         writer,
         &control,
@@ -1442,6 +1493,7 @@ fn serve_client(
 }
 
 fn stream_frames(
+    viewport: &ViewportRequest,
     capture: &mut X11Capture,
     writer: SessionWriter<DeadlineWriter<TcpStream>>,
     control: &TcpStream,
@@ -1508,6 +1560,12 @@ fn stream_frames(
             // Announce every capture-path transition, not just the first. Each
             // of these degradations is large and was previously visible only
             // as a single line that had long since scrolled away.
+            if let Some(requested) = viewport.take() {
+                let width = effective_encoded_width(options.max_width, requested);
+                if capture.set_max_width(width) {
+                    eprintln!("jwm-remote: encoding at up to {width} pixels wide for this viewer");
+                }
+            }
             let mode = capture.mode();
             // Record every tick: the telemetry window resets on each report, so
             // recording only on change left later windows claiming a fully
@@ -1835,6 +1893,7 @@ fn receive_input(
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
+    viewport: &ViewportRequest,
 ) -> RemoteResult<()> {
     let mut payload = Vec::new();
     let session_result = (|| -> RemoteResult<()> {
@@ -1905,6 +1964,11 @@ fn receive_input(
                 }
                 MessageKind::Heartbeat => {
                     return Err(invalid_data("client heartbeat payload must be empty").into());
+                }
+                MessageKind::Viewport => {
+                    let (width, height) = decode_viewport(&payload)?;
+                    viewport.request(width);
+                    let _ = height;
                 }
                 MessageKind::FrameAck => {
                     let acknowledged_at = Instant::now();
@@ -2144,6 +2208,43 @@ mod tests {
             .decode_into(payload, new_decode_buffer_pool())
             .expect("host wire frames decode");
         (frame.sequence(), frame.image().clone())
+    }
+
+    #[test]
+    fn a_viewport_request_can_only_narrow_the_operator_ceiling() {
+        // A peer asking for more pixels than the operator allowed gets the
+        // ceiling. Otherwise the viewer would dictate host CPU, readback size
+        // and bandwidth, which is exactly what --max-width exists to bound.
+        assert_eq!(effective_encoded_width(1280, 2560), 1280);
+        assert_eq!(effective_encoded_width(1280, 1280), 1280);
+        assert_eq!(effective_encoded_width(1280, 640), 640);
+
+        // Native capture has no ceiling, so any request narrows it.
+        assert_eq!(effective_encoded_width(0, 1600), 1600);
+        assert_eq!(effective_encoded_width(0, 16384), 16384);
+
+        // The floor matches the CLI's, so a peer cannot drive the encoder
+        // below a width the rest of the pipeline supports.
+        assert_eq!(effective_encoded_width(1280, 1), MIN_VIEWPORT_WIDTH);
+        assert_eq!(effective_encoded_width(0, 0), MIN_VIEWPORT_WIDTH);
+        // ...and the ceiling still wins when it is itself below the floor.
+        assert_eq!(effective_encoded_width(320, 8), MIN_VIEWPORT_WIDTH);
+    }
+
+    #[test]
+    fn viewport_requests_are_idempotent_and_consumed_once() {
+        let viewport = ViewportRequest::new();
+        assert_eq!(viewport.take(), None, "nothing requested yet");
+
+        viewport.request(900);
+        assert_eq!(viewport.take(), Some(900));
+        assert_eq!(viewport.take(), None, "a request is acted on once");
+
+        // A newer request supersedes an unread one; the capture thread only
+        // ever needs the latest size.
+        viewport.request(800);
+        viewport.request(1024);
+        assert_eq!(viewport.take(), Some(1024));
     }
 
     #[test]
@@ -3570,6 +3671,7 @@ mod tests {
                 &receiver_credits,
                 &receiver_telemetry,
                 &receiver_jpeg_quality,
+                &ViewportRequest::new(),
             )
         });
 

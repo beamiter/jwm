@@ -1570,6 +1570,40 @@ impl X11Capture {
         Ok(())
     }
 
+    /// Narrow the encoded width for the rest of the session.
+    ///
+    /// The operator's `--max-width` stays the ceiling: a peer can ask for
+    /// fewer pixels than the host was configured to send, never more. Sending
+    /// a viewer more pixels than its window can show costs bandwidth, encode
+    /// time and readback for detail that is thrown away on arrival.
+    ///
+    /// Returns whether the effective width changed.
+    pub fn set_max_width(&mut self, max_width: u16) -> bool {
+        if self.max_width == max_width {
+            return false;
+        }
+        self.max_width = max_width;
+        // A native-width session never built a scaler. Downscaling now needs
+        // one, and the CPU resize fallback would otherwise be permanent.
+        if max_width != 0 && self.render_scaler.is_none() && self.render_failures == 0 {
+            match self.screen() {
+                Ok(screen) => {
+                    let screen = screen.clone();
+                    match RenderScaler::connect(&self.conn, self.screen_num, &screen) {
+                        Ok(scaler) => self.render_scaler = Some(scaler),
+                        Err(error) => eprintln!(
+                            "jwm-remote: XRender downscaling unavailable ({error}); using CPU fallback"
+                        ),
+                    }
+                }
+                Err(error) => eprintln!(
+                    "jwm-remote: cannot inspect the screen for XRender downscaling ({error}); using CPU fallback"
+                ),
+            }
+        }
+        true
+    }
+
     /// Borrow the capture connection's file descriptor.
     #[must_use]
     pub fn connection_fd(&self) -> BorrowedFd<'_> {

@@ -150,6 +150,9 @@ pub enum MessageKind {
     FrameAck = 10,
     /// One atomically decoded batch of pointer, key, button, or release events.
     InputBatch = 11,
+    /// Client's current viewable size, so the host stops encoding pixels the
+    /// viewer cannot display.
+    Viewport = 12,
 }
 
 impl TryFrom<u8> for MessageKind {
@@ -168,6 +171,7 @@ impl TryFrom<u8> for MessageKind {
             9 => Ok(Self::Heartbeat),
             10 => Ok(Self::FrameAck),
             11 => Ok(Self::InputBatch),
+            12 => Ok(Self::Viewport),
             other => Err(ProtocolError::UnknownMessageKind(other)),
         }
     }

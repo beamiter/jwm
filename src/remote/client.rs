@@ -5,6 +5,7 @@ use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_bu
 use super::key::load_key_file;
 use super::messages::{
     ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
+    encode_viewport,
 };
 use super::protocol::{
     MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
@@ -214,6 +215,10 @@ fn viewer_loop(
     let mut next_heartbeat = Instant::now() + HEARTBEAT_INTERVAL;
     let mut input_batch = Vec::with_capacity(MAX_INPUT_BATCH_EVENTS);
     let mut input_payload = Vec::new();
+    // Tell the host how much this window can actually show. Without it the
+    // host encodes to a fixed width forever, so a small window receives detail
+    // it immediately throws away.
+    let mut reported_viewport = None;
     loop {
         wake.drain()?;
         let events = viewer.poll_events()?;
@@ -225,6 +230,16 @@ fn viewer_loop(
             |batch| write_input_batch(writer, batch, &mut input_payload),
         )?;
         let mut wrote = outcome.wrote_input;
+        // Sent after poll_events, which coalesces an interactive resize burst
+        // into its final size, so a drag produces one request rather than one
+        // per intermediate size.
+        let viewport = viewer.viewport();
+        if reported_viewport != Some(viewport) && !outcome.close {
+            let (width, height) = viewport;
+            writer.write_message(MessageKind::Viewport, &encode_viewport(width, height))?;
+            reported_viewport = Some(viewport);
+            wrote = true;
+        }
         if Instant::now() >= next_heartbeat {
             writer.write_message(MessageKind::Heartbeat, &[])?;
             wrote = true;
@@ -970,7 +985,8 @@ fn receive_frames(
             | MessageKind::Key
             | MessageKind::Button
             | MessageKind::ReleaseAll
-            | MessageKind::InputBatch => {
+            | MessageKind::InputBatch
+            | MessageKind::Viewport => {
                 return Err(invalid_data(format!("unexpected host message: {kind:?}")).into());
             }
             MessageKind::Heartbeat => {

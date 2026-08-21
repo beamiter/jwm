@@ -487,6 +487,25 @@ belonging to no extension this connection selected cannot have cost a
 notification it depends on, so those are tolerated in a run of eight before the
 session distrusts its caches wholesale.
 
+### Viewport negotiation
+
+The viewer reports its window size, and the host stops encoding pixels that
+window cannot show. A 640-wide viewer previously received a 1280-wide image and
+threw half of it away on arrival; the request is re-sent whenever the window
+resizes, coalesced so an interactive drag produces one request rather than one
+per intermediate size.
+
+`--max-width` is a ceiling, not a target. A request may only ever narrow it, so
+a peer can never make the host spend more readback, encode time or bandwidth
+than the operator allowed; requests below the 320-pixel floor are clamped to
+it. To let a large viewer receive more detail, raise `--max-width` on the host
+— that stays an operator decision.
+
+Changing the encoded size retargets the XRender scaler and forces one keyframe,
+since the viewer's canvas geometry has changed. Measured on a 3440x1440 host as
+a viewer resized from 1280 to 640 wide: capture fell from 18.3 ms to 9.5 ms per
+frame, encode from 2.2 ms to 0.6 ms, and capture-to-ACK from 4.9 ms to 2.4 ms.
+
 ### Capture scheduling
 
 `--fps` is a rate limiter, not a schedule. The capture loop waits on the X
