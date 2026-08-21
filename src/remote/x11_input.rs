@@ -170,14 +170,24 @@ impl InputInjector {
     ///
     /// XTEST's `time` field is a delay in milliseconds, not the source X event
     /// timestamp, so interactive operations always use a zero delay here.
-    pub fn inject(&mut self, event: InputEvent) -> Result<(), InputError> {
-        self.inject_batch(std::slice::from_ref(&event))
+    pub fn inject(&mut self, event: InputEvent, origin: (i16, i16)) -> Result<(), InputError> {
+        self.inject_batch(std::slice::from_ref(&event), origin)
     }
 
     /// Validate a complete batch, queue its XTEST requests in order, then
     /// flush the connection once. No request is queued until every keycode,
     /// coordinate, button mapping, and `ReleaseAll` expansion is valid.
-    pub fn inject_batch(&mut self, events: &[InputEvent]) -> Result<(), InputError> {
+    /// `origin` is where the shared area starts in root coordinates.
+    ///
+    /// The viewer maps its window onto the shared area, so the coordinates it
+    /// sends are relative to that area, while XTEST warps in root
+    /// coordinates. Sharing one monitor of a multi-monitor root would
+    /// otherwise land every click on the leftmost display.
+    pub fn inject_batch(
+        &mut self,
+        events: &[InputEvent],
+        origin: (i16, i16),
+    ) -> Result<(), InputError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -196,6 +206,7 @@ impl InputInjector {
             self.min_keycode,
             self.max_keycode,
             &pointer_mapping,
+            origin,
         )?;
         let conn = &self.conn;
         let root = self.root;
@@ -301,6 +312,12 @@ fn coordinate(axis: char, value: u16) -> Result<i16, InputError> {
     i16::try_from(value).map_err(|_| InputError::CoordinateOutOfRange { axis, value })
 }
 
+/// Translate a shared-area coordinate into a root coordinate.
+fn root_coordinate(axis: char, value: u16, origin: i16) -> Result<i16, InputError> {
+    let translated = i32::from(coordinate(axis, value)?) + i32::from(origin);
+    i16::try_from(translated).map_err(|_| InputError::CoordinateOutOfRange { axis, value })
+}
+
 fn physical_button(mapping: &[u8], logical: u8) -> Option<u8> {
     mapping
         .iter()
@@ -322,6 +339,7 @@ fn prepare_batch(
     min_keycode: u8,
     max_keycode: u8,
     pointer_mapping: &[u8],
+    origin: (i16, i16),
 ) -> Result<(Vec<PreparedInput>, PressedState, PressedState), InputError> {
     let mut next_pressed = pressed.clone();
     // Until the one final flush succeeds, any prefix of the queued requests
@@ -340,7 +358,9 @@ fn prepare_batch(
             next_pressed.record_success(InputEvent::ReleaseAll, None);
             continue;
         }
-        let Some(request) = prepare_input(event, min_keycode, max_keycode, pointer_mapping)? else {
+        let Some(request) =
+            prepare_input(event, min_keycode, max_keycode, pointer_mapping, origin)?
+        else {
             continue;
         };
         let physical = matches!(event, InputEvent::Button { .. }).then_some(request.detail);
@@ -377,13 +397,14 @@ fn prepare_input(
     min_keycode: u8,
     max_keycode: u8,
     pointer_mapping: &[u8],
+    origin: (i16, i16),
 ) -> Result<Option<PreparedInput>, InputError> {
     let (type_, detail, root_x, root_y) = match event {
         InputEvent::Pointer { x, y } => (
             MOTION_NOTIFY_EVENT,
             ABSOLUTE_MOTION,
-            coordinate('x', x)?,
-            coordinate('y', y)?,
+            root_coordinate('x', x, origin.0)?,
+            root_coordinate('y', y, origin.1)?,
         ),
         InputEvent::Key { keycode, pressed } => {
             if !(min_keycode..=max_keycode).contains(&keycode) {
@@ -690,6 +711,38 @@ mod tests {
     }
 
     #[test]
+    fn pointer_coordinates_are_translated_into_root_space() {
+        // The viewer maps its window onto the shared area, so it sends
+        // area-relative coordinates. Sharing the right-hand monitor of a dual
+        // 1920x1080 root would otherwise land every click on the left one.
+        let pressed = PressedState::default();
+        let events = [InputEvent::Pointer { x: 10, y: 20 }];
+        let (prepared, _, _) =
+            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], (1920, 0)).unwrap();
+        assert_eq!(prepared[0].root_x, 1930);
+        assert_eq!(prepared[0].root_y, 20);
+
+        // Whole-root sharing keeps the coordinates exactly as sent.
+        let (prepared, _, _) =
+            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], (0, 0)).unwrap();
+        assert_eq!((prepared[0].root_x, prepared[0].root_y), (10, 20));
+
+        // A translation that leaves the X11 coordinate range fails closed
+        // rather than wrapping into some unrelated part of the desktop.
+        assert!(
+            prepare_batch(
+                &[InputEvent::Pointer { x: 30000, y: 0 }],
+                &pressed,
+                8,
+                255,
+                &[1, 2, 3],
+                (30000, 0)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn an_unmapped_button_is_dropped_without_losing_the_rest_of_the_batch() {
         // The peer's pointer map is not this host's. A 12-button mouse, or a
         // horizontal scroll (libinput legacy buttons 6/7), names buttons that
@@ -714,7 +767,7 @@ mod tests {
         ];
 
         let (prepared, next_pressed, uncertain_pressed) =
-            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3]).unwrap();
+            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3], (0, 0)).unwrap();
         let types_and_details: Vec<_> = prepared
             .iter()
             .map(|request| (request.type_, request.detail))
@@ -745,6 +798,7 @@ mod tests {
             8,
             255,
             &[3, 2, 1],
+            (0, 0),
         )
         .unwrap();
         pressed = next_pressed;
@@ -759,8 +813,15 @@ mod tests {
         // The pointer is remapped to identity while the button is still down.
         // The release must still target physical 3, or the real button stays
         // stuck down on the host with no way for the peer to lift it.
-        let (prepared, after, _) =
-            prepare_batch(&[InputEvent::ReleaseAll], &pressed, 8, 255, &[1, 2, 3]).unwrap();
+        let (prepared, after, _) = prepare_batch(
+            &[InputEvent::ReleaseAll],
+            &pressed,
+            8,
+            255,
+            &[1, 2, 3],
+            (0, 0),
+        )
+        .unwrap();
         assert_eq!(
             prepared
                 .iter()
@@ -811,7 +872,7 @@ mod tests {
         ];
 
         let (prepared, next_pressed, uncertain_pressed) =
-            prepare_batch(&events, &pressed, 8, 255, &[3, 2, 1, 4, 5]).unwrap();
+            prepare_batch(&events, &pressed, 8, 255, &[3, 2, 1, 4, 5], (0, 0)).unwrap();
         let types_and_details: Vec<_> = prepared
             .iter()
             .map(|request| (request.type_, request.detail))
@@ -877,7 +938,7 @@ mod tests {
             },
         ];
 
-        assert!(prepare_batch(&events, &pressed, 8, 255, &[]).is_err());
+        assert!(prepare_batch(&events, &pressed, 8, 255, &[], (0, 0)).is_err());
         assert!(pressed.release_plan().is_empty());
     }
 
@@ -905,6 +966,7 @@ mod tests {
             8,
             255,
             &[1, 2, 3, 4, 5],
+            (0, 0),
         )
         .unwrap();
         assert!(final_pressed.release_plan().is_empty());
@@ -941,7 +1003,7 @@ mod tests {
             },
         ];
         let (prepared, final_pressed, uncertain_pressed) =
-            prepare_batch(&events, &initial, 8, 255, &[1, 2, 3, 4, 5]).unwrap();
+            prepare_batch(&events, &initial, 8, 255, &[1, 2, 3, 4, 5], (0, 0)).unwrap();
         let uncertain_plan = uncertain_pressed.release_plan();
         let final_plan = final_pressed.release_plan();
 

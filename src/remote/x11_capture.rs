@@ -215,6 +215,31 @@ pub enum CaptureSource {
     Root,
 }
 
+/// Parse `WxH+X+Y`, the geometry spelling X11 tools already use.
+impl std::str::FromStr for CaptureRegion {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let malformed = || format!("region must look like WxH+X+Y, got {value:?}");
+        let (size, offsets) = value.split_once('+').ok_or_else(malformed)?;
+        let (width, height) = size.split_once(['x', 'X']).ok_or_else(malformed)?;
+        let (x, y) = offsets.split_once('+').ok_or_else(malformed)?;
+        let width: u16 = width.parse().map_err(|_| malformed())?;
+        let height: u16 = height.parse().map_err(|_| malformed())?;
+        let x: i16 = x.parse().map_err(|_| malformed())?;
+        let y: i16 = y.parse().map_err(|_| malformed())?;
+        if width == 0 || height == 0 {
+            return Err(format!("region has an empty dimension: {value:?}"));
+        }
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
 impl std::str::FromStr for CaptureSource {
     type Err = String;
 
@@ -904,6 +929,10 @@ pub struct X11Capture {
     max_width: u16,
     /// Optional encoded-height bound; zero leaves height unbounded.
     max_height: u16,
+    /// What the operator asked to share.
+    area: CaptureArea,
+    /// The resolved rectangle, or `None` for the whole root.
+    region: Option<CaptureRegion>,
     render_scaler: Option<RenderScaler>,
     /// When XRender scaling may be attempted again after a rejected request.
     render_suspended_until: Option<Instant>,
@@ -917,6 +946,7 @@ impl X11Capture {
         display: Option<&str>,
         requested_source: CaptureSource,
         max_width: u16,
+        area: CaptureArea,
     ) -> RemoteResult<Self> {
         let (conn, screen_num) = x11rb::connect(display)?;
         let screen = conn
@@ -1042,12 +1072,17 @@ impl X11Capture {
             requested_source,
             max_width,
             max_height: 0,
+            area,
+            region: None,
             render_scaler,
             render_suspended_until: None,
             render_failures: 0,
             event_attribution,
             shm_readback,
         };
+        // Fail fast on an unusable area: a typo in --monitor should be an
+        // error at startup, not a black rectangle discovered later.
+        capture.refresh_region()?;
         // Drain notifications queued between subscription and the baselines.
         // No pixels are captured until all three caches have been reconciled.
         capture.drain_dynamic_events()?;
@@ -1069,8 +1104,20 @@ impl X11Capture {
         if self.sync_overlay_source()? {
             self.damage.invalidate();
         }
+        let (root_width, root_height) = self.root_geometry.dimensions(&self.conn, self.root)?;
+        validate_root_geometry(root_width, root_height)?;
+        // A layout change can move or retire the monitor being shared, so the
+        // area is re-resolved rather than remembered as a fixed rectangle.
+        if self.region.is_some_and(|region| {
+            clip_region_to_root(region, root_width, root_height) != Some(region)
+        }) || (self.region.is_none() && self.area != CaptureArea::Root)
+        {
+            self.refresh_region()?;
+        }
         let (mut source_width, mut source_height) =
-            self.root_geometry.dimensions(&self.conn, self.root)?;
+            self.region.map_or((root_width, root_height), |region| {
+                (region.width, region.height)
+            });
         validate_root_geometry(source_width, source_height)?;
         let mut source_geometry_epoch = self.root_geometry.epoch();
 
@@ -1216,6 +1263,7 @@ impl X11Capture {
         source_geometry_epoch: u64,
         allow_render: bool,
     ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
+        let origin = self.origin();
         let (output_width, output_height) =
             scaled_dimensions(source_width, source_height, self.max_width, self.max_height);
         let render_source = render_capture_source(self.root, drawable);
@@ -1238,6 +1286,7 @@ impl X11Capture {
                     &self.conn,
                     &mut self.shm_readback,
                     render_source,
+                    origin,
                     source_width,
                     source_height,
                     output_width,
@@ -1257,6 +1306,7 @@ impl X11Capture {
                         &mut self.cursor,
                         pending_cursor,
                     )?;
+                    let position = translate_cursor(position, origin);
                     self.finish_cursor(position, &mut image, source_width, source_height)
                         .map_err(CaptureFailure::fatal)?;
                     if render_source == RenderCaptureSource::RootSnapshot
@@ -1293,6 +1343,7 @@ impl X11Capture {
         let image_result = self.shm_readback.capture_rgb(
             &self.conn,
             drawable,
+            origin,
             source_width,
             source_height,
             ReadbackLayout::ReplyVisual {
@@ -1606,6 +1657,23 @@ impl X11Capture {
             }
         }
         true
+    }
+
+    /// Re-resolve the shared area against the current root geometry.
+    fn refresh_region(&mut self) -> RemoteResult<()> {
+        let (root_width, root_height) = self.root_geometry.dimensions(&self.conn, self.root)?;
+        self.region =
+            resolve_capture_area(&self.conn, self.root, &self.area, root_width, root_height)?;
+        Ok(())
+    }
+
+    /// Origin of the shared area in root coordinates.
+    ///
+    /// Injected pointer coordinates arrive in shared-area space, so the host
+    /// adds this before handing them to XTEST.
+    #[must_use]
+    pub fn origin(&self) -> (i16, i16) {
+        self.region.map_or((0, 0), |region| (region.x, region.y))
     }
 
     /// Borrow the capture connection's file descriptor.
@@ -2361,6 +2429,7 @@ impl ShmReadback {
         &mut self,
         conn: &RustConnection,
         drawable: u32,
+        origin: (i16, i16),
         width: u16,
         height: u16,
         layout: ReadbackLayout,
@@ -2368,11 +2437,11 @@ impl ShmReadback {
         let shm_result = match self {
             Self::Disabled => None,
             Self::Enabled(readback) => {
-                Some(readback.capture_rgb(conn, drawable, width, height, layout))
+                Some(readback.capture_rgb(conn, drawable, origin, width, height, layout))
             }
         };
         match resolve_readback(shm_result, || {
-            core_capture_rgb(conn, drawable, width, height, layout)
+            core_capture_rgb(conn, drawable, origin, width, height, layout)
         }) {
             ReadbackOutcome::Image(image) => Ok(image),
             ReadbackOutcome::CoreFallback { image, shm_error } => {
@@ -2409,6 +2478,7 @@ impl EnabledShmReadback {
         &mut self,
         conn: &RustConnection,
         drawable: u32,
+        origin: (i16, i16),
         width: u16,
         height: u16,
         layout: ReadbackLayout,
@@ -2423,8 +2493,8 @@ impl EnabledShmReadback {
             let reply = shm::get_image(
                 conn,
                 drawable,
-                0,
-                0,
+                origin.0,
+                origin.1,
                 width,
                 height,
                 u32::MAX,
@@ -2669,6 +2739,7 @@ fn shm_needs_growth(current_capacity: Option<usize>, required: usize) -> bool {
 fn core_capture_rgb(
     conn: &RustConnection,
     drawable: u32,
+    origin: (i16, i16),
     width: u16,
     height: u16,
     layout: ReadbackLayout,
@@ -2677,8 +2748,8 @@ fn core_capture_rgb(
         .get_image(
             ImageFormat::Z_PIXMAP,
             drawable,
-            0,
-            0,
+            origin.0,
+            origin.1,
             width,
             height,
             u32::MAX,
@@ -2881,7 +2952,7 @@ enum RenderSourceBacking {
 struct RenderSource {
     backing: RenderSourceBacking,
     picture: Picture,
-    transform: Option<(u16, u16, u16, u16)>,
+    transform: Option<((i16, i16), u16, u16, u16, u16)>,
 }
 
 struct RenderTarget {
@@ -2901,7 +2972,7 @@ struct RenderScaler {
     root_standard_bgrx_visual: bool,
     source: Option<RenderSource>,
     target: Option<RenderTarget>,
-    reported_dimensions: Option<(u16, u16, u16, u16)>,
+    reported_dimensions: Option<((i16, i16), u16, u16, u16, u16)>,
 }
 
 impl RenderScaler {
@@ -2989,6 +3060,7 @@ impl RenderScaler {
         conn: &RustConnection,
         readback: &mut ShmReadback,
         capture_source: RenderCaptureSource,
+        origin: (i16, i16),
         source_width: u16,
         source_height: u16,
         output_width: u16,
@@ -2996,7 +3068,20 @@ impl RenderScaler {
     ) -> Result<RgbImage, RenderCaptureError> {
         self.ensure_target(conn, output_width, output_height)?;
         self.ensure_source(conn, capture_source, source_width, source_height)?;
-        let dimensions = (source_width, source_height, output_width, output_height);
+        // A root snapshot copies the shared area into the staging pixmap, so
+        // its own origin is already zero; only the overlay Picture, which
+        // wraps the whole root, needs the offset folded into the transform.
+        let transform_origin = match capture_source {
+            RenderCaptureSource::RootSnapshot => (0, 0),
+            RenderCaptureSource::Overlay(_) => origin,
+        };
+        let dimensions = (
+            transform_origin,
+            source_width,
+            source_height,
+            output_width,
+            output_height,
+        );
         let source = self
             .source
             .as_mut()
@@ -3005,7 +3090,13 @@ impl RenderScaler {
             render::set_picture_transform(
                 conn,
                 source.picture,
-                scale_transform(source_width, source_height, output_width, output_height)?,
+                scale_transform(
+                    transform_origin,
+                    source_width,
+                    source_height,
+                    output_width,
+                    output_height,
+                )?,
             )?
             .check()?;
             source.transform = Some(dimensions);
@@ -3024,8 +3115,8 @@ impl RenderScaler {
                 self.root,
                 pixmap,
                 gc,
-                0,
-                0,
+                origin.0,
+                origin.1,
                 0,
                 0,
                 source_width,
@@ -3059,6 +3150,7 @@ impl RenderScaler {
         let image = readback.capture_rgb(
             conn,
             target.pixmap,
+            (0, 0),
             output_width,
             output_height,
             ReadbackLayout::Known {
@@ -3077,9 +3169,13 @@ impl RenderScaler {
         let composite_result = composite.check().map_err(Into::into);
         let image = resolve_render_readback(image, copy_result, composite_result)?;
         if self.reported_dimensions != Some(dimensions) {
+            let area = if origin == (0, 0) {
+                String::new()
+            } else {
+                format!(" from +{}+{}", origin.0, origin.1)
+            };
             eprintln!(
-                "jwm-remote: XRender downscale {}x{} -> {}x{}",
-                source_width, source_height, output_width, output_height
+                "jwm-remote: XRender downscale {source_width}x{source_height}{area} -> {output_width}x{output_height}"
             );
             self.reported_dimensions = Some(dimensions);
         }
@@ -3419,11 +3515,18 @@ fn free_gc_and_pixmap_checked(conn: &RustConnection, gc: Gcontext, pixmap: Pixma
 }
 
 fn scale_transform(
+    origin: (i16, i16),
     source_width: u16,
     source_height: u16,
     output_width: u16,
     output_height: u16,
 ) -> RemoteResult<Transform> {
+    fn fixed_offset(value: i16) -> RemoteResult<i32> {
+        i32::from(value)
+            .checked_shl(16)
+            .ok_or_else(|| invalid_data("XRender source origin exceeds 16.16 range").into())
+    }
+
     fn fixed_ratio(source: u16, output: u16) -> RemoteResult<i32> {
         if output == 0 {
             return Err(invalid_data("XRender output dimension is zero").into());
@@ -3434,13 +3537,15 @@ fn scale_transform(
             .map_err(|_| invalid_data("XRender scale transform exceeds 16.16 range").into())
     }
 
+    // The matrix maps destination coordinates back into the source, so the
+    // shared area's origin is simply the translation column.
     Ok(Transform {
         matrix11: fixed_ratio(source_width, output_width)?,
         matrix12: 0,
-        matrix13: 0,
+        matrix13: fixed_offset(origin.0)?,
         matrix21: 0,
         matrix22: fixed_ratio(source_height, output_height)?,
-        matrix23: 0,
+        matrix23: fixed_offset(origin.1)?,
         matrix31: 0,
         matrix32: 0,
         matrix33: 1 << 16,
@@ -3843,6 +3948,139 @@ fn find_visual(screen: &Screen, visual_id: u32) -> Option<Visualtype> {
 }
 
 #[must_use]
+/// A sub-rectangle of the X root to share.
+///
+/// The X root spans every monitor, so on a dual 1920x1080 desk it is
+/// 3840x1080 and the default `--max-width 1280` delivers each monitor at
+/// 640x360. Sharing one monitor is what makes that legible again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureRegion {
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+}
+
+/// What the operator asked to share.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum CaptureArea {
+    /// The whole root, spanning every monitor.
+    #[default]
+    Root,
+    /// One RandR monitor, re-resolved by name whenever the layout changes.
+    Monitor(String),
+    /// A fixed rectangle in root coordinates.
+    Region(CaptureRegion),
+}
+
+/// Resolve what the operator asked to share into a rectangle.
+///
+/// Monitors are looked up by name on every call rather than remembered as a
+/// rectangle, so unplugging or rearranging displays moves the shared area with
+/// them instead of leaving it pointing at whatever is now in those pixels.
+fn resolve_capture_area(
+    conn: &RustConnection,
+    root: Window,
+    area: &CaptureArea,
+    root_width: u16,
+    root_height: u16,
+) -> RemoteResult<Option<CaptureRegion>> {
+    let region = match area {
+        CaptureArea::Root => return Ok(None),
+        CaptureArea::Region(region) => *region,
+        CaptureArea::Monitor(name) => {
+            let monitors = randr::get_monitors(conn, root, true)?.reply()?;
+            let mut available = Vec::new();
+            let mut found = None;
+            for monitor in monitors.monitors {
+                let label = conn.get_atom_name(monitor.name)?.reply()?;
+                let label = String::from_utf8_lossy(&label.name).into_owned();
+                if label.eq_ignore_ascii_case(name) {
+                    found = Some(CaptureRegion {
+                        x: monitor.x,
+                        y: monitor.y,
+                        width: monitor.width,
+                        height: monitor.height,
+                    });
+                }
+                available.push(label);
+            }
+            found.ok_or_else(|| {
+                invalid_data(format!(
+                    "no RandR monitor named {name:?}; this display has: {}",
+                    available.join(", ")
+                ))
+            })?
+        }
+    };
+    clip_region_to_root(region, root_width, root_height)
+        .ok_or_else(|| {
+            invalid_data(format!(
+                "the requested capture area lies outside the {root_width}x{root_height} root"
+            ))
+            .into()
+        })
+        .map(Some)
+}
+
+/// Move a root-absolute cursor position into shared-area coordinates.
+///
+/// A cursor outside the shared area lands at a negative or out-of-range
+/// coordinate, which the compositing step already clips away.
+fn translate_cursor(position: Option<(i32, i32)>, origin: (i16, i16)) -> Option<(i32, i32)> {
+    position.map(|(x, y)| (x - i32::from(origin.0), y - i32::from(origin.1)))
+}
+
+/// Check that the requested area exists, before the host starts listening.
+///
+/// Capture is per-session, so without this a typo in `--monitor` would print
+/// a healthy "listening on ..." and only fail when somebody finally connected.
+pub fn validate_capture_area(display: Option<&str>, area: &CaptureArea) -> RemoteResult<()> {
+    if *area == CaptureArea::Root {
+        return Ok(());
+    }
+    let (conn, screen_num) = x11rb::connect(display)?;
+    let root = conn
+        .setup()
+        .roots
+        .get(screen_num)
+        .ok_or_else(|| invalid_data("X11 selected an unavailable screen"))?
+        .root;
+    let geometry = conn.get_geometry(root)?.reply()?;
+    let region = resolve_capture_area(&conn, root, area, geometry.width, geometry.height)?;
+    if let Some(region) = region {
+        eprintln!(
+            "jwm-remote: sharing {}x{} at +{}+{} of the {}x{} root",
+            region.width, region.height, region.x, region.y, geometry.width, geometry.height
+        );
+    }
+    Ok(())
+}
+
+/// Clip `region` to a root of `root_width x root_height`.
+///
+/// Returns `None` when nothing of the region remains on screen, which is what
+/// a monitor being unplugged looks like.
+fn clip_region_to_root(
+    region: CaptureRegion,
+    root_width: u16,
+    root_height: u16,
+) -> Option<CaptureRegion> {
+    let left = i32::from(region.x).max(0);
+    let top = i32::from(region.y).max(0);
+    let right = (i32::from(region.x) + i32::from(region.width)).min(i32::from(root_width));
+    let bottom = (i32::from(region.y) + i32::from(region.height)).min(i32::from(root_height));
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(CaptureRegion {
+        x: i16::try_from(left).ok()?,
+        y: i16::try_from(top).ok()?,
+        width: u16::try_from(right - left).ok()?,
+        height: u16::try_from(bottom - top).ok()?,
+    })
+}
+
 /// Fit `width x height` inside both bounds, preserving aspect and never
 /// upscaling. A zero bound is unbounded.
 ///
@@ -3961,7 +4199,7 @@ mod tests {
 
     #[test]
     fn xrender_transform_maps_destination_back_to_source() {
-        let transform = scale_transform(1920, 1080, 1280, 720).unwrap();
+        let transform = scale_transform((0, 0), 1920, 1080, 1280, 720).unwrap();
         assert_eq!(transform.matrix11, 98_304);
         assert_eq!(transform.matrix22, 98_304);
         assert_eq!(transform.matrix33, 65_536);
@@ -4076,6 +4314,137 @@ mod tests {
             )),
             Err((false, "readback".to_string()))
         );
+    }
+
+    #[test]
+    fn region_geometry_parses_the_x11_spelling() {
+        assert_eq!(
+            "1280x720+100+50".parse::<CaptureRegion>().unwrap(),
+            CaptureRegion {
+                x: 100,
+                y: 50,
+                width: 1280,
+                height: 720
+            }
+        );
+        // A second monitor commonly sits at a negative offset.
+        assert_eq!(
+            "1920x1080+-1920+0".parse::<CaptureRegion>().unwrap().x,
+            -1920
+        );
+
+        for bad in [
+            "1280x720",
+            "1280+100+50",
+            "x720+100+50",
+            "0x720+0+0",
+            "1280x0+0+0",
+            "",
+            "garbage",
+        ] {
+            assert!(
+                bad.parse::<CaptureRegion>().is_err(),
+                "{bad:?} must not parse as a region"
+            );
+        }
+    }
+
+    #[test]
+    fn a_region_is_clipped_to_the_root_it_lives_on() {
+        let root = (1920_u16, 1080_u16);
+        let inside = CaptureRegion {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 200,
+        };
+        assert_eq!(clip_region_to_root(inside, root.0, root.1), Some(inside));
+
+        // A monitor that used to sit to the left of the origin, or one that
+        // now overhangs a shrunken root, keeps only the visible part.
+        assert_eq!(
+            clip_region_to_root(
+                CaptureRegion {
+                    x: -50,
+                    y: -50,
+                    width: 200,
+                    height: 200
+                },
+                root.0,
+                root.1
+            ),
+            Some(CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 150,
+                height: 150
+            })
+        );
+        assert_eq!(
+            clip_region_to_root(
+                CaptureRegion {
+                    x: 1900,
+                    y: 1070,
+                    width: 200,
+                    height: 200
+                },
+                root.0,
+                root.1
+            ),
+            Some(CaptureRegion {
+                x: 1900,
+                y: 1070,
+                width: 20,
+                height: 10
+            })
+        );
+
+        // Entirely off-screen is what an unplugged monitor looks like.
+        for gone in [
+            CaptureRegion {
+                x: 1920,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            CaptureRegion {
+                x: -100,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        ] {
+            assert_eq!(clip_region_to_root(gone, root.0, root.1), None);
+        }
+    }
+
+    #[test]
+    fn the_transform_translates_by_the_shared_areas_origin() {
+        // The matrix maps destination coordinates back into the source, so an
+        // origin is the translation column in 16.16 fixed point.
+        let plain = scale_transform((0, 0), 1920, 1080, 1280, 720).unwrap();
+        assert_eq!((plain.matrix13, plain.matrix23), (0, 0));
+
+        let offset = scale_transform((1920, 40), 1920, 1080, 1280, 720).unwrap();
+        assert_eq!(offset.matrix13, 1920 << 16);
+        assert_eq!(offset.matrix23, 40 << 16);
+        // Scaling is unaffected by where the area starts.
+        assert_eq!(offset.matrix11, plain.matrix11);
+        assert_eq!(offset.matrix22, plain.matrix22);
+    }
+
+    #[test]
+    fn the_cursor_moves_into_shared_area_coordinates() {
+        assert_eq!(
+            translate_cursor(Some((2000, 100)), (1920, 0)),
+            Some((80, 100))
+        );
+        // Outside the shared area lands negative, which compositing clips.
+        assert_eq!(
+            translate_cursor(Some((10, 100)), (1920, 0)),
+            Some((-1910, 100))
+        );
+        assert_eq!(translate_cursor(None, (1920, 0)), None);
     }
 
     #[test]

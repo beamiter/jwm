@@ -65,6 +65,18 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote host` can share one monitor or a fixed rectangle instead of the
+  whole root, with `--monitor NAME` or `--region WxH+X+Y`. The X root spans
+  every display, so a dual 1920x1080 desk is one 3840x1080 drawable and the
+  default `--max-width 1280` delivered each monitor at 640x360; on a triple
+  head, 426x240. `--monitor` is re-resolved by name whenever the layout
+  changes, so unplugging or rearranging displays moves the shared area with
+  them, and a name that does not exist fails at startup listing the names that
+  do rather than when a client finally connects. Input and the host cursor are
+  translated by the area's origin, so sharing the right-hand monitor no longer
+  lands every click on the left one. Verified pixel-for-pixel against the live
+  root: a region captured at +1200+300 differs from that crop by 0.4 mean
+  absolute value, which is JPEG loss, against 2-13 at any other offset.
 - `jwm-remote` can share the clipboard in both directions, off unless the host
   passes `--allow-clipboard` *and* the viewer passes `--clipboard`: the host's
   flag is policy and the client's is consent, and a session where either is

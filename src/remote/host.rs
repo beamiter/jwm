@@ -12,7 +12,10 @@ use super::protocol::{
     server_handshake,
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
-use super::x11_capture::{CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
+use super::x11_capture::{
+    CaptureArea, CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture,
+    validate_capture_area,
+};
 use super::x11_input::InputInjector;
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
@@ -1245,6 +1248,8 @@ pub struct HostOptions {
     pub fixed_jpeg_quality: bool,
     pub max_width: u16,
     pub capture_source: CaptureSource,
+    /// Which part of the root to share; the whole root by default.
+    pub capture_area: CaptureArea,
     pub allow_lan: bool,
     pub allow_input: bool,
     pub allow_clipboard: bool,
@@ -1260,6 +1265,7 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
         Instant::now(),
     )?;
     let key = load_key_file(&options.key_file)?;
+    validate_capture_area(options.display.as_deref(), &options.capture_area)?;
     let listener = TcpListener::bind(&options.listen)?;
     listener.set_nonblocking(true)?;
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -1374,7 +1380,11 @@ fn serve_client(
         options.display.as_deref(),
         options.capture_source,
         options.max_width,
+        options.capture_area.clone(),
     )?;
+    // Injected pointer coordinates arrive in shared-area space; XTEST wants
+    // root coordinates. Resolved once here rather than per event.
+    let input_origin = capture.origin();
     let mut keyboard_enabled = false;
     let mut verified_keymap = None;
     let injector = if options.allow_input && hello.request_input {
@@ -1486,6 +1496,7 @@ fn serve_client(
             receive_input(
                 reader,
                 injector,
+                input_origin,
                 keyboard_enabled,
                 verified_keymap,
                 INITIAL_ACTIVITY_TIMEOUT,
@@ -2022,6 +2033,7 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
 fn receive_input(
     mut reader: SessionReader<TcpStream>,
     mut injector: Option<InputInjector>,
+    input_origin: (i16, i16),
     keyboard_enabled: bool,
     verified_keymap: Option<[u8; 32]>,
     initial_activity_timeout: Duration,
@@ -2084,7 +2096,7 @@ fn receive_input(
                     if contains_keyboard {
                         verify_injector_keymap(injector, verified_keymap)?;
                     }
-                    injector.inject_batch(&events)?;
+                    injector.inject_batch(&events, input_origin)?;
                 }
                 MessageKind::Pointer
                 | MessageKind::Key
@@ -2491,6 +2503,7 @@ mod tests {
             fixed_jpeg_quality: false,
             max_width: 1280,
             capture_source: CaptureSource::Auto,
+            capture_area: CaptureArea::Root,
             allow_lan: false,
             allow_input: false,
             allow_clipboard: false,
@@ -3824,6 +3837,7 @@ mod tests {
             receive_input(
                 reader,
                 None,
+                (0, 0),
                 false,
                 None,
                 Duration::from_millis(600),

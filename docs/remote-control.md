@@ -487,6 +487,40 @@ belonging to no extension this connection selected cannot have cost a
 notification it depends on, so those are tolerated in a run of eight before the
 session distrusts its caches wholesale.
 
+### Sharing one monitor
+
+The X root spans every monitor, so a dual 1920x1080 desk is one 3840x1080
+drawable and the default `--max-width 1280` delivers each display at 640x360.
+On a triple head it is 426x240. Sharing one monitor is what makes that legible
+again:
+
+```bash
+jwm-remote host ... --monitor DP-1
+jwm-remote host ... --region 1920x1080+1920+0
+```
+
+`--monitor` takes a RandR monitor name — `xrandr --listmonitors` lists them —
+and is re-resolved by name whenever the layout changes, so unplugging or
+rearranging displays moves the shared area with them instead of leaving it
+pointing at whatever is now in those pixels. A name that does not exist is an
+error at startup, listing the names that do, rather than a failure discovered
+when someone finally connects. `--region` takes the usual X11 `WxH+X+Y`
+spelling and accepts the negative offsets a left-hand monitor has.
+
+Either way the shared area is clipped to the root, and an area that ends up
+entirely off-screen — what an unplugged monitor looks like — is an error rather
+than a black rectangle.
+
+Input follows the picture. The viewer maps its window onto the shared area, so
+the coordinates it sends are area-relative while XTEST warps in root
+coordinates; the host adds the origin before injecting. Without that, sharing
+the right-hand monitor would land every click on the left one. The host cursor
+is translated the same way and clipped when it leaves the shared area.
+
+Sharing a region also shrinks the root-capture staging pixmap to the region
+rather than the whole root, which is what the 64 MiB staging limit is measured
+against.
+
 ### Clipboard sharing
 
 Off unless **both** sides ask for it: the host needs `--allow-clipboard` and
@@ -601,7 +635,8 @@ once, by a line that had long since scrolled away.
 ## MVP limits
 
 - one connected controller at a time;
-- the combined X root is shared (all monitors), with the host XFixes cursor
+- one region, one RandR monitor, or the combined X root (the default), with
+  the host XFixes cursor
   included in video; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;

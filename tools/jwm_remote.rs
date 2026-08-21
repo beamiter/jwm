@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::generate_key_file;
-use jwm::remote::x11_capture::CaptureSource;
+use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource};
 use std::path::PathBuf;
 
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
@@ -68,6 +68,18 @@ enum Command {
         /// auto prefers JWM's Composite overlay and falls back to root.
         #[arg(long, default_value = "auto", value_parser = parse_capture_source)]
         capture_source: CaptureSource,
+
+        /// Share one RandR monitor instead of the whole root, by name.
+        ///
+        /// The root spans every monitor, so on a dual 1920x1080 desk it is
+        /// 3840x1080 and each display arrives at less than half the requested
+        /// width. Re-resolved by name when the layout changes.
+        #[arg(long, value_name = "NAME", conflicts_with = "region")]
+        monitor: Option<String>,
+
+        /// Share a fixed rectangle of the root, as WxH+X+Y.
+        #[arg(long, value_name = "WxH+X+Y", value_parser = parse_region)]
+        region: Option<CaptureRegion>,
 
         /// Permit binding beyond loopback.
         ///
@@ -135,12 +147,19 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             fixed_jpeg_quality,
             max_width,
             capture_source,
+            monitor,
+            region,
             allow_lan,
             allow_input,
             allow_clipboard,
             once,
         } => {
             let jpeg_quality_floor = resolve_quality_floor(jpeg_quality, jpeg_quality_floor)?;
+            let capture_area = match (monitor, region) {
+                (Some(name), _) => CaptureArea::Monitor(name),
+                (None, Some(region)) => CaptureArea::Region(region),
+                (None, None) => CaptureArea::Root,
+            };
             run_host(HostOptions {
                 listen,
                 key_file,
@@ -151,6 +170,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 fixed_jpeg_quality,
                 max_width,
                 capture_source,
+                capture_area,
                 allow_lan,
                 allow_input,
                 allow_clipboard,
@@ -205,6 +225,10 @@ fn parse_max_width(value: &str) -> Result<u16, String> {
 }
 
 fn parse_capture_source(value: &str) -> Result<CaptureSource, String> {
+    value.parse()
+}
+
+fn parse_region(value: &str) -> Result<CaptureRegion, String> {
     value.parse()
 }
 
