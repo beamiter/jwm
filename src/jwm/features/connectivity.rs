@@ -873,6 +873,15 @@ pub fn start_state_read() -> BackgroundJob<ConnectivityState> {
 }
 
 impl crate::jwm::Jwm {
+    /// Start a read only when none is already in flight. Passive UI openings
+    /// coalesce here so rapid close/reopen cycles do not detach a trail of
+    /// still-running nmcli workers.
+    pub(crate) fn ensure_connectivity_refresh(&mut self) {
+        if self.features.connectivity_poll.is_none() {
+            self.features.connectivity_poll = Some(start_state_read());
+        }
+    }
+
     /// Kick off a background re-read of Wi-Fi and Bluetooth. The result is
     /// adopted from the frame tick by [`Self::poll_connectivity_job`].
     /// Called after a toggle and on the hardware poll.

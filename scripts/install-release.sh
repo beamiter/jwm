@@ -120,6 +120,7 @@ valid_stable_path() {
         usr/local/bin/jwm-tool|\
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
+        usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
         usr/share/xsessions/jwm-x11rb-debug.desktop|\
@@ -284,6 +285,7 @@ load_manifest() {
         usr/local/bin/jwm-tool
         usr/local/bin/jwm-support
         usr/local/bin/jwm-bridge
+        usr/local/bin/tao_glow_bar
         usr/local/bin/tao_pixels_bar
         usr/share/xsessions/jwm-x11rb.desktop
         usr/share/xsessions/jwm-x11rb-debug.desktop

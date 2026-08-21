@@ -58,6 +58,22 @@ const fn shell_entry(active: bool, locked: bool, mine: bool) -> ShellEntry {
     }
 }
 
+fn should_start_control_snapshot(
+    in_flight: bool,
+    refreshed_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    !in_flight
+        && crate::jwm::features::system_controls::control_center_snapshot_is_stale(
+            refreshed_at,
+            now,
+        )
+}
+
+const fn control_snapshot_epoch_matches(spawn_epoch: u64, current_epoch: u64) -> bool {
+    spawn_epoch == current_epoch
+}
+
 impl Jwm {
     /// Adjust the default sink volume by the binding's Int argument
     /// (percentage points) and show the OSD with the result.
@@ -73,6 +89,7 @@ impl Jwm {
         let Some(state) = crate::jwm::features::system_controls::volume_adjust(delta) else {
             return Err("no working volume control (wpctl/pactl/amixer)".into());
         };
+        self.cache_control_volume(state);
         self.show_volume_osd(backend, state);
         Ok(())
     }
@@ -86,6 +103,7 @@ impl Jwm {
         let Some(state) = crate::jwm::features::system_controls::volume_toggle_mute() else {
             return Err("no working volume control (wpctl/pactl/amixer)".into());
         };
+        self.cache_control_volume(state);
         self.show_volume_osd(backend, state);
         Ok(())
     }
@@ -104,6 +122,7 @@ impl Jwm {
         let Some(percent) = crate::jwm::features::system_controls::brightness_adjust(delta) else {
             return Err("no backlight control (brightnessctl or /sys/class/backlight)".into());
         };
+        self.cache_control_brightness(percent);
         backend.compositor_show_osd(crate::backend::api::OsdKind::Brightness, percent);
         Ok(())
     }
@@ -173,10 +192,13 @@ impl Jwm {
     }
 
     fn build_shell_hub_state(&self) -> crate::jwm::features::SystemUiState {
-        let volume = crate::jwm::features::system_controls::volume_state()
+        let controls = self.features.control_snapshot.as_ref();
+        let volume = controls
+            .and_then(|snapshot| snapshot.volume)
             .map(|state| (state.percent, state.muted));
-        let brightness = crate::jwm::features::system_controls::brightness_percent();
-        let profiles = crate::jwm::features::power::profiles();
+        let brightness = controls.and_then(|snapshot| snapshot.brightness);
+        let audio_defaults = controls.map(|snapshot| &snapshot.audio_defaults);
+        let profiles = controls.and_then(|snapshot| snapshot.power_profiles.as_ref());
         let cfg = CONFIG.load();
         let behavior = cfg.behavior();
         crate::jwm::features::SystemUiState::control_center(
@@ -191,24 +213,105 @@ impl Jwm {
                 media: self.features.media.get(),
                 volume,
                 brightness,
-                audio_output: self
-                    .features
-                    .audio_defaults
-                    .name(crate::jwm::features::system_controls::AudioDirection::Output),
-                audio_input: self
-                    .features
-                    .audio_defaults
-                    .name(crate::jwm::features::system_controls::AudioDirection::Input),
+                audio_output: audio_defaults.and_then(|defaults| {
+                    defaults.name(crate::jwm::features::system_controls::AudioDirection::Output)
+                }),
+                audio_input: audio_defaults.and_then(|defaults| {
+                    defaults.name(crate::jwm::features::system_controls::AudioDirection::Input)
+                }),
                 battery: self.features.battery.as_ref(),
                 resources: behavior.resource_rows.then_some(&self.features.resources),
                 network: self.features.connectivity.network.as_ref(),
                 bluetooth: Some(&self.features.connectivity.bluetooth),
-                power_profile: profiles.as_ref().map(|(_, active)| active.as_str()),
+                power_profile: profiles.map(|(_, active)| active.as_str()),
                 night_light: self.night_light_active(),
                 do_not_disturb: self.do_not_disturb,
                 idle_inhibited: self.idle_inhibited,
             },
         )
+    }
+
+    /// Adopt one completed slow-control snapshot without ever waiting for it.
+    /// A user mutation increments the epoch, so an older worker result is
+    /// discarded instead of rolling the visible value back.
+    pub(crate) fn poll_control_snapshot_job(&mut self) {
+        let Some((epoch, snapshot)) = self
+            .features
+            .control_snapshot_job
+            .as_ref()
+            .and_then(crate::jwm::features::connectivity::BackgroundJob::take)
+        else {
+            return;
+        };
+        self.features.control_snapshot_job = None;
+        if !control_snapshot_epoch_matches(epoch, self.features.control_snapshot_epoch) {
+            return;
+        }
+
+        let changed = self.features.control_snapshot.as_ref() != Some(&snapshot);
+        self.features.control_snapshot = Some(snapshot);
+        self.features.control_snapshot_refreshed_at = Some(std::time::Instant::now());
+        if changed {
+            self.refresh_open_control_center();
+        }
+    }
+
+    /// Coalesce a stale-while-revalidate read. Opening and ordinary panel
+    /// rebuilds call this freely; at most one external-tool worker is alive.
+    pub(crate) fn ensure_control_snapshot_refresh(&mut self, now: std::time::Instant) {
+        self.poll_control_snapshot_job();
+        if !should_start_control_snapshot(
+            self.features.control_snapshot_job.is_some(),
+            self.features.control_snapshot_refreshed_at,
+            now,
+        ) {
+            return;
+        }
+        let epoch = self.features.control_snapshot_epoch;
+        self.features.control_snapshot_job = Some(
+            crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
+                (
+                    epoch,
+                    crate::jwm::features::system_controls::ControlCenterSnapshot::read(),
+                )
+            }),
+        );
+    }
+
+    fn mutate_control_snapshot(
+        &mut self,
+        update: impl FnOnce(&mut crate::jwm::features::system_controls::ControlCenterSnapshot),
+    ) {
+        self.features.control_snapshot_epoch = self.features.control_snapshot_epoch.wrapping_add(1);
+        update(
+            self.features
+                .control_snapshot
+                .get_or_insert_with(Default::default),
+        );
+    }
+
+    pub(crate) fn cache_control_volume(
+        &mut self,
+        state: crate::jwm::features::system_controls::AudioState,
+    ) {
+        self.mutate_control_snapshot(|snapshot| snapshot.volume = Some(state));
+    }
+
+    pub(crate) fn cache_control_brightness(&mut self, percent: u8) {
+        self.mutate_control_snapshot(|snapshot| snapshot.brightness = Some(percent));
+    }
+
+    pub(crate) fn cache_control_audio_defaults(
+        &mut self,
+        defaults: crate::jwm::features::system_controls::AudioDefaults,
+    ) {
+        self.mutate_control_snapshot(|snapshot| snapshot.audio_defaults = defaults);
+    }
+
+    pub(crate) fn cache_control_power_profiles(&mut self, available: Vec<String>, active: String) {
+        self.mutate_control_snapshot(|snapshot| {
+            snapshot.power_profiles = Some((available, active));
+        });
     }
 
     fn wallpaper_picker_state() -> crate::jwm::features::SystemUiState {
@@ -364,13 +467,12 @@ impl Jwm {
         if !self.prepare_system_ui_deferrable(backend, label)? {
             return Ok(false);
         }
-        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
-
         let Some(route) = route else {
             // Same as the key-bound control center: open on the cached
             // connectivity reading and let the background re-read update the
             // rows in place, because nmcli can block for seconds.
-            self.refresh_connectivity();
+            self.ensure_control_snapshot_refresh(std::time::Instant::now());
+            self.ensure_connectivity_refresh();
             self.features.system_ui_return_to_hub = false;
             self.features.system_ui = self.build_shell_hub_state();
             self.sync_system_ui(backend);
@@ -389,7 +491,8 @@ impl Jwm {
     /// Rebuild the shell home page after leaving a child page. This path does
     /// not reacquire grabs or toggle the compositor.
     pub(crate) fn return_to_shell_hub(&mut self, backend: &mut dyn Backend) {
-        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
+        self.ensure_control_snapshot_refresh(std::time::Instant::now());
+        self.ensure_connectivity_refresh();
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui = self.build_shell_hub_state();
         self.sync_system_ui(backend);
@@ -409,19 +512,20 @@ impl Jwm {
             return Ok(());
         }
         self.prepare_system_ui(backend, "control center", true)?;
-        self.features.audio_defaults = crate::jwm::features::system_controls::AudioDefaults::read();
+        self.ensure_control_snapshot_refresh(std::time::Instant::now());
         // Open with the cached connectivity reading — read_state() shells out
         // to nmcli and can block for seconds — and re-read in the background;
         // the rows update in place once the fresh state is adopted.
-        self.refresh_connectivity();
+        self.ensure_connectivity_refresh();
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui = self.build_shell_hub_state();
         self.sync_system_ui(backend);
         Ok(())
     }
 
-    /// Rebuild an open control center so a media push does not leave a stale
-    /// track on screen. Volume/brightness are re-read the same way.
+    /// Rebuild an open control center entirely from cached state, preserving
+    /// the selected action even when async hardware rows were inserted or
+    /// removed.
     pub(crate) fn refresh_open_control_center(&mut self) {
         if !matches!(
             self.features.system_ui,
@@ -429,12 +533,13 @@ impl Jwm {
         ) {
             return;
         }
+        let selected_kind = self.features.system_ui.selected_control();
         let selected = match &self.features.system_ui {
             crate::jwm::features::SystemUiState::ControlCenter { selected, .. } => *selected,
             _ => 0,
         };
         let mut rebuilt = self.build_shell_hub_state();
-        rebuilt.restore_control_selection(selected);
+        rebuilt.restore_control_selection_kind(selected_kind, selected);
         self.features.system_ui = rebuilt;
         // Rebuilt in memory only. Half this function's callers — a
         // connectivity re-read, a battery poll — have no backend to push
@@ -575,19 +680,17 @@ impl Jwm {
         // accepts the request and then puts the default back, because the
         // device is not actually available — an HDMI output with no monitor,
         // a headset microphone with no headset. Believe the re-read.
-        let devices = system_controls::audio_devices(direction);
+        let inventory = system_controls::audio_inventory();
+        let devices = inventory.devices(direction);
         let took = devices
             .iter()
             .any(|device| device.id == id && device.is_default);
         self.features
             .system_ui
-            .set_audio_devices(direction, &devices);
-        self.features.audio_defaults = system_controls::AudioDefaults::read();
-        let in_use = self
-            .features
-            .audio_defaults
-            .name(direction)
-            .map(str::to_string);
+            .set_audio_devices(direction, devices);
+        let defaults = inventory.defaults();
+        let in_use = defaults.name(direction).map(str::to_string);
+        self.cache_control_audio_defaults(defaults);
         let message = match (took, in_use) {
             (true, Some(name)) => {
                 log::info!("audio: {} is now {name}", direction.label());
@@ -2696,7 +2799,9 @@ mod configured_feature_gate_tests {
 
 #[cfg(test)]
 mod shell_entry_tests {
-    use super::{ShellEntry, shell_entry};
+    use super::{
+        ShellEntry, control_snapshot_epoch_matches, shell_entry, should_start_control_snapshot,
+    };
 
     #[test]
     fn an_empty_screen_just_opens() {
@@ -2728,5 +2833,48 @@ mod shell_entry_tests {
         for mine in [false, true] {
             assert_eq!(shell_entry(true, true, mine), ShellEntry::Refuse);
         }
+    }
+
+    #[test]
+    fn control_snapshot_refreshes_are_coalesced_and_epoch_guarded() {
+        let now = std::time::Instant::now();
+        assert!(should_start_control_snapshot(false, None, now));
+        assert!(!should_start_control_snapshot(true, None, now));
+        assert!(!should_start_control_snapshot(false, Some(now), now));
+
+        assert!(control_snapshot_epoch_matches(7, 7));
+        assert!(!control_snapshot_epoch_matches(7, 8));
+    }
+
+    #[test]
+    fn shell_hub_build_and_open_paths_do_not_read_external_controls_inline() {
+        const SOURCE: &str = include_str!("toggles.rs");
+        let build = SOURCE
+            .split_once("fn build_shell_hub_state")
+            .unwrap()
+            .1
+            .split_once("fn wallpaper_picker_state")
+            .unwrap()
+            .0;
+        for forbidden in [
+            "volume_state()",
+            "brightness_percent()",
+            "power::profiles()",
+            "AudioDefaults::read()",
+        ] {
+            assert!(
+                !build.contains(forbidden),
+                "Shell Hub build regained blocking call {forbidden}"
+            );
+        }
+
+        let open_paths = SOURCE
+            .split_once("pub(crate) fn begin_shell_from_status_bar")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn session_menu")
+            .unwrap()
+            .0;
+        assert!(!open_paths.contains("AudioDefaults::read()"));
     }
 }

@@ -8,6 +8,7 @@ built	jwm-support	bin/jwm-support	usr/local/bin/jwm-support	0755
 built	jwm-remote	bin/jwm-remote	-	0755
 built	jwm-bridge	bin/jwm-bridge	usr/local/bin/jwm-bridge	0755
 built	tao_pixels_bar	bin/tao_pixels_bar	usr/local/bin/tao_pixels_bar	0755
+built	tao_glow_bar	bin/tao_glow_bar	usr/local/bin/tao_glow_bar	0755
 repo-file	jwm-x11rb.desktop	share/xsessions/jwm-x11rb.desktop	usr/share/xsessions/jwm-x11rb.desktop	0644
 repo-file	jwm-x11rb-debug.desktop	share/xsessions/jwm-x11rb-debug.desktop	usr/share/xsessions/jwm-x11rb-debug.desktop	0644
 repo-file	jwm-xcb.desktop	share/xsessions/jwm-xcb.desktop	usr/share/xsessions/jwm-xcb.desktop	0644

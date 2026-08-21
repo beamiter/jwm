@@ -272,7 +272,7 @@ pub fn get_backend_family() -> BackendFamily {
 
 /// Matches the bar installed by `scripts/install_jwm_scripts.sh` when the user
 /// does not select another implementation explicitly.
-pub const STATUS_BAR_NAME: &str = "tao_pixels_bar";
+pub const STATUS_BAR_NAME: &str = "tao_glow_bar";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TomlConfig {

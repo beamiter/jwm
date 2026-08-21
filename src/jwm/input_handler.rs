@@ -715,6 +715,7 @@ impl Jwm {
                         None
                     };
                     if let Some(state) = state {
+                        self.cache_control_volume(state);
                         self.features.system_ui.update_control(
                             ControlKind::Volume,
                             state.percent,
@@ -725,6 +726,7 @@ impl Jwm {
                 ControlKind::Brightness => {
                     if let Some(delta) = slider_delta {
                         if let Some(percent) = system_controls::brightness_adjust(delta) {
+                            self.cache_control_brightness(percent);
                             self.features.system_ui.update_control(
                                 ControlKind::Brightness,
                                 percent,
@@ -842,8 +844,13 @@ impl Jwm {
                     // Read-only: the row is information, not a control.
                 }
                 ControlKind::PowerProfile => {
+                    let profiles = self
+                        .features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.power_profiles.clone());
                     if let Some(delta) = slider_delta
-                        && let Some((available, active)) = crate::jwm::features::power::profiles()
+                        && let Some((available, active)) = profiles
                         && let Some(next) = crate::jwm::features::power::cycle_profile(
                             &available,
                             &active,
@@ -851,7 +858,10 @@ impl Jwm {
                         )
                         && crate::jwm::features::power::set_profile(&next)
                     {
-                        // Rebuild so the row shows what actually took effect.
+                        // The mutation is authoritative until the next worker
+                        // verifies it; its epoch prevents an older read from
+                        // rolling the row back.
+                        self.cache_control_power_profiles(available, next);
                         self.refresh_open_control_center();
                     }
                 }

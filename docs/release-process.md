@@ -42,6 +42,7 @@ It creates `jwm-<version>-source.tar.gz` with `git archive`, writes and verifies
    cargo clippy --locked -p xbar_linux_actions -p xbar_dbus_providers \
      --all-targets --no-deps -- -D warnings
    cargo test --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets
+   cargo test --locked --manifest-path bars/tao_glow_bar/Cargo.toml --all-targets
    cargo test --locked --manifest-path bars/tao_pixels_bar/Cargo.toml --all-targets
    bash scripts/test-install-lifecycle.sh
    bash scripts/package-release.sh --output-dir dist

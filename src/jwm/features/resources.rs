@@ -449,16 +449,29 @@ impl crate::jwm::Jwm {
             }
             return;
         }
+        let previous = self.features.resources;
         if !self.features.resource_sampler.maybe_sample() {
             return;
         }
         let state = self.features.resource_sampler.state();
         self.features.resources = state;
 
-        // Only the three labels are retyped. Rebuilding the panel would
-        // re-run `wpctl`, `brightnessctl` and `powerprofilesctl` — three
-        // processes every two seconds for as long as the panel is open.
+        // Only the three labels are retyped when the row topology is stable;
+        // this avoids needless layout/raster work between snapshot refreshes.
         if !self.features.system_ui.is_control_center() {
+            return;
+        }
+        let previous_shape = (
+            previous.cpu_present,
+            previous.memory.is_some(),
+            previous.net_present,
+        );
+        let shape = (state.cpu_present, state.memory.is_some(), state.net_present);
+        if shape != previous_shape {
+            // A row that did not exist on the first frame cannot be updated in
+            // place. The Hub builder is now cache-only, so a topology rebuild
+            // is cheap and preserves the selected ControlKind.
+            self.refresh_open_control_center();
             return;
         }
         self.features

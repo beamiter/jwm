@@ -48,6 +48,17 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- New configurations and the installer now agree on `tao_glow_bar` as the
+  default status bar.
+- The Shell Hub's first frame no longer waits for a chain of audio, backlight
+  and power-profile tools. Slow controls now use one coalesced two-second
+  stale-while-revalidate snapshot; panel opens and unrelated media,
+  notification, clipboard, battery and connectivity rebuilds are memory-only.
+  A worker result is epoch-guarded against newer user adjustments, async row
+  insertion restores the selected `ControlKind`, and PipeWire output/input
+  defaults share one `wpctl status` read instead of two. Passive Hub openings
+  also reuse an in-flight connectivity read rather than detaching another
+  nmcli worker.
 - Opening the application launcher no longer recursively reads every desktop
   entry and executable on JWM's compositor/input thread. The catalog is built
   on a worker, shared as an immutable snapshot, reused for five minutes, and
@@ -66,7 +77,7 @@ monorepo use independent Semantic Versions.
   duration now also snap compositor-owned shell cards, row highlights, toasts,
   OSD and HUD geometry. Their springs settle internally, so reduced motion
   does not keep requesting invisible follow-up frames.
-- The default `tao_pixels_bar` switches from portable emoji to private-use
+- `tao_pixels_bar` switches from portable emoji to private-use
   Nerd Font icons only when the selected family is actually installed, and
   passes that exact canonical family to Cairo. Missing or invalid icon fonts
   now retain readable emoji instead of tofu or unrelated fallback glyphs.

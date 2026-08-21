@@ -9,6 +9,7 @@
 
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioState {
@@ -458,14 +459,60 @@ pub struct AudioDefaults {
     pub input: Option<AudioDevice>,
 }
 
+/// Both halves of the sound-server topology from one coherent read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AudioInventory {
+    pub output: Vec<AudioDevice>,
+    pub input: Vec<AudioDevice>,
+}
+
+impl AudioInventory {
+    #[must_use]
+    pub fn devices(&self, direction: AudioDirection) -> &[AudioDevice] {
+        match direction {
+            AudioDirection::Output => &self.output,
+            AudioDirection::Input => &self.input,
+        }
+    }
+
+    #[must_use]
+    pub fn defaults(&self) -> AudioDefaults {
+        AudioDefaults {
+            output: self.output.iter().find(|device| device.is_default).cloned(),
+            input: self.input.iter().find(|device| device.is_default).cloned(),
+        }
+    }
+}
+
+fn parse_wpctl_inventory(status: &str) -> AudioInventory {
+    AudioInventory {
+        output: parse_wpctl_devices(status, AudioDirection::Output),
+        input: parse_wpctl_devices(status, AudioDirection::Input),
+    }
+}
+
+/// Read both directions. PipeWire exposes them in one `wpctl status`, so this
+/// is also the primitive for IPC snapshots and post-switch verification.
+#[must_use]
+pub fn audio_inventory() -> AudioInventory {
+    match detect_volume_tool() {
+        Some(VolumeTool::Wpctl) => run("wpctl", &["status"])
+            .map_or_else(AudioInventory::default, |status| {
+                parse_wpctl_inventory(&status)
+            }),
+        Some(VolumeTool::Pactl) => AudioInventory {
+            output: audio_devices(AudioDirection::Output),
+            input: audio_devices(AudioDirection::Input),
+        },
+        Some(VolumeTool::Amixer) | None => AudioInventory::default(),
+    }
+}
+
 impl AudioDefaults {
     /// Read both ends from the sound server.
     #[must_use]
     pub fn read() -> Self {
-        Self {
-            output: default_audio_device(AudioDirection::Output),
-            input: default_audio_device(AudioDirection::Input),
-        }
+        audio_inventory().defaults()
     }
 
     /// Name of the device in use, or `None` when this session cannot switch
@@ -478,6 +525,45 @@ impl AudioDefaults {
         }
         .map(|device| device.description.as_str())
     }
+}
+
+/// Slow, externally sourced rows shown by the Shell Hub.
+///
+/// Everything here may spawn a session tool. Keeping it in one immutable
+/// value lets the event loop rebuild the panel from memory while a worker
+/// refreshes the next snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlCenterSnapshot {
+    pub volume: Option<AudioState>,
+    pub brightness: Option<u8>,
+    pub audio_defaults: AudioDefaults,
+    pub power_profiles: Option<(Vec<String>, String)>,
+}
+
+impl ControlCenterSnapshot {
+    /// Read every slow control domain. This must run on a background worker;
+    /// the function is intentionally synchronous so each domain keeps its
+    /// established fallback order and error semantics.
+    #[must_use]
+    pub fn read() -> Self {
+        Self {
+            volume: volume_state(),
+            brightness: brightness_percent(),
+            audio_defaults: AudioDefaults::read(),
+            power_profiles: crate::jwm::features::power::profiles(),
+        }
+    }
+}
+
+/// A visible control center refreshes volatile values often enough to follow
+/// external changes, but never performs the reads on the compositor thread.
+pub const CONTROL_CENTER_SNAPSHOT_TTL: Duration = Duration::from_secs(2);
+
+#[must_use]
+pub fn control_center_snapshot_is_stale(refreshed_at: Option<Instant>, now: Instant) -> bool {
+    refreshed_at.is_none_or(|refreshed_at| {
+        now.saturating_duration_since(refreshed_at) >= CONTROL_CENTER_SNAPSHOT_TTL
+    })
 }
 
 /// Make `id` the default device, taking already-playing streams with it.
@@ -664,26 +750,31 @@ pub fn brightness_set(percent: u8) -> Option<u8> {
     }
 }
 
+#[must_use]
+pub fn audio_inventory_json(inventory: &AudioInventory) -> serde_json::Value {
+    let list = |devices: &[AudioDevice]| {
+        devices
+            .iter()
+            .map(|device| {
+                serde_json::json!({
+                    "id": device.id,
+                    "description": device.description,
+                    "default": device.is_default,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "output": list(&inventory.output),
+        "input": list(&inventory.input),
+    })
+}
+
 impl crate::jwm::Jwm {
     /// Both device lists, with the one in use marked. Bars and scripts use
     /// this to build their own audio menus.
     pub(crate) fn audio_devices_json(&self) -> serde_json::Value {
-        let list = |direction: AudioDirection| {
-            audio_devices(direction)
-                .into_iter()
-                .map(|device| {
-                    serde_json::json!({
-                        "id": device.id,
-                        "description": device.description,
-                        "default": device.is_default,
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        serde_json::json!({
-            "output": list(AudioDirection::Output),
-            "input": list(AudioDirection::Input),
-        })
+        audio_inventory_json(&audio_inventory())
     }
 }
 
@@ -799,6 +890,22 @@ Settings
     }
 
     #[test]
+    fn one_wpctl_document_builds_both_defaults() {
+        let inventory = parse_wpctl_inventory(WPCTL_STATUS);
+        assert_eq!(inventory.output.len(), 2);
+        assert_eq!(inventory.input.len(), 2);
+        let defaults = inventory.defaults();
+        assert_eq!(defaults.output.as_ref().map(|d| d.id.as_str()), Some("49"));
+        assert_eq!(defaults.input.as_ref().map(|d| d.id.as_str()), Some("50"));
+        assert!(
+            inventory
+                .input
+                .iter()
+                .all(|device| !device.description.contains("Camera"))
+        );
+    }
+
+    #[test]
     fn wpctl_status_without_an_audio_tree_lists_nothing() {
         assert!(
             parse_wpctl_devices("PipeWire 'pipewire-0' [1.0.5]\n", AudioDirection::Output)
@@ -869,6 +976,23 @@ Source #51
         assert!(device_row(&default).ends_with("Built-in Audio"));
         assert!(device_control_row(AudioDirection::Output, Some(&default)).contains("Built-in"));
         assert!(device_control_row(AudioDirection::Input, None).ends_with("none"));
+    }
+
+    #[test]
+    fn control_center_snapshot_refresh_uses_a_monotonic_ttl() {
+        let now = Instant::now();
+        assert!(control_center_snapshot_is_stale(None, now));
+        assert!(!control_center_snapshot_is_stale(Some(now), now));
+        let almost = now
+            .checked_sub(CONTROL_CENTER_SNAPSHOT_TTL - Duration::from_nanos(1))
+            .unwrap();
+        assert!(!control_center_snapshot_is_stale(Some(almost), now,));
+        let expired = now.checked_sub(CONTROL_CENTER_SNAPSHOT_TTL).unwrap();
+        assert!(control_center_snapshot_is_stale(Some(expired), now,));
+        assert!(!control_center_snapshot_is_stale(
+            Some(now + Duration::from_secs(1)),
+            now,
+        ));
     }
 
     #[test]

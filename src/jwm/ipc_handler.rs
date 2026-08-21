@@ -1392,7 +1392,8 @@ impl Jwm {
             let Some(id) = args.get("id").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_audio_device: expected string field 'id'");
             };
-            let devices = system_controls::audio_devices(direction);
+            let inventory = system_controls::audio_inventory();
+            let devices = inventory.devices(direction);
             if !devices.iter().any(|device| device.id == id) {
                 return IpcResponse::err(format!(
                     "set_audio_device: no {} device with id {id:?}",
@@ -1407,18 +1408,24 @@ impl Jwm {
             }
             // Re-read rather than trust the exit code: sound servers accept a
             // switch to an unavailable device and then quietly revert it.
-            self.features.audio_defaults = system_controls::AudioDefaults::read();
-            if !system_controls::audio_devices(direction)
+            let post = system_controls::audio_inventory();
+            let defaults = post.defaults();
+            let kept = post
+                .devices(direction)
                 .iter()
-                .any(|device| device.id == id && device.is_default)
-            {
+                .any(|device| device.id == id && device.is_default);
+            self.cache_control_audio_defaults(defaults);
+            self.refresh_open_control_center();
+            self.broadcast_ipc_event(
+                "audio/devices",
+                system_controls::audio_inventory_json(&post),
+            );
+            if !kept {
                 return IpcResponse::err(format!(
                     "the sound server did not keep {id:?} as the {} device; it is likely unavailable",
                     direction.label()
                 ));
             }
-            self.refresh_open_control_center();
-            self.broadcast_ipc_event("audio/devices", self.audio_devices_json());
             return IpcResponse::ok(None);
         }
 
@@ -1426,7 +1433,22 @@ impl Jwm {
             let Some(profile) = args.get("profile").and_then(|value| value.as_str()) else {
                 return IpcResponse::err("set_power_profile: expected string field 'profile'");
             };
-            let Some((available, _)) = crate::jwm::features::power::profiles() else {
+            let now = std::time::Instant::now();
+            let cached_is_fresh =
+                !crate::jwm::features::system_controls::control_center_snapshot_is_stale(
+                    self.features.control_snapshot_refreshed_at,
+                    now,
+                );
+            let profiles = cached_is_fresh
+                .then(|| {
+                    self.features
+                        .control_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.power_profiles.clone())
+                })
+                .flatten()
+                .or_else(crate::jwm::features::power::profiles);
+            let Some((available, _)) = profiles else {
                 return IpcResponse::err("this machine has no power profile control");
             };
             if !available.iter().any(|name| name == profile) {
@@ -1438,8 +1460,16 @@ impl Jwm {
             if !crate::jwm::features::power::set_profile(profile) {
                 return IpcResponse::err(format!("could not switch to power profile {profile:?}"));
             }
+            let (available, active) = crate::jwm::features::power::profiles()
+                .unwrap_or_else(|| (available, profile.to_string()));
+            self.cache_control_power_profiles(available, active.clone());
             self.refresh_open_control_center();
-            self.broadcast_ipc_event("power/profile", serde_json::json!({ "active": profile }));
+            self.broadcast_ipc_event("power/profile", serde_json::json!({ "active": active }));
+            if active != profile {
+                return IpcResponse::err(format!(
+                    "power profile stayed on {active:?} after requesting {profile:?}"
+                ));
+            }
             return IpcResponse::ok(None);
         }
 

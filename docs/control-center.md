@@ -51,6 +51,14 @@ Rows appear only when the machine can back them, so a desktop with no
 battery, no backlight, and no player shows a short panel rather than dead
 controls.
 
+Opening the Hub never waits for `wpctl`, `pactl`, `brightnessctl` or
+`powerprofilesctl`. It paints immediately from the last immutable control
+snapshot, starts at most one background refresh when that snapshot is older
+than two seconds, and inserts/removes hardware rows when the result arrives.
+The highlighted action is restored by identity rather than row number, so an
+audio or brightness row appearing above it cannot change what `Enter` will do.
+PipeWire output and input defaults come from one shared `wpctl status` read.
+
 | Row | Appears when | Keys |
 | --- | --- | --- |
 | Media | An MPRIS player is running | `Left`/`Right` skip, `Enter` play/pause |
@@ -73,7 +81,9 @@ controls.
 
 The panel rebuilds itself when the state behind a row changes — a track
 change, a battery poll — so an open card never shows a stale value, and the
-selection stays put (clamped if a row disappeared).
+selection stays put (falling back to the nearest row only if the selected
+control itself disappeared). Slow external controls refresh in the background;
+media, notification and clipboard updates rebuild from memory only.
 
 ## Opening the shell from a status bar
 

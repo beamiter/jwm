@@ -112,6 +112,7 @@ valid_stable_path() {
         usr/local/bin/jwm-tool|\
         usr/local/bin/jwm-support|\
         usr/local/bin/jwm-bridge|\
+        usr/local/bin/tao_glow_bar|\
         usr/local/bin/tao_pixels_bar|\
         usr/share/xsessions/jwm-x11rb.desktop|\
         usr/share/xsessions/jwm-x11rb-debug.desktop|\
@@ -157,6 +158,7 @@ if ((SKIP_BUILD == 0)); then
     command -v cargo >/dev/null 2>&1 || die "cargo is required unless --no-build is used"
     cargo build --locked --release --bins --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/Cargo.toml"
     cargo build --locked --release --bin jwm-bridge --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bridge/Cargo.toml"
+    cargo build --locked --release --bin tao_glow_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_glow_bar/Cargo.toml"
     cargo build --locked --release --bin tao_pixels_bar --target-dir "$TARGET_DIR" --manifest-path "$PROJECT_ROOT/bars/tao_pixels_bar/Cargo.toml"
 fi
 

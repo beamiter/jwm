@@ -1654,6 +1654,27 @@ impl SystemUiState {
         }
     }
 
+    /// Restore a selection across a topology-changing rebuild.
+    ///
+    /// Background control discovery can insert Volume/Audio/Profile rows in
+    /// front of the old numeric index. Identity wins so Enter keeps targeting
+    /// the same action; the index is only a fallback when that hardware row
+    /// genuinely disappeared.
+    pub fn restore_control_selection_kind(
+        &mut self,
+        previous_kind: Option<ControlKind>,
+        previous_index: usize,
+    ) {
+        if let Self::ControlCenter {
+            entries, selected, ..
+        } = self
+        {
+            *selected = previous_kind
+                .and_then(|kind| entries.iter().position(|entry| entry.kind == kind))
+                .unwrap_or_else(|| previous_index.min(entries.len().saturating_sub(1)));
+        }
+    }
+
     /// The control the selection currently rests on, if the panel is open.
     pub fn selected_control(&self) -> Option<ControlKind> {
         let Self::ControlCenter {
@@ -1683,11 +1704,9 @@ impl SystemUiState {
 
     /// Retype one row's pre-rendered label, leaving every other row alone.
     ///
-    /// This is what makes a two-second refresh affordable: rebuilding the
-    /// panel would re-run `wpctl`, `brightnessctl` and `powerprofilesctl`,
-    /// three processes every two seconds for as long as the panel is open.
-    /// A row that is not there is not an error — the machine may have grown
-    /// an interface since the panel opened.
+    /// A stable row can be retyped without rebuilding/rerasterizing unrelated
+    /// sections. A row that is not there is not an error — the caller performs
+    /// a cache-only topology rebuild when hardware presence changes.
     pub fn update_control_label(&mut self, kind: ControlKind, label: String) {
         if let Self::ControlCenter { entries, .. } = self
             && let Some(entry) = entries.iter_mut().find(|entry| entry.kind == kind)
@@ -3842,6 +3861,36 @@ mod tests {
         let mut rebuilt = SystemUiState::control_center(&ControlCenterInputs::default());
         rebuilt.restore_control_selection(9);
         assert_eq!(rebuilt.selected_control(), Some(ControlKind::Session));
+    }
+
+    #[test]
+    fn async_control_rows_do_not_move_the_selected_action() {
+        let mut original = SystemUiState::control_center(&ControlCenterInputs::default());
+        original.restore_control_selection(1);
+        assert_eq!(original.selected_control(), Some(ControlKind::DoNotDisturb));
+
+        let mut rebuilt = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((55, false)),
+            brightness: Some(70),
+            audio_output: Some("Speakers"),
+            power_profile: Some("balanced"),
+            ..Default::default()
+        });
+        rebuilt.restore_control_selection_kind(original.selected_control(), 1);
+        assert_eq!(rebuilt.selected_control(), Some(ControlKind::DoNotDisturb));
+    }
+
+    #[test]
+    fn a_disappeared_control_kind_falls_back_to_the_old_index() {
+        let original = SystemUiState::control_center(&ControlCenterInputs {
+            volume: Some((55, false)),
+            ..Default::default()
+        });
+        assert_eq!(original.selected_control(), Some(ControlKind::Volume));
+
+        let mut rebuilt = SystemUiState::control_center(&ControlCenterInputs::default());
+        rebuilt.restore_control_selection_kind(original.selected_control(), 0);
+        assert_eq!(rebuilt.selected_control(), Some(ControlKind::NightLight));
     }
 
     #[test]

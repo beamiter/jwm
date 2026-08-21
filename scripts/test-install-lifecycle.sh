@@ -244,6 +244,7 @@ for required_path in \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-support \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-remote \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/jwm-bridge \
+    payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_glow_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/bin/tao_pixels_bar \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/xsessions/jwm-x11rb.desktop \
     payload/usr/local/lib/jwm/versions/$PACKAGE_VERSION/share/wayland-sessions/jwm-wayland.desktop \

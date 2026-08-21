@@ -147,6 +147,14 @@ impl Jwm {
         // at the end of this tick.
         self.poll_launcher_catalog_job();
 
+        // The Shell Hub's slow controls are sampled off-thread. Always adopt
+        // a completed value so a panel closed mid-read still warms the next
+        // opening; only a visible Hub schedules periodic SWR refreshes.
+        self.poll_control_snapshot_job();
+        if self.features.system_ui.is_control_center() {
+            self.ensure_control_snapshot_refresh(Instant::now());
+        }
+
         // The Wi-Fi picker's scan and connect run on worker threads; adopt
         // their results here rather than blocking a frame on nmcli.
         if backend.has_compositor() {

@@ -91,9 +91,15 @@ pub struct FeatureStates {
     pub resource_sampler: resources::ResourceSampler,
     /// Clipboard history. Memory only, never written to disk.
     pub clipboard: ClipboardHistory,
-    /// Audio devices in use at both ends, refreshed when the control center
-    /// opens and after a switch.
-    pub audio_defaults: system_controls::AudioDefaults,
+    /// Last complete set of slow Shell Hub controls. The panel itself only
+    /// reads this memory; external tools are sampled by `control_snapshot_job`.
+    pub control_snapshot: Option<system_controls::ControlCenterSnapshot>,
+    /// One coalesced background refresh. The epoch travels with the value so
+    /// a read started before a user mutation cannot roll that mutation back.
+    pub control_snapshot_job:
+        Option<connectivity::BackgroundJob<(u64, system_controls::ControlCenterSnapshot)>>,
+    pub control_snapshot_refreshed_at: Option<std::time::Instant>,
+    pub control_snapshot_epoch: u64,
     /// Latest Wi-Fi/Bluetooth reading, refreshed on the same poll and
     /// whenever the control center opens.
     pub connectivity: ConnectivityState,

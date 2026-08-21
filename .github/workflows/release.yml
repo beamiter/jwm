@@ -113,6 +113,7 @@ jobs:
           cargo test --locked -p xbar_core --all-features --all-targets
           cargo clippy --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets --no-deps -- -D warnings
           cargo test --locked -p xbar_linux_actions -p xbar_dbus_providers --all-targets
+          cargo test --locked --manifest-path bars/tao_glow_bar/Cargo.toml --all-targets
           cargo test --locked --manifest-path bars/tao_pixels_bar/Cargo.toml --all-targets
 
       - name: Test release install lifecycle
