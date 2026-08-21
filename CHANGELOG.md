@@ -48,6 +48,15 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- X11RB and XCB no longer conflate JWM state-machine work with compositor-only
+  damage in one 1 ms polling branch. Layout/overview/expose animations and
+  deferred grabs now drive the shared update timer at 16 ms. X damage still
+  renders immediately after event dispatch, while continuous compositor work
+  is frame-paced instead of polling at 1 kHz. Idle maintenance remains at 20 ms
+  until IPC and bar commands gain readiness sources, avoiding the previous
+  millisecond spin without delaying DamageNotify or recording deadlines. A
+  timer-driven handler frame is also no longer followed by a redundant second
+  compositor swap in the same dispatch.
 - The udev Wayland backend no longer wakes every 16 ms just to discover that
   no shortcut is repeating. A repeatable press now arms one 400 ms timer and
   reuses it at the exact 50 ms interval; release, a new key, exact modifier

@@ -125,6 +125,12 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   remain explicitly unmanaged: timestamps are consumed for protocol progress,
   no Smithay barriers are installed, and the compositor does not scan the
   scene for nonexistent barrier state.
+- X11RB/XCB share one calloop pacing policy: continuous handler/compositor work
+  selects a 16 ms adaptive update cadence, X damage renders immediately after
+  dispatch, timer-driven updates suppress a redundant post-dispatch swap, and
+  recording contributes its own deadline. The 20 ms idle maintenance fallback
+  remains explicit until IPC clients and futex-backed bar commands are bridged
+  to stable readiness fds.
 - Compositor benchmarking is the first capability extracted from the monolithic
   `Backend` trait. Application startup now depends on `CompositorBenchmark`
   rather than the complete platform interface for benchmark configuration.

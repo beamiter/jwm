@@ -22,6 +22,7 @@ use crate::backend::common_define::{
 };
 use crate::backend::error::{BackendContextExt, BackendError};
 use crate::backend::x11::compositor_common::X11ConnectionOps;
+use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
@@ -65,7 +66,6 @@ use std::sync::{
     Arc, Mutex, RwLock,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
 use xcb::{Cookie, Raw, Xid, XidNew, x};
 
 use crate::sync_ext::MutexExt;
@@ -829,6 +829,9 @@ struct XcbLoopData<'a> {
     backend: &'a mut XcbBackend,
     handler: &'a mut dyn EventHandler,
     should_exit: bool,
+    /// True when the timer consumed compositor work that was already pending;
+    /// a later X event clears it to retain immediate damage handling.
+    compositor_frame_consumed_this_dispatch: bool,
 }
 
 /// Bound the amount of XCB work performed in one calloop dispatch.  libxcb may
@@ -2539,6 +2542,7 @@ impl Backend for XcbBackend {
 
         handle
             .insert_source(XcbEventSource::new(self.conn.clone()), |events, _, data| {
+                data.compositor_frame_consumed_this_dispatch = false;
                 let mut pending_motion = None;
                 let mut pending_configure = None;
                 for event in events {
@@ -2568,6 +2572,7 @@ impl Backend for XcbBackend {
         handle
             .insert_source(signals, |event, _, data| {
                 if event.signal() == Signal::SIGCHLD {
+                    data.compositor_frame_consumed_this_dispatch = false;
                     if let Err(e) = data
                         .handler
                         .handle_event(data.backend, BackendEvent::ChildProcessExited)
@@ -2578,17 +2583,30 @@ impl Backend for XcbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Signal source: {e}")))?;
 
-        let update_interval = Duration::from_millis(20);
-        let timer = Timer::from_duration(update_interval);
+        let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
         handle
-            .insert_source(timer, move |_, _, data| {
-                if let Err(e) = data.handler.update(data.backend) {
-                    log::error!("Error in update loop: {e:?}");
+            .insert_source(timer, move |deadline, _, data| {
+                let compositor_pending_before_update = data.backend.compositor_needs_render();
+                match data.handler.update(data.backend) {
+                    Ok(()) => {
+                        data.compositor_frame_consumed_this_dispatch =
+                            compositor_pending_before_update;
+                    }
+                    Err(e) => {
+                        data.compositor_frame_consumed_this_dispatch = false;
+                        log::error!("Error in update loop: {e:?}");
+                    }
                 }
                 if data.handler.should_exit() {
                     data.should_exit = true;
                 }
-                TimeoutAction::ToDuration(update_interval)
+                let frame_work_pending =
+                    data.handler.needs_tick() || data.backend.compositor_needs_render();
+                TimeoutAction::ToInstant(scheduling::next_update_deadline(
+                    deadline,
+                    std::time::Instant::now(),
+                    frame_work_pending,
+                ))
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {e}")))?;
 
@@ -2630,6 +2648,7 @@ impl Backend for XcbBackend {
                                 _ => true,
                             });
                         if relevant {
+                            data.compositor_frame_consumed_this_dispatch = false;
                             if let Err(e) = data
                                 .handler
                                 .handle_event(data.backend, BackendEvent::ConfigChanged)
@@ -2656,17 +2675,20 @@ impl Backend for XcbBackend {
             backend: self,
             handler,
             should_exit: false,
+            compositor_frame_consumed_this_dispatch: false,
         };
         while !data.should_exit {
-            // See the x11rb loop: recording paces itself, so an idle loop sleeps
-            // until the next capture is due rather than until the next event.
-            let timeout = if data.handler.needs_tick() || data.backend.compositor_needs_render() {
-                Some(Duration::from_millis(1))
-            } else {
-                data.backend.compositor_frame_deadline()
-            };
+            data.compositor_frame_consumed_this_dispatch = false;
+            // Shared with x11rb: continuous frame work uses the adaptive timer,
+            // X damage renders immediately, and recording supplies its own
+            // idle deadline.
+            let timeout = scheduling::dispatch_timeout(
+                data.handler.needs_tick(),
+                data.backend.compositor_needs_render(),
+                data.backend.compositor_frame_deadline(),
+            );
             event_loop.dispatch(timeout, &mut data)?;
-            if !data.should_exit {
+            if !data.should_exit && !data.compositor_frame_consumed_this_dispatch {
                 data.handler.render_compositor_immediate(data.backend);
             }
             if data.backend.benchmark_auto_exit && data.backend.compositor_benchmark_is_complete() {

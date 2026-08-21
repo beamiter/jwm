@@ -14,7 +14,6 @@ use calloop::signals::{Signal, Signals};
 use std::any::Any;
 use std::env;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use x11rb::connection::Connection;
 use x11rb::connection::RequestConnection;
 use x11rb::protocol::randr::ConnectionExt as RandrExt;
@@ -33,6 +32,7 @@ use crate::backend::api::{
     WindowHandoffIdentity, WindowOps,
 };
 use crate::backend::x11::compositor_common::X11ConnectionOps;
+use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
@@ -50,6 +50,10 @@ pub struct X11rbLoopData<'a> {
     pub backend: &'a mut X11rbBackend,
     pub handler: &'a mut dyn EventHandler,
     pub should_exit: bool,
+    /// The timer consumed compositor work that was pending before its handler
+    /// update. X events arriving later in the same dispatch clear this so their
+    /// new damage still takes the immediate path.
+    compositor_frame_consumed_this_dispatch: bool,
 }
 
 #[allow(dead_code)]
@@ -1344,6 +1348,7 @@ impl Backend for X11rbBackend {
 
         handle
             .insert_source(x11_source, |event, _, data| {
+                data.compositor_frame_consumed_this_dispatch = false;
                 let destroyed_window = match &event {
                     BackendEvent::WindowDestroyed(win) => Some(*win),
                     _ => None,
@@ -1368,6 +1373,7 @@ impl Backend for X11rbBackend {
         handle
             .insert_source(signals, |event, _, data| {
                 if event.signal() == Signal::SIGCHLD {
+                    data.compositor_frame_consumed_this_dispatch = false;
                     if let Err(e) = data.handler.handle_event(
                         data.backend,
                         crate::backend::api::BackendEvent::ChildProcessExited,
@@ -1380,17 +1386,30 @@ impl Backend for X11rbBackend {
 
         // 3. 注册 Timer
         // Timer 绝对不是 Send/Sync 的，必须转 String
-        let update_interval = Duration::from_millis(20);
-        let timer = Timer::from_duration(update_interval);
+        let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
         handle
-            .insert_source(timer, move |_, _, data| {
-                if let Err(e) = data.handler.update(data.backend) {
-                    log::error!("Error in update loop: {:?}", e);
+            .insert_source(timer, move |deadline, _, data| {
+                let compositor_pending_before_update = data.backend.compositor_needs_render();
+                match data.handler.update(data.backend) {
+                    Ok(()) => {
+                        data.compositor_frame_consumed_this_dispatch =
+                            compositor_pending_before_update;
+                    }
+                    Err(e) => {
+                        data.compositor_frame_consumed_this_dispatch = false;
+                        log::error!("Error in update loop: {:?}", e);
+                    }
                 }
                 if data.handler.should_exit() {
                     data.should_exit = true;
                 }
-                TimeoutAction::ToDuration(update_interval)
+                let frame_work_pending =
+                    data.handler.needs_tick() || data.backend.compositor_needs_render();
+                TimeoutAction::ToInstant(scheduling::next_update_deadline(
+                    deadline,
+                    std::time::Instant::now(),
+                    frame_work_pending,
+                ))
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {}", e)))?;
 
@@ -1445,6 +1464,7 @@ impl Backend for X11rbBackend {
                                 _ => true,
                             });
                         if relevant {
+                            data.compositor_frame_consumed_this_dispatch = false;
                             if let Err(e) = data.handler.handle_event(
                                 data.backend,
                                 crate::backend::api::BackendEvent::ConfigChanged,
@@ -1476,26 +1496,20 @@ impl Backend for X11rbBackend {
             backend: self,
             handler,
             should_exit: false,
+            compositor_frame_consumed_this_dispatch: false,
         };
         loop {
-            // When animations or overview are active, use a very short timeout so
-            // the event loop doesn't block between frames.  With vsync-enabled
-            // glXSwapBuffers (swap interval=1) the ~16.6ms vblank wait already
-            // provides natural frame pacing; we just need dispatch to return
-            // promptly after the swap completes so we can start the next frame.
-            // Without this, dispatch(None) only wakes on the 20ms calloop timer,
-            // which drifts against the vblank period and produces severe stutter
-            // (the exact symptom: smooth when mouse moves, choppy when still).
-            // Screen recording is the one consumer that needs a frame on a
-            // schedule of its own rather than in response to an event, so an
-            // otherwise idle loop sleeps until its next capture is due instead
-            // of blocking until some client happens to draw.
-            let timeout =
-                if loop_data.handler.needs_tick() || loop_data.backend.compositor_needs_render() {
-                    Some(Duration::from_millis(1))
-                } else {
-                    loop_data.backend.compositor_frame_deadline()
-                };
+            loop_data.compositor_frame_consumed_this_dispatch = false;
+            // Core handler work (layout animation, overview, deferred grabs)
+            // and continuous compositor work follow a 16 ms frame cadence.
+            // Ordinary X damage still renders immediately after dispatch, so
+            // it needs no millisecond poll. Recording contributes its own
+            // deadline when the loop is otherwise idle.
+            let timeout = scheduling::dispatch_timeout(
+                loop_data.handler.needs_tick(),
+                loop_data.backend.compositor_needs_render(),
+                loop_data.backend.compositor_frame_deadline(),
+            );
             event_loop
                 .dispatch(timeout, &mut loop_data)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
@@ -1504,7 +1518,7 @@ impl Backend for X11rbBackend {
             // DamageNotify), render without waiting for the 20ms timer.
             // This dramatically reduces visual latency for rapidly-updating
             // overlay windows (e.g. flameshot screenshot selection).
-            if !loop_data.should_exit {
+            if !loop_data.should_exit && !loop_data.compositor_frame_consumed_this_dispatch {
                 loop_data
                     .handler
                     .render_compositor_immediate(loop_data.backend);
