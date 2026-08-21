@@ -13,7 +13,7 @@ use super::protocol::{
 use super::tile::TileDecoder;
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
-use super::x11_viewer::{Viewer, ViewerEvent};
+use super::x11_viewer::{Viewer, ViewerEvent, validate_escape_key};
 use super::{RemoteResult, VIDEO_FRAME_IDLE_TIMEOUT};
 use crate::backend::clipboard_x11::{Clipboard, ClipboardCaptures, ClipboardSetter};
 use nix::errno::Errno;
@@ -50,9 +50,12 @@ pub struct ClientOptions {
     pub view_only: bool,
     pub grab_input: bool,
     pub clipboard: bool,
+    /// X keysym name that releases the local grab on a double tap.
+    pub escape_key: String,
 }
 
 pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
+    validate_escape_key(&options.escape_key)?;
     let key = load_key_file(&options.key_file)?;
     let request_input = !options.view_only;
     let keymap_fingerprint = if request_input {
@@ -132,6 +135,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         hello.keyboard_enabled,
         hello.keyboard_enabled.then_some(keymap_fingerprint),
         options.grab_input && (hello.pointer_enabled || hello.keyboard_enabled),
+        &options.escape_key,
     )?;
     draw_and_ack(&mut writer, first_frame, &state.telemetry, |frame| {
         viewer.draw_recyclable(frame)
@@ -1324,8 +1328,8 @@ mod tests {
                 },
                 pointer(20),
                 pointer(21),
-                // The viewer keeps F12 local and represents it upstream as
-                // this ReleaseAll edge.
+                // A double-tapped escape key releases the grab, which the
+                // viewer represents upstream as this ReleaseAll edge.
                 ViewerEvent::ReleaseAll,
                 pointer(22),
                 pointer(23),

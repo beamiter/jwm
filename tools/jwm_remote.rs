@@ -5,6 +5,7 @@ use jwm::remote::client::{ClientOptions, run_client};
 use jwm::remote::host::{HostOptions, run_host};
 use jwm::remote::key::generate_key_file;
 use jwm::remote::x11_capture::{CaptureArea, CaptureRegion, CaptureSource};
+use jwm::remote::x11_viewer::DEFAULT_ESCAPE_KEY;
 use std::path::PathBuf;
 
 const DEFAULT_JPEG_QUALITY_FLOOR: u8 = 40;
@@ -118,9 +119,15 @@ enum Command {
         #[arg(long)]
         view_only: bool,
 
-        /// Click the viewer to grab local input; F12 releases the grab.
+        /// Click the viewer to grab local input; double-tap the escape key to release.
         #[arg(long, conflicts_with = "view_only")]
         grab_input: bool,
+
+        /// X keysym name that releases the grab when tapped twice quickly.
+        ///
+        /// A single press is forwarded to the remote machine as usual.
+        #[arg(long, default_value = DEFAULT_ESCAPE_KEY, value_name = "KEYSYM")]
+        escape_key: String,
 
         /// Share the clipboard with the host, both directions.
         ///
@@ -184,6 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             view_only,
             grab_input,
             clipboard,
+            escape_key,
         } => run_client(ClientOptions {
             address,
             key_file,
@@ -191,6 +199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             view_only,
             grab_input,
             clipboard,
+            escape_key,
         }),
     }
 }

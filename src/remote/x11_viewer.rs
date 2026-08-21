@@ -35,7 +35,14 @@ use super::{RemoteError, RemoteResult};
 
 const TITLE: &[u8] = b"JWM Remote";
 const WM_CLASS: &[u8] = b"jwm-remote\0JwmRemote\0";
-const XK_F12: u32 = 0xffc9;
+/// Default grab-release key, kept for compatibility with earlier releases.
+pub const DEFAULT_ESCAPE_KEY: &str = "F12";
+/// Two presses within this window release the grab.
+///
+/// A single press is forwarded instead, so the escape key is still usable on
+/// the remote machine. Swallowing it outright meant a grabbed session could
+/// never send that key at all.
+const ESCAPE_DOUBLE_TAP: Duration = Duration::from_millis(500);
 const KEY_RELEASE_DEFER: Duration = Duration::from_millis(8);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const RENDER_CLIENT_VERSION: (u32, u32) = (0, 11);
@@ -159,7 +166,10 @@ pub struct Viewer {
     forward_keyboard: bool,
     verified_keymap: Option<[u8; 32]>,
     grabbed: bool,
-    f12_keycodes: Vec<u8>,
+    escape_keycodes: Vec<u8>,
+    escape_keysym: u32,
+    escape_name: String,
+    escape_taps: EscapeTapDetector,
     held_keycodes: HashSet<u8>,
     pending_key_release: Option<PendingKeyRelease>,
     deferred_events: VecDeque<Event>,
@@ -178,6 +188,7 @@ impl Viewer {
         forward_keyboard: bool,
         verified_keymap: Option<[u8; 32]>,
         grab_input: bool,
+        escape_key: &str,
     ) -> RemoteResult<Self> {
         if initial_width == 0 || initial_height == 0 {
             return Err(invalid_input("remote viewer dimensions must be nonzero").into());
@@ -305,11 +316,13 @@ impl Viewer {
         conn.map_window(window)?.check()?;
         conn.flush()?;
 
-        let f12_keycodes = load_f12_keycodes(&conn)?;
-        if grab_input && f12_keycodes.is_empty() {
-            return Err(invalid_data(
-                "--grab-input requires an unmodified F12 key in the local X11 keymap",
-            )
+        let escape_keysym = escape_keysym_from_name(escape_key)?;
+        let escape_keycodes = load_escape_keycodes(&conn, escape_keysym)?;
+        if grab_input && escape_keycodes.is_empty() {
+            return Err(invalid_data(format!(
+                "--grab-input requires an unmodified {escape_key} key in the local X11 keymap; \
+                     pick another with --escape-key"
+            ))
             .into());
         }
         Ok(Self {
@@ -335,7 +348,10 @@ impl Viewer {
             forward_keyboard,
             verified_keymap,
             grabbed: false,
-            f12_keycodes,
+            escape_keycodes,
+            escape_keysym,
+            escape_name: escape_key.to_string(),
+            escape_taps: EscapeTapDetector::default(),
             held_keycodes: HashSet::new(),
             pending_key_release: None,
             deferred_events: VecDeque::new(),
@@ -348,7 +364,8 @@ impl Viewer {
     /// Drain all currently queued X11 events without blocking.
     ///
     /// With input grabbing enabled, the first button press grabs the local
-    /// keyboard and pointer.  F12 is kept local, releases both grabs, and emits
+    /// keyboard and pointer.  Double-tapping the escape key releases both
+    /// grabs and emits
     /// `ReleaseAll` so the remote host cannot retain a half-finished chord.
     pub fn poll_events(&mut self) -> RemoteResult<Vec<ViewerEvent>> {
         let mut result = Vec::new();
@@ -450,12 +467,16 @@ impl Viewer {
                     }
                 }
                 Event::KeyPress(event) if event.event == self.window => {
-                    if self.grab_input && self.grabbed && self.is_f12(event.detail) {
+                    // Release on a double tap only, so a single press still
+                    // reaches the remote machine. Swallowing the escape key
+                    // outright meant a grabbed session could never send it.
+                    let escape = self.grab_input && self.grabbed && self.is_escape(event.detail);
+                    let released = escape && self.escape_taps.observe(Instant::now());
+                    if released {
                         self.release_local_grab()?;
                         self.release_all_input(&mut result);
                     } else if self.forwarding_input()
                         && self.forward_keyboard
-                        && !(self.grab_input && self.is_f12(event.detail))
                         && self.held_keycodes.insert(event.detail)
                     {
                         result.push(ViewerEvent::Key {
@@ -465,12 +486,13 @@ impl Viewer {
                     }
                 }
                 Event::KeyRelease(event) if event.event == self.window => {
-                    // Swallow the release corresponding to the local F12
-                    // escape even though ungrabbing can leave keyboard focus
-                    // on this window.
+                    // A release for a key we forwarded is forwarded too. The
+                    // press that released the grab was not forwarded, and
+                    // release_all_input has already cleared the held set, so
+                    // held_keycodes is what decides.
                     if self.forwarding_input()
                         && self.forward_keyboard
-                        && !(self.grab_input && self.is_f12(event.detail))
+                        && self.held_keycodes.contains(&event.detail)
                     {
                         self.pending_key_release = Some(PendingKeyRelease {
                             keycode: event.detail,
@@ -492,16 +514,17 @@ impl Viewer {
                             .into());
                         }
                     }
-                    let f12_keycodes = load_f12_keycodes(&self.conn)?;
-                    if self.grab_input && f12_keycodes.is_empty() {
+                    let escape_keycodes = load_escape_keycodes(&self.conn, self.escape_keysym)?;
+                    if self.grab_input && escape_keycodes.is_empty() {
                         self.release_local_grab()?;
                         self.release_all_input(&mut result);
-                        return Err(invalid_data(
-                            "local X11 keymap no longer has an unmodified F12 escape key",
-                        )
+                        return Err(invalid_data(format!(
+                            "local X11 keymap no longer has an unmodified {} escape key",
+                            self.escape_name
+                        ))
                         .into());
                     }
-                    self.f12_keycodes = f12_keycodes;
+                    self.escape_keycodes = escape_keycodes;
                 }
                 Event::Error(error) if is_closed_window_error(&error, self.window) => {
                     self.closed = true;
@@ -619,10 +642,10 @@ impl Viewer {
         (self.width, self.height)
     }
 
-    /// Whether `keycode` currently resolves to the F12 keysym on this X server.
+    /// Whether `keycode` currently resolves to the escape keysym here.
     #[must_use]
-    pub fn is_f12(&self, keycode: u8) -> bool {
-        self.f12_keycodes.contains(&keycode)
+    pub fn is_escape(&self, keycode: u8) -> bool {
+        self.escape_keycodes.contains(&keycode)
     }
 
     fn forwarding_input(&self) -> bool {
@@ -2359,7 +2382,47 @@ fn find_visual(screen: &Screen, visual_id: u32) -> Option<(u8, Visualtype)> {
     })
 }
 
-fn load_f12_keycodes(conn: &RustConnection) -> RemoteResult<Vec<u8>> {
+/// Tracks escape-key presses so only a quick pair releases the grab.
+#[derive(Debug, Default)]
+struct EscapeTapDetector {
+    last_press: Option<Instant>,
+}
+
+impl EscapeTapDetector {
+    /// Record a press, reporting whether it completed a double tap.
+    fn observe(&mut self, now: Instant) -> bool {
+        let doubled = self
+            .last_press
+            .is_some_and(|previous| now.duration_since(previous) <= ESCAPE_DOUBLE_TAP);
+        // Consume the pair, so a third press starts a new one rather than
+        // releasing again on every subsequent tap.
+        self.last_press = if doubled { None } else { Some(now) };
+        doubled
+    }
+}
+
+/// Check an escape-key name before anything slow happens.
+///
+/// Resolution otherwise waited until the viewer window was created, which is
+/// after the network connect and the handshake, so a typo surfaced as a
+/// failure well into an apparently working session.
+pub fn validate_escape_key(name: &str) -> RemoteResult<()> {
+    escape_keysym_from_name(name).map(|_| ())
+}
+
+/// Resolve an X keysym name such as `F12`, `Pause` or `Scroll_Lock`.
+fn escape_keysym_from_name(name: &str) -> RemoteResult<u32> {
+    let keysym = xkbcommon::xkb::keysym_from_name(name, xkbcommon::xkb::KEYSYM_NO_FLAGS);
+    if keysym.raw() == xkbcommon::xkb::keysyms::KEY_NoSymbol {
+        return Err(invalid_input(format!(
+            "unknown escape key {name:?}; use an X keysym name such as F12, Pause or Scroll_Lock"
+        ))
+        .into());
+    }
+    Ok(keysym.raw())
+}
+
+fn load_escape_keycodes(conn: &RustConnection, keysym: u32) -> RemoteResult<Vec<u8>> {
     let setup = conn.setup();
     let min = setup.min_keycode;
     let count = setup.max_keycode.saturating_sub(min).saturating_add(1);
@@ -2374,7 +2437,7 @@ fn load_f12_keycodes(conn: &RustConnection) -> RemoteResult<Vec<u8>> {
         .chunks_exact(per_keycode)
         .enumerate()
         .filter_map(|(offset, keysyms)| {
-            (keysyms.first() == Some(&XK_F12))
+            (keysyms.first() == Some(&keysym))
                 .then(|| min.saturating_add(u8::try_from(offset).unwrap_or(u8::MAX)))
         })
         .collect())
@@ -2439,6 +2502,49 @@ mod tests {
             depth: 24,
             bits_per_pixel: 32,
             scanline_pad: 32,
+        }
+    }
+
+    #[test]
+    fn escape_releases_on_a_double_tap_and_never_on_a_single_one() {
+        let mut taps = EscapeTapDetector::default();
+        let base = Instant::now();
+
+        // A single press must not release, so it can be forwarded instead.
+        assert!(!taps.observe(base));
+        // ...and a slow second press starts a new pair rather than completing
+        // the old one, or the key would be unusable at a comfortable rate.
+        assert!(!taps.observe(base + ESCAPE_DOUBLE_TAP + Duration::from_millis(1)));
+
+        // Two quick taps release.
+        let quick = base + Duration::from_secs(10);
+        assert!(!taps.observe(quick));
+        assert!(taps.observe(quick + Duration::from_millis(120)));
+
+        // The pair is consumed: a third tap starts over rather than releasing
+        // again on every subsequent press.
+        assert!(!taps.observe(quick + Duration::from_millis(200)));
+        assert!(taps.observe(quick + Duration::from_millis(300)));
+
+        // Exactly at the boundary still counts as a double tap.
+        let edge = quick + Duration::from_secs(10);
+        assert!(!taps.observe(edge));
+        assert!(taps.observe(edge + ESCAPE_DOUBLE_TAP));
+    }
+
+    #[test]
+    fn escape_key_names_resolve_through_xkb() {
+        assert_eq!(escape_keysym_from_name("F12").unwrap(), 0xffc9);
+        // The default must keep resolving to the key earlier releases used.
+        assert_eq!(escape_keysym_from_name(DEFAULT_ESCAPE_KEY).unwrap(), 0xffc9);
+        assert!(escape_keysym_from_name("Pause").is_ok());
+        assert!(escape_keysym_from_name("Scroll_Lock").is_ok());
+
+        for bad in ["", "NotAKey", "f12 "] {
+            assert!(
+                escape_keysym_from_name(bad).is_err(),
+                "{bad:?} must not resolve to a keysym"
+            );
         }
     }
 

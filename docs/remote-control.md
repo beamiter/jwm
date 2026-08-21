@@ -194,9 +194,18 @@ jwm-remote connect 192.168.1.50:48221 \
 ```
 
 With `--grab-input`, click inside the viewer before using JWM shortcuts. Press
-F12 to release the local keyboard/pointer grab and release every remotely held
+F12 **twice in quick succession** to release the local keyboard/pointer grab
+and release every remotely held
 key/button. The client refuses `--grab-input` if its base keymap has no plain
-F12 escape key. Closing the viewer also performs that release. Without
+F12 escape key; `--escape-key` takes any X keysym name, such as `Pause` or
+`Scroll_Lock`, for keyboards without a usable F12.
+
+A *single* press of the escape key is forwarded to the remote machine like any
+other key. Only a second press within half a second releases the grab. The
+earlier behaviour swallowed the key entirely, which meant a grabbed session
+could never send it at all — an application on the remote side that wanted F12
+simply could not be driven. Closing the viewer also performs that release.
+Without
 `--grab-input`, ordinary pointer and key events are forwarded while the viewer
 has focus, but local JWM global shortcuts may win their passive grabs.
 

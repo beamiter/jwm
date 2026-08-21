@@ -65,6 +65,13 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- The `jwm-remote` viewer forwards a single press of its grab-release key
+  instead of swallowing it, releasing only on a second press within half a
+  second. With `--grab-input` that key could previously never reach the remote
+  machine at all, so an application there that wanted F12 simply could not be
+  driven. `--escape-key` takes any X keysym name — `Pause`, `Scroll_Lock` — for
+  keyboards without a usable F12, and an unknown name now fails immediately
+  rather than after the connect and handshake had already succeeded.
 - `jwm-remote host` can share one monitor or a fixed rectangle instead of the
   whole root, with `--monitor NAME` or `--region WxH+X+Y`. The X root spans
   every display, so a dual 1920x1080 desk is one 3840x1080 drawable and the
