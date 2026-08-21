@@ -497,9 +497,18 @@ per intermediate size.
 
 `--max-width` is a ceiling, not a target. A request may only ever narrow it, so
 a peer can never make the host spend more readback, encode time or bandwidth
-than the operator allowed; requests below the 320-pixel floor are clamped to
-it. To let a large viewer receive more detail, raise `--max-width` on the host
-— that stays an operator decision.
+than the operator allowed; requests below the 320x200 floor are clamped to it.
+To let a large viewer receive more detail, raise `--max-width` on the host —
+that stays an operator decision.
+
+The encode is fitted inside *both* the viewer's width and its height, whichever
+binds harder, preserving aspect and never upscaling. Clamping width alone made
+one `--max-width` mean very different amounts of work depending on how the
+host's monitors are arranged: a 3440x1440 side-by-side root becomes 1280x535,
+while a 2560x2880 stacked root becomes 1280x1440 — 2.7 times the pixels for the
+same flag — and a portrait root is barely clamped at all. `--max-width` still
+has no height counterpart of its own; the viewer's height is what bounds that
+axis.
 
 Changing the encoded size retargets the XRender scaler and forces one keyframe,
 since the viewer's canvas geometry has changed. Measured on a 3440x1440 host as

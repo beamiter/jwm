@@ -70,9 +70,14 @@ monorepo use independent Semantic Versions.
   1280-wide image and discarded half of it on arrival. `--max-width` becomes a
   ceiling rather than a target: a request may only narrow it, so a peer can
   never make the host spend more readback, encode time or bandwidth than the
-  operator allowed. Measured on a 3440x1440 host as a viewer resized from 1280
-  to 640 wide: capture 18.3 -> 9.5 ms per frame, encode 2.2 -> 0.6 ms,
-  capture-to-ACK 4.9 -> 2.4 ms.
+  operator allowed. The encode is fitted inside both the viewer's width and its
+  height, whichever binds harder: clamping width alone made one `--max-width`
+  mean very different amounts of work depending on monitor arrangement, since a
+  2560x2880 stacked root became 1280x1440 — 2.7 times the pixels of a
+  side-by-side root at the same flag — and a portrait root was barely clamped
+  at all. Measured on a 3440x1440 host as a viewer resized from 1280 to 640
+  wide: capture 18.3 -> 9.5 ms per frame, encode 2.2 -> 0.6 ms, capture-to-ACK
+  4.9 -> 2.4 ms.
 - The `jwm-remote` viewer no longer clears its whole window before every frame.
   The backing pixmap is retained between frames and an upload only touches the
   image rectangle, so the bars around it stay correct until the letterbox

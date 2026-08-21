@@ -4,8 +4,8 @@ use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
 use super::key::load_key_file;
 use super::messages::{
-    ClientHello, MIN_VIEWPORT_WIDTH, ServerHello, decode_frame_ack, decode_input_batch,
-    decode_viewport,
+    ClientHello, MIN_VIEWPORT_HEIGHT, MIN_VIEWPORT_WIDTH, ServerHello, decode_frame_ack,
+    decode_input_batch, decode_viewport,
 };
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
@@ -60,25 +60,26 @@ const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
 /// update is corrected by the next request, and neither side may block.
 #[derive(Debug)]
 struct ViewportRequest {
-    /// Requested width, or zero while the viewer has not asked for anything.
-    width: AtomicU32,
+    /// Packed `width << 16 | height`, or zero while nothing has been asked.
+    size: AtomicU32,
 }
 
 impl ViewportRequest {
     fn new() -> Self {
         Self {
-            width: AtomicU32::new(0),
+            size: AtomicU32::new(0),
         }
     }
 
-    fn request(&self, width: u16) {
-        self.width.store(u32::from(width), Ordering::Relaxed);
+    fn request(&self, width: u16, height: u16) {
+        let packed = (u32::from(width) << 16) | u32::from(height);
+        self.size.store(packed, Ordering::Relaxed);
     }
 
-    fn take(&self) -> Option<u16> {
-        match self.width.swap(0, Ordering::Relaxed) {
+    fn take(&self) -> Option<(u16, u16)> {
+        match self.size.swap(0, Ordering::Relaxed) {
             0 => None,
-            width => u16::try_from(width).ok(),
+            packed => Some(((packed >> 16) as u16, packed as u16)),
         }
     }
 }
@@ -87,14 +88,20 @@ impl ViewportRequest {
 ///
 /// `--max-width` is a policy limit, so a request may only ever narrow it. A
 /// peer that asks for more pixels than the operator allowed gets the ceiling,
-/// not its request.
-fn effective_encoded_width(configured: u16, requested: u16) -> u16 {
-    let requested = requested.max(MIN_VIEWPORT_WIDTH);
-    if configured == 0 {
+/// not its request. Height has no configured counterpart, so the viewer's own
+/// height bounds it directly -- which is also what stops one `--max-width`
+/// meaning very different amounts of work on stacked or portrait roots.
+fn effective_encoded_bounds(configured_width: u16, requested: (u16, u16)) -> (u16, u16) {
+    let (width, height) = requested;
+    let width = width.max(MIN_VIEWPORT_WIDTH);
+    let height = height.max(MIN_VIEWPORT_HEIGHT);
+    let width = if configured_width == 0 {
         // Native capture: any request narrows it.
-        return requested;
-    }
-    requested.min(configured)
+        width
+    } else {
+        width.min(configured_width)
+    };
+    (width, height)
 }
 const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
@@ -1561,9 +1568,9 @@ fn stream_frames(
             // of these degradations is large and was previously visible only
             // as a single line that had long since scrolled away.
             if let Some(requested) = viewport.take() {
-                let width = effective_encoded_width(options.max_width, requested);
-                if capture.set_max_width(width) {
-                    eprintln!("jwm-remote: encoding at up to {width} pixels wide for this viewer");
+                let (width, height) = effective_encoded_bounds(options.max_width, requested);
+                if capture.set_encoded_bounds(width, height) {
+                    eprintln!("jwm-remote: encoding to fit {width}x{height} for this viewer");
                 }
             }
             let mode = capture.mode();
@@ -1967,8 +1974,7 @@ fn receive_input(
                 }
                 MessageKind::Viewport => {
                     let (width, height) = decode_viewport(&payload)?;
-                    viewport.request(width);
-                    let _ = height;
+                    viewport.request(width, height);
                 }
                 MessageKind::FrameAck => {
                     let acknowledged_at = Instant::now();
@@ -2215,20 +2221,29 @@ mod tests {
         // A peer asking for more pixels than the operator allowed gets the
         // ceiling. Otherwise the viewer would dictate host CPU, readback size
         // and bandwidth, which is exactly what --max-width exists to bound.
-        assert_eq!(effective_encoded_width(1280, 2560), 1280);
-        assert_eq!(effective_encoded_width(1280, 1280), 1280);
-        assert_eq!(effective_encoded_width(1280, 640), 640);
+        assert_eq!(effective_encoded_bounds(1280, (2560, 1440)).0, 1280);
+        assert_eq!(effective_encoded_bounds(1280, (1280, 720)).0, 1280);
+        assert_eq!(effective_encoded_bounds(1280, (640, 400)).0, 640);
 
         // Native capture has no ceiling, so any request narrows it.
-        assert_eq!(effective_encoded_width(0, 1600), 1600);
-        assert_eq!(effective_encoded_width(0, 16384), 16384);
+        assert_eq!(effective_encoded_bounds(0, (1600, 900)).0, 1600);
+        assert_eq!(effective_encoded_bounds(0, (16384, 900)).0, 16384);
 
-        // The floor matches the CLI's, so a peer cannot drive the encoder
-        // below a width the rest of the pipeline supports.
-        assert_eq!(effective_encoded_width(1280, 1), MIN_VIEWPORT_WIDTH);
-        assert_eq!(effective_encoded_width(0, 0), MIN_VIEWPORT_WIDTH);
+        // The floors match the CLI's, so a peer cannot drive the encoder below
+        // a size the rest of the pipeline supports.
+        assert_eq!(
+            effective_encoded_bounds(1280, (1, 1)),
+            (MIN_VIEWPORT_WIDTH, MIN_VIEWPORT_HEIGHT)
+        );
+        assert_eq!(
+            effective_encoded_bounds(0, (0, 0)),
+            (MIN_VIEWPORT_WIDTH, MIN_VIEWPORT_HEIGHT)
+        );
         // ...and the ceiling still wins when it is itself below the floor.
-        assert_eq!(effective_encoded_width(320, 8), MIN_VIEWPORT_WIDTH);
+        assert_eq!(effective_encoded_bounds(320, (8, 8)).0, MIN_VIEWPORT_WIDTH);
+
+        // Height is bounded by the viewer directly: it has no operator flag.
+        assert_eq!(effective_encoded_bounds(1280, (900, 600)).1, 600);
     }
 
     #[test]
@@ -2236,15 +2251,15 @@ mod tests {
         let viewport = ViewportRequest::new();
         assert_eq!(viewport.take(), None, "nothing requested yet");
 
-        viewport.request(900);
-        assert_eq!(viewport.take(), Some(900));
+        viewport.request(900, 600);
+        assert_eq!(viewport.take(), Some((900, 600)));
         assert_eq!(viewport.take(), None, "a request is acted on once");
 
         // A newer request supersedes an unread one; the capture thread only
         // ever needs the latest size.
-        viewport.request(800);
-        viewport.request(1024);
-        assert_eq!(viewport.take(), Some(1024));
+        viewport.request(800, 500);
+        viewport.request(1024, 768);
+        assert_eq!(viewport.take(), Some((1024, 768)));
     }
 
     #[test]

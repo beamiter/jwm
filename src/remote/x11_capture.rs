@@ -902,6 +902,8 @@ pub struct X11Capture {
     inhibitor_window: Window,
     requested_source: CaptureSource,
     max_width: u16,
+    /// Optional encoded-height bound; zero leaves height unbounded.
+    max_height: u16,
     render_scaler: Option<RenderScaler>,
     /// When XRender scaling may be attempted again after a rejected request.
     render_suspended_until: Option<Instant>,
@@ -1039,6 +1041,7 @@ impl X11Capture {
             inhibitor_window,
             requested_source,
             max_width,
+            max_height: 0,
             render_scaler,
             render_suspended_until: None,
             render_failures: 0,
@@ -1214,7 +1217,7 @@ impl X11Capture {
         allow_render: bool,
     ) -> Result<CaptureDrawableOutcome, CaptureFailure> {
         let (output_width, output_height) =
-            scaled_dimensions(source_width, source_height, self.max_width);
+            scaled_dimensions(source_width, source_height, self.max_width, self.max_height);
         let render_source = render_capture_source(self.root, drawable);
         let render_allowed_for_source = self
             .render_scaler
@@ -1570,19 +1573,20 @@ impl X11Capture {
         Ok(())
     }
 
-    /// Narrow the encoded width for the rest of the session.
+    /// Narrow the encoded size for the rest of the session.
     ///
     /// The operator's `--max-width` stays the ceiling: a peer can ask for
     /// fewer pixels than the host was configured to send, never more. Sending
     /// a viewer more pixels than its window can show costs bandwidth, encode
     /// time and readback for detail that is thrown away on arrival.
     ///
-    /// Returns whether the effective width changed.
-    pub fn set_max_width(&mut self, max_width: u16) -> bool {
-        if self.max_width == max_width {
+    /// Returns whether the effective bounds changed.
+    pub fn set_encoded_bounds(&mut self, max_width: u16, max_height: u16) -> bool {
+        if (self.max_width, self.max_height) == (max_width, max_height) {
             return false;
         }
         self.max_width = max_width;
+        self.max_height = max_height;
         // A native-width session never built a scaler. Downscaling now needs
         // one, and the CPU resize fallback would otherwise be permanent.
         if max_width != 0 && self.render_scaler.is_none() && self.render_failures == 0 {
@@ -3839,13 +3843,43 @@ fn find_visual(screen: &Screen, visual_id: u32) -> Option<Visualtype> {
 }
 
 #[must_use]
-pub fn scaled_dimensions(width: u16, height: u16, max_width: u16) -> (u16, u16) {
-    if max_width == 0 || width <= max_width || height == 0 {
+/// Fit `width x height` inside both bounds, preserving aspect and never
+/// upscaling. A zero bound is unbounded.
+///
+/// Clamping width alone made one `--max-width` mean very different amounts of
+/// work depending on how the monitors are arranged: a 3440x1440 side-by-side
+/// root becomes 1280x535, while a 2560x2880 stacked root becomes 1280x1440 --
+/// 2.7 times the pixels for the same flag. A portrait root is barely clamped
+/// at all.
+pub fn scaled_dimensions(width: u16, height: u16, max_width: u16, max_height: u16) -> (u16, u16) {
+    if width == 0 || height == 0 {
         return (width, height);
     }
-    let scaled_height = (u32::from(height) * u32::from(max_width) / u32::from(width))
-        .clamp(1, u32::from(u16::MAX)) as u16;
-    (max_width, scaled_height)
+    let width_fits = max_width == 0 || width <= max_width;
+    let height_fits = max_height == 0 || height <= max_height;
+    if width_fits && height_fits {
+        return (width, height);
+    }
+    // Whichever bound demands the smaller scale factor is the one that binds.
+    // Comparing the two ratios by cross-multiplication keeps this exact.
+    let bind_to_width = match (max_width == 0, max_height == 0) {
+        (false, true) => true,
+        (true, false) => false,
+        (false, false) => {
+            u32::from(max_width) * u32::from(height) <= u32::from(max_height) * u32::from(width)
+        }
+        // Both unbounded cannot reach here: it would have fitted above.
+        (true, true) => return (width, height),
+    };
+    if bind_to_width {
+        let scaled_height = (u32::from(height) * u32::from(max_width) / u32::from(width))
+            .clamp(1, u32::from(u16::MAX)) as u16;
+        (max_width, scaled_height)
+    } else {
+        let scaled_width = (u32::from(width) * u32::from(max_height) / u32::from(height))
+            .clamp(1, u32::from(u16::MAX)) as u16;
+        (scaled_width, max_height)
+    }
 }
 
 fn validate_root_geometry(width: u16, height: u16) -> RemoteResult<()> {
@@ -3878,15 +3912,51 @@ mod tests {
 
     #[test]
     fn downscale_preserves_aspect_ratio_without_upscaling() {
-        assert_eq!(scaled_dimensions(1920, 1080, 1280), (1280, 720));
-        assert_eq!(scaled_dimensions(2560, 1440, 1920), (1920, 1080));
-        assert_eq!(scaled_dimensions(1024, 768, 1280), (1024, 768));
-        assert_eq!(scaled_dimensions(1024, 768, 0), (1024, 768));
+        assert_eq!(scaled_dimensions(1920, 1080, 1280, 0), (1280, 720));
+        assert_eq!(scaled_dimensions(2560, 1440, 1920, 0), (1920, 1080));
+        assert_eq!(scaled_dimensions(1024, 768, 1280, 0), (1024, 768));
+        assert_eq!(scaled_dimensions(1024, 768, 0, 0), (1024, 768));
     }
 
     #[test]
     fn tiny_aspect_ratios_keep_a_nonzero_height() {
-        assert_eq!(scaled_dimensions(u16::MAX, 1, 1), (1, 1));
+        assert_eq!(scaled_dimensions(u16::MAX, 1, 1, 0), (1, 1));
+    }
+
+    #[test]
+    fn the_tighter_of_the_two_bounds_is_the_one_that_binds() {
+        // Width binds on a wide root.
+        assert_eq!(scaled_dimensions(3440, 1440, 1280, 1024), (1280, 535));
+        // Height binds on a stacked root, which clamping width alone missed
+        // entirely: 1280x1440 is 2.7x the pixels of the wide case.
+        assert_eq!(scaled_dimensions(2560, 2880, 1280, 720), (640, 720));
+        // A portrait root is barely clamped by width at all.
+        assert_eq!(scaled_dimensions(1440, 2560, 1280, 800), (450, 800));
+        // Either bound alone still works.
+        assert_eq!(scaled_dimensions(1920, 1080, 0, 540), (960, 540));
+        // Neither bound may upscale.
+        assert_eq!(scaled_dimensions(800, 600, 1920, 1080), (800, 600));
+        assert_eq!(scaled_dimensions(800, 600, 0, 0), (800, 600));
+    }
+
+    #[test]
+    fn bounded_scaling_never_produces_an_empty_or_growing_frame() {
+        for (width, height) in [(1_u16, 1_u16), (u16::MAX, 1), (1, u16::MAX), (3440, 1440)] {
+            for max_width in [0_u16, 1, 320, 1280, u16::MAX] {
+                for max_height in [0_u16, 1, 200, 720, u16::MAX] {
+                    let (out_width, out_height) =
+                        scaled_dimensions(width, height, max_width, max_height);
+                    assert!(
+                        out_width > 0 && out_height > 0,
+                        "{width}x{height} under {max_width}x{max_height} collapsed"
+                    );
+                    assert!(
+                        out_width <= width && out_height <= height,
+                        "{width}x{height} under {max_width}x{max_height} grew to {out_width}x{out_height}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

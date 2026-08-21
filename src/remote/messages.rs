@@ -115,6 +115,9 @@ fn decode_hello(payload: &[u8]) -> RemoteResult<u8> {
 /// floor so a peer cannot drive the encoder below a supported size.
 pub const MIN_VIEWPORT_WIDTH: u16 = 320;
 
+/// Smallest viewport height a client may request.
+pub const MIN_VIEWPORT_HEIGHT: u16 = 200;
+
 /// Encode the client's current viewable size.
 #[must_use]
 pub fn encode_viewport(width: u16, height: u16) -> [u8; 4] {
