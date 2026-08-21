@@ -2069,6 +2069,15 @@ pub trait EventHandler {
         None
     }
 
+    /// Duplicate a stable level-triggered descriptor that becomes readable
+    /// when external I/O requires [`EventHandler::update`]. The event loop owns
+    /// the returned fd; the handler must clear the underlying readiness while
+    /// updating. Backends without fd integration may ignore this hook and keep
+    /// their normal maintenance fallback.
+    fn duplicate_update_readiness_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        None
+    }
+
     /// Immediately render the compositor if it has pending damage.
     /// Called from the event loop right after processing X events to
     /// minimise visual latency for rapidly-updating overlay windows

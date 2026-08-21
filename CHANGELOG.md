@@ -48,6 +48,15 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- IPC now exposes one stable epoll readiness descriptor covering the Unix
+  listener, dynamic long-lived clients, disconnects, and write backpressure.
+  X11RB/XCB register it directly with calloop, so control commands wake JWM
+  immediately instead of waiting for the maintenance timer. A private eventfd
+  republishes complete frames left in userspace by fairness budgets, and
+  `EPOLLOUT` is enabled only while a slow client has buffered output, avoiding
+  both lost continuations and writable busy loops. The 20 ms fallback remains
+  for futex-backed status-bar commands and maintenance work that has not yet
+  gained an exact deadline or notifier.
 - X11RB and XCB no longer conflate JWM state-machine work with compositor-only
   damage in one 1 ms polling branch. Layout/overview/expose animations and
   deferred grabs now drive the shared update timer at 16 ms. X damage still

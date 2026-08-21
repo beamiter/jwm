@@ -832,6 +832,7 @@ struct XcbLoopData<'a> {
     /// True when the timer consumed compositor work that was already pending;
     /// a later X event clears it to retain immediate damage handling.
     compositor_frame_consumed_this_dispatch: bool,
+    update_requested: bool,
 }
 
 /// Bound the amount of XCB work performed in one calloop dispatch.  libxcb may
@@ -2583,9 +2584,24 @@ impl Backend for XcbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Signal source: {e}")))?;
 
+        if let Some(readiness_fd) = handler.duplicate_update_readiness_fd()
+            && let Err(error) = handle.insert_source(
+                calloop::generic::Generic::new(readiness_fd, Interest::READ, Mode::Level),
+                |_, _, data| {
+                    data.update_requested = true;
+                    Ok(PostAction::Continue)
+                },
+            )
+        {
+            log::warn!(
+                "Failed to insert handler readiness source: {error}. Falling back to timer polling."
+            );
+        }
+
         let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
         handle
             .insert_source(timer, move |deadline, _, data| {
+                data.update_requested = false;
                 let compositor_pending_before_update = data.backend.compositor_needs_render();
                 match data.handler.update(data.backend) {
                     Ok(()) => {
@@ -2676,6 +2692,7 @@ impl Backend for XcbBackend {
             handler,
             should_exit: false,
             compositor_frame_consumed_this_dispatch: false,
+            update_requested: false,
         };
         while !data.should_exit {
             data.compositor_frame_consumed_this_dispatch = false;
@@ -2688,6 +2705,23 @@ impl Backend for XcbBackend {
                 data.backend.compositor_frame_deadline(),
             );
             event_loop.dispatch(timeout, &mut data)?;
+            if data.update_requested {
+                data.update_requested = false;
+                let compositor_pending_before_update = data.backend.compositor_needs_render();
+                match data.handler.update(data.backend) {
+                    Ok(()) => {
+                        data.compositor_frame_consumed_this_dispatch =
+                            compositor_pending_before_update;
+                    }
+                    Err(error) => {
+                        data.compositor_frame_consumed_this_dispatch = false;
+                        log::error!("Error in readiness-driven update: {error:?}");
+                    }
+                }
+                if data.handler.should_exit() {
+                    data.should_exit = true;
+                }
+            }
             if !data.should_exit && !data.compositor_frame_consumed_this_dispatch {
                 data.handler.render_compositor_immediate(data.backend);
             }

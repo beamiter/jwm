@@ -22,7 +22,8 @@ use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
 
 use calloop::{
-    EventLoop,
+    EventLoop, Interest, Mode, PostAction,
+    generic::Generic,
     timer::{TimeoutAction, Timer},
 };
 
@@ -54,6 +55,7 @@ pub struct X11rbLoopData<'a> {
     /// update. X events arriving later in the same dispatch clear this so their
     /// new damage still takes the immediate path.
     compositor_frame_consumed_this_dispatch: bool,
+    update_requested: bool,
 }
 
 #[allow(dead_code)]
@@ -1384,11 +1386,28 @@ impl Backend for X11rbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Signal source: {}", e)))?;
 
-        // 3. 注册 Timer
+        // 3. Register the handler's stable external-I/O readiness hub. IPC
+        // listener/client membership changes behind this one epoll fd.
+        if let Some(readiness_fd) = handler.duplicate_update_readiness_fd()
+            && let Err(error) = handle.insert_source(
+                Generic::new(readiness_fd, Interest::READ, Mode::Level),
+                |_, _, data| {
+                    data.update_requested = true;
+                    Ok(PostAction::Continue)
+                },
+            )
+        {
+            log::warn!(
+                "Failed to insert handler readiness source: {error}. Falling back to timer polling."
+            );
+        }
+
+        // 4. 注册 Timer
         // Timer 绝对不是 Send/Sync 的，必须转 String
         let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
         handle
             .insert_source(timer, move |deadline, _, data| {
+                data.update_requested = false;
                 let compositor_pending_before_update = data.backend.compositor_needs_render();
                 match data.handler.update(data.backend) {
                     Ok(()) => {
@@ -1413,7 +1432,7 @@ impl Backend for X11rbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {}", e)))?;
 
-        // 4. 注册 inotify 配置文件监听
+        // 5. 注册 inotify 配置文件监听
         //
         // 监听父目录而非配置文件本身:编辑器普遍以"写临时文件 + rename 覆盖"的
         // 原子保存方式落盘,这会使针对文件 inode 的 watch 收到 IN_IGNORED 而被
@@ -1491,12 +1510,13 @@ impl Backend for X11rbBackend {
             log::info!("Config file hot-reload enabled via inotify");
         }
 
-        // 5. 运行事件循环
+        // 6. 运行事件循环
         let mut loop_data = X11rbLoopData {
             backend: self,
             handler,
             should_exit: false,
             compositor_frame_consumed_this_dispatch: false,
+            update_requested: false,
         };
         loop {
             loop_data.compositor_frame_consumed_this_dispatch = false;
@@ -1513,6 +1533,24 @@ impl Backend for X11rbBackend {
             event_loop
                 .dispatch(timeout, &mut loop_data)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
+
+            if loop_data.update_requested {
+                loop_data.update_requested = false;
+                let compositor_pending_before_update = loop_data.backend.compositor_needs_render();
+                match loop_data.handler.update(loop_data.backend) {
+                    Ok(()) => {
+                        loop_data.compositor_frame_consumed_this_dispatch =
+                            compositor_pending_before_update;
+                    }
+                    Err(error) => {
+                        loop_data.compositor_frame_consumed_this_dispatch = false;
+                        log::error!("Error in readiness-driven update: {error:?}");
+                    }
+                }
+                if loop_data.handler.should_exit() {
+                    loop_data.should_exit = true;
+                }
+            }
 
             // Immediate compositor render: after processing X events (including
             // DamageNotify), render without waiting for the 20ms timer.

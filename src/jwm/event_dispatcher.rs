@@ -3386,6 +3386,17 @@ impl EventHandler for Jwm {
         })
     }
 
+    fn duplicate_update_readiness_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        let ipc = self.ipc_server.as_ref()?;
+        match ipc.duplicate_readiness_fd() {
+            Ok(fd) => fd,
+            Err(error) => {
+                log::warn!("[ipc] could not duplicate update readiness fd: {error}");
+                None
+            }
+        }
+    }
+
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {
         self.render_pending_frame(backend);
     }

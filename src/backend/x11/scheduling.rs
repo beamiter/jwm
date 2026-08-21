@@ -108,6 +108,8 @@ mod tests {
             assert!(backend.contains("scheduling::dispatch_timeout("));
             assert!(backend.contains("scheduling::next_update_deadline("));
             assert!(backend.contains("TimeoutAction::ToInstant("));
+            assert!(backend.contains("handler.duplicate_update_readiness_fd()"));
+            assert!(backend.contains("data.update_requested = true"));
             assert!(!backend.contains("Duration::from_millis(1)"));
             assert!(!backend.contains("TimeoutAction::ToDuration"));
         }

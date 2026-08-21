@@ -1,8 +1,12 @@
 use log::{debug, info, warn};
+use nix::errno::Errno;
+use nix::sys::epoll::{Epoll, EpollCreateFlags, EpollEvent, EpollFlags};
+use nix::sys::eventfd::{EfdFlags, EventFd};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -265,6 +269,7 @@ struct IpcClient {
     out_buf: Vec<u8>,
     subscriptions: Vec<String>,
     read_closed: bool,
+    writable_interest: bool,
 }
 
 impl IpcClient {
@@ -278,6 +283,7 @@ impl IpcClient {
             out_buf: Vec::new(),
             subscriptions: Vec::new(),
             read_closed: false,
+            writable_interest: false,
         })
     }
 
@@ -465,6 +471,10 @@ impl IpcClient {
                     .is_some_and(|suffix| suffix.starts_with('/'))
         })
     }
+
+    fn has_buffered_frame(&self) -> bool {
+        self.buf[self.scan_pos.max(self.buf_start)..].contains(&b'\n')
+    }
 }
 
 fn normalize_subscriptions(topics: Vec<String>) -> Vec<String> {
@@ -489,6 +499,107 @@ fn normalize_subscriptions(topics: Vec<String>) -> Vec<String> {
 // IPC Server
 // ---------------------------------------------------------------------------
 
+const IPC_READINESS_CAPACITY: usize = MAX_CLIENTS + 2;
+
+/// Stable, level-triggered readiness descriptor for the listener and every
+/// dynamic client. The outer compositor loop registers a duplicate of the
+/// epoll fd, while this owner updates interests as clients come and go.
+#[derive(Debug)]
+struct IpcReadiness {
+    epoll: Epoll,
+    continuation: EventFd,
+    continuation_armed: bool,
+    events: Vec<EpollEvent>,
+}
+
+impl IpcReadiness {
+    fn new(listener: &UnixListener) -> io::Result<Self> {
+        let epoll = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).map_err(errno_io)?;
+        let continuation = EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)
+            .map_err(errno_io)?;
+        epoll
+            .add(listener, EpollEvent::new(EpollFlags::EPOLLIN, u64::MAX - 1))
+            .map_err(errno_io)?;
+        epoll
+            .add(
+                &continuation,
+                EpollEvent::new(EpollFlags::EPOLLIN, u64::MAX),
+            )
+            .map_err(errno_io)?;
+        Ok(Self {
+            epoll,
+            continuation,
+            continuation_armed: false,
+            events: vec![EpollEvent::empty(); IPC_READINESS_CAPACITY],
+        })
+    }
+
+    fn duplicate_fd(&self) -> io::Result<OwnedFd> {
+        self.epoll.0.try_clone()
+    }
+
+    fn client_flags(writable: bool) -> EpollFlags {
+        let mut flags = EpollFlags::EPOLLIN
+            | EpollFlags::EPOLLRDHUP
+            | EpollFlags::EPOLLHUP
+            | EpollFlags::EPOLLERR;
+        if writable {
+            flags |= EpollFlags::EPOLLOUT;
+        }
+        flags
+    }
+
+    fn add_client(&self, id: u64, client: &IpcClient) -> io::Result<()> {
+        self.epoll
+            .add(
+                &client.stream,
+                EpollEvent::new(Self::client_flags(false), id),
+            )
+            .map_err(errno_io)
+    }
+
+    fn sync_client_interest(&self, id: u64, client: &mut IpcClient) -> io::Result<()> {
+        let writable = !client.out_buf.is_empty();
+        if writable == client.writable_interest {
+            return Ok(());
+        }
+        let mut event = EpollEvent::new(Self::client_flags(writable), id);
+        self.epoll
+            .modify(&client.stream, &mut event)
+            .map_err(errno_io)?;
+        client.writable_interest = writable;
+        Ok(())
+    }
+
+    /// Consume the inner epoll ready list and the userspace-continuation
+    /// eventfd. Socket I/O immediately afterwards clears level readiness.
+    fn drain(&mut self) -> io::Result<()> {
+        self.epoll.wait(&mut self.events, 0u8).map_err(errno_io)?;
+        match self.continuation.read() {
+            Ok(_) | Err(Errno::EAGAIN) => {}
+            Err(error) => return Err(errno_io(error)),
+        }
+        self.continuation_armed = false;
+        Ok(())
+    }
+
+    /// Re-publish work that is already buffered in userspace. After a
+    /// fairness budget is reached the socket itself may no longer be readable,
+    /// so kernel readiness alone cannot schedule the continuation.
+    fn arm_continuation(&mut self) -> io::Result<()> {
+        if self.continuation_armed {
+            return Ok(());
+        }
+        self.continuation.write(1).map_err(errno_io)?;
+        self.continuation_armed = true;
+        Ok(())
+    }
+}
+
+fn errno_io(error: Errno) -> io::Error {
+    io::Error::from_raw_os_error(error as i32)
+}
+
 pub struct IpcServer {
     listener: UnixListener,
     socket_path: PathBuf,
@@ -498,6 +609,7 @@ pub struct IpcServer {
     /// Client id at which the next poll should begin. Client ids are sorted
     /// before polling so fairness does not depend on `HashMap` iteration order.
     next_poll_client: u64,
+    readiness: Option<IpcReadiness>,
 }
 
 /// Parsed & validated message from a client, ready to process.
@@ -529,6 +641,13 @@ impl IpcServer {
         let path = validated_socket_path()?;
         let (listener, identity) = bind_owned_socket(&path)?;
         listener.set_nonblocking(true)?;
+        let readiness = match IpcReadiness::new(&listener) {
+            Ok(readiness) => Some(readiness),
+            Err(error) => {
+                warn!("[ipc] readiness hub unavailable, retaining timer fallback: {error}");
+                None
+            }
+        };
         info!("[ipc] listening on {}", path.display());
         Ok(Self {
             listener,
@@ -537,12 +656,31 @@ impl IpcServer {
             clients: HashMap::new(),
             next_id: 1,
             next_poll_client: 1,
+            readiness,
         })
     }
 
     #[must_use]
     pub fn socket_path() -> PathBuf {
         socket_location().0
+    }
+
+    /// Duplicate the stable readiness descriptor for an owning event source.
+    /// The duplicate is close-on-exec and remains valid while client
+    /// registrations are changed on the original epoll instance.
+    pub fn duplicate_readiness_fd(&self) -> io::Result<Option<OwnedFd>> {
+        self.readiness
+            .as_ref()
+            .map(IpcReadiness::duplicate_fd)
+            .transpose()
+    }
+
+    fn drain_readiness(&mut self) {
+        if let Some(readiness) = self.readiness.as_mut()
+            && let Err(error) = readiness.drain()
+        {
+            warn!("[ipc] could not drain readiness hub: {error}");
+        }
     }
 
     /// Accept any pending connections.
@@ -559,6 +697,13 @@ impl IpcServer {
                     self.next_id = self.next_id.wrapping_add(1).max(1);
                     match IpcClient::new(stream) {
                         Ok(client) => {
+                            if let Some(readiness) = self.readiness.as_ref()
+                                && let Err(error) = readiness.add_client(id, &client)
+                            {
+                                warn!(
+                                    "[ipc] client {id} readiness registration failed; retaining timer fallback: {error}"
+                                );
+                            }
                             debug!("[ipc] client {} connected", id);
                             self.clients.insert(id, client);
                         }
@@ -576,6 +721,7 @@ impl IpcServer {
 
     /// Read from all clients and return parsed messages.
     pub fn poll_clients(&mut self) -> Vec<IncomingIpc> {
+        self.drain_readiness();
         let mut incoming = Vec::new();
         let mut dead = Vec::new();
         let mut client_ids: Vec<_> = self.clients.keys().copied().collect();
@@ -655,6 +801,12 @@ impl IpcServer {
                 }
                 Err(_) => dead.push(id),
             }
+
+            if let Some(readiness) = self.readiness.as_ref()
+                && let Err(error) = readiness.sync_client_interest(id, client)
+            {
+                warn!("[ipc] client {id} readiness update failed: {error}");
+            }
         }
 
         for id in dead {
@@ -662,16 +814,31 @@ impl IpcServer {
             self.clients.remove(&id);
         }
 
+        if self.clients.values().any(IpcClient::has_buffered_frame)
+            && let Some(readiness) = self.readiness.as_mut()
+            && let Err(error) = readiness.arm_continuation()
+        {
+            warn!("[ipc] could not arm buffered-work continuation: {error}");
+        }
+
         incoming
     }
 
     /// Send a response to a specific client.
     pub fn respond(&mut self, client_id: u64, resp: &IpcResponse) {
+        let mut remove = false;
         if let Some(client) = self.clients.get_mut(&client_id) {
             if let Err(e) = client.send_response(resp) {
                 warn!("[ipc] failed to send response to client {client_id}: {e}");
-                self.clients.remove(&client_id);
+                remove = true;
+            } else if let Some(readiness) = self.readiness.as_ref()
+                && let Err(error) = readiness.sync_client_interest(client_id, client)
+            {
+                warn!("[ipc] client {client_id} readiness update failed: {error}");
             }
+        }
+        if remove {
+            self.clients.remove(&client_id);
         }
     }
 
@@ -686,8 +853,16 @@ impl IpcServer {
     pub fn broadcast(&mut self, event: &IpcEvent) {
         let mut dead = Vec::new();
         for (&id, client) in self.clients.iter_mut() {
-            if client.is_subscribed(&event.event) && client.send_event(event).is_err() {
-                dead.push(id);
+            if client.is_subscribed(&event.event) {
+                if client.send_event(event).is_err() {
+                    dead.push(id);
+                    continue;
+                }
+                if let Some(readiness) = self.readiness.as_ref()
+                    && let Err(error) = readiness.sync_client_interest(id, client)
+                {
+                    warn!("[ipc] client {id} readiness update failed: {error}");
+                }
             }
         }
         for id in dead {
@@ -725,7 +900,9 @@ impl Drop for IpcServer {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::fd::AsFd;
 
+    use nix::poll::{PollFd, PollFlags, poll};
     use std::sync::atomic::{AtomicU64, Ordering};
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -741,6 +918,7 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
         let identity = socket_identity(&path).unwrap();
+        let readiness = Some(IpcReadiness::new(&listener).unwrap());
         IpcServer {
             listener,
             socket_path: path,
@@ -748,19 +926,146 @@ mod tests {
             clients: HashMap::new(),
             next_id: 1,
             next_poll_client: 1,
+            readiness,
         }
     }
 
     fn attach_test_client(server: &mut IpcServer, id: u64) -> UnixStream {
         let (server_stream, peer) = UnixStream::pair().unwrap();
+        let client = IpcClient::new(server_stream).unwrap();
         server
-            .clients
-            .insert(id, IpcClient::new(server_stream).unwrap());
+            .readiness
+            .as_ref()
+            .unwrap()
+            .add_client(id, &client)
+            .unwrap();
+        server.clients.insert(id, client);
         peer
     }
 
     fn query_payload(count: usize) -> Vec<u8> {
         "{\"query\":\"get_version\"}\n".repeat(count).into_bytes()
+    }
+
+    fn fd_is_readable(fd: &OwnedFd) -> bool {
+        let mut descriptors = [PollFd::new(fd.as_fd(), PollFlags::POLLIN)];
+        poll(&mut descriptors, 0u8).unwrap() > 0
+            && descriptors[0]
+                .revents()
+                .is_some_and(|events| events.contains(PollFlags::POLLIN))
+    }
+
+    #[test]
+    fn readiness_duplicate_nests_in_an_outer_epoll_and_is_close_on_exec() {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+
+        let mut server = make_test_server();
+        let readiness = server.duplicate_readiness_fd().unwrap().unwrap();
+        let descriptor_flags =
+            FdFlag::from_bits_truncate(fcntl(&readiness, FcntlArg::F_GETFD).unwrap());
+        assert!(descriptor_flags.contains(FdFlag::FD_CLOEXEC));
+
+        let outer = Epoll::new(EpollCreateFlags::EPOLL_CLOEXEC).unwrap();
+        outer
+            .add(&readiness, EpollEvent::new(EpollFlags::EPOLLIN, 42))
+            .unwrap();
+        let mut client = UnixStream::connect(server.socket_path.clone()).unwrap();
+        client.write_all(b"{\"query\":\"get_version\"}\n").unwrap();
+
+        let mut events = [EpollEvent::empty()];
+        assert_eq!(outer.wait(&mut events, 100u8).unwrap(), 1);
+        assert_eq!(events[0].data(), 42);
+        server.accept_connections();
+        assert_eq!(server.poll_clients().len(), 1);
+        assert_eq!(outer.wait(&mut events, 0u8).unwrap(), 0);
+    }
+
+    #[test]
+    fn disconnected_idle_client_wakes_once_and_is_retired() {
+        let mut server = make_test_server();
+        let readiness = server.duplicate_readiness_fd().unwrap().unwrap();
+        let peer = attach_test_client(&mut server, 11);
+        assert!(!fd_is_readable(&readiness));
+
+        drop(peer);
+        assert!(fd_is_readable(&readiness));
+        assert!(server.poll_clients().is_empty());
+        assert!(!server.clients.contains_key(&11));
+        assert!(!fd_is_readable(&readiness));
+    }
+
+    #[test]
+    fn listener_and_persistent_client_drive_one_stable_readiness_fd() {
+        let mut server = make_test_server();
+        let readiness = server.duplicate_readiness_fd().unwrap().unwrap();
+        let path = server.socket_path.clone();
+        assert!(!fd_is_readable(&readiness));
+
+        let mut client = UnixStream::connect(path).unwrap();
+        assert!(fd_is_readable(&readiness));
+        server.accept_connections();
+        server.poll_clients();
+        assert_eq!(server.clients.len(), 1);
+        assert!(!fd_is_readable(&readiness));
+
+        client.write_all(b"{\"query\":\"get_version\"}\n").unwrap();
+        assert!(fd_is_readable(&readiness));
+        let first = server.poll_clients();
+        assert_eq!(first.len(), 1);
+        assert!(!fd_is_readable(&readiness));
+
+        client.write_all(b"{\"query\":\"get_tree\"}\n").unwrap();
+        assert!(fd_is_readable(&readiness));
+        let second = server.poll_clients();
+        assert_eq!(second.len(), 1);
+        assert!(!fd_is_readable(&readiness));
+    }
+
+    #[test]
+    fn buffered_frames_rearm_readiness_after_the_socket_is_drained() {
+        let mut server = make_test_server();
+        let readiness = server.duplicate_readiness_fd().unwrap().unwrap();
+        let mut peer = attach_test_client(&mut server, 7);
+        peer.write_all(&query_payload(MAX_MESSAGES_PER_POLL + 7))
+            .unwrap();
+        assert!(fd_is_readable(&readiness));
+
+        let first = server.poll_clients();
+        assert_eq!(first.len(), MAX_MESSAGES_PER_POLL);
+        assert!(server.clients[&7].has_buffered_frame());
+        assert!(
+            fd_is_readable(&readiness),
+            "the continuation eventfd must publish userspace-only work"
+        );
+
+        let second = server.poll_clients();
+        assert_eq!(second.len(), 7);
+        assert!(!server.clients[&7].has_buffered_frame());
+        assert!(!fd_is_readable(&readiness));
+    }
+
+    #[test]
+    fn writable_interest_is_removed_after_the_output_queue_drains() {
+        let mut server = make_test_server();
+        let readiness_fd = server.duplicate_readiness_fd().unwrap().unwrap();
+        let mut peer = attach_test_client(&mut server, 9);
+        let readiness = server.readiness.as_ref().unwrap();
+        let client = server.clients.get_mut(&9).unwrap();
+
+        client.out_buf.extend_from_slice(b"pending");
+        readiness.sync_client_interest(9, client).unwrap();
+        assert!(client.writable_interest);
+        assert!(fd_is_readable(&readiness_fd));
+
+        assert!(server.poll_clients().is_empty());
+        let client = &server.clients[&9];
+        assert!(client.out_buf.is_empty());
+        assert!(!client.writable_interest);
+        assert!(!fd_is_readable(&readiness_fd));
+
+        let mut delivered = [0; 7];
+        std::io::Read::read_exact(&mut peer, &mut delivered).unwrap();
+        assert_eq!(&delivered, b"pending");
     }
 
     #[test]
