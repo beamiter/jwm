@@ -129,15 +129,16 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   selects a 16 ms adaptive update cadence, X damage renders immediately after
   dispatch, timer-driven updates suppress a redundant post-dispatch swap, and
   recording contributes its own deadline. The 20 ms idle maintenance fallback
-  remains explicit until the remaining futex-backed bar commands, clipboard
-  delivery, and lifecycle/telemetry work gain readiness or exact deadlines.
-- IPC owns a nested level-triggered epoll hub. Its stable outer fd represents
-  the listener plus every current client; client membership and `EPOLLOUT`
-  interest change internally without re-registering calloop. A coalesced
-  eventfd carries userspace-only continuation work after fairness limits. Both
-  X11 loops turn this readiness into one handler update before immediate
-  rendering; the timer remains a correctness backstop for bar commands and
-  maintenance work not yet fully deadline-driven.
+  remains explicit until clipboard delivery and lifecycle/telemetry work gain
+  readiness or exact deadlines.
+- JWM owns a process-lifetime level-triggered epoll hub registered once by each
+  X11 loop. It nests IPC's listener/client epoll and dynamically added per-bar
+  command eventfds, so IPC reconnects and monitor hotplug do not mutate calloop
+  registrations. IPC uses an eventfd for userspace-only fairness continuation
+  and conditional `EPOLLOUT`; xbar's command notifier preserves the futex wire
+  protocol while bridging bar-to-WM commands to eventfd. Source eventfds and
+  rings are drained before the aggregate ready list, and bar teardown removes
+  its interest before destroying the ring and joining the waiter thread.
 - Compositor benchmarking is the first capability extracted from the monolithic
   `Backend` trait. Application startup now depends on `CompositorBenchmark`
   rather than the complete platform interface for benchmark configuration.

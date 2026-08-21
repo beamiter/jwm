@@ -25,6 +25,7 @@ pub mod strut_manager;
 pub mod swallowing;
 pub mod tag_manager;
 pub mod types;
+pub(crate) mod update_readiness;
 pub mod visibility;
 
 pub mod monitor_management;
@@ -80,6 +81,7 @@ use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor};
 use crate::ipc_server::IpcServer;
+use crate::jwm::update_readiness::UpdateReadinessHub;
 
 use crate::core::animation::AnimationManager;
 use xbar_core::shared_structures::CommandType;
@@ -96,6 +98,7 @@ lazy_static::lazy_static! {
 
 static WM_SESSION_ID: OnceLock<u64> = OnceLock::new();
 static BAR_SNAPSHOT_GENERATION: AtomicU64 = AtomicU64::new(1);
+const MAX_BAR_COMMANDS_PER_MONITOR_UPDATE: usize = 64;
 
 /// A window id is intentionally only meaningful for one WM lifetime.  Mixing
 /// a queued click from a previous JWM process with a recycled backend id could
@@ -215,6 +218,7 @@ pub struct Jwm {
 
     // IPC
     pub ipc_server: Option<IpcServer>,
+    pub(crate) update_readiness: Option<UpdateReadinessHub>,
 
     // Config hot-reload. Both backend inotify events and the backend-neutral
     // update-loop poll feed this tracker so a revision is only attempted once.
@@ -1027,6 +1031,20 @@ impl Jwm {
                 None
             }
         };
+        let update_readiness = match UpdateReadinessHub::new() {
+            Ok(hub) => Some(hub),
+            Err(error) => {
+                warn!("failed to create update readiness hub; retaining timer fallback: {error}");
+                None
+            }
+        };
+        if let (Some(hub), Some(ipc_fd)) = (
+            update_readiness.as_ref(),
+            ipc_server.as_ref().and_then(IpcServer::readiness_fd),
+        ) && let Err(error) = hub.register(ipc_fd)
+        {
+            warn!("failed to aggregate IPC readiness; retaining timer fallback: {error}");
+        }
         let mut jwm = Jwm {
             state: WMState::new(),
             runtime_backend,
@@ -1070,6 +1088,7 @@ impl Jwm {
             drag_ctl: None,
 
             ipc_server,
+            update_readiness,
             config_reload_tracker: lifecycle::ConfigReloadTracker::new(config_revision),
             config_last_modified: config_revision,
             config_reload_debounce: None,
@@ -1715,7 +1734,17 @@ impl Jwm {
 
         // Read commands from all per-monitor status bars
         for (&source_monitor, bar) in &mut self.secondary_bars {
-            loop {
+            // Clear the outward level before consuming the ring. A command
+            // arriving after this point either joins this drain or causes the
+            // futex worker to publish a fresh eventfd level.
+            if let Some(notifier) = bar.command_notifier.as_ref()
+                && let Err(error) = notifier.drain()
+            {
+                warn!("[process_commands] failed to drain bar {source_monitor} notifier: {error}");
+            }
+            // Bound one producer's work. If it refills continuously and a
+            // command remains, the level worker republishes the next batch.
+            for _ in 0..MAX_BAR_COMMANDS_PER_MONITOR_UPDATE {
                 match bar.shmem.try_receive_command() {
                     Ok(Some(cmd)) => commands_to_process.push((source_monitor, cmd)),
                     Ok(None) => break,

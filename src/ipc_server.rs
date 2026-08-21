@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -673,6 +673,14 @@ impl IpcServer {
             .as_ref()
             .map(IpcReadiness::duplicate_fd)
             .transpose()
+    }
+
+    /// Borrow the stable inner epoll descriptor for a process-level readiness
+    /// aggregator. Its lifetime remains owned by this server.
+    pub(crate) fn readiness_fd(&self) -> Option<BorrowedFd<'_>> {
+        self.readiness
+            .as_ref()
+            .map(|readiness| readiness.epoll.0.as_fd())
     }
 
     fn drain_readiness(&mut self) {

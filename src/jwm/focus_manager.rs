@@ -1021,6 +1021,7 @@ mod scratchpad_reveal_tests {
             debug_hud_on: false,
             external_struts: HashMap::new(),
             ipc_server: None,
+            update_readiness: None,
             config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
             config_last_modified: None,
             config_reload_debounce: None,
@@ -1107,7 +1108,8 @@ mod scratchpad_reveal_tests {
             monitor_id,
             SecondaryBarInstance {
                 monitor_id,
-                shmem: producer,
+                shmem: std::sync::Arc::new(producer),
+                command_notifier: None,
                 pid: child.id(),
                 child,
                 client_key: None,

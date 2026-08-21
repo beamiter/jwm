@@ -1186,7 +1186,9 @@ impl Jwm {
     }
 
     pub(crate) fn cleanup_secondary_bars(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        for (mon_id, mut bar) in self.secondary_bars.drain() {
+        let bars = std::mem::take(&mut self.secondary_bars);
+        for (mon_id, mut bar) in bars {
+            self.unregister_secondary_bar_readiness(&bar);
             match super::monitor_management::terminate_secondary_bar_child(
                 &mut bar.child,
                 Duration::from_secs(3),
@@ -1205,7 +1207,9 @@ impl Jwm {
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Clean up all monitor bars shared memory
-        for (mon_id, mut bar) in self.secondary_bars.drain() {
+        let bars = std::mem::take(&mut self.secondary_bars);
+        for (mon_id, mut bar) in bars {
+            self.unregister_secondary_bar_readiness(&bar);
             if let Err(error) = super::monitor_management::terminate_secondary_bar_child(
                 &mut bar.child,
                 Duration::from_secs(3),
@@ -1215,7 +1219,7 @@ impl Jwm {
                     mon_id, error
                 );
             }
-            drop(bar.shmem);
+            drop(bar);
             #[cfg(unix)]
             {
                 let path = format!("/dev/shm/jwm_bar_mon_{}", mon_id);

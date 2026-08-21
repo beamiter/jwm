@@ -1757,6 +1757,7 @@ mod tests {
             debug_hud_on: false,
             external_struts: HashMap::new(),
             ipc_server: None,
+            update_readiness: None,
             config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
             config_last_modified: None,
             config_reload_debounce: None,
@@ -3344,6 +3345,15 @@ impl EventHandler for Jwm {
             }
         }
 
+        // Individual level sources above have now been consumed. Drain the
+        // stable aggregate last, otherwise epoll can immediately requeue a
+        // still-readable child and cause one redundant handler update.
+        if let Some(readiness) = self.update_readiness.as_mut()
+            && let Err(error) = readiness.drain()
+        {
+            log::warn!("could not drain update readiness hub: {error}");
+        }
+
         backend.window_ops().flush()?;
         Ok(())
     }
@@ -3387,6 +3397,14 @@ impl EventHandler for Jwm {
     }
 
     fn duplicate_update_readiness_fd(&self) -> Option<std::os::fd::OwnedFd> {
+        if let Some(readiness) = self.update_readiness.as_ref() {
+            match readiness.duplicate_fd() {
+                Ok(fd) => return Some(fd),
+                Err(error) => {
+                    log::warn!("could not duplicate update readiness hub fd: {error}");
+                }
+            }
+        }
         let ipc = self.ipc_server.as_ref()?;
         match ipc.duplicate_readiness_fd() {
             Ok(fd) => fd,

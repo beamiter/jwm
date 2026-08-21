@@ -13,6 +13,35 @@ use shared_structures::SharedRingBuffer;
 const WAIT_SLICE: Duration = Duration::from_millis(250);
 const LEVEL_RECHECK: Duration = Duration::from_millis(10);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SharedEventChannel {
+    Message,
+    Command,
+}
+
+impl SharedEventChannel {
+    fn wait(self, buffer: &SharedRingBuffer) -> io::Result<bool> {
+        match self {
+            Self::Message => buffer.wait_for_message(Some(WAIT_SLICE)),
+            Self::Command => buffer.wait_for_command(Some(WAIT_SLICE)),
+        }
+    }
+
+    fn has_data(self, buffer: &SharedRingBuffer) -> bool {
+        match self {
+            Self::Message => buffer.has_message(),
+            Self::Command => buffer.has_command(),
+        }
+    }
+
+    const fn thread_name(self) -> &'static str {
+        match self {
+            Self::Message => "xbar-message-notifier",
+            Self::Command => "xbar-command-notifier",
+        }
+    }
+}
+
 /// Observable result of synchronizing a [`TransportNotifierSlot`] with a
 /// [`crate::BarRuntime`].
 ///
@@ -148,7 +177,7 @@ impl TransportNotifierSlot {
 /// An owned eventfd plus its notification worker.
 ///
 /// The handle owns both the file descriptor and the worker lifetime. Dropping
-/// it requests cancellation, waits for the bounded `wait_for_message` call to
+/// it requests cancellation, waits for the bounded ring-channel wait to
 /// return, joins the thread, and only then closes the descriptor. This ordering
 /// prevents a worker from writing through a descriptor number that the process
 /// has already reused for another resource.
@@ -163,6 +192,24 @@ pub struct SharedEventNotifier {
 impl SharedEventNotifier {
     /// Spawn a notifier for an existing shared ring buffer.
     pub(crate) fn spawn(buffer: Arc<SharedRingBuffer>, non_blocking: bool) -> io::Result<Self> {
+        Self::spawn_channel(buffer, non_blocking, SharedEventChannel::Message)
+    }
+
+    /// Spawn a notifier for commands sent from a bar to the window manager.
+    ///
+    /// This is the reverse direction of the message notifier used by bar
+    /// frontends. The worker waits through the ring's native synchronization
+    /// backend and publishes one level-triggered eventfd notification while
+    /// commands remain unread.
+    pub fn for_commands(buffer: Arc<SharedRingBuffer>, non_blocking: bool) -> io::Result<Self> {
+        Self::spawn_channel(buffer, non_blocking, SharedEventChannel::Command)
+    }
+
+    fn spawn_channel(
+        buffer: Arc<SharedRingBuffer>,
+        non_blocking: bool,
+        channel: SharedEventChannel,
+    ) -> io::Result<Self> {
         let flags = libc::EFD_CLOEXEC | if non_blocking { libc::EFD_NONBLOCK } else { 0 };
         let raw_fd = unsafe { libc::eventfd(0, flags) };
         if raw_fd < 0 {
@@ -176,8 +223,8 @@ impl SharedEventNotifier {
         // this descriptor stays valid for the entire closure lifetime.
         let worker_fd = fd.as_raw_fd();
         let worker = thread::Builder::new()
-            .name("xbar-shared-notifier".into())
-            .spawn(move || worker_loop(buffer, worker_fd, worker_stop));
+            .name(channel.thread_name().into())
+            .spawn(move || worker_loop(buffer, worker_fd, worker_stop, channel));
 
         match worker {
             Ok(worker) => Ok(Self {
@@ -261,9 +308,14 @@ impl Drop for SharedEventNotifier {
     }
 }
 
-fn worker_loop(buffer: Arc<SharedRingBuffer>, fd: RawFd, stop: Arc<AtomicBool>) {
+fn worker_loop(
+    buffer: Arc<SharedRingBuffer>,
+    fd: RawFd,
+    stop: Arc<AtomicBool>,
+    channel: SharedEventChannel,
+) {
     while !stop.load(Ordering::Acquire) {
-        match buffer.wait_for_message(Some(WAIT_SLICE)) {
+        match channel.wait(&buffer) {
             Ok(true) => {
                 // Keep eventfd level-triggered while the ring is non-empty,
                 // but never increment an already-readable counter.  Calling
@@ -272,7 +324,7 @@ fn worker_loop(buffer: Arc<SharedRingBuffer>, fd: RawFd, stop: Arc<AtomicBool>) 
                 // ring.  Checking the descriptor also closes the drain/read
                 // race: if the frontend drains eventfd before it drains the
                 // ring, the worker re-arms one notification.
-                while buffer.has_message() && !stop.load(Ordering::Acquire) {
+                while channel.has_data(&buffer) && !stop.load(Ordering::Acquire) {
                     match eventfd_is_readable(fd) {
                         Ok(true) => {}
                         Ok(false) => {
@@ -365,7 +417,7 @@ fn write_eventfd(fd: RawFd, value: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared_structures::SharedMessage;
+    use shared_structures::{SharedCommand, SharedMessage};
     use std::sync::atomic::AtomicU64;
 
     static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
@@ -462,6 +514,107 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(notifier.worker.as_ref().unwrap().is_finished());
+    }
+
+    #[test]
+    fn command_notifier_covers_preexisting_and_later_commands() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-command-notifier-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .command_capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .expect("create isolated shared ring");
+        let sender = shared_structures::SharedRingBuffer::open_auto(&path, None)
+            .expect("open command sender");
+
+        assert!(
+            sender
+                .try_send_command(SharedCommand::view_tag(1, 0))
+                .unwrap()
+        );
+        let observer = Arc::new(
+            shared_structures::SharedRingBuffer::open_auto(&path, None)
+                .expect("open command observer"),
+        );
+        let notifier = SharedEventNotifier::for_commands(observer, true).unwrap();
+        let descriptor_flags = unsafe { libc::fcntl(notifier.as_raw_fd(), libc::F_GETFD) };
+        let status_flags = unsafe { libc::fcntl(notifier.as_raw_fd(), libc::F_GETFL) };
+        assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+        assert_ne!(status_flags & libc::O_NONBLOCK, 0);
+        let mut descriptor = libc::pollfd {
+            fd: notifier.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 2_000) }, 1);
+        assert_eq!(notifier.drain().unwrap(), 1);
+        assert!(owner.try_receive_command().unwrap().is_some());
+
+        // The worker may have observed the first command between our eventfd
+        // drain and ring drain. Settle that permitted re-arm so the next
+        // assertion proves a genuinely new burst wakes the notifier.
+        thread::sleep(LEVEL_RECHECK * 2);
+        let _ = notifier.drain();
+        descriptor.revents = 0;
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 50) }, 0);
+
+        assert!(owner.try_write_message(&SharedMessage::default()).unwrap());
+        descriptor.revents = 0;
+        assert_eq!(
+            unsafe { libc::poll(&mut descriptor, 1, 50) },
+            0,
+            "message traffic must not wake a command notifier"
+        );
+        assert!(owner.try_read_latest_message().unwrap().is_some());
+
+        assert!(
+            sender
+                .try_send_command(SharedCommand::view_tag(2, 0))
+                .unwrap()
+        );
+        descriptor.revents = 0;
+        assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 2_000) }, 1);
+        assert!(owner.try_receive_command().unwrap().is_some());
+        let _ = notifier.drain();
+
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn command_notifier_worker_stops_promptly_when_owner_destroys_ring() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-command-notifier-destroy-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .command_capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .expect("create isolated shared ring");
+        let observer = Arc::new(
+            shared_structures::SharedRingBuffer::open_auto(&path, None)
+                .expect("open command observer"),
+        );
+        let notifier = SharedEventNotifier::for_commands(observer, true).unwrap();
+
+        let started = std::time::Instant::now();
+        owner.destroy().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !notifier.worker.as_ref().unwrap().is_finished()
+            && std::time::Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(notifier.worker.as_ref().unwrap().is_finished());
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "destroy should wake the command futex without accumulating wait slices"
+        );
     }
 
     #[test]

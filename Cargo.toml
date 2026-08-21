@@ -164,7 +164,7 @@ toml = "1.1.3"
 # Protocol single entry point: shared_structures is consumed only through
 # xbar_core's re-export, and both live in this tree — the working tree IS the
 # protocol revision for jwm and every bar.
-xbar_core = { path = "crates/xbar_core", features = ["logging-flexi", "transport-shared"] }
+xbar_core = { path = "crates/xbar_core", features = ["logging-flexi", "runtime-linux", "transport-shared"] }
 nix = { version = "0.31.3", features = ["signal", "inotify", "fs", "poll", "event"] }
 lazy_static = "1.5.0"
 arc-swap = "1"

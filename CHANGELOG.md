@@ -48,22 +48,24 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
-- IPC now exposes one stable epoll readiness descriptor covering the Unix
-  listener, dynamic long-lived clients, disconnects, and write backpressure.
-  X11RB/XCB register it directly with calloop, so control commands wake JWM
-  immediately instead of waiting for the maintenance timer. A private eventfd
-  republishes complete frames left in userspace by fairness budgets, and
-  `EPOLLOUT` is enabled only while a slow client has buffered output, avoiding
-  both lost continuations and writable busy loops. The 20 ms fallback remains
-  for futex-backed status-bar commands and maintenance work that has not yet
+- JWM now exposes one process-lifetime epoll readiness descriptor to X11RB/XCB.
+  It aggregates the IPC listener/dynamic clients and every monitor bar's
+  command notifier without re-registering calloop. IPC fairness continuations
+  and slow-client `EPOLLOUT` remain level-triggered, while a direction-aware
+  xbar worker bridges each existing futex command queue to eventfd; status-bar
+  clicks therefore wake JWM immediately instead of waiting up to 20 ms. Bar
+  command bursts are bounded per monitor so a continuously refilling producer
+  cannot monopolize one update. Retirement unregisters the source, destroys
+  the owner ring to wake its futex, and joins the worker before fd reuse. The
+  timer fallback remains for lifecycle and telemetry work that has not yet
   gained an exact deadline or notifier.
 - X11RB and XCB no longer conflate JWM state-machine work with compositor-only
   damage in one 1 ms polling branch. Layout/overview/expose animations and
   deferred grabs now drive the shared update timer at 16 ms. X damage still
   renders immediately after event dispatch, while continuous compositor work
   is frame-paced instead of polling at 1 kHz. Idle maintenance remains at 20 ms
-  until IPC and bar commands gain readiness sources, avoiding the previous
-  millisecond spin without delaying DamageNotify or recording deadlines. A
+  until the remaining maintenance work gains deadlines/notifiers, avoiding the
+  previous millisecond spin without delaying DamageNotify or recording. A
   timer-driven handler frame is also no longer followed by a redundant second
   compositor swap in the same dispatch.
 - The udev Wayland backend no longer wakes every 16 ms just to discover that

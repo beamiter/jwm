@@ -7,16 +7,44 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use std::collections::HashSet;
 use std::io;
+use std::os::fd::AsFd;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use xbar_core::SharedEventNotifier;
 use xbar_core::shared_structures::SharedRingBufferOptions;
 
 use super::Jwm;
+use super::update_readiness::UpdateReadinessHub;
 
 const BAR_MAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const BAR_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const BAR_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn install_bar_command_notifier(
+    readiness: Option<&UpdateReadinessHub>,
+    ring_buffer: &Arc<xbar_core::shared_structures::SharedRingBuffer>,
+    monitor_id: i32,
+) -> Option<SharedEventNotifier> {
+    let readiness = readiness?;
+    let notifier = match SharedEventNotifier::for_commands(Arc::clone(ring_buffer), true) {
+        Ok(notifier) => notifier,
+        Err(error) => {
+            warn!(
+                "Could not create command notifier for bar {monitor_id}; retaining timer fallback: {error}"
+            );
+            return None;
+        }
+    };
+    if let Err(error) = readiness.register(notifier.as_fd()) {
+        warn!(
+            "Could not register command notifier for bar {monitor_id}; retaining timer fallback: {error}"
+        );
+        return None;
+    }
+    Some(notifier)
+}
 
 /// Stop and reap a secondary bar through its owning `Child` handle.
 ///
@@ -61,6 +89,20 @@ pub(super) fn terminate_secondary_bar_child(
 }
 
 impl Jwm {
+    pub(super) fn unregister_secondary_bar_readiness(&self, bar: &super::SecondaryBarInstance) {
+        if let Some(notifier) = bar.command_notifier.as_ref() {
+            if let Some(readiness) = self.update_readiness.as_ref()
+                && let Err(error) = readiness.unregister(notifier.as_fd())
+            {
+                warn!(
+                    "Could not unregister command notifier for bar {}: {error}",
+                    bar.monitor_id
+                );
+            }
+            notifier.request_shutdown();
+        }
+    }
+
     pub(super) fn createmon(&mut self, show_bar: bool) -> WMMonitor {
         // info!("[createmon]");
         let cfg = CONFIG.load();
@@ -228,13 +270,14 @@ impl Jwm {
         now: Instant,
         reason: &str,
     ) {
-        if let Some(mut bar) = self.secondary_bars.remove(&monitor_id)
-            && let Err(error) = terminate_secondary_bar_child(&mut bar.child, Duration::ZERO)
-        {
-            warn!(
-                "Could not stop and reap failed bar on monitor {}: {}",
-                monitor_id, error
-            );
+        if let Some(mut bar) = self.secondary_bars.remove(&monitor_id) {
+            self.unregister_secondary_bar_readiness(&bar);
+            if let Err(error) = terminate_secondary_bar_child(&mut bar.child, Duration::ZERO) {
+                warn!(
+                    "Could not stop and reap failed bar on monitor {}: {}",
+                    monitor_id, error
+                );
+            }
         }
         self.clear_minimized_dock_for_monitor(backend, monitor_id);
         self.note_secondary_bar_failure(monitor_id, now, reason);
@@ -262,6 +305,7 @@ impl Jwm {
         let Some(mut bar) = self.secondary_bars.remove(&monitor_id) else {
             return None;
         };
+        self.unregister_secondary_bar_readiness(&bar);
         let retired_client = bar.client_key;
 
         if let Some(client_key) = bar.client_key
@@ -408,9 +452,17 @@ impl Jwm {
                     monitor_id, pid
                 );
 
+                let ring_buffer = Arc::new(ring_buffer);
+                let command_notifier = install_bar_command_notifier(
+                    self.update_readiness.as_ref(),
+                    &ring_buffer,
+                    monitor_id,
+                );
+
                 let bar_instance = super::SecondaryBarInstance {
                     monitor_id,
                     shmem: ring_buffer,
+                    command_notifier,
                     pid,
                     child,
                     client_key: None,
@@ -482,6 +534,54 @@ impl Jwm {
 #[cfg(test)]
 mod secondary_bar_child_tests {
     use super::*;
+    use nix::poll::{PollFd, PollFlags, poll};
+    use std::os::fd::AsFd;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+
+    static NEXT_RING: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn command_notifier_dynamically_joins_the_stable_hub() {
+        let mut readiness = UpdateReadinessHub::new().unwrap();
+        let stable = readiness.duplicate_fd().unwrap();
+        let sequence = NEXT_RING.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/jwm-bar-command-ready-{}-{sequence}",
+            std::process::id()
+        );
+        let ring = Arc::new(
+            SharedRingBufferOptions::new()
+                .command_capacity(8)
+                .adaptive_poll_spins(0)
+                .create(&path)
+                .unwrap(),
+        );
+        let notifier = install_bar_command_notifier(Some(&readiness), &ring, 3).unwrap();
+        let sender =
+            xbar_core::shared_structures::SharedRingBuffer::open_auto(&path, None).unwrap();
+
+        assert!(
+            sender
+                .try_send_command(xbar_core::shared_structures::SharedCommand::view_tag(1, 3))
+                .unwrap()
+        );
+        let mut descriptors = [PollFd::new(stable.as_fd(), PollFlags::POLLIN)];
+        assert_eq!(poll(&mut descriptors, 2_000u16).unwrap(), 1);
+
+        notifier.drain().unwrap();
+        assert!(ring.try_receive_command().unwrap().is_some());
+        assert!(ring.try_receive_command().unwrap().is_none());
+        thread::sleep(Duration::from_millis(25));
+        let _ = notifier.drain();
+        let _ = readiness.drain();
+        assert_eq!(poll(&mut descriptors, 0u8).unwrap(), 0);
+
+        readiness.unregister(notifier.as_fd()).unwrap();
+        notifier.request_shutdown();
+        ring.destroy().unwrap();
+        drop(notifier);
+    }
 
     #[test]
     fn terminate_secondary_bar_child_reaps_forced_exit() {

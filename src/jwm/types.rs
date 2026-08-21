@@ -6,7 +6,9 @@ use crate::core::layout::LayoutEnum;
 use crate::core::models::ClientKey;
 use std::process::Child;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
+use xbar_core::SharedEventNotifier;
 use xbar_core::shared_structures::SharedRingBuffer;
 
 pub const WITHDRAWN_STATE: u8 = crate::backend::api::ICCCM_WITHDRAWN_STATE;
@@ -198,11 +200,29 @@ pub struct InteractionState {
 #[allow(dead_code)]
 pub struct SecondaryBarInstance {
     pub monitor_id: i32,
-    pub shmem: SharedRingBuffer,
+    pub shmem: Arc<SharedRingBuffer>,
+    pub(crate) command_notifier: Option<SharedEventNotifier>,
     pub child: Child,
     pub pid: u32,
     pub client_key: Option<ClientKey>,
     pub window: Option<WindowId>,
     pub has_focus: bool,
     pub last_spawn: Instant,
+}
+
+impl Drop for SecondaryBarInstance {
+    fn drop(&mut self) {
+        if let Some(notifier) = self.command_notifier.as_ref() {
+            notifier.request_shutdown();
+        }
+        if let Err(error) = self.shmem.destroy() {
+            log::warn!(
+                "failed to destroy status-bar transport for monitor {}: {error}",
+                self.monitor_id
+            );
+        }
+        // Destroy wakes the command futex before the join, so ordinary bar
+        // retirement does not wait out the worker's 250 ms safety timeout.
+        self.command_notifier.take();
+    }
 }
