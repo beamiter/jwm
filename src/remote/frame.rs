@@ -29,9 +29,15 @@ pub(crate) fn new_decode_buffer_pool() -> SharedDecodeBufferPool {
     Arc::new(Mutex::new(DecodeBufferPool::default()))
 }
 
-struct BoundedPayloadWriter<'a> {
+pub(crate) struct BoundedPayloadWriter<'a> {
     payload: &'a mut Vec<u8>,
     max_len: usize,
+}
+
+impl<'a> BoundedPayloadWriter<'a> {
+    pub(crate) fn new(payload: &'a mut Vec<u8>, max_len: usize) -> Self {
+        Self { payload, max_len }
+    }
 }
 
 impl Write for BoundedPayloadWriter<'_> {
@@ -83,7 +89,7 @@ pub(crate) struct RecyclableDecodedFrame {
 }
 
 impl RecyclableDecodedFrame {
-    fn new(
+    pub(crate) fn new(
         sequence: u64,
         source_width: u16,
         source_height: u16,
@@ -294,7 +300,7 @@ pub(crate) fn decode_frame_recyclable(
     ))
 }
 
-fn decode_rgb8_into_pool(
+pub(crate) fn decode_rgb8_into_pool(
     width: u32,
     height: u32,
     expected_len: usize,
@@ -432,7 +438,7 @@ pub(crate) fn validate_dimensions(width: u16, height: u16) -> RemoteResult<()> {
     Ok(())
 }
 
-fn invalid_data(message: impl Into<String>) -> io::Error {
+pub(crate) fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 

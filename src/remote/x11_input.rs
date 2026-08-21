@@ -122,6 +122,11 @@ pub struct InputInjector {
     min_keycode: u8,
     max_keycode: u8,
     pressed: PressedState,
+    /// Core pointer map, refreshed only after a `Mapping::POINTER` notice.
+    ///
+    /// Fetching it per batch cost one blocking round trip for every scroll
+    /// notch, because a wheel notch is a button press/release edge.
+    pointer_mapping: Option<Vec<u8>>,
 }
 
 impl InputInjector {
@@ -148,6 +153,7 @@ impl InputInjector {
         }
 
         Ok(Self {
+            pointer_mapping: None,
             conn,
             root,
             min_keycode,
@@ -180,7 +186,7 @@ impl InputInjector {
             .iter()
             .any(|event| matches!(event, InputEvent::Button { .. } | InputEvent::ReleaseAll));
         let pointer_mapping = if needs_pointer_mapping {
-            self.conn.get_pointer_mapping()?.reply()?.map
+            self.pointer_mapping()?.to_vec()
         } else {
             Vec::new()
         };
@@ -207,16 +213,26 @@ impl InputInjector {
     /// mapping may have changed.  Callers re-fingerprint before deciding that
     /// keyboard forwarding is unsafe: some X11 tools temporarily replace and
     /// then restore a mapping, leaving a harmless notification queued here.
-    pub fn take_keymap_change(&self) -> Result<bool, InputError> {
+    pub fn take_keymap_change(&mut self) -> Result<bool, InputError> {
         let mut changed = false;
         while let Some(event) = self.conn.poll_for_event()? {
-            if let Event::MappingNotify(event) = event
-                && event.request != Mapping::POINTER
-            {
-                changed = true;
+            if let Event::MappingNotify(event) = event {
+                if event.request == Mapping::POINTER {
+                    // Drop the cache rather than re-fetching here: the next
+                    // batch that actually needs a button will pay for it.
+                    self.pointer_mapping = None;
+                } else {
+                    changed = true;
+                }
             }
         }
         Ok(changed)
+    }
+
+    /// True while this injector holds any key or button down on the host.
+    #[must_use]
+    pub fn has_pressed(&self) -> bool {
+        !self.pressed.held.is_empty()
     }
 
     /// Best-effort unwind of every key/button pressed by this injector.
@@ -226,9 +242,9 @@ impl InputInjector {
     /// only what remains.
     pub fn release_all(&mut self) -> Result<(), InputError> {
         let mut first_error = None;
-        for event in self.pressed.release_plan() {
-            match self.send(event) {
-                Ok(()) => self.pressed.record_success(event),
+        for held in self.pressed.release_plan() {
+            match self.send_release(held) {
+                Ok(()) => self.pressed.release(held),
                 Err(error) => {
                     if first_error.is_none() {
                         first_error = Some(error);
@@ -248,16 +264,22 @@ impl InputInjector {
         }
     }
 
-    fn send(&self, event: InputEvent) -> Result<(), InputError> {
-        if event == InputEvent::ReleaseAll {
-            return Ok(());
+    fn pointer_mapping(&mut self) -> Result<&[u8], InputError> {
+        if self.pointer_mapping.is_none() {
+            self.pointer_mapping = Some(self.conn.get_pointer_mapping()?.reply()?.map);
         }
-        let pointer_mapping = if matches!(event, InputEvent::Button { .. }) {
-            self.conn.get_pointer_mapping()?.reply()?.map
-        } else {
-            Vec::new()
-        };
-        let request = prepare_input(event, self.min_keycode, self.max_keycode, &pointer_mapping)?;
+        Ok(self
+            .pointer_mapping
+            .as_deref()
+            .expect("the pointer mapping was just populated"))
+    }
+
+    /// Release one tracked press without consulting the current pointer map.
+    ///
+    /// The physical button was pinned when the press was queued, so a remap
+    /// that lands mid-press cannot leave the real button stuck down.
+    fn send_release(&mut self, held: HeldInput) -> Result<(), InputError> {
+        let request = release_request(held, self.min_keycode, self.max_keycode)?;
         queue_prepared(&self.conn, self.root, request)?;
         self.conn.flush()?;
         Ok(())
@@ -279,12 +301,11 @@ fn coordinate(axis: char, value: u16) -> Result<i16, InputError> {
     i16::try_from(value).map_err(|_| InputError::CoordinateOutOfRange { axis, value })
 }
 
-fn physical_button(mapping: &[u8], logical: u8) -> Result<u8, InputError> {
+fn physical_button(mapping: &[u8], logical: u8) -> Option<u8> {
     mapping
         .iter()
         .position(|mapped| *mapped == logical)
         .and_then(|index| u8::try_from(index + 1).ok())
-        .ok_or(InputError::UnmappedButton { button: logical })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -310,26 +331,22 @@ fn prepare_batch(
     let mut prepared = Vec::with_capacity(events.len().saturating_add(pressed.held.len()));
     for &event in events {
         if event == InputEvent::ReleaseAll {
-            for release in next_pressed.release_plan() {
-                prepared.push(prepare_input(
-                    release,
-                    min_keycode,
-                    max_keycode,
-                    pointer_mapping,
-                )?);
-                next_pressed.record_success(release);
+            for held in next_pressed.release_plan() {
+                // Releases use the button pinned at press time, so they never
+                // consult the pointer map and can never be dropped.
+                prepared.push(release_request(held, min_keycode, max_keycode)?);
+                next_pressed.release(held);
             }
-            next_pressed.record_success(InputEvent::ReleaseAll);
+            next_pressed.record_success(InputEvent::ReleaseAll, None);
             continue;
         }
-        prepared.push(prepare_input(
-            event,
-            min_keycode,
-            max_keycode,
-            pointer_mapping,
-        )?);
-        next_pressed.record_success(event);
-        uncertain_pressed.record_possible_press(event);
+        let Some(request) = prepare_input(event, min_keycode, max_keycode, pointer_mapping)? else {
+            continue;
+        };
+        let physical = matches!(event, InputEvent::Button { .. }).then_some(request.detail);
+        prepared.push(request);
+        next_pressed.record_success(event, physical);
+        uncertain_pressed.record_possible_press(event, physical);
     }
     Ok((prepared, next_pressed, uncertain_pressed))
 }
@@ -354,12 +371,13 @@ fn execute_prepared_batch<E>(
     Ok(())
 }
 
+/// Build one XTEST request, or `None` when this host cannot express the event.
 fn prepare_input(
     event: InputEvent,
     min_keycode: u8,
     max_keycode: u8,
     pointer_mapping: &[u8],
-) -> Result<PreparedInput, InputError> {
+) -> Result<Option<PreparedInput>, InputError> {
     let (type_, detail, root_x, root_y) = match event {
         InputEvent::Pointer { x, y } => (
             MOTION_NOTIFY_EVENT,
@@ -394,7 +412,16 @@ fn prepare_input(
             // mapping, while XTEST expects a physical button and applies the
             // destination mapping. One batch snapshots the mapping before it
             // queues any sparse button edge.
-            let physical = physical_button(pointer_mapping, button)?;
+            // An unmapped button is a property of *this host's* pointer map,
+            // not a protocol violation: the peer's 12-button mouse or its
+            // horizontal-scroll buttons 6/7 simply do not exist here. Skip the
+            // event. Failing the batch used to disconnect the session, and
+            // because the whole batch is validated before anything is queued,
+            // it also discarded every pointer motion and any ReleaseAll
+            // travelling alongside it.
+            let Some(physical) = physical_button(pointer_mapping, button) else {
+                return Ok(None);
+            };
             (
                 if pressed {
                     BUTTON_PRESS_EVENT
@@ -408,12 +435,12 @@ fn prepare_input(
         }
         InputEvent::ReleaseAll => unreachable!("ReleaseAll is expanded before preparation"),
     };
-    Ok(PreparedInput {
+    Ok(Some(PreparedInput {
         type_,
         detail,
         root_x,
         root_y,
-    })
+    }))
 }
 
 fn queue_prepared(
@@ -441,7 +468,16 @@ fn queue_prepared(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HeldInput {
     Key(u8),
-    Button(u8),
+    /// A held button, with the physical button pinned at press time.
+    ///
+    /// `logical` is what the peer sent and what a later release event matches
+    /// on; `physical` is what XTEST was actually told to press. Re-deriving
+    /// `physical` at release time against a pointer map that changed during
+    /// the press would release a different button and leave the real one down.
+    Button {
+        logical: u8,
+        physical: u8,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -452,10 +488,20 @@ struct PressedState {
 }
 
 impl PressedState {
-    fn record_success(&mut self, event: InputEvent) {
+    /// Record the outcome of an event that was actually queued.
+    ///
+    /// `physical` carries the resolved button for a button press; it is
+    /// ignored for keys and releases.
+    fn record_success(&mut self, event: InputEvent, physical: Option<u8>) {
         let (held, pressed) = match event {
             InputEvent::Key { keycode, pressed } => (HeldInput::Key(keycode), pressed),
-            InputEvent::Button { button, pressed } => (HeldInput::Button(button), pressed),
+            InputEvent::Button { button, pressed } => (
+                HeldInput::Button {
+                    logical: button,
+                    physical: physical.unwrap_or(button),
+                },
+                pressed,
+            ),
             InputEvent::Pointer { .. } => return,
             InputEvent::ReleaseAll => {
                 self.held.clear();
@@ -464,47 +510,85 @@ impl PressedState {
         };
 
         if pressed {
-            if !self.held.contains(&held) {
+            if !self.held.iter().any(|item| same_input(*item, held)) {
                 self.held.push(held);
             }
-        } else if let Some(index) = self.held.iter().position(|item| *item == held) {
+        } else if let Some(index) = self.held.iter().position(|item| same_input(*item, held)) {
             self.held.remove(index);
         }
     }
 
-    fn release_plan(&self) -> Vec<InputEvent> {
-        self.held
-            .iter()
-            .rev()
-            .map(|held| match *held {
-                HeldInput::Key(keycode) => InputEvent::Key {
-                    keycode,
-                    pressed: false,
-                },
-                HeldInput::Button(button) => InputEvent::Button {
-                    button,
-                    pressed: false,
-                },
-            })
-            .collect()
+    /// Forget one held input that has already been released.
+    fn release(&mut self, held: HeldInput) {
+        if let Some(index) = self.held.iter().position(|item| same_input(*item, held)) {
+            self.held.remove(index);
+        }
     }
 
-    fn record_possible_press(&mut self, event: InputEvent) {
+    /// Held inputs in reverse press order, so chords unwind naturally.
+    fn release_plan(&self) -> Vec<HeldInput> {
+        self.held.iter().rev().copied().collect()
+    }
+
+    fn record_possible_press(&mut self, event: InputEvent, physical: Option<u8>) {
         if matches!(
             event,
             InputEvent::Key { pressed: true, .. } | InputEvent::Button { pressed: true, .. }
         ) {
-            self.record_success(event);
+            self.record_success(event, physical);
         }
+    }
+}
+
+/// Identity for the held set: buttons are identified by their logical number,
+/// because that is what a peer's release event names.
+fn same_input(left: HeldInput, right: HeldInput) -> bool {
+    match (left, right) {
+        (HeldInput::Key(left), HeldInput::Key(right)) => left == right,
+        (HeldInput::Button { logical: left, .. }, HeldInput::Button { logical: right, .. }) => {
+            left == right
+        }
+        _ => false,
+    }
+}
+
+/// Build the XTEST request that releases one already-pressed input.
+fn release_request(
+    held: HeldInput,
+    min_keycode: u8,
+    max_keycode: u8,
+) -> Result<PreparedInput, InputError> {
+    match held {
+        HeldInput::Key(keycode) => {
+            if !(min_keycode..=max_keycode).contains(&keycode) {
+                return Err(InputError::InvalidKeycode {
+                    keycode,
+                    min: min_keycode,
+                    max: max_keycode,
+                });
+            }
+            Ok(PreparedInput {
+                type_: KEY_RELEASE_EVENT,
+                detail: keycode,
+                root_x: 0,
+                root_y: 0,
+            })
+        }
+        HeldInput::Button { physical, .. } => Ok(PreparedInput {
+            type_: BUTTON_RELEASE_EVENT,
+            detail: physical,
+            root_x: 0,
+            root_y: 0,
+        }),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, InputEvent, KEY_PRESS_EVENT, KEY_RELEASE_EVENT,
-        MOTION_NOTIFY_EVENT, PressedState, coordinate, execute_prepared_batch, physical_button,
-        prepare_batch, supports_required_xtest,
+        BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, HeldInput, InputEvent, KEY_PRESS_EVENT,
+        KEY_RELEASE_EVENT, MOTION_NOTIFY_EVENT, PressedState, coordinate, execute_prepared_batch,
+        physical_button, prepare_batch, supports_required_xtest,
     };
 
     #[test]
@@ -514,24 +598,24 @@ mod tests {
             keycode: 38,
             pressed: true,
         };
-        state.record_success(key);
-        state.record_success(InputEvent::Button {
-            button: 1,
-            pressed: true,
-        });
-        state.record_success(key);
+        state.record_success(key, None);
+        state.record_success(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(key, None);
 
         assert_eq!(
             state.release_plan(),
             vec![
-                InputEvent::Button {
-                    button: 1,
-                    pressed: false,
+                HeldInput::Button {
+                    logical: 1,
+                    physical: 1,
                 },
-                InputEvent::Key {
-                    keycode: 38,
-                    pressed: false,
-                },
+                HeldInput::Key(38),
             ]
         );
     }
@@ -539,50 +623,59 @@ mod tests {
     #[test]
     fn successful_release_removes_only_the_matching_input() {
         let mut state = PressedState::default();
-        state.record_success(InputEvent::Key {
-            keycode: 37,
-            pressed: true,
-        });
-        state.record_success(InputEvent::Button {
-            button: 1,
-            pressed: true,
-        });
-        state.record_success(InputEvent::Key {
-            keycode: 54,
-            pressed: true,
-        });
-        state.record_success(InputEvent::Button {
-            button: 1,
-            pressed: false,
-        });
+        state.record_success(
+            InputEvent::Key {
+                keycode: 37,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(
+            InputEvent::Key {
+                keycode: 54,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(
+            InputEvent::Button {
+                button: 1,
+                pressed: false,
+            },
+            None,
+        );
 
         assert_eq!(
             state.release_plan(),
-            vec![
-                InputEvent::Key {
-                    keycode: 54,
-                    pressed: false,
-                },
-                InputEvent::Key {
-                    keycode: 37,
-                    pressed: false,
-                },
-            ]
+            vec![HeldInput::Key(54), HeldInput::Key(37)]
         );
     }
 
     #[test]
     fn release_all_state_transition_clears_everything() {
         let mut state = PressedState::default();
-        state.record_success(InputEvent::Key {
-            keycode: 38,
-            pressed: true,
-        });
-        state.record_success(InputEvent::Button {
-            button: 3,
-            pressed: true,
-        });
-        state.record_success(InputEvent::ReleaseAll);
+        state.record_success(
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(
+            InputEvent::Button {
+                button: 3,
+                pressed: true,
+            },
+            None,
+        );
+        state.record_success(InputEvent::ReleaseAll, None);
 
         assert!(state.release_plan().is_empty());
     }
@@ -597,23 +690,113 @@ mod tests {
     }
 
     #[test]
+    fn an_unmapped_button_is_dropped_without_losing_the_rest_of_the_batch() {
+        // The peer's pointer map is not this host's. A 12-button mouse, or a
+        // horizontal scroll (libinput legacy buttons 6/7), names buttons that
+        // simply do not exist here. Failing the batch used to end the session,
+        // and because prevalidation is all-or-nothing it also discarded the
+        // pointer motion travelling alongside the bad button.
+        let pressed = PressedState::default();
+        let events = [
+            InputEvent::Pointer { x: 10, y: 20 },
+            InputEvent::Button {
+                button: 7,
+                pressed: true,
+            },
+            InputEvent::Button {
+                button: 7,
+                pressed: false,
+            },
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+        ];
+
+        let (prepared, next_pressed, uncertain_pressed) =
+            prepare_batch(&events, &pressed, 8, 255, &[1, 2, 3]).unwrap();
+        let types_and_details: Vec<_> = prepared
+            .iter()
+            .map(|request| (request.type_, request.detail))
+            .collect();
+        assert_eq!(
+            types_and_details,
+            [(MOTION_NOTIFY_EVENT, 0), (KEY_PRESS_EVENT, 38)],
+            "the unmappable button vanishes; everything else is preserved in order"
+        );
+        assert_eq!(
+            next_pressed.release_plan(),
+            [HeldInput::Key(38)],
+            "a button that was never pressed must not be tracked as held"
+        );
+        assert_eq!(uncertain_pressed.release_plan(), [HeldInput::Key(38)]);
+    }
+
+    #[test]
+    fn a_pointer_remap_mid_press_still_releases_the_physical_button() {
+        // Press logical 1 while the map is [3,2,1] -> physical 3.
+        let mut pressed = PressedState::default();
+        let (_, next_pressed, _) = prepare_batch(
+            &[InputEvent::Button {
+                button: 1,
+                pressed: true,
+            }],
+            &pressed,
+            8,
+            255,
+            &[3, 2, 1],
+        )
+        .unwrap();
+        pressed = next_pressed;
+        assert_eq!(
+            pressed.release_plan(),
+            [HeldInput::Button {
+                logical: 1,
+                physical: 3,
+            }]
+        );
+
+        // The pointer is remapped to identity while the button is still down.
+        // The release must still target physical 3, or the real button stays
+        // stuck down on the host with no way for the peer to lift it.
+        let (prepared, after, _) =
+            prepare_batch(&[InputEvent::ReleaseAll], &pressed, 8, 255, &[1, 2, 3]).unwrap();
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|request| (request.type_, request.detail))
+                .collect::<Vec<_>>(),
+            [(BUTTON_RELEASE_EVENT, 3)]
+        );
+        assert!(after.release_plan().is_empty());
+    }
+
+    #[test]
     fn logical_buttons_are_inverted_through_the_host_mapping() {
         assert_eq!(physical_button(&[3, 2, 1, 4, 5], 1).unwrap(), 3);
         assert_eq!(physical_button(&[3, 2, 1, 4, 5], 3).unwrap(), 1);
-        assert!(physical_button(&[3, 2, 1], 4).is_err());
+        assert!(physical_button(&[3, 2, 1], 4).is_none());
     }
 
     #[test]
     fn batch_prevalidation_preserves_edges_and_expands_release_all_in_reverse_order() {
         let mut pressed = PressedState::default();
-        pressed.record_success(InputEvent::Key {
-            keycode: 38,
-            pressed: true,
-        });
-        pressed.record_success(InputEvent::Button {
-            button: 1,
-            pressed: true,
-        });
+        pressed.record_success(
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            None,
+        );
+        // Logical 1 resolves to physical 3 under the map used below; pinning
+        // it here is what lets the ReleaseAll below emit physical 3.
+        pressed.record_success(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            Some(3),
+        );
         let events = [
             InputEvent::Pointer { x: 120, y: 240 },
             InputEvent::Key {
@@ -646,44 +829,35 @@ mod tests {
         );
         assert_eq!(
             next_pressed.release_plan(),
-            [InputEvent::Button {
-                button: 3,
-                pressed: false,
+            [HeldInput::Button {
+                logical: 3,
+                physical: 1,
             }]
         );
         assert_eq!(
             uncertain_pressed.release_plan(),
             [
-                InputEvent::Button {
-                    button: 3,
-                    pressed: false,
+                HeldInput::Button {
+                    logical: 3,
+                    physical: 1,
                 },
-                InputEvent::Key {
-                    keycode: 39,
-                    pressed: false,
+                HeldInput::Key(39),
+                HeldInput::Button {
+                    logical: 1,
+                    physical: 3,
                 },
-                InputEvent::Button {
-                    button: 1,
-                    pressed: false,
-                },
-                InputEvent::Key {
-                    keycode: 38,
-                    pressed: false,
-                },
+                HeldInput::Key(38),
             ],
             "the uncertain state must cover every held input in any request prefix"
         );
         assert_eq!(
             pressed.release_plan(),
             [
-                InputEvent::Button {
-                    button: 1,
-                    pressed: false,
+                HeldInput::Button {
+                    logical: 1,
+                    physical: 3,
                 },
-                InputEvent::Key {
-                    keycode: 38,
-                    pressed: false,
-                },
+                HeldInput::Key(38),
             ],
             "prevalidation must not mutate the live pressed state"
         );
@@ -710,14 +884,20 @@ mod tests {
     #[test]
     fn release_all_has_an_empty_final_state_but_retains_uncertain_cleanup() {
         let mut initial = PressedState::default();
-        initial.record_success(InputEvent::Key {
-            keycode: 38,
-            pressed: true,
-        });
-        initial.record_success(InputEvent::Button {
-            button: 1,
-            pressed: true,
-        });
+        initial.record_success(
+            InputEvent::Key {
+                keycode: 38,
+                pressed: true,
+            },
+            None,
+        );
+        initial.record_success(
+            InputEvent::Button {
+                button: 1,
+                pressed: true,
+            },
+            None,
+        );
 
         let (_, final_pressed, uncertain_pressed) = prepare_batch(
             &[InputEvent::ReleaseAll],
@@ -734,10 +914,13 @@ mod tests {
     #[test]
     fn queue_and_flush_failures_keep_a_conservative_cleanup_plan() {
         let mut initial = PressedState::default();
-        initial.record_success(InputEvent::Key {
-            keycode: 37,
-            pressed: true,
-        });
+        initial.record_success(
+            InputEvent::Key {
+                keycode: 37,
+                pressed: true,
+            },
+            None,
+        );
         let events = [
             InputEvent::Key {
                 keycode: 38,

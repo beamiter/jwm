@@ -38,9 +38,12 @@ gives each complete authenticated video record, including its final flush, one
 budget; a partial or timed-out record closes the whole session so its wire
 sequence can never be retried out of sync.
 
-The current application protocol is version 3. Version 2 is deliberately
-incompatible, so update `jwm-remote` on both machines together; negotiation
-rejects an older peer before screen or input data is exchanged. Version 3
+The current application protocol is version 4. Versions 2 and 3 are
+deliberately incompatible, so update `jwm-remote` on both machines together;
+negotiation rejects an older peer before screen or input data is exchanged.
+Version 4 replaces whole-frame JPEG video with dirty-tile delta coding on the
+same frame message; a version-3 peer would misread the first frame body, so the
+handshake fails closed instead. Version 4
 retains acknowledgements only for frames successfully drawn by the viewer,
 which bounds host work and end-to-end video backlog. It carries input in
 authenticated batches of 1–128 operations with a separate 641-byte payload
@@ -272,21 +275,59 @@ arbitrary byte boundary. The ACK thread queues only bounded scalar feedback;
 the video sender alone updates and reads quality immediately before encoding,
 with encoding, logging and frame destruction outside the controller lock.
 
-Before requesting a quality setting or encoding, the video sender compares a
-dequeued capture with the last frame whose complete authenticated record and
-flush succeeded. Equality includes the source dimensions, encoded image
-dimensions and all RGB bytes. An exact duplicate less than four seconds later
-is discarded without consuming an application/wire frame sequence, display
-credit or quality decision. Suppression never advances that four-second clock;
-at the boundary an unchanged keepalive is sent, keeping static sessions inside
-the viewer's shared eight-second video idle timeout. The conservative timing
-budget is four seconds of unchanged keepalive plus the two-second forced
-XDamage refresh and one second of scheduling margin, still strictly below that
-eight-second timeout. A failed write or flush
-does not update the comparison baseline. Host telemetry reports discarded
-samples as `unchanged-suppressed` and successful periodic frames as
-`unchanged-keepalive`; both are subsets of `dequeued`, while only the latter is
-also `encoded` and `sent`.
+### Dirty-tile delta coding
+
+Video is coded as 16-pixel tiles rather than whole frames. Before requesting a
+quality setting or encoding, the sender compares the dequeued capture against
+the pixels the viewer was last *sent* and collects the tiles that differ by
+more than a small per-channel tolerance. Only those tiles are copied into one
+packed atlas image, and that single atlas is JPEG-encoded.
+
+The reference is deliberately the last transmitted content rather than the
+previous capture. A region drifting slowly therefore still crosses the
+tolerance against its own stale copy and is retransmitted, so the tolerance
+bounds the error instead of letting it accumulate. It also makes committing a
+frame proportional to the dirty area rather than the whole image.
+
+One atlas beats one JPEG per dirty rectangle by roughly 3x on real desktops,
+because a few hundred small rectangles otherwise pay a few hundred JPEG headers
+and lose all shared Huffman statistics. Sixteen-pixel tiles keep every tile
+aligned to a 4:2:0 minimum coded unit, so atlas neighbours cannot bleed chroma
+into each other.
+
+A frame with no dirty tiles is not sent at all, which subsumes the previous
+exact-duplicate suppressor. At the four-second keepalive boundary an empty tile
+frame — a header and a bitmap, no atlas — is sent instead, keeping static
+sessions inside the viewer's shared eight-second video idle timeout. The
+conservative timing budget is four seconds of keepalive plus the two-second
+forced XDamage refresh and one second of scheduling margin, still strictly
+below that eight-second timeout.
+
+The first frame of a session, a root geometry change and an encoded-size change
+each force a keyframe carrying every tile. A failed write or flush never
+advances the reference, so the host's model of the viewer's canvas cannot run
+ahead of what the viewer actually received.
+
+Measured on a 3440x1440 JWM session sharing a lightly-active desktop over
+loopback, against the previous whole-frame encoder:
+
+| | whole-frame | dirty-tile | |
+|---|---|---|---|
+| wire, `--max-width 1280` | 10.1 Mbit/s | 0.5-0.9 Mbit/s | ~15x |
+| wire, `--max-width 0` | 53.3 Mbit/s | 1.8-2.6 Mbit/s | ~25x |
+| encode, 1280 wide | 9-17 ms | 0.4-1.2 ms | ~20x |
+| encode, native | 60 ms | 1.5-2.7 ms | ~30x |
+| capture-to-ACK, native | 80-89 ms | 12-14 ms | ~6x |
+
+The 60 ms native encode had capped the achievable rate near 16 fps regardless
+of link speed; that ceiling is gone.
+
+Host telemetry reports suppressed frames as `unchanged-suppressed` and periodic
+empty frames as `unchanged-keepalive`; both are subsets of `dequeued`, while
+only the latter is also `encoded` and `sent`. `keyframes` counts frames
+carrying every tile, and `tiles A/B (P% dirty)` reports transmitted versus
+total tiles for the window — the single best indicator of how much the codec is
+actually saving on the content being shared.
 
 The sender writes each JPEG directly behind its frame header in one reusable
 allocation while hard-bounding the total payload length, and the viewer's
@@ -339,6 +380,44 @@ Every frame write has a 10-second absolute deadline across its header, JPEG,
 authenticator, and flush. If it expires, the host tears down that session and
 the normal cleanup path releases any keys or buttons held by its controller.
 
+### Session resilience
+
+The listener survives everything that concerns a single connection. An
+unauthenticated peer that connects and immediately resets, an aborted
+connection, an interrupted syscall, or descriptor exhaustion are all logged and
+retried rather than ending the host; only a genuinely broken listener stops it.
+The peer address comes from `accept` itself, because asking the accepted socket
+for it is a liveness question that a reset peer answers with an error.
+
+`--once` returns the session's own result, so a scripted run that failed is
+distinguishable from a clean one by exit code.
+
+While the controller holds any key or button, the host requires it to stay
+audible: 600 ms of silence releases everything held, without ending the
+session. The host X server generates autorepeat, so without this a network
+partition with a key down kept typing into whatever had focus for the full
+eight-second idle timeout. The host waits for the socket to become readable
+rather than shortening its read timeout, so a record is never interrupted
+part-way through.
+
+A button the peer sends that this host's pointer map does not define — a
+12-button mouse, or horizontal-scroll buttons 6 and 7 — is dropped rather than
+failing the batch. Because a batch is validated before anything is queued,
+failing it also discarded every pointer motion and any release-all travelling
+alongside. The physical button is pinned when a press is queued, so a pointer
+remap arriving mid-press cannot release a different button and leave the real
+one stuck down.
+
+The client bounds its TCP connect. Every later phase already had an absolute
+deadline, but a black-holed address otherwise burned the kernel's full SYN
+retry budget against a five-second negotiation budget.
+
+An overlay readback failure now arms the same bounded retry as an overlay
+acquire failure. Without it, re-acquisition waited for a compositor-owner
+transition that never arrives while the same compositor keeps running, so one
+transient error downgraded the session to ungated root capture — and with it
+the XDamage gate — for the rest of the session.
+
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may
   omit compositor-only effects on some X servers.
@@ -358,7 +437,8 @@ the normal cleanup path releases any keys or buttons held by its controller.
   included in video; the viewer cursor is transparent during ordinary input
   forwarding and an active grab, while view-only and released-grab windows keep
   a visible local cursor; the rest of the client desktop is never affected;
-- JPEG video only: no audio, clipboard, file transfer, or adaptive codec yet;
+- JPEG tile video only: no audio, clipboard, file transfer, or inter-frame
+  codec yet;
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;

@@ -2,20 +2,22 @@
 
 use super::RemoteResult;
 use super::deadline::TcpStreamDeadline;
-use super::frame::encode_frame_into;
 use super::key::load_key_file;
 use super::messages::{ClientHello, ServerHello, decode_frame_ack, decode_input_batch};
 use super::protocol::{
     MessageKind, PayloadBufferRetention, ProtocolError, SessionReader, SessionWriter,
     server_handshake,
 };
+use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
 use super::x11_capture::{CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
 use signal_hook::flag;
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -29,8 +31,16 @@ const FRAME_WRITE_DEADLINE: Duration = Duration::from_secs(10);
 // decoded and drawn.  Do not apply the held-input safety timeout before then.
 const INITIAL_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long the peer may go silent while it still holds a key or button.
+///
+/// The *host* X server generates autorepeat, so a partition with a key down
+/// injected characters for the full session idle timeout — eight seconds of
+/// repeat, or eight seconds of held Ctrl/Alt/Super, into whatever had focus.
+const HELD_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(600);
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTSTANDING_FRAMES: u64 = 2;
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
 const MAX_BACKPRESSURE_REFRESH: Duration = Duration::from_secs(1);
@@ -239,49 +249,48 @@ struct PendingFrame {
     captured_at: Instant,
 }
 
-struct SuccessfulWireFrame {
-    frame: CapturedFrame,
-    committed_at: Instant,
+/// Chooses what each captured frame owes the viewer and encodes it.
+///
+/// The delta encoder subsumes the previous exact-duplicate suppressor: an
+/// unchanged capture simply has no dirty tiles. Keepalive timing stays here
+/// rather than in the codec because it is a property of the *session*, and it
+/// must remain strictly inside the viewer's shared video idle timeout.
+struct FrameSender {
+    encoder: TileEncoder,
+    committed_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FrameDedupDecision {
-    SendChanged,
-    SendKeepalive,
-    Suppress,
-}
+impl FrameSender {
+    fn new() -> Self {
+        Self {
+            encoder: TileEncoder::new(),
+            committed_at: None,
+        }
+    }
 
-#[derive(Default)]
-struct FrameDeduplicator {
-    last: Option<SuccessfulWireFrame>,
-}
-
-impl FrameDeduplicator {
-    fn decide_at(&self, frame: &CapturedFrame, now: Instant) -> FrameDedupDecision {
-        let Some(last) = self.last.as_ref() else {
-            return FrameDedupDecision::SendChanged;
+    fn plan_at(&mut self, frame: &CapturedFrame, now: Instant) -> RemoteResult<TilePlan> {
+        let request = match self.committed_at {
+            None => TileEncodeRequest::Keyframe,
+            Some(committed_at)
+                if now.saturating_duration_since(committed_at) >= UNCHANGED_FRAME_KEEPALIVE =>
+            {
+                TileEncodeRequest::Keepalive
+            }
+            Some(_) => TileEncodeRequest::Delta,
         };
-        if !captured_frames_equal(&last.frame, frame) {
-            return FrameDedupDecision::SendChanged;
-        }
-        if now.saturating_duration_since(last.committed_at) >= UNCHANGED_FRAME_KEEPALIVE {
-            return FrameDedupDecision::SendKeepalive;
-        }
-        FrameDedupDecision::Suppress
+        self.encoder.plan(frame, request)
     }
 
-    fn commit_at(&mut self, frame: CapturedFrame, committed_at: Instant) {
-        self.last = Some(SuccessfulWireFrame {
-            frame,
-            committed_at,
-        });
+    /// Adopt a frame whose authenticated record and flush both succeeded.
+    fn commit_at(&mut self, frame: &CapturedFrame, committed_at: Instant) {
+        self.encoder.commit(frame);
+        self.committed_at = Some(committed_at);
     }
-}
 
-fn captured_frames_equal(left: &CapturedFrame, right: &CapturedFrame) -> bool {
-    (left.source_width, left.source_height) == (right.source_width, right.source_height)
-        && left.image.dimensions() == right.image.dimensions()
-        && left.image.as_raw() == right.image.as_raw()
+    /// Abandon an encoded-but-unsent frame, leaving the viewer's model intact.
+    fn discard(&mut self) {
+        self.encoder.discard();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -296,6 +305,9 @@ struct HostTelemetryWindow {
     unchanged_suppressed: u64,
     unchanged_keepalive: u64,
     encoded: u64,
+    keyframes: u64,
+    dirty_tiles: u64,
+    total_tiles: u64,
     sent: u64,
     bytes: u64,
     drawn_acks: u64,
@@ -325,6 +337,7 @@ impl HostTelemetryWindow {
             || self.unchanged_suppressed != 0
             || self.unchanged_keepalive != 0
             || self.encoded != 0
+            || self.keyframes != 0
             || self.sent != 0
             || self.bytes != 0
             || self.drawn_acks != 0
@@ -422,10 +435,19 @@ impl HostTelemetry {
         });
     }
 
-    fn record_encoded(&self, elapsed: Duration) {
+    fn record_encoded(&self, elapsed: Duration, plan: TilePlan) {
         self.update(|window| {
             window.encoded = window.encoded.saturating_add(1);
             window.encode_elapsed = window.encode_elapsed.saturating_add(elapsed);
+            if plan.keyframe {
+                window.keyframes = window.keyframes.saturating_add(1);
+            }
+            window.dirty_tiles = window
+                .dirty_tiles
+                .saturating_add(u64::from(plan.dirty_tiles));
+            window.total_tiles = window
+                .total_tiles
+                .saturating_add(u64::from(plan.total_tiles));
         });
     }
 
@@ -611,7 +633,7 @@ struct AckObservation {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct JpegQualitySignals {
     acknowledgements: u64,
-    viewer_superseded: u64,
+    same_epoch_superseded: u64,
     pressure: u64,
     max_ack_rtt: Duration,
     max_payload_bytes: u64,
@@ -636,8 +658,8 @@ impl JpegQualitySignals {
 
     fn record_ack(&mut self, ack: AckObservation, pressure: u64) {
         self.acknowledgements = self.acknowledgements.saturating_add(1);
-        self.viewer_superseded = self
-            .viewer_superseded
+        self.same_epoch_superseded = self
+            .same_epoch_superseded
             .saturating_add(ack.same_epoch_retired.saturating_sub(1));
         self.pressure = self.pressure.saturating_add(pressure);
         self.max_ack_rtt = self.max_ack_rtt.max(ack.send_to_ack);
@@ -1184,24 +1206,60 @@ pub fn run_host(options: HostOptions) -> RemoteResult<()> {
     }
 
     while !shutdown.load(Ordering::Acquire) {
-        let stream = match listener.accept() {
-            Ok((stream, _)) => stream,
+        // Take the address `accept` already resolved. Calling `peer_addr` on
+        // the accepted socket instead is a liveness question, not a naming
+        // one: a peer that sends RST before we get here makes it fail with
+        // ENOTCONN, and propagating that killed the whole host. One
+        // unauthenticated connect-then-reset from any port scanner was enough.
+        let (stream, peer) = match listener.accept() {
+            Ok(accepted) => accepted,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(ACCEPT_POLL_INTERVAL);
+                continue;
+            }
+            Err(error) if accept_error_is_transient(&error) => {
+                // Aborted connections and interrupted syscalls are routine.
+                // Descriptor or memory exhaustion is transient too, but
+                // spinning on it burns a core, so back off before retrying.
+                if accept_error_needs_backoff(&error) {
+                    eprintln!("jwm-remote: accept deferred ({error}); retrying");
+                    thread::sleep(ACCEPT_EXHAUSTION_BACKOFF);
+                }
                 continue;
             }
             Err(error) => return Err(error.into()),
         };
-        let peer = stream.peer_addr()?;
         eprintln!("jwm-remote: connection from {peer}");
-        if let Err(error) = serve_client(stream, &key, &options, &shutdown) {
+        let outcome = serve_client(stream, &key, &options, &shutdown);
+        if let Err(error) = &outcome {
             eprintln!("jwm-remote: session with {peer} ended: {error}");
         }
         if options.once {
-            return Ok(());
+            // `--once` is documented for tests and scripts, so a failed
+            // session has to be distinguishable from a clean one by exit code.
+            return outcome;
         }
     }
     Ok(())
+}
+
+/// Accept errors that concern one connection rather than the listener.
+fn accept_error_is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::NotConnected
+    ) || accept_error_needs_backoff(error)
+}
+
+/// Resource exhaustion: retryable, but only after yielding for a moment.
+fn accept_error_needs_backoff(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE) | Some(libc::ENFILE) | Some(libc::ENOBUFS) | Some(libc::ENOMEM)
+    )
 }
 
 fn serve_client(
@@ -1501,9 +1559,13 @@ fn captured_frame_from_outcome(outcome: CaptureOutcome) -> Option<CapturedFrame>
 }
 
 fn backpressure_refresh_interval(frame_interval: Duration) -> Duration {
+    // Never slower than the requested rate allows: a fixed 250 ms floor turned
+    // a 60 fps session's natural 50 ms refresh into fifteen frame-times of
+    // added staleness while backpressured.
+    let floor = MIN_BACKPRESSURE_REFRESH.min(frame_interval);
     frame_interval
         .saturating_mul(3)
-        .clamp(MIN_BACKPRESSURE_REFRESH, MAX_BACKPRESSURE_REFRESH)
+        .clamp(floor, MAX_BACKPRESSURE_REFRESH)
 }
 
 fn target_frame_interval(fps: u16) -> Duration {
@@ -1518,26 +1580,26 @@ fn send_frames<W: std::io::Write + SetWriteTimeout>(
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
 ) -> RemoteResult<()> {
-    let mut deduplicator = FrameDeduplicator::default();
-    send_frames_with_deduplicator(
+    let mut sender = FrameSender::new();
+    send_frames_with_encoder(
         mailbox,
         writer,
         running,
         credits,
         telemetry,
         jpeg_quality,
-        &mut deduplicator,
+        &mut sender,
     )
 }
 
-fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
+fn send_frames_with_encoder<W: std::io::Write + SetWriteTimeout>(
     mailbox: Arc<LatestMailbox<PendingFrame>>,
     mut writer: SessionWriter<DeadlineWriter<W>>,
     running: &AtomicBool,
     credits: &FrameCredits,
     telemetry: &HostTelemetry,
     jpeg_quality: &JpegQualityController,
-    deduplicator: &mut FrameDeduplicator,
+    sender: &mut FrameSender,
 ) -> RemoteResult<()> {
     let mut sequence = 0_u64;
     let mut payload = Vec::new();
@@ -1554,14 +1616,12 @@ fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
         if !running.load(Ordering::Acquire) {
             break;
         }
-        let unchanged_keepalive = match deduplicator.decide_at(&pending.frame, Instant::now()) {
-            FrameDedupDecision::Suppress => {
-                telemetry.record_unchanged_suppressed();
-                continue;
-            }
-            FrameDedupDecision::SendKeepalive => true,
-            FrameDedupDecision::SendChanged => false,
-        };
+        let plan = sender.plan_at(&pending.frame, Instant::now())?;
+        if !plan.emit {
+            telemetry.record_unchanged_suppressed();
+            continue;
+        }
+        let unchanged_keepalive = plan.dirty_tiles == 0;
 
         let quality = jpeg_quality.quality_before_encode_at(Instant::now());
         if let Some(adjustment) = quality.adjustment {
@@ -1570,7 +1630,7 @@ fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
                 JpegQualityAdjustment::Increased => "increased",
             };
             eprintln!(
-                "jwm-remote: adaptive JPEG quality {direction} {} -> {} (ACKs {}, pressure {}, max send-to-ACK {:.1} ms, payload {} bytes, same-epoch outstanding {}, viewer-superseded {})",
+                "jwm-remote: adaptive JPEG quality {direction} {} -> {} (ACKs {}, pressure {}, max send-to-ACK {:.1} ms, payload {} bytes, same-epoch outstanding {}, same-epoch-superseded {})",
                 quality.previous,
                 quality.quality,
                 quality.signals.acknowledgements,
@@ -1578,12 +1638,14 @@ fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
                 quality.signals.max_ack_rtt.as_secs_f64() * 1000.0,
                 quality.signals.max_payload_bytes,
                 quality.signals.max_outstanding,
-                quality.signals.viewer_superseded,
+                quality.signals.same_epoch_superseded,
             );
         }
         let encode_started = Instant::now();
-        encode_frame_into(&mut payload, sequence, &pending.frame, quality.quality)?;
-        telemetry.record_encoded(encode_started.elapsed());
+        sender
+            .encoder
+            .encode_into(&mut payload, sequence, &pending.frame, quality.quality)?;
+        telemetry.record_encoded(encode_started.elapsed(), plan);
         // Publish the application sequence before the bytes reach the peer so
         // an immediate cumulative ACK can never race ahead of host state.
         let sent_at = Instant::now();
@@ -1597,7 +1659,12 @@ fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
         )?;
         telemetry.record_outstanding(outstanding);
         let write_started = Instant::now();
-        write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE)?;
+        if let Err(error) = write_frame_record(&mut writer, &payload, FRAME_WRITE_DEADLINE) {
+            // The viewer never applied these tiles, so the encoder's model of
+            // its canvas must not advance past them.
+            sender.discard();
+            return Err(error.into());
+        }
         telemetry.record_sent(payload.len(), write_started.elapsed());
         if unchanged_keepalive {
             telemetry.record_unchanged_keepalive();
@@ -1605,7 +1672,7 @@ fn send_frames_with_deduplicator<W: std::io::Write + SetWriteTimeout>(
         // Commit by move only after the complete authenticated record and its
         // flush succeeded. A partial/failed write therefore cannot suppress a
         // future frame in a replacement session or test harness.
-        deduplicator.commit_at(pending.frame, Instant::now());
+        sender.commit_at(&pending.frame, Instant::now());
         sequence = sequence
             .checked_add(1)
             .ok_or_else(|| io::Error::other("remote frame sequence exhausted"))?;
@@ -1672,8 +1739,13 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
     } else {
         window.bytes as f64 * 8.0 / seconds / 1_000_000.0
     };
+    let tile_percent = if window.total_tiles == 0 {
+        0.0
+    } else {
+        window.dirty_tiles as f64 * 100.0 / window.total_tiles as f64
+    };
     eprintln!(
-        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
+        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} keyframes {} tiles {}/{} ({tile_percent:.1}% dirty) sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
         seconds,
         window.scheduled,
         window.captured,
@@ -1685,6 +1757,9 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.unchanged_suppressed,
         window.unchanged_keepalive,
         window.encoded,
+        window.keyframes,
+        window.dirty_tiles,
+        window.total_tiles,
         window.sent,
         window.bytes,
         window.drawn_acks,
@@ -1723,6 +1798,25 @@ fn receive_input(
             .set_read_timeout(Some(initial_activity_timeout))?;
         let mut awaiting_first_activity = true;
         while running.load(Ordering::Acquire) {
+            // While the peer holds something down, wait for readability in a
+            // short slice first and release on silence. Waiting for the socket
+            // to become readable — rather than shortening the read timeout —
+            // means a record is never interrupted part-way through, which the
+            // authenticated stream could not resynchronise from.
+            if injector.as_ref().is_some_and(InputInjector::has_pressed)
+                && !wait_readable(reader.get_ref(), HELD_INPUT_SILENCE_TIMEOUT)?
+            {
+                if let Some(injector) = injector.as_mut() {
+                    eprintln!(
+                        "jwm-remote: controller silent for {} ms with input held; releasing keys and buttons",
+                        HELD_INPUT_SILENCE_TIMEOUT.as_millis()
+                    );
+                    if let Err(error) = injector.release_all() {
+                        eprintln!("jwm-remote: releasing held input failed: {error}");
+                    }
+                }
+                continue;
+            }
             let kind = reader.read_message_into(&mut payload)?;
             if awaiting_first_activity {
                 reader
@@ -1754,13 +1848,13 @@ fn receive_input(
                 | MessageKind::Button
                 | MessageKind::ReleaseAll => {
                     return Err(invalid_data(
-                        "legacy single-event input is invalid in application protocol v3",
+                        "legacy single-event input is invalid in application protocol v4",
                     )
                     .into());
                 }
                 MessageKind::Close => break,
                 MessageKind::Heartbeat if payload.is_empty() => {
-                    if keyboard_enabled && let Some(injector) = injector.as_ref() {
+                    if keyboard_enabled && let Some(injector) = injector.as_mut() {
                         verify_injector_keymap(injector, verified_keymap)?;
                     }
                 }
@@ -1816,7 +1910,7 @@ fn receive_input(
 }
 
 fn verify_injector_keymap(
-    injector: &InputInjector,
+    injector: &mut InputInjector,
     expected: Option<[u8; 32]>,
 ) -> RemoteResult<()> {
     if !injector.take_keymap_change()? {
@@ -1831,6 +1925,26 @@ fn verify_injector_keymap(
     Ok(())
 }
 
+/// Wait for `stream` to become readable, returning false on timeout.
+///
+/// Errors and hangups count as readable so the following read reports them
+/// through the normal path instead of being swallowed here.
+fn wait_readable(stream: &TcpStream, timeout: Duration) -> RemoteResult<bool> {
+    let fd = stream.as_fd();
+    let interests = PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP;
+    let mut fds = [PollFd::new(fd, interests)];
+    let timeout = PollTimeout::try_from(timeout.as_millis().min(u128::from(u16::MAX)) as u16)
+        .unwrap_or(PollTimeout::MAX);
+    loop {
+        return match poll(&mut fds, timeout) {
+            Ok(0) => Ok(false),
+            Ok(_) => Ok(true),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => Err(io::Error::from(error).into()),
+        };
+    }
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -1842,7 +1956,8 @@ fn permission_denied(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::frame::decode_frame;
+    use crate::remote::frame::new_decode_buffer_pool;
+    use crate::remote::tile::TileDecoder;
     use image::{Rgb, RgbImage};
     use std::io::{Cursor, Write};
     use std::net::TcpListener;
@@ -1961,6 +2076,79 @@ mod tests {
         }
     }
 
+    /// Plan, encode and commit one frame the way the sender loop does.
+    ///
+    /// Committing without encoding would silently do nothing, so tests must
+    /// walk the same three steps as production.
+    fn accept_frame(sender: &mut FrameSender, frame: &CapturedFrame, at: Instant) -> TilePlan {
+        let plan = sender.plan_at(frame, at).expect("planning succeeds");
+        if plan.emit {
+            let mut payload = Vec::new();
+            sender
+                .encoder
+                .encode_into(&mut payload, 0, frame, 70)
+                .expect("encoding succeeds");
+            sender.commit_at(frame, at);
+        }
+        plan
+    }
+
+    /// Decode a captured wire stream in order; deltas need their predecessors.
+    fn decode_wire(decoder: &mut TileDecoder, payload: &[u8]) -> (u64, RgbImage) {
+        let frame = decoder
+            .decode_into(payload, new_decode_buffer_pool())
+            .expect("host wire frames decode");
+        (frame.sequence(), frame.image().clone())
+    }
+
+    #[test]
+    fn per_connection_accept_errors_never_kill_the_listener() {
+        // A peer that resets before we look at the socket makes peer_addr fail
+        // with ENOTCONN; treating that as fatal let one unauthenticated packet
+        // from a port scanner take down the whole host.
+        for kind in [
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::NotConnected,
+        ] {
+            let error = io::Error::new(kind, "synthetic");
+            assert!(
+                accept_error_is_transient(&error),
+                "{kind:?} must not be fatal"
+            );
+            assert!(
+                !accept_error_needs_backoff(&error),
+                "{kind:?} needs no backoff"
+            );
+        }
+
+        for raw in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            let error = io::Error::from_raw_os_error(raw);
+            assert!(
+                accept_error_is_transient(&error),
+                "errno {raw} must not be fatal"
+            );
+            assert!(
+                accept_error_needs_backoff(&error),
+                "errno {raw} must back off rather than spin a core"
+            );
+        }
+
+        // A genuinely broken listener still has to surface.
+        let fatal = io::Error::from_raw_os_error(libc::EINVAL);
+        assert!(!accept_error_is_transient(&fatal));
+    }
+
+    fn test_tile_plan(dirty_tiles: u32, total_tiles: u32) -> TilePlan {
+        TilePlan {
+            keyframe: dirty_tiles == total_tiles,
+            dirty_tiles,
+            total_tiles,
+            emit: true,
+        }
+    }
+
     fn test_captured_frame(red: u8) -> CapturedFrame {
         CapturedFrame {
             image: RgbImage::from_pixel(2, 2, Rgb([red, 0, 0])),
@@ -2005,27 +2193,15 @@ mod tests {
     }
 
     #[test]
-    fn frame_dedup_is_exact_and_suppression_never_refreshes_keepalive() {
+    fn an_unchanged_capture_sends_nothing_until_the_keepalive_boundary() {
         let base = Instant::now();
+        let mut sender = FrameSender::new();
         let first = test_captured_frame(10);
-        let first_pixels = first.image.as_raw().as_ptr();
-        let mut deduplicator = FrameDeduplicator::default();
-        assert_eq!(
-            deduplicator.decide_at(&first, base),
-            FrameDedupDecision::SendChanged
-        );
-        deduplicator.commit_at(first, base);
-        assert_eq!(
-            deduplicator
-                .last
-                .as_ref()
-                .unwrap()
-                .frame
-                .image
-                .as_raw()
-                .as_ptr(),
-            first_pixels,
-            "the successful frame must move into the cache without cloning"
+
+        let plan = accept_frame(&mut sender, &first, base);
+        assert!(
+            plan.emit && plan.keyframe,
+            "the first frame is self-contained"
         );
 
         for elapsed in [
@@ -2033,71 +2209,99 @@ mod tests {
             Duration::from_secs(2),
             UNCHANGED_FRAME_KEEPALIVE - Duration::from_millis(1),
         ] {
+            let plan = sender
+                .plan_at(&test_captured_frame(10), base + elapsed)
+                .unwrap();
+            assert!(!plan.emit, "an unchanged capture has no dirty tiles");
+            assert_eq!(plan.dirty_tiles, 0);
             assert_eq!(
-                deduplicator.decide_at(&test_captured_frame(10), base + elapsed),
-                FrameDedupDecision::Suppress
+                sender.committed_at,
+                Some(base),
+                "suppression must never refresh the keepalive clock"
             );
-            assert_eq!(deduplicator.last.as_ref().unwrap().committed_at, base);
         }
-        assert_eq!(
-            deduplicator.decide_at(&test_captured_frame(10), base + UNCHANGED_FRAME_KEEPALIVE),
-            FrameDedupDecision::SendKeepalive
+
+        let plan = sender
+            .plan_at(&test_captured_frame(10), base + UNCHANGED_FRAME_KEEPALIVE)
+            .unwrap();
+        assert!(
+            plan.emit && plan.dirty_tiles == 0,
+            "the boundary sends an empty liveness frame, not a whole picture"
         );
+    }
+
+    #[test]
+    fn every_kind_of_change_marks_tiles_dirty() {
+        let base = Instant::now();
+        let mut sender = FrameSender::new();
+        let first = test_captured_frame(10);
+        accept_frame(&mut sender, &first, base);
 
         let mut raw_changed = test_captured_frame(10);
-        raw_changed.image.as_mut()[0] ^= 1;
-        assert_eq!(
-            deduplicator.decide_at(&raw_changed, base + Duration::from_secs(1)),
-            FrameDedupDecision::SendChanged
-        );
+        raw_changed.image.as_mut()[0] = 200;
+        let plan = sender
+            .plan_at(&raw_changed, base + Duration::from_secs(1))
+            .unwrap();
+        assert!(plan.emit && !plan.keyframe && plan.dirty_tiles == 1);
+
         let mut source_changed = test_captured_frame(10);
         source_changed.source_width = 3;
-        assert_eq!(
-            deduplicator.decide_at(&source_changed, base + Duration::from_secs(1)),
-            FrameDedupDecision::SendChanged
+        let plan = sender
+            .plan_at(&source_changed, base + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            plan.emit && plan.keyframe,
+            "a changed root geometry invalidates the reference"
         );
+
         let image_geometry_changed = CapturedFrame {
             image: RgbImage::from_pixel(1, 4, Rgb([10, 0, 0])),
             source_width: 2,
             source_height: 2,
         };
-        assert_eq!(
-            deduplicator.decide_at(&image_geometry_changed, base + Duration::from_secs(1)),
-            FrameDedupDecision::SendChanged
+        let plan = sender
+            .plan_at(&image_geometry_changed, base + Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            plan.emit && plan.keyframe,
+            "a resize invalidates the reference"
         );
     }
 
     #[test]
-    fn uncommitted_send_attempt_cannot_change_the_dedup_baseline() {
+    fn an_uncommitted_send_attempt_cannot_change_the_viewer_model() {
         let base = Instant::now();
-        let mut deduplicator = FrameDeduplicator::default();
+        let mut sender = FrameSender::new();
         let first = test_captured_frame(10);
-        assert_eq!(
-            deduplicator.decide_at(&first, base),
-            FrameDedupDecision::SendChanged
-        );
-        // A failed first wire attempt never calls commit_at.
-        assert_eq!(
-            deduplicator.decide_at(&first, base + Duration::from_secs(1)),
-            FrameDedupDecision::SendChanged
-        );
 
-        deduplicator.commit_at(first, base);
+        assert!(sender.plan_at(&first, base).unwrap().emit);
+        // A failed first wire attempt never calls commit_at, so the next plan
+        // must still be a self-contained keyframe.
+        let plan = sender
+            .plan_at(&first, base + Duration::from_secs(1))
+            .unwrap();
+        assert!(plan.emit && plan.keyframe);
+
+        accept_frame(&mut sender, &first, base);
         let changed = test_captured_frame(20);
-        assert_eq!(
-            deduplicator.decide_at(&changed, base + Duration::from_secs(1)),
-            FrameDedupDecision::SendChanged
+        assert!(
+            sender
+                .plan_at(&changed, base + Duration::from_secs(1))
+                .unwrap()
+                .emit
         );
-        // Simulate a failed changed-frame write: the old successful frame is
-        // still the comparison baseline.
-        assert_eq!(
-            deduplicator.decide_at(&test_captured_frame(10), base + Duration::from_secs(2)),
-            FrameDedupDecision::Suppress
-        );
-        assert_eq!(
-            deduplicator.decide_at(&changed, base + Duration::from_secs(2)),
-            FrameDedupDecision::SendChanged
-        );
+        // Simulate a failed changed-frame write: the committed frame is still
+        // what the viewer holds, so the old pixels are still unchanged...
+        sender.discard();
+        let plan = sender
+            .plan_at(&test_captured_frame(10), base + Duration::from_secs(2))
+            .unwrap();
+        assert!(!plan.emit);
+        // ...and the changed frame is still owed to the viewer.
+        let plan = sender
+            .plan_at(&changed, base + Duration::from_secs(2))
+            .unwrap();
+        assert!(plan.emit && plan.dirty_tiles == 1);
     }
 
     #[test]
@@ -2184,14 +2388,31 @@ mod tests {
             backpressure_refresh_interval(Duration::from_millis(125)),
             Duration::from_millis(375)
         );
+        // The floor may never be slower than the requested rate itself.
+        // Clamping every fast session up to a fixed 250 ms added fifteen
+        // frame-times of staleness at 60 fps for no benefit.
         assert_eq!(
             backpressure_refresh_interval(Duration::from_millis(83)),
-            Duration::from_millis(250)
+            Duration::from_millis(249),
+            "a 12 fps session keeps its natural three-frame refresh"
         );
         assert_eq!(
             backpressure_refresh_interval(Duration::from_millis(16)),
-            Duration::from_millis(250)
+            Duration::from_millis(48),
+            "a 60 fps session refreshes at its own cadence, not a fixed floor"
         );
+        for fps in 1..=60_u16 {
+            let interval = target_frame_interval(fps);
+            let refresh = backpressure_refresh_interval(interval);
+            assert!(
+                refresh >= interval,
+                "{fps} fps: refresh {refresh:?} must not outpace the frame interval"
+            );
+            assert!(
+                refresh <= MAX_BACKPRESSURE_REFRESH,
+                "{fps} fps: refresh {refresh:?} must stay inside the staleness ceiling"
+            );
+        }
     }
 
     #[test]
@@ -2704,8 +2925,8 @@ mod tests {
         telemetry.record_dequeued(Duration::from_millis(20), Duration::from_millis(2));
         telemetry.record_unchanged_suppressed();
         telemetry.record_unchanged_keepalive();
-        telemetry.record_encoded(Duration::from_millis(6));
-        telemetry.record_encoded(Duration::from_millis(7));
+        telemetry.record_encoded(Duration::from_millis(6), test_tile_plan(1, 4));
+        telemetry.record_encoded(Duration::from_millis(7), test_tile_plan(2, 4));
 
         let outstanding = credits
             .mark_sent(
@@ -2948,11 +3169,12 @@ mod tests {
         assert_eq!(first_kind, MessageKind::Frame);
         assert_eq!(second_kind, MessageKind::Frame);
         assert_eq!(third_kind, MessageKind::Frame);
-        assert_eq!(decode_frame(&first_payload).unwrap().sequence, 0);
-        assert_eq!(decode_frame(&second_payload).unwrap().sequence, 1);
-        let third = decode_frame(&third_payload).unwrap();
-        assert_eq!(third.sequence, 2);
-        assert!(third.image.get_pixel(0, 0).0[0].abs_diff(70) <= 2);
+        let mut decoder = TileDecoder::new();
+        assert_eq!(decode_wire(&mut decoder, &first_payload).0, 0);
+        assert_eq!(decode_wire(&mut decoder, &second_payload).0, 1);
+        let (sequence, image) = decode_wire(&mut decoder, &third_payload);
+        assert_eq!(sequence, 2);
+        assert!(image.get_pixel(0, 0).0[0].abs_diff(70) <= 2);
     }
 
     #[test]
@@ -3070,10 +3292,11 @@ mod tests {
         let mut reader = SessionReader::new(Cursor::new(wire), [0x6b; 32]);
         let (_, first_payload) = reader.read_message().unwrap();
         let (_, second_payload) = reader.read_message().unwrap();
-        assert_eq!(decode_frame(&first_payload).unwrap().sequence, 0);
-        let second = decode_frame(&second_payload).unwrap();
-        assert_eq!(second.sequence, 1);
-        assert!(second.image.get_pixel(0, 0).0[0].abs_diff(20) <= 2);
+        let mut decoder = TileDecoder::new();
+        assert_eq!(decode_wire(&mut decoder, &first_payload).0, 0);
+        let (sequence, image) = decode_wire(&mut decoder, &second_payload);
+        assert_eq!(sequence, 1);
+        assert!(image.get_pixel(0, 0).0[0].abs_diff(20) <= 2);
         let window = telemetry.state.lock().unwrap().window;
         assert_eq!(window.dequeued, 3);
         assert_eq!(window.unchanged_suppressed, 1);
@@ -3099,28 +3322,34 @@ mod tests {
         let committed_at = Instant::now()
             .checked_sub(UNCHANGED_FRAME_KEEPALIVE + Duration::from_millis(1))
             .expect("the monotonic clock must cover the keepalive interval");
-        let mut deduplicator = FrameDeduplicator::default();
-        deduplicator.commit_at(test_captured_frame(10), committed_at);
+        let mut sender = FrameSender::new();
+        let baseline = test_captured_frame(10);
+        accept_frame(&mut sender, &baseline, committed_at);
         let writer = SessionWriter::new(
             DeadlineWriter::new(FlushFailWriter::default(), WRITE_TIMEOUT),
             [0x7c; 32],
         );
 
         assert!(
-            send_frames_with_deduplicator(
+            send_frames_with_encoder(
                 mailbox,
                 writer,
                 &running,
                 &credits,
                 &telemetry,
                 &jpeg_quality,
-                &mut deduplicator,
+                &mut sender,
             )
             .is_err()
         );
-        let last = deduplicator.last.as_ref().unwrap();
-        assert_eq!(last.committed_at, committed_at);
-        assert!(captured_frames_equal(&last.frame, &test_captured_frame(10)));
+        assert_eq!(sender.committed_at, Some(committed_at));
+        assert!(
+            !sender
+                .plan_at(&test_captured_frame(10), committed_at)
+                .unwrap()
+                .emit,
+            "a failed keepalive write must leave the viewer model exactly as it was"
+        );
         let window = telemetry.state.lock().unwrap().window;
         assert_eq!(window.encoded, 1);
         assert_eq!(window.sent, 0);
@@ -3148,21 +3377,31 @@ mod tests {
             DeadlineWriter::new(FailingWriter, WRITE_TIMEOUT),
             [0x8d; 32],
         );
-        let mut deduplicator = FrameDeduplicator::default();
+        let mut sender = FrameSender::new();
 
         assert!(
-            send_frames_with_deduplicator(
+            send_frames_with_encoder(
                 mailbox,
                 writer,
                 &running,
                 &credits,
                 &telemetry,
                 &jpeg_quality,
-                &mut deduplicator,
+                &mut sender,
             )
             .is_err()
         );
-        assert!(deduplicator.last.is_none());
+        assert!(
+            sender.committed_at.is_none(),
+            "a frame that never reached the wire cannot become the viewer model"
+        );
+        assert!(
+            sender
+                .plan_at(&test_captured_frame(10), Instant::now())
+                .unwrap()
+                .keyframe,
+            "the next attempt must still be self-contained"
+        );
         let window = telemetry.state.lock().unwrap().window;
         assert_eq!(window.encoded, 1);
         assert_eq!(window.sent, 0);

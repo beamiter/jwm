@@ -1,9 +1,7 @@
 //! Remote desktop viewer/client orchestration.
 
 use super::deadline::TcpStreamDeadline;
-use super::frame::{
-    RecyclableDecodedFrame, SharedDecodeBufferPool, decode_frame_recyclable, new_decode_buffer_pool,
-};
+use super::frame::{RecyclableDecodedFrame, SharedDecodeBufferPool, new_decode_buffer_pool};
 use super::key::load_key_file;
 use super::messages::{
     ClientHello, MAX_INPUT_BATCH_EVENTS, ServerHello, encode_frame_ack, encode_input_batch_into,
@@ -11,6 +9,7 @@ use super::messages::{
 use super::protocol::{
     MessageKind, PayloadBufferRetention, SessionReader, SessionWriter, client_handshake,
 };
+use super::tile::TileDecoder;
 use super::x11_input::InputEvent;
 use super::x11_keymap::fingerprint_display;
 use super::x11_viewer::{Viewer, ViewerEvent};
@@ -19,7 +18,7 @@ use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::io::Write as _;
 use std::io::{self, Read as _};
-use std::net::{Shutdown, TcpStream};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -29,6 +28,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
@@ -52,7 +52,7 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     } else {
         [0; 32]
     };
-    let stream = TcpStream::connect(&options.address)?;
+    let stream = connect_with_timeout(&options.address, CONNECT_TIMEOUT)?;
     let (mut reader, mut writer, hello) = negotiate_session(
         stream,
         &key,
@@ -75,7 +75,13 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
     state.telemetry.record_received();
     // SessionReader exposes this payload only after its record MAC succeeds;
     // no decoded-image allocation is checked out before authentication.
-    let first_frame = decode_queued_frame(&payload, &state.telemetry, &state.decode_pool)?;
+    let mut tile_decoder = TileDecoder::new();
+    let first_frame = decode_queued_frame(
+        &mut tile_decoder,
+        &payload,
+        &state.telemetry,
+        &state.decode_pool,
+    )?;
     reader
         .get_ref()
         .set_read_timeout(Some(VIDEO_FRAME_IDLE_TIMEOUT))?;
@@ -105,7 +111,14 @@ pub fn run_client(options: ClientOptions) -> RemoteResult<()> {
         // Move the authenticated first-frame allocation into the receiver
         // thread. It remains thread-local while avoiding a second large
         // allocation for the next frame.
-        receive_frames(reader, receive_state, last_sequence, payload, wake_sender);
+        receive_frames(
+            reader,
+            receive_state,
+            last_sequence,
+            payload,
+            wake_sender,
+            tile_decoder,
+        );
     })?;
 
     let pointer_enabled = hello.pointer_enabled && !options.view_only;
@@ -835,12 +848,16 @@ fn replace_latest<T>(latest: &Mutex<Option<T>>, next: T) -> Option<T> {
 }
 
 fn decode_queued_frame(
+    decoder: &mut TileDecoder,
     payload: &[u8],
     telemetry: &ClientTelemetry,
     pool: &SharedDecodeBufferPool,
 ) -> RemoteResult<QueuedFrame> {
     let decode_started = Instant::now();
-    let frame = decode_frame_recyclable(payload, Arc::clone(pool))?;
+    // Deltas are applied in arrival order into the decoder's own canvas, so a
+    // frame the viewer later drops from its one-slot queue still contributes
+    // its tiles. Only presentation is allowed to skip frames, never decoding.
+    let frame = decoder.decode_into(payload, Arc::clone(pool))?;
     let ready_at = Instant::now();
     telemetry.record_decoded_at(decode_started, ready_at);
     Ok(QueuedFrame { frame, ready_at })
@@ -905,6 +922,7 @@ fn receive_frames(
     mut last_sequence: u64,
     mut payload: Vec<u8>,
     wake: WakeSender,
+    mut tile_decoder: TileDecoder,
 ) {
     let mut completion = ReceiveCompletion::new(Arc::clone(&state), wake);
     let mut payload_retention = PayloadBufferRetention::default();
@@ -916,7 +934,12 @@ fn receive_frames(
                 // returning Frame, so pool checkout starts only on trusted
                 // header/JPEG bytes.
                 state.telemetry.record_received();
-                let queued = decode_queued_frame(&payload, &state.telemetry, &state.decode_pool)?;
+                let queued = decode_queued_frame(
+                    &mut tile_decoder,
+                    &payload,
+                    &state.telemetry,
+                    &state.decode_pool,
+                )?;
                 let expected = last_sequence
                     .checked_add(1)
                     .ok_or_else(|| invalid_data("video frame sequence exhausted"))?;
@@ -960,6 +983,39 @@ fn receive_frames(
     completion.finish(result);
 }
 
+/// Connect with an explicit bound on the TCP handshake.
+///
+/// Every later phase of a session is absolutely bounded, but a bare
+/// `TcpStream::connect` is not: a black-holed address burns the kernel's whole
+/// SYN retry budget (~130 s on Linux) against a documented 5 s negotiation
+/// budget. Each resolved address gets its own attempt so a stale AAAA record
+/// cannot consume the entire allowance.
+fn connect_with_timeout(address: &str, timeout: Duration) -> RemoteResult<TcpStream> {
+    let resolved = address
+        .to_socket_addrs()
+        .map_err(|error| invalid_data(format!("cannot resolve {address}: {error}")))?
+        .collect::<Vec<_>>();
+    let Some((last, rest)) = resolved.split_last() else {
+        return Err(invalid_data(format!("{address} resolved to no addresses")).into());
+    };
+    let per_address = timeout
+        .checked_div(resolved.len() as u32)
+        .unwrap_or(timeout)
+        .max(Duration::from_secs(1));
+    for candidate in rest {
+        if let Ok(stream) = TcpStream::connect_timeout(candidate, per_address) {
+            return Ok(stream);
+        }
+    }
+    TcpStream::connect_timeout(last, per_address).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot reach {address} within {timeout:?}: {error}"),
+        )
+        .into()
+    })
+}
+
 fn invalid_data(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -967,9 +1023,10 @@ fn invalid_data(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::frame::{DecodedFrame, decode_pool_snapshot, encode_frame};
+    use crate::remote::frame::{DecodedFrame, decode_pool_snapshot};
     use crate::remote::messages::decode_frame_ack;
     use crate::remote::protocol::{PSK_LEN, server_handshake};
+    use crate::remote::tile::{TileEncodeRequest, TileEncoder};
     use crate::remote::x11_capture::CapturedFrame;
     use image::Rgb;
     use image::RgbImage;
@@ -979,6 +1036,20 @@ mod tests {
     use std::net::TcpListener;
 
     const TEST_PSK: [u8; PSK_LEN] = [0x5a; PSK_LEN];
+
+    /// One self-contained tile keyframe, as the host would put on the wire.
+    fn tile_keyframe_payload(sequence: u64, frame: &CapturedFrame, quality: u8) -> Vec<u8> {
+        let mut encoder = TileEncoder::new();
+        let mut payload = Vec::new();
+        let plan = encoder
+            .plan(frame, TileEncodeRequest::Keyframe)
+            .expect("a keyframe always plans");
+        assert!(plan.emit && plan.keyframe);
+        encoder
+            .encode_into(&mut payload, sequence, frame, quality)
+            .expect("a keyframe always encodes");
+        payload
+    }
 
     fn decoded_test_frame(sequence: u64) -> RecyclableDecodedFrame {
         decoded_test_frame_in_pool(sequence, new_decode_buffer_pool())
@@ -1437,7 +1508,13 @@ mod tests {
         let telemetry = ClientTelemetry::default();
         telemetry.record_received();
         assert!(
-            decode_queued_frame(b"not a frame", &telemetry, &new_decode_buffer_pool()).is_err()
+            decode_queued_frame(
+                &mut TileDecoder::new(),
+                b"not a frame",
+                &telemetry,
+                &new_decode_buffer_pool()
+            )
+            .is_err()
         );
 
         let window = telemetry.take_window();
@@ -1466,7 +1543,7 @@ mod tests {
         let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (receiver, _) = listener.accept().unwrap();
         let mut writer = SessionWriter::new(sender, TEST_PSK);
-        let payload = encode_frame(
+        let payload = tile_keyframe_payload(
             2,
             &CapturedFrame {
                 image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
@@ -1474,8 +1551,7 @@ mod tests {
                 source_height: 18,
             },
             80,
-        )
-        .unwrap();
+        );
         writer.write_message(MessageKind::Frame, &payload).unwrap();
         writer.flush().unwrap();
 
@@ -1487,6 +1563,7 @@ mod tests {
             0,
             Vec::new(),
             wake_sender,
+            TileDecoder::new(),
         );
 
         assert!(!state.alive.load(Ordering::Acquire));
@@ -1508,7 +1585,7 @@ mod tests {
         let sender = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (receiver, _) = listener.accept().unwrap();
         let mut writer = SessionWriter::new(sender, [0x91; PSK_LEN]);
-        let payload = encode_frame(
+        let payload = tile_keyframe_payload(
             1,
             &CapturedFrame {
                 image: RgbImage::from_pixel(32, 18, Rgb([20, 40, 80])),
@@ -1516,8 +1593,7 @@ mod tests {
                 source_height: 18,
             },
             80,
-        )
-        .unwrap();
+        );
         writer.write_message(MessageKind::Frame, &payload).unwrap();
         writer.flush().unwrap();
 
@@ -1529,6 +1605,7 @@ mod tests {
             0,
             Vec::new(),
             wake_sender,
+            TileDecoder::new(),
         );
 
         assert!(!state.alive.load(Ordering::Acquire));

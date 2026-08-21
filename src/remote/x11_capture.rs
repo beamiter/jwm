@@ -1018,10 +1018,20 @@ impl X11Capture {
                                 && self.requested_source == CaptureSource::Auto =>
                         {
                             eprintln!(
-                                "remote: compositor overlay readback failed ({}); switching to root capture",
+                                "remote: compositor overlay readback failed ({}); using root capture and retrying",
                                 failure.error
                             );
                             self.release_overlay_runtime()?;
+                            // Arm the retry exactly as the acquire-failure arm
+                            // does. Without it, re-acquisition needs a
+                            // compositor-owner transition that never comes
+                            // while the same compositor keeps running, so one
+                            // transient BadDrawable during a RandR resize
+                            // downgraded the session to ungated root capture
+                            // for life -- and because the damage target is
+                            // derived from the overlay, it killed the damage
+                            // gate with it.
+                            self.next_overlay_retry = Some(Instant::now() + OVERLAY_RETRY_DELAY);
                             drawable = self.root;
                             allow_render = false;
                         }

@@ -65,6 +65,22 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` video is now dirty-tile delta coded instead of whole-frame JPEG,
+  which is application protocol version 4 (update both machines together). Each
+  frame ships only the 16-pixel tiles that differ from the pixels the viewer was
+  last sent, packed into one atlas image and encoded once. Measured on a
+  3440x1440 desktop over loopback: 10.1 -> 0.5-0.9 Mbit/s at the default
+  `--max-width 1280`, and 53.3 -> 1.8-2.6 Mbit/s at native resolution. Encode
+  time fell from 60 ms to 1.5-2.7 ms per native frame, removing a ceiling that
+  had capped the achievable rate near 16 fps regardless of link speed, and
+  capture-to-ACK fell from 80-89 ms to 12-14 ms. Comparing against the last
+  transmitted pixels rather than the previous capture means the small tolerance
+  that absorbs scaler dither cannot accumulate into visible drift. Host
+  telemetry gained `keyframes` and `tiles A/B (P% dirty)`.
+- `jwm-remote host --once` returns the session's own result, so a scripted run
+  that failed is distinguishable from a clean one by exit code.
+- `jwm-remote` backpressure refresh is no longer clamped up to a fixed 250 ms
+  floor, which had added fifteen frame-times of staleness at `--fps 60`.
 - `jwm-remote` now downsizes both Composite-overlay and root-fallback frames
   with XRender before readback, overlaps capture with JPEG/network sending
   through a one-frame latest-wins queue, reports stage latency and dropped
@@ -197,6 +213,33 @@ monorepo use independent Semantic Versions.
   both bail while a panel is up, so the drag was never committed or cancelled.
 - Locking from the Shell Hub's session page no longer leaves the lock marked as
   a page the Hub can be backed out to.
+- A single unauthenticated TCP connection that resets immediately no longer
+  kills `jwm-remote host`. The accept loop took the peer address from the
+  accepted socket rather than from `accept` itself, and a peer that sent RST
+  first made that fail with `ENOTCONN`, which propagated out of the listener.
+  Aborted connections, interrupted syscalls and descriptor exhaustion are now
+  logged and retried too, so one packet from a port scanner can no longer take
+  down the host a user was relying on to reach the machine remotely.
+- `jwm-remote` releases held keys and buttons after 600 ms of controller
+  silence instead of waiting out the eight-second session idle timeout. The
+  host X server generates autorepeat, so a network partition with a key down
+  used to type into whatever had focus for the full eight seconds.
+- A mouse button the controller sends that the host's pointer map does not
+  define — a 12-button mouse, or horizontal-scroll buttons 6 and 7 — is dropped
+  instead of ending the session. Because an input batch is validated before
+  anything is queued, failing it also discarded every pointer motion and any
+  release-all in the same record.
+- `jwm-remote` pins a button's physical number when the press is queued, so a
+  pointer remap arriving mid-press can no longer release a different button and
+  leave the real one stuck down on the host.
+- `jwm-remote connect` bounds its TCP connect. Every later phase already had an
+  absolute deadline, but a black-holed address burned the kernel's full SYN
+  retry budget against a five-second negotiation budget.
+- A Composite overlay readback failure now arms the same bounded retry as an
+  overlay acquire failure. Re-acquisition otherwise waited for a
+  compositor-owner transition that never arrives while the same compositor
+  keeps running, so one transient error downgraded the session to ungated root
+  capture — and with it the XDamage gate — for the rest of the session.
 - Screen recording no longer freezes the desktop. The compositor used to write
   each captured frame — 8 MB at 1080p — straight into ffmpeg's 64 KiB stdin pipe
   from its render loop, so whenever the encoder fell behind, the one thread that

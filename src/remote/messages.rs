@@ -7,7 +7,7 @@ use super::x11_input::InputEvent;
 use std::io;
 
 const APPLICATION_MAGIC: &[u8; 8] = b"JWMREM01";
-const APPLICATION_VERSION: u16 = 3;
+const APPLICATION_VERSION: u16 = 4;
 const SERVER_HELLO_LEN: usize = 11;
 const CLIENT_HELLO_LEN: usize = SERVER_HELLO_LEN + 32;
 const FLAG_POINTER: u8 = 1 << 0;
@@ -363,26 +363,34 @@ mod tests {
     }
 
     #[test]
-    fn hello_uses_version_three_and_rejects_version_two() {
+    fn hello_uses_version_four_and_rejects_neighbouring_versions() {
         let payload = ServerHello {
             pointer_enabled: false,
             keyboard_enabled: false,
         }
         .encode();
-        assert_eq!(&payload[8..10], &3_u16.to_be_bytes());
+        assert_eq!(&payload[8..10], &4_u16.to_be_bytes());
 
-        let mut version_two = payload;
-        version_two[8..10].copy_from_slice(&2_u16.to_be_bytes());
-        let error = ServerHello::decode(&version_two).unwrap_err();
+        // Version 3 carried whole-frame JPEGs; version 4 carries dirty-tile
+        // deltas on the same message kind, so an older peer must fail the
+        // handshake rather than misread the first frame body.
+        let mut version_three = payload;
+        version_three[8..10].copy_from_slice(&3_u16.to_be_bytes());
+        let error = ServerHello::decode(&version_three).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("application version 2; expected 3")
+                .contains("application version 3; expected 4")
         );
 
-        let mut version_four = payload;
-        version_four[8..10].copy_from_slice(&4_u16.to_be_bytes());
-        assert!(ServerHello::decode(&version_four).is_err());
+        for rejected in [0_u16, 2, 5, u16::MAX] {
+            let mut other = payload;
+            other[8..10].copy_from_slice(&rejected.to_be_bytes());
+            assert!(
+                ServerHello::decode(&other).is_err(),
+                "version {rejected} must be rejected"
+            );
+        }
     }
 
     #[test]
