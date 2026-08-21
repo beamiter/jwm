@@ -116,6 +116,11 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 - Interactive move/resize transport state moved into the backend contract.
 - Key-repeat policy is now binding metadata produced by configuration; the
   Wayland input backend no longer inspects or imports concrete `Jwm` methods.
+- Wayland xdg-toplevel configure fallback uses one 250 ms one-shot per new
+  surface rather than a permanent 50 ms poll. `wp-commit-timing` and `wp-fifo`
+  remain explicitly unmanaged: timestamps are consumed for protocol progress,
+  no Smithay barriers are installed, and the compositor does not scan the
+  scene for nonexistent barrier state.
 - Compositor benchmarking is the first capability extracted from the monolithic
   `Backend` trait. Application startup now depends on `CompositorBenchmark`
   rather than the complete platform interface for benchmark configuration.

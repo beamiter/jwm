@@ -48,6 +48,12 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Wayland no longer wakes every 50 ms to clone every role root and traverse
+  all surface trees for commit-timing barriers that cannot exist in the
+  configured unmanaged protocol mode. Initial xdg-toplevel liveness is now a
+  per-window 250 ms one-shot timer shared by udev and both nested backends;
+  normal configure or destroy consumes its token and the later callback is an
+  O(1) no-op.
 - New configurations and the installer now agree on `tao_glow_bar` as the
   default status bar.
 - The Shell Hub's first frame no longer waits for a chain of audio, backlight

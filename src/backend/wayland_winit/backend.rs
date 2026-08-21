@@ -40,7 +40,6 @@ use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::output::{Mode as WlMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::channel::{self, Sender};
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::{EventLoop, Interest, Mode, PostAction};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -1075,23 +1074,6 @@ impl WaylandWinitBackend {
                 .map_err(|e| {
                     BackendError::Message(format!(
                         "calloop insert_source(wayland display) failed: {e}"
-                    ))
-                })?;
-        }
-
-        {
-            let initial_configure_timeout = Duration::from_millis(250);
-            let tick = Duration::from_millis(50);
-            let timer = Timer::from_duration(tick);
-            event_loop
-                .handle()
-                .insert_source(timer, move |_, _, state| {
-                    state.ensure_initial_configure_timeout(initial_configure_timeout);
-                    TimeoutAction::ToDuration(tick)
-                })
-                .map_err(|e| {
-                    BackendError::Message(format!(
-                        "calloop insert_source(initial configure timer) failed: {e}"
                     ))
                 })?;
         }

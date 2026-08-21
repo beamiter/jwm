@@ -1590,27 +1590,6 @@ impl UdevBackend {
                 })?;
         }
 
-        // Safety net: if the WM doesn't configure a new toplevel quickly enough, clients can stall
-        // forever waiting for the initial xdg_toplevel configure. Keep a small timeout-based
-        // fallback to ensure we eventually send one.
-        {
-            let initial_configure_timeout = Duration::from_millis(250);
-            let tick = Duration::from_millis(50);
-            let timer = Timer::from_duration(tick);
-            event_loop
-                .handle()
-                .insert_source(timer, move |_, _, state| {
-                    state.signal_due_commit_timing_barriers();
-                    state.ensure_initial_configure_timeout(initial_configure_timeout);
-                    TimeoutAction::ToDuration(tick)
-                })
-                .map_err(|e| {
-                    BackendError::Message(format!(
-                        "calloop insert_source(initial configure timer) failed: {e}"
-                    ))
-                })?;
-        }
-
         let shared = Arc::new(Mutex::new(SharedState::default()));
         let pending_events = Arc::new(Mutex::new(VecDeque::<BackendEvent>::new()));
 

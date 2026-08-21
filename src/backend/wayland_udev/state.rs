@@ -25,13 +25,14 @@ use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState}
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::reexports::calloop::channel::Sender;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, ObjectId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource};
 use smithay::utils::{
-    Clock, Logical, Monotonic, Point, Rectangle, Serial, Time, SERIAL_COUNTER as SCOUNTER,
+    Logical, Point, Rectangle, Serial, SERIAL_COUNTER as SCOUNTER,
 };
 use smithay::desktop::{
     find_popup_root_surface, get_popup_toplevel_coords, layer_map_for_output,
@@ -96,14 +97,12 @@ use smithay::wayland::alpha_modifier::AlphaModifierState;
 use smithay::wayland::background_effect::{BackgroundEffectState, ExtBackgroundEffectHandler};
 use smithay::wayland::foreign_toplevel_list::{ForeignToplevelListState, ForeignToplevelListHandler, ForeignToplevelHandle};
 use smithay::wayland::tablet_manager::TabletManagerState;
-use smithay::wayland::fifo::{FifoBarrierCachedState, FifoManagerState};
+use smithay::wayland::fifo::FifoManagerState;
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
 };
 use smithay::wayland::security_context::SecurityContextState;
-use smithay::wayland::commit_timing::{
-    CommitTimerBarrierStateUserData, CommitTimerStateUserData, CommitTimingManagerState,
-};
+use smithay::wayland::commit_timing::{CommitTimerStateUserData, CommitTimingManagerState};
 use smithay::wayland::shell::xdg::dialog::{XdgDialogState, XdgDialogHandler, ToplevelDialogHint};
 use smithay::wayland::xdg_foreign::{XdgForeignState, XdgForeignHandler};
 use smithay::wayland::xdg_system_bell::{XdgSystemBellState, XdgSystemBellHandler};
@@ -120,6 +119,8 @@ use smithay::wayland::selection::ext_data_control::{
 use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorationState};
 use smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as KdeMode;
 use smithay::input::pointer::PointerHandle;
+
+const INITIAL_CONFIGURE_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Default)]
 pub struct JwmClientState {
@@ -418,7 +419,7 @@ pub struct JwmWaylandState {
     /// retrying a hidden minimized-surface import on every unrelated frame.
     surface_commit_epochs: HashMap<WindowId, u64>,
 
-    pub pending_initial_configure: HashMap<WindowId, Instant>,
+    pub pending_initial_configure: HashSet<WindowId>,
     pending_size_reconfigure: HashMap<WindowId, ((u32, u32), Instant)>,
 
     pub popups: HashMap<ObjectId, PopupSurface>,
@@ -516,6 +517,10 @@ fn apply_manager_mapping_state(
 
 fn manager_allows_surface_map(manager_unmapped_windows: &HashSet<WindowId>, win: WindowId) -> bool {
     !manager_unmapped_windows.contains(&win)
+}
+
+fn claim_initial_configure_fallback(pending: &mut HashSet<WindowId>, win: WindowId) -> bool {
+    pending.remove(&win)
 }
 
 fn take_window_mapping_state(
@@ -2006,7 +2011,7 @@ impl JwmWaylandState {
                 surface_to_window: HashMap::new(),
                 surface_commit_epochs: HashMap::new(),
 
-                pending_initial_configure: HashMap::new(),
+                pending_initial_configure: HashSet::new(),
                 pending_size_reconfigure: HashMap::new(),
 
                 popups: HashMap::new(),
@@ -2051,127 +2056,37 @@ impl JwmWaylandState {
             socket_name,
         ))
     }
-    pub fn ensure_initial_configure_timeout(&mut self, timeout: Duration) {
-        if self.pending_initial_configure.is_empty() {
+    fn ensure_initial_configure_fallback(&mut self, win: WindowId) {
+        // The ordinary WindowOps::configure path removes this token. A
+        // one-shot fallback that fires afterwards is therefore a constant-time
+        // no-op instead of a perpetual scan over every surface.
+        if !claim_initial_configure_fallback(&mut self.pending_initial_configure, win) {
             return;
         }
 
-        let now = Instant::now();
-        let expired: Vec<WindowId> = self
-            .pending_initial_configure
-            .iter()
-            .filter_map(|(win, since)| {
-                if now.duration_since(*since) >= timeout {
-                    Some(*win)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let Some(toplevel) = self.toplevels.get(&win).cloned() else {
+            return;
+        };
+        if toplevel.is_initial_configure_sent() {
+            return;
+        }
 
-        for win in expired {
-            // Only send a configure if the WM hasn't already done so.
-            let Some(toplevel) = self.toplevels.get(&win).cloned() else {
-                self.pending_initial_configure.remove(&win);
-                continue;
-            };
-
-            if !toplevel.is_initial_configure_sent() {
-                let (w, h) = self
-                    .window_geometry
-                    .get(&win)
-                    .map(|g| (g.w, g.h))
-                    .unwrap_or((800, 600));
-
-                toplevel.with_pending_state(|s| {
-                    if self.is_dialog_like_toplevel(win) && w == 800 && h == 600 {
-                        s.size = None;
-                        Self::set_toplevel_tiled_state(s, false);
-                    } else {
-                        s.size = Some((w as i32, h as i32).into());
-                        Self::set_toplevel_tiled_state(s, true);
-                    }
-                });
-                let _ = toplevel.send_configure();
-                self.needs_redraw = true;
+        let (w, h) = self
+            .window_geometry
+            .get(&win)
+            .map(|g| (g.w, g.h))
+            .unwrap_or((800, 600));
+        toplevel.with_pending_state(|s| {
+            if self.is_dialog_like_toplevel(win) && w == 800 && h == 600 {
+                s.size = None;
+                Self::set_toplevel_tiled_state(s, false);
+            } else {
+                s.size = Some((w as i32, h as i32).into());
+                Self::set_toplevel_tiled_state(s, true);
             }
-
-            self.pending_initial_configure.remove(&win);
-        }
-    }
-
-    pub fn signal_surface_pacing_barriers(
-        surface: &WlSurface,
-        commit_deadline: Option<Time<Monotonic>>,
-        signal_fifo: bool,
-    ) -> bool {
-        let mut signaled = false;
-
-        with_surface_tree_downward(
-            surface,
-            (),
-            |_, _, _| TraversalAction::DoChildren(()),
-            |_surface, states, _| {
-                if signal_fifo {
-                    let fifo_barrier = {
-                        let mut cached = states.cached_state.get::<FifoBarrierCachedState>();
-                        cached.current().barrier.take()
-                    };
-                    if let Some(barrier) = fifo_barrier {
-                        barrier.signal();
-                        signaled = true;
-                    }
-                }
-
-                if let Some(deadline) = commit_deadline {
-                    if let Some(commit_timer) =
-                        states.data_map.get::<CommitTimerBarrierStateUserData>()
-                    {
-                        if commit_timer.lock().unwrap().signal_until(deadline) {
-                            signaled = true;
-                        }
-                    }
-                }
-            },
-            |_, _, _| true,
-        );
-
-        signaled
-    }
-
-    pub fn signal_due_commit_timing_barriers(&mut self) {
-        let deadline = Clock::<Monotonic>::new().now();
-        let mut roots: Vec<WlSurface> = Vec::new();
-
-        roots.extend(
-            self.toplevels
-                .values()
-                .map(|surface| surface.wl_surface().clone()),
-        );
-        roots.extend(self.popups.values().map(|popup| popup.wl_surface().clone()));
-        roots.extend(
-            self.im_popups
-                .iter()
-                .map(|popup| popup.wl_surface().clone()),
-        );
-        roots.extend(self.layer_surfaces.values().cloned());
-        roots.extend(
-            self.lock_surfaces
-                .values()
-                .map(|lock| lock.wl_surface().clone()),
-        );
-        if let Some(icon) = &self.dnd_icon {
-            roots.push(icon.surface.clone());
-        }
-
-        let mut signaled = false;
-        for root in roots {
-            signaled |= Self::signal_surface_pacing_barriers(&root, Some(deadline), false);
-        }
-
-        if signaled {
-            self.needs_redraw = true;
-        }
+        });
+        let _ = toplevel.send_configure();
+        self.needs_redraw = true;
     }
 
     pub(crate) fn enforce_toplevel_configure_size(&mut self, win: WindowId, surface: &WlSurface) {
@@ -2900,6 +2815,8 @@ impl CompositorHandler for JwmWaylandState {
         // the protocol without Smithay installing commit blockers. We still
         // must consume one pending timestamp per commit; otherwise a client
         // that updates the target timestamp again trips TimestampExists.
+        // Unmanaged mode creates no CommitTimerBarrierState, so there is also
+        // deliberately no periodic surface-tree barrier scan to perform.
         smithay::wayland::compositor::add_pre_commit_hook::<JwmWaylandState, _>(
             surface,
             |_state, _dh, surface| {
@@ -3639,7 +3556,19 @@ impl XdgShellHandler for JwmWaylandState {
         // Track windows that still need their initial configure. Normally the WM triggers this via
         // `WindowOps::configure`, but we keep a timeout-based fallback to avoid clients stalling
         // indefinitely if the WM doesn't configure quickly enough.
-        self.pending_initial_configure.insert(win, Instant::now());
+        self.pending_initial_configure.insert(win);
+
+        // One timer per new toplevel preserves the 250 ms safety bound without
+        // waking the compositor 20 times a second for the rest of the session.
+        let timer = Timer::from_duration(INITIAL_CONFIGURE_TIMEOUT);
+        if let Err(error) = self.loop_handle.insert_source(timer, move |_, _, state| {
+            state.ensure_initial_configure_fallback(win);
+            TimeoutAction::Drop
+        }) {
+            warn!("[udev/wayland] could not arm initial configure fallback for {win:?}: {error}");
+            // Losing the timer must not leave the client stalled forever.
+            self.ensure_initial_configure_fallback(win);
+        }
 
         self.push_event(BackendEvent::WindowCreated(win));
         self.needs_redraw = true;
@@ -3993,8 +3922,8 @@ fn match_x11_window_by_surface_id(
 #[cfg(test)]
 mod xwayland_legacy_assoc_tests {
     use super::{
-        JwmWaylandState, apply_manager_mapping_state, manager_allows_surface_map,
-        match_x11_window_by_surface_id, take_window_mapping_state,
+        JwmWaylandState, apply_manager_mapping_state, claim_initial_configure_fallback,
+        manager_allows_surface_map, match_x11_window_by_surface_id, take_window_mapping_state,
     };
     use crate::backend::common_define::WindowId;
     use std::collections::HashSet;
@@ -4090,6 +4019,54 @@ mod xwayland_legacy_assoc_tests {
             backend.matches("self.request_flush();").count() >= 2,
             "map and unmap operations must wake the native render loop"
         );
+    }
+
+    #[test]
+    fn unmanaged_pacing_has_no_periodic_barrier_tree_scan() {
+        let state = include_str!("state.rs");
+        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        assert!(production.contains("CommitTimingManagerState::unmanaged"));
+        assert!(production.contains("FifoManagerState::unmanaged"));
+        assert!(!production.contains("pub fn signal_due_commit_timing_barriers"));
+        assert!(!production.contains("pub fn signal_surface_pacing_barriers"));
+        assert!(
+            !production.contains("get::<CommitTimerBarrierStateUserData>()"),
+            "unmanaged mode must not pretend Smithay created managed barriers"
+        );
+    }
+
+    #[test]
+    fn initial_configure_fallback_is_per_toplevel_and_one_shot() {
+        let state = include_str!("state.rs");
+        let production = state.split_once("#[cfg(test)]").unwrap().0;
+        assert!(production.contains("Timer::from_duration(INITIAL_CONFIGURE_TIMEOUT)"));
+        assert!(production.contains("state.ensure_initial_configure_fallback(win)"));
+        assert!(production.contains("TimeoutAction::Drop"));
+
+        for backend in [
+            include_str!("backend.rs"),
+            include_str!("../wayland_x11/backend.rs"),
+            include_str!("../wayland_winit/backend.rs"),
+        ] {
+            assert!(!backend.contains("ensure_initial_configure_timeout"));
+            assert!(!backend.contains("insert_source(initial configure timer)"));
+        }
+    }
+
+    #[test]
+    fn initial_configure_claims_are_independent_and_consumed_once() {
+        let a = WindowId::from_raw(41);
+        let b = WindowId::from_raw(42);
+        let mut pending = HashSet::from([a, b]);
+
+        assert!(claim_initial_configure_fallback(&mut pending, a));
+        assert!(!claim_initial_configure_fallback(&mut pending, a));
+        assert!(pending.contains(&b), "one timer consumed another window");
+
+        // Normal configure/destroy paths use the same removal. Their later
+        // timer callback must therefore be a no-op.
+        pending.remove(&b);
+        assert!(!claim_initial_configure_fallback(&mut pending, b));
     }
 
     #[test]

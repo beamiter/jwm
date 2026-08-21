@@ -46,7 +46,7 @@ use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size, Time};
+use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
 use smithay::wayland::compositor::{TraversalAction, with_states, with_surface_tree_downward};
 use smithay::wayland::dmabuf::get_dmabuf;
@@ -826,8 +826,6 @@ impl KmsState {
         )]
         let visible = out.frame_callback_visible.clone();
         let refresh = out.refresh_interval;
-        let commit_deadline = presentation_time.map(Time::<Monotonic>::from);
-
         for root in &out.frame_callback_roots {
             let mut root_tree_visible = visible.contains(&root.downgrade());
             if !root_tree_visible {
@@ -871,12 +869,9 @@ impl KmsState {
                 );
             }
 
-            crate::backend::wayland::state::JwmWaylandState::signal_surface_pacing_barriers(
-                root,
-                commit_deadline,
-                true,
-            );
-
+            // wp-fifo/wp-commit-timing are intentionally advertised in
+            // unmanaged mode; that mode installs no Smithay barriers to
+            // signal here. Frame callbacks remain tied to the real vblank.
             send_frames_surface_tree(root, &output, now, throttle, |surface, _states| {
                 if (surface.id() == root.id() && root_tree_visible)
                     || visible.contains(&surface.downgrade())
