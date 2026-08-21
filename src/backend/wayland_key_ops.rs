@@ -79,7 +79,9 @@ impl UdevKeyOps {
 
 impl KeyOps for UdevKeyOps {
     fn grab_keys(&self, _root: WindowId, _bindings: &[(Mods, KeySym)]) -> Result<(), BackendError> {
-        // No global key grabbing in the udev backend (handled by the compositor input path).
+        // No global key grabbing in the udev backend. Its libinput path
+        // atomically refreshes suppression/repeat metadata from CONFIG on the
+        // first physical key after an ArcSwap generation change.
         Ok(())
     }
 

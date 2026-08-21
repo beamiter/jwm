@@ -48,6 +48,13 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- The udev Wayland backend no longer wakes every 16 ms just to discover that
+  no shortcut is repeating. A repeatable press now arms one 400 ms timer and
+  reuses it at the exact 50 ms interval; release, a new key, exact modifier
+  mismatch, config replacement, built-in/protocol lock, or VT pause removes or
+  invalidates it. Repeat timestamps follow real elapsed time with Wayland's
+  wrapping u32 semantics, and successful config reloads refresh the backend's
+  suppression/repeatability snapshot before the next physical key is routed.
 - Wayland no longer wakes every 50 ms to clone every role root and traverse
   all surface trees for commit-timing barriers that cannot exist in the
   configured unmanaged protocol mode. Initial xdg-toplevel liveness is now a

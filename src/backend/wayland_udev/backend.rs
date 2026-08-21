@@ -19,7 +19,7 @@ use crate::backend::api::{
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
-use crate::config::CONFIG;
+use crate::config::{CONFIG, Config};
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -180,7 +180,6 @@ fn surface_tree_has_committed_buffer(
 // Emulate the common behavior for WM shortcuts.
 const KEY_REPEAT_DELAY: Duration = Duration::from_millis(400);
 const KEY_REPEAT_INTERVAL: Duration = Duration::from_millis(50);
-const KEY_REPEAT_TICK: Duration = Duration::from_millis(16);
 
 fn handler_wakeup_timeout(can_present: bool, next_wakeup: Option<Duration>) -> Option<Duration> {
     if can_present { next_wakeup } else { None }
@@ -230,11 +229,14 @@ fn event_loop_timeout(
 
 #[derive(Clone, Copy, Debug)]
 struct RepeatState {
+    generation: u64,
+    session_lock_epoch: u64,
     keycode: u8,
     mods_raw: u16,
     required_mods: Mods,
-    last_time: u32,
-    next_fire: Instant,
+    press_time: u32,
+    pressed_at: Instant,
+    timer_token: Option<smithay::reexports::calloop::RegistrationToken>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -269,12 +271,16 @@ struct SharedState {
     cursor_dirty: bool,
     /// Cached key bindings (mods, keysym) for key event suppression.
     key_bindings: Vec<ShortcutBinding>,
+    /// Exact config allocation those bindings came from. Arc identity makes
+    /// the common keyboard-event check allocation-free.
+    binding_config: Option<Arc<Config>>,
     /// xkb keycode (0..=255) -> base (unmodified) keysym.
     keysym_table: Vec<crate::backend::common_define::KeySym>,
     /// xkb keycodes that were intercepted on press and should be intercepted on release.
     suppressed_keycodes: HashSet<u8>,
 
     repeat: Option<RepeatState>,
+    repeat_generation: u64,
     outputs: Vec<OutputInfo>,
     output_key_to_id: HashMap<u64, OutputId>,
     next_output_raw: u64,
@@ -300,10 +306,12 @@ impl Default for SharedState {
             cursor_kind: StdCursorKind::LeftPtr,
             cursor_dirty: false,
             key_bindings: Vec::new(),
+            binding_config: None,
             keysym_table: vec![0; 256],
             suppressed_keycodes: HashSet::new(),
 
             repeat: None,
+            repeat_generation: 0,
             outputs: Vec::new(),
             output_key_to_id: HashMap::new(),
             next_output_raw: 0,
@@ -315,6 +323,130 @@ impl Default for SharedState {
             screenshot_grab_active: false,
             system_ui_grab_active: false,
         }
+    }
+}
+
+fn shortcut_bindings_from_config(config: &Config) -> Vec<ShortcutBinding> {
+    config
+        .get_keys()
+        .into_iter()
+        .map(|key| ShortcutBinding {
+            mods: key.mask & allowed_shortcut_mods(),
+            keysym: key.key_sym,
+            repeatable: key.repeatable,
+        })
+        .collect()
+}
+
+fn refresh_shortcut_snapshot(
+    shared: &mut SharedState,
+) -> (bool, Option<smithay::reexports::calloop::RegistrationToken>) {
+    let config = CONFIG.load_full();
+    if shared
+        .binding_config
+        .as_ref()
+        .is_some_and(|snapshot| Arc::ptr_eq(snapshot, &config))
+    {
+        return (false, None);
+    }
+    shared.key_bindings = shortcut_bindings_from_config(&config);
+    shared.binding_config = Some(config);
+    // Keep suppressed_keycodes until their physical releases, but stop a
+    // repeat whose action/repeatability may have changed under it.
+    (
+        true,
+        shared.repeat.take().and_then(|repeat| repeat.timer_token),
+    )
+}
+
+fn advance_key_repeat(
+    repeat: &mut Option<RepeatState>,
+    generation: u64,
+    mods_raw: u16,
+    repeat_allowed: bool,
+    session_lock_epoch: u64,
+    now: Instant,
+) -> Option<BackendEvent> {
+    let Some(mut state) = *repeat else {
+        return None;
+    };
+    // A newer key press owns a different timer. The stale callback must not
+    // cancel or mutate it when it finally wakes.
+    if state.generation != generation {
+        return None;
+    }
+
+    let current_mods = Mods::from_bits_truncate(mods_raw) & allowed_shortcut_mods();
+    if !repeat_allowed
+        || state.session_lock_epoch != session_lock_epoch
+        || current_mods != state.required_mods
+    {
+        *repeat = None;
+        return None;
+    }
+
+    state.mods_raw = mods_raw;
+    let modulus = u128::from(u32::MAX) + 1;
+    let elapsed_ms =
+        u32::try_from(now.saturating_duration_since(state.pressed_at).as_millis() % modulus)
+            .expect("elapsed milliseconds were reduced to the u32 range");
+    let event_time = state.press_time.wrapping_add(elapsed_ms);
+    *repeat = Some(state);
+    Some(BackendEvent::KeyPress {
+        keycode: state.keycode,
+        state: state.mods_raw,
+        time: event_time,
+    })
+}
+
+fn arm_key_repeat_timer(
+    handle: &smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
+    shared: Arc<Mutex<SharedState>>,
+    pending_events: Arc<Mutex<VecDeque<BackendEvent>>>,
+    generation: u64,
+) -> Result<smithay::reexports::calloop::RegistrationToken, String> {
+    let timer = Timer::from_duration(KEY_REPEAT_DELAY);
+    handle
+        .insert_source(timer, move |_, _, state| {
+            let event = {
+                let mut shared = shared.lock_safe();
+                let mods_raw = shared.mods_state;
+                let config = CONFIG.load_full();
+                let repeat_allowed = shared.session_active
+                    && !state.session_locked
+                    && shared
+                        .binding_config
+                        .as_ref()
+                        .is_some_and(|snapshot| Arc::ptr_eq(snapshot, &config));
+                advance_key_repeat(
+                    &mut shared.repeat,
+                    generation,
+                    mods_raw,
+                    repeat_allowed,
+                    state.session_lock_epoch,
+                    Instant::now(),
+                )
+            };
+            let Some(event) = event else {
+                return TimeoutAction::Drop;
+            };
+            pending_events.lock_safe().push_back(event);
+            TimeoutAction::ToDuration(KEY_REPEAT_INTERVAL)
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn cancel_key_repeat_timer(
+    handle: &smithay::reexports::calloop::LoopHandle<'static, JwmWaylandState>,
+    shared: &Arc<Mutex<SharedState>>,
+) {
+    let token = shared
+        .lock_safe()
+        .repeat
+        .take()
+        .and_then(|repeat| repeat.timer_token);
+    if let Some(token) = token {
+        handle.remove(token);
     }
 }
 
@@ -1596,76 +1728,12 @@ impl UdevBackend {
         // Prepare key binding suppression table (like X11 grabs) for the udev/Wayland path.
         // We match against the same (mods, keysym) pair that JWM uses for shortcuts.
         {
-            let key_bindings = CONFIG
-                .load()
-                .get_keys()
-                .into_iter()
-                .map(|k| ShortcutBinding {
-                    mods: k.mask & allowed_shortcut_mods(),
-                    keysym: k.key_sym,
-                    repeatable: k.repeatable,
-                })
-                .collect::<Vec<_>>();
+            let config = CONFIG.load_full();
+            let key_bindings = shortcut_bindings_from_config(&config);
 
             let mut s = shared.lock_safe();
             s.key_bindings = key_bindings;
-        }
-
-        // libinput does not synthesize key-repeat events; emulate X11-style autorepeat
-        // for WM shortcuts so holding (Alt+J) keeps cycling.
-        {
-            let shared = shared.clone();
-            let pending_events = pending_events.clone();
-            let timer = Timer::from_duration(KEY_REPEAT_TICK);
-            event_loop
-                .handle()
-                .insert_source(timer, move |_, _, _state| {
-                    let maybe_event = {
-                        let mut s = shared.lock_safe();
-
-                        let Some(mut rep) = s.repeat else {
-                            return TimeoutAction::ToDuration(KEY_REPEAT_TICK);
-                        };
-
-                        let now = Instant::now();
-                        if now < rep.next_fire {
-                            // Not yet time; keep waiting.
-                            s.repeat = Some(rep);
-                            return TimeoutAction::ToDuration(KEY_REPEAT_TICK);
-                        }
-
-                        let current_mods =
-                            Mods::from_bits_truncate(s.mods_state) & allowed_shortcut_mods();
-                        if !current_mods.contains(rep.required_mods) {
-                            // Modifiers released; stop repeating.
-                            s.repeat = None;
-                            return TimeoutAction::ToDuration(KEY_REPEAT_TICK);
-                        }
-
-                        // Generate one repeat event per tick at most.
-                        rep.last_time = rep.last_time.saturating_add(
-                            KEY_REPEAT_INTERVAL.as_millis().min(u128::from(u32::MAX)) as u32,
-                        );
-                        rep.next_fire = now + KEY_REPEAT_INTERVAL;
-                        rep.mods_raw = s.mods_state;
-
-                        let ev = BackendEvent::KeyPress {
-                            keycode: rep.keycode,
-                            state: rep.mods_raw,
-                            time: rep.last_time,
-                        };
-                        s.repeat = Some(rep);
-                        ev
-                    };
-
-                    pending_events.lock_safe().push_back(maybe_event);
-                    TimeoutAction::ToDuration(KEY_REPEAT_TICK)
-                })
-                .map_err(|e| {
-                    BackendError::Message(format!(
-                        "calloop insert_source(key repeat timer) failed: {e}"
-                    ))
-                })?;
+            s.binding_config = Some(config);
         }
 
         // Hot-reload of the user config: watch the parent directory (not the
@@ -2399,6 +2467,14 @@ impl UdevBackend {
                             let pressed = matches!(state_key, smithay::backend::input::KeyState::Pressed);
                             let session_locked = state.session_locked;
 
+                            let (_, stale_repeat_token) = {
+                                let mut shared = shared.lock_safe();
+                                refresh_shortcut_snapshot(&mut shared)
+                            };
+                            if let Some(token) = stale_repeat_token {
+                                state.loop_handle.remove(token);
+                            }
+
                             let debug_keys = std::env::var("JWM_DEBUG_KEYS")
                                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                                 .unwrap_or(false);
@@ -2658,7 +2734,7 @@ impl UdevBackend {
                                 || (!(screenshot_grab_active || system_ui_grab_active)
                                     && (shortcuts_inhibited || handled_by_exclusive_layer))
                             {
-                                shared.lock_safe().repeat = None;
+                                cancel_key_repeat_timer(&state.loop_handle, &shared);
                             }
                             if matches!(state_key, smithay::backend::input::KeyState::Pressed)
                                 && !session_locked
@@ -2677,11 +2753,9 @@ impl UdevBackend {
 
                                 // Start (or reset) key repeat for bound shortcuts.
                                 // This mirrors X11 autorepeat behavior for WM shortcuts.
-                                {
+                                cancel_key_repeat_timer(&state.loop_handle, &shared);
+                                let repeat_generation = {
                                     let mut s = shared.lock_safe();
-
-                                    // Any new key press cancels previous repeat.
-                                    s.repeat = None;
 
                                     let keysym = s
                                         .keysym_table
@@ -2700,13 +2774,52 @@ impl UdevBackend {
                                         .unwrap_or(false);
 
                                     if is_repeatable {
+                                        s.repeat_generation = s.repeat_generation.wrapping_add(1);
+                                        let generation = s.repeat_generation;
                                         s.repeat = Some(RepeatState {
+                                            generation,
+                                            session_lock_epoch: state.session_lock_epoch,
                                             keycode: keycode_u8,
                                             mods_raw: mods_state,
                                             required_mods: clean_mods,
-                                            last_time: time,
-                                            next_fire: Instant::now() + KEY_REPEAT_DELAY,
+                                            press_time: time,
+                                            pressed_at: Instant::now(),
+                                            timer_token: None,
                                         });
+                                        Some(generation)
+                                    } else {
+                                        None
+                                    }
+                                };
+                                if let Some(generation) = repeat_generation {
+                                    match arm_key_repeat_timer(
+                                        &state.loop_handle,
+                                        shared.clone(),
+                                        pending_events.clone(),
+                                        generation,
+                                    ) {
+                                        Ok(token) => {
+                                            let mut s = shared.lock_safe();
+                                            if let Some(repeat) = s.repeat.as_mut().filter(|repeat| {
+                                                repeat.generation == generation
+                                            }) {
+                                                repeat.timer_token = Some(token);
+                                            } else {
+                                                drop(s);
+                                                state.loop_handle.remove(token);
+                                            }
+                                        }
+                                        Err(error) => {
+                                            log::warn!(
+                                                "[udev/key-repeat] could not arm timer: {error}"
+                                            );
+                                            let mut s = shared.lock_safe();
+                                            if s.repeat.is_some_and(|repeat| {
+                                                repeat.generation == generation
+                                            }) {
+                                                s.repeat = None;
+                                            }
+                                        }
                                     }
                                 }
 
@@ -2724,16 +2837,20 @@ impl UdevBackend {
                             // modifiers are no longer satisfied (e.g. Alt released).
                             if matches!(state_key, smithay::backend::input::KeyState::Released) {
                                 let keycode_u8 = u8::try_from(u32::from(keycode)).unwrap_or(0);
-                                let mut s = shared.lock_safe();
-                                if let Some(rep) = s.repeat {
-                                    if rep.keycode == keycode_u8 {
-                                        s.repeat = None;
+                                let should_cancel = {
+                                    let s = shared.lock_safe();
+                                    if let Some(rep) = s.repeat {
+                                        let current_mods =
+                                            Mods::from_bits_truncate(s.mods_state)
+                                                & allowed_shortcut_mods();
+                                        rep.keycode == keycode_u8
+                                            || current_mods != rep.required_mods
                                     } else {
-                                        let current_mods = Mods::from_bits_truncate(s.mods_state) & allowed_shortcut_mods();
-                                        if !current_mods.contains(rep.required_mods) {
-                                            s.repeat = None;
-                                        }
+                                        false
                                     }
+                                };
+                                if should_cancel {
+                                    cancel_key_repeat_timer(&state.loop_handle, &shared);
                                 }
                             }
                         }
@@ -2981,9 +3098,13 @@ impl UdevBackend {
             let mut notifier_libinput_context = libinput_context.clone();
             event_loop
                 .handle()
-                .insert_source(notifier, move |event, &mut (), _state| match event {
+                .insert_source(notifier, move |event, &mut (), state| match event {
                     SessionEvent::PauseSession => {
+                        cancel_key_repeat_timer(&state.loop_handle, &shared);
                         shared.lock_safe().session_active = false;
+                        pending_events
+                            .lock_safe()
+                            .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
                         notifier_libinput_context.suspend();
                         pending_events
                             .lock_safe()
@@ -3005,9 +3126,9 @@ impl UdevBackend {
                         ) {
                             log::warn!("{err}");
                         }
-                        sync_output_rects(_state, &shared);
-                        if let Some(grab_win) = _state.popup_grab_toplevel {
-                            _state.reconstrain_popups_for_toplevel(grab_win);
+                        sync_output_rects(state, &shared);
+                        if let Some(grab_win) = state.popup_grab_toplevel {
+                            state.reconstrain_popups_for_toplevel(grab_win);
                         }
                         queue_kms_reinit(&shared);
                     }
@@ -3643,6 +3764,13 @@ impl CompositorMedia for UdevBackend {
 
 impl CompositorWorkspaceEffects for UdevBackend {
     fn compositor_set_system_ui(&mut self, overlay: Option<SystemUiOverlay>) {
+        let locked = overlay.as_ref().is_some_and(|overlay| overlay.locked);
+        if locked {
+            cancel_key_repeat_timer(&self.state.loop_handle, &self.shared);
+            self.pending_events
+                .lock_safe()
+                .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
+        }
         self.shared.lock_safe().system_ui_grab_active = overlay.is_some();
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.set_system_ui(overlay);
@@ -5415,6 +5543,20 @@ impl Backend for UdevBackend {
             let mut handled_any = false;
             loop {
                 let next = { self.pending_events.lock_safe().pop_front() };
+                if matches!(&next, Some(BackendEvent::KeyPress { .. })) {
+                    let (changed, token) = {
+                        let mut shared = self.shared.lock_safe();
+                        refresh_shortcut_snapshot(&mut shared)
+                    };
+                    if let Some(token) = token {
+                        self.state.loop_handle.remove(token);
+                    }
+                    if changed {
+                        // A synthetic repeat queued before ConfigChanged must
+                        // never be reinterpreted as the newly bound action.
+                        continue;
+                    }
+                }
                 match next {
                     Some(BackendEvent::OutputPowerSet {
                         ref output_name,
@@ -6071,6 +6213,185 @@ mod udev_backend_selection_tests {
             function: "scrolling_focus_column".to_string(),
             argument: ArgumentConfig::Int(1),
         }
+    }
+
+    fn repeat(
+        generation: u64,
+        required_mods: Mods,
+        press_time: u32,
+        pressed_at: Instant,
+    ) -> Option<RepeatState> {
+        Some(RepeatState {
+            generation,
+            session_lock_epoch: 3,
+            keycode: 42,
+            mods_raw: required_mods.bits(),
+            required_mods,
+            press_time,
+            pressed_at,
+            timer_token: None,
+        })
+    }
+
+    #[test]
+    fn key_repeat_first_tick_uses_the_real_initial_delay() {
+        let start = Instant::now();
+        let mut state = repeat(7, Mods::ALT, 1_000, start);
+        let event = advance_key_repeat(
+            &mut state,
+            7,
+            Mods::ALT.bits(),
+            true,
+            3,
+            start + KEY_REPEAT_DELAY,
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            BackendEvent::KeyPress {
+                keycode: 42,
+                state,
+                time: 1_400,
+            } if state == Mods::ALT.bits()
+        ));
+        assert_eq!(state.unwrap().press_time, 1_000);
+
+        let next = advance_key_repeat(
+            &mut state,
+            7,
+            Mods::ALT.bits(),
+            true,
+            3,
+            start + KEY_REPEAT_DELAY + KEY_REPEAT_INTERVAL,
+        )
+        .unwrap();
+        assert!(matches!(next, BackendEvent::KeyPress { time: 1_450, .. }));
+    }
+
+    #[test]
+    fn stale_repeat_timer_never_mutates_the_new_key() {
+        let start = Instant::now();
+        let mut state = repeat(8, Mods::SUPER, 2_000, start);
+        assert!(
+            advance_key_repeat(
+                &mut state,
+                7,
+                Mods::SUPER.bits(),
+                true,
+                3,
+                start + KEY_REPEAT_DELAY,
+            )
+            .is_none()
+        );
+        let current = state.expect("newer repeat survives");
+        assert_eq!(current.generation, 8);
+        assert_eq!(current.press_time, 2_000);
+    }
+
+    #[test]
+    fn releasing_a_required_modifier_cancels_repeat() {
+        let start = Instant::now();
+        let mut state = repeat(9, Mods::ALT | Mods::SHIFT, 3_000, start);
+        assert!(
+            advance_key_repeat(
+                &mut state,
+                9,
+                Mods::ALT.bits(),
+                true,
+                3,
+                start + KEY_REPEAT_DELAY,
+            )
+            .is_none()
+        );
+        assert!(state.is_none());
+
+        let mut extra_modifier = repeat(9, Mods::ALT, 3_000, start);
+        assert!(
+            advance_key_repeat(
+                &mut extra_modifier,
+                9,
+                (Mods::ALT | Mods::SHIFT).bits(),
+                true,
+                3,
+                start + KEY_REPEAT_DELAY,
+            )
+            .is_none()
+        );
+        assert!(extra_modifier.is_none());
+    }
+
+    #[test]
+    fn lock_epoch_and_config_change_both_cancel_repeat() {
+        let start = Instant::now();
+        let mut locked = repeat(10, Mods::ALT, 4_000, start);
+        assert!(
+            advance_key_repeat(
+                &mut locked,
+                10,
+                Mods::ALT.bits(),
+                true,
+                4,
+                start + KEY_REPEAT_DELAY,
+            )
+            .is_none()
+        );
+        assert!(locked.is_none());
+
+        let mut config_changed = repeat(11, Mods::ALT, 4_000, start);
+        assert!(
+            advance_key_repeat(
+                &mut config_changed,
+                11,
+                Mods::ALT.bits(),
+                false,
+                3,
+                start + KEY_REPEAT_DELAY,
+            )
+            .is_none()
+        );
+        assert!(config_changed.is_none());
+    }
+
+    #[test]
+    fn repeat_timestamp_wraps_like_wayland_input_time() {
+        let start = Instant::now();
+        let mut state = repeat(12, Mods::ALT, u32::MAX - 100, start);
+        let event = advance_key_repeat(
+            &mut state,
+            12,
+            Mods::ALT.bits(),
+            true,
+            3,
+            start + KEY_REPEAT_DELAY,
+        )
+        .unwrap();
+        assert!(matches!(event, BackendEvent::KeyPress { time: 299, .. }));
+    }
+
+    #[test]
+    fn key_repeat_has_no_idle_periodic_timer() {
+        let source = include_str!("backend.rs");
+        let production = source.split_once("#[cfg(test)]").unwrap().0;
+        assert!(!production.contains("KEY_REPEAT_TICK"));
+        assert!(production.contains("Timer::from_duration(KEY_REPEAT_DELAY)"));
+        assert!(production.contains("TimeoutAction::ToDuration(KEY_REPEAT_INTERVAL)"));
+        assert!(production.contains("TimeoutAction::Drop"));
+        assert!(!production.contains("let repeat_handle = event_loop.handle()"));
+        assert!(production.contains("refresh_shortcut_snapshot(&mut shared)"));
+        assert!(production.contains("cancel_key_repeat_timer(&state.loop_handle"));
+        assert!(production.contains("let locked = overlay.as_ref().is_some_and"));
+        assert!(
+            production
+                .matches("retain(|event| !matches!(event, BackendEvent::KeyPress")
+                .count()
+                >= 2,
+            "built-in lock and VT pause must purge queued repeat presses"
+        );
+
+        let state = include_str!("state.rs");
+        let state_production = state.split_once("#[cfg(test)]").unwrap().0;
+        assert!(state_production.contains("session_lock_epoch = self.session_lock_epoch"));
+        assert!(state_production.contains("BackendEvent::KeyPress { .. }"));
     }
 
     #[test]

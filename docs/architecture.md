@@ -114,8 +114,12 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   commented and reference-only. It must not be enabled without explicit
   maintainer approval and a dedicated benchmark/build/diagnostics review.
 - Interactive move/resize transport state moved into the backend contract.
-- Key-repeat policy is now binding metadata produced by configuration; the
-  Wayland input backend no longer inspects or imports concrete `Jwm` methods.
+- Key-repeat policy is binding metadata produced by configuration; the Wayland
+  input backend no longer inspects or imports concrete `Jwm` methods. Udev
+  repeat is event-driven: a repeatable press owns a cancellable 400 ms/50 ms
+  calloop timer, while config generations, exact modifiers, session locks and
+  VT state prevent a stale timer from emitting into a new action or lock
+  surface.
 - Wayland xdg-toplevel configure fallback uses one 250 ms one-shot per new
   surface rather than a permanent 50 ms poll. `wp-commit-timing` and `wp-fifo`
   remain explicitly unmanaged: timestamps are consumed for protocol progress,

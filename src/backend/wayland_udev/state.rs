@@ -348,6 +348,9 @@ pub struct JwmWaylandState {
     /// idle notifier because both are fed from the same libinput callback.
     pub last_input: std::time::Instant,
     pub session_locked: bool,
+    /// Monotonic lock generation. A repeat armed before a fast lock/unlock
+    /// cycle must not resume after the lock disappears.
+    pub session_lock_epoch: u64,
     /// Per-output session lock surfaces. Key: Smithay output name.
     /// Populated on `SessionLockHandler::new_surface`, drained on unlock or
     /// destruction. Used to know whether the lock client has a presence on a
@@ -828,6 +831,10 @@ impl SessionLockHandler for JwmWaylandState {
         info!("[udev/wayland] session lock requested");
         confirmation.lock();
         self.session_locked = true;
+        self.session_lock_epoch = self.session_lock_epoch.wrapping_add(1);
+        self.pending_events
+            .lock_safe()
+            .retain(|event| !matches!(event, BackendEvent::KeyPress { .. }));
         self.needs_redraw = true;
     }
 
@@ -1987,6 +1994,7 @@ impl JwmWaylandState {
                 idle_inhibiting_surfaces: HashSet::new(),
                 last_input: std::time::Instant::now(),
                 session_locked: false,
+                session_lock_epoch: 0,
                 lock_surfaces: HashMap::new(),
                 foreign_toplevel_handles: HashMap::new(),
                 gesture_swipe: GestureSwipeTracker::default(),
