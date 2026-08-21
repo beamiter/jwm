@@ -70,11 +70,14 @@ Particular care is required around:
 - unsafe FFI and driver-facing resource lifetime;
 - logs and diagnostics that may expose desktop content.
 
-`jwm-remote` is disabled unless its separate host process is started. Its
-direct-LAN MVP authenticates peers and every ordered message but does not
-encrypt screen or input payloads; non-loopback binding and XTEST control each
-require an explicit flag. Treat direct mode as trusted-LAN-only, or carry the
-default loopback listener through SSH. See
+`jwm-remote` is disabled unless its separate host process is started. It
+authenticates peers and encrypts every ordered message with
+ChaCha20-Poly1305, binding both peers' advertised transport version into key
+derivation so a downgrade fails closed; non-loopback binding and XTEST control
+each require an explicit flag. It does not provide forward secrecy — traffic
+keys derive from the pre-shared key, so a leaked key file decrypts recorded
+sessions — and it does not hide inter-keystroke timing. Rotate the key file, or
+carry the default loopback listener through SSH, when either matters. See
 [`docs/remote-control.md`](docs/remote-control.md).
 
 JWM cannot make untrusted X11 clients mutually isolated; the X11 security model

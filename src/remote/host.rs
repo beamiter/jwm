@@ -39,6 +39,13 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 const HELD_INPUT_SILENCE_TIMEOUT: Duration = Duration::from_millis(600);
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTSTANDING_FRAMES: u64 = 2;
+/// Largest record the host ever legitimately receives.
+///
+/// The client sends only a hello, empty heartbeats, eight-byte frame
+/// acknowledgements and input batches; the largest of those is a padded
+/// 641-byte batch. Declaring that here stops an unauthenticated length field
+/// from making the host reserve up to the global 32 MiB frame limit.
+const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
@@ -1277,6 +1284,7 @@ fn serve_client(
     reader_stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (receive_key, send_key) = session_keys.into_server();
     let mut reader = SessionReader::new(reader_stream, receive_key);
+    reader.set_max_payload_len(MAX_INBOUND_PAYLOAD_LEN);
     let mut writer = SessionWriter::new(DeadlineWriter::new(stream, WRITE_TIMEOUT), send_key);
 
     let (kind, hello_payload) = reader.read_message()?;
@@ -3457,7 +3465,9 @@ mod tests {
             DeadlineWriter::new(drip, Duration::from_secs(1)),
             [0x7c; 32],
         );
-        let error = write_frame_record(&mut writer, b"frame", Duration::from_millis(40))
+        // One 8 ms write now carries the whole record, so the budget has to be
+        // tight enough that only the 30 ms flush can overrun it.
+        let error = write_frame_record(&mut writer, b"frame", Duration::from_millis(20))
             .expect_err("flush must share the record's absolute deadline");
         assert!(matches!(
             error,

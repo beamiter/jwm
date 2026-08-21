@@ -164,10 +164,11 @@ jwm-remote connect 192.168.1.50:48221 --grab-input \
   --key-file ~/.config/jwm/remote.key
 ```
 
-Direct LAN traffic is authenticated but not encrypted; the safer option is the
-default loopback listener carried through SSH. See the complete setup,
-security boundary, tuning, and current limits in
-[JWM remote control](docs/remote-control.md).
+Direct LAN traffic is authenticated and encrypted with ChaCha20-Poly1305, but
+without forward secrecy: a leaked key file decrypts previously recorded
+sessions. Rotate the key, or carry the default loopback listener through SSH,
+when that matters. See the complete setup, security boundary, tuning, and
+current limits in [JWM remote control](docs/remote-control.md).
 
 The default modifier is Alt (`Mod1`). Useful built-in bindings include:
 

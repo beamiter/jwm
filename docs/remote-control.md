@@ -28,7 +28,8 @@ only on `127.0.0.1` by default. A non-loopback listener requires the explicit
 
 Every session uses a 256-bit pre-shared key, fresh client/server nonces,
 role-separated HMAC-SHA256 proofs, independent traffic keys, strictly
-increasing record sequence numbers, and a MAC on every frame/input message.
+increasing record sequence numbers, and ChaCha20-Poly1305 on every
+frame/input message.
 The key is never sent over the network. Key files must be owned by the current
 user, must not be symlinks, and must have no group/other permission bits.
 Both peers enforce a total negotiation deadline, so slowly dripping handshake
@@ -53,13 +54,62 @@ any input side effect, the host decodes and validates the complete batch,
 preflights negotiated capabilities, the keyboard mapping and every XTEST
 operation, then queues the batch in order and flushes XTEST once.
 Authenticated record storage is reused only inside its owning network thread.
-The receiver validates the declared 32 MiB limit before growing that storage
+The receiver validates the declared length limit before growing that storage
 and clears it on every truncated, malformed, or unauthenticated record; message
-contents and kinds reach callers only after the MAC succeeds.
+contents and kinds reach callers only after the tag verifies. The host declares
+a 1 KiB inbound ceiling rather than the global 32 MiB frame limit, because it
+only ever receives a hello, empty heartbeats, eight-byte acknowledgements and
+input batches — an unauthenticated length field cannot make it reserve
+megabytes.
 
-The LAN MVP authenticates traffic and rejects modification/replay, but **does
-not encrypt screen images or input**. Use it only on a trusted, isolated LAN.
-For confidentiality, keep the default loopback listener and carry it over SSH:
+### Transport encryption
+
+Screen images and input are encrypted, not merely authenticated. This matters
+most for input: a key press is a three-byte record, so a passive listener could
+otherwise reconstruct a typed password, SSH passphrase or 2FA code byte for
+byte with no image analysis at all.
+
+The transport handshake is:
+
+```text
+server -> client: "JWMRT" || version (u16) || server_nonce (32)
+client -> server: "JWMRT" || version (u16) || client_nonce (32) || proof (32)
+server -> client: server_proof (32)
+```
+
+Both proofs and both traffic keys are derived over the complete transcript,
+including each side's advertised version, so rewriting the version changes
+every derived secret and the handshake fails rather than quietly settling on
+weaker terms. The current transport version is 2; version 1 was the
+authenticated-but-unencrypted transport, and its key-derivation domains are
+separately versioned so the two can never collide even for an identical key.
+
+Each record is `kind || sequence || ciphertext_len || ciphertext || tag(16)`.
+The plaintext is sealed with ChaCha20-Poly1305 under a nonce of four zero bytes
+followed by the record's big-endian sequence, with the 13-byte header
+authenticated as associated data. Sequence numbers start at zero, advance by
+exactly one, and exhausting the range is a hard error on both the read and the
+write path, so a key/nonce pair is never reused. The 16-byte tag is *smaller*
+than the 32-byte HMAC it replaces, and the whole record is assembled in one
+reusable buffer and written with a single `write_all` — both peers set
+`TCP_NODELAY` and neither wraps a buffered writer, so this replaced three
+unbuffered socket writes per record with one.
+
+Small records are padded to 64, 256 or 704 bytes before sealing, because length
+alone otherwise distinguishes a keystroke batch from a pointer run from a
+release-all. Larger records are not padded: a screen frame's size is dominated
+by its content and no bucket could hide that. **Inter-keystroke timing remains
+a side channel** — padding does not hide when you type, only what you type.
+
+Measured cost on a 3440x1440 native-resolution session, the largest payloads
+this carries: the telemetry `write` stage stayed at 0.0-0.1 ms, unchanged from
+the unencrypted transport. ChaCha20-Poly1305 is pure Rust here and adds no C
+toolchain or system dependency to the helper.
+
+What this does **not** provide is forward secrecy: the traffic keys are a
+function of the pre-shared key and both nonces, so anyone who later obtains the
+key file can decrypt a recorded session. Rotate the key file if that matters,
+and keep using SSH when you want an independently keyed channel:
 
 ```bash
 # Host
@@ -442,7 +492,9 @@ the XDamage gate — for the rest of the session.
 - video uses cumulative display acknowledgements, at most two unacknowledged
   frames, and one latest queued frame; persistently slow viewers therefore
   reduce capture/encode/network work instead of accumulating stale video;
-- authenticated but unencrypted direct-LAN transport;
+- encrypted and authenticated direct-LAN transport, without forward secrecy:
+  a leaked key file decrypts previously recorded sessions;
+- inter-keystroke timing is not hidden;
 - X11 `x11rb`/`xcb` JWM sessions only.
 
 These boundaries keep the first end-to-end path small and observable. A future

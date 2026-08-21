@@ -65,6 +65,23 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` now encrypts the session, not just authenticates it. Screen and
+  input payloads are sealed with ChaCha20-Poly1305 (transport version 2). This
+  mattered most for input: a key press is a three-byte record, so a passive
+  listener on the LAN could previously reconstruct a typed password, SSH
+  passphrase or 2FA code byte for byte with no image analysis. The handshake
+  gained magic and a version field, and both proofs and both traffic keys are
+  now derived over the complete transcript, so rewriting the version changes
+  every derived secret and fails closed instead of negotiating weaker terms.
+  Small records are padded to 64/256/704-byte buckets, because length alone
+  otherwise distinguishes a keystroke batch from a pointer run from a
+  release-all; inter-keystroke timing is still not hidden. There is no forward
+  secrecy — a leaked key file decrypts recorded sessions. The 16-byte tag is
+  smaller than the 32-byte HMAC it replaces, and each record is now assembled
+  in one reusable buffer and written with a single `write_all` instead of three
+  unbuffered socket writes. Measured at native 3440x1440, the largest payloads
+  this carries, the telemetry `write` stage was unchanged at 0.0-0.1 ms.
+  ChaCha20-Poly1305 is pure Rust: no C toolchain or system dependency is added.
 - `jwm-remote` video is now dirty-tile delta coded instead of whole-frame JPEG,
   which is application protocol version 4 (update both machines together). Each
   frame ships only the 16-pixel tiles that differ from the pixels the viewer was
@@ -213,6 +230,10 @@ monorepo use independent Semantic Versions.
   both bail while a panel is up, so the drag was never committed or cancelled.
 - Locking from the Shell Hub's session page no longer leaves the lock marked as
   a page the Hub can be backed out to.
+- `jwm-remote host` declares a 1 KiB inbound record ceiling instead of the
+  global 32 MiB frame limit. It only ever receives a hello, empty heartbeats,
+  eight-byte acknowledgements and input batches, so an unauthenticated length
+  field could previously make it reserve megabytes before any tag was checked.
 - A single unauthenticated TCP connection that resets immediately no longer
   kills `jwm-remote host`. The accept loop took the peer address from the
   accepted socket rather than from `accept` itself, and a peer that sent RST
