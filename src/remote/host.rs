@@ -47,6 +47,8 @@ const MAX_OUTSTANDING_FRAMES: u64 = 2;
 /// from making the host reserve up to the global 32 MiB frame limit.
 const MAX_INBOUND_PAYLOAD_LEN: usize = 1024;
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Longest single sleep while rate limited, so shutdown stays responsive.
+const CAPTURE_RATE_LIMIT_SLICE: Duration = Duration::from_millis(20);
 const ACCEPT_EXHAUSTION_BACKOFF: Duration = Duration::from_millis(200);
 const UNCHANGED_FRAME_KEEPALIVE: Duration = Duration::from_secs(4);
 const MIN_BACKPRESSURE_REFRESH: Duration = Duration::from_millis(250);
@@ -1493,7 +1495,12 @@ fn stream_frames(
 
     let interval = target_frame_interval(options.fps);
     let backpressure_refresh = backpressure_refresh_interval(interval);
-    let mut next_frame = Instant::now();
+    // `interval` is a rate limiter, not a schedule. Capturing on a fixed grid
+    // made every interaction wait for the next grid point -- a mean of half an
+    // interval, 42 ms at the default 12 fps -- for a tick that had nothing to
+    // do with it. The loop now waits on the X connection instead and captures
+    // as soon as the server reports something, never faster than `interval`.
+    let mut next_capture_allowed = Instant::now();
     let mut reported_mode: Option<CaptureMode> = None;
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
@@ -1513,14 +1520,22 @@ fn stream_frames(
                 reported_mode = Some(mode);
             }
             report_host_if_due(telemetry, credits, now);
-            if now < next_frame {
-                thread::sleep((next_frame - now).min(Duration::from_millis(20)));
+            if now < next_capture_allowed {
+                // Rate limited. Damage arriving now stays pending in the gate,
+                // so nothing is lost by sleeping through it.
+                thread::sleep((next_capture_allowed - now).min(CAPTURE_RATE_LIMIT_SLICE));
                 continue;
             }
-            next_frame += interval;
-            if next_frame < now {
-                next_frame = now + interval;
+            // Bounded by one interval so that even if an event were somehow
+            // missed, this degrades to exactly the old fixed-grid cadence
+            // rather than stalling. The damage gate still decides whether the
+            // wake is worth a readback, including its forced refresh and
+            // cursor probing.
+            capture.wait_for_activity(interval)?;
+            if !running.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
+                break;
             }
+            next_capture_allowed = Instant::now() + interval;
             telemetry.record_scheduled();
 
             match mailbox.capture_decision(backpressure_refresh)? {

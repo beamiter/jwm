@@ -487,6 +487,28 @@ belonging to no extension this connection selected cannot have cost a
 notification it depends on, so those are tolerated in a run of eight before the
 session distrusts its caches wholesale.
 
+### Capture scheduling
+
+`--fps` is a rate limiter, not a schedule. The capture loop waits on the X
+connection and captures as soon as the server reports something, never more
+often than the requested interval. Capturing on a fixed grid instead made every
+interaction wait for the next grid point — a mean of half an interval, 42 ms at
+the default 12 FPS — for a tick that had nothing to do with it.
+
+The wait is bounded by one frame interval, so a missed notification degrades to
+exactly the old fixed-grid cadence rather than stalling. Notifications x11rb
+already buffered while waiting for a capture's own reply are drained before the
+descriptor is polled, so an event in hand never waits on a socket with nothing
+left to deliver. The damage gate still decides whether a wake is worth a
+readback, including its forced refresh and cursor probing, and an early wake
+still passes through capture-mailbox backpressure.
+
+Measured on a live 3440x1440 session at the default 12 FPS, `scheduled` fell
+from a constant 60 per five-second window to 21-51, tracking real screen
+activity instead of the clock. A change arriving while the rate limiter is
+still holding is not lost: it stays pending in the gate and is captured as soon
+as the interval allows.
+
 ### Reading the capture mode
 
 Each telemetry line begins with the paths the capture loop is actually taking,

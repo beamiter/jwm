@@ -8,10 +8,11 @@
 
 use super::{RemoteError, RemoteResult};
 use image::{RgbImage, RgbaImage, imageops::FilterType};
+use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use std::borrow::Cow;
 use std::fs::File;
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::ptr::{self, NonNull};
 use std::time::{Duration, Instant};
 use x11rb::connection::{Connection, RequestConnection};
@@ -125,6 +126,26 @@ impl CaptureMode {
             parts.push("compositor-poll");
         }
         parts.join("/")
+    }
+}
+
+/// Wait for `fd` to become readable, returning false on timeout.
+fn wait_readable(fd: BorrowedFd<'_>, timeout: Duration) -> RemoteResult<bool> {
+    let mut fds = [PollFd::new(
+        fd,
+        PollFlags::POLLIN | PollFlags::POLLERR | PollFlags::POLLHUP,
+    )];
+    let timeout = PollTimeout::try_from(timeout.as_millis().min(u128::from(u16::MAX)) as u16)
+        .unwrap_or(PollTimeout::MAX);
+    loop {
+        return match poll(&mut fds, timeout) {
+            Ok(0) => Ok(false),
+            Ok(_) => Ok(true),
+            // A signal is not an answer; keep waiting rather than reporting a
+            // spurious wake that would cost a redundant readback.
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => Err(io::Error::from(error).into()),
+        };
     }
 }
 
@@ -1414,8 +1435,11 @@ impl X11Capture {
         }))
     }
 
-    fn drain_dynamic_events(&mut self) -> RemoteResult<()> {
+    /// Consume every queued notification, reporting whether any arrived.
+    fn drain_dynamic_events(&mut self) -> RemoteResult<bool> {
+        let mut observed = false;
         while let Some(event) = self.conn.poll_for_event()? {
+            observed = true;
             match event {
                 Event::ConfigureNotify(event)
                     if event.event == self.root && event.window == self.root =>
@@ -1487,7 +1511,7 @@ impl X11Capture {
                 _ => {}
             }
         }
-        Ok(())
+        Ok(observed)
     }
 
     fn damage_target(&self) -> Option<Window> {
@@ -1544,6 +1568,34 @@ impl X11Capture {
             );
         }
         Ok(())
+    }
+
+    /// Borrow the capture connection's file descriptor.
+    #[must_use]
+    pub fn connection_fd(&self) -> BorrowedFd<'_> {
+        self.conn.stream().as_fd()
+    }
+
+    /// Block until the X server reports something, or `timeout` elapses.
+    ///
+    /// Returns whether anything arrived. The capture loop previously slept
+    /// blindly to its next scheduled tick and never watched this descriptor,
+    /// so at twelve frames a second a keystroke waited a mean of forty-two
+    /// milliseconds for a grid point that had nothing to do with it.
+    ///
+    /// x11rb buffers events it reads while waiting for a reply, and a
+    /// synchronous capture does exactly that, so the internal queue is drained
+    /// first: an event already in hand must not be made to wait on a socket
+    /// that has nothing left to deliver.
+    pub fn wait_for_activity(&mut self, timeout: Duration) -> RemoteResult<bool> {
+        if self.drain_dynamic_events()? {
+            return Ok(true);
+        }
+        if !wait_readable(self.connection_fd(), timeout)? {
+            return Ok(false);
+        }
+        self.drain_dynamic_events()?;
+        Ok(true)
     }
 
     /// Report every path the capture loop is currently taking.

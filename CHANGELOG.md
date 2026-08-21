@@ -65,6 +65,16 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` captures when the X server reports a change rather than on a
+  fixed timer; `--fps` became a rate limiter instead of a schedule. The loop
+  slept blindly to its next grid point and never watched the X connection, so
+  at the default 12 FPS every interaction waited a mean of 42 ms for a tick
+  that had nothing to do with it. The wait is bounded by one frame interval, so
+  a missed notification degrades to exactly the old cadence rather than
+  stalling, and events x11rb buffered while a capture waited on its own reply
+  are drained before the descriptor is polled. Measured on a live 3440x1440
+  session, `scheduled` fell from a constant 60 per five-second window to 21-51,
+  following real screen activity.
 - `jwm-remote` host telemetry leads with the capture paths actually in use —
   `mode overlay/xrender/shm/damage/cursor-events` — and announces every
   transition as it happens. Four separate facilities can degrade themselves at
