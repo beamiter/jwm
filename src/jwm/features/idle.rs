@@ -182,21 +182,47 @@ impl IdleTracker {
 /// about this often, so nothing is kept awake to ask.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+fn configured_idle_settings() -> IdleSettings {
+    let cfg = crate::config::CONFIG.load();
+    let behavior = cfg.behavior();
+    IdleSettings::from_secs(
+        behavior.idle_dim_secs,
+        behavior.idle_dim_level,
+        behavior.idle_lock_secs,
+        behavior.idle_screen_off_secs,
+        !behavior.idle_screen_off_command.trim().is_empty(),
+    )
+}
+
+fn idle_poll_wakeup(
+    enabled: bool,
+    restore_pending: bool,
+    last_poll: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<Duration> {
+    if !enabled {
+        return restore_pending.then_some(Duration::ZERO);
+    }
+    Some(last_poll.map_or(Duration::ZERO, |last| {
+        POLL_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+    }))
+}
+
 impl crate::jwm::Jwm {
+    pub(crate) fn idle_next_wakeup(&self, now: std::time::Instant) -> Option<Duration> {
+        let settings = configured_idle_settings();
+        idle_poll_wakeup(
+            settings.is_enabled(),
+            self.idle.is_dimmed() || self.idle.is_screen_off(),
+            self.last_idle_poll,
+            now,
+        )
+    }
+
     /// Read the idle clock and carry out what the policy asks for. Called
-    /// from the frame tick; does nothing until the interval is up.
+    /// from the maintenance update; does nothing until the interval is up.
     pub(crate) fn poll_idle(&mut self, backend: &mut dyn crate::backend::api::Backend) {
-        let settings = {
-            let cfg = crate::config::CONFIG.load();
-            let behavior = cfg.behavior();
-            IdleSettings::from_secs(
-                behavior.idle_dim_secs,
-                behavior.idle_dim_level,
-                behavior.idle_lock_secs,
-                behavior.idle_screen_off_secs,
-                !behavior.idle_screen_off_command.trim().is_empty(),
-            )
-        };
+        let settings = configured_idle_settings();
         if !settings.is_enabled() {
             // Switched off while it had already dimmed the screen: put the
             // screen back rather than leaving the session dark.
@@ -205,13 +231,14 @@ impl crate::jwm::Jwm {
             }
             return;
         }
+        let now = std::time::Instant::now();
         if self
             .last_idle_poll
-            .is_some_and(|last| last.elapsed() < POLL_INTERVAL)
+            .is_some_and(|last| now.saturating_duration_since(last) < POLL_INTERVAL)
         {
             return;
         }
-        self.last_idle_poll = Some(std::time::Instant::now());
+        self.last_idle_poll = Some(now);
 
         // Two idle policies in one session do not share the work, they fight:
         // the X server's blanker resets the very clock read below, so a stage
@@ -395,6 +422,37 @@ mod tests {
 
     fn secs(seconds: u64) -> Duration {
         Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn poll_wakeup_is_exact_and_disabled_policy_settles() {
+        let now = std::time::Instant::now();
+        assert_eq!(idle_poll_wakeup(false, false, None, now), None);
+        assert_eq!(
+            idle_poll_wakeup(false, true, Some(now), now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            idle_poll_wakeup(true, false, None, now),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            idle_poll_wakeup(
+                true,
+                false,
+                Some(now),
+                now + POLL_INTERVAL - Duration::from_nanos(1),
+            ),
+            Some(Duration::from_nanos(1))
+        );
+        assert_eq!(
+            idle_poll_wakeup(true, false, Some(now), now + POLL_INTERVAL),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            idle_poll_wakeup(true, false, Some(now + Duration::from_secs(2)), now,),
+            Some(POLL_INTERVAL)
+        );
     }
 
     #[test]

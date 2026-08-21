@@ -24,6 +24,37 @@ use std::sync::atomic::Ordering;
 /// Wakeup pacing for the panels that animate on their own, roughly one frame
 /// at 60 Hz.
 const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn min_optional_duration(
+    left: Option<std::time::Duration>,
+    right: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn ping_schedule_next_wakeup(
+    last_ping: Option<std::time::Instant>,
+    has_target: bool,
+    pending: impl IntoIterator<Item = std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    let send = has_target.then(|| {
+        last_ping.map_or(std::time::Duration::ZERO, |last| {
+            PING_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+        })
+    });
+    let timeout = pending
+        .into_iter()
+        .map(|sent| PING_TIMEOUT.saturating_sub(now.saturating_duration_since(sent)))
+        .min();
+    min_optional_duration(send, timeout)
+}
 
 fn requested_hidden_state(action: NetWmAction, currently_hidden: bool) -> bool {
     match action {
@@ -174,12 +205,13 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_child_process_exited(&mut self, _backend: &mut dyn Backend) {
-        debug!("Received SIGCHLD, polling JWM-owned transient children...");
+    fn on_child_process_exited(&mut self, backend: &mut dyn Backend) {
+        debug!("Received SIGCHLD, polling JWM-owned children...");
         // SIGCHLD is only a latency optimization on backends that expose it.
         // Bypass the one-second backend-neutral insurance poll so failed
         // scratchpad launches release their pending-name gate immediately.
         self.reap_transient_children_immediately();
+        self.poll_secondary_bar_children(backend, std::time::Instant::now(), true);
     }
 
     // === 窗口生命周期 ===
@@ -1810,6 +1842,23 @@ mod tests {
     }
 
     #[test]
+    fn headless_periodic_deadlines_are_consumed_and_stop_being_zero() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        assert_eq!(
+            <Jwm as EventHandler>::next_wakeup(&jwm),
+            Some(std::time::Duration::ZERO)
+        );
+        assert!(<Jwm as EventHandler>::needs_tick(&jwm));
+
+        EventHandler::update(&mut jwm, &mut backend).unwrap();
+
+        assert!(<Jwm as EventHandler>::next_wakeup(&jwm).is_some_and(|delay| !delay.is_zero()));
+        assert!(!<Jwm as EventHandler>::needs_tick(&jwm));
+    }
+
+    #[test]
     fn event_handler_trait_object_delegates_immediate_render_to_jwm() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -1818,6 +1867,34 @@ mod tests {
         handler.render_compositor_immediate(&mut backend);
 
         assert_eq!(backend.rendered_frames, 1);
+    }
+
+    #[test]
+    fn ping_schedule_uses_exact_send_and_timeout_boundaries() {
+        let now = std::time::Instant::now();
+        assert_eq!(ping_schedule_next_wakeup(None, false, [], now), None);
+        assert_eq!(
+            ping_schedule_next_wakeup(None, true, [], now),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            ping_schedule_next_wakeup(
+                Some(now),
+                true,
+                [now - PING_TIMEOUT + std::time::Duration::from_millis(1)],
+                now,
+            ),
+            Some(std::time::Duration::from_millis(1))
+        );
+        assert_eq!(
+            ping_schedule_next_wakeup(Some(now - PING_INTERVAL), true, [now - PING_TIMEOUT], now,),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            ping_schedule_next_wakeup(Some(now + std::time::Duration::from_secs(1)), true, [], now,),
+            Some(PING_INTERVAL),
+            "a future timestamp must not underflow"
+        );
     }
 
     #[test]
@@ -2079,13 +2156,28 @@ mod tests {
         backend.x11_client_list = true;
         // Settle the independent config-poll deadline so the assertions below
         // isolate the hidden-park scheduler's wakeup behavior.
-        jwm.poll_config_reload(&mut backend, std::time::Instant::now());
+        let settled_at = std::time::Instant::now();
+        jwm.poll_config_reload(&mut backend, settled_at);
+        jwm.last_battery_poll = Some(settled_at);
+        jwm.last_idle_poll = Some(settled_at);
+        jwm.last_ping_time = Some(settled_at);
+        jwm.features.resource_sampler.defer_for_test(settled_at);
         backend
             .window_ops
             .fail_position
             .store(true, AtomicOrdering::Relaxed);
 
         jwm.add_monitor(output_info(99, -4000));
+        for monitor_id in jwm
+            .state
+            .monitors
+            .values()
+            .map(|monitor| monitor.num)
+            .collect::<Vec<_>>()
+        {
+            jwm.secondary_bar_retry_after
+                .insert(monitor_id, settled_at + std::time::Duration::from_secs(5));
+        }
         jwm.repark_all_hidden_clients(&mut backend);
 
         assert!(jwm.has_hidden_client_park_retry(target));
@@ -2702,6 +2794,114 @@ mod tests {
             jwm.secondary_bar_retry_after.get(&5).copied(),
             now.checked_add(std::time::Duration::from_secs(5))
         );
+        assert_eq!(
+            jwm.secondary_bar_next_wakeup(now),
+            Some(std::time::Duration::from_secs(5))
+        );
+        assert_eq!(
+            jwm.secondary_bar_next_wakeup(now + std::time::Duration::from_secs(5)),
+            Some(std::time::Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn bar_health_deadline_and_sigchld_force_the_same_supervisor_path() {
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 5;
+        jwm.insert_monitor(monitor);
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = format!("/tmp/jwm-bar-health-{}-{nonce}", std::process::id());
+        let ring = std::sync::Arc::new(
+            xbar_core::shared_structures::SharedRingBufferOptions::new()
+                .create(&path)
+                .unwrap(),
+        );
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+        let now = std::time::Instant::now();
+        jwm.secondary_bars.insert(
+            5,
+            crate::jwm::types::SecondaryBarInstance {
+                monitor_id: 5,
+                shmem: ring,
+                command_notifier: None,
+                pid: child.id(),
+                child,
+                client_key: None,
+                window: Some(WindowId::from_raw(0x505)),
+                has_focus: false,
+                last_spawn: now,
+                next_health_check: now + std::time::Duration::from_secs(1),
+            },
+        );
+        assert_eq!(
+            jwm.secondary_bar_next_wakeup(now),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            jwm.secondary_bar_next_wakeup(now + std::time::Duration::from_secs(1)),
+            Some(std::time::Duration::ZERO)
+        );
+
+        let mut backend = RenderSpyBackend::new();
+        jwm.on_child_process_exited(&mut backend);
+        assert!(!jwm.secondary_bars.contains_key(&5));
+        assert_eq!(jwm.secondary_bar_failures.get(&5), Some(&1));
+        assert!(jwm.secondary_bar_retry_after.contains_key(&5));
+    }
+
+    #[test]
+    fn orphan_bar_is_retired_before_a_mapping_bar_blocks_creation() {
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.num = 0;
+        jwm.insert_monitor(monitor);
+        let now = std::time::Instant::now();
+        for monitor_id in [0, 9] {
+            let path = format!("/tmp/jwm-bar-orphan-{}-{monitor_id}", std::process::id());
+            let ring = std::sync::Arc::new(
+                xbar_core::shared_structures::SharedRingBufferOptions::new()
+                    .reclaim_stale(true)
+                    .open_or_create(&path)
+                    .unwrap(),
+            );
+            let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+            child.wait().unwrap();
+            jwm.secondary_bars.insert(
+                monitor_id,
+                crate::jwm::types::SecondaryBarInstance {
+                    monitor_id,
+                    shmem: ring,
+                    command_notifier: None,
+                    pid: child.id(),
+                    child,
+                    client_key: None,
+                    window: None,
+                    has_focus: false,
+                    last_spawn: now,
+                    next_health_check: now + std::time::Duration::from_secs(1),
+                },
+            );
+        }
+        assert_eq!(
+            jwm.secondary_bar_next_wakeup(now),
+            Some(std::time::Duration::ZERO)
+        );
+
+        let mut backend = RenderSpyBackend::new();
+        jwm.ensure_secondary_bars_running(&mut backend, now);
+
+        assert!(jwm.secondary_bars.contains_key(&0));
+        assert!(!jwm.secondary_bars.contains_key(&9));
+        assert!(
+            jwm.secondary_bar_next_wakeup(now)
+                .is_some_and(|delay| !delay.is_zero())
+        );
+        jwm.retire_secondary_bar(&mut backend, 0);
     }
 
     #[test]
@@ -3064,6 +3264,28 @@ mod tests {
 // =================================================================================
 // EventHandler trait 实现 - 事件循环主处理器
 // =================================================================================
+impl Jwm {
+    fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
+        let mut next = Some(self.config_reload_next_wakeup(now));
+        if let Some(picker) = self.layout_picker_wakeup(now) {
+            next = min_optional_duration(next, Some(picker.min(FRAME_INTERVAL)));
+        }
+        next = min_optional_duration(next, self.hidden_client_park_retry_next_wakeup(now));
+        if self.has_deferred_grab() {
+            next = min_optional_duration(next, Some(crate::jwm::features::deferred_grab::RETRY));
+        }
+        next = min_optional_duration(next, self.transient_child_next_wakeup(now));
+        next = min_optional_duration(next, self.scratchpad_pending.next_wakeup(now));
+        next = min_optional_duration(next, self.layout_persist_next_wakeup(now));
+        next = min_optional_duration(next, self.secondary_bar_next_wakeup(now));
+        next = min_optional_duration(next, self.ping_next_wakeup(now));
+        next = min_optional_duration(next, self.idle_next_wakeup(now));
+        next = min_optional_duration(next, self.resources_next_wakeup(now));
+        next = min_optional_duration(next, Some(self.battery_next_wakeup(now)));
+        next.expect("config reload always supplies a maintenance deadline")
+    }
+}
+
 impl EventHandler for Jwm {
     fn handle_event(
         &mut self,
@@ -3370,30 +3592,11 @@ impl EventHandler for Jwm {
             || self.features.expose_active
             || self.features.system_ui.is_layout_picker()
             || self.has_deferred_grab()
-            || self.config_reload_deadline_is_due(now)
-            || self.hidden_client_park_retry_deadline_is_due(now)
+            || self.maintenance_next_wakeup_at(now).is_zero()
     }
 
     fn next_wakeup(&self) -> Option<std::time::Duration> {
-        let now = std::time::Instant::now();
-        let config_reload = self.config_reload_next_wakeup(now);
-        // The picker's countdown bar has to advance, and it commits when the
-        // countdown runs out, so it wants a frame long before the config
-        // reload poll would come round.
-        let base = match self.layout_picker_wakeup(now) {
-            Some(remaining) => config_reload.min(remaining).min(FRAME_INTERVAL),
-            None => config_reload,
-        };
-        let base = self
-            .hidden_client_park_retry_next_wakeup(now)
-            .map_or(base, |remaining| base.min(remaining));
-        // A request waiting on the pointer has to poll: the button release
-        // that frees it goes to the client holding the grab, not here.
-        Some(if self.has_deferred_grab() {
-            base.min(crate::jwm::features::deferred_grab::RETRY)
-        } else {
-            base
-        })
+        Some(self.maintenance_next_wakeup_at(std::time::Instant::now()))
     }
 
     fn duplicate_update_readiness_fd(&self) -> Option<std::os::fd::OwnedFd> {
@@ -3421,14 +3624,20 @@ impl EventHandler for Jwm {
 }
 
 impl Jwm {
-    fn tick_ping_check(&mut self, backend: &mut dyn Backend, now: std::time::Instant) {
-        const PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
-        const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    fn ping_next_wakeup(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        ping_schedule_next_wakeup(
+            self.last_ping_time,
+            self.get_selected_client_key().is_some(),
+            self.pending_pings.values().copied(),
+            now,
+        )
+    }
 
+    fn tick_ping_check(&mut self, backend: &mut dyn Backend, now: std::time::Instant) {
         let timed_out: Vec<_> = self
             .pending_pings
             .iter()
-            .filter(|(_, sent_at)| now.duration_since(**sent_at) > PING_TIMEOUT)
+            .filter(|(_, sent_at)| now.saturating_duration_since(**sent_at) >= PING_TIMEOUT)
             .map(|(win, _)| *win)
             .collect();
         for win in timed_out {
@@ -3436,26 +3645,26 @@ impl Jwm {
             self.unresponsive_windows.insert(win);
         }
 
+        let Some(sel) = self.get_selected_client_key() else {
+            return;
+        };
         let should_ping = self
             .last_ping_time
-            .map(|t| now.duration_since(t) > PING_INTERVAL)
+            .map(|t| now.saturating_duration_since(t) >= PING_INTERVAL)
             .unwrap_or(true);
         if !should_ping {
             return;
         }
         self.last_ping_time = Some(now);
 
-        if let Some(sel) = self.get_selected_client_key() {
-            let win = match self.state.clients.get(sel) {
-                Some(c) => c.win,
-                None => return,
-            };
-            if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_pings.entry(win)
-            {
-                let ts = now.elapsed().subsec_millis();
-                if let Ok(true) = backend.property_ops().send_ping(win, ts) {
-                    entry.insert(now);
-                }
+        let win = match self.state.clients.get(sel) {
+            Some(c) => c.win,
+            None => return,
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.pending_pings.entry(win) {
+            let ts = now.elapsed().subsec_millis();
+            if let Ok(true) = backend.property_ops().send_ping(win, ts) {
+                entry.insert(now);
             }
         }
     }

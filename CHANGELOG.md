@@ -48,6 +48,18 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Handler maintenance now has one exact wakeup contract shared by
+  `needs_tick()` and `next_wakeup()`. Config debounce, layout picker, hidden
+  parking, deferred grabs, transient-child insurance, scratchpad expiry,
+  layout persistence, secondary-bar health/map/retry, ping send/timeout, idle,
+  resources, and battery polling all contribute bounded deadlines with exact
+  equality semantics. Battery/resources and Wi-Fi/Bluetooth job adoption no
+  longer depend on an active compositor, preventing permanent zero deadlines
+  in headless mode. X11RB/XCB keep their Timer in a calloop Dispatcher: events
+  may only pull an existing deadline earlier, while a completed update may
+  reset it, and vblank-blocked updates do not sleep a second frame. The 20 ms
+  safety cap remains until clipboard and generic worker completion gain
+  readiness notifications.
 - JWM now exposes one process-lifetime epoll readiness descriptor to X11RB/XCB.
   It aggregates the IPC listener/dynamic clients and every monitor bar's
   command notifier without re-registering calloop. IPC fairness continuations

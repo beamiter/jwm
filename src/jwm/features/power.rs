@@ -372,12 +372,12 @@ pub fn profile_row(current: &str) -> String {
 }
 
 /// How often the battery is re-read. Slow: a percentage point takes minutes
-/// to move, and this runs on the compositor's frame tick.
+/// to move, and this runs on JWM's backend-neutral maintenance update.
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl crate::jwm::Jwm {
     /// Re-read the battery, warn if it crossed a threshold, and keep an open
-    /// control center current. Called from the frame tick behind its own
+    /// control center current. Called from the maintenance update behind its own
     /// interval gate.
     pub(crate) fn poll_battery(&mut self, backend: &mut dyn crate::backend::api::Backend) {
         let Some(state) = read_battery() else {

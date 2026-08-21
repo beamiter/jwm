@@ -48,6 +48,18 @@ fn settle_layout_persist_dirty(dirty: &mut Option<Instant>, retry_at: Instant, s
     *dirty = if succeeded { None } else { Some(retry_at) };
 }
 
+fn pending_layout_persist_wakeup(
+    dirty: Option<Instant>,
+    config_reload_pending: bool,
+    now: Instant,
+) -> Option<Duration> {
+    let changed_at = dirty?;
+    if config_reload_pending {
+        return None;
+    }
+    Some(PERSIST_DEBOUNCE.saturating_sub(now.saturating_duration_since(changed_at)))
+}
+
 /// Fill `monitor`'s pertag block from the config entries matching monitor
 /// index `mon_index`, then re-apply the current tag so the monitor shows what
 /// was restored rather than the defaults it was created with.
@@ -99,6 +111,14 @@ pub(crate) fn seed_pertag_from_config(monitor: &mut WMMonitor, mon_index: i32, c
 }
 
 impl Jwm {
+    pub(crate) fn layout_persist_next_wakeup(&self, now: Instant) -> Option<Duration> {
+        pending_layout_persist_wakeup(
+            self.layout_persist_dirty,
+            self.config_reload_is_pending(),
+            now,
+        )
+    }
+
     /// Note that a tag's layout changed. The write itself waits for
     /// [`Jwm::flush_layout_persistence`] on a later update tick.
     pub(crate) fn mark_layout_dirty(&mut self) {
@@ -264,6 +284,29 @@ mod tests {
 
         settle_layout_persist_dirty(&mut dirty, retry_at, true);
         assert_eq!(dirty, None);
+    }
+
+    #[test]
+    fn persistence_wakeup_respects_debounce_and_config_precedence() {
+        let changed_at = Instant::now();
+        assert_eq!(pending_layout_persist_wakeup(None, false, changed_at), None);
+        assert_eq!(
+            pending_layout_persist_wakeup(
+                Some(changed_at),
+                false,
+                changed_at + PERSIST_DEBOUNCE - Duration::from_nanos(1),
+            ),
+            Some(Duration::from_nanos(1))
+        );
+        assert_eq!(
+            pending_layout_persist_wakeup(Some(changed_at), false, changed_at + PERSIST_DEBOUNCE,),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            pending_layout_persist_wakeup(Some(changed_at), true, changed_at + PERSIST_DEBOUNCE,),
+            None,
+            "the config tracker owns the next wake while a user edit is pending"
+        );
     }
 
     #[test]

@@ -128,9 +128,13 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 - X11RB/XCB share one calloop pacing policy: continuous handler/compositor work
   selects a 16 ms adaptive update cadence, X damage renders immediately after
   dispatch, timer-driven updates suppress a redundant post-dispatch swap, and
-  recording contributes its own deadline. The 20 ms idle maintenance fallback
-  remains explicit until clipboard delivery and lifecycle/telemetry work gain
-  readiness or exact deadlines.
+  recording contributes its own deadline. Their update Timer is retained as a
+  mutable calloop Dispatcher: non-update events may only tighten its promise,
+  while a completed handler update may reset it in either direction. JWM's
+  unified maintenance deadline covers child/bar supervision, scratchpad and
+  layout persistence expiry, ping, idle, resources, battery, config and picker
+  work. The 20 ms safety cap remains explicit until clipboard and generic
+  background-job completion are readiness-driven.
 - JWM owns a process-lifetime level-triggered epoll hub registered once by each
   X11 loop. It nests IPC's listener/client epoll and dynamically added per-bar
   command eventfds, so IPC reconnects and monitor hotplug do not mutate calloop

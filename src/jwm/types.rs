@@ -208,6 +208,7 @@ pub struct SecondaryBarInstance {
     pub window: Option<WindowId>,
     pub has_focus: bool,
     pub last_spawn: Instant,
+    pub next_health_check: Instant,
 }
 
 impl Drop for SecondaryBarInstance {

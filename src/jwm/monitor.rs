@@ -42,10 +42,6 @@ impl HiddenClientParkRetries {
         self.pending.remove(&client_key);
     }
 
-    fn deadline_is_due(&self, now: Instant) -> bool {
-        self.pending.values().any(|retry| retry.deadline <= now)
-    }
-
     fn next_wakeup(&self, now: Instant) -> Option<Duration> {
         self.pending
             .values()
@@ -529,10 +525,6 @@ impl Jwm {
 
     pub(crate) fn clear_hidden_client_park_retry(&mut self, client_key: ClientKey) {
         self.hidden_client_park_retries.clear(client_key);
-    }
-
-    pub(crate) fn hidden_client_park_retry_deadline_is_due(&self, now: Instant) -> bool {
-        self.hidden_client_park_retries.deadline_is_due(now)
     }
 
     pub(crate) fn hidden_client_park_retry_next_wakeup(&self, now: Instant) -> Option<Duration> {

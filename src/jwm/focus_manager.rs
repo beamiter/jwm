@@ -1116,6 +1116,7 @@ mod scratchpad_reveal_tests {
                 window: None,
                 has_focus: false,
                 last_spawn: Instant::now(),
+                next_health_check: Instant::now() + std::time::Duration::from_secs(1),
             },
         );
 

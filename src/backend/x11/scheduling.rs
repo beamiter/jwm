@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-/// Ordinary maintenance cadence while IPC/bar readiness is still polled.
+/// Safety cadence while clipboard and generic worker completion still poll.
 pub(crate) const IDLE_UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 /// Cadence for handler-owned and compositor-owned continuous frame work.
 pub(crate) const ACTIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
@@ -27,10 +27,48 @@ pub(crate) fn next_update_deadline(
     previous_deadline: Instant,
     now: Instant,
     frame_work_pending: bool,
+    handler_wakeup: Option<Duration>,
 ) -> Instant {
-    previous_deadline
+    let cadence = previous_deadline
         .checked_add(update_interval(frame_work_pending))
-        .map_or(now, |next| next.max(now))
+        .map_or(now, |next| next.max(now));
+    handler_wakeup
+        .and_then(|delay| now.checked_add(delay))
+        .map_or(cadence, |deadline| cadence.min(deadline))
+}
+
+/// Fresh candidate after a non-timer event or a readiness-driven update.
+#[must_use]
+pub(crate) fn requested_update_deadline(
+    now: Instant,
+    frame_work_pending: bool,
+    handler_wakeup: Option<Duration>,
+) -> Instant {
+    let cadence = now
+        .checked_add(update_interval(frame_work_pending))
+        .unwrap_or(now);
+    handler_wakeup
+        .and_then(|delay| now.checked_add(delay))
+        .map_or(cadence, |deadline| cadence.min(deadline))
+}
+
+/// Return a deadline that needs to be installed in the timer.
+///
+/// Events that have not run `handler.update()` may only make a promise earlier;
+/// a completed update starts a new generation and may reset it in either
+/// direction.
+#[must_use]
+pub(crate) fn timer_rearm_deadline(
+    current: Option<Instant>,
+    candidate: Instant,
+    reset_after_update: bool,
+) -> Option<Instant> {
+    match current {
+        None => Some(candidate),
+        Some(current) if reset_after_update && current != candidate => Some(candidate),
+        Some(current) if candidate < current => Some(candidate),
+        Some(_) => None,
+    }
 }
 
 /// Timeout for the outer calloop dispatch.
@@ -89,14 +127,83 @@ mod tests {
     fn update_deadline_does_not_sleep_again_after_a_blocking_swap() {
         let start = Instant::now();
         assert_eq!(
-            next_update_deadline(start, start + Duration::from_millis(4), true),
+            next_update_deadline(start, start + Duration::from_millis(4), true, None),
             start + ACTIVE_UPDATE_INTERVAL
         );
         let returned_after_vblank = start + Duration::from_millis(17);
         assert_eq!(
-            next_update_deadline(start, returned_after_vblank, true),
+            next_update_deadline(start, returned_after_vblank, true, None),
             returned_after_vblank
         );
+    }
+
+    #[test]
+    fn handler_deadlines_join_the_absolute_frame_clock() {
+        let now = Instant::now();
+        assert_eq!(
+            requested_update_deadline(now, false, Some(Duration::from_millis(7))),
+            now + Duration::from_millis(7)
+        );
+        assert_eq!(
+            requested_update_deadline(now, true, Some(Duration::from_secs(1))),
+            now + ACTIVE_UPDATE_INTERVAL
+        );
+        assert_eq!(
+            next_update_deadline(
+                now,
+                now + Duration::from_millis(4),
+                false,
+                Some(Duration::from_millis(3)),
+            ),
+            now + Duration::from_millis(7)
+        );
+    }
+
+    #[test]
+    fn events_only_tighten_but_completed_updates_can_reset() {
+        let now = Instant::now();
+        let current = now + Duration::from_millis(8);
+        assert_eq!(
+            timer_rearm_deadline(Some(current), now + Duration::from_millis(12), false),
+            None
+        );
+        assert_eq!(
+            timer_rearm_deadline(Some(current), now + Duration::from_millis(4), false),
+            Some(now + Duration::from_millis(4))
+        );
+        assert_eq!(
+            timer_rearm_deadline(Some(current), now + Duration::from_secs(1), true),
+            Some(now + Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn dispatcher_reregistration_makes_an_existing_timer_earlier() {
+        use calloop::timer::{TimeoutAction, Timer};
+        use calloop::{Dispatcher, EventLoop};
+
+        let mut event_loop: EventLoop<usize> = EventLoop::try_new().unwrap();
+        let handle = event_loop.handle();
+        let timer = Dispatcher::new(
+            Timer::from_duration(Duration::from_secs(1)),
+            |_, _, fired: &mut usize| {
+                *fired += 1;
+                TimeoutAction::Drop
+            },
+        );
+        let token = handle.register_dispatcher(timer.clone()).unwrap();
+        {
+            timer
+                .as_source_mut()
+                .set_deadline(Instant::now() + Duration::from_millis(2));
+        }
+        handle.update(&token).unwrap();
+
+        let mut fired = 0;
+        event_loop
+            .dispatch(Some(Duration::from_millis(100)), &mut fired)
+            .unwrap();
+        assert_eq!(fired, 1);
     }
 
     #[test]
@@ -107,6 +214,8 @@ mod tests {
         ] {
             assert!(backend.contains("scheduling::dispatch_timeout("));
             assert!(backend.contains("scheduling::next_update_deadline("));
+            assert!(backend.contains("scheduling::timer_rearm_deadline("));
+            assert!(backend.contains("register_dispatcher("));
             assert!(backend.contains("TimeoutAction::ToInstant("));
             assert!(backend.contains("handler.duplicate_update_readiness_fd()"));
             assert!(backend.contains("data.update_requested = true"));

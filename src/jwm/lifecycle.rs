@@ -368,6 +368,7 @@ impl ConfigReloadTracker {
         debounce_in.map_or(poll_in, |debounce_in| poll_in.min(debounce_in))
     }
 
+    #[cfg(test)]
     fn deadline_is_due(&self, now: Instant) -> bool {
         self.next_wakeup_in(now).is_zero()
     }
@@ -1358,10 +1359,6 @@ impl Jwm {
 
     pub(crate) fn config_reload_next_wakeup(&self, now: Instant) -> Duration {
         self.config_reload_tracker.next_wakeup_in(now)
-    }
-
-    pub(crate) fn config_reload_deadline_is_due(&self, now: Instant) -> bool {
-        self.config_reload_tracker.deadline_is_due(now)
     }
 
     pub(crate) fn apply_config_changes(&mut self, backend: &mut dyn Backend) {

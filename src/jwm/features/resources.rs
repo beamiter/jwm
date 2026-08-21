@@ -367,6 +367,22 @@ pub struct ResourceSampler {
 }
 
 impl ResourceSampler {
+    #[cfg(test)]
+    pub(crate) fn defer_for_test(&mut self, sampled_at: Instant) {
+        self.previous = Some(Sample {
+            at: sampled_at,
+            cpu: None,
+            net: None,
+        });
+    }
+
+    #[must_use]
+    pub(crate) fn next_wakeup(&self, now: Instant) -> Duration {
+        self.previous.map_or(Duration::ZERO, |previous| {
+            POLL_INTERVAL.saturating_sub(now.saturating_duration_since(previous.at))
+        })
+    }
+
     /// Re-read if the interval is up. Returns whether [`Self::state`] changed,
     /// so a caller never redraws a panel that would look identical.
     ///
@@ -376,10 +392,7 @@ impl ResourceSampler {
     /// after every stall.
     pub fn maybe_sample(&mut self) -> bool {
         let now = Instant::now();
-        if self
-            .previous
-            .is_some_and(|previous| now.duration_since(previous.at) < POLL_INTERVAL)
-        {
+        if !self.next_wakeup(now).is_zero() {
             return false;
         }
 
@@ -425,8 +438,16 @@ fn read(path: &str) -> Option<String> {
 }
 
 impl crate::jwm::Jwm {
+    pub(crate) fn resources_next_wakeup(&self, now: Instant) -> Option<Duration> {
+        crate::config::CONFIG
+            .load()
+            .behavior()
+            .resource_rows
+            .then(|| self.features.resource_sampler.next_wakeup(now))
+    }
+
     /// Re-read the machine's resources and keep an open control center
-    /// current. Called from the frame tick; the interval gate is inside.
+    /// current. Called from the maintenance update; its interval gate is inside.
     pub(crate) fn poll_resources(&mut self) {
         use crate::jwm::features::ControlKind;
 
@@ -830,5 +851,26 @@ enp2s0.100: 1000000 100 0 0 0 0 0 0 500000 50 0 0 0 0 0 0
         assert!(first.memory.is_some_and(|memory| memory.total_kib > 0));
         // The interval gate holds the second read off.
         assert!(!sampler.maybe_sample());
+    }
+
+    #[test]
+    fn sampler_wakeup_uses_the_sample_timestamp_without_underflow() {
+        let now = Instant::now();
+        let mut sampler = ResourceSampler::default();
+        assert_eq!(sampler.next_wakeup(now), Duration::ZERO);
+        sampler.previous = Some(Sample {
+            at: now,
+            cpu: None,
+            net: None,
+        });
+        assert_eq!(
+            sampler.next_wakeup(now + POLL_INTERVAL - Duration::from_nanos(1)),
+            Duration::from_nanos(1)
+        );
+        assert_eq!(sampler.next_wakeup(now + POLL_INTERVAL), Duration::ZERO);
+        assert_eq!(
+            sampler.next_wakeup(now - Duration::from_secs(1)),
+            POLL_INTERVAL
+        );
     }
 }

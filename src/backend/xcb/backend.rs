@@ -55,7 +55,8 @@ use crate::backend::xcb::compositor_protocol::{
 use crate::backend::xcb::present::load_present_manager as load_xcb_present_manager;
 use calloop::signals::{Signal, Signals};
 use calloop::{
-    EventLoop, EventSource, Interest, Mode, Poll, PostAction, Readiness, Token, TokenFactory,
+    Dispatcher, EventLoop, EventSource, Interest, Mode, Poll, PostAction, Readiness, Token,
+    TokenFactory,
     timer::{TimeoutAction, Timer},
 };
 use std::any::Any;
@@ -833,6 +834,7 @@ struct XcbLoopData<'a> {
     /// a later X event clears it to retain immediate damage handling.
     compositor_frame_consumed_this_dispatch: bool,
     update_requested: bool,
+    update_ran_this_dispatch: bool,
 }
 
 /// Bound the amount of XCB work performed in one calloop dispatch.  libxcb may
@@ -2598,10 +2600,11 @@ impl Backend for XcbBackend {
             );
         }
 
-        let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
-        handle
-            .insert_source(timer, move |deadline, _, data| {
+        let update_timer = Dispatcher::new(
+            Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL),
+            move |deadline, _, data: &mut XcbLoopData<'_>| {
                 data.update_requested = false;
+                data.update_ran_this_dispatch = true;
                 let compositor_pending_before_update = data.backend.compositor_needs_render();
                 match data.handler.update(data.backend) {
                     Ok(()) => {
@@ -2618,12 +2621,17 @@ impl Backend for XcbBackend {
                 }
                 let frame_work_pending =
                     data.handler.needs_tick() || data.backend.compositor_needs_render();
+                let handler_wakeup = data.handler.next_wakeup();
                 TimeoutAction::ToInstant(scheduling::next_update_deadline(
                     deadline,
                     std::time::Instant::now(),
                     frame_work_pending,
+                    handler_wakeup,
                 ))
-            })
+            },
+        );
+        let update_timer_token = handle
+            .register_dispatcher(update_timer.clone())
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {e}")))?;
 
         let setup_inotify = || -> Result<(), BackendError> {
@@ -2693,9 +2701,11 @@ impl Backend for XcbBackend {
             should_exit: false,
             compositor_frame_consumed_this_dispatch: false,
             update_requested: false,
+            update_ran_this_dispatch: false,
         };
         while !data.should_exit {
             data.compositor_frame_consumed_this_dispatch = false;
+            data.update_ran_this_dispatch = false;
             // Shared with x11rb: continuous frame work uses the adaptive timer,
             // X damage renders immediately, and recording supplies its own
             // idle deadline.
@@ -2705,8 +2715,11 @@ impl Backend for XcbBackend {
                 data.backend.compositor_frame_deadline(),
             );
             event_loop.dispatch(timeout, &mut data)?;
-            if data.update_requested {
+            let mut post_update_anchor = None;
+            if data.update_requested && !data.update_ran_this_dispatch {
                 data.update_requested = false;
+                data.update_ran_this_dispatch = true;
+                post_update_anchor = Some(std::time::Instant::now());
                 let compositor_pending_before_update = data.backend.compositor_needs_render();
                 match data.handler.update(data.backend) {
                     Ok(()) => {
@@ -2722,6 +2735,7 @@ impl Backend for XcbBackend {
                     data.should_exit = true;
                 }
             }
+            data.update_requested = false;
             if !data.should_exit && !data.compositor_frame_consumed_this_dispatch {
                 data.handler.render_compositor_immediate(data.backend);
             }
@@ -2730,6 +2744,39 @@ impl Backend for XcbBackend {
                     println!("{report}");
                 }
                 data.should_exit = true;
+            }
+            if !data.should_exit {
+                let now = std::time::Instant::now();
+                let frame_work_pending =
+                    data.handler.needs_tick() || data.backend.compositor_needs_render();
+                let handler_wakeup = data.handler.next_wakeup();
+                let candidate = post_update_anchor.map_or_else(
+                    || {
+                        scheduling::requested_update_deadline(
+                            now,
+                            frame_work_pending,
+                            handler_wakeup,
+                        )
+                    },
+                    |anchor| {
+                        scheduling::next_update_deadline(
+                            anchor,
+                            now,
+                            frame_work_pending,
+                            handler_wakeup,
+                        )
+                    },
+                );
+                let current = update_timer.as_source_ref().current_deadline();
+                let reset_after_update = post_update_anchor.is_some();
+                if let Some(deadline) =
+                    scheduling::timer_rearm_deadline(current, candidate, reset_after_update)
+                {
+                    {
+                        update_timer.as_source_mut().set_deadline(deadline);
+                    }
+                    handle.update(&update_timer_token)?;
+                }
             }
         }
         Ok(())

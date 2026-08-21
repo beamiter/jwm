@@ -21,6 +21,15 @@ use super::update_readiness::UpdateReadinessHub;
 const BAR_MAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const BAR_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const BAR_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const BAR_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+fn min_bar_wakeup(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
 
 fn install_bar_command_notifier(
     readiness: Option<&UpdateReadinessHub>,
@@ -89,6 +98,67 @@ pub(super) fn terminate_secondary_bar_child(
 }
 
 impl Jwm {
+    pub(crate) fn secondary_bar_next_wakeup(&self, now: Instant) -> Option<Duration> {
+        let monitor_ids: HashSet<i32> = self
+            .state
+            .monitors
+            .values()
+            .map(|monitor| monitor.num)
+            .collect();
+        if self
+            .secondary_bars
+            .keys()
+            .any(|monitor_id| !monitor_ids.contains(monitor_id))
+        {
+            return Some(Duration::ZERO);
+        }
+
+        // Health checks are independent of sequential creation: an exited
+        // later bar must be reaped even while an earlier one is still mapping.
+        let mut next = self
+            .secondary_bars
+            .values()
+            .map(|bar| bar.next_health_check.saturating_duration_since(now))
+            .min();
+
+        let mut ordered: Vec<_> = monitor_ids.into_iter().collect();
+        ordered.sort_unstable();
+        for monitor_id in ordered {
+            if let Some(retry_at) = self.secondary_bar_retry_after.get(&monitor_id) {
+                let remaining = retry_at.saturating_duration_since(now);
+                next = min_bar_wakeup(next, Some(remaining));
+                if !remaining.is_zero() {
+                    // A backoff does not block later monitors in the current
+                    // supervisor, so continue modelling that exact behavior.
+                    continue;
+                }
+                return Some(Duration::ZERO);
+            }
+
+            let Some(bar) = self.secondary_bars.get(&monitor_id) else {
+                return Some(Duration::ZERO);
+            };
+            if bar
+                .client_key
+                .is_some_and(|client_key| !self.state.clients.contains_key(client_key))
+            {
+                return Some(Duration::ZERO);
+            }
+            if bar.window.is_none() {
+                let map_deadline = bar
+                    .last_spawn
+                    .checked_add(BAR_MAP_TIMEOUT)
+                    .unwrap_or(bar.last_spawn)
+                    .saturating_duration_since(now);
+                next = min_bar_wakeup(next, Some(map_deadline));
+                // Sequential creation stops behind the first not-yet-mapped
+                // bar; a later missing bar must not create a permanent ZERO.
+                break;
+            }
+        }
+        next
+    }
+
     pub(super) fn unregister_secondary_bar_readiness(&self, bar: &super::SecondaryBarInstance) {
         if let Some(notifier) = bar.command_notifier.as_ref() {
             if let Some(readiness) = self.update_readiness.as_ref()
@@ -139,6 +209,33 @@ impl Jwm {
         return m;
     }
 
+    pub(crate) fn poll_secondary_bar_children(
+        &mut self,
+        backend: &mut dyn Backend,
+        now: Instant,
+        force: bool,
+    ) {
+        let mut failures = Vec::new();
+        for (&monitor_id, bar) in &mut self.secondary_bars {
+            if !force && now < bar.next_health_check {
+                continue;
+            }
+            bar.next_health_check = now + BAR_HEALTH_CHECK_INTERVAL;
+            let reason = match bar.child.try_wait() {
+                Ok(Some(status)) => Some(format!("exited: {status}")),
+                Ok(None) => None,
+                Err(error) => Some(format!("try_wait failed: {error}")),
+            };
+            if let Some(reason) = reason {
+                failures.push((monitor_id, reason));
+            }
+        }
+        for (monitor_id, reason) in failures {
+            info!("Bar for monitor {monitor_id} failed: {reason}");
+            self.handle_secondary_bar_failure(backend, monitor_id, now, &reason);
+        }
+    }
+
     pub(super) fn dirtomon(&mut self, dir: &i32) -> Option<MonitorKey> {
         let selected_monitor_key = self.state.sel_mon?;
         if self.state.monitor_order.is_empty() {
@@ -167,9 +264,29 @@ impl Jwm {
         backend: &mut dyn Backend,
         now: Instant,
     ) {
+        self.poll_secondary_bar_children(backend, now, false);
         // Get all monitor IDs sorted
         let mut all_mon_ids: Vec<i32> = self.state.monitors.values().map(|m| m.num).collect();
         all_mon_ids.sort_unstable();
+        let existing_monitors: HashSet<_> = all_mon_ids.iter().copied().collect();
+
+        // Retire orphaned bars before the sequential creation barrier. A
+        // still-mapping earlier bar returns from the loop below; leaving this
+        // cleanup after it would make the orphan's immediate deadline
+        // permanently due without ever consuming it.
+        let removed_monitors: Vec<_> = self
+            .secondary_bars
+            .keys()
+            .copied()
+            .filter(|monitor| !existing_monitors.contains(monitor))
+            .collect();
+        for monitor in removed_monitors {
+            let _ = self.retire_secondary_bar(backend, monitor);
+        }
+        self.secondary_bar_failures
+            .retain(|mon_id, _| existing_monitors.contains(mon_id));
+        self.secondary_bar_retry_after
+            .retain(|mon_id, _| existing_monitors.contains(mon_id));
 
         // Sequential creation: only create the next bar if all previous bars are managed
         for &mon_id in &all_mon_ids {
@@ -190,34 +307,19 @@ impl Jwm {
                     .and_then(|bar| bar.client_key)
                     .is_some_and(|client_key| !self.state.clients.contains_key(client_key));
 
-                // Check if process is still alive
-                if let Some(bar) = self.secondary_bars.get_mut(&mon_id) {
+                if let Some(bar) = self.secondary_bars.get(&mon_id) {
                     if lost_managed_window {
                         remove_reason = Some("managed bar window disappeared".to_owned());
-                    } else {
-                        match bar.child.try_wait() {
-                            Ok(Some(status)) => {
-                                remove_reason = Some(format!("exited: {status}"));
-                            }
-                            Ok(None) => {
-                                // Process still running. If it never maps a window, treat it as a
-                                // failed bar after a short grace period and let the WM keep going.
-                                if bar.window.is_none() {
-                                    if now.saturating_duration_since(bar.last_spawn)
-                                        > BAR_MAP_TIMEOUT
-                                    {
-                                        remove_reason = Some(format!(
-                                            "did not map a window within {}s",
-                                            BAR_MAP_TIMEOUT.as_secs()
-                                        ));
-                                    } else {
-                                        waiting_for_map = true;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                remove_reason = Some(format!("try_wait failed: {e}"));
-                            }
+                    } else if bar.window.is_none() {
+                        // If it never maps a window, treat it as a failed bar
+                        // after a short grace period and keep the WM running.
+                        if now.saturating_duration_since(bar.last_spawn) >= BAR_MAP_TIMEOUT {
+                            remove_reason = Some(format!(
+                                "did not map a window within {}s",
+                                BAR_MAP_TIMEOUT.as_secs()
+                            ));
+                        } else {
+                            waiting_for_map = true;
                         }
                     }
                 }
@@ -242,22 +344,6 @@ impl Jwm {
             // Only create one at a time, stop here
             return;
         }
-
-        // Remove bars for monitors that no longer exist
-        let existing_monitors: HashSet<i32> = self.state.monitors.values().map(|m| m.num).collect();
-        let removed_monitors: Vec<_> = self
-            .secondary_bars
-            .keys()
-            .copied()
-            .filter(|monitor| !existing_monitors.contains(monitor))
-            .collect();
-        for monitor in removed_monitors {
-            let _ = self.retire_secondary_bar(backend, monitor);
-        }
-        self.secondary_bar_failures
-            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
-        self.secondary_bar_retry_after
-            .retain(|&mon_id, _| existing_monitors.contains(&mon_id));
     }
 
     /// Apply the common cleanup/backoff policy after a managed bar fails.
@@ -469,6 +555,7 @@ impl Jwm {
                     window: None,
                     has_focus: false,
                     last_spawn: now,
+                    next_health_check: now + BAR_HEALTH_CHECK_INTERVAL,
                 };
 
                 self.secondary_bars.insert(monitor_id, bar_instance);

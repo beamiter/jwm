@@ -23,6 +23,19 @@ const MAX_TRANSIENT_CHILDREN: usize = 1024;
 /// bounded without making frame production the polling clock.
 const TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+fn transient_child_reap_next_wakeup(
+    has_children: bool,
+    last_reap_at: Option<Instant>,
+    now: Instant,
+) -> Option<Duration> {
+    if !has_children {
+        return None;
+    }
+    Some(last_reap_at.map_or(Duration::ZERO, |last| {
+        TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL.saturating_sub(now.saturating_duration_since(last))
+    }))
+}
+
 fn transient_child_reap_is_due(force: bool, last_reap_at: Option<Instant>, now: Instant) -> bool {
     force
         || last_reap_at.is_none_or(|last| {
@@ -196,6 +209,14 @@ pub(crate) struct TransientChildSupervisor {
 }
 
 impl TransientChildSupervisor {
+    fn next_reap_wakeup(&self, now: Instant) -> Option<Duration> {
+        transient_child_reap_next_wakeup(
+            !self.children.is_empty() || !self.inherited_pids.is_empty(),
+            self.last_reap_at,
+            now,
+        )
+    }
+
     fn supervise(&mut self, child: Child) {
         if self.children.is_empty() && self.inherited_pids.is_empty() {
             // A newly non-empty supervisor gets one prompt insurance poll even
@@ -329,6 +350,10 @@ impl TransientChildSupervisor {
 }
 
 impl Jwm {
+    pub(crate) fn transient_child_next_wakeup(&self, now: Instant) -> Option<Duration> {
+        self.transient_children.next_reap_wakeup(now)
+    }
+
     fn is_smithay_backend(backend: &dyn Backend) -> bool {
         #[allow(unused_mut)]
         let mut is_smithay = Self::is_udev_backend(backend);
@@ -600,6 +625,31 @@ mod tests {
     #[test]
     fn fallback_reap_is_rate_limited_but_a_signal_forces_an_immediate_pass() {
         let start = Instant::now();
+        assert_eq!(transient_child_reap_next_wakeup(false, None, start), None);
+        assert_eq!(
+            transient_child_reap_next_wakeup(true, None, start),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            transient_child_reap_next_wakeup(
+                true,
+                Some(start),
+                start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL - Duration::from_nanos(1),
+            ),
+            Some(Duration::from_nanos(1))
+        );
+        assert_eq!(
+            transient_child_reap_next_wakeup(
+                true,
+                Some(start),
+                start + TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL,
+            ),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            transient_child_reap_next_wakeup(true, Some(start + Duration::from_secs(2)), start),
+            Some(TRANSIENT_CHILD_FALLBACK_POLL_INTERVAL)
+        );
         assert!(transient_child_reap_is_due(false, None, start));
         assert!(!transient_child_reap_is_due(
             false,

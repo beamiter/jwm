@@ -22,7 +22,7 @@ use x11rb::protocol::xproto::Screen;
 use x11rb::rust_connection::RustConnection;
 
 use calloop::{
-    EventLoop, Interest, Mode, PostAction,
+    Dispatcher, EventLoop, Interest, Mode, PostAction,
     generic::Generic,
     timer::{TimeoutAction, Timer},
 };
@@ -56,6 +56,7 @@ pub struct X11rbLoopData<'a> {
     /// new damage still takes the immediate path.
     compositor_frame_consumed_this_dispatch: bool,
     update_requested: bool,
+    update_ran_this_dispatch: bool,
 }
 
 #[allow(dead_code)]
@@ -1404,10 +1405,11 @@ impl Backend for X11rbBackend {
 
         // 4. 注册 Timer
         // Timer 绝对不是 Send/Sync 的，必须转 String
-        let timer = Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL);
-        handle
-            .insert_source(timer, move |deadline, _, data| {
+        let update_timer = Dispatcher::new(
+            Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL),
+            move |deadline, _, data: &mut X11rbLoopData<'_>| {
                 data.update_requested = false;
+                data.update_ran_this_dispatch = true;
                 let compositor_pending_before_update = data.backend.compositor_needs_render();
                 match data.handler.update(data.backend) {
                     Ok(()) => {
@@ -1424,12 +1426,17 @@ impl Backend for X11rbBackend {
                 }
                 let frame_work_pending =
                     data.handler.needs_tick() || data.backend.compositor_needs_render();
+                let handler_wakeup = data.handler.next_wakeup();
                 TimeoutAction::ToInstant(scheduling::next_update_deadline(
                     deadline,
                     std::time::Instant::now(),
                     frame_work_pending,
+                    handler_wakeup,
                 ))
-            })
+            },
+        );
+        let update_timer_token = handle
+            .register_dispatcher(update_timer.clone())
             .map_err(|e| BackendError::Message(format!("Failed to insert Timer source: {}", e)))?;
 
         // 5. 注册 inotify 配置文件监听
@@ -1517,9 +1524,11 @@ impl Backend for X11rbBackend {
             should_exit: false,
             compositor_frame_consumed_this_dispatch: false,
             update_requested: false,
+            update_ran_this_dispatch: false,
         };
         loop {
             loop_data.compositor_frame_consumed_this_dispatch = false;
+            loop_data.update_ran_this_dispatch = false;
             // Core handler work (layout animation, overview, deferred grabs)
             // and continuous compositor work follow a 16 ms frame cadence.
             // Ordinary X damage still renders immediately after dispatch, so
@@ -1534,8 +1543,11 @@ impl Backend for X11rbBackend {
                 .dispatch(timeout, &mut loop_data)
                 .map_err(|e| BackendError::Other(Box::new(e)))?;
 
-            if loop_data.update_requested {
+            let mut post_update_anchor = None;
+            if loop_data.update_requested && !loop_data.update_ran_this_dispatch {
                 loop_data.update_requested = false;
+                loop_data.update_ran_this_dispatch = true;
+                post_update_anchor = Some(std::time::Instant::now());
                 let compositor_pending_before_update = loop_data.backend.compositor_needs_render();
                 match loop_data.handler.update(loop_data.backend) {
                     Ok(()) => {
@@ -1551,6 +1563,7 @@ impl Backend for X11rbBackend {
                     loop_data.should_exit = true;
                 }
             }
+            loop_data.update_requested = false;
 
             // Immediate compositor render: after processing X events (including
             // DamageNotify), render without waiting for the 20ms timer.
@@ -1569,6 +1582,42 @@ impl Backend for X11rbBackend {
                         println!("{}", report);
                     }
                     loop_data.should_exit = true;
+                }
+            }
+
+            if !loop_data.should_exit {
+                let now = std::time::Instant::now();
+                let frame_work_pending =
+                    loop_data.handler.needs_tick() || loop_data.backend.compositor_needs_render();
+                let handler_wakeup = loop_data.handler.next_wakeup();
+                let candidate = post_update_anchor.map_or_else(
+                    || {
+                        scheduling::requested_update_deadline(
+                            now,
+                            frame_work_pending,
+                            handler_wakeup,
+                        )
+                    },
+                    |anchor| {
+                        scheduling::next_update_deadline(
+                            anchor,
+                            now,
+                            frame_work_pending,
+                            handler_wakeup,
+                        )
+                    },
+                );
+                let current = update_timer.as_source_ref().current_deadline();
+                let reset_after_update = post_update_anchor.is_some();
+                if let Some(deadline) =
+                    scheduling::timer_rearm_deadline(current, candidate, reset_after_update)
+                {
+                    {
+                        update_timer.as_source_mut().set_deadline(deadline);
+                    }
+                    handle
+                        .update(&update_timer_token)
+                        .map_err(|error| BackendError::Other(Box::new(error)))?;
                 }
             }
 

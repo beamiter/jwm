@@ -57,6 +57,13 @@ fn push_scene_window(
 }
 
 impl Jwm {
+    pub(crate) fn battery_next_wakeup(&self, now: Instant) -> Duration {
+        self.last_battery_poll.map_or(Duration::ZERO, |last| {
+            crate::jwm::features::power::POLL_INTERVAL
+                .saturating_sub(now.saturating_duration_since(last))
+        })
+    }
+
     pub(super) fn render_pending_frame(&mut self, backend: &mut dyn Backend) {
         if !backend.has_compositor() {
             return;
@@ -85,14 +92,15 @@ impl Jwm {
     }
 
     pub(super) fn tick_animations(&mut self, backend: &mut dyn Backend) {
+        let now = Instant::now();
         // --- Night Light: update color temperature once per minute ---
         if backend.has_compositor() {
             let should_update = match self.last_night_light_update {
-                Some(last) => last.elapsed() >= Duration::from_secs(60),
+                Some(last) => now.saturating_duration_since(last) >= Duration::from_secs(60),
                 None => true,
             };
             if should_update {
-                self.last_night_light_update = Some(Instant::now());
+                self.last_night_light_update = Some(now);
                 let cfg = CONFIG.load();
                 let behavior = cfg.behavior();
                 // A user override outranks the schedule until it is toggled
@@ -110,30 +118,27 @@ impl Jwm {
                 };
                 backend.compositor_set_color_temperature(temp);
             }
-
-            // --- Battery: re-read on its own, slower interval ---
-            let should_poll = match self.last_battery_poll {
-                Some(last) => last.elapsed() >= crate::jwm::features::power::POLL_INTERVAL,
-                None => true,
-            };
-            if should_poll {
-                self.last_battery_poll = Some(Instant::now());
-                self.poll_battery(backend);
-                // Periodic re-read; skip while one is in flight so a hung
-                // nmcli cannot pile up worker threads.
-                if self.features.connectivity_poll.is_none() {
-                    self.refresh_connectivity();
-                }
-            }
-            // Adopt whatever background connectivity read has finished,
-            // whether the periodic one above or one kicked off by a toggle.
-            self.poll_connectivity_job();
-
-            // --- CPU / memory / network: a much faster interval, gated
-            // inside the sampler because a rate has to divide by the gap it
-            // actually waited rather than the one it meant to.
-            self.poll_resources();
         }
+
+        // --- Battery: re-read on its own, slower interval. This is hardware
+        // state rather than compositor state, so headless/non-composited
+        // sessions consume the same deadline instead of leaving it at ZERO.
+        if self.battery_next_wakeup(now).is_zero() {
+            self.last_battery_poll = Some(now);
+            self.poll_battery(backend);
+            // Periodic re-read; skip while one is in flight so a hung nmcli
+            // cannot pile up worker threads.
+            if backend.has_compositor() && self.features.connectivity_poll.is_none() {
+                self.refresh_connectivity();
+            }
+        }
+        // Adopt whatever background connectivity read has finished, whether
+        // the periodic one above or one kicked off by a toggle.
+        self.poll_connectivity_job();
+
+        // --- CPU / memory / network: a much faster interval, gated inside
+        // the sampler because a rate divides by the gap actually observed.
+        self.poll_resources();
 
         // Clipboard capture runs on its own thread and connection; adopt what
         // it copied here.
@@ -157,10 +162,8 @@ impl Jwm {
 
         // The Wi-Fi picker's scan and connect run on worker threads; adopt
         // their results here rather than blocking a frame on nmcli.
-        if backend.has_compositor() {
-            self.poll_wifi_jobs(backend);
-            self.poll_bluetooth_jobs(backend);
-        }
+        self.poll_wifi_jobs(backend);
+        self.poll_bluetooth_jobs(backend);
 
         // Wallpaper colour extraction decodes an image; the same applies.
         self.poll_wallpaper_theme(backend);

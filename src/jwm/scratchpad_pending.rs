@@ -123,6 +123,14 @@ impl ScratchpadPendingRegistry {
     }
 
     #[must_use]
+    pub(crate) fn next_wakeup(&self, now: Instant) -> Option<Duration> {
+        self.by_pid
+            .values()
+            .map(|pending| pending.deadline.saturating_duration_since(now))
+            .min()
+    }
+
+    #[must_use]
     pub(crate) fn pending_pid_for_name(&self, name: &str) -> Option<u32> {
         self.by_pid
             .iter()
@@ -414,6 +422,33 @@ mod tests {
             .unwrap();
         assert_eq!(registry.len(), 2);
         assert!(registry.names_are_unique());
+    }
+
+    #[test]
+    fn next_wakeup_tracks_the_earliest_exact_deadline() {
+        let now = Instant::now();
+        let mut registry = ScratchpadPendingRegistry::default();
+        assert_eq!(registry.next_wakeup(now), None);
+        registry
+            .register_with_remaining(101, "slow".into(), Some(1001), now, Duration::from_secs(3))
+            .unwrap();
+        registry
+            .register_with_remaining(102, "fast".into(), Some(1002), now, Duration::from_secs(1))
+            .unwrap();
+
+        assert_eq!(
+            registry.next_wakeup(now + Duration::from_millis(999)),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            registry.next_wakeup(now + Duration::from_secs(1)),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(registry.remove_exited(102), Some("fast".into()));
+        assert_eq!(
+            registry.next_wakeup(now + Duration::from_secs(1)),
+            Some(Duration::from_secs(2))
+        );
     }
 
     #[test]
