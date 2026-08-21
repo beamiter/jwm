@@ -468,6 +468,43 @@ transition that never arrives while the same compositor keeps running, so one
 transient error downgraded the session to ungated root capture — and with it
 the XDamage gate — for the rest of the session.
 
+A failure inside a scaled capture is attributed to the stage that actually
+failed. The accelerated path issues `CopyArea` and `Composite` and then reads
+the small target back, and a failure of that readback used to be reported as an
+XRender fault. Since losing XRender means every later frame reads back the
+full-resolution drawable and resizes it on the CPU, one transient readback
+error bought roughly a hundredfold host-CPU increase for the rest of the
+session. Readback failures now take the ordinary readback path, and a genuine
+XRender rejection suspends scaling with a 1 s / 5 s / 30 s backoff, retiring it
+only after four consecutive failures.
+
+An unparsed X11 event is attributed to the extension that owns its event code
+and demotes only that facility: XDamage for the damage gate, XFixes for the
+cursor and compositor-owner caches, RandR for the root geometry. Previously any
+single unrecognized event retired all four at once with no path back, taking
+steady state from one blocking round trip per frame to about five. An event
+belonging to no extension this connection selected cannot have cost a
+notification it depends on, so those are tolerated in a run of eight before the
+session distrusts its caches wholesale.
+
+### Reading the capture mode
+
+Each telemetry line begins with the paths the capture loop is actually taking,
+and every transition is announced as it happens:
+
+```text
+jwm-remote: host 5.0s mode overlay/xrender/shm/damage/cursor-events scheduled 60 ...
+jwm-remote: capture mode now overlay/cpu-resize/shm/damage/cursor-events
+```
+
+The healthy reading is `overlay/xrender/shm/damage/cursor-events`. Each field
+names its fallback explicitly rather than disappearing, so a degraded session
+is obvious at a glance: `root`, `cpu-resize`, `core-getimage`, `no-damage`,
+`cursor-poll`, and the `geometry-poll` / `compositor-poll` fields that appear
+only when those caches have stopped following notifications. `cpu-resize` and
+`no-damage` in particular are large, and each of them used to be announced only
+once, by a line that had long since scrolled away.
+
 - A black/invalid Composite overlay can be bypassed with
   `--capture-source root`. Root capture is a compatibility fallback and may
   omit compositor-only effects on some X servers.

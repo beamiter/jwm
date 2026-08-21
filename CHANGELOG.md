@@ -65,6 +65,11 @@ monorepo use independent Semantic Versions.
   typed query line to the 4.5:1 body ratio. The default `glass` theme drew its
   hint at 1.6:1 — the least legible text on the panel was the line naming the
   keys — and its `hint_ink` has been darkened accordingly.
+- `jwm-remote` host telemetry leads with the capture paths actually in use —
+  `mode overlay/xrender/shm/damage/cursor-events` — and announces every
+  transition as it happens. Four separate facilities can degrade themselves at
+  runtime, each of them expensive, and each previously announced only once by a
+  line that had long since scrolled away.
 - `jwm-remote` now encrypts the session, not just authenticates it. Screen and
   input payloads are sealed with ChaCha20-Poly1305 (transport version 2). This
   mattered most for input: a key press is a three-byte record, so a passive
@@ -230,6 +235,20 @@ monorepo use independent Semantic Versions.
   both bail while a panel is up, so the drag was never committed or cancelled.
 - Locking from the Shell Hub's session page no longer leaves the lock marked as
   a page the Hub can be backed out to.
+- A transient readback failure inside a scaled `jwm-remote` capture no longer
+  retires XRender for the whole session. The accelerated path reads its small
+  target back itself, and any error from that read was reported as an XRender
+  fault; losing the scaler makes every later frame read back the
+  full-resolution drawable and resize it on the CPU, so one transient error
+  bought roughly a hundredfold host-CPU increase permanently. Failures are now
+  attributed to the stage that failed, and a genuine XRender rejection suspends
+  scaling with a 1 s / 5 s / 30 s backoff instead of retiring it outright.
+- A single unparsed X11 event no longer disables all four of `jwm-remote`'s
+  event-driven capture caches at once. Unknown events are attributed to the
+  extension owning their event code and demote only that facility; steady state
+  had otherwise gone from one blocking round trip per frame to about five, with
+  no path back. Events from extensions the capture connection never selected
+  are tolerated in a run of eight.
 - `jwm-remote host` declares a 1 KiB inbound record ceiling instead of the
   global 32 MiB frame limit. It only ever receives a hello, empty heartbeats,
   eight-byte acknowledgements and input batches, so an unauthenticated length

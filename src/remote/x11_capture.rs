@@ -39,6 +39,143 @@ const DAMAGE_CLIENT_VERSION: (u32, u32) = (1, 1);
 const SHM_FD_VERSION: (u16, u16) = (1, 2);
 const REMOTE_CAPTURE_OWNER: &[u8] = b"_JWM_REMOTE_CAPTURE_OWNER";
 const OVERLAY_RETRY_DELAY: Duration = Duration::from_secs(1);
+/// Backoff before retrying XRender scaling after a rejected request.
+///
+/// Losing the scaler is a ~100x host-CPU cliff: every later frame reads back
+/// the full-resolution drawable and resizes it on the CPU instead of reading
+/// back the already-downscaled target. A single transient rejection must not
+/// buy that for the rest of the session.
+const RENDER_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(5),
+    Duration::from_secs(30),
+];
+/// Consecutive rejections after which XRender is genuinely retired.
+const RENDER_MAX_FAILURES: u32 = 4;
+/// Unattributable unknown events tolerated before distrusting every cache.
+///
+/// x11rb reports any event it cannot parse as `Unknown`. Most are from
+/// extensions this connection never selected and therefore cannot have cost us
+/// a notification we depend on, so one of them must not retire the whole
+/// event-driven capture path.
+const UNKNOWN_EVENT_TOLERANCE: u32 = 8;
+
+bitflags::bitflags! {
+    /// Compact snapshot of every path the capture loop is currently taking.
+    ///
+    /// Four separate facilities can degrade themselves at runtime, each of
+    /// them a large and permanent cost, and each previously announced only by
+    /// one `eprintln` that had long since scrolled away. Folding the live
+    /// state into the periodic telemetry line is what makes those cliffs
+    /// noticeable in the field instead of being mistaken for slow hardware.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct CaptureMode: u32 {
+        /// Capturing the Composite overlay rather than the bare root.
+        const OVERLAY = 1 << 0;
+        /// Downscaling in the X server instead of on the CPU.
+        const XRENDER = 1 << 1;
+        /// Reading back through MIT-SHM rather than core `GetImage`.
+        const SHM = 1 << 2;
+        /// XDamage is gating redundant readbacks.
+        const DAMAGE = 1 << 3;
+        /// The cursor shape follows XFixes notifications rather than polling.
+        const CURSOR_EVENTS = 1 << 4;
+        /// Root geometry follows notifications rather than polling.
+        const GEOMETRY_EVENTS = 1 << 5;
+        /// Compositor ownership follows notifications rather than polling.
+        const COMPOSITOR_EVENTS = 1 << 6;
+    }
+}
+
+impl CaptureMode {
+    /// Render as `source/scale/readback/damage/cursor`, naming the degraded
+    /// path explicitly so a bad session reads differently from a good one.
+    #[must_use]
+    pub fn describe(self) -> String {
+        let mut parts = Vec::with_capacity(5);
+        parts.push(if self.contains(Self::OVERLAY) {
+            "overlay"
+        } else {
+            "root"
+        });
+        parts.push(if self.contains(Self::XRENDER) {
+            "xrender"
+        } else {
+            "cpu-resize"
+        });
+        parts.push(if self.contains(Self::SHM) {
+            "shm"
+        } else {
+            "core-getimage"
+        });
+        parts.push(if self.contains(Self::DAMAGE) {
+            "damage"
+        } else {
+            "no-damage"
+        });
+        parts.push(if self.contains(Self::CURSOR_EVENTS) {
+            "cursor-events"
+        } else {
+            "cursor-poll"
+        });
+        if !self.contains(Self::GEOMETRY_EVENTS) {
+            parts.push("geometry-poll");
+        }
+        if !self.contains(Self::COMPOSITOR_EVENTS) {
+            parts.push("compositor-poll");
+        }
+        parts.join("/")
+    }
+}
+
+/// Which cache an extension's notifications keep fresh.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventFacility {
+    Damage,
+    /// XFixes drives both the cursor shape and the compositor selection.
+    Cursor,
+    Geometry,
+}
+
+/// Maps an unparsed event code back to the extension that owns it.
+///
+/// Extension event codes are assigned contiguously from each extension's
+/// `first_event`, so the owner is the extension with the greatest
+/// `first_event` not above the code.
+#[derive(Debug, Default)]
+struct EventAttribution {
+    bases: Vec<(u8, EventFacility)>,
+    unattributed: u32,
+}
+
+impl EventAttribution {
+    fn new(conn: &RustConnection) -> Self {
+        let mut bases = Vec::new();
+        for (name, facility) in [
+            (damage::X11_EXTENSION_NAME, EventFacility::Damage),
+            (xfixes::X11_EXTENSION_NAME, EventFacility::Cursor),
+            (randr::X11_EXTENSION_NAME, EventFacility::Geometry),
+        ] {
+            if let Ok(Some(info)) = conn.extension_information(name) {
+                bases.push((info.first_event, facility));
+            }
+        }
+        bases.sort_unstable_by_key(|(first_event, _)| std::cmp::Reverse(*first_event));
+        Self {
+            bases,
+            unattributed: 0,
+        }
+    }
+
+    fn owner(&self, response_type: u8) -> Option<EventFacility> {
+        // Core events occupy 2..=34; anything below the lowest extension base
+        // belongs to no extension we depend on.
+        self.bases
+            .iter()
+            .find(|(first_event, _)| response_type >= *first_event)
+            .map(|(_, facility)| *facility)
+    }
+}
 pub(crate) const DAMAGE_FORCE_REFRESH: Duration = Duration::from_secs(2);
 const ROOT_STAGING_MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -745,6 +882,10 @@ pub struct X11Capture {
     requested_source: CaptureSource,
     max_width: u16,
     render_scaler: Option<RenderScaler>,
+    /// When XRender scaling may be attempted again after a rejected request.
+    render_suspended_until: Option<Instant>,
+    render_failures: u32,
+    event_attribution: EventAttribution,
     shm_readback: ShmReadback,
 }
 
@@ -860,6 +1001,7 @@ impl X11Capture {
             DamageTracker::connect(&conn)?
         };
 
+        let event_attribution = EventAttribution::new(&conn);
         let mut capture = Self {
             conn,
             screen_num,
@@ -877,6 +1019,9 @@ impl X11Capture {
             requested_source,
             max_width,
             render_scaler,
+            render_suspended_until: None,
+            render_failures: 0,
+            event_attribution,
             shm_readback,
         };
         // Drain notifications queued between subscription and the baselines.
@@ -1006,11 +1151,7 @@ impl X11Capture {
 
                     match failure.kind {
                         CaptureFailureKind::Render => {
-                            eprintln!(
-                                "jwm-remote: XRender downscaling stopped ({}); using CPU fallback",
-                                failure.error
-                            );
-                            self.release_render_scaler();
+                            self.suspend_render_scaler(&failure.error);
                             allow_render = false;
                         }
                         CaptureFailureKind::Readback
@@ -1062,6 +1203,7 @@ impl X11Capture {
             && self.render_scaler.is_some()
             && allow_render
             && render_allowed_for_source
+            && !self.render_suspended(Instant::now())
         {
             let pending_cursor = prepare_cursor_for_frame(&self.conn, self.root, &mut self.cursor)?;
             let render_result = self
@@ -1077,8 +1219,14 @@ impl X11Capture {
                     output_width,
                     output_height,
                 );
+            let render_result = render_result.map_err(|error| match error {
+                RenderCaptureError::Request(error) => CaptureFailure::render(error),
+                RenderCaptureError::Readback(error) => CaptureFailure::readback(error),
+            });
             match render_result {
                 Ok(mut image) => {
+                    self.render_failures = 0;
+                    self.render_suspended_until = None;
                     let position = resolve_cursor_for_frame(
                         &self.conn,
                         self.root,
@@ -1109,9 +1257,9 @@ impl X11Capture {
                         },
                     }));
                 }
-                Err(error) => {
+                Err(failure) => {
                     pending_cursor.discard();
-                    return Err(CaptureFailure::render(error));
+                    return Err(failure);
                 }
             }
         }
@@ -1306,17 +1454,34 @@ impl X11Capture {
                     }
                 }
                 Event::Unknown(_) => {
-                    self.damage.disable_recoverable(
-                        &self.conn,
-                        "an unrecognized extension event made damage tracking unreliable",
-                    )?;
-                    let geometry = self.root_geometry.fall_back_to_polling();
-                    let cursor = self.cursor.fall_back_to_polling();
-                    let compositor = self.compositor.fall_back_to_polling();
-                    if geometry || cursor || compositor {
-                        eprintln!(
-                            "remote: unrecognized X11 event disabled event-driven capture caches"
-                        );
+                    // Demote only the facility whose extension owns the code.
+                    // Retiring all four on one unparsed event took steady state
+                    // from one blocking round trip per frame to about five, and
+                    // none of them had a path back.
+                    match self.event_attribution.owner(event.response_type()) {
+                        Some(EventFacility::Damage) => {
+                            self.damage.disable_recoverable(
+                                &self.conn,
+                                "an unrecognized XDamage event made damage tracking unreliable",
+                            )?;
+                        }
+                        Some(EventFacility::Cursor) => {
+                            let cursor = self.cursor.fall_back_to_polling();
+                            let compositor = self.compositor.fall_back_to_polling();
+                            if cursor || compositor {
+                                eprintln!(
+                                    "remote: unrecognized XFixes event; polling the cursor and compositor owner"
+                                );
+                            }
+                        }
+                        Some(EventFacility::Geometry) => {
+                            if self.root_geometry.fall_back_to_polling() {
+                                eprintln!(
+                                    "remote: unrecognized RandR event; polling the root geometry"
+                                );
+                            }
+                        }
+                        None => self.distrust_unattributed_event()?,
                     }
                 }
                 _ => {}
@@ -1356,6 +1521,79 @@ impl X11Capture {
             self.overlay_acquired = false;
         }
         self.drawable = self.root;
+    }
+
+    /// An unknown event from no extension we depend on cannot have cost us a
+    /// notification, so tolerate a run of them before distrusting everything.
+    fn distrust_unattributed_event(&mut self) -> RemoteResult<()> {
+        self.event_attribution.unattributed = self.event_attribution.unattributed.saturating_add(1);
+        if self.event_attribution.unattributed < UNKNOWN_EVENT_TOLERANCE {
+            return Ok(());
+        }
+        self.event_attribution.unattributed = 0;
+        self.damage.disable_recoverable(
+            &self.conn,
+            "repeated unrecognized extension events made damage tracking unreliable",
+        )?;
+        let geometry = self.root_geometry.fall_back_to_polling();
+        let cursor = self.cursor.fall_back_to_polling();
+        let compositor = self.compositor.fall_back_to_polling();
+        if geometry || cursor || compositor {
+            eprintln!(
+                "remote: repeated unrecognized X11 events disabled event-driven capture caches"
+            );
+        }
+        Ok(())
+    }
+
+    /// Report every path the capture loop is currently taking.
+    #[must_use]
+    pub fn mode(&self) -> CaptureMode {
+        let mut mode = CaptureMode::empty();
+        mode.set(CaptureMode::OVERLAY, self.overlay_acquired);
+        mode.set(
+            CaptureMode::XRENDER,
+            self.render_scaler.is_some() && !self.render_suspended(Instant::now()),
+        );
+        mode.set(CaptureMode::SHM, self.shm_readback.is_enabled());
+        mode.set(CaptureMode::DAMAGE, self.damage.active().is_some());
+        mode.set(
+            CaptureMode::CURSOR_EVENTS,
+            self.cursor.mode == CursorMode::EventDriven,
+        );
+        mode.set(
+            CaptureMode::GEOMETRY_EVENTS,
+            self.root_geometry.event_driven,
+        );
+        mode.set(CaptureMode::COMPOSITOR_EVENTS, self.compositor.event_driven);
+        mode
+    }
+
+    fn render_suspended(&self, now: Instant) -> bool {
+        self.render_suspended_until
+            .is_some_and(|deadline| now < deadline)
+    }
+
+    /// Step XRender back after a rejected request, retiring it only if the
+    /// rejections keep coming.
+    fn suspend_render_scaler(&mut self, error: &RemoteError) {
+        self.render_failures = self.render_failures.saturating_add(1);
+        if self.render_failures >= RENDER_MAX_FAILURES {
+            eprintln!(
+                "jwm-remote: XRender downscaling failed {} times ({error}); retiring it and using the CPU fallback",
+                self.render_failures
+            );
+            self.render_suspended_until = None;
+            self.release_render_scaler();
+            return;
+        }
+        let delay = RENDER_RETRY_DELAYS
+            [(self.render_failures as usize - 1).min(RENDER_RETRY_DELAYS.len() - 1)];
+        eprintln!(
+            "jwm-remote: XRender downscaling failed ({error}); using CPU fallback and retrying in {:.0}s",
+            delay.as_secs_f64()
+        );
+        self.render_suspended_until = Some(Instant::now() + delay);
     }
 
     fn release_render_scaler(&mut self) {
@@ -1976,6 +2214,10 @@ enum ShmReadback {
 }
 
 impl ShmReadback {
+    fn is_enabled(&self) -> bool {
+        matches!(self, Self::Enabled(_))
+    }
+
     fn connect(conn: &RustConnection, depth: u8) -> Self {
         match Self::try_connect(conn, depth) {
             Ok(Some(readback)) => Self::Enabled(readback),
@@ -2480,14 +2722,42 @@ fn root_staging_bytes(width: u16, height: u16, format: Format) -> Option<usize> 
         .filter(|size| *size <= ROOT_STAGING_MAX_BYTES)
 }
 
-fn resolve_render_readback<T, E>(
-    image: Result<T, E>,
-    copy: Result<(), E>,
-    composite: Result<(), E>,
-) -> Result<T, E> {
-    copy?;
-    composite?;
-    image
+/// Which stage of a scaled capture failed.
+///
+/// The distinction is not cosmetic. A failed X request means the scaler itself
+/// is unusable, but a failed *readback* is the same transient condition the
+/// unscaled path reports as `Readback`, and treating it as a scaler fault used
+/// to retire XRender permanently on the first occurrence.
+#[derive(Debug)]
+enum RenderCaptureError {
+    /// Setup, transform, CopyArea or Composite was rejected.
+    Request(RemoteError),
+    /// The small target readback failed.
+    Readback(RemoteError),
+}
+
+impl<E> From<E> for RenderCaptureError
+where
+    E: Into<RemoteError>,
+{
+    fn from(error: E) -> Self {
+        // Everything reached with `?` inside a scaled capture is setup or a
+        // queued request; the readback is classified explicitly at its site.
+        Self::Request(error.into())
+    }
+}
+
+fn resolve_render_readback<T>(
+    image: RemoteResult<T>,
+    copy: RemoteResult<()>,
+    composite: RemoteResult<()>,
+) -> Result<T, RenderCaptureError> {
+    // Request errors are checked first: a rejected CopyArea or Composite means
+    // the readback saw a stale or absent target, so its own error is a
+    // consequence rather than the cause.
+    copy.map_err(RenderCaptureError::Request)?;
+    composite.map_err(RenderCaptureError::Request)?;
+    image.map_err(RenderCaptureError::Readback)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2633,7 +2903,7 @@ impl RenderScaler {
         source_height: u16,
         output_width: u16,
         output_height: u16,
-    ) -> RemoteResult<RgbImage> {
+    ) -> Result<RgbImage, RenderCaptureError> {
         self.ensure_target(conn, output_width, output_height)?;
         self.ensure_source(conn, capture_source, source_width, source_height)?;
         let dimensions = (source_width, source_height, output_width, output_height);
@@ -2693,7 +2963,7 @@ impl RenderScaler {
                 if let Some(cookie) = copy {
                     let _ = cookie.check();
                 }
-                return Err(error.into());
+                return Err(RenderCaptureError::Request(error.into()));
             }
         };
         let image = readback.capture_rgb(
@@ -3603,24 +3873,108 @@ mod tests {
         );
     }
 
+    fn probe_error(message: &str) -> RemoteError {
+        io::Error::other(message.to_string()).into()
+    }
+
+    fn classify(result: Result<u8, RenderCaptureError>) -> Result<u8, (bool, String)> {
+        result.map_err(|error| match error {
+            RenderCaptureError::Request(error) => (true, error.to_string()),
+            RenderCaptureError::Readback(error) => (false, error.to_string()),
+        })
+    }
+
     #[test]
     fn render_request_errors_never_publish_the_small_readback() {
         assert_eq!(
-            resolve_render_readback(Ok::<_, &str>(7), Ok(()), Ok(())),
+            classify(resolve_render_readback(Ok(7), Ok(()), Ok(()))),
             Ok(7)
         );
         assert_eq!(
-            resolve_render_readback(Ok(7), Err("copy"), Err("composite")),
-            Err("copy")
+            classify(resolve_render_readback(
+                Ok(7),
+                Err(probe_error("copy")),
+                Err(probe_error("composite"))
+            )),
+            Err((true, "copy".to_string()))
         );
         assert_eq!(
-            resolve_render_readback(Ok(7), Ok(()), Err("composite")),
-            Err("composite")
+            classify(resolve_render_readback(
+                Ok(7),
+                Ok(()),
+                Err(probe_error("composite"))
+            )),
+            Err((true, "composite".to_string()))
         );
+    }
+
+    #[test]
+    fn a_failed_small_readback_is_not_blamed_on_the_scaler() {
+        // Retiring XRender on a transient readback error is a ~100x host-CPU
+        // cliff for the rest of the session, so the two must stay distinct.
         assert_eq!(
-            resolve_render_readback(Err::<u8, _>("readback"), Ok(()), Ok(())),
-            Err("readback")
+            classify(resolve_render_readback(
+                Err(probe_error("readback")),
+                Ok(()),
+                Ok(())
+            )),
+            Err((false, "readback".to_string()))
         );
+    }
+
+    #[test]
+    fn capture_mode_names_the_degraded_path_explicitly() {
+        let best = CaptureMode::OVERLAY
+            | CaptureMode::XRENDER
+            | CaptureMode::SHM
+            | CaptureMode::DAMAGE
+            | CaptureMode::CURSOR_EVENTS
+            | CaptureMode::GEOMETRY_EVENTS
+            | CaptureMode::COMPOSITOR_EVENTS;
+        assert_eq!(best.describe(), "overlay/xrender/shm/damage/cursor-events");
+
+        // A fully degraded session must read differently at a glance, and the
+        // polling fallbacks must be named rather than merely absent.
+        assert_eq!(
+            CaptureMode::empty().describe(),
+            "root/cpu-resize/core-getimage/no-damage/cursor-poll/geometry-poll/compositor-poll"
+        );
+
+        // The XRender cliff in isolation: everything else still healthy.
+        assert_eq!(
+            (best - CaptureMode::XRENDER).describe(),
+            "overlay/cpu-resize/shm/damage/cursor-events"
+        );
+    }
+
+    #[test]
+    fn unknown_events_are_attributed_to_the_extension_that_owns_them() {
+        let attribution = EventAttribution {
+            bases: vec![
+                (91, EventFacility::Geometry),
+                (87, EventFacility::Cursor),
+                (85, EventFacility::Damage),
+            ],
+            unattributed: 0,
+        };
+        assert_eq!(attribution.owner(85), Some(EventFacility::Damage));
+        assert_eq!(attribution.owner(86), Some(EventFacility::Damage));
+        assert_eq!(attribution.owner(87), Some(EventFacility::Cursor));
+        assert_eq!(attribution.owner(90), Some(EventFacility::Cursor));
+        assert_eq!(attribution.owner(91), Some(EventFacility::Geometry));
+        assert_eq!(attribution.owner(200), Some(EventFacility::Geometry));
+        // Core events, and extensions this connection never selected, cannot
+        // have cost us a notification we depend on.
+        assert_eq!(attribution.owner(2), None);
+        assert_eq!(attribution.owner(84), None);
+    }
+
+    #[test]
+    fn an_empty_attribution_table_blames_nothing() {
+        let attribution = EventAttribution::default();
+        for code in [0_u8, 2, 64, 85, 255] {
+            assert_eq!(attribution.owner(code), None);
+        }
     }
 
     #[test]

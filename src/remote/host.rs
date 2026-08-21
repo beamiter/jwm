@@ -9,7 +9,7 @@ use super::protocol::{
     server_handshake,
 };
 use super::tile::{TileEncodeRequest, TileEncoder, TilePlan};
-use super::x11_capture::{CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
+use super::x11_capture::{CaptureMode, CaptureOutcome, CaptureSource, CapturedFrame, X11Capture};
 use super::x11_input::InputInjector;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use signal_hook::consts::{SIGINT, SIGTERM};
@@ -321,6 +321,7 @@ struct HostTelemetryWindow {
     drawn_bytes: u64,
     retired: u64,
     viewer_superseded: u64,
+    capture_mode: CaptureMode,
     capture_elapsed: Duration,
     queue_elapsed: Duration,
     credit_wait_elapsed: Duration,
@@ -345,6 +346,7 @@ impl HostTelemetryWindow {
             || self.unchanged_keepalive != 0
             || self.encoded != 0
             || self.keyframes != 0
+            || self.capture_mode != CaptureMode::empty()
             || self.sent != 0
             || self.bytes != 0
             || self.drawn_acks != 0
@@ -397,6 +399,10 @@ impl HostTelemetry {
 
     fn record_skipped(&self) {
         self.update(|window| window.skipped = window.skipped.saturating_add(1));
+    }
+
+    fn record_capture_mode(&self, mode: CaptureMode) {
+        self.update(|window| window.capture_mode = mode);
     }
 
     fn record_damage_skipped(&self) {
@@ -1488,9 +1494,24 @@ fn stream_frames(
     let interval = target_frame_interval(options.fps);
     let backpressure_refresh = backpressure_refresh_interval(interval);
     let mut next_frame = Instant::now();
+    let mut reported_mode: Option<CaptureMode> = None;
     let capture_result = (|| -> RemoteResult<()> {
         while running.load(Ordering::Acquire) && !shutdown.load(Ordering::Acquire) {
             let now = Instant::now();
+            // Announce every capture-path transition, not just the first. Each
+            // of these degradations is large and was previously visible only
+            // as a single line that had long since scrolled away.
+            let mode = capture.mode();
+            // Record every tick: the telemetry window resets on each report, so
+            // recording only on change left later windows claiming a fully
+            // degraded path that nothing had actually degraded.
+            telemetry.record_capture_mode(mode);
+            if reported_mode != Some(mode) {
+                if reported_mode.is_some() {
+                    eprintln!("jwm-remote: capture mode now {}", mode.describe());
+                }
+                reported_mode = Some(mode);
+            }
             report_host_if_due(telemetry, credits, now);
             if now < next_frame {
                 thread::sleep((next_frame - now).min(Duration::from_millis(20)));
@@ -1753,8 +1774,9 @@ fn print_host_telemetry(snapshot: HostTelemetrySnapshot, outstanding: u64) {
         window.dirty_tiles as f64 * 100.0 / window.total_tiles as f64
     };
     eprintln!(
-        "jwm-remote: host {:.1}s scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} keyframes {} tiles {}/{} ({tile_percent:.1}% dirty) sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
+        "jwm-remote: host {:.1}s mode {} scheduled {} captured {} skipped {} damage-skipped {} published {} replaced {} dequeued {} unchanged-suppressed {} unchanged-keepalive {} encoded {} keyframes {} tiles {}/{} ({tile_percent:.1}% dirty) sent {} ({sent_fps:.1} fps, {megabits_per_second:.2} Mbit/s) bytes {} drawn-acks {} retired {} viewer-superseded {} drawn-bytes {}; avg capture/queue/credit-wait/encode/write/capture-to-ACK/send-to-ACK {:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1}/{:.1} ms; outstanding current/max {outstanding}/{}, max-queue {:.1} ms",
         seconds,
+        window.capture_mode.describe(),
         window.scheduled,
         window.captured,
         window.skipped,
