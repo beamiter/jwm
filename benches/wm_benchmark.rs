@@ -62,6 +62,12 @@ pub struct OldWM {
     pub monitors: Option<Rc<RefCell<OldWMMonitor>>>,
 }
 
+impl Default for OldWM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OldWM {
     pub fn new() -> Self {
         Self { monitors: None }
@@ -225,6 +231,12 @@ pub struct NewWM {
     pub monitor_num_to_key: std::collections::HashMap<i32, MonitorKey>,
 }
 
+impl Default for NewWM {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NewWM {
     pub fn new() -> Self {
         Self {
@@ -281,27 +293,27 @@ impl NewWM {
 
     /// 删除客户端
     pub fn remove_client(&mut self, win: Window) -> bool {
-        if let Some(client_key) = self.client_to_key.remove(&win) {
-            if let Some(client) = self.clients.remove(client_key) {
-                // 从监视器的客户端列表中移除
-                if let Some(monitor_key) = client.mon {
-                    if let Some(client_list) = self.monitor_clients.get_mut(monitor_key) {
-                        client_list.retain(|&key| key != client_key);
-                    }
-                }
-                return true;
+        if let Some(client_key) = self.client_to_key.remove(&win)
+            && let Some(client) = self.clients.remove(client_key)
+        {
+            // 从监视器的客户端列表中移除
+            if let Some(monitor_key) = client.mon
+                && let Some(client_list) = self.monitor_clients.get_mut(monitor_key)
+            {
+                client_list.retain(|&key| key != client_key);
             }
+            return true;
         }
         false
     }
 
     /// 更新客户端几何信息
     pub fn update_client_geometry(&mut self, win: Window, geometry: ClientGeometry) -> bool {
-        if let Some(&client_key) = self.client_to_key.get(&win) {
-            if let Some(client) = self.clients.get_mut(client_key) {
-                client.geometry = geometry;
-                return true;
-            }
+        if let Some(&client_key) = self.client_to_key.get(&win)
+            && let Some(client) = self.clients.get_mut(client_key)
+        {
+            client.geometry = geometry;
+            return true;
         }
         false
     }

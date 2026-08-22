@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-08-22：外部帧尾观测十轮加固
+
+1. 外部帧尾 blocker 改为 `LinearTailBlocker` 类型，避免调用点拼写漂移。
+2. 每个 blocker 的稳定 wire name 集中在唯一映射中。
+3. `ExternalElementColorPlan` 用单一 bitset 保存状态，安全位与清单不再来自两套 bool。
+4. cursor/output 命中抽成 half-open 纯几何函数。
+5. 负坐标输出、左上包含与右下排除边界有独立回归。
+6. 几何运算提升到 i64，i32 极值不再依赖饱和加法；非有限 pointer fail-closed。
+7. DPMS-off/soft-disabled 等不参与输出不会贡献 cursor/layer blocker。
+8. 跨输出清单只累积不被后一个空输出清除，policy 记录边界只接受类型化 blocker。
+9. `ColorDeliveryPolicyDecisionStatus` 可区分 unknown 与 observed-clear，并检查 safe/list、名称和去重一致性。
+10. render-decision IPC 同步公开当前 policy 的观测状态、blocker、safe 位与一致性结果，含 legacy/异常 payload 回归。
+
+## 2026-08-22：外部帧尾 schema/IPC 二十轮加固
+
+1. 当前 compositor blocker 的 wire name 改为 API 层唯一常量表。
+2. `is_known_linear_tail_blocker_name` 让诊断可识别当前版本名称而不复制匹配表。
+3. typed、raw JSON 与反序列化入口共享 32 项清单上限。
+4. `LinearTailInventoryObservation` 类型化 unknown/clear/blocked/malformed。
+5. `LinearTailInventoryIssue` 为每种失配提供稳定且不含 payload 的类别。
+6. `LinearTailInventorySummary` 统一状态、issue 与非敏感计数。
+7. 缺失/null 清单稳定归类为 unknown，并保持 schema-v1 兼容。
+8. `Some([])` 单独归类为 observed-clear。
+9. 非空合法清单单独归类为 observed-blocked。
+10. 非数组值归类为 malformed/non-array，而不是与 unknown 混同。
+11. 数组中的非字符串归类为 non-string-blocker。
+12. 空、超长或非 canonical 名称归类为 invalid-blocker-name。
+13. 重复名称归类为 duplicate-blocker。
+14. safe 位与空/非空清单冲突归类为 safe-flag-mismatch。
+15. raw future schema 若有清单但无 safe 位，归类为 missing-safe-flag。
+16. 当前已知 blocker 计数由唯一名称表计算。
+17. 合法 future blocker 保持前向兼容，并单独进入 unknown 计数。
+18. typed status 与 render-decision IPC 调用同一分类器，不再维护两套一致性逻辑。
+19. IPC 新增 state/issue/total/known/unknown 字段，同时保留旧 observation 字段兼容。
+20. typed/raw/serde/IPC 回归覆盖 legacy、clear、future、重复、类型错误、safe 失配和超限清单。
+
+---
+
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
 ### 进展（2026-08-20）：P0 last-success 诊断已完成

@@ -379,6 +379,118 @@ pub(super) struct ColorPipelineDecision {
         Option<Vec<crate::backend::wayland_udev::color_pipeline::OutputColorRegion>>,
 }
 
+/// Per-frame inventory of elements Smithay assembles outside the compositor's
+/// common linear-sRGB texture. Keeping the classes explicit makes fallback
+/// diagnostics actionable and gives later internalization work one checklist
+/// to update instead of another aggregate boolean.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LinearTailBlocker {
+    CompositorEncodedTail,
+    CaptureReadback,
+    SessionLockSurface,
+    DragIcon,
+    Cursor,
+    TopOrOverlayLayerSurface,
+}
+
+impl LinearTailBlocker {
+    const ALL: [Self; 6] = [
+        Self::CompositorEncodedTail,
+        Self::CaptureReadback,
+        Self::SessionLockSurface,
+        Self::DragIcon,
+        Self::Cursor,
+        Self::TopOrOverlayLayerSurface,
+    ];
+
+    const fn wire_name(self) -> &'static str {
+        crate::backend::api::LINEAR_TAIL_BLOCKER_NAMES[self as usize]
+    }
+
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ExternalElementColorPlan {
+    blocker_bits: u8,
+}
+
+impl ExternalElementColorPlan {
+    fn from_frame_flags(capture_readback: bool, session_lock: bool, drag_icon: bool) -> Self {
+        let mut plan = Self::default();
+        plan.set(LinearTailBlocker::CaptureReadback, capture_readback);
+        plan.set(LinearTailBlocker::SessionLockSurface, session_lock);
+        plan.set(LinearTailBlocker::DragIcon, drag_icon);
+        plan
+    }
+
+    fn set(&mut self, blocker: LinearTailBlocker, present: bool) {
+        if present {
+            self.blocker_bits |= blocker.bit();
+        } else {
+            self.blocker_bits &= !blocker.bit();
+        }
+    }
+
+    fn observe_output(
+        &mut self,
+        cursor: Option<(i32, i32)>,
+        origin: (i32, i32),
+        mode_size: (i32, i32),
+        participating: bool,
+        has_top_or_overlay_layer: bool,
+    ) {
+        if !participating {
+            return;
+        }
+        // An invalid pointer coordinate is not proof that the externally
+        // rendered cursor disappeared, so inventory it conservatively.
+        if cursor.is_none_or(|point| point_in_output(point, origin, mode_size)) {
+            self.set(LinearTailBlocker::Cursor, true);
+        }
+        if has_top_or_overlay_layer {
+            self.set(LinearTailBlocker::TopOrOverlayLayerSurface, true);
+        }
+    }
+
+    pub(super) fn is_safe(&self) -> bool {
+        self.blocker_bits == 0
+    }
+
+    pub(super) fn blockers(&self) -> Vec<LinearTailBlocker> {
+        LinearTailBlocker::ALL
+            .into_iter()
+            .filter(|blocker| self.blocker_bits & blocker.bit() != 0)
+            .collect()
+    }
+}
+
+fn rounded_pointer_location(x: f64, y: f64) -> Option<(i32, i32)> {
+    if !x.is_finite()
+        || !y.is_finite()
+        || x.round() < f64::from(i32::MIN)
+        || x.round() > f64::from(i32::MAX)
+        || y.round() < f64::from(i32::MIN)
+        || y.round() > f64::from(i32::MAX)
+    {
+        return None;
+    }
+    Some((x.round() as i32, y.round() as i32))
+}
+
+fn point_in_output(point: (i32, i32), origin: (i32, i32), mode_size: (i32, i32)) -> bool {
+    let (width, height) = mode_size;
+    if width <= 0 || height <= 0 {
+        return false;
+    }
+    let (x, y) = (i64::from(point.0), i64::from(point.1));
+    let (ox, oy) = (i64::from(origin.0), i64::from(origin.1));
+    x >= ox && y >= oy && x < ox + i64::from(width) && y < oy + i64::from(height)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PreparedColorDelivery {
     route: &'static str,
@@ -1350,10 +1462,10 @@ impl KmsState {
     /// the compositor has finalized that texture. Until those elements gain
     /// an explicit color-domain adapter, their presence requires the global
     /// encoded-sRGB fallback.
-    pub(super) fn external_elements_color_pipeline_safe(
+    pub(super) fn external_element_color_plan(
         &self,
         state: &crate::backend::wayland::state::JwmWaylandState,
-    ) -> bool {
+    ) -> ExternalElementColorPlan {
         let capture_pending = self.pending_screenshot.is_some()
             || self.pending_screenshot_region.is_some()
             || self
@@ -1364,35 +1476,32 @@ impl KmsState {
                 .image_capture_pending
                 .as_ref()
                 .is_some_and(|queue| !queue.lock_safe().is_empty());
-        if capture_pending || state.session_locked || state.dnd_icon.is_some() {
-            return false;
-        }
+        let mut plan = ExternalElementColorPlan::from_frame_flags(
+            capture_pending,
+            state.session_locked,
+            state.dnd_icon.is_some(),
+        );
 
-        let cursor_x = state.pointer_location.x.round() as i32;
-        let cursor_y = state.pointer_location.y.round() as i32;
+        let cursor = rounded_pointer_location(state.pointer_location.x, state.pointer_location.y);
         for output in &self.outputs {
-            if output.dpms_off || state.soft_disabled_outputs.contains(&output.output_name) {
+            let participating =
+                !output.dpms_off && !state.soft_disabled_outputs.contains(&output.output_name);
+            if !participating {
                 continue;
             }
-            let (ox, oy) = output.origin;
-            let (width, height) = output.mode_size;
-            if cursor_x >= ox
-                && cursor_y >= oy
-                && cursor_x < ox.saturating_add(width)
-                && cursor_y < oy.saturating_add(height)
-            {
-                return false;
-            }
-
             let map = layer_map_for_output(&output.output);
-            if [WlrLayer::Overlay, WlrLayer::Top]
+            let has_top_or_overlay_layer = [WlrLayer::Overlay, WlrLayer::Top]
                 .into_iter()
-                .any(|layer| map.layers_on(layer).next().is_some())
-            {
-                return false;
-            }
+                .any(|layer| map.layers_on(layer).next().is_some());
+            plan.observe_output(
+                cursor,
+                output.origin,
+                output.mode_size,
+                participating,
+                has_top_or_overlay_layer,
+            );
         }
-        true
+        plan
     }
 
     /// Record the current frame's color-delivery decision without claiming it
@@ -1402,9 +1511,10 @@ impl KmsState {
     pub(super) fn record_color_delivery_attempt(
         &mut self,
         decision: &ColorPipelineDecision,
-        linear_tail_safe: bool,
+        linear_tail_blockers: &[LinearTailBlocker],
         scene_linear_active: bool,
     ) {
+        let linear_tail_safe = linear_tail_blockers.is_empty();
         let prepared = prepared_color_delivery(decision, linear_tail_safe, scene_linear_active);
         self.color_delivery_policy_sequence = self.color_delivery_policy_sequence.saturating_add(1);
         self.last_color_delivery_policy =
@@ -1415,6 +1525,12 @@ impl KmsState {
                 reason: prepared.fallback_reason.map(str::to_owned),
                 scene_linear_active,
                 linear_tail_safe,
+                linear_tail_blockers: Some(
+                    linear_tail_blockers
+                        .iter()
+                        .map(|blocker| blocker.wire_name().to_owned())
+                        .collect(),
+                ),
             });
         self.prepared_color_delivery = (!decision.delivery_blocked).then_some(prepared);
     }
@@ -1438,6 +1554,7 @@ impl KmsState {
                 reason: prepared.fallback_reason.map(str::to_owned),
                 scene_linear_active: false,
                 linear_tail_safe: false,
+                linear_tail_blockers: None,
             });
         self.prepared_color_delivery = Some(prepared);
     }
@@ -5511,17 +5628,17 @@ fn spawn_screenshot_png_write(
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
     use super::{
-        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, FrameQueueBoundary,
-        OutputColorDeliveryTracker, OutputColorRegionCandidate, QueuedFrameData,
-        client_direct_scanout_presented, compositor_output_texture_identity_matches,
-        connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
-        direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
-        frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
-        legacy_color_delivery_attempt_needed, output_color_target,
-        plan_output_configuration_rollback, plan_software_color_regions, prepared_color_delivery,
-        rollback_mode_requires_restore, smithay_transform_to_wl,
-        submitted_color_delivery_observation, vblank_is_not_older_than_queue,
-        wl_transform_to_smithay,
+        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, ExternalElementColorPlan,
+        FrameQueueBoundary, LinearTailBlocker, OutputColorDeliveryTracker,
+        OutputColorRegionCandidate, QueuedFrameData, client_direct_scanout_presented,
+        compositor_output_texture_identity_matches, connector_color_property_neutral_value,
+        crtc_color_property, ctm_offload_allowed, direct_scanout_allowed_for_color_retry,
+        frame_flags_for_color_delivery, frame_watchdog_remaining, frame_watchdog_timeout,
+        gamma_ramp_is_identity, legacy_color_delivery_attempt_needed, output_color_target,
+        plan_output_configuration_rollback, plan_software_color_regions, point_in_output,
+        prepared_color_delivery, rollback_mode_requires_restore, rounded_pointer_location,
+        smithay_transform_to_wl, submitted_color_delivery_observation,
+        vblank_is_not_older_than_queue, wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
@@ -5702,6 +5819,147 @@ mod compositor_texture_ownership_tests {
         let blocked = prepared_color_delivery(&decision, true, true);
         assert_eq!(blocked.route, "hold_last_success");
         assert_eq!(blocked.fallback_reason, Some("kms_color_state_unresolved"));
+    }
+
+    #[test]
+    fn external_element_plan_reports_every_visible_frame_tail_class() {
+        let safe = ExternalElementColorPlan::default();
+        assert!(safe.is_safe());
+        assert!(safe.blockers().is_empty());
+
+        let mut blocked = ExternalElementColorPlan::from_frame_flags(true, true, true);
+        blocked.observe_output(Some((5, 5)), (0, 0), (10, 10), true, true);
+        assert!(!blocked.is_safe());
+        assert_eq!(
+            blocked
+                .blockers()
+                .into_iter()
+                .map(LinearTailBlocker::wire_name)
+                .collect::<Vec<_>>(),
+            [
+                "capture_readback",
+                "session_lock_surface",
+                "drag_icon",
+                "cursor",
+                "top_or_overlay_layer_surface",
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_output_hit_testing_uses_half_open_signed_geometry() {
+        let origin = (-1920, -1080);
+        let size = (1920, 1080);
+        assert!(point_in_output((-1920, -1080), origin, size));
+        assert!(point_in_output((-1, -1), origin, size));
+        assert!(!point_in_output((0, -1), origin, size));
+        assert!(!point_in_output((-1, 0), origin, size));
+        assert!(!point_in_output((-1921, -1080), origin, size));
+        assert!(!point_in_output((0, 0), origin, (0, 1080)));
+    }
+
+    #[test]
+    fn cursor_output_hit_testing_cannot_overflow_i32_edges() {
+        assert!(point_in_output(
+            (i32::MAX, i32::MAX),
+            (i32::MAX, i32::MAX),
+            (1, 1),
+        ));
+        assert!(point_in_output(
+            (i32::MIN, i32::MIN),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+        ));
+        assert!(!point_in_output(
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+        ));
+    }
+
+    #[test]
+    fn pointer_rounding_rejects_nonfinite_or_unrepresentable_coordinates() {
+        assert_eq!(rounded_pointer_location(4.49, -2.5), Some((4, -3)));
+        assert_eq!(rounded_pointer_location(f64::NAN, 0.0), None);
+        assert_eq!(rounded_pointer_location(0.0, f64::INFINITY), None);
+        assert_eq!(
+            rounded_pointer_location(f64::from(i32::MAX) + 1.0, 0.0),
+            None
+        );
+    }
+
+    #[test]
+    fn inactive_outputs_contribute_no_cursor_or_layer_blocker() {
+        let mut plan = ExternalElementColorPlan::default();
+        plan.observe_output(Some((5, 5)), (0, 0), (10, 10), false, true);
+        assert!(plan.is_safe());
+    }
+
+    #[test]
+    fn output_inventory_accumulates_instead_of_last_output_winning() {
+        let mut plan = ExternalElementColorPlan::default();
+        plan.observe_output(Some((5, 5)), (0, 0), (10, 10), true, true);
+        plan.observe_output(Some((5, 5)), (100, 100), (10, 10), true, false);
+        assert_eq!(
+            plan.blockers(),
+            [
+                LinearTailBlocker::Cursor,
+                LinearTailBlocker::TopOrOverlayLayerSurface,
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_pointer_state_fails_closed_on_a_participating_output() {
+        let mut plan = ExternalElementColorPlan::default();
+        plan.observe_output(None, (0, 0), (1920, 1080), true, false);
+        assert_eq!(plan.blockers(), [LinearTailBlocker::Cursor]);
+    }
+
+    #[test]
+    fn color_delivery_policy_serializes_observed_tail_inventory() {
+        let status = crate::backend::api::ColorDeliveryPolicyDecisionStatus {
+            sequence: 3,
+            composited_route: "global_srgb_fallback".into(),
+            blocked: false,
+            reason: Some("linear_tail_unsafe".into()),
+            scene_linear_active: true,
+            linear_tail_safe: false,
+            linear_tail_blockers: Some(vec!["cursor".into(), "drag_icon".into()]),
+        };
+        let encoded = serde_json::to_value(&status).unwrap();
+        assert!(status.linear_tail_inventory_consistent());
+        assert_eq!(
+            status.observed_linear_tail_blockers().unwrap(),
+            ["cursor", "drag_icon"]
+        );
+        assert_eq!(encoded["linear_tail_blockers"][0], "cursor");
+        assert_eq!(encoded["linear_tail_blockers"][1], "drag_icon");
+
+        let mut observed_clear = status.clone();
+        observed_clear.linear_tail_safe = true;
+        observed_clear.linear_tail_blockers = Some(Vec::new());
+        let clear = serde_json::to_value(observed_clear).unwrap();
+        assert_eq!(clear["linear_tail_blockers"], serde_json::json!([]));
+
+        let mut legacy = encoded;
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("linear_tail_blockers");
+        let decoded: crate::backend::api::ColorDeliveryPolicyDecisionStatus =
+            serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.linear_tail_blockers, None);
+        assert!(decoded.linear_tail_inventory_consistent());
+
+        let mut inconsistent = status;
+        inconsistent.linear_tail_safe = true;
+        assert!(!inconsistent.linear_tail_inventory_consistent());
+        inconsistent.linear_tail_safe = false;
+        inconsistent.linear_tail_blockers = Some(vec!["cursor".into(), "cursor".into()]);
+        assert!(!inconsistent.linear_tail_inventory_consistent());
+        inconsistent.linear_tail_blockers = Some(vec!["future_blocker_2".into()]);
+        assert!(inconsistent.linear_tail_inventory_consistent());
     }
 
     #[test]

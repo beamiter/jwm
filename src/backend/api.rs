@@ -297,6 +297,469 @@ pub struct ColorDeliveryPolicyDecisionStatus {
     pub reason: Option<String>,
     pub scene_linear_active: bool,
     pub linear_tail_safe: bool,
+    /// Frame-tail classes observed outside the common linear workspace when
+    /// this decision was evaluated. `Some([])` means the inventory ran and
+    /// found none; `None` means it was not applicable or an older schema-v1
+    /// payload did not record it. The inventory is diagnostic, not proof that
+    /// any one class caused the selected route.
+    #[serde(default, deserialize_with = "deserialize_linear_tail_blockers")]
+    pub linear_tail_blockers: Option<Vec<String>>,
+}
+
+/// Maximum number of blocker classes accepted from either the typed status
+/// schema or its JSON diagnostic representation.
+pub const MAX_LINEAR_TAIL_BLOCKERS: usize = 32;
+/// Maximum bytes in one stable or future blocker name.
+pub const MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES: usize = 64;
+
+/// Stable blocker names emitted by the current compositor. Future names that
+/// satisfy the grammar remain valid and are counted as unknown.
+pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 6] = [
+    "compositor_encoded_tail",
+    "capture_readback",
+    "session_lock_surface",
+    "drag_icon",
+    "cursor",
+    "top_or_overlay_layer_surface",
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearTailInventoryObservation {
+    Unknown,
+    ObservedClear,
+    ObservedBlocked,
+    Malformed,
+}
+
+impl LinearTailInventoryObservation {
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::ObservedClear => "observed_clear",
+            Self::ObservedBlocked => "observed_blocked",
+            Self::Malformed => "malformed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinearTailInventoryIssue {
+    NonArray,
+    TooManyBlockers,
+    NonStringBlocker,
+    InvalidBlockerName,
+    DuplicateBlocker,
+    MissingSafeFlag,
+    SafeFlagMismatch,
+}
+
+impl LinearTailInventoryIssue {
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::NonArray => "non_array",
+            Self::TooManyBlockers => "too_many_blockers",
+            Self::NonStringBlocker => "non_string_blocker",
+            Self::InvalidBlockerName => "invalid_blocker_name",
+            Self::DuplicateBlocker => "duplicate_blocker",
+            Self::MissingSafeFlag => "missing_safe_flag",
+            Self::SafeFlagMismatch => "safe_flag_mismatch",
+        }
+    }
+}
+
+/// Content-free classification of one linear-tail inventory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinearTailInventorySummary {
+    pub observation: LinearTailInventoryObservation,
+    pub issue: Option<LinearTailInventoryIssue>,
+    pub blocker_count: usize,
+    pub known_blocker_count: usize,
+    pub unknown_blocker_count: usize,
+}
+
+impl LinearTailInventorySummary {
+    #[must_use]
+    pub const fn is_consistent(self) -> bool {
+        self.issue.is_none()
+    }
+}
+
+impl ColorDeliveryPolicyDecisionStatus {
+    /// Whether an observed inventory agrees with its aggregate safety bit.
+    /// `None` remains valid because legacy/inapplicable payloads are unknown;
+    /// unknown future blocker names are accepted, while empty names and
+    /// duplicates are rejected as malformed diagnostics.
+    #[must_use]
+    pub fn linear_tail_inventory_consistent(&self) -> bool {
+        self.linear_tail_inventory_summary().is_consistent()
+    }
+
+    /// Classify unknown, clear, blocked, and malformed inventories while
+    /// keeping future valid names forward-compatible.
+    #[must_use]
+    pub fn linear_tail_inventory_summary(&self) -> LinearTailInventorySummary {
+        match self.linear_tail_blockers.as_deref() {
+            None => summarize_linear_tail_names(Some(self.linear_tail_safe), None),
+            Some(blockers) if blockers.len() > MAX_LINEAR_TAIL_BLOCKERS => {
+                malformed_linear_tail_summary(LinearTailInventoryIssue::TooManyBlockers)
+            }
+            Some(blockers) => summarize_linear_tail_names(
+                Some(self.linear_tail_safe),
+                Some(blockers.iter().map(String::as_str).collect()),
+            ),
+        }
+    }
+
+    /// The observed blocker list, distinguishing unknown (`None`) from an
+    /// observed clear inventory (`Some([])`).
+    #[must_use]
+    pub fn observed_linear_tail_blockers(&self) -> Option<&[String]> {
+        self.linear_tail_blockers.as_deref()
+    }
+}
+
+pub(crate) fn linear_tail_blocker_name_is_valid(blocker: &str) -> bool {
+    !blocker.is_empty()
+        && blocker.len() <= MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES
+        && blocker
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[must_use]
+pub fn is_known_linear_tail_blocker_name(blocker: &str) -> bool {
+    LINEAR_TAIL_BLOCKER_NAMES.contains(&blocker)
+}
+
+fn malformed_linear_tail_summary(issue: LinearTailInventoryIssue) -> LinearTailInventorySummary {
+    LinearTailInventorySummary {
+        observation: LinearTailInventoryObservation::Malformed,
+        issue: Some(issue),
+        blocker_count: 0,
+        known_blocker_count: 0,
+        unknown_blocker_count: 0,
+    }
+}
+
+fn summarize_linear_tail_names(
+    safe: Option<bool>,
+    blockers: Option<Vec<&str>>,
+) -> LinearTailInventorySummary {
+    let Some(blockers) = blockers else {
+        return LinearTailInventorySummary {
+            observation: LinearTailInventoryObservation::Unknown,
+            issue: None,
+            blocker_count: 0,
+            known_blocker_count: 0,
+            unknown_blocker_count: 0,
+        };
+    };
+    if blockers.len() > MAX_LINEAR_TAIL_BLOCKERS {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::TooManyBlockers);
+    }
+    if blockers
+        .iter()
+        .any(|blocker| !linear_tail_blocker_name_is_valid(blocker))
+    {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::InvalidBlockerName);
+    }
+    if blockers
+        .iter()
+        .enumerate()
+        .any(|(index, blocker)| blockers[..index].contains(blocker))
+    {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::DuplicateBlocker);
+    }
+    let blocker_count = blockers.len();
+    let known_blocker_count = blockers
+        .iter()
+        .filter(|blocker| is_known_linear_tail_blocker_name(blocker))
+        .count();
+    let summary = LinearTailInventorySummary {
+        observation: if blockers.is_empty() {
+            LinearTailInventoryObservation::ObservedClear
+        } else {
+            LinearTailInventoryObservation::ObservedBlocked
+        },
+        issue: if safe.is_none() {
+            Some(LinearTailInventoryIssue::MissingSafeFlag)
+        } else if safe != Some(blockers.is_empty()) {
+            Some(LinearTailInventoryIssue::SafeFlagMismatch)
+        } else {
+            None
+        },
+        blocker_count,
+        known_blocker_count,
+        unknown_blocker_count: blocker_count.saturating_sub(known_blocker_count),
+    };
+    if summary.issue.is_some() {
+        LinearTailInventorySummary {
+            observation: LinearTailInventoryObservation::Malformed,
+            ..summary
+        }
+    } else {
+        summary
+    }
+}
+
+pub(crate) fn summarize_linear_tail_inventory_value(
+    safe: Option<bool>,
+    value: Option<&serde_json::Value>,
+) -> LinearTailInventorySummary {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return summarize_linear_tail_names(safe, None);
+    };
+    let Some(blockers) = value.as_array() else {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::NonArray);
+    };
+    if blockers.len() > MAX_LINEAR_TAIL_BLOCKERS {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::TooManyBlockers);
+    }
+    let Some(names) = blockers
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return malformed_linear_tail_summary(LinearTailInventoryIssue::NonStringBlocker);
+    };
+    summarize_linear_tail_names(safe, Some(names))
+}
+
+fn deserialize_linear_tail_blockers<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalInventoryVisitor;
+    struct InventoryVisitor;
+    struct BoundedBlockerName(String);
+
+    impl<'de> Deserialize<'de> for BoundedBlockerName {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            struct NameVisitor;
+
+            impl serde::de::Visitor<'_> for NameVisitor {
+                type Value = BoundedBlockerName;
+
+                fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    write!(
+                        formatter,
+                        "a blocker name of at most {MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES} bytes"
+                    )
+                }
+
+                fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    if value.len() > MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES {
+                        return Err(E::custom("linear-tail blocker name exceeds its byte limit"));
+                    }
+                    Ok(BoundedBlockerName(value.to_owned()))
+                }
+
+                fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    if value.len() > MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES {
+                        return Err(E::custom("linear-tail blocker name exceeds its byte limit"));
+                    }
+                    Ok(BoundedBlockerName(value))
+                }
+            }
+
+            deserializer.deserialize_string(NameVisitor)
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for OptionalInventoryVisitor {
+        type Value = Option<Vec<String>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null or a bounded linear-tail blocker array")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_seq(InventoryVisitor).map(Some)
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for InventoryVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded linear-tail blocker array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut blockers = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_LINEAR_TAIL_BLOCKERS),
+            );
+            while blockers.len() < MAX_LINEAR_TAIL_BLOCKERS {
+                let Some(blocker) = sequence.next_element::<BoundedBlockerName>()? else {
+                    return Ok(blockers);
+                };
+                blockers.push(blocker.0);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "linear-tail blocker inventory exceeds its entry limit",
+                ));
+            }
+            Ok(blockers)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalInventoryVisitor)
+}
+
+#[cfg(test)]
+mod linear_tail_inventory_tests {
+    use super::*;
+
+    fn status(safe: bool, blockers: Option<Vec<&str>>) -> ColorDeliveryPolicyDecisionStatus {
+        ColorDeliveryPolicyDecisionStatus {
+            sequence: 1,
+            composited_route: "global_srgb_fallback".into(),
+            blocked: false,
+            reason: None,
+            scene_linear_active: true,
+            linear_tail_safe: safe,
+            linear_tail_blockers: blockers
+                .map(|blockers| blockers.into_iter().map(ToOwned::to_owned).collect()),
+        }
+    }
+
+    #[test]
+    fn summaries_distinguish_unknown_clear_blocked_and_future_names() {
+        let unknown = status(false, None).linear_tail_inventory_summary();
+        assert_eq!(unknown.observation, LinearTailInventoryObservation::Unknown);
+        assert!(unknown.is_consistent());
+
+        let clear = status(true, Some(Vec::new())).linear_tail_inventory_summary();
+        assert_eq!(
+            clear.observation,
+            LinearTailInventoryObservation::ObservedClear
+        );
+        assert_eq!(clear.blocker_count, 0);
+
+        let blocked =
+            status(false, Some(vec!["cursor", "future_blocker_2"])).linear_tail_inventory_summary();
+        assert_eq!(
+            blocked.observation,
+            LinearTailInventoryObservation::ObservedBlocked
+        );
+        assert_eq!(blocked.blocker_count, 2);
+        assert_eq!(blocked.known_blocker_count, 1);
+        assert_eq!(blocked.unknown_blocker_count, 1);
+        assert!(blocked.is_consistent());
+        assert!(is_known_linear_tail_blocker_name("cursor"));
+        assert!(!is_known_linear_tail_blocker_name("future_blocker_2"));
+    }
+
+    #[test]
+    fn raw_inventory_classification_reports_one_stable_issue() {
+        let cases = [
+            (
+                Some(false),
+                serde_json::json!("cursor"),
+                LinearTailInventoryIssue::NonArray,
+            ),
+            (
+                Some(false),
+                serde_json::json!(["cursor", 1]),
+                LinearTailInventoryIssue::NonStringBlocker,
+            ),
+            (
+                Some(false),
+                serde_json::json!(["Bad-Name"]),
+                LinearTailInventoryIssue::InvalidBlockerName,
+            ),
+            (
+                Some(false),
+                serde_json::json!(["cursor", "cursor"]),
+                LinearTailInventoryIssue::DuplicateBlocker,
+            ),
+            (
+                None,
+                serde_json::json!(["cursor"]),
+                LinearTailInventoryIssue::MissingSafeFlag,
+            ),
+            (
+                Some(true),
+                serde_json::json!(["cursor"]),
+                LinearTailInventoryIssue::SafeFlagMismatch,
+            ),
+        ];
+        for (safe, value, expected) in cases {
+            let summary = summarize_linear_tail_inventory_value(safe, Some(&value));
+            assert_eq!(
+                summary.observation,
+                LinearTailInventoryObservation::Malformed
+            );
+            assert_eq!(summary.issue, Some(expected));
+            assert!(!summary.is_consistent());
+        }
+    }
+
+    #[test]
+    fn blocker_entry_limit_applies_to_typed_raw_and_deserialized_schemas() {
+        let blockers = vec!["future"; MAX_LINEAR_TAIL_BLOCKERS + 1];
+        let typed = status(false, Some(blockers.clone())).linear_tail_inventory_summary();
+        assert_eq!(typed.issue, Some(LinearTailInventoryIssue::TooManyBlockers));
+
+        let raw = serde_json::json!(blockers);
+        assert_eq!(
+            summarize_linear_tail_inventory_value(Some(false), Some(&raw)).issue,
+            Some(LinearTailInventoryIssue::TooManyBlockers)
+        );
+
+        let encoded = serde_json::json!({
+            "sequence": 1,
+            "composited_route": "global_srgb_fallback",
+            "blocked": false,
+            "reason": null,
+            "scene_linear_active": true,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": blockers,
+        });
+        assert!(serde_json::from_value::<ColorDeliveryPolicyDecisionStatus>(encoded).is_err());
+
+        let huge_name = serde_json::json!({
+            "sequence": 1,
+            "composited_route": "global_srgb_fallback",
+            "blocked": false,
+            "reason": null,
+            "scene_linear_active": true,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": ["x".repeat(1024 * 1024)],
+        });
+        assert!(serde_json::from_value::<ColorDeliveryPolicyDecisionStatus>(huge_name).is_err());
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

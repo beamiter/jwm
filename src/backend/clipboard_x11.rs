@@ -115,11 +115,13 @@ impl Clipboard {
     }
 
     /// Text copied since the last call, oldest first.
+    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn drain_captured(&self) -> Vec<String> {
         self.captured.try_iter().collect()
     }
 
     /// Offer `text` to other applications.
+    #[cfg(feature = "backend-x11rb")]
     pub(crate) fn set_text(&self, text: &str) -> bool {
         self.serve.send(text.to_string()).is_ok()
     }
@@ -128,6 +130,7 @@ impl Clipboard {
     ///
     /// The remote helper watches captures on one thread and serves incoming
     /// text from another, and neither may block the other.
+    #[cfg(feature = "remote-x11")]
     pub(crate) fn split(self) -> (ClipboardCaptures, ClipboardSetter) {
         (
             ClipboardCaptures(self.captured),
@@ -137,8 +140,10 @@ impl Clipboard {
 }
 
 /// Receiving half: text copied on this display.
+#[cfg(feature = "remote-x11")]
 pub(crate) struct ClipboardCaptures(std::sync::mpsc::Receiver<String>);
 
+#[cfg(feature = "remote-x11")]
 impl ClipboardCaptures {
     /// Block for the next captured text, giving up after `timeout`.
     ///
@@ -150,9 +155,11 @@ impl ClipboardCaptures {
 }
 
 /// Sending half: text to offer to other applications on this display.
+#[cfg(feature = "remote-x11")]
 #[derive(Clone)]
 pub(crate) struct ClipboardSetter(std::sync::mpsc::Sender<String>);
 
+#[cfg(feature = "remote-x11")]
 impl ClipboardSetter {
     pub(crate) fn set_text(&self, text: &str) -> bool {
         self.0.send(text.to_string()).is_ok()

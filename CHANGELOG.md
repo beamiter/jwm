@@ -7,6 +7,20 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Direct DRM/KMS color delivery now inventories capture, session-lock, drag
+  icon, cursor, and top/overlay layer surfaces as separate frame-tail classes.
+  The same plan selects the conservative global-sRGB fallback and is exposed
+  as `last_policy_decision.linear_tail_blockers`, so diagnostics report the
+  observed remaining adaptation inventory instead of one aggregate boolean.
+  `Some([])` records an evaluated clear tail while missing/null preserves
+  unknown or non-applicable legacy status; entries are not presented as proof
+  that one class caused the selected route.
+- Linear-tail diagnostics now share a bounded typed classifier across the
+  backend status and render-decision IPC. The IPC retains its compatibility
+  observation while adding distinct unknown/clear/blocked/malformed state, a
+  stable non-payload issue code, and total/known/future blocker counts. Valid
+  future names remain forward-compatible; malformed and over-limit arrays are
+  never mistaken for unknown legacy status or reflected unboundedly.
 - Long native-shell lists now share desktop-standard navigation: `Home`/`End`,
   `Page Up`/`Page Down`, and backward `Shift+Tab`, including the launcher,
   Shell Hub, notification history and device/content pickers. Direct Unicode

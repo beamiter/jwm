@@ -296,8 +296,18 @@ The compositor's live counters are on `Alt+Shift+F12`; see
 [the debug HUD](docs/debug-hud.md).
 On direct DRM/KMS sessions, `jwm-tool msg get_wayland_status` now exposes a
 versioned `color_delivery` snapshot. Its `last_policy_decision` describes the
-most recent composited-route selection, while each output's `last_success`
+most recent composited-route selection and, when evaluated, inventories any
+capture, cursor, drag, lock, or top/overlay elements still outside the common
+linear tail. This is an observed diagnostic inventory, not a claim that one
+listed class caused the selected route. `[]` means the inventory ran and found
+none; a missing/null value means older or non-applicable status. Each output's `last_success`
 records its actual route only after a page-flip/vblank confirms presentation.
+The render-decisions view keeps its legacy `linear_tail_observation` field and
+also reports `linear_tail_inventory_state` (`unknown`, `observed_clear`,
+`observed_blocked`, or `malformed`), a stable issue code, and bounded
+total/known/future counts. Future canonical blocker names remain valid; a bad
+shape, duplicate, invalid name, safe/list mismatch, or over-limit inventory is
+reported as malformed rather than silently becoming unknown.
 Every success carries the policy sequence it was queued under, so partial or
 mixed multi-output cohorts remain auditable. Hardware color-property and
 participation transitions invalidate prior evidence until a replacement frame

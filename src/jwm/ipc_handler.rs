@@ -849,10 +849,38 @@ fn render_decisions_json(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let current_policy_sequence = color_delivery
-        .and_then(|status| status.get("last_policy_decision"))
+    let current_policy_decision =
+        color_delivery.and_then(|status| status.get("last_policy_decision"));
+    let current_policy_sequence = current_policy_decision
         .and_then(|decision| decision.get("sequence"))
         .and_then(|value| value.as_u64());
+    let current_linear_tail_safe = current_policy_decision
+        .and_then(|decision| decision.get("linear_tail_safe"))
+        .and_then(|value| value.as_bool());
+    let current_linear_tail_blockers_value =
+        current_policy_decision.and_then(|decision| decision.get("linear_tail_blockers"));
+    let linear_tail_inventory = crate::backend::api::summarize_linear_tail_inventory_value(
+        current_linear_tail_safe,
+        current_linear_tail_blockers_value,
+    );
+    // Preserve a bounded, structurally valid future inventory in diagnostics,
+    // including one whose aggregate safe bit disagrees. Malformed entries or
+    // an over-limit array are classified without reflecting their contents.
+    let current_linear_tail_blockers = current_linear_tail_blockers_value
+        .and_then(serde_json::Value::as_array)
+        .filter(|blockers| blockers.len() <= crate::backend::api::MAX_LINEAR_TAIL_BLOCKERS)
+        .filter(|blockers| {
+            blockers.iter().all(|blocker| {
+                blocker
+                    .as_str()
+                    .is_some_and(crate::backend::api::linear_tail_blocker_name_is_valid)
+            })
+        })
+        .filter(|blockers| {
+            blockers.iter().enumerate().all(|(index, blocker)| {
+                !blockers[..index].iter().any(|previous| previous == blocker)
+            })
+        });
     let delivery_output_count = participating_delivery_outputs.len();
     let successful_deliveries = participating_delivery_outputs
         .iter()
@@ -962,6 +990,21 @@ fn render_decisions_json(
         "policy_sequence": current_policy_sequence,
         "observed_policy_sequences": &observed_policy_sequences,
         "observed_routes": observed_routes,
+        // Compatibility classification retained for existing IPC consumers.
+        "linear_tail_observation": match linear_tail_inventory.observation {
+            crate::backend::api::LinearTailInventoryObservation::Malformed => "malformed",
+            crate::backend::api::LinearTailInventoryObservation::Unknown => "unknown_or_not_applicable",
+            crate::backend::api::LinearTailInventoryObservation::ObservedClear
+            | crate::backend::api::LinearTailInventoryObservation::ObservedBlocked => "observed_current_policy",
+        },
+        "linear_tail_inventory_state": linear_tail_inventory.observation.wire_name(),
+        "linear_tail_inventory_issue": linear_tail_inventory.issue.map(|issue| issue.wire_name()),
+        "linear_tail_blocker_count": linear_tail_inventory.blocker_count,
+        "linear_tail_known_blocker_count": linear_tail_inventory.known_blocker_count,
+        "linear_tail_unknown_blocker_count": linear_tail_inventory.unknown_blocker_count,
+        "linear_tail_safe": current_linear_tail_safe,
+        "linear_tail_blockers": current_linear_tail_blockers,
+        "linear_tail_inventory_consistent": linear_tail_inventory.is_consistent(),
         "scene_linear_target_active": scene_linear_target_active,
         "capability": if color_render_path_enabled && scene_linear_target_active {
             "normalized_linear_srgb_per_output_delivery"
@@ -3775,7 +3818,9 @@ mod tests {
             "schema_version": 1,
             "last_policy_decision": {
                 "sequence": 9,
-                "composited_route": "software_per_output_regions"
+                "composited_route": "software_per_output_regions",
+                "linear_tail_safe": false,
+                "linear_tail_blockers": ["cursor"]
             },
             "outputs": [{
                 "output_name": "DP-1",
@@ -3814,6 +3859,150 @@ mod tests {
         assert_eq!(
             decisions["color_pipeline"]["observed_routes"]["software_per_output_regions"],
             1
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_observation"],
+            "observed_current_policy"
+        );
+        assert_eq!(decisions["color_pipeline"]["linear_tail_safe"], false);
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_blockers"],
+            serde_json::json!(["cursor"])
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_consistent"],
+            true
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_state"],
+            "observed_blocked"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_issue"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn render_decisions_distinguish_unknown_and_inconsistent_tail_inventory() {
+        let delivery = |decision: serde_json::Value| {
+            serde_json::json!({
+                "schema_version": 1,
+                "last_policy_decision": decision,
+                "outputs": []
+            })
+        };
+        let render = |delivery: &serde_json::Value| {
+            render_decisions_json(
+                None,
+                None,
+                &[],
+                Some(delivery),
+                0,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+            )
+        };
+
+        let legacy = delivery(serde_json::json!({
+            "sequence": 1,
+            "linear_tail_safe": false
+        }));
+        let decisions = render(&legacy);
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_observation"],
+            "unknown_or_not_applicable"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_consistent"],
+            true
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_state"],
+            "unknown"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_issue"],
+            serde_json::Value::Null
+        );
+
+        let inconsistent = delivery(serde_json::json!({
+            "sequence": 2,
+            "linear_tail_safe": true,
+            "linear_tail_blockers": ["cursor", "cursor"]
+        }));
+        let decisions = render(&inconsistent);
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_consistent"],
+            false
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_issue"],
+            "duplicate_blocker"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_blockers"],
+            serde_json::Value::Null
+        );
+
+        let malformed = delivery(serde_json::json!({
+            "sequence": 3,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": "cursor"
+        }));
+        let decisions = render(&malformed);
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_observation"],
+            "malformed"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_consistent"],
+            false
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_blockers"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_issue"],
+            "non_array"
+        );
+
+        let future = delivery(serde_json::json!({
+            "sequence": 4,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": ["cursor", "future_blocker_2"]
+        }));
+        let decisions = render(&future);
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_state"],
+            "observed_blocked"
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_known_blocker_count"],
+            1
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_unknown_blocker_count"],
+            1
+        );
+        assert_eq!(
+            decisions["color_pipeline"]["linear_tail_inventory_consistent"],
+            true
+        );
+
+        let clear = delivery(serde_json::json!({
+            "sequence": 5,
+            "linear_tail_safe": true,
+            "linear_tail_blockers": []
+        }));
+        assert_eq!(
+            render(&clear)["color_pipeline"]["linear_tail_inventory_state"],
+            "observed_clear"
         );
     }
 
