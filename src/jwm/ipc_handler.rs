@@ -51,6 +51,18 @@ fn runtime_health(config_status: &serde_json::Value, monitor_count: usize) -> Ru
     RuntimeHealth::from_reasons(reasons)
 }
 
+fn fullscreen_screenshot_submission_response(
+    submission: Result<std::path::PathBuf, String>,
+) -> IpcResponse {
+    match submission {
+        Ok(path) => IpcResponse::ok(Some(serde_json::json!({
+            "status": "queued",
+            "path": path.to_string_lossy(),
+        }))),
+        Err(error) => IpcResponse::err(error),
+    }
+}
+
 fn resolved_client_monitor_num(
     monitors: &slotmap::SlotMap<MonitorKey, WMMonitor>,
     client: &WMClient,
@@ -1295,6 +1307,16 @@ impl Jwm {
         name: &str,
         args: &serde_json::Value,
     ) -> IpcResponse {
+        // This remains a dispatch command so it can be bound to a key, but IPC
+        // callers need the asynchronous submission contract and destination
+        // rather than a bare success bit that could be mistaken for a saved PNG.
+        if name == "take_screenshot_fullscreen" {
+            return fullscreen_screenshot_submission_response(
+                self.submit_screenshot_fullscreen(backend)
+                    .map_err(|error| error.to_string()),
+            );
+        }
+
         // Special command: reload_config
         if name == "reload_config" {
             return self.do_config_reload(backend);
@@ -3020,10 +3042,11 @@ mod tests {
     use super::{
         MAX_COMMAND_BATCH_ENTRIES, MAX_CONFIG_BATCH_CHANGES, client_window_info,
         color_managed_surface_json, color_session_policy_json, color_surface_summary_json,
-        optional_protocol_enabled_from_flags, output_color_policy_json, parse_benchmark_request,
-        parse_command_batch_entries, parse_config_batch_changes, parse_optional_u32_ipc_arg,
-        parse_required_i32_ipc_arg, render_decisions_json, resolved_client_monitor_num,
-        runtime_health, tagged_client_count, workspace_layout_state,
+        fullscreen_screenshot_submission_response, optional_protocol_enabled_from_flags,
+        output_color_policy_json, parse_benchmark_request, parse_command_batch_entries,
+        parse_config_batch_changes, parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg,
+        render_decisions_json, resolved_client_monitor_num, runtime_health, tagged_client_count,
+        workspace_layout_state,
     };
     use crate::application::BenchmarkRequest;
     use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
@@ -3034,6 +3057,33 @@ mod tests {
     use crate::core::state::WMState;
     use crate::ipc::RuntimeHealthStatus;
     use std::rc::Rc;
+
+    #[test]
+    fn fullscreen_screenshot_ipc_reports_an_explicit_queued_submission() {
+        let response = fullscreen_screenshot_submission_response(Ok(std::path::PathBuf::from(
+            "/tmp/screenshot.png",
+        )));
+
+        assert!(response.success);
+        assert!(response.error.is_none());
+        let data = response.data.expect("queued submission data");
+        assert_eq!(data["status"], "queued");
+        assert_eq!(data["path"], "/tmp/screenshot.png");
+    }
+
+    #[test]
+    fn fullscreen_screenshot_ipc_reports_submission_errors() {
+        let response = fullscreen_screenshot_submission_response(Err(
+            "cannot create screenshot staging file".to_string(),
+        ));
+
+        assert!(!response.success);
+        assert!(response.data.is_none());
+        assert_eq!(
+            response.error.as_deref(),
+            Some("cannot create screenshot staging file")
+        );
+    }
 
     fn output(hdr_metadata: Option<EdidHdrCapabilities>) -> OutputInfo {
         OutputInfo {

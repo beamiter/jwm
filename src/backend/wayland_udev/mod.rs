@@ -34,5 +34,4 @@ pub mod color_management;
 
 pub mod icc;
 
-#[cfg(feature = "backend-wayland-udev")]
 pub mod color_pipeline;

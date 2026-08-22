@@ -243,14 +243,15 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
   (unpremultiply, decode, gamut matrix, optional encode, repremultiply), retain
   explicit PQ/HLG decode plans when entering the common workspace, and normalize
   runtime 3x3 uploads to column-major data with `GL_FALSE`; filler and legacy
-  transition branches explicitly clear that state. The workspace is relative,
-  not absolute-luminance-normalized; non-D65 descriptions have no chromatic
-  adaptation, dynamic surface-description changes are not yet latched to the
-  corresponding `wl_surface.commit`, KMS-external elements are not adapted,
-  and color properties plus framebuffer are not committed as one atomic
-  transaction. All close paths go
-  through `OverviewState::deactivate`, which also resets the slide offset the
-  inline Escape path used to leave stale.
+  transition branches explicitly clear that state. Explicit non-D65 white
+  points are Bradford-adapted into the destination white; explicit primaries
+  are domain- and matrix-validated before an image description becomes ready.
+  The workspace remains relative rather than absolute-luminance-normalized.
+  Dynamic surface-description changes are not yet latched to the corresponding
+  `wl_surface.commit`, KMS-external elements are not adapted, and color
+  properties plus framebuffer are not committed as one atomic transaction. All
+  close paths go through `OverviewState::deactivate`, which also resets the
+  slide offset the inline Escape path used to leave stale.
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than

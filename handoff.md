@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-08-22：可靠性、色彩和 CI 闭环
+
+1. 非 D65 显式白点现在经 Bradford CAT 进入目标白点，中性色与 D50↔D65
+   往返有纯数学回归；非法/退化 explicit primaries 在 protocol Create 阶段直接失败，
+   数学层仍以 identity 二次兜底。
+2. 全屏截图会同步预检输出目录和 staging 文件；IPC 成功明确返回
+   `{status: "queued", path}`，unsupported/backend/preflight error 则为 `success: false`。
+   区域截图回退的真实错误不再被吞掉；KMS 连续请求进入有序队列，PNG 只在完整
+   encode/sync 后原子发布，不覆盖已有目标或暴露半写文件。
+3. `jwm-tool wayland-status` 在 IPC 与所有兼容查询都失败时非零退出，JSON/
+   文本均区分 complete、degraded 与 unavailable。
+4. `xcb` 升至 1.7.1，锁文件不再含有受 RUSTSEC-2026-0194/0195 影响的
+   build-only `quick-xml` 0.30。
+5. WaterLily 移除零引用且会在 headless CI 初始化 GLFW 的 GLMakie，并显式
+   声明 `Random`；GTK/Relm bar 补齐 protocol-v14 `ClientIcon` 节点分支。
+6. 仓库不再含 Rust `#[ignore]`：toolbar contact sheet 改为纯内存逐格合成断言；
+   shared_structures 子进程 helper 由父测试通过 child mode 普通 exact-test 入口分派。
+
 ## 2026-08-22：外部帧尾观测十轮加固
 
 1. 外部帧尾 blocker 改为 `LinearTailBlocker` 类型，避免调用点拼写漂移。
@@ -89,7 +107,7 @@ exact-sRGB fallback。
    blocker；capture/readback 要从明确编码的独立 view 派生，不能通过改变物理 scanout route
    来获得截图。
 5. **真实 HDR 语义尚不完整。** normalized linear-sRGB 目前没有统一 absolute-luminance/
-   working-white、tone mapping 或非 D65 chromatic adaptation；surface description 也尚未与
+   working-white 或 tone mapping；非 D65 白点已经 Bradford 适应，surface description 仍尚未与
    对应 `wl_surface.commit` 原子锁存。
 6. **KMS 交付还不是 framebuffer 原子事务。** `DEGAMMA/CTM/GAMMA`、connector
    `Colorspace`/`HDR_OUTPUT_METADATA` 与目标 FB 必须同一 TEST_ONLY + atomic commit；还要
@@ -121,8 +139,9 @@ exact-sRGB fallback。
    - 建立帧尾 domain table，让每一类 overlay 要么在 final delivery 前绘制，要么有显式颜色
      adapter；capture/recording 使用独立、目标明确的 view，不再反向约束物理输出 route。
 5. **P1：补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
-   - 定义 working white/absolute luminance、SDR/PQ/HLG 标尺与 tone-map policy；实现并测试
-     非 D65 CAT。将 image-description pending/current 双缓冲，只在匹配 surface commit 生效。
+   - 非 D65 Bradford CAT 已实现并测试。剩余：定义 working white/absolute
+     luminance、SDR/PQ/HLG 标尺与 tone-map policy；将 image-description
+     pending/current 双缓冲，只在匹配 surface commit 生效。
 6. **P1：KMS 原子交付与位深** — `src/backend/udev_kms.rs`
    - 将 plane FB、CRTC color stages 与 connector signalling 合并为同一受控 atomic request；
      跨 DRM device 或 10-bit 链路不完整时继续软件 SDR，不宣称 hardware HDR active。
@@ -154,7 +173,7 @@ exact-sRGB fallback。
 **P0（里程碑 1–4）的非目标**
 
 - 开放 HDR signalling；在 P1/P2 完成前 enable 继续明确拒绝。
-- HDR/SDR absolute-luminance、tone mapping、working-white、非 D65 CAT 和 surface-description
+- HDR/SDR absolute-luminance、tone mapping、working-white 和 surface-description
   commit latch；这些属于 P1，不能用 P0 的 normalized workspace 冒充完成。
 - negative-origin、non-unit scale、rotated 或冲突 overlap 输出拓扑的逐输出交付。
 

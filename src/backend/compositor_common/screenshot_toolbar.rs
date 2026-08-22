@@ -1118,11 +1118,10 @@ mod tests {
         }
     }
 
-    /// Not an assertion — a contact sheet to eyeball when an icon is edited.
-    /// `cargo test -- --ignored icon_contact_sheet`
+    /// Exercise the contact-sheet compositor on every icon and size entirely
+    /// in memory, keeping ordinary test runs deterministic and side-effect free.
     #[test]
-    #[ignore]
-    fn icon_contact_sheet() {
+    fn icon_contact_sheet_composites_every_icon_at_every_size() {
         const ICONS: [ToolbarIcon; 19] = [
             ToolbarIcon::Pencil,
             ToolbarIcon::Line,
@@ -1149,15 +1148,20 @@ mod tests {
         let width = cell * ICONS.len() as u32;
         let height = cell * sizes.len() as u32;
         let mut sheet = image::RgbaImage::from_pixel(width, height, image::Rgba([32, 30, 40, 255]));
+        let mut covered_pixels = 0usize;
         for (row, px) in sizes.iter().enumerate() {
             for (col, icon) in ICONS.iter().enumerate() {
                 let (pixels, w, h) = icon_rgba(*icon, *px, [235, 235, 245, 255]);
                 let ox = col as u32 * cell + (cell - w) / 2;
                 let oy = row as u32 * cell + (cell - h) / 2;
+                let mut cell_covered_pixels = 0usize;
                 for y in 0..h {
                     for x in 0..w {
                         let o = ((y * w + x) * 4) as usize;
                         let a = f32::from(pixels[o + 3]) / 255.0;
+                        if a > 0.0 {
+                            cell_covered_pixels += 1;
+                        }
                         let dst = sheet.get_pixel_mut(ox + x, oy + y);
                         for c in 0..3 {
                             dst[c] = (f32::from(dst[c]) * (1.0 - a) + f32::from(pixels[o + c]) * a)
@@ -1165,12 +1169,22 @@ mod tests {
                         }
                     }
                 }
+                assert!(
+                    cell_covered_pixels > 0,
+                    "{icon:?} at {px}px contributed no contact-sheet pixels"
+                );
+                assert!(
+                    (0..h).any(|y| (0..w).any(|x| {
+                        let pixel = sheet.get_pixel(ox + x, oy + y);
+                        [pixel[0], pixel[1], pixel[2]] != [32, 30, 40]
+                    })),
+                    "{icon:?} at {px}px did not alter its contact-sheet cell"
+                );
+                covered_pixels += cell_covered_pixels;
             }
         }
-        let path = std::env::var("JWM_ICON_SHEET")
-            .unwrap_or_else(|_| "/tmp/jwm-toolbar-icons.png".to_owned());
-        sheet.save(&path).expect("write contact sheet");
-        println!("contact sheet → {path}");
+        assert_eq!(sheet.dimensions(), (width, height));
+        assert!(covered_pixels > ICONS.len() * sizes.len());
     }
 
     #[test]

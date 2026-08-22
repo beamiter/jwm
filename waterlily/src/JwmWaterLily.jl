@@ -1,5 +1,6 @@
 module JwmWaterLily
 
+using Random
 using Sockets
 using StaticArrays
 using WaterLily

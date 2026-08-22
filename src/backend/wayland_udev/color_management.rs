@@ -14,6 +14,7 @@ pub(crate) use crate::backend::color_policy::{
 };
 use crate::backend::edid::EdidHdrCapabilities;
 use crate::backend::wayland::state::JwmWaylandState;
+use crate::backend::wayland_udev::color_pipeline::parametric_primaries_are_valid;
 use crate::sync_ext::MutexExt;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::wp::color_management::v1::server::{
@@ -361,6 +362,36 @@ fn make_ready_description(
         allow_info,
     }));
     (id, data)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParametricCreateValidationError {
+    Incomplete,
+    InvalidPrimaries,
+}
+
+impl ParametricCreateValidationError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete parametric set",
+            Self::InvalidPrimaries => "invalid or degenerate explicit primaries",
+        }
+    }
+}
+
+/// Pure admission check shared by the protocol `Create` path and unit tests.
+/// Matrix validation remains owned by `color_pipeline`, so protocol admission
+/// cannot drift from the values the renderer and KMS paths consider safe.
+fn validate_parametric_create(
+    params: &ParametricParams,
+) -> Result<(), ParametricCreateValidationError> {
+    if !params.is_complete() {
+        return Err(ParametricCreateValidationError::Incomplete);
+    }
+    if !parametric_primaries_are_valid(params) {
+        return Err(ParametricCreateValidationError::InvalidPrimaries);
+    }
+    Ok(())
 }
 
 // === GlobalDispatch for the manager ===
@@ -782,14 +813,16 @@ impl Dispatch<WpImageDescriptionCreatorParamsV1, ParametricCreatorData> for JwmW
         match request {
             wp_image_description_creator_params_v1::Request::Create { image_description } => {
                 let params = data.lock_safe().clone();
-                if !params.is_complete() {
+                if let Err(error) = validate_parametric_create(&params) {
                     // Per spec we should raise the incomplete_set protocol error;
                     // for slice 1 we conservatively fail the resulting description
                     // so the client gets a clean signal without killing the connection.
+                    // Invalid explicit primaries are likewise kept out of Ready
+                    // descriptions before they can reach rendering or KMS.
                     let st: ImageDescriptionData =
                         Arc::new(Mutex::new(ImageDescriptionState::Failed));
                     let desc = data_init.init(image_description, st);
-                    desc.failed(Cause::Unsupported, "incomplete parametric set".into());
+                    desc.failed(Cause::Unsupported, error.message().into());
                     return;
                 }
                 let (id, st) = make_ready_description(state, params, false);
@@ -962,6 +995,14 @@ mod tests {
     use super::*;
     use crate::backend::color_policy;
 
+    fn complete_explicit_params(primaries: [i32; 8]) -> ParametricParams {
+        ParametricParams {
+            tf_named: Some(color_policy::TF_SRGB),
+            primaries: Some(primaries),
+            ..Default::default()
+        }
+    }
+
     /// The pure policy module encodes wp_color_manager_v1 enum values as
     /// numeric constants so backend-neutral code needs no protocol bindings.
     /// This pins them to the generated protocol enums.
@@ -979,6 +1020,57 @@ mod tests {
         assert_eq!(
             color_policy::PRIMARIES_NAMED_BT2020,
             Primaries::Bt2020 as u32
+        );
+    }
+
+    #[test]
+    fn parametric_create_validation_accepts_named_and_valid_explicit_primaries() {
+        let named = ParametricParams {
+            tf_named: Some(color_policy::TF_SRGB),
+            primaries_named: Some(color_policy::PRIMARIES_NAMED_SRGB),
+            ..Default::default()
+        };
+        assert_eq!(validate_parametric_create(&named), Ok(()));
+
+        // BT.2020 red has x + y == 1. It is a valid primary even though the
+        // corresponding boundary would be invalid for a white point.
+        let bt2020 = complete_explicit_params(color_policy::PRIMARIES_BT2020);
+        assert_eq!(validate_parametric_create(&bt2020), Ok(()));
+    }
+
+    #[test]
+    fn parametric_create_validation_rejects_invalid_or_degenerate_explicit_primaries() {
+        let mut negative_y = complete_explicit_params([
+            640_000, -1, 300_000, 600_000, 150_000, 60_000, 312_700, 329_000,
+        ]);
+        // Explicit data remains authoritative even if a valid named fallback
+        // was also supplied by the client.
+        negative_y.primaries_named = Some(color_policy::PRIMARIES_NAMED_SRGB);
+
+        let white_on_boundary = complete_explicit_params([
+            640_000, 330_000, 300_000, 600_000, 150_000, 60_000, 400_000, 600_000,
+        ]);
+        let collinear = complete_explicit_params([
+            640_000, 330_000, 395_000, 195_000, 150_000, 60_000, 395_000, 195_000,
+        ]);
+
+        for params in [negative_y, white_on_boundary, collinear] {
+            assert_eq!(
+                validate_parametric_create(&params),
+                Err(ParametricCreateValidationError::InvalidPrimaries)
+            );
+        }
+    }
+
+    #[test]
+    fn parametric_create_validation_preserves_incomplete_failure() {
+        let incomplete = ParametricParams {
+            primaries_named: Some(color_policy::PRIMARIES_NAMED_SRGB),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_parametric_create(&incomplete),
+            Err(ParametricCreateValidationError::Incomplete)
         );
     }
 

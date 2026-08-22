@@ -10,6 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHILD_MODE_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_CHILD";
+const MESSAGE_CHILD_MODE: &str = "message";
+const PRODUCER_CHILD_MODE: &str = "producer";
 const PATH_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_PATH";
 const TOKEN_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_TOKEN";
 const BACKEND_ENV: &str = "SHARED_STRUCTURES_CROSS_PROCESS_BACKEND";
@@ -85,6 +87,11 @@ impl Drop for ChildGuard {
 
 #[test]
 fn cross_process_message_and_command_ack() {
+    if matches!(env::var(CHILD_MODE_ENV).as_deref(), Ok(MESSAGE_CHILD_MODE)) {
+        cross_process_child_helper();
+        return;
+    }
+
     // A no-backend build is a supported compile/check configuration. There is no transport to
     // exercise in that configuration, so the integration test intentionally becomes a no-op.
     for &(backend_name, strategy) in COMPILED_BACKENDS {
@@ -94,12 +101,13 @@ fn cross_process_message_and_command_ack() {
     }
 }
 
-// The parent launches this exact test in a fresh process. Keeping it ignored prevents a normal
-// `cargo test` invocation from running the helper without its required environment.
-#[test]
-#[ignore = "launched by cross_process_message_and_command_ack"]
+// The parent test re-launches its exact harness entry with MESSAGE_CHILD_MODE,
+// then dispatches here before executing any parent-side setup.
 fn cross_process_child_helper() {
-    assert!(matches!(env::var(CHILD_MODE_ENV).as_deref(), Ok("1")));
+    assert!(matches!(
+        env::var(CHILD_MODE_ENV).as_deref(),
+        Ok(MESSAGE_CHILD_MODE)
+    ));
 
     let path = env::var(PATH_ENV).expect("parent did not provide the shared-memory path");
     let backend_name = env::var(BACKEND_ENV).expect("parent did not provide the backend name");
@@ -149,12 +157,11 @@ fn run_backend_exchange(backend_name: &str, strategy: SyncStrategy) -> Result<()
 
 fn spawn_child(path: &str, backend_name: &str, token: u32) -> io::Result<Child> {
     Command::new(env::current_exe()?)
-        .arg("--ignored")
         .arg("--exact")
-        .arg("cross_process_child_helper")
+        .arg("cross_process_message_and_command_ack")
         .arg("--nocapture")
         .arg("--test-threads=1")
-        .env(CHILD_MODE_ENV, "1")
+        .env(CHILD_MODE_ENV, MESSAGE_CHILD_MODE)
         .env(PATH_ENV, path)
         .env(TOKEN_ENV, token.to_string())
         .env(BACKEND_ENV, backend_name)
@@ -317,6 +324,11 @@ const PER_PRODUCER: usize = 64;
 /// 与背压（队列满）路径。
 #[test]
 fn cross_process_multiple_producers() {
+    if matches!(env::var(CHILD_MODE_ENV).as_deref(), Ok(PRODUCER_CHILD_MODE)) {
+        cross_process_producer_helper();
+        return;
+    }
+
     for &(backend_name, strategy) in COMPILED_BACKENDS {
         if let Err(error) = run_multi_producer(backend_name, strategy) {
             panic!("cross-process {backend_name} multi-producer failed: {error}");
@@ -324,12 +336,13 @@ fn cross_process_multiple_producers() {
     }
 }
 
-// The parent launches this exact test in fresh processes. Keeping it ignored prevents a normal
-// `cargo test` invocation from running the helper without its required environment.
-#[test]
-#[ignore = "launched by cross_process_multiple_producers"]
+// The parent test re-launches its exact harness entry with
+// PRODUCER_CHILD_MODE, then dispatches here before parent-side setup.
 fn cross_process_producer_helper() {
-    assert!(matches!(env::var(CHILD_MODE_ENV).as_deref(), Ok("1")));
+    assert!(matches!(
+        env::var(CHILD_MODE_ENV).as_deref(),
+        Ok(PRODUCER_CHILD_MODE)
+    ));
 
     let path = env::var(PATH_ENV).expect("parent did not provide the shared-memory path");
     let base = env::var(PRODUCER_BASE_ENV)
@@ -417,12 +430,11 @@ fn run_multi_producer(backend_name: &str, strategy: SyncStrategy) -> Result<(), 
 
 fn spawn_producer(path: &str, base: i32) -> io::Result<Child> {
     Command::new(env::current_exe()?)
-        .arg("--ignored")
         .arg("--exact")
-        .arg("cross_process_producer_helper")
+        .arg("cross_process_multiple_producers")
         .arg("--nocapture")
         .arg("--test-threads=1")
-        .env(CHILD_MODE_ENV, "1")
+        .env(CHILD_MODE_ENV, PRODUCER_CHILD_MODE)
         .env(PATH_ENV, path)
         .env(PRODUCER_BASE_ENV, base.to_string())
         .env(PRODUCER_COUNT_ENV, PER_PRODUCER.to_string())

@@ -195,7 +195,9 @@ drm-ffi = { version = "0.9.1", optional = true }
 libseat = { version = "0.2.4", optional = true }
 gbm = { version = "0.18.0", optional = true }
 egl = { version = "0.2.7", optional = true }
-xcb = { version = "1.7.0", features = ["composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
+# 1.7.1 raises its build-only quick-xml dependency to the security-fixed 0.41
+# line (RUSTSEC-2026-0194/0195).
+xcb = { version = "1.7.1", features = ["composite", "shape", "randr", "damage", "present", "xfixes", "screensaver"], optional = true }
 # ChaCha20-Poly1305 for the remote transport record layer. Pure Rust and
 # no_std-capable: it adds no C toolchain or system dependency to the helper.
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }

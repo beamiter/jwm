@@ -300,6 +300,7 @@ fn node_class(id: NodeId) -> &'static str {
         NodeId::LayoutButton => "layout-button",
         NodeId::LayoutOption(_) => "layout-option",
         NodeId::Client => "client",
+        NodeId::ClientIcon => "client-icon",
         NodeId::Monitor => "monitor",
         NodeId::Cpu => "cpu",
         NodeId::Memory => "memory",

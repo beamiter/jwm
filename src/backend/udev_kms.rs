@@ -803,8 +803,7 @@ pub(super) struct KmsState {
     cursor_fallback_body_ids: Vec<Id>,
     cursor_fallback_shadow_ids: Vec<Id>,
 
-    pending_screenshot: Option<std::path::PathBuf>,
-    pending_screenshot_region: Option<(std::path::PathBuf, i32, i32, u32, u32)>,
+    screenshot_requests: crate::backend::compositor_common::screenshot::ScreenshotQueue,
 
     /// Shared queue for pending screencopy frames (from wlr-screencopy-unstable-v1).
     screencopy_pending: Option<crate::backend::wayland_udev::screencopy::PendingScreencopyQueue>,
@@ -1385,7 +1384,7 @@ impl KmsState {
     }
 
     pub(super) fn request_screenshot(&mut self, path: std::path::PathBuf) {
-        self.pending_screenshot = Some(path);
+        self.screenshot_requests.request_full(path);
         self.needs_render = true;
     }
 
@@ -1397,7 +1396,7 @@ impl KmsState {
         w: u32,
         h: u32,
     ) {
-        self.pending_screenshot_region = Some((path, x, y, w, h));
+        self.screenshot_requests.request_region(path, x, y, w, h);
         self.needs_render = true;
     }
 
@@ -1466,8 +1465,7 @@ impl KmsState {
         &self,
         state: &crate::backend::wayland::state::JwmWaylandState,
     ) -> ExternalElementColorPlan {
-        let capture_pending = self.pending_screenshot.is_some()
-            || self.pending_screenshot_region.is_some()
+        let capture_pending = self.screenshot_requests.has_pending()
             || self
                 .screencopy_pending
                 .as_ref()
@@ -4317,8 +4315,7 @@ impl KmsState {
             cursor_fallback_body_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
             cursor_fallback_shadow_ids: (0..CURSOR_RECTS.len()).map(|_| Id::new()).collect(),
 
-            pending_screenshot: None,
-            pending_screenshot_region: None,
+            screenshot_requests: Default::default(),
             screencopy_pending: None,
             image_capture_pending: None,
             capture_counters: None,
@@ -5203,27 +5200,35 @@ impl KmsState {
 
             // ── Screenshot capture (offscreen render) ───────────────────────
             if out_idx == 0 {
-                if let Some(screenshot_path) = self.pending_screenshot.take() {
-                    Self::capture_screenshot_offscreen_impl(
-                        &mut self.renderer,
-                        out_w,
-                        out_h,
-                        &elements,
-                        &screenshot_path,
-                    );
-                }
-                if let Some((region_path, rx, ry, rw, rh)) = self.pending_screenshot_region.take() {
-                    Self::capture_screenshot_region_impl(
-                        &mut self.renderer,
-                        out_w,
-                        out_h,
-                        &elements,
-                        &region_path,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                    );
+                for request in self.screenshot_requests.take_all() {
+                    match request {
+                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
+                            path,
+                        ) => Self::capture_screenshot_offscreen_impl(
+                            &mut self.renderer,
+                            out_w,
+                            out_h,
+                            &elements,
+                            &path,
+                        ),
+                        crate::backend::compositor_common::screenshot::ScreenshotRequest::Region {
+                            path,
+                            x,
+                            y,
+                            width,
+                            height,
+                        } => Self::capture_screenshot_region_impl(
+                            &mut self.renderer,
+                            out_w,
+                            out_h,
+                            &elements,
+                            &path,
+                            x,
+                            y,
+                            width,
+                            height,
+                        ),
+                    }
                 }
             }
 
@@ -5587,20 +5592,9 @@ fn save_rgba_png(
     height: u32,
     pixels: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::io::BufWriter;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file = std::fs::File::create(path)?;
-    let w = BufWriter::new(file);
-
-    let mut encoder = png::Encoder::new(w, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-
-    writer.write_image_data(pixels)?;
+    crate::backend::compositor_common::screenshot::save_png_atomically(
+        path, pixels, width, height,
+    )?;
     Ok(())
 }
 

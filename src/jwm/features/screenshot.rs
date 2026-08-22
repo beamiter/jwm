@@ -2,15 +2,20 @@
 
 use crate::backend::api::Backend;
 use crate::backend::common_define::{EventMaskBits, StdCursorKind};
+use crate::backend::compositor_common::screenshot::screenshot_staging_path;
 use crate::backend::compositor_common::screenshot_toolbar::{
     ScreenshotToolbar, ToolbarButton, ToolbarIcon,
 };
 use crate::core::types::Rect;
 use crate::jwm::features::capture::CaptureTarget;
+use crate::jwm::features::capture_plan::execute_fullscreen_capture;
 use crate::jwm::features::deferred_grab::{DeferredGrab, DeferredGrabAction};
 use crate::jwm::types::WMArgEnum;
 use image::{Rgba, RgbaImage};
 use log::{error, info, warn};
+use std::fs::OpenOptions;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// Stroke width bounds. The floor keeps a stroke visible; the ceiling keeps a
@@ -838,9 +843,102 @@ impl ScreenshotState {
 
 use crate::jwm::Jwm;
 
+fn screenshot_io_error(error: io::Error, operation: impl std::fmt::Display) -> io::Error {
+    io::Error::new(error.kind(), format!("{operation}: {error}"))
+}
+
+/// Prepare one concrete destination and synchronously prove that the staging
+/// file used by the asynchronous PNG writer can be created there.
+fn prepare_screenshot_path_in_directory(output_dir: &Path, filename: &str) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(output_dir).map_err(|error| {
+        screenshot_io_error(
+            error,
+            format_args!(
+                "cannot create screenshot output directory '{}'",
+                output_dir.display()
+            ),
+        )
+    })?;
+
+    let path = output_dir.join(filename);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("screenshot output already exists: '{}'", path.display()),
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(screenshot_io_error(
+                error,
+                format_args!("cannot inspect screenshot output '{}'", path.display()),
+            ));
+        }
+    }
+
+    let staging_path = screenshot_staging_path(&path);
+    let staging_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging_path)
+        .map_err(|error| {
+            screenshot_io_error(
+                error,
+                format_args!(
+                    "cannot create screenshot staging file '{}'",
+                    staging_path.display()
+                ),
+            )
+        })?;
+    drop(staging_file);
+    std::fs::remove_file(&staging_path).map_err(|error| {
+        screenshot_io_error(
+            error,
+            format_args!(
+                "cannot remove screenshot staging probe '{}'",
+                staging_path.display()
+            ),
+        )
+    })?;
+
+    Ok(path)
+}
+
+fn prepare_screenshot_path_with_fallback(
+    preferred_dir: &Path,
+    fallback_dir: &Path,
+    filename: &str,
+) -> io::Result<PathBuf> {
+    match prepare_screenshot_path_in_directory(preferred_dir, filename) {
+        Ok(path) => Ok(path),
+        Err(preferred_error) if preferred_dir == fallback_dir => Err(preferred_error),
+        Err(preferred_error) => {
+            warn!(
+                "[take_screenshot] cannot prepare output in '{}': {}; falling back to '{}'",
+                preferred_dir.display(),
+                preferred_error,
+                fallback_dir.display()
+            );
+            prepare_screenshot_path_in_directory(fallback_dir, filename).map_err(
+                |fallback_error| {
+                    io::Error::new(
+                        fallback_error.kind(),
+                        format!(
+                            "cannot prepare screenshot output in '{}' ({preferred_error}); fallback '{}' also failed ({fallback_error})",
+                            preferred_dir.display(),
+                            fallback_dir.display()
+                        ),
+                    )
+                },
+            )
+        }
+    }
+}
+
 impl Jwm {
     /// 准备截图输出路径（交互式和全屏截图共用）
-    fn prepare_screenshot_path() -> Option<String> {
+    fn prepare_screenshot_path() -> io::Result<PathBuf> {
         let timestamp = chrono::Local::now().format("%Y%m%d-%H%M%S-%6f");
         let pictures_dir = std::env::var_os("XDG_PICTURES_DIR")
             .filter(|path| !path.is_empty())
@@ -853,28 +951,10 @@ impl Jwm {
                     .map(|home| home.join("Pictures"))
             })
             .unwrap_or_else(std::env::temp_dir);
-        let mut output_dir = pictures_dir;
-        if let Err(e) = std::fs::create_dir_all(&output_dir) {
-            warn!(
-                "[take_screenshot] cannot create output dir '{}': {}, fallback to /tmp",
-                output_dir.display(),
-                e
-            );
-            output_dir = std::env::temp_dir();
-            if let Err(e2) = std::fs::create_dir_all(&output_dir) {
-                error!(
-                    "[take_screenshot] cannot create fallback dir '{}': {}",
-                    output_dir.display(),
-                    e2
-                );
-                return None;
-            }
-        }
-        Some(
-            output_dir
-                .join(format!("screenshot-{}.png", timestamp))
-                .to_string_lossy()
-                .to_string(),
+        prepare_screenshot_path_with_fallback(
+            &pictures_dir,
+            &std::env::temp_dir(),
+            &format!("screenshot-{timestamp}.png"),
         )
     }
 
@@ -891,10 +971,9 @@ impl Jwm {
             return Ok(());
         }
 
-        let screenshot_path = match Self::prepare_screenshot_path() {
-            Some(p) => p,
-            None => return Ok(()),
-        };
+        let screenshot_path = Self::prepare_screenshot_path()?
+            .to_string_lossy()
+            .into_owned();
 
         if !backend.has_compositor() {
             return Err("interactive screenshots require an active compositor".into());
@@ -1042,29 +1121,28 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let screenshot_path = match Self::prepare_screenshot_path() {
-            Some(p) => p,
-            None => return Ok(()),
-        };
+        self.submit_screenshot_fullscreen(backend).map(|_| ())
+    }
 
-        let path = std::path::PathBuf::from(&screenshot_path);
-        match backend.take_screenshot_to_file(&path) {
-            Ok(true) => {
-                info!(
-                    "[take_screenshot_fullscreen] compositor screenshot → {}",
-                    path.display()
-                );
-            }
-            Ok(false) => {
-                info!(
-                    "[take_screenshot_fullscreen] backend doesn't support compositor screenshots"
-                );
-            }
-            Err(e) => {
-                error!("[take_screenshot_fullscreen] compositor screenshot failed: {e}");
-            }
-        }
-        Ok(())
+    /// Submit a full-screen capture and return the destination selected for it.
+    ///
+    /// A successful return means the compositor accepted the request. The GL
+    /// readback and PNG encoding remain asynchronous and report their eventual
+    /// completion through logs rather than this command result.
+    pub(crate) fn submit_screenshot_fullscreen(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = Self::prepare_screenshot_path()?;
+        execute_fullscreen_capture(backend, &path).map_err(|error| {
+            error!("[take_screenshot_fullscreen] compositor screenshot failed: {error}");
+            Box::new(error) as Box<dyn std::error::Error>
+        })?;
+        info!(
+            "[take_screenshot_fullscreen] compositor screenshot queued → {}",
+            path.display()
+        );
+        Ok(path)
     }
 
     /// 取消交互式截图选择模式
@@ -1160,20 +1238,20 @@ impl Jwm {
         let captured = match execute_capture_plan(backend, &plan) {
             CaptureExecution::CapturedRegion => {
                 info!(
-                    "[take_screenshot] region screenshot → {} ({width}x{height} at {x},{y})",
+                    "[take_screenshot] region screenshot queued → {} ({width}x{height} at {x},{y})",
                     plan.save_path
                 );
                 true
             }
             CaptureExecution::CapturedFullFallback => {
                 info!(
-                    "[take_screenshot] backend doesn't support region screenshots, falling back to full"
+                    "[take_screenshot] backend doesn't support region screenshots; full-screen fallback queued"
                 );
                 true
             }
             CaptureExecution::Unavailable => {
                 info!(
-                    "[take_screenshot] backend doesn't support region screenshots, falling back to full"
+                    "[take_screenshot] backend supports neither region nor full-screen screenshots"
                 );
                 false
             }
@@ -1825,6 +1903,101 @@ impl Jwm {
 mod tests {
     use super::*;
     use crate::backend::compositor_common::screenshot_toolbar::ButtonFace;
+
+    struct ScratchDir(PathBuf);
+
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "jwm-screenshot-{label}-{}-{nanos}-{sequence}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("create screenshot test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn screenshot_path_preflight_creates_directory_and_cleans_probe() {
+        let scratch = ScratchDir::new("preflight-ok");
+        let output_dir = scratch.path().join("Pictures");
+
+        let path = prepare_screenshot_path_in_directory(&output_dir, "shot.png").unwrap();
+
+        assert_eq!(path, output_dir.join("shot.png"));
+        assert!(output_dir.is_dir());
+        assert!(!path.exists(), "preflight must not publish an empty PNG");
+        assert!(
+            !screenshot_staging_path(&path).exists(),
+            "the staging probe must be removed before submission"
+        );
+    }
+
+    #[test]
+    fn screenshot_path_preflight_rejects_a_non_directory_target() {
+        let scratch = ScratchDir::new("directory-error");
+        let not_a_directory = scratch.path().join("Pictures");
+        std::fs::write(&not_a_directory, b"file").unwrap();
+
+        let error = prepare_screenshot_path_in_directory(&not_a_directory, "shot.png").unwrap_err();
+
+        assert!(error.to_string().contains("output directory"));
+    }
+
+    #[test]
+    fn screenshot_path_preflight_rejects_an_uncreatable_staging_file() {
+        let scratch = ScratchDir::new("staging-error");
+        let output_dir = scratch.path().join("Pictures");
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let output_path = output_dir.join("shot.png");
+        std::fs::create_dir(screenshot_staging_path(&output_path)).unwrap();
+
+        let error = prepare_screenshot_path_in_directory(&output_dir, "shot.png").unwrap_err();
+
+        assert!(error.to_string().contains("staging file"));
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn screenshot_path_preflight_uses_fallback_and_reports_double_failure() {
+        let scratch = ScratchDir::new("fallback");
+        let blocked_preferred = scratch.path().join("preferred-file");
+        std::fs::write(&blocked_preferred, b"file").unwrap();
+        let fallback = scratch.path().join("fallback");
+
+        let path = prepare_screenshot_path_with_fallback(&blocked_preferred, &fallback, "shot.png")
+            .unwrap();
+        assert_eq!(path, fallback.join("shot.png"));
+
+        let blocked_fallback = scratch.path().join("fallback-file");
+        std::fs::write(&blocked_fallback, b"file").unwrap();
+        let error = prepare_screenshot_path_with_fallback(
+            &blocked_preferred,
+            &blocked_fallback,
+            "other.png",
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("preferred-file"));
+        assert!(message.contains("fallback-file"));
+        assert!(message.contains("also failed"));
+    }
 
     #[test]
     fn test_screenshot_workflow() {

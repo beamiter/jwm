@@ -228,11 +228,12 @@ mock implementing the complete backend surface. (First met by
   so interactive sessions mostly exercise that fallback. Native HDR signalling
   remains fail-closed SDR/sRGB in this slice: the enable command is rejected and
   inherited connector metadata is cleared until those external elements can be
-  adapted without mixing domains. The next slice is to color-adapt or internalize
-  those elements, establish an absolute-luminance
-  working-white convention, add chromatic adaptation for non-D65 descriptions,
-  latch dynamic surface descriptions to their matching surface commit, and
-  coordinate KMS color properties with the matching framebuffer atomically.
+  adapted without mixing domains. Explicit non-D65 descriptions now use
+  Bradford chromatic adaptation. The next slice is to color-adapt or internalize
+  the external elements, establish an absolute-luminance working-white
+  convention, latch dynamic surface descriptions to their matching surface
+  commit, and coordinate KMS color properties with the matching framebuffer
+  atomically.
 - Keep GLX and EGL/GLES resource ownership in explicit platform adapters.
   Started: the graphics platform is now a directory module with one adapter
   per API — `compositor/platform/glx.rs` owns the GLX context, overlay

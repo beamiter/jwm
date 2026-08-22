@@ -440,6 +440,8 @@ enum Commands {
     },
 
     /// 聚合 Wayland/KMS/合成器诊断状态
+    ///
+    /// IPC 完全不可用时返回非零；旧服务仅部分查询成功时保留可用结果并标记 degraded。
     WaylandStatus {
         /// 输出完整 JSON 响应集合
         #[arg(long)]
@@ -1559,19 +1561,19 @@ const WAYLAND_AUDIT_ROWS: &[AuditRow] = &[
         area: "协议与生态",
         competitor_signal: "niri/Hyprland 都依赖 layer-shell、screencopy、gamma、workspace、portal、XWayland 等生态协议形成日用闭环。",
         jwm_now: "udev 后端已覆盖 layer-shell、xdg-output、IME、XWayland、screencopy、image-copy-capture、workspace、gamma、output-power/management、foreign-toplevel、virtual-pointer。",
-        next_move: "新增协议自检与默认策略：启动时输出缺失/禁用协议，给 waybar、kanshi、grim、OBS、wlsunset 一组回归脚本。",
+        next_move: "把现有 wayland-smoke 协议/客户端预检升级为可选的真实客户端运行器，并为 waybar、kanshi、grim、OBS、wlsunset 留下可比较的运行证据。",
     },
     AuditRow {
         area: "显示管线",
         competitor_signal: "Hyprland 强在动效/外观和游戏路径；niri 强在稳定的多显示器、混合 DPI、低干扰重排。",
-        jwm_now: "JWM 已有 DRM/KMS、dmabuf feedback、direct scanout、VRR/tearing、HDR metadata、scene-linear、KMS gamma/CTM offload、per-monitor blur 策略。",
-        next_move: "优先补三件可感知能力：每输出 presentation telemetry、direct-scanout 拒绝原因统计、混合 DPI/刷新率基准场景。",
+        jwm_now: "JWM 已有 DRM/KMS、dmabuf feedback、direct scanout、VRR/tearing、HDR metadata、scene-linear、KMS gamma/CTM offload，以及每输出 presentation/direct-scanout 诊断。",
+        next_move: "在真实硬件上固化热插拔、混合 DPI/刷新率、direct-scanout 进退与 HDR/VRR 的验收矩阵和基线。",
     },
     AuditRow {
         area: "控制面",
         competitor_signal: "Hyprland 的 hyprctl 提供 monitors/workspaces/clients/devices/configerrors/rollinglog/JSON 等强控制面。",
-        jwm_now: "jwm-tool 已有 daemon/status/msg 和 IPC 查询，但 Wayland 后端的输出、协议、KMS、颜色、延迟诊断还分散。",
-        next_move: "把 compositor_get_metrics、VRR、KMS caps、color surfaces、session-lock、tearing hints 汇总成 `jwm-tool wayland-status --json`。",
+        jwm_now: "`jwm-tool wayland-status --json` 已聚合输出、协议、KMS、颜色、capture、session-lock、tearing 与延迟诊断。",
+        next_move: "把聚合状态收敛为稳定 finding code/严重级别，并将隐私安全的摘要纳入 support bundle。",
     },
     AuditRow {
         area: "配置与规则",
@@ -1582,8 +1584,8 @@ const WAYLAND_AUDIT_ROWS: &[AuditRow] = &[
     AuditRow {
         area: "可靠性",
         competitor_signal: "niri 强调日用稳定、属性测试、profiling、输入延迟测量；Hyprland 依靠活跃生态快速修复兼容问题。",
-        jwm_now: "JWM 已有 benchmark/metrics 文档和若干单测，但 Wayland 端还缺跨客户端冒烟矩阵。",
-        next_move: "建立 `wayland-smoke`：foot/gtk/qt/electron/xwayland/waybar/grim/OBS/wlsunset/kanshi，记录截图、协议、帧统计。",
+        jwm_now: "JWM 已有性能契约、wayland-smoke 预检和 versioned nested-smoke 后端矩阵；预检目前不启动真实 GUI 客户端。",
+        next_move: "补真实硬件与跨 toolkit 的侵入式矩阵，记录截图、协议绑定、帧统计和失败日志，并保持预检模式无副作用。",
     },
 ];
 
@@ -2661,7 +2663,12 @@ fn main() -> io::Result<()> {
 
         Commands::WaylandAudit { markdown } => print_wayland_audit(markdown),
 
-        Commands::WaylandStatus { json } => run_wayland_status(json)?,
+        Commands::WaylandStatus { json } => {
+            let code = run_wayland_status(json)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
 
         Commands::WaylandSmoke { json, save } => print_wayland_smoke(json, save)?,
 
@@ -2864,16 +2871,18 @@ fn run_ipc_msg(name: &str, args_str: &str, subscribe: Option<&str>, raw: bool) -
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        Cli, Commands, InstallPlanEntry, SmokeTarget, acquire_daemon_lock_at,
-        acquire_response_lock, append_log_with_rotation, capabilities_output_lines,
+        Cli, Commands, InstallPlanEntry, SmokeTarget, WaylandStatusCompleteness,
+        WaylandStatusCoverage, acquire_daemon_lock_at, acquire_response_lock,
+        aggregated_wayland_status_data, append_log_with_rotation, capabilities_output_lines,
         daemon_command_response, ensure_ipc_response_succeeded, health_output_lines, ipc_request,
         jwm_install_plan, legacy_daemon_metadata_matches, mkfifo_safe, parse_boot_id,
         parse_daemon_pidfile, parse_legacy_daemon_pidfile, parse_linux_proc_stat_identity,
         parse_msg_args, parse_subscription_topics, parse_v1_daemon_pidfile, process_identity,
-        process_identity_matches, response_flock_path, response_lock_path, rotated_log_path,
-        session_install_targets, smoke_artifacts_json, smoke_ci_profile_json,
-        smoke_manual_kms_checklist_json, smoke_target_json, split_path_list, successful_query_data,
-        validate_daemon_response, validate_ipc_response, write_fifo_nonblock,
+        process_identity_matches, response_data, response_flock_path, response_lock_path,
+        rotated_log_path, session_install_targets, should_attempt_wayland_status_fallback,
+        smoke_artifacts_json, smoke_ci_profile_json, smoke_manual_kms_checklist_json,
+        smoke_target_json, split_path_list, successful_query_data, validate_daemon_response,
+        validate_ipc_response, write_fifo_nonblock,
     };
     use clap::Parser;
     use std::collections::HashSet;
@@ -2958,6 +2967,120 @@ mod tests {
             Cli::try_parse_from(["jwm-tool", "status"]).unwrap().cmd,
             Commands::Status
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["jwm-tool", "wayland-status", "--json"])
+                .unwrap()
+                .cmd,
+            Commands::WaylandStatus { json: true }
+        ));
+    }
+
+    #[test]
+    fn wayland_status_cli_fails_when_every_fallback_query_fails() {
+        let responses = serde_json::json!({
+            "get_version": {"success": false, "error": "unavailable"},
+            "get_monitors": {"success": false, "error": "unavailable"},
+        });
+        let coverage = WaylandStatusCoverage::from_responses(responses.as_object().unwrap());
+
+        assert_eq!(
+            coverage.completeness,
+            WaylandStatusCompleteness::Unavailable
+        );
+        assert_eq!(coverage.successful_queries, 0);
+        assert_eq!(coverage.failed_query_names.len(), 2);
+        assert_ne!(coverage.completeness.exit_code(), 0);
+        assert_eq!(coverage.summary_json()["status"], "unavailable");
+    }
+
+    #[test]
+    fn wayland_status_cli_keeps_partial_fallback_results_as_degraded_success() {
+        let responses = serde_json::json!({
+            "get_version": {"success": true, "data": {"version": "0.2.0"}},
+            "get_blur_status": {"success": false, "error": "unsupported"},
+        });
+        let coverage = WaylandStatusCoverage::from_responses(responses.as_object().unwrap());
+
+        assert_eq!(coverage.completeness, WaylandStatusCompleteness::Degraded);
+        assert_eq!(coverage.successful_queries, 1);
+        assert_eq!(coverage.failed_query_names, ["get_blur_status"]);
+        assert_eq!(coverage.completeness.exit_code(), 0);
+        assert_eq!(coverage.summary_json()["status"], "degraded");
+        let probe = coverage.legacy_fallback_json("aggregate query unsupported");
+        assert_eq!(probe["mode"], "legacy_fallback");
+        assert_eq!(probe["fallback_reason"], "aggregate query unsupported");
+    }
+
+    #[test]
+    fn wayland_status_cli_reports_complete_fallback_success() {
+        let responses = serde_json::json!({
+            "get_version": {"success": true, "data": {"version": "0.2.0"}},
+            "get_monitors": {"success": true, "data": []},
+        });
+        let coverage = WaylandStatusCoverage::from_responses(responses.as_object().unwrap());
+
+        assert_eq!(coverage.completeness, WaylandStatusCompleteness::Complete);
+        assert_eq!(coverage.successful_queries, 2);
+        assert!(coverage.failed_query_names.is_empty());
+        assert_eq!(coverage.completeness.exit_code(), 0);
+        assert_eq!(coverage.summary_json()["status"], "complete");
+    }
+
+    #[test]
+    fn wayland_status_cli_rejects_success_without_usable_data() {
+        let responses = serde_json::json!({
+            "missing_data": {"success": true},
+            "null_data": {"success": true, "data": null},
+            "scalar_data": {"success": true, "data": "malformed"},
+        });
+        let coverage = WaylandStatusCoverage::from_responses(responses.as_object().unwrap());
+
+        assert_eq!(
+            coverage.completeness,
+            WaylandStatusCompleteness::Unavailable
+        );
+        assert_eq!(coverage.successful_queries, 0);
+        assert_eq!(
+            coverage.failed_query_names,
+            ["missing_data", "null_data", "scalar_data"]
+        );
+        assert_ne!(coverage.completeness.exit_code(), 0);
+
+        assert!(aggregated_wayland_status_data(&serde_json::json!({"success": true})).is_none());
+        assert!(
+            aggregated_wayland_status_data(&serde_json::json!({
+                "success": true,
+                "data": null
+            }))
+            .is_none()
+        );
+        assert!(
+            aggregated_wayland_status_data(&serde_json::json!({
+                "success": true,
+                "data": []
+            }))
+            .is_none()
+        );
+        assert!(
+            aggregated_wayland_status_data(&serde_json::json!({
+                "success": true,
+                "data": {}
+            }))
+            .is_some()
+        );
+
+        assert!(should_attempt_wayland_status_fallback(
+            &std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "legacy close")
+        ));
+        assert!(should_attempt_wayland_status_fallback(
+            &std::io::Error::new(std::io::ErrorKind::InvalidData, "legacy response")
+        ));
+        assert!(!should_attempt_wayland_status_fallback(
+            &std::io::Error::new(std::io::ErrorKind::NotFound, "no compositor")
+        ));
+        assert!(!should_attempt_wayland_status_fallback(
+            &std::io::Error::new(std::io::ErrorKind::TimedOut, "hung compositor")
+        ));
     }
 
     #[test]
@@ -3002,6 +3125,22 @@ mod tests {
             )
             .is_err()
         );
+        assert!(successful_query_data("get_status", serde_json::json!({"success": true})).is_err());
+        assert!(
+            successful_query_data(
+                "get_status",
+                serde_json::json!({"success": true, "data": null})
+            )
+            .is_err()
+        );
+        let failed_with_data = serde_json::json!({
+            "get_status": {
+                "success": false,
+                "error": "stale",
+                "data": {"version": "must-not-render"}
+            }
+        });
+        assert!(response_data(&failed_with_data, "get_status").is_none());
     }
 
     #[test]
@@ -3415,12 +3554,26 @@ fn successful_query_data(name: &str, response: serde_json::Value) -> io::Result<
             .unwrap_or("IPC query failed");
         return Err(io::Error::other(format!("{name}: {error}")));
     }
-    response.get("data").cloned().ok_or_else(|| {
+    query_response_data(&response).cloned().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{name}: successful response did not contain data"),
+            format!("{name}: successful response did not contain structured data"),
         )
     })
+}
+
+fn query_response_data(response: &serde_json::Value) -> Option<&serde_json::Value> {
+    if response.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+
+    response
+        .get("data")
+        .filter(|data| data.is_object() || data.is_array())
+}
+
+fn aggregated_wayland_status_data(response: &serde_json::Value) -> Option<&serde_json::Value> {
+    query_response_data(response).filter(|data| data.is_object())
 }
 
 fn health_output_lines(status: &serde_json::Value) -> Vec<String> {
@@ -3543,7 +3696,7 @@ fn response_data<'a>(
     responses: &'a serde_json::Value,
     name: &str,
 ) -> Option<&'a serde_json::Value> {
-    responses.get(name)?.get("data")
+    responses.get(name).and_then(query_response_data)
 }
 
 fn response_array_len(responses: &serde_json::Value, name: &str) -> usize {
@@ -3551,6 +3704,90 @@ fn response_array_len(responses: &serde_json::Value, name: &str) -> usize {
         .and_then(|v| v.as_array())
         .map(|a| a.len())
         .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WaylandStatusCompleteness {
+    Complete,
+    Degraded,
+    Unavailable,
+}
+
+impl WaylandStatusCompleteness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Degraded => "degraded",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    fn exit_code(self) -> i32 {
+        match self {
+            Self::Complete | Self::Degraded => 0,
+            Self::Unavailable => 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WaylandStatusCoverage {
+    completeness: WaylandStatusCompleteness,
+    successful_queries: usize,
+    total_queries: usize,
+    failed_query_names: Vec<String>,
+}
+
+impl WaylandStatusCoverage {
+    fn from_responses(responses: &serde_json::Map<String, serde_json::Value>) -> Self {
+        let successful_queries = responses
+            .values()
+            .filter(|response| query_response_data(response).is_some())
+            .count();
+        let failed_query_names = responses
+            .iter()
+            .filter(|(_, response)| query_response_data(response).is_none())
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        let total_queries = responses.len();
+        let completeness = if successful_queries == 0 {
+            WaylandStatusCompleteness::Unavailable
+        } else if failed_query_names.is_empty() {
+            WaylandStatusCompleteness::Complete
+        } else {
+            WaylandStatusCompleteness::Degraded
+        };
+
+        Self {
+            completeness,
+            successful_queries,
+            total_queries,
+            failed_query_names,
+        }
+    }
+
+    fn summary_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.completeness.as_str(),
+            "successful_queries": self.successful_queries,
+            "failed_queries": self.failed_query_names.len(),
+            "total_queries": self.total_queries,
+            "failed_query_names": self.failed_query_names,
+        })
+    }
+
+    fn legacy_fallback_json(&self, fallback_reason: &str) -> serde_json::Value {
+        let mut summary = self.summary_json();
+        let object = summary
+            .as_object_mut()
+            .expect("coverage summaries are JSON objects");
+        object.insert("mode".into(), serde_json::json!("legacy_fallback"));
+        object.insert(
+            "fallback_reason".into(),
+            serde_json::Value::String(fallback_reason.to_owned()),
+        );
+        summary
+    }
 }
 
 fn print_unified_wayland_status(status: &serde_json::Value) {
@@ -4404,13 +4641,34 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
     }
 }
 
-fn run_wayland_status(json_output: bool) -> io::Result<()> {
-    match send_ipc_query("get_wayland_status") {
-        Ok(resp) if resp.get("success").and_then(|v| v.as_bool()) == Some(true) => {
-            let status = resp.get("data").cloned().unwrap_or(serde_json::Value::Null);
+fn should_attempt_wayland_status_fallback(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+    )
+}
+
+fn run_wayland_status(json_output: bool) -> io::Result<i32> {
+    let fallback_reason = match send_ipc_query("get_wayland_status") {
+        Ok(resp) if aggregated_wayland_status_data(&resp).is_some() => {
+            let status = aggregated_wayland_status_data(&resp)
+                .cloned()
+                .expect("guard requires an object data payload");
             let snapshot = serde_json::json!({
                 "generated_at": Local::now().to_rfc3339(),
                 "socket": ipc_socket_path(),
+                "probe": {
+                    "mode": "aggregated_query",
+                    "status": "complete",
+                    "successful_queries": 1,
+                    "failed_queries": 0,
+                    "total_queries": 1,
+                    "failed_query_names": [],
+                },
                 "wayland_status": status,
             });
 
@@ -4418,18 +4676,41 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
                 println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
             } else {
                 print_unified_wayland_status(&snapshot["wayland_status"]);
+                println!("ipc: complete (1/1 query succeeded)");
             }
-            return Ok(());
+            return Ok(0);
         }
-        Ok(_) => {
+        Ok(resp) => {
             // Connected to an older compositor that does not know
-            // get_wayland_status yet; fall through to legacy query fan-out.
+            // get_wayland_status yet, or received an invalid aggregate;
+            // fall through to the bounded legacy query fan-out while keeping
+            // the reason visible in the resulting diagnostic envelope.
+            if resp.get("success").and_then(serde_json::Value::as_bool) == Some(true) {
+                "get_wayland_status returned success without an object data payload".to_string()
+            } else {
+                let error = resp
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("query was rejected without an error message");
+                format!("get_wayland_status failed: {error}")
+            }
+        }
+        Err(e) if should_attempt_wayland_status_fallback(&e) => {
+            format!("get_wayland_status returned an incompatible response: {e}")
         }
         Err(e) => {
             let snapshot = serde_json::json!({
                 "generated_at": Local::now().to_rfc3339(),
                 "socket": ipc_socket_path(),
                 "success": false,
+                "probe": {
+                    "mode": "aggregated_query",
+                    "status": "unavailable",
+                    "successful_queries": 0,
+                    "failed_queries": 1,
+                    "total_queries": 1,
+                    "failed_query_names": ["get_wayland_status"],
+                },
                 "error": e.to_string(),
             });
             if json_output {
@@ -4440,9 +4721,9 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
                 println!("socket: {}", ipc_socket_path().display());
                 println!("ipc: unavailable ({})", e);
             }
-            return Ok(());
+            return Ok(WaylandStatusCompleteness::Unavailable.exit_code());
         }
-    }
+    };
 
     let queries = [
         "get_version",
@@ -4474,15 +4755,18 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         responses.insert(query.to_string(), value);
     }
 
+    let coverage = WaylandStatusCoverage::from_responses(&responses);
+    let probe = coverage.legacy_fallback_json(&fallback_reason);
     let snapshot = serde_json::json!({
         "generated_at": Local::now().to_rfc3339(),
         "socket": ipc_socket_path(),
+        "probe": probe,
         "queries": responses,
     });
 
     if json_output {
         println!("{}", serde_json::to_string_pretty(&snapshot).unwrap());
-        return Ok(());
+        return Ok(coverage.completeness.exit_code());
     }
 
     let queries = &snapshot["queries"];
@@ -4494,23 +4778,30 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
     println!("=== JWM Wayland Status ===");
     println!("version: {}", version);
     println!("socket: {}", ipc_socket_path().display());
+    println!("probe: legacy fallback ({fallback_reason})");
 
-    let successful_queries = queries
-        .as_object()
-        .map(|m| {
-            m.values()
-                .filter(|v| v.get("success").and_then(|v| v.as_bool()) == Some(true))
-                .count()
-        })
-        .unwrap_or(0);
-    if successful_queries == 0 {
+    if coverage.completeness == WaylandStatusCompleteness::Unavailable {
         let first_error = queries
             .as_object()
             .and_then(|m| m.values().find_map(|v| v.get("error")))
             .and_then(|v| v.as_str())
             .unwrap_or("no successful IPC queries");
         println!("ipc: unavailable ({})", first_error);
-        return Ok(());
+        return Ok(coverage.completeness.exit_code());
+    }
+
+    if coverage.completeness == WaylandStatusCompleteness::Degraded {
+        println!(
+            "ipc: degraded ({}/{} queries succeeded; failed={})",
+            coverage.successful_queries,
+            coverage.total_queries,
+            coverage.failed_query_names.join(",")
+        );
+    } else {
+        println!(
+            "ipc: complete ({}/{} queries succeeded)",
+            coverage.successful_queries, coverage.total_queries
+        );
     }
 
     println!("monitors: {}", response_array_len(queries, "get_monitors"));
@@ -4731,7 +5022,7 @@ fn run_wayland_status(json_output: bool) -> io::Result<()> {
         }
     }
 
-    Ok(())
+    Ok(coverage.completeness.exit_code())
 }
 
 fn read_ipc_line(stream: &mut UnixStream) -> io::Result<String> {

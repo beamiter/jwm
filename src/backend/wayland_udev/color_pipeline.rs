@@ -8,9 +8,10 @@
 //!      CTM/GAMMA_LUT.
 //!
 //! The legacy encoded path can still build a direct surface→output plan. Both
-//! stages use `M_out_from_in = M_xyz_to_rgb(out) · M_rgb_to_xyz(in)`. Non-D65
-//! custom white points currently use this direct approximation; a chromatic
-//! adaptation transform remains future work.
+//! stages use `M_out_from_in = M_xyz_to_rgb(out) · CAT(out ← in) ·
+//! M_rgb_to_xyz(in)`. The Bradford chromatic-adaptation transform keeps neutral
+//! colors neutral when a client supplies custom primaries whose white point is
+//! not the compositor's D65 working white.
 //!
 //! It intentionally owns math and render plans only: GL state and uniform
 //! bindings stay in the compositor adapters. Keeping the calculations here
@@ -226,7 +227,9 @@ fn srgb_inverse(e: f32) -> f32 {
     }
 }
 
+#[cfg(feature = "backend-wayland-udev")]
 pub use drm_ffi::drm_color_ctm as DrmColorCtm;
+#[cfg(feature = "backend-wayland-udev")]
 pub use drm_ffi::drm_color_lut as DrmColorLut;
 
 /// Identity 3×3 color matrix, row-major. Public mirror of the private `IDENTITY_3X3`
@@ -237,6 +240,7 @@ pub const IDENTITY_CTM: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
 /// Pack a row-major 3×3 f32 matrix into the kernel's `drm_color_ctm` layout
 /// (9 × s31.32 fixed-point as `u64`, sign in bit 63, magnitude in bits 62..0).
 /// Matrix values are clamped to the representable magnitude range before packing.
+#[cfg(feature = "backend-wayland-udev")]
 pub fn build_ctm(matrix: [f32; 9]) -> DrmColorCtm {
     let mut out = DrmColorCtm { matrix: [0; 9] };
     for (i, &v) in matrix.iter().enumerate() {
@@ -256,6 +260,7 @@ pub fn build_ctm(matrix: [f32; 9]) -> DrmColorCtm {
 /// gray ramp (R == G == B at every entry) of `size` entries. Each entry encodes
 /// `tf.forward(i / (size - 1))` scaled into the 16-bit unsigned fixed-point
 /// range expected by the kernel. Caller guarantees `size >= 2`.
+#[cfg(feature = "backend-wayland-udev")]
 pub fn build_gamma_lut(tf: TransferKind, size: usize) -> Vec<DrmColorLut> {
     let denom = (size - 1) as f32;
     (0..size)
@@ -455,6 +460,13 @@ impl ColorTransform {
 
 const IDENTITY_3X3: [f32; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
+// Color matrices generated from real display primaries are normally close to
+// unity (sRGB/BT.2020 conversions stay below 2). This deliberately generous
+// ceiling still rejects malformed chromaticities that amplify a channel by
+// orders of magnitude before such a matrix reaches a shader or KMS CTM.
+const MAX_REASONABLE_MATRIX_COMPONENT: f32 = 64.0;
+const MIN_RELATIVE_MATRIX_DETERMINANT: f32 = 1.0e-6;
+
 fn primaries_match(a: &ColorSpacePrimaries, b: &ColorSpacePrimaries) -> bool {
     const TOL: f32 = 0.001;
     let close =
@@ -462,15 +474,68 @@ fn primaries_match(a: &ColorSpacePrimaries, b: &ColorSpacePrimaries) -> bool {
     close(a.r, b.r) && close(a.g, b.g) && close(a.b, b.b) && close(a.w, b.w)
 }
 
+/// RGB primaries may lie on the spectral-locus boundary. In particular,
+/// BT.2020 red has `x + y == 1` (Z == 0), so that boundary must not be rejected.
+fn valid_rgb_primary(primary: Chromaticity) -> bool {
+    primary.x.is_finite()
+        && primary.y.is_finite()
+        && primary.x >= 0.0
+        && primary.y > 0.0
+        && primary.x + primary.y <= 1.0
+}
+
+/// A usable reference white needs positive X, Y and Z tristimulus components.
+/// Unlike an individual RGB primary, a white point on `x + y == 1` has Z == 0
+/// and is not a physically useful adaptation target.
+fn valid_white_point(white: Chromaticity) -> bool {
+    white.x.is_finite()
+        && white.y.is_finite()
+        && white.x > 0.0
+        && white.y > 0.0
+        && white.x + white.y < 1.0
+}
+
+fn matrix_determinant(matrix: &[f32; 9]) -> f32 {
+    let [a, b, c, d, e, f, g, h, i] = *matrix;
+    a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+}
+
+/// Reject non-finite, near-singular, or implausibly large color matrices.
+/// Comparing the determinant to the cube of the largest entry makes the
+/// singularity test scale-relative instead of depending on one absolute
+/// epsilon.
+fn matrix_is_reasonable(matrix: &[f32; 9]) -> bool {
+    if matrix.iter().any(|component| {
+        !component.is_finite() || component.abs() > MAX_REASONABLE_MATRIX_COMPONENT
+    }) {
+        return false;
+    }
+
+    let scale = matrix
+        .iter()
+        .fold(0.0_f32, |largest, component| largest.max(component.abs()));
+    if scale == 0.0 {
+        return false;
+    }
+
+    let determinant = matrix_determinant(matrix);
+    determinant.is_finite() && determinant.abs() > MIN_RELATIVE_MATRIX_DETERMINANT * scale.powi(3)
+}
+
 /// Compute the 3x3 RGB→XYZ matrix for the given primaries.
 /// Derived from the standard "primary matrix" construction: choose scaling
 /// factors S_r, S_g, S_b so that [S_r, S_g, S_b] · 1 = whitepoint XYZ.
-fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> [f32; 9] {
+fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> Option<[f32; 9]> {
+    if !valid_rgb_primary(p.r)
+        || !valid_rgb_primary(p.g)
+        || !valid_rgb_primary(p.b)
+        || !valid_white_point(p.w)
+    {
+        return None;
+    }
+
     let to_xyz = |c: Chromaticity| -> (f32, f32, f32) {
         // X = x/y, Y = 1, Z = (1-x-y)/y. Use Y=1 by convention.
-        if c.y.abs() < 1e-9 {
-            return (0.0, 0.0, 0.0);
-        }
         (c.x / c.y, 1.0, (1.0 - c.x - c.y) / c.y)
     };
     let (xr, yr, zr) = to_xyz(p.r);
@@ -479,28 +544,23 @@ fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> [f32; 9] {
     let (xw, _yw, zw) = to_xyz(p.w);
     // Solve M · [S_r, S_g, S_b]^T = [Xw, Yw=1, Zw]^T where
     //   M = [[xr xg xb], [yr yg yb], [zr zg zb]]
-    let det = xr * (yg * zb - yb * zg) - xg * (yr * zb - yb * zr) + xb * (yr * zg - yg * zr);
-    if det.abs() < 1e-12 {
-        return IDENTITY_3X3;
-    }
-    let inv_det = 1.0 / det;
-    // Inverse of 3x3 columns is the matrix of cofactors transposed × 1/det.
-    let inv = [
-        (yg * zb - yb * zg) * inv_det,
-        -(xg * zb - xb * zg) * inv_det,
-        (xg * yb - xb * yg) * inv_det,
-        -(yr * zb - yb * zr) * inv_det,
-        (xr * zb - xb * zr) * inv_det,
-        -(xr * yb - xb * yr) * inv_det,
-        (yr * zg - yg * zr) * inv_det,
-        -(xr * zg - xg * zr) * inv_det,
-        (xr * yg - xg * yr) * inv_det,
-    ];
+    let primary_matrix = [xr, xg, xb, yr, yg, yb, zr, zg, zb];
+    let inv = invert_3x3(&primary_matrix)?;
     // S = M^{-1} · whitepoint_XYZ
     let sr = inv[0] * xw + inv[1] * 1.0 + inv[2] * zw;
     let sg = inv[3] * xw + inv[4] * 1.0 + inv[5] * zw;
     let sb = inv[6] * xw + inv[7] * 1.0 + inv[8] * zw;
-    [
+    // A white point outside the RGB triangle produces a negative channel
+    // scale. Treat that description as unusable instead of emitting a matrix
+    // with surprising sign/amplification behavior.
+    if [sr, sg, sb]
+        .iter()
+        .any(|scale| !scale.is_finite() || *scale <= 0.0)
+    {
+        return None;
+    }
+
+    let matrix = [
         sr * xr,
         sg * xg,
         sb * xb,
@@ -510,10 +570,14 @@ fn rgb_to_xyz_matrix(p: &ColorSpacePrimaries) -> [f32; 9] {
         sr * zr,
         sg * zg,
         sb * zb,
-    ]
+    ];
+    matrix_is_reasonable(&matrix).then_some(matrix)
 }
 
-fn invert_3x3(m: &[f32; 9]) -> [f32; 9] {
+fn invert_3x3(m: &[f32; 9]) -> Option<[f32; 9]> {
+    if !matrix_is_reasonable(m) {
+        return None;
+    }
     let a = m[0];
     let b = m[1];
     let c = m[2];
@@ -523,12 +587,9 @@ fn invert_3x3(m: &[f32; 9]) -> [f32; 9] {
     let g = m[6];
     let h = m[7];
     let i = m[8];
-    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-    if det.abs() < 1e-12 {
-        return IDENTITY_3X3;
-    }
+    let det = matrix_determinant(m);
     let inv_det = 1.0 / det;
-    [
+    let inverse = [
         (e * i - f * h) * inv_det,
         -(b * i - c * h) * inv_det,
         (b * f - c * e) * inv_det,
@@ -538,7 +599,8 @@ fn invert_3x3(m: &[f32; 9]) -> [f32; 9] {
         (d * h - e * g) * inv_det,
         -(a * h - b * g) * inv_det,
         (a * e - b * d) * inv_det,
-    ]
+    ];
+    matrix_is_reasonable(&inverse).then_some(inverse)
 }
 
 fn mat3_mul(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
@@ -555,18 +617,127 @@ fn mat3_mul(a: &[f32; 9], b: &[f32; 9]) -> [f32; 9] {
     out
 }
 
-/// RGB→RGB matrix taking linear surface RGB to linear output RGB. Assumes both
-/// spaces share the same white point; if they don't, a Bradford CAT would be
-/// applied between the two halves. For the v1 protocol both sRGB and BT.2020
-/// use D65, so the no-CAT path covers our two named primaries. If a client
-/// supplies explicit primaries with a different white point, the result is a
-/// pure rotation in XYZ — sufficient correctness for the V1 slice; a future
-/// pass can fold in a Bradford CAT if real clients hit it.
+fn mat3_mul_vec(matrix: &[f32; 9], vector: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0] * vector[0] + matrix[1] * vector[1] + matrix[2] * vector[2],
+        matrix[3] * vector[0] + matrix[4] * vector[1] + matrix[5] * vector[2],
+        matrix[6] * vector[0] + matrix[7] * vector[1] + matrix[8] * vector[2],
+    ]
+}
+
+fn white_xyz(white: Chromaticity) -> Option<[f32; 3]> {
+    if !valid_white_point(white) {
+        return None;
+    }
+    let xyz = [white.x / white.y, 1.0, (1.0 - white.x - white.y) / white.y];
+    xyz.iter()
+        .all(|component| component.is_finite())
+        .then_some(xyz)
+}
+
+/// Bradford chromatic adaptation in XYZ space, from `source_white` to
+/// `destination_white`.
+///
+/// Invalid custom white points return `None`; the public RGB conversion then
+/// fails closed to identity. Protocol validation is expected to reject them
+/// earlier, but color planning must never turn a bad description into NaN
+/// uniforms or a non-finite KMS CTM.
+fn bradford_adaptation_matrix(
+    source_white: Chromaticity,
+    destination_white: Chromaticity,
+) -> Option<[f32; 9]> {
+    const BRADFORD: [f32; 9] = [
+        0.8951, 0.2664, -0.1614, -0.7502, 1.7135, 0.0367, 0.0389, -0.0685, 1.0296,
+    ];
+    const BRADFORD_INVERSE: [f32; 9] = [
+        0.986_992_9,
+        -0.147_054_3,
+        0.159_962_7,
+        0.432_305_3,
+        0.518_360_3,
+        0.049_291_2,
+        -0.008_528_7,
+        0.040_042_8,
+        0.968_486_7,
+    ];
+
+    // Validate before the equality fast path: two identical invalid whites are
+    // still an invalid description, not a successful identity adaptation.
+    if !valid_white_point(source_white) || !valid_white_point(destination_white) {
+        return None;
+    }
+    if (source_white.x - destination_white.x).abs() < 1e-7
+        && (source_white.y - destination_white.y).abs() < 1e-7
+    {
+        return Some(IDENTITY_3X3);
+    }
+    let (Some(source_xyz), Some(destination_xyz)) =
+        (white_xyz(source_white), white_xyz(destination_white))
+    else {
+        return None;
+    };
+    let source_cone = mat3_mul_vec(&BRADFORD, source_xyz);
+    let destination_cone = mat3_mul_vec(&BRADFORD, destination_xyz);
+    if source_cone
+        .iter()
+        .any(|component| !component.is_finite() || *component <= 1e-6)
+        || destination_cone
+            .iter()
+            .any(|component| !component.is_finite() || *component <= 1e-6)
+    {
+        return None;
+    }
+
+    let scale = [
+        destination_cone[0] / source_cone[0],
+        destination_cone[1] / source_cone[1],
+        destination_cone[2] / source_cone[2],
+    ];
+    if scale
+        .iter()
+        .any(|component| !component.is_finite() || *component <= 0.0)
+    {
+        return None;
+    }
+    let diagonal = [scale[0], 0.0, 0.0, 0.0, scale[1], 0.0, 0.0, 0.0, scale[2]];
+    let adaptation = mat3_mul(&BRADFORD_INVERSE, &mat3_mul(&diagonal, &BRADFORD));
+    matrix_is_reasonable(&adaptation).then_some(adaptation)
+}
+
+/// Validate explicit parametric primaries using the exact same domain,
+/// invertibility, and matrix-safety checks as the render pipeline.
+///
+/// Named primaries are protocol enums backed by known-safe built-ins, so a
+/// description without an explicit `primaries` payload needs no additional
+/// mathematical validation here. When both named and explicit primaries are
+/// present, the explicit payload is authoritative and is always checked.
+#[must_use]
+pub fn parametric_primaries_are_valid(params: &ParametricParams) -> bool {
+    params.primaries.is_none()
+        || rgb_to_xyz_matrix(&ColorSpacePrimaries::from_params(params)).is_some()
+}
+
+/// RGB→RGB matrix taking linear surface RGB to linear output RGB. A Bradford
+/// CAT is folded between the RGB→XYZ and XYZ→RGB halves when their white
+/// points differ. Named sRGB and BT.2020 are both D65, so their established
+/// matrices stay byte-for-byte on the identity-CAT path. Invalid or
+/// numerically unsafe descriptions fail closed to identity rather than
+/// exposing a non-finite, singular, or unreasonably amplified matrix to the
+/// renderer/KMS pipeline.
 pub fn rgb_to_rgb_matrix(surface: &ColorSpacePrimaries, output: &ColorSpacePrimaries) -> [f32; 9] {
-    let m_in = rgb_to_xyz_matrix(surface);
-    let m_out = rgb_to_xyz_matrix(output);
-    let m_out_inv = invert_3x3(&m_out);
-    mat3_mul(&m_out_inv, &m_in)
+    checked_rgb_to_rgb_matrix(surface, output).unwrap_or(IDENTITY_3X3)
+}
+
+fn checked_rgb_to_rgb_matrix(
+    surface: &ColorSpacePrimaries,
+    output: &ColorSpacePrimaries,
+) -> Option<[f32; 9]> {
+    let m_in = rgb_to_xyz_matrix(surface)?;
+    let m_out = rgb_to_xyz_matrix(output)?;
+    let m_out_inv = invert_3x3(&m_out)?;
+    let adaptation = bradford_adaptation_matrix(surface.w, output.w)?;
+    let matrix = mat3_mul(&m_out_inv, &mat3_mul(&adaptation, &m_in));
+    matrix_is_reasonable(&matrix).then_some(matrix)
 }
 
 #[cfg(test)]
@@ -708,7 +879,8 @@ mod tests {
     fn srgb_to_xyz_d65_row_sums_match_white() {
         // For an RGB-to-XYZ matrix with D65 normalization, multiplying by
         // [1,1,1] (encoded white) must give the white point XYZ where Y=1.
-        let m = rgb_to_xyz_matrix(&ColorSpacePrimaries::SRGB_D65);
+        let m = rgb_to_xyz_matrix(&ColorSpacePrimaries::SRGB_D65)
+            .expect("the built-in sRGB primaries must be valid");
         let xw = m[0] + m[1] + m[2];
         let yw = m[3] + m[4] + m[5];
         let zw = m[6] + m[7] + m[8];
@@ -716,6 +888,199 @@ mod tests {
         assert!(approx_eq(xw, 0.9504, 5e-4));
         assert!(approx_eq(yw, 1.0, 5e-4));
         assert!(approx_eq(zw, 1.0888, 5e-4));
+    }
+
+    #[test]
+    fn bradford_d65_to_d50_matches_reference_matrix() {
+        let d50 = Chromaticity {
+            x: 0.34567,
+            y: 0.35850,
+        };
+        let adaptation = bradford_adaptation_matrix(ColorSpacePrimaries::SRGB_D65.w, d50)
+            .expect("D65 and D50 are valid white points");
+        let expected = [
+            1.047_81, 0.022_89, -0.050_13, 0.029_54, 0.990_48, -0.017_05, -0.009_23, 0.015_04,
+            0.752_13,
+        ];
+        assert!(
+            approx_mat(&adaptation, &expected, 5e-4),
+            "unexpected D65→D50 Bradford matrix: {adaptation:?}"
+        );
+    }
+
+    #[test]
+    fn non_d65_rgb_conversion_preserves_neutral_and_round_trips() {
+        let d50_srgb_primaries = ColorSpacePrimaries {
+            w: Chromaticity {
+                x: 0.34567,
+                y: 0.35850,
+            },
+            ..ColorSpacePrimaries::SRGB_D65
+        };
+        let d50_to_d65 = rgb_to_rgb_matrix(&d50_srgb_primaries, &ColorSpacePrimaries::SRGB_D65);
+        // A neutral RGB triplet describes the source white. Chromatic
+        // adaptation must carry it to the destination white, which is also
+        // neutral in destination RGB.
+        for row in 0..3 {
+            let sum = d50_to_d65[row * 3..row * 3 + 3].iter().sum::<f32>();
+            assert!(
+                approx_eq(sum, 1.0, 5e-4),
+                "neutral row {row} mapped to {sum}: {d50_to_d65:?}"
+            );
+        }
+
+        let d65_to_d50 = rgb_to_rgb_matrix(&ColorSpacePrimaries::SRGB_D65, &d50_srgb_primaries);
+        let roundtrip = mat3_mul(&d65_to_d50, &d50_to_d65);
+        assert!(
+            approx_mat(&roundtrip, &IDENTITY_3X3, 2e-3),
+            "D50→D65→D50 should round-trip, got {roundtrip:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_custom_white_never_produces_non_finite_matrix_entries() {
+        let invalid = ColorSpacePrimaries {
+            w: Chromaticity { x: 0.3, y: 0.0 },
+            ..ColorSpacePrimaries::SRGB_D65
+        };
+        assert!(checked_rgb_to_rgb_matrix(&invalid, &ColorSpacePrimaries::SRGB_D65).is_none());
+        let matrix = rgb_to_rgb_matrix(&invalid, &ColorSpacePrimaries::SRGB_D65);
+        assert!(matrix.iter().all(|component| component.is_finite()));
+        assert_eq!(matrix, IDENTITY_3X3);
+    }
+
+    #[test]
+    fn bt2020_red_spectral_boundary_remains_valid() {
+        let red = ColorSpacePrimaries::BT2020_D65.r;
+        assert_eq!(red.x + red.y, 1.0, "test must exercise the Z=0 boundary");
+        assert!(valid_rgb_primary(red));
+        assert!(rgb_to_xyz_matrix(&ColorSpacePrimaries::BT2020_D65).is_some());
+
+        let conversion = checked_rgb_to_rgb_matrix(
+            &ColorSpacePrimaries::BT2020_D65,
+            &ColorSpacePrimaries::SRGB_D65,
+        )
+        .expect("BT.2020 must produce a usable conversion matrix");
+        assert!(!approx_mat(&conversion, &IDENTITY_3X3, 1e-6));
+    }
+
+    #[test]
+    fn negative_y_chromaticities_fail_closed() {
+        let negative_primary = ColorSpacePrimaries {
+            r: Chromaticity { x: 0.64, y: -0.01 },
+            ..ColorSpacePrimaries::SRGB_D65
+        };
+        assert!(!valid_rgb_primary(negative_primary.r));
+        assert!(rgb_to_xyz_matrix(&negative_primary).is_none());
+        assert_eq!(
+            rgb_to_rgb_matrix(&negative_primary, &ColorSpacePrimaries::SRGB_D65),
+            IDENTITY_3X3
+        );
+
+        let negative_white = ColorSpacePrimaries {
+            w: Chromaticity { x: 0.3127, y: -0.1 },
+            ..ColorSpacePrimaries::SRGB_D65
+        };
+        assert!(!valid_white_point(negative_white.w));
+        assert!(rgb_to_xyz_matrix(&negative_white).is_none());
+        assert_eq!(
+            rgb_to_rgb_matrix(&negative_white, &ColorSpacePrimaries::SRGB_D65),
+            IDENTITY_3X3
+        );
+    }
+
+    #[test]
+    fn white_on_or_outside_xyz_boundary_fails_closed() {
+        for white in [
+            Chromaticity { x: 0.4, y: 0.6 },
+            Chromaticity { x: 0.5, y: 0.6 },
+        ] {
+            let invalid = ColorSpacePrimaries {
+                w: white,
+                ..ColorSpacePrimaries::SRGB_D65
+            };
+            assert!(!valid_white_point(white));
+            assert!(checked_rgb_to_rgb_matrix(&invalid, &ColorSpacePrimaries::SRGB_D65).is_none());
+            assert_eq!(
+                rgb_to_rgb_matrix(&invalid, &ColorSpacePrimaries::SRGB_D65),
+                IDENTITY_3X3
+            );
+        }
+    }
+
+    #[test]
+    fn collinear_and_near_singular_primaries_fail_closed() {
+        let collinear = ColorSpacePrimaries {
+            r: Chromaticity { x: 0.640, y: 0.330 },
+            g: Chromaticity { x: 0.395, y: 0.195 },
+            b: Chromaticity { x: 0.150, y: 0.060 },
+            w: Chromaticity { x: 0.395, y: 0.195 },
+        };
+        let near_singular = ColorSpacePrimaries {
+            g: Chromaticity {
+                x: 0.395,
+                y: 0.195_000_1,
+            },
+            w: Chromaticity {
+                x: 0.395,
+                y: 0.195_000_04,
+            },
+            ..collinear
+        };
+
+        for invalid in [collinear, near_singular] {
+            assert!(valid_rgb_primary(invalid.r));
+            assert!(valid_rgb_primary(invalid.g));
+            assert!(valid_rgb_primary(invalid.b));
+            assert!(valid_white_point(invalid.w));
+            assert!(rgb_to_xyz_matrix(&invalid).is_none());
+            assert_eq!(
+                rgb_to_rgb_matrix(&invalid, &ColorSpacePrimaries::SRGB_D65),
+                IDENTITY_3X3
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_singular_and_huge_matrices_are_unreasonable() {
+        assert!(matrix_is_reasonable(&IDENTITY_3X3));
+
+        let mut non_finite = IDENTITY_3X3;
+        non_finite[4] = f32::NAN;
+        assert!(!matrix_is_reasonable(&non_finite));
+
+        let singular = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        assert!(!matrix_is_reasonable(&singular));
+
+        let huge = [65.0, 0.0, 0.0, 0.0, 65.0, 0.0, 0.0, 0.0, 65.0];
+        assert!(!matrix_is_reasonable(&huge));
+    }
+
+    #[test]
+    fn production_builders_keep_transfer_semantics_but_drop_invalid_gamut_matrix() {
+        let invalid_surface = ParametricParams {
+            primaries_named: Some(6),
+            primaries: Some([
+                640_000, -10_000, 300_000, 600_000, 150_000, 60_000, 312_700, 329_000,
+            ]),
+            tf_named: Some(11 /* PQ */),
+            ..Default::default()
+        };
+        let output = ParametricParams {
+            primaries_named: Some(6 /* BT.2020 */),
+            tf_named: Some(13 /* HLG */),
+            ..Default::default()
+        };
+
+        let scene_linear = ColorTransform::build_to_linear_srgb(&invalid_surface);
+        assert_eq!(scene_linear.inverse_eotf, TransferKind::St2084Pq);
+        assert_eq!(scene_linear.forward_eotf, TransferKind::Linear);
+        assert_eq!(scene_linear.matrix_row_major, IDENTITY_3X3);
+
+        let legacy = ColorTransform::build_explicit(&invalid_surface, &output);
+        assert_eq!(legacy.inverse_eotf, TransferKind::St2084Pq);
+        assert_eq!(legacy.forward_eotf, TransferKind::Hlg);
+        assert_eq!(legacy.matrix_row_major, IDENTITY_3X3);
     }
 
     #[test]
@@ -834,6 +1199,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_gamma_lut_linear_is_identity() {
         let lut = build_gamma_lut(TransferKind::Linear, 256);
@@ -854,6 +1220,7 @@ mod tests {
         assert!((lut[128].red as i32 - 32896).abs() <= 1);
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_gamma_lut_srgb_endpoints_and_known_midpoint() {
         let lut = build_gamma_lut(TransferKind::Srgb, 256);
@@ -912,6 +1279,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_gamma_lut_pq_monotonic_and_endpoints() {
         let lut = build_gamma_lut(TransferKind::St2084Pq, 1024);
@@ -922,6 +1290,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_gamma_lut_hlg_monotonic_and_endpoints() {
         let lut = build_gamma_lut(TransferKind::Hlg, 1024);
@@ -936,6 +1305,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_ctm_identity_packs_to_one_and_zero() {
         let ctm = build_ctm(IDENTITY_CTM);
@@ -943,6 +1313,7 @@ mod tests {
         assert_eq!(ctm.matrix, [one, 0, 0, 0, one, 0, 0, 0, one]);
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_ctm_negative_sets_sign_bit() {
         let m = [-0.5_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
@@ -960,6 +1331,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_ctm_round_trip_unpack() {
         // A non-trivial real matrix: sRGB→BT.2020 gamut.
@@ -981,6 +1353,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "backend-wayland-udev")]
     #[test]
     fn build_gamma_lut_srgb_monotonic() {
         let lut = build_gamma_lut(TransferKind::Srgb, 1024);

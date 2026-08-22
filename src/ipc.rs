@@ -968,6 +968,18 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_screenshot_remains_a_bindable_dispatch_command() {
+        let (command, arg) =
+            dispatch_command("take_screenshot_fullscreen", &serde_json::Value::Null).unwrap();
+
+        assert!(std::ptr::fn_addr_eq(
+            command,
+            Jwm::take_screenshot_fullscreen as WMFuncType
+        ));
+        assert_eq!(arg, WMArgEnum::Int(0));
+    }
+
+    #[test]
     fn dispatch_unknown_command_errors() {
         let args = serde_json::json!(null);
         assert!(dispatch_command("nonexistent", &args).is_err());

@@ -62,6 +62,14 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Explicit non-D65 surface and output descriptions now pass through a Bradford
+  chromatic-adaptation transform between RGB→XYZ and XYZ→RGB. Neutral colors
+  remain neutral across white points, D65 sRGB/BT.2020 matrices retain their
+  existing identity-CAT path, and invalid or degenerate explicit primaries are
+  rejected before they can inject unsafe color uniforms or KMS CTMs.
+- The XCB transport now requires `xcb` 1.7.1, removing its vulnerable
+  build-only `quick-xml` 0.30 dependency. The locked graph reuses the
+  security-fixed 0.41 line already present in the workspace.
 - Handler maintenance now has one exact wakeup contract shared by
   `needs_tick()` and `next_wakeup()`. Config debounce, layout picker, hidden
   parking, deferred grabs, transient-child insurance, scratchpad expiry,
@@ -392,6 +400,30 @@ monorepo use independent Semantic Versions.
 
 ### Fixed
 
+- Full-screen screenshot IPC now reports the asynchronous contract explicitly
+  as `{status: "queued", path}`. It returns an error when destination/staging
+  preflight fails or the backend rejects submission; region capture also
+  preserves errors from its full-screen fallback. Logs no longer describe an
+  accepted asynchronous request as an already-saved image. KMS now queues
+  consecutive requests in order, and all compositor PNG writers publish
+  atomically without overwriting an existing destination or exposing a partial
+  image.
+- `jwm-tool wayland-status` exits non-zero when IPC and every compatibility
+  query are unavailable. Complete and partial legacy probes now publish an
+  explicit `probe` status, counts, failed query names, mode, and fallback
+  reason. Missing/null/scalar payloads no longer count as successful data, and
+  legacy servers that close or return old-format aggregate responses still get
+  the bounded per-query fallback.
+- The GTK/Relm status bars compile with protocol-v14 client icons again; their
+  renderer now maps `ClientIcon` to its own stable CSS node class.
+- The headless WaterLily test job no longer precompiles the unused GLMakie/GLFW
+  stack, and `Random` is an explicit package dependency instead of an
+  undeclared transitive import.
+- The toolbar contact-sheet test now runs as a deterministic in-memory
+  composition assertion. Shared-structure subprocess helpers dispatch through
+  their parent tests' ordinary exact-test entries, eliminating the repository's
+  remaining Rust `#[ignore]` entries without no-op helper tests or filesystem
+  side effects.
 - The lock card's advertised `Esc  clear` action now securely overwrites and
   clears the entered password and authentication message while keeping the
   session locked.

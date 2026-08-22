@@ -134,9 +134,9 @@ ownership transitions, and keeps the actual output signal on exact sRGB; EDID
 PQ/HLG profiles exposed by diagnostics describe capability, not an active route.
 
 The working values are relative: JWM does not yet normalize SDR, PQ and HLG to
-one absolute luminance scale. Explicit non-D65 white points also lack a
-chromatic-adaptation transform; dynamic surface-description changes are not yet
-latched to their matching `wl_surface.commit`; and KMS color-property updates
+one absolute luminance scale. Explicit non-D65 white points are Bradford-adapted
+to the destination white, but dynamic surface-description changes are not yet
+latched to their matching `wl_surface.commit`, and KMS color-property updates
 are not committed atomically with their matching framebuffer. Those are
 output-pipeline limits, not overview-specific exceptions.
 
@@ -146,7 +146,8 @@ reflection contact falloff, deterministic skydome pixels, scene-linear
 materials, non-symmetric color matrices, explicit PQ/HLG decode plans and transparent
 color-managed texels. The fullscreen transfer pair is also checked against the
 CPU oracle for Linear, Power, BT.1886, Gamma 2.2, PQ, HLG and sRGB. Asymmetric
-matrix and disjoint-region pixel tests cover independent per-output delivery,
+matrix, non-D65 Bradford, and disjoint-region tests cover independent
+per-output delivery,
 including untouched gaps, while route/scissor tests lock conservative fallback
 selection. CI forces Mesa's
 surfaceless EGL platform and treats a missing GL context as a failure, so these

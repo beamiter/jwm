@@ -81,21 +81,21 @@ pub fn plan_capture_completion(
     })
 }
 
-/// 捕获执行结果；日志由调用方按既有格式输出。
+/// 捕获请求提交结果；日志由调用方按既有格式输出。
 #[derive(Debug)]
 pub enum CaptureExecution {
-    /// 区域捕获成功。
+    /// 后端接受了区域捕获请求；实际落盘可能异步失败。
     CapturedRegion,
-    /// 后端不支持区域捕获，回退全屏捕获成功。
+    /// 后端不支持区域捕获，但接受了全屏回退请求；实际落盘可能异步失败。
     CapturedFullFallback,
-    /// 区域捕获不受支持，全屏回退也失败或不受支持。
+    /// 区域捕获不受支持，全屏回退也不受支持。
     Unavailable,
-    /// 区域捕获返回错误。
+    /// 区域捕获或全屏回退返回错误。
     Failed(BackendError),
 }
 
 impl CaptureExecution {
-    /// 是否产生了捕获文件（后续剪贴板 / 标注烘焙的前提）。
+    /// 后端是否接受了捕获请求（不代表异步文件已经产生）。
     #[must_use]
     pub fn captured(&self) -> bool {
         matches!(self, Self::CapturedRegion | Self::CapturedFullFallback)
@@ -114,14 +114,29 @@ pub fn execute_capture_plan(
     let (x, y, width, height) = plan.region;
     match media.take_screenshot_region_to_file(&path, x, y, width, height) {
         Ok(true) => CaptureExecution::CapturedRegion,
-        Ok(false) => {
-            if media.take_screenshot_to_file(&path).unwrap_or(false) {
-                CaptureExecution::CapturedFullFallback
-            } else {
-                CaptureExecution::Unavailable
-            }
-        }
+        Ok(false) => match media.take_screenshot_to_file(&path) {
+            Ok(true) => CaptureExecution::CapturedFullFallback,
+            Ok(false) => CaptureExecution::Unavailable,
+            Err(error) => CaptureExecution::Failed(error),
+        },
         Err(error) => CaptureExecution::Failed(error),
+    }
+}
+
+/// Execute a requested full-screen capture without collapsing backend errors
+/// into an apparent success.
+///
+/// `Ok(false)` is the backend contract for an unsupported capture operation;
+/// commands need that to be an error so IPC clients do not report success when
+/// no file was produced.
+pub(crate) fn execute_fullscreen_capture(
+    media: &mut dyn CompositorMedia,
+    path: &std::path::Path,
+) -> Result<(), BackendError> {
+    match media.take_screenshot_to_file(path) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(BackendError::Unsupported("fullscreen screenshot capture")),
+        Err(error) => Err(error),
     }
 }
 
@@ -215,8 +230,8 @@ mod tests {
     /// `CompositorMedia`，不必 mock 完整 `Backend` 接口。
     #[derive(Default)]
     struct FakeMedia {
-        region_result: Option<Result<bool, ()>>,
-        full_result: bool,
+        region_result: Option<Result<bool, &'static str>>,
+        full_result: Option<Result<bool, &'static str>>,
         region_calls: Vec<(i32, i32, u32, u32)>,
         full_calls: usize,
     }
@@ -233,7 +248,7 @@ mod tests {
             self.region_calls.push((x, y, width, height));
             match self.region_result.take().unwrap_or(Ok(true)) {
                 Ok(supported) => Ok(supported),
-                Err(()) => Err(BackendError::Message("capture failed".into())),
+                Err(message) => Err(BackendError::Message(message.into())),
             }
         }
 
@@ -242,7 +257,10 @@ mod tests {
             _path: &std::path::Path,
         ) -> Result<bool, BackendError> {
             self.full_calls += 1;
-            Ok(self.full_result)
+            match self.full_result.take().unwrap_or(Ok(false)) {
+                Ok(supported) => Ok(supported),
+                Err(message) => Err(BackendError::Message(message.into())),
+            }
         }
     }
 
@@ -272,7 +290,7 @@ mod tests {
     fn execution_falls_back_to_full_capture_when_region_is_unsupported() {
         let mut media = FakeMedia {
             region_result: Some(Ok(false)),
-            full_result: true,
+            full_result: Some(Ok(true)),
             ..Default::default()
         };
         assert!(execute_capture_plan(&mut media, &plan()).captured());
@@ -280,7 +298,7 @@ mod tests {
 
         let mut media = FakeMedia {
             region_result: Some(Ok(false)),
-            full_result: false,
+            full_result: Some(Ok(false)),
             ..Default::default()
         };
         let outcome = execute_capture_plan(&mut media, &plan());
@@ -291,11 +309,60 @@ mod tests {
     #[test]
     fn execution_reports_region_errors_without_a_fallback_attempt() {
         let mut media = FakeMedia {
-            region_result: Some(Err(())),
+            region_result: Some(Err("region capture failed")),
             ..Default::default()
         };
         let outcome = execute_capture_plan(&mut media, &plan());
         assert!(matches!(outcome, CaptureExecution::Failed(_)));
         assert_eq!(media.full_calls, 0);
+    }
+
+    #[test]
+    fn execution_preserves_fullscreen_fallback_errors() {
+        let mut media = FakeMedia {
+            region_result: Some(Ok(false)),
+            full_result: Some(Err("fullscreen fallback failed")),
+            ..Default::default()
+        };
+
+        let outcome = execute_capture_plan(&mut media, &plan());
+        assert!(matches!(
+            outcome,
+            CaptureExecution::Failed(BackendError::Message(message))
+                if message == "fullscreen fallback failed"
+        ));
+        assert_eq!(media.full_calls, 1);
+    }
+
+    #[test]
+    fn fullscreen_command_execution_rejects_unsupported_capture() {
+        let mut media = FakeMedia {
+            full_result: Some(Ok(false)),
+            ..Default::default()
+        };
+
+        let error = execute_fullscreen_capture(&mut media, std::path::Path::new("/tmp/shot.png"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BackendError::Unsupported("fullscreen screenshot capture")
+        ));
+        assert_eq!(media.full_calls, 1);
+    }
+
+    #[test]
+    fn fullscreen_command_execution_preserves_backend_errors() {
+        let mut media = FakeMedia {
+            full_result: Some(Err("fullscreen capture failed")),
+            ..Default::default()
+        };
+
+        let error = execute_fullscreen_capture(&mut media, std::path::Path::new("/tmp/shot.png"))
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            BackendError::Message(message) if message == "fullscreen capture failed"
+        ));
+        assert_eq!(media.full_calls, 1);
     }
 }
