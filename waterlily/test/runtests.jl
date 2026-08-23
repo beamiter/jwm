@@ -907,9 +907,8 @@ end
     @test 0 < partial < 10.0
 
     # A forced runner sheds a wet trail as it slides.
-    runner = JwmWaterLily.rain_stuck_drop(64.0, 10.0, 0.0, case.unit)
-    runner.radius = runner.release_radius * 1.2f0
-    runner.sliding = true
+    critical = JwmWaterLily.rain_critical_radius(1.0f0) * case.resolution
+    runner = JwmWaterLily.rain_stuck_drop(case, 64.0, 10.0, 1.4f0 * critical)
     push!(case.drops, runner)
     JwmWaterLily.advance!(case, 1.0)
     trail = maximum(
@@ -925,4 +924,131 @@ end
     @test all(d -> hypot(d.x - 64, d.y - 48) > wipe, case.drops)
     JwmWaterLily.advance!(case, 5.0)
     @test case.wetness[64, 48] < 1.0
+end
+
+# The drop model is a force balance in SI units rather than an animation
+# curve, so its thresholds and rates are pinned against the physics they
+# claim to implement instead of against a rendered look.
+@testset "rain drop physics" begin
+    # Spherical-cap geometry: an impacting sphere of diameter D relaxes into
+    # a cap of the same volume.
+    for diameter in (0.8f-3, 1.5f-3, 2.5f-3)
+        radius = JwmWaterLily.rain_impact_radius(diameter)
+        @test JwmWaterLily.rain_drop_volume(radius) ≈ Float32(pi / 6) * diameter^3 rtol =
+            1.0f-5
+    end
+    volume = JwmWaterLily.rain_drop_volume(2.0f-3)
+    @test JwmWaterLily.rain_radius_from_volume(volume) ≈ 2.0f-3 rtol = 1.0f-5
+
+    # Furmidge: the critical contact radius is where gravity exactly balances
+    # the retention force, and for water on glass it lands near 2 mm.
+    critical = JwmWaterLily.rain_critical_radius(1.0f0)
+    @test JwmWaterLily.rain_gravity_force(critical) ≈
+          JwmWaterLily.rain_retention_force(critical, 1.0f0) rtol = 1.0f-5
+    @test 1.5f-3 < critical < 3.0f-3
+    # Stickier glass holds bigger drops.
+    @test JwmWaterLily.rain_critical_radius(1.3f0) > critical
+
+    # Terminal velocity from the Cox-Voinov drag: measured slide speeds of
+    # millimetric drops on vertical glass are centimetres per second, and
+    # they grow with drop size.
+    terminal(a) =
+        (JwmWaterLily.rain_gravity_force(a) - JwmWaterLily.rain_retention_force(a, 1.0f0)) /
+        JwmWaterLily.rain_drag_coefficient(a)
+    @test terminal(3.0f-3) < terminal(4.0f-3)
+    @test 0.02f0 < terminal(3.0f-3) < 0.30f0
+
+    case = build_case("rain", (192, 800); memory=Array)
+    # Pin the defect landscape so the threshold under test is the physical
+    # one rather than a sample of the field.
+    fill!(case.pinning, 1.0f0)
+    fill!(case.wetness, 0.0f0)
+    empty!(case.drops)
+    critical_px = critical * case.resolution
+    spawned = JwmWaterLily.Raindrop[]
+
+    # Just under the threshold the drop hangs; just over it, it releases on
+    # its own. Nothing sets `sliding` — the force balance does.
+    held = JwmWaterLily.rain_stuck_drop(case, 96.0, 100.0, 0.92f0 * critical_px)
+    held.pinning = 1.0f0
+    JwmWaterLily.rain_dynamics!(case, held, spawned, 0.05f0)
+    @test !held.sliding
+    @test held.speed == 0.0f0
+    @test held.y == 100.0f0
+
+    released = JwmWaterLily.rain_stuck_drop(case, 96.0, 100.0, 1.15f0 * critical_px)
+    released.pinning = 1.0f0
+    for _ in 1:20
+        JwmWaterLily.rain_dynamics!(case, released, spawned, 0.05f0)
+    end
+    @test released.sliding
+    @test released.speed > 0.0f0
+    @test released.y > 100.0f0
+    # The swept contact area wipes the mist over the full contact width.
+    @test case.wetness[96, 105] > 0.5f0
+    @test case.wetness[
+        clamp(96 + round(Int, 2.5f0 * released.radius), 1, 192),
+        105,
+    ] < 0.2f0
+
+    # Contact-angle hysteresis is a loop: a drop that drains back under the
+    # retention force re-pins by itself instead of coasting forever.
+    draining = JwmWaterLily.rain_stuck_drop(case, 40.0, 100.0, 0.7f0 * critical_px)
+    draining.pinning = 1.0f0
+    draining.speed = 300.0f0
+    draining.sliding = true
+    for _ in 1:120
+        JwmWaterLily.rain_dynamics!(case, draining, spawned, 1.0f0 / 60.0f0)
+    end
+    @test !draining.sliding
+    @test draining.speed == 0.0f0
+
+    # Coalescence conserves volume and mixes momentum.
+    empty!(case.drops)
+    big = JwmWaterLily.rain_stuck_drop(case, 96.0, 300.0, 0.8f0 * critical_px)
+    small = JwmWaterLily.rain_stuck_drop(case, 96.0 + 0.9f0 * critical_px, 300.0,
+                                         0.5f0 * critical_px)
+    big.speed = 200.0f0
+    total = JwmWaterLily.rain_drop_volume(big.radius / case.resolution) +
+            JwmWaterLily.rain_drop_volume(small.radius / case.resolution)
+    append!(case.drops, (big, small))
+    JwmWaterLily.rain_merge!(case, spawned)
+    survivors = filter(d -> d.radius > 0.0f0, case.drops)
+    @test length(survivors) == 1
+    merged = only(survivors)
+    @test JwmWaterLily.rain_drop_volume(merged.radius / case.resolution) ≈ total rtol =
+        1.0f-4
+    @test 0.0f0 < merged.speed < 200.0f0
+
+    # Coalescence tests the segment a drop swept this substep, so a fast
+    # runner absorbs what it passes instead of tunnelling through it.
+    empty!(case.drops)
+    runner = JwmWaterLily.rain_stuck_drop(case, 96.0, 400.0, 1.2f0 * critical_px)
+    runner.previous_y = 200.0f0
+    victim = JwmWaterLily.rain_stuck_drop(case, 96.0, 300.0, 0.4f0 * critical_px)
+    append!(case.drops, (runner, victim))
+    JwmWaterLily.rain_merge!(case, spawned)
+    @test victim.radius == 0.0f0
+    @test runner.radius > 1.2f0 * critical_px
+
+    # Marshall-Palmer: a gust raises the rain rate, which both flattens the
+    # size distribution (smaller Λ, so bigger drops) and lifts the impact
+    # flux. The phases below pin the gust to its trough and its crest.
+    gusting(phases) = JwmWaterLily.RainCase(
+        case.dimensions,
+        JwmWaterLily.Raindrop[],
+        case.wetness,
+        case.grain,
+        case.nucleation,
+        case.pinning,
+        case.pinning_step,
+        Ref(0.0),
+        phases,
+        case.resolution,
+    )
+    calm_rate, calm_lambda = JwmWaterLily.rain_impact_flux(gusting((pi / 2, -pi / 2)), 0.0)
+    heavy_rate, heavy_lambda = JwmWaterLily.rain_impact_flux(gusting((pi / 2, pi / 2)), 0.0)
+    @test calm_rate > 0.0f0
+    @test heavy_lambda < calm_lambda
+    @test heavy_rate > calm_rate
 end

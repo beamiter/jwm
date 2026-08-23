@@ -20,7 +20,7 @@ public `AutoBody` and `Simulation` APIs:
 | `jelly` | Five lane-distributed 3D jellyfish adapted from upstream's `ThreeD_Jelly`: pulsing analytic bell membranes roam smoothly along independently seeded x, depth, and height paths; the rose gonad crown inside each translucent bell, four thick curling oral arms, five thin trailing filaments, and the simulated wakes are published with them as a native RGBA volume inside a near-full-screen perspective glass aquarium | violet purple/green |
 | `orbit` | Cylinder stirring quiescent fluid along a circular orbit, curling spiral vortex arms | cosmos rose/slate |
 | `puddle` | Rain falling into a puddle over the desktop: a damped wave equation whose ripple slopes refract the live screen through the compositor's water-lens contract, with foam on fast crests and pointer-drag wakes | ocean teal/orange |
-| `rain` | Rain on fogged glass: droplets pin, grow, merge and run down, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
+| `rain` | Rain on fogged glass: a drop-scale force balance in SI units — Furmidge pinning, Cox-Voinov drag, Landau-Levich trails and Marshall-Palmer impacts — pins, grows, merges and runs droplets down the pane, wiping the frost into clear refracting trails; pointer events wipe the mist by hand | glacier azure/bronze |
 | `stylus` | Cylinder chasing the mouse pointer through quiescent fluid on a critically damped spring, so every cursor stroke writes vorticity onto the canvas | fluent rainbow |
 | `turbulence` | True 3D free turbulence in a periodic tank: randomly oriented Gaussian vortex blobs stretch into filaments, pointer strokes inject depth-localized 3D dipoles, and sparse ambient forcing keeps the cascade alive; vorticity magnitude controls volume density while signed depth-axis vorticity selects the fluent palette's cold/warm side | fluent rainbow |
 | `waltz` | Cylinder following the mouse pointer through a uniform stream with dance's transverse heave riding the chase spring, trailing the braided wake from the cursor | mica teal/amethyst |
@@ -181,6 +181,61 @@ click-through: pointer and keyboard control continue to target normal client
 windows. JWM-owned HUD, transition, and system UI layers remain above
 WaterLily. Direct scanout and fullscreen unredirect are suppressed while the
 layer is visible because both paths would bypass compositor-owned visuals.
+
+### Rain: a drop-scale force balance
+
+`rain` is the one case whose physics is not a WaterLily solve. Drops on a
+vertical pane are a free-surface, moving-contact-line problem, and an
+incompressible Navier-Stokes solver over an immersed body cannot represent
+either. It is instead a Lagrangian population of sessile drops whose every
+rule is a force or a flux written in SI units and converted to canvas pixels
+exactly once, through the pane's resolution in pixels per metre:
+
+- **Geometry.** A drop is a spherical cap, `V = π/3·f(θ)·a³` for contact
+  radius `a`, so merges, pearls and film losses conserve volume, not radius.
+- **Pinning.** A drop hangs while gravity `ρVg` stays below the Furmidge
+  retention force `σ·2a·(cos θ_r − cos θ_a)`. That balance sets the critical
+  contact radius — about 2.2 mm for water on glass, some 7 px on an 800-tall
+  frame — rather than a tuned threshold.
+- **Motion.** A runner integrates `m·dU/dt = ρVg − F_retention − k_v·U` with
+  Cox-Voinov contact-line dissipation `k_v ∝ μ·a·ln(a/λ)/θ`. Terminal
+  velocities land in the 5-20 cm/s measured for 10-50 µL drops on vertical
+  glass, and a drop that drains back under the retention force re-pins by
+  itself: the hysteresis loop is the physics, not a state flag.
+- **Trails.** The moving contact line deposits a Landau-Levich-Derjaguin film
+  of thickness `1.34·a·Ca^{2/3}`, gated by the partial-wetting threshold
+  `Ca_c ≈ θ_r³/9L`. The deposited rivulet is Rayleigh-Plateau unstable and
+  beads up into the residual pearls a runner leaves behind, so the trail, the
+  drain rate and the pearls are one conserved volume budget.
+- **Impacts.** Sizes are sampled from the Marshall-Palmer distribution
+  `N(D) ∝ exp(−Λ D)`, `Λ = 4.1 R^−0.21 mm⁻¹`, at the wind-driven flux onto a
+  vertical pane; drops below the tracked cutoff are the mist itself. The
+  Cossali-Mundo splash parameter `K = We^{1/2}·Re^{1/4}` decides whether an
+  impact throws satellites, and the couple-per-thousand impacts that land
+  already above the release radius fall out of the distribution instead of
+  being dialled in. A gust raises the rain rate, which flattens the
+  distribution and lifts the flux together: squalls arrive as more *and*
+  bigger drops.
+- **Growth.** Condensation is diffusion limited, `da/dt = K/a`, so small
+  drops grow quickly and large ones stall — coalescence, not condensation, is
+  what carries most drops over the release radius, as in a real breath
+  figure. Coalescence conserves volume and mixes momentum, and tests the
+  segment a drop swept during the substep so a fast runner absorbs what it
+  passes instead of tunnelling through it.
+- **Steering.** A static defect field modulates the local hysteresis, and a
+  wetted path relieves it. The cross-stream asymmetry of the retention force
+  over the contact line is the lateral force, so meanders and the way runners
+  fall into existing channels come out of the same term rather than a sine
+  wave.
+
+Two of those interact with the compositor contract rather than with the
+water. The frame integrates a runner over an exposure, so drops are drawn
+motion-blurred and their optical depth thins as they stretch. And the mist
+re-forms by heterogeneous nucleation at a rate that varies across the pane,
+with a spinodal-dewetting rush through the half-cleared band: the shader keys
+mist to frost only at alpha >= 0.97 and refracts water at low alpha, so a
+pixel parked between those states is painted as opaque producer color, and an
+aging trail that lingered there read as a milky slab.
 
 There is no hand tracking in this design. It does not use a camera, MediaPipe,
 landmarks, or a selected window. The chosen WaterLily case advances on its own
