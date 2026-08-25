@@ -343,6 +343,43 @@ impl WMController for Jwm {
             return;
         }
         if self.features.system_ui.is_active() {
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            let hit = backend.compositor_system_ui_hit_test(x, y);
+            use crate::backend::api::SystemUiHitTarget;
+            match detail {
+                // Wheel anywhere on the card browses the current page. The
+                // scrim stays inert so an accidental scroll never changes a
+                // modal selection the pointer is not near.
+                4 if !matches!(
+                    hit,
+                    SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                ) =>
+                {
+                    self.scroll_system_ui_from_pointer(backend, -1);
+                }
+                5 if !matches!(
+                    hit,
+                    SystemUiHitTarget::Outside | SystemUiHitTarget::Unavailable
+                ) =>
+                {
+                    self.scroll_system_ui_from_pointer(backend, 1);
+                }
+                1 => match hit {
+                    SystemUiHitTarget::Item(row) => {
+                        if let Err(error) = self.activate_system_ui_pointer_row(backend, row) {
+                            error!("Error activating system UI row: {error}");
+                        }
+                    }
+                    SystemUiHitTarget::Outside => {
+                        self.dismiss_system_ui_from_pointer(backend);
+                    }
+                    SystemUiHitTarget::Panel | SystemUiHitTarget::Unavailable => {}
+                },
+                _ => {}
+            }
             return;
         }
         // Annotation mode: a button press starts a new stroke at the cursor.
@@ -586,6 +623,12 @@ impl WMController for Jwm {
             // one a click would take.
             if self.features.system_ui.is_layout_picker() {
                 self.hover_layout_picker(backend, root_x, root_y);
+            } else {
+                let row = match backend.compositor_system_ui_hit_test(root_x, root_y) {
+                    crate::backend::api::SystemUiHitTarget::Item(row) => Some(row),
+                    _ => None,
+                };
+                self.hover_system_ui_pointer_row(backend, row);
             }
             return;
         }
@@ -1275,8 +1318,8 @@ mod tests {
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
         Geometry, InputOps, KeyOps, ManagedUnmapReason, NetWmState, NormalHints, OutputInfo,
-        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowChanges, WindowOps,
-        WindowType, WmHints,
+        OutputOps, PropertyOps, RenderScheduler, SystemUiHitTarget, WindowAttributes,
+        WindowChanges, WindowOps, WindowType, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::wayland_dummy_ops::{
@@ -1590,6 +1633,8 @@ mod tests {
         compositor_forgotten_visuals: Vec<WindowId>,
         dock_geometry_updates: Vec<(WindowId, Option<CompositorRect>)>,
         dock_preview_updates: Vec<(Option<WindowId>, Option<CompositorRect>)>,
+        system_ui_hit: SystemUiHitTarget,
+        system_ui_hover_updates: Vec<Option<usize>>,
         x11_client_list: bool,
     }
 
@@ -1613,6 +1658,8 @@ mod tests {
                 compositor_forgotten_visuals: Vec::new(),
                 dock_geometry_updates: Vec::new(),
                 dock_preview_updates: Vec::new(),
+                system_ui_hit: SystemUiHitTarget::Unavailable,
+                system_ui_hover_updates: Vec::new(),
                 x11_client_list: false,
             }
         }
@@ -1622,7 +1669,15 @@ mod tests {
     impl BackendDiagnostics for RenderSpyBackend {}
     impl CompositorControl for RenderSpyBackend {}
     impl CompositorMedia for RenderSpyBackend {}
-    impl CompositorWorkspaceEffects for RenderSpyBackend {}
+    impl CompositorWorkspaceEffects for RenderSpyBackend {
+        fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
+            self.system_ui_hover_updates.push(row);
+        }
+
+        fn compositor_system_ui_hit_test(&self, _x: f64, _y: f64) -> SystemUiHitTarget {
+            self.system_ui_hit
+        }
+    }
     impl CompositorWindowEffects for RenderSpyBackend {
         fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
             self.compositor_urgency.push((window, urgent));
@@ -1942,6 +1997,91 @@ mod tests {
         assert!(jwm.features.system_ui.is_launcher());
         jwm.app_launcher(&mut backend, &WMArgEnum::Int(0)).unwrap();
         assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn system_ui_pointer_hover_click_wheel_and_scrim_follow_keyboard_semantics() {
+        use crate::jwm::features::{ControlCenterInputs, ControlKind, SystemUiState};
+
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        jwm.features.system_ui = SystemUiState::control_center(&ControlCenterInputs::default());
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::NightLight)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Item(1);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            100.0,
+            100.0,
+            0,
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&Some(1)));
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::NightLight),
+            "hover is a preview and must not steal keyboard focus"
+        );
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::DoNotDisturb)
+        );
+        assert!(jwm.do_not_disturb, "click must run the row's Enter action");
+
+        // The wheel uses the card, not the row under it, and clears the stale
+        // hover cue before moving keyboard selection.
+        backend.system_ui_hit = SystemUiHitTarget::Panel;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            5,
+            0,
+        );
+        assert_eq!(backend.system_ui_hover_updates.last(), Some(&None));
+        assert_ne!(
+            jwm.features.system_ui.selected_control(),
+            Some(ControlKind::DoNotDisturb)
+        );
+
+        backend.system_ui_hit = SystemUiHitTarget::Outside;
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(!jwm.features.system_ui.is_active());
+
+        jwm.features.system_ui = SystemUiState::lock();
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(
+            jwm.features.system_ui.is_locked(),
+            "the lock screen must ignore scrim clicks"
+        );
     }
 
     #[test]

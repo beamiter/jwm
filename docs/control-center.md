@@ -26,6 +26,14 @@ The first section routes to the shell's pages:
 grabs; `Esc` returns to the Hub, and a second `Esc` closes it. Directly opened
 pages still close with one `Esc`.
 
+The same surface is pointer-operable: hover shows a quiet cue without moving
+keyboard focus or making the list jump, a left click performs the row's `Enter` action, and the
+wheel browses the current list. Clicking the dimmed area outside the card acts
+like `Esc` (cancel a passphrase first, return to the Hub from a child page, then
+close). Section headings, status/empty rows, notification button strips and
+secret prompts deliberately do not become accidental click targets. The lock
+screen ignores outside clicks.
+
 Every panel key is a toggle: pressing the binding that opened a panel takes it
 back down, so `Alt+F10` both opens and dismisses the Hub — from any of its
 pages — and the same holds for `Alt+F11`, `Alt+F12`, `Alt+F9` and the rest.

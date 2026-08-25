@@ -211,14 +211,14 @@ impl ListKind {
         }
         match self {
             Self::Notifications => {
-                "Enter  activate    \u{f060}/\u{f061} 1-6  action    d  dismiss    c  clear    Esc"
+                "Click/Enter  activate    \u{f060}/\u{f061} 1-6  action    d  dismiss    c  clear    Esc"
             }
-            Self::Clipboard => "Enter  copy    d  forget    c  clear all    Esc  close",
-            Self::Wifi => "Enter  join    \u{f062}/\u{f063}  select    Esc  close",
-            Self::Bluetooth => "Enter  connect/disconnect    r  refresh    Esc  close",
-            Self::Wallpaper => "Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Clipboard => "Click/Enter  copy    d  forget    c  clear all    Esc  close",
+            Self::Wifi => "Click/Enter  join    \u{f062}/\u{f063}  select    Esc  close",
+            Self::Bluetooth => "Click/Enter  connect/disconnect    r  refresh    Esc  close",
+            Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput => {
-                "Enter  use    \u{f062}/\u{f063}  select    Esc  close"
+                "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
             }
         }
     }
@@ -467,6 +467,53 @@ fn shell_hub_rows(entries: &[ControlEntry], selected: usize, armed: bool) -> She
         total,
     };
     (items, Some(selected_visual - start), Some(scroll))
+}
+
+fn shell_hub_entry_at_visible_row(
+    entries: &[ControlEntry],
+    selected: usize,
+    visible_row: usize,
+) -> Option<usize> {
+    if entries.is_empty() {
+        return None;
+    }
+    let selected = selected.min(entries.len() - 1);
+    let mut previous_section = None;
+    let mut total = 0usize;
+    let mut selected_visual = 0;
+    for (index, entry) in entries.iter().enumerate() {
+        let section = control_section(entry.kind);
+        if previous_section != Some(section) {
+            total += 1;
+            previous_section = Some(section);
+        }
+        if index == selected {
+            selected_visual = total;
+        }
+        total += 1;
+    }
+    let start = selected_visual
+        .saturating_sub(SHELL_HUB_VISIBLE_LINES / 2)
+        .min(total.saturating_sub(SHELL_HUB_VISIBLE_LINES));
+    let wanted = start.checked_add(visible_row)?;
+
+    previous_section = None;
+    let mut visual = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        let section = control_section(entry.kind);
+        if previous_section != Some(section) {
+            if visual == wanted {
+                return None;
+            }
+            visual += 1;
+            previous_section = Some(section);
+        }
+        if visual == wanted {
+            return Some(index);
+        }
+        visual += 1;
+    }
+    None
 }
 
 /// Whether activating this row needs a second Enter to confirm.
@@ -2054,6 +2101,105 @@ impl SystemUiState {
         }
     }
 
+    /// Resolve an `items` index to the underlying interactive row. `None`
+    /// means an empty-state line, section heading, status message, or
+    /// notification action strip.
+    pub fn visible_row_target(&self, visual_row: usize) -> Option<usize> {
+        match self {
+            Self::Launcher {
+                matches,
+                selected,
+                computed,
+                ..
+            } => {
+                if computed.is_some() && visual_row == 0 {
+                    return Some(0);
+                }
+                if matches.is_empty() {
+                    return None;
+                }
+                let start = selected.saturating_sub(11);
+                let target = start.checked_add(visual_row)?;
+                (target < matches.len() && target < start + 12).then_some(target)
+            }
+            Self::ControlCenter {
+                entries,
+                selected,
+                shell_hub,
+                ..
+            } => {
+                if *shell_hub {
+                    shell_hub_entry_at_visible_row(entries, *selected, visual_row)
+                } else {
+                    (visual_row < entries.len()).then_some(visual_row)
+                }
+            }
+            Self::ListPanel {
+                kind,
+                rows,
+                selected,
+                prompt,
+                ..
+            } => {
+                if prompt.is_some() || rows.is_empty() {
+                    return None;
+                }
+                let window = kind.window();
+                let start = selected.saturating_sub(window.saturating_sub(1));
+                let shown = rows.len().saturating_sub(start).min(window);
+                let selected_local = *selected - start;
+                let has_action_strip = *kind == ListKind::Notifications
+                    && matches!(
+                        rows.get(*selected).map(|row| &row.data),
+                        Some(RowData::Notification { actions, .. }) if !actions.is_empty()
+                    );
+                let list_row = if has_action_strip {
+                    if visual_row == selected_local + 1 {
+                        return None;
+                    }
+                    visual_row - usize::from(visual_row > selected_local + 1)
+                } else {
+                    visual_row
+                };
+                if list_row >= shown {
+                    return None;
+                }
+                Some(start + list_row)
+            }
+            Self::SessionMenu { entries, .. } => (visual_row < entries.len()).then_some(visual_row),
+            Self::Inactive
+            | Self::Info { .. }
+            | Self::LayoutPicker(_)
+            | Self::MonitorLayout { .. }
+            | Self::Locked { .. }
+            | Self::Calendar { .. } => None,
+        }
+    }
+
+    /// Select a row by its index in the currently rendered `items` slice.
+    /// `Some(changed)` means the row is interactive.
+    pub fn select_visible_row(&mut self, visual_row: usize) -> Option<bool> {
+        let target = self.visible_row_target(visual_row)?;
+        let (selected, armed) = match self {
+            Self::Launcher { selected, .. } | Self::ListPanel { selected, .. } => (selected, None),
+            Self::ControlCenter {
+                selected, armed, ..
+            }
+            | Self::SessionMenu {
+                selected, armed, ..
+            } => (selected, Some(armed)),
+            _ => return None,
+        };
+        let changed = *selected != target;
+        if changed {
+            *selected = target;
+            if let Some(armed) = armed {
+                *armed = false;
+            }
+        }
+        Some(changed)
+    }
+
     /// Jump to the first or last selectable row. Returns false for panels
     /// whose arrows mean something else (calendar/display layout) or which do
     /// not carry a selection.
@@ -2311,7 +2457,7 @@ impl SystemUiState {
                         query: Some(query.clone()),
                         selected: Some(0),
                         items: vec![format!("=  {result}")],
-                        hint: "Enter  copy    Esc  close".into(),
+                        hint: "Click/Enter  copy    Esc  close".into(),
                         scroll: None,
                     };
                 }
@@ -2364,8 +2510,9 @@ impl SystemUiState {
                     items,
                     // `/` lists open windows; it cannot be arithmetic, so the
                     // two modes never compete for the same query.
-                    hint: "Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
-                        .into(),
+                    hint:
+                        "Click/Enter  open    /  windows    \u{f062}/\u{f063}  select    Esc  close"
+                            .into(),
                     scroll,
                 }
             }
@@ -2438,12 +2585,12 @@ impl SystemUiState {
                     items,
                     selected: visual_selection,
                     hint: if *armed {
-                        "Enter  confirm    Esc  back".into()
+                        "Click/Enter  confirm    Esc  back".into()
                     } else if *shell_hub {
-                        "A apps  N notices  C clipboard  D calendar  W wallpaper    \u{f062}/\u{f063} move  Enter  Esc"
+                        "A apps  N notices  C clipboard  D calendar  W wallpaper    \u{f062}/\u{f063} move  Click/Enter  Esc"
                             .into()
                     } else {
-                        "\u{f060}/\u{f061}  adjust    Enter  toggle    Esc  close".into()
+                        "\u{f060}/\u{f061}  adjust    Click/Enter  toggle    Esc  close".into()
                     },
                     scroll,
                 }
@@ -2547,9 +2694,9 @@ impl SystemUiState {
                     })
                     .collect();
                 let hint = if *armed {
-                    "Enter  confirm    Esc  cancel".to_string()
+                    "Click/Enter  confirm    Esc  cancel".to_string()
                 } else {
-                    "Enter  select    \u{f062}/\u{f063}  move    Esc  close".to_string()
+                    "Click/Enter  select    \u{f062}/\u{f063}  move    Esc  close".to_string()
                 };
                 OverlayParts {
                     title: "\u{f011}  SESSION".into(),
@@ -3385,6 +3532,76 @@ mod tests {
     }
 
     #[test]
+    fn pointer_rows_skip_shell_headings() {
+        let mut panel = SystemUiState::ControlCenter {
+            entries: vec![
+                ControlEntry::simple(ControlKind::Volume, 50, false),
+                ControlEntry::simple(ControlKind::Battery, 80, false),
+            ],
+            selected: 0,
+            armed: false,
+            shell_hub: true,
+        };
+
+        // SOUND & DISPLAY heading, Volume, SYSTEM heading, Battery.
+        assert_eq!(panel.visible_row_target(0), None);
+        assert_eq!(panel.visible_row_target(1), Some(0));
+        assert_eq!(panel.visible_row_target(2), None);
+        assert_eq!(panel.visible_row_target(3), Some(1));
+        assert_eq!(panel.select_visible_row(3), Some(true));
+        assert_eq!(panel.selected_control(), Some(ControlKind::Battery));
+    }
+
+    #[test]
+    fn pointer_rows_skip_a_notification_action_strip() {
+        use crate::jwm::features::notifications::NotificationAction;
+
+        let row = |id: u32, actions: Vec<NotificationAction>| ListRow {
+            key: id.to_string(),
+            text: format!("notification {id}"),
+            data: RowData::Notification {
+                id,
+                actions,
+                cursor: 0,
+            },
+        };
+        let mut panel = SystemUiState::ListPanel {
+            kind: ListKind::Notifications,
+            rows: vec![
+                row(
+                    1,
+                    vec![NotificationAction {
+                        key: "open".into(),
+                        label: "Open".into(),
+                    }],
+                ),
+                row(2, Vec::new()),
+                row(3, Vec::new()),
+            ],
+            selected: 0,
+            message: String::new(),
+            prompt: None,
+            empty: String::new(),
+        };
+
+        assert_eq!(panel.visible_row_target(0), Some(0));
+        assert_eq!(panel.visible_row_target(1), None, "the action strip");
+        assert_eq!(panel.visible_row_target(2), Some(1));
+        assert_eq!(panel.select_visible_row(2), Some(true));
+        assert_eq!(panel.selected_notification().unwrap().0, 2);
+    }
+
+    #[test]
+    fn a_secret_prompt_has_no_pointer_selectable_rows() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.set_wifi_networks(&[wifi("Alpha", true)]);
+        panel.prompt_wifi_passphrase();
+
+        assert_eq!(panel.visible_row_target(0), None);
+        assert_eq!(panel.visible_row_target(2), None);
+    }
+
+    #[test]
     fn a_list_panel_answers_only_to_its_own_kind() {
         let panel = SystemUiState::wifi_picker("");
         assert!(panel.is_wifi_picker());
@@ -3684,6 +3901,7 @@ mod tests {
         let parts = state.overlay_parts();
         assert_eq!(parts.title, "\u{f1de}  JWM SHELL");
         let selected = parts.selected.expect("hub selection");
+        assert_eq!(state.visible_row_target(selected), Some(0));
         assert!(parts.items[selected].contains("Applications"));
         assert!(
             parts

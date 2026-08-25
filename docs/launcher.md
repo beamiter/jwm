@@ -6,6 +6,11 @@
 close. Direct Unicode keysyms are accepted, so an international keyboard can
 search with the characters it produces.
 
+With a pointer, hover previews the row that a click will use, left-click opens
+it, the wheel browses the result list, and clicking outside the card closes the
+launcher. Keyboard selection stays where it was until a click commits, so
+moving the pointer across a windowed result list does not make the list jump.
+
 Applications come from the desktop entries in `$XDG_DATA_HOME/applications` and
 `$XDG_DATA_DIRS`, plus every executable on `PATH` that no desktop entry already
 named. Entries marked `Hidden=true` or `NoDisplay=true` are left out, because

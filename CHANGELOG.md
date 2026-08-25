@@ -7,6 +7,12 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Native shell cards are now fully pointer-operable on X11 and Wayland:
+  hovering an interactive row shows a quiet preview cue, clicking runs the same
+  guarded action as `Enter`, the wheel browses lists (and calendar months),
+  and clicking the modal scrim backs out like `Esc`. Hit testing uses the
+  compositor's actual animated card geometry, while headings, empty states,
+  notification action strips and password prompts remain non-clickable.
 - Direct DRM/KMS color delivery now inventories capture, session-lock, drag
   icon, cursor, and top/overlay layer surfaces as separate frame-tail classes.
   The same plan selects the conservative global-sRGB fallback and is exposed

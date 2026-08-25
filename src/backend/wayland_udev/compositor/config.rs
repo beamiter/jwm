@@ -243,6 +243,9 @@ impl WaylandCompositor {
     }
 
     pub(crate) fn set_system_ui(&mut self, overlay: Option<crate::backend::api::SystemUiOverlay>) {
+        if overlay.is_none() || overlay.as_ref().is_some_and(|ui| ui.filmstrip.is_some()) {
+            self.system_ui_hit_geometry = None;
+        }
         let viewport_changed = matches!(
             (self.system_ui.as_deref(), overlay.as_ref()),
             (Some(old), Some(new)) if old.viewport != new.viewport || old.locked != new.locked
@@ -259,6 +262,10 @@ impl WaylandCompositor {
             _ => true,
         };
         self.sysui_text_dirty |= text_changed;
+        if text_changed {
+            self.system_ui_hit_geometry = None;
+            self.system_ui_hovered = None;
+        }
         // Opening a panel springs it out of the bar; closing one forgets its
         // geometry so the next open springs again rather than resuming.
         if self.system_ui.is_none() || overlay.is_none() {
@@ -274,9 +281,38 @@ impl WaylandCompositor {
             self.system_ui_identity = identity.to_string();
             self.system_ui_width_floor = 0.0;
             self.system_ui_highlight.reset();
+            self.system_ui_hovered = None;
         }
         self.system_ui = overlay.map(Arc::new);
         self.needs_render = true;
+    }
+
+    pub(crate) fn set_system_ui_hover(&mut self, row: Option<usize>) -> bool {
+        if self.system_ui_hovered != row {
+            self.system_ui_hovered = row;
+            self.needs_render = true;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn system_ui_hit_test(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> crate::backend::api::SystemUiHitTarget {
+        use crate::backend::api::SystemUiHitTarget;
+        use crate::backend::compositor_common::system_ui_panel::Hit;
+
+        match self
+            .system_ui_hit_geometry
+            .map(|geometry| geometry.hit_test(x, y))
+        {
+            Some(Hit::Panel) => SystemUiHitTarget::Panel,
+            Some(Hit::Item(row)) => SystemUiHitTarget::Item(row),
+            Some(Hit::Outside) => SystemUiHitTarget::Outside,
+            None => SystemUiHitTarget::Unavailable,
+        }
     }
 
     pub(crate) fn push_toast(&mut self, toast: crate::backend::api::ToastNotification) {

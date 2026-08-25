@@ -1040,6 +1040,8 @@ impl<C: CompositorConnection> Compositor<C> {
             system_ui_highlight: Default::default(),
             system_ui_width_floor: 0.0,
             system_ui_identity: String::new(),
+            system_ui_hit_geometry: None,
+            system_ui_hovered: None,
             hud_island: Default::default(),
             debug_hud: behavior.debug_hud,
             sys_stats: crate::backend::sys_stats::SysStatsSampler::new(),

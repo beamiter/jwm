@@ -47,6 +47,12 @@ while notifications are muted.
 | `Esc` or `Alt+F11` | close the panel — the key that opened it also dismisses it |
 | another panel key | hand the screen to that panel, closing this one |
 
+Pointer input follows the same model: hover highlights a notification, click
+invokes its current/default action (or dismisses an action-less row), the wheel
+browses history, and clicking outside closes the card. The numbered action
+strip remains a keyboard cursor target rather than pretending each glyph is a
+separate pointer button.
+
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.
 

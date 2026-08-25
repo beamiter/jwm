@@ -2021,6 +2021,7 @@ impl<C: CompositorConnection> Compositor<C> {
         let Some(overlay) = self.system_ui.clone() else {
             return;
         };
+        self.system_ui_hit_geometry = None;
         self.update_system_ui_textures(&overlay);
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
@@ -2201,6 +2202,24 @@ impl<C: CompositorConnection> Compositor<C> {
                     total: s.total,
                 }),
             );
+            let hover_selection = self
+                .system_ui_hovered
+                .filter(|row| overlay.selected != Some(*row))
+                .and_then(|row| {
+                    panel::contents(
+                        [x, y, panel_w, panel_h],
+                        &sizes,
+                        overlay.items.len(),
+                        Some(row),
+                        None,
+                    )
+                    .selection
+                });
+            self.system_ui_hit_geometry = Some(panel::HitGeometry::new(
+                [x, y, panel_w, panel_h],
+                &layout,
+                overlay.items.len(),
+            ));
 
             if let Some([fx, fy, fw, fh]) = layout.query_field {
                 self.sysui_fill_rounded(
@@ -2210,6 +2229,24 @@ impl<C: CompositorConnection> Compositor<C> {
                     fh,
                     panel::QUERY_RADIUS,
                     UiPalette::faded(ui.field, content_a),
+                );
+            }
+            if let Some(hover) = hover_selection {
+                // Hover is a quiet preview, distinct from the keyboard's
+                // persistent selection below. Keeping both visible avoids a
+                // stationary pointer stealing focus from arrow-key input.
+                self.sysui_fill_rounded(
+                    hover[0],
+                    hover[1],
+                    hover[2],
+                    hover[3],
+                    panel::SELECTION_RADIUS,
+                    [
+                        accent[0],
+                        accent[1],
+                        accent[2],
+                        ui.selection_alpha * 0.32 * content_a,
+                    ],
                 );
             }
             if let Some(target) = layout.selection {

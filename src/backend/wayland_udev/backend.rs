@@ -3777,6 +3777,28 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
+
+    fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
+        if self
+            .compositor
+            .as_mut()
+            .is_some_and(|compositor| compositor.set_system_ui_hover(row))
+        {
+            self.request_render();
+        }
+    }
+
+    fn compositor_system_ui_hit_test(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> crate::backend::api::SystemUiHitTarget {
+        self.compositor.as_ref().map_or(
+            crate::backend::api::SystemUiHitTarget::Unavailable,
+            |compositor| compositor.system_ui_hit_test(x, y),
+        )
+    }
+
     fn compositor_push_toast(&mut self, toast: crate::backend::api::ToastNotification) {
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.push_toast(toast);

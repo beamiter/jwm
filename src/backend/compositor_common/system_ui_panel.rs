@@ -158,6 +158,72 @@ pub(crate) struct PanelContents {
     pub(crate) scroll_thumb: Option<Rect>,
 }
 
+/// The input geometry paired with one painted card frame.
+///
+/// This is cached by each compositor after layout. Pointer handling then asks
+/// the compositor which visible row was hit, so a springing/docked card never
+/// has a second, approximate hit-test layout in the window manager.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HitGeometry {
+    panel: Rect,
+    items: Option<Rect>,
+    row_height: f32,
+    rows: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hit {
+    Outside,
+    Panel,
+    Item(usize),
+}
+
+impl HitGeometry {
+    #[must_use]
+    pub(crate) fn new(panel: Rect, contents: &PanelContents, rows: usize) -> Self {
+        let items = contents.items.and_then(|[_, y]| {
+            (rows > 0 && contents.row_height > 0.0).then_some([
+                panel[0] + PAD - SELECTION_BLEED,
+                y,
+                (panel[2] - 2.0 * PAD + 2.0 * SELECTION_BLEED).max(0.0),
+                contents.row_height * rows as f32 + 2.0 * TEXT_PAD,
+            ])
+        });
+        Self {
+            panel,
+            items,
+            row_height: contents.row_height,
+            rows,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn hit_test(self, x: f64, y: f64) -> Hit {
+        let x = x as f32;
+        let y = y as f32;
+        if !contains(self.panel, x, y) {
+            return Hit::Outside;
+        }
+        let Some(items) = self.items else {
+            return Hit::Panel;
+        };
+        if !contains(items, x, y) {
+            return Hit::Panel;
+        }
+        let row = ((y - items[1]) / self.row_height).floor().max(0.0) as usize;
+        Hit::Item(row.min(self.rows.saturating_sub(1)))
+    }
+}
+
+fn contains(rect: Rect, x: f32, y: f32) -> bool {
+    rect[2] > 0.0
+        && rect[3] > 0.0
+        && x >= rect[0]
+        && y >= rect[1]
+        && x < rect[0] + rect[2]
+        && y < rect[1] + rect[3]
+}
+
 /// The size the card wants for `sizes`, before the open/morph spring.
 ///
 /// `width_floor` is the widest this panel has been since it opened; the result
@@ -587,5 +653,37 @@ mod tests {
         assert_eq!(c.query_field.unwrap()[2], 0.0);
         assert!(c.selection.unwrap()[2] >= 0.0);
         assert!(c.divider.unwrap()[2] >= 0.0);
+    }
+
+    #[test]
+    fn hit_testing_uses_the_rows_that_were_actually_painted() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
+        let panel = [100.0, 50.0, 600.0, 400.0];
+        let contents = contents(panel, &s, 10, Some(3), None);
+        let hit = HitGeometry::new(panel, &contents, 10);
+        let items_y = contents.items.unwrap()[1];
+
+        assert_eq!(hit.hit_test(130.0, items_y as f64 + 1.0), Hit::Item(0));
+        assert_eq!(
+            hit.hit_test(130.0, items_y as f64 + contents.row_height as f64 * 6.5),
+            Hit::Item(6)
+        );
+        assert_eq!(hit.hit_test(101.0, items_y as f64), Hit::Panel);
+        assert_eq!(hit.hit_test(99.0, 100.0), Hit::Outside);
+        assert_eq!(hit.hit_test(700.0, 100.0), Hit::Outside);
+    }
+
+    #[test]
+    fn hit_testing_treats_the_bottom_text_padding_as_the_last_row() {
+        let s = sizes((40.0, 24.0), (0.0, 0.0), (300.0, 204.0), (0.0, 0.0));
+        let panel = [0.0, 0.0, 600.0, 400.0];
+        let contents = contents(panel, &s, 10, None, None);
+        let hit = HitGeometry::new(panel, &contents, 10);
+        let items_y = contents.items.unwrap()[1];
+
+        assert_eq!(
+            hit.hit_test(300.0, (items_y + s.items.1 - 0.5) as f64),
+            Hit::Item(9)
+        );
     }
 }

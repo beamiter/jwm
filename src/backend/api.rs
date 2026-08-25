@@ -870,6 +870,26 @@ pub struct SystemUiOverlay {
     pub filmstrip: Option<LayoutFilmstrip>,
 }
 
+/// What is under the pointer on the compositor-drawn system-UI card.
+///
+/// The compositor owns the final animated geometry (including the docked
+/// card's spring), while JWM owns what activating a row means.  Keeping this
+/// tiny semantic boundary lets mouse input land on exactly what was painted
+/// without moving any policy into a renderer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemUiHitTarget {
+    /// No system-UI frame has been painted yet (or this backend has no
+    /// compositor hit map). Input should be left untouched.
+    #[default]
+    Unavailable,
+    /// Outside the card, on its modal scrim.
+    Outside,
+    /// Inside the card, but not on a selectable list row.
+    Panel,
+    /// A visible row in [`SystemUiOverlay::items`].
+    Item(usize),
+}
+
 impl SystemUiOverlay {
     /// Viewport a renderer must use. Keeping the lock override here makes it
     /// impossible for either backend to accidentally weaken the lock screen
@@ -2295,6 +2315,15 @@ pub trait CompositorMedia: Send {
 /// Workspace transition and interactive preview effects.
 pub trait CompositorWorkspaceEffects: Send {
     fn compositor_set_system_ui(&mut self, _overlay: Option<SystemUiOverlay>) {}
+
+    /// Show a quiet hover cue on an interactive visible row. `None` clears it;
+    /// the keyboard selection remains independently visible.
+    fn compositor_set_system_ui_hover(&mut self, _row: Option<usize>) {}
+
+    /// Hit-test the last system-UI frame at global screen coordinates.
+    fn compositor_system_ui_hit_test(&self, _x: f64, _y: f64) -> SystemUiHitTarget {
+        SystemUiHitTarget::Unavailable
+    }
 
     fn compositor_push_toast(&mut self, _toast: ToastNotification) {}
 

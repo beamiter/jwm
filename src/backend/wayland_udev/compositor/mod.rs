@@ -1304,6 +1304,10 @@ pub(crate) struct WaylandCompositor {
     /// two pieces of state above: both have to forget what they knew when the
     /// surface underneath them is replaced.
     system_ui_identity: String,
+    /// Hit regions from the last painted system-UI frame.
+    system_ui_hit_geometry: Option<crate::backend::compositor_common::system_ui_panel::HitGeometry>,
+    /// Visible row under the pointer; it only affects the quiet hover cue.
+    system_ui_hovered: Option<usize>,
     /// Open/morph spring for the docked debug HUD card.
     hud_island: crate::backend::compositor_common::dynamic_island::IslandMotion,
     compositor_start_time: Instant,
@@ -2616,6 +2620,8 @@ impl WaylandCompositor {
                 system_ui_highlight: Default::default(),
                 system_ui_width_floor: 0.0,
                 system_ui_identity: String::new(),
+                system_ui_hit_geometry: None,
+                system_ui_hovered: None,
                 hud_island: Default::default(),
                 compositor_start_time: now,
 

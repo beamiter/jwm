@@ -190,7 +190,7 @@ impl Jwm {
                 parts.title = "\u{f120}  COMMAND".into();
                 parts.items = vec![format!("\u{f120}  Run command  {typed}")];
                 parts.selected = Some(0);
-                parts.hint = "Enter  run command    Esc  close".into();
+                parts.hint = "Click/Enter  run command    Esc  close".into();
                 // One synthesised row replaces the match list, so whatever the
                 // launcher was scrolled to no longer describes what is drawn.
                 parts.scroll = None;
@@ -1053,6 +1053,142 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
+    /// Activate the launcher's current result. Returns `true` when the panel
+    /// was consumed (copied, focused, or launched).
+    fn activate_launcher_selection(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if let Some(result) = self
+            .features
+            .system_ui
+            .computed_result()
+            .map(str::to_string)
+        {
+            if backend.set_clipboard_text(&result) {
+                self.record_clipboard(&result);
+                log::info!("Launcher: copied {result}");
+            } else {
+                log::warn!("Launcher: this backend cannot set the clipboard");
+            }
+            self.close_system_ui(backend);
+            return Ok(true);
+        }
+        if let Some(window) = self.features.system_ui.selected_window() {
+            self.close_system_ui(backend);
+            if let Err(error) = self.reveal_and_focus(
+                backend,
+                crate::backend::common_define::WindowId::from_raw(window),
+            ) {
+                log::warn!("Launcher: could not focus window: {error}");
+            }
+            return Ok(true);
+        }
+        if let Some(command) = direct_command_from_launcher(&self.features.system_ui) {
+            let id = command[0].clone();
+            self.features.system_ui.note_launch(&id);
+            log::info!("Launcher: running {id}");
+            self.close_system_ui(backend);
+            self.spawn(backend, &WMArgEnum::StringVec(command))?;
+            return Ok(true);
+        }
+        if let Some(choice) = self.features.system_ui.selected_launch() {
+            self.features.system_ui.note_launch(&choice.id);
+            let command = crate::jwm::features::launcher::launch_command(
+                &crate::config::Config::get_terminal_exec_prefix(),
+                &choice.command,
+                choice.terminal,
+            );
+            self.close_system_ui(backend);
+            self.spawn(backend, &WMArgEnum::StringVec(command))?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Pointer counterpart of Return: select the visible row under the mouse,
+    /// then run the same action path used by the keyboard.
+    pub(crate) fn activate_system_ui_pointer_row(
+        &mut self,
+        backend: &mut dyn Backend,
+        row: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let direct_command_row =
+            row == 0 && direct_command_from_launcher(&self.features.system_ui).is_some();
+        let Some(changed) = self.features.system_ui.select_visible_row(row) else {
+            if !direct_command_row {
+                return Ok(());
+            }
+            return self.activate_launcher_selection(backend).map(|_| ());
+        };
+        if changed {
+            self.sync_system_ui(backend);
+        }
+
+        if let Some(control) = self.features.system_ui.selected_control() {
+            self.handle_control_center_key(backend, control, keys::KEY_Return, Mods::empty());
+        } else if self.features.system_ui.is_notification_center() {
+            self.handle_notification_center_key(backend, keys::KEY_Return);
+        } else if self.features.system_ui.is_session_menu() {
+            self.handle_session_menu_key(backend, keys::KEY_Return);
+        } else if self.features.system_ui.is_wifi_picker() {
+            self.handle_wifi_picker_key(backend, keys::KEY_Return, Mods::empty());
+        } else if self.features.system_ui.is_bluetooth_picker() {
+            self.handle_bluetooth_picker_key(backend, keys::KEY_Return);
+        } else if self.features.system_ui.audio_picker_direction().is_some() {
+            self.use_selected_audio_device(backend);
+        } else if self.features.system_ui.is_clipboard_picker() {
+            self.copy_selected_clipboard(backend);
+        } else if self.features.system_ui.is_wallpaper_picker() {
+            self.apply_selected_wallpaper(backend);
+        } else {
+            let _ = self.activate_launcher_selection(backend)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn hover_system_ui_pointer_row(
+        &mut self,
+        backend: &mut dyn Backend,
+        row: Option<usize>,
+    ) {
+        // Keep motion allocation- and I/O-free. Direct command validation can
+        // stat an explicit path, so that exceptional synthetic row is checked
+        // only on click; ordinary and calculator rows resolve from memory.
+        let row = row.filter(|row| self.features.system_ui.visible_row_target(*row).is_some());
+        backend.compositor_set_system_ui_hover(row);
+    }
+
+    pub(crate) fn scroll_system_ui_from_pointer(
+        &mut self,
+        backend: &mut dyn Backend,
+        direction: isize,
+    ) {
+        backend.compositor_set_system_ui_hover(None);
+        if self.features.system_ui.is_calendar() {
+            self.features
+                .system_ui
+                .shift_calendar(direction.signum() as i32, 0, false);
+        } else {
+            self.features.system_ui.move_selection(direction.signum());
+        }
+        self.sync_system_ui(backend);
+    }
+
+    pub(crate) fn dismiss_system_ui_from_pointer(&mut self, backend: &mut dyn Backend) {
+        if self.features.system_ui.is_locked() {
+            return;
+        }
+        backend.compositor_set_system_ui_hover(None);
+        if self.features.system_ui.cancel_wifi_passphrase() {
+            self.sync_system_ui(backend);
+        } else if self.features.system_ui_return_to_hub {
+            self.return_to_shell_hub(backend);
+        } else {
+            self.close_system_ui(backend);
+        }
+    }
+
     pub(crate) fn on_key_press_internal(
         &mut self,
         backend: &mut dyn Backend,
@@ -1103,6 +1239,10 @@ impl Jwm {
         // Built-in system UI is modal and consumes every key. This branch is
         // shared by X11rb, XCB and Wayland-udev, keeping behavior identical.
         if self.features.system_ui.is_active() {
+            // The most recent input modality owns the selection cue. Once the
+            // keyboard moves again, a stationary pointer must not keep the
+            // pill pinned to its old row.
+            backend.compositor_set_system_ui_hover(None);
             let locked = self.features.system_ui.is_locked();
             // Escape backs out of the passphrase prompt before it closes the
             // picker, so a typo does not cost the whole scan.
@@ -1374,48 +1514,8 @@ impl Jwm {
                         }
                         self.features.system_ui.authentication_failed();
                     }
-                } else if let Some(result) = self
-                    .features
-                    .system_ui
-                    .computed_result()
-                    .map(str::to_string)
-                {
-                    // An answer nobody can paste is half an answer.
-                    if backend.set_clipboard_text(&result) {
-                        self.record_clipboard(&result);
-                        log::info!("Launcher: copied {result}");
-                    } else {
-                        log::warn!("Launcher: this backend cannot set the clipboard");
-                    }
-                    self.close_system_ui(backend);
+                } else if self.activate_launcher_selection(backend)? {
                     return Ok(());
-                } else if let Some(window) = self.features.system_ui.selected_window() {
-                    // Focusing what already exists rather than starting a
-                    // second copy of it.
-                    self.close_system_ui(backend);
-                    if let Err(error) = self.reveal_and_focus(
-                        backend,
-                        crate::backend::common_define::WindowId::from_raw(window),
-                    ) {
-                        log::warn!("Launcher: could not focus window: {error}");
-                    }
-                    return Ok(());
-                } else if let Some(command) = direct_command_from_launcher(&self.features.system_ui)
-                {
-                    let id = command[0].clone();
-                    self.features.system_ui.note_launch(&id);
-                    log::info!("Launcher: running {id}");
-                    self.close_system_ui(backend);
-                    return self.spawn(backend, &WMArgEnum::StringVec(command));
-                } else if let Some(choice) = self.features.system_ui.selected_launch() {
-                    self.features.system_ui.note_launch(&choice.id);
-                    let command = crate::jwm::features::launcher::launch_command(
-                        &crate::config::Config::get_terminal_exec_prefix(),
-                        &choice.command,
-                        choice.terminal,
-                    );
-                    self.close_system_ui(backend);
-                    return self.spawn(backend, &WMArgEnum::StringVec(command));
                 }
             } else if let Some(ch) = Self::system_ui_char(keysym, clean_state) {
                 self.features.system_ui.push_char(ch);
