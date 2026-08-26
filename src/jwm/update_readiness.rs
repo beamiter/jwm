@@ -129,4 +129,19 @@ mod tests {
         let _ = hub.drain().unwrap();
         assert_eq!(outer.wait(&mut outer_events, 0u8).unwrap(), 0);
     }
+
+    #[test]
+    fn async_completion_notifier_reaches_the_stable_hub_fd() {
+        let mut hub = UpdateReadinessHub::new().unwrap();
+        let stable = hub.duplicate_fd().unwrap();
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        hub.register(notifier.as_fd()).unwrap();
+
+        assert!(!readable(&stable));
+        notifier.notify();
+        assert!(readable(&stable));
+        assert_eq!(notifier.drain().unwrap(), 1);
+        let _ = hub.drain().unwrap();
+        assert!(!readable(&stable));
+    }
 }

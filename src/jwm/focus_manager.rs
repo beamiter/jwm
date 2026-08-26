@@ -1022,6 +1022,7 @@ mod scratchpad_reveal_tests {
             external_struts: HashMap::new(),
             ipc_server: None,
             update_readiness: None,
+            async_update_notifier: None,
             config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
             config_last_modified: None,
             config_reload_debounce: None,

@@ -34,6 +34,8 @@ pub mod compositor_font;
 
 // Backend-independent process RSS + CPU sampler used by the debug HUD.
 pub mod sys_stats;
+#[doc(hidden)]
+pub mod update_notifier;
 
 /// Diagnostics for the X11 damage pipeline. Counters are bumped at each stage
 /// so the periodic render-frequency log line can show where DamageNotify

@@ -402,20 +402,67 @@ impl WifiNetwork {
 /// owns all state, so nothing but the finished value crosses the boundary.
 #[derive(Debug)]
 pub struct BackgroundJob<T> {
-    slot: std::sync::Arc<std::sync::Mutex<Option<T>>>,
+    slot: std::sync::Arc<std::sync::Mutex<BackgroundJobState<T>>>,
+}
+
+#[derive(Debug)]
+struct BackgroundJobState<T> {
+    result: Option<T>,
+    notifier: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
 }
 
 impl<T: Send + 'static> BackgroundJob<T> {
     pub fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
-        let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let slot = std::sync::Arc::new(std::sync::Mutex::new(BackgroundJobState {
+            result: None,
+            notifier: None,
+        }));
         let handle = std::sync::Arc::clone(&slot);
         std::thread::spawn(move || {
             let value = work();
-            if let Ok(mut guard) = handle.lock() {
-                *guard = Some(value);
+            let notifier = {
+                let mut guard = handle
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // Publish the result while holding the mutex, then clone the
+                // notifier and release the mutex before signalling. A handler
+                // woken by the eventfd can therefore take the value at once.
+                guard.result = Some(value);
+                guard.notifier.clone()
+            };
+            if let Some(notifier) = notifier {
+                notifier.notify();
             }
         });
         Self { slot }
+    }
+
+    /// Attach this job to one JWM event loop.
+    ///
+    /// Attachment is race-safe when a very short job finishes first: seeing
+    /// an already-published result emits the wake here instead of waiting for
+    /// the old 20 ms polling cadence.
+    #[must_use]
+    pub(crate) fn with_notifier(
+        self,
+        notifier: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
+    ) -> Self {
+        let notify_now = {
+            let mut guard = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.notifier = notifier;
+            guard
+                .result
+                .is_some()
+                .then(|| guard.notifier.clone())
+                .flatten()
+        };
+        if let Some(notifier) = notify_now {
+            notifier.notify();
+        }
+        self
     }
 
     /// The finished value, once. Returns `None` while the work is still
@@ -423,7 +470,30 @@ impl<T: Send + 'static> BackgroundJob<T> {
     /// "not ready yet" and is retried on the next frame.
     #[must_use]
     pub fn take(&self) -> Option<T> {
-        self.slot.try_lock().ok()?.take()
+        self.slot.try_lock().ok()?.result.take()
+    }
+
+    /// Whether dropping the idle poll is safe while this job is in flight.
+    /// Lock contention is treated conservatively as uncovered for one
+    /// scheduling decision.
+    #[must_use]
+    pub(crate) fn readiness_is_covered(&self) -> bool {
+        self.slot.try_lock().ok().is_some_and(|guard| {
+            guard
+                .notifier
+                .as_ref()
+                .is_some_and(crate::backend::update_notifier::AsyncUpdateNotifier::is_healthy)
+        })
+    }
+}
+
+impl<T> Drop for BackgroundJob<T> {
+    fn drop(&mut self) {
+        // A closed picker deliberately detaches its in-flight worker. Avoid a
+        // needless event-loop wake when that discarded result later arrives.
+        if let Ok(mut guard) = self.slot.try_lock() {
+            guard.notifier = None;
+        }
     }
 }
 
@@ -873,12 +943,22 @@ pub fn start_state_read() -> BackgroundJob<ConnectivityState> {
 }
 
 impl crate::jwm::Jwm {
+    /// Bind a worker's completion to this handler's readiness fd. When the fd
+    /// could not be created or aggregated, `None` leaves the job on the
+    /// conservative timer fallback.
+    pub(crate) fn track_background_job<T: Send + 'static>(
+        &self,
+        job: BackgroundJob<T>,
+    ) -> BackgroundJob<T> {
+        job.with_notifier(self.async_update_notifier.clone())
+    }
+
     /// Start a read only when none is already in flight. Passive UI openings
     /// coalesce here so rapid close/reopen cycles do not detach a trail of
     /// still-running nmcli workers.
     pub(crate) fn ensure_connectivity_refresh(&mut self) {
         if self.features.connectivity_poll.is_none() {
-            self.features.connectivity_poll = Some(start_state_read());
+            self.features.connectivity_poll = Some(self.track_background_job(start_state_read()));
         }
     }
 
@@ -890,7 +970,7 @@ impl crate::jwm::Jwm {
     /// replaced; its thread finishes on its own and the stale result is
     /// dropped with the handle.
     pub(crate) fn refresh_connectivity(&mut self) {
-        self.features.connectivity_poll = Some(start_state_read());
+        self.features.connectivity_poll = Some(self.track_background_job(start_state_read()));
     }
 
     /// Adopt a finished background connectivity read and refresh an open
@@ -1419,6 +1499,47 @@ mod tests {
         assert_eq!(value, Some(42));
         // Taken once: a second poll must not repeat the work's result.
         assert_eq!(job.take(), None);
+    }
+
+    #[test]
+    fn a_notified_background_job_publishes_before_waking() {
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        let (release, wait) = std::sync::mpsc::channel();
+        let job = BackgroundJob::spawn(move || {
+            wait.recv().unwrap();
+            73_u32
+        })
+        .with_notifier(Some(notifier.clone()));
+
+        release.send(()).unwrap();
+        let mut woke = false;
+        for _ in 0..200 {
+            if notifier.drain().unwrap() > 0 {
+                woke = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(woke, "job completion did not signal its owning handler");
+        assert_eq!(
+            job.take(),
+            Some(73),
+            "a wake must never precede result publication"
+        );
+    }
+
+    #[test]
+    fn unnotified_jobs_keep_the_idle_poll_fallback() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let job = BackgroundJob::spawn(move || {
+            wait.recv().unwrap();
+        });
+        assert!(!job.readiness_is_covered());
+
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        let job = job.with_notifier(Some(notifier));
+        assert!(job.readiness_is_covered());
+        release.send(()).unwrap();
     }
 
     #[test]

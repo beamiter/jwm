@@ -9,12 +9,16 @@ use crate::core::models::{ClientKey, MonitorKey, WMClient, WMMonitor};
 use crate::core::state::WMState;
 use crate::core::types::Rect;
 use crate::ipc::{
-    self, IpcEvent, IpcResponse, MonitorInfoIpc, RuntimeCounts, RuntimeFeatureStates,
-    RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
+    self, CompositorTransitionStatus, IpcEvent, IpcResponse, MonitorInfoIpc, RuntimeCounts,
+    RuntimeFeatureStates, RuntimeHealth, RuntimeStatusV1, TreeNode, WindowInfo, WorkspaceInfo,
 };
 use crate::ipc_server::IncomingIpc;
 
-fn runtime_health(config_status: &serde_json::Value, monitor_count: usize) -> RuntimeHealth {
+fn runtime_health(
+    config_status: &serde_json::Value,
+    monitor_count: usize,
+    compositor_transition_error: Option<&str>,
+) -> RuntimeHealth {
     let mut reasons = Vec::new();
     if !config_status
         .get("exists")
@@ -47,6 +51,9 @@ fn runtime_health(config_status: &serde_json::Value, monitor_count: usize) -> Ru
     }
     if monitor_count == 0 {
         reasons.push("no monitors are available".to_string());
+    }
+    if let Some(error) = compositor_transition_error {
+        reasons.push(format!("last compositor transition failed: {error}"));
     }
     RuntimeHealth::from_reasons(reasons)
 }
@@ -2621,7 +2628,11 @@ impl Jwm {
             pid: std::process::id(),
             allocations: crate::alloc_counter::current(),
             uptime_ms,
-            health: runtime_health(&config, monitors),
+            health: runtime_health(
+                &config,
+                monitors,
+                self.features.compositor_transition.last_error.as_deref(),
+            ),
             counts: RuntimeCounts {
                 windows,
                 monitors,
@@ -2631,6 +2642,13 @@ impl Jwm {
             compositor_active: backend.has_compositor(),
             compositor_configured,
             compositor_temporary: self.features.system_ui_temporary_compositor,
+            compositor_transition: CompositorTransitionStatus {
+                attempts: self.features.compositor_transition.attempts,
+                last_requested_active: self.features.compositor_transition.last_requested_active,
+                last_attempt_unix_ms: self.features.compositor_transition.last_attempt_unix_ms,
+                last_success: self.features.compositor_transition.last_success,
+                last_error: self.features.compositor_transition.last_error.clone(),
+            },
             features: RuntimeFeatureStates {
                 do_not_disturb: self.do_not_disturb,
                 screenshot: self.features.screenshot.active,
@@ -3118,8 +3136,16 @@ mod tests {
             "reload": {"last_success": null, "last_error": null}
         });
         assert_eq!(
-            runtime_health(&healthy_config, 1).status,
+            runtime_health(&healthy_config, 1, None).status,
             RuntimeHealthStatus::Healthy
+        );
+
+        let transition_failure =
+            runtime_health(&healthy_config, 1, Some("selection already owned"));
+        assert_eq!(transition_failure.status, RuntimeHealthStatus::Degraded);
+        assert_eq!(
+            transition_failure.reasons,
+            ["last compositor transition failed: selection already owned"]
         );
 
         let failed_reload = serde_json::json!({
@@ -3127,7 +3153,7 @@ mod tests {
             "diagnostics": {"error_count": 0, "warning_count": 1},
             "reload": {"last_success": false, "last_error": "bad TOML"}
         });
-        let health = runtime_health(&failed_reload, 0);
+        let health = runtime_health(&failed_reload, 0, None);
         assert_eq!(health.status, RuntimeHealthStatus::Degraded);
         assert_eq!(health.reasons.len(), 3);
         assert!(

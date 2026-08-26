@@ -309,7 +309,12 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.is_popup_like(backend, client_key) {
+        let structurally_borderless = self.is_popup_like(backend, client_key)
+            || self.state.clients.get(client_key).is_some_and(|client| {
+                let types = backend.property_ops().get_window_types(client.win);
+                types.contains(&WindowType::Dock) || types.contains(&WindowType::Desktop)
+            });
+        if structurally_borderless {
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.geometry.border_w = 0;
             }
@@ -335,7 +340,11 @@ impl Jwm {
         info!("Setting up window {:?}", win);
 
         if let Some(client) = self.state.clients.get_mut(client_key) {
-            client.geometry.border_w = CONFIG.load().border_px() as i32;
+            client.geometry.border_w = if client.state.no_decorations {
+                0
+            } else {
+                CONFIG.load().border_px() as i32
+            };
         }
 
         self.update_client_decoration(backend, client_key, true)?;
@@ -355,8 +364,17 @@ impl Jwm {
             .get(client_key)
             .is_some_and(|client| client.state.is_hidden);
         if !backend.has_compositor() && !keep_iconic_offscreen {
+            let desktop_left = self.desktop_left_edge();
             let (x, y, w, h) = if let Some(client) = self.state.clients.get(client_key) {
-                let offscreen_x = client.geometry.x + 2 * self.s_w;
+                // Derive the staging slot from the complete desktop instead
+                // of adding two root widths to an untrusted client x. The old
+                // expression could overflow i32 and a stale `s_w` after an
+                // output change did not prove the client was actually outside
+                // every monitor. Reuse the same saturating left-hand parking
+                // contract as hidden clients, without setting a semantic
+                // hidden marker on this visible client.
+                let offscreen_x =
+                    hidden_x_left_of_desktop(desktop_left, client.total_width().max(1));
                 (
                     offscreen_x,
                     client.geometry.y,
@@ -595,6 +613,13 @@ impl Jwm {
             self.stage_initially_minimized_geometry(client_key);
         }
 
+        // Decoration hints are client-owned and may already be present before
+        // the first MapRequest. Adopt them before setup configures the native
+        // X11 border; doing it after MapWindow exposes one framed flash for
+        // CSD/Motif-borderless clients when no compositor is available to
+        // mask the transition.
+        self.apply_motif_hints(backend, client_key);
+        self.apply_gtk_frame_extents(backend, client_key);
         self.setup_client_window(backend, client_key)?;
 
         self.updatewindowtype(backend, client_key);
@@ -647,8 +672,6 @@ impl Jwm {
             }
         }
         self.updatewmhints(backend, client_key);
-        self.apply_motif_hints(backend, client_key);
-        self.apply_gtk_frame_extents(backend, client_key);
         self.set_initial_frame_extents(backend, client_key);
         self.set_initial_allowed_actions(backend, client_key);
         self.read_sync_counter(backend, client_key);
@@ -2058,8 +2081,8 @@ mod unmanage_minimized_tests {
         BackendDiagnostics, Capabilities, CloseResult, ColorAllocator, CompositorAnnotation,
         CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
         CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-        InputOps, KeyOps, MinimizedRestoreRect, MinimizedRestoreState, NormalHints, OutputOps,
-        PropertyOps, RenderScheduler, WindowAttributes, WindowOps, WmHints,
+        InputOps, KeyOps, MinimizedRestoreRect, MinimizedRestoreState, MotifWmHints, NormalHints,
+        OutputOps, PropertyOps, RenderScheduler, WindowAttributes, WindowOps, WmHints,
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::error::BackendError;
@@ -2101,6 +2124,8 @@ mod unmanage_minimized_tests {
         wm_state: AtomicI64,
         dock_type: AtomicBool,
         fullscreen: AtomicBool,
+        motif_borderless: AtomicBool,
+        gtk_client_frame: AtomicBool,
         fail_restore_get: AtomicBool,
         fail_restore_set: AtomicBool,
         fail_next_wm_state_read: AtomicBool,
@@ -2128,6 +2153,22 @@ mod unmanage_minimized_tests {
             } else {
                 vec![WindowType::Normal]
             }
+        }
+
+        fn get_motif_hints(&self, _win: WindowId) -> Option<MotifWmHints> {
+            self.motif_borderless
+                .load(Ordering::Relaxed)
+                .then_some(MotifWmHints {
+                    flags: 0x2,
+                    decorations: 0,
+                    ..Default::default()
+                })
+        }
+
+        fn get_gtk_frame_extents(&self, _win: WindowId) -> Option<[u32; 4]> {
+            self.gtk_client_frame
+                .load(Ordering::Relaxed)
+                .then_some([8, 8, 28, 8])
         }
 
         fn is_fullscreen(&self, _win: WindowId) -> bool {
@@ -2306,6 +2347,7 @@ mod unmanage_minimized_tests {
         maps: Mutex<Vec<WindowId>>,
         focuses: Mutex<Vec<Option<WindowId>>>,
         changes: Mutex<Vec<(WindowId, WindowChanges)>>,
+        decorations: Mutex<Vec<(WindowId, u32)>>,
         event_masks: Mutex<Vec<WindowId>>,
         ungrabs: Mutex<Vec<WindowId>>,
         reported_geometry: Mutex<Option<Geometry>>,
@@ -2389,10 +2431,14 @@ mod unmanage_minimized_tests {
 
         fn set_decoration_style(
             &self,
-            _win: WindowId,
-            _border_width: u32,
+            win: WindowId,
+            border_width: u32,
             _border_color: Pixel,
         ) -> Result<(), BackendError> {
+            self.decorations
+                .lock()
+                .expect("window decorations lock")
+                .push((win, border_width));
             Ok(())
         }
 
@@ -3456,6 +3502,178 @@ mod unmanage_minimized_tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn native_new_window_staging_is_overflow_safe_and_outside_the_complete_desktop() {
+        let mut backend = ClientSpyBackend::new();
+        backend.has_compositor = false;
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        // This deliberately made the former `x + 2 * s_w` expression panic
+        // in debug builds before it had a chance to stage the client.
+        jwm.s_w = i32::MAX;
+        let desktop_left = jwm.desktop_left_edge();
+        let window = WindowId::from_raw(0x82ff);
+        let mut client = WMClient::new(window);
+        client.geometry.x = i32::MAX - 8;
+        client.geometry.y = 90;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        let client_key = jwm.insert_client(client);
+
+        jwm.setup_client_window(&mut backend, client_key).unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        let total_width = client.total_width().max(1);
+        let changes = backend
+            .window_ops
+            .changes
+            .lock()
+            .expect("window changes lock");
+        let staging_x = changes
+            .iter()
+            .find_map(|(candidate, changes)| (*candidate == window).then_some(changes.x).flatten())
+            .expect("native setup staging configure");
+        assert!(staging_x.saturating_add(total_width) <= desktop_left);
+        assert!(client.geometry.hidden_x.is_none());
+        assert!(client.geometry.hidden_restore_rect.is_none());
+    }
+
+    #[test]
+    fn native_decoration_hints_apply_before_map_and_reconcile_live_deletions() {
+        let mut backend = ClientSpyBackend::new();
+        backend.has_compositor = false;
+        backend
+            .property_ops
+            .motif_borderless
+            .store(true, Ordering::Relaxed);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let window = WindowId::from_raw(0x8300);
+        let geometry = Geometry {
+            x: 160,
+            y: 90,
+            w: 640,
+            h: 480,
+            border: 0,
+        };
+
+        jwm.manage(&mut backend, window, &geometry).unwrap();
+
+        let client_key = jwm.wintoclient(window).expect("managed CSD client");
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.no_decorations);
+        assert_eq!(client.geometry.border_w, 0);
+        assert!(
+            backend
+                .window_ops
+                .decorations
+                .lock()
+                .expect("window decorations lock")
+                .iter()
+                .filter(|(candidate, _)| *candidate == window)
+                .all(|(_, border)| *border == 0),
+            "the native border must never appear before or after MapWindow"
+        );
+
+        backend
+            .property_ops
+            .motif_borderless
+            .store(false, Ordering::Relaxed);
+        jwm.handle_motif_hints_change(&mut backend, client_key)
+            .unwrap();
+        let expected = CONFIG.load().border_px();
+        assert!(!jwm.state.clients[client_key].state.no_decorations);
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.border_w,
+            expected as i32
+        );
+        assert_eq!(
+            backend
+                .window_ops
+                .decorations
+                .lock()
+                .expect("window decorations lock")
+                .last(),
+            Some(&(window, expected))
+        );
+
+        backend
+            .property_ops
+            .gtk_client_frame
+            .store(true, Ordering::Relaxed);
+        jwm.handle_gtk_frame_extents_change(&mut backend, client_key)
+            .unwrap();
+        assert!(jwm.state.clients[client_key].state.no_decorations);
+        assert_eq!(jwm.state.clients[client_key].geometry.border_w, 0);
+        assert_eq!(
+            backend
+                .window_ops
+                .decorations
+                .lock()
+                .expect("window decorations lock")
+                .last(),
+            Some(&(window, 0))
+        );
+
+        jwm.setfullscreen(&mut backend, client_key, true).unwrap();
+        backend
+            .property_ops
+            .gtk_client_frame
+            .store(false, Ordering::Relaxed);
+        jwm.handle_gtk_frame_extents_change(&mut backend, client_key)
+            .unwrap();
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_fullscreen);
+        assert_eq!(client.geometry.border_w, 0);
+        assert_eq!(client.geometry.old_border_w, expected as i32);
+
+        jwm.setfullscreen(&mut backend, client_key, false).unwrap();
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.border_w, expected as i32,
+            "leaving fullscreen must restore the border policy adopted while fullscreen"
+        );
+    }
+
+    #[test]
+    fn native_external_dock_is_floating_focusless_and_never_gets_a_server_border() {
+        let mut backend = ClientSpyBackend::new();
+        backend.has_compositor = false;
+        backend
+            .property_ops
+            .dock_type
+            .store(true, Ordering::Relaxed);
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let window = WindowId::from_raw(0x8301);
+
+        jwm.manage(
+            &mut backend,
+            window,
+            &Geometry {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 32,
+                border: 0,
+            },
+        )
+        .unwrap();
+
+        let client_key = jwm.wintoclient(window).expect("managed external Dock");
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_dock);
+        assert!(client.state.is_floating);
+        assert!(client.state.never_focus);
+        assert_eq!(client.geometry.border_w, 0);
+        assert!(
+            backend
+                .window_ops
+                .decorations
+                .lock()
+                .expect("window decorations lock")
+                .iter()
+                .filter(|(candidate, _)| *candidate == window)
+                .all(|(_, border)| *border == 0)
+        );
     }
 
     #[test]

@@ -77,6 +77,7 @@ use crate::backend::common_define::EventMaskBits;
 use crate::backend::common_define::SchemeType;
 use crate::backend::common_define::{KeySym, Mods};
 use crate::backend::error::BackendError;
+use crate::backend::update_notifier::AsyncUpdateNotifier;
 use crate::config::CONFIG;
 use crate::core::layout::LayoutEnum;
 use crate::core::models::{ClientKey, MonitorKey, ScrollingState, WMClient, WMMonitor};
@@ -219,6 +220,9 @@ pub struct Jwm {
     // IPC
     pub ipc_server: Option<IpcServer>,
     pub(crate) update_readiness: Option<UpdateReadinessHub>,
+    /// Completion signal shared by every worker queue that JWM polls from
+    /// `update()`. `None` retains the conservative timer fallback.
+    pub(crate) async_update_notifier: Option<AsyncUpdateNotifier>,
 
     // Config hot-reload. Both backend inotify events and the backend-neutral
     // update-loop poll feed this tracker so a revision is only attempted once.
@@ -1049,13 +1053,42 @@ impl Jwm {
                 None
             }
         };
-        if let (Some(hub), Some(ipc_fd)) = (
-            update_readiness.as_ref(),
-            ipc_server.as_ref().and_then(IpcServer::readiness_fd),
-        ) && let Err(error) = hub.register(ipc_fd)
-        {
-            warn!("failed to aggregate IPC readiness; retaining timer fallback: {error}");
-        }
+        let ipc_readiness_aggregated = match ipc_server.as_ref() {
+            None => true,
+            Some(ipc) => match (update_readiness.as_ref(), ipc.readiness_fd()) {
+                (Some(hub), Some(ipc_fd)) => match hub.register(ipc_fd) {
+                    Ok(_) => true,
+                    Err(error) => {
+                        warn!(
+                            "failed to aggregate IPC readiness; retaining timer fallback: {error}"
+                        );
+                        false
+                    }
+                },
+                _ => false,
+            },
+        };
+        let async_update_notifier = update_readiness.as_ref().and_then(|hub| {
+            if !ipc_readiness_aggregated {
+                return None;
+            }
+            let notifier = match AsyncUpdateNotifier::new() {
+                Ok(notifier) => notifier,
+                Err(error) => {
+                    warn!(
+                        "failed to create async update notifier; retaining timer fallback: {error}"
+                    );
+                    return None;
+                }
+            };
+            if let Err(error) = hub.register(notifier.as_fd()) {
+                warn!(
+                    "failed to aggregate async update notifier; retaining timer fallback: {error}"
+                );
+                return None;
+            }
+            Some(notifier)
+        });
         let mut jwm = Jwm {
             state: WMState::new(),
             runtime_backend,
@@ -1100,6 +1133,7 @@ impl Jwm {
 
             ipc_server,
             update_readiness,
+            async_update_notifier,
             config_reload_tracker: lifecycle::ConfigReloadTracker::new(config_revision),
             config_last_modified: config_revision,
             config_reload_debounce: None,
@@ -1748,10 +1782,19 @@ impl Jwm {
             // Clear the outward level before consuming the ring. A command
             // arriving after this point either joins this drain or causes the
             // futex worker to publish a fresh eventfd level.
-            if let Some(notifier) = bar.command_notifier.as_ref()
-                && let Err(error) = notifier.drain()
-            {
-                warn!("[process_commands] failed to drain bar {source_monitor} notifier: {error}");
+            let notifier_failed = bar.command_notifier.as_ref().is_some_and(|notifier| {
+                notifier.drain().is_err_and(|error| {
+                    warn!(
+                        "[process_commands] failed to drain bar {source_monitor} notifier; restoring timer fallback: {error}"
+                    );
+                    true
+                })
+            });
+            if notifier_failed && let Some(notifier) = bar.command_notifier.take() {
+                // Closing the descriptor removes it from epoll automatically.
+                // `None` is also the scheduler's durable signal that this bar
+                // must return to timer polling.
+                notifier.request_shutdown();
             }
             // Bound one producer's work. If it refills continuously and a
             // command remains, the level worker republishes the next batch.

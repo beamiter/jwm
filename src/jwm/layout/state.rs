@@ -370,7 +370,11 @@ impl Jwm {
             for ck in client_keys {
                 if let Some(client) = self.state.clients.get_mut(ck) {
                     if !client.state.is_floating {
-                        client.geometry.border_w = border_w;
+                        client.geometry.border_w = if client.state.no_decorations {
+                            0
+                        } else {
+                            border_w
+                        };
                     }
                 }
             }

@@ -174,12 +174,14 @@ impl WMController for Jwm {
         if let Err(e) = self.handle_output_added(backend, info) {
             error!("Error handling OutputAdded: {:?}", e);
         }
+        self.reconcile_external_struts_after_topology_change(backend);
     }
 
     fn on_output_removed(&mut self, backend: &mut dyn Backend, id: OutputId) {
         if let Err(e) = self.handle_output_removed(backend, id) {
             error!("Error handling OutputRemoved: {:?}", e);
         }
+        self.reconcile_external_struts_after_topology_change(backend);
     }
 
     fn on_output_changed(
@@ -190,15 +192,13 @@ impl WMController for Jwm {
         if let Err(e) = self.handle_output_changed(backend, info) {
             error!("Error handling OutputChanged: {:?}", e);
         }
+        self.reconcile_external_struts_after_topology_change(backend);
     }
 
     fn on_screen_layout_changed(&mut self, backend: &mut dyn Backend) {
         info!("[WMController] Screen Layout Changed (Hotplug detected), refreshing geometry...");
         if self.updategeom(backend) {
-            // Re-apply external strut reservations after geometry reset
-            if !self.external_struts.is_empty() {
-                self.apply_strut_reservations();
-            }
+            self.reconcile_external_struts_after_topology_change(backend);
             if let Err(e) = self.handle_screen_geometry_change(backend) {
                 error!("Error handling ScreenLayoutChanged: {:?}", e);
             }
@@ -250,6 +250,15 @@ impl WMController for Jwm {
             sync_configured_client_geometry(self, win, x, y, width, height);
         }
 
+        // A panel can cross outputs without changing its strut property. Do
+        // this before OR-event coalescing so every physical host transition
+        // updates legacy whole-screen strut attribution.
+        if self.refresh_external_strut_host_from_geometry(backend, win, x, y, width, height) {
+            info!("[strut] Rehosted external strut for {win:?} after ConfigureNotify");
+            self.apply_strut_reservations();
+            self.arrange(backend, None);
+        }
+
         // Keep the OR geometry cache up to date so build_compositor_scene
         // doesn't need a synchronous GetGeometry round-trip per frame.
         if self.override_redirect_windows.contains(&win) {
@@ -277,8 +286,12 @@ impl WMController for Jwm {
                 return;
             }
         }
+        let root_configured = backend.root_window() == Some(win);
         if let Err(e) = self.configurenotify(backend, win, x, y, width, height) {
             error!("Error handling ConfigureNotify: {:?}", e);
+        }
+        if root_configured {
+            self.reconcile_external_struts_after_topology_change(backend);
         }
     }
 
@@ -946,9 +959,8 @@ impl WMController for Jwm {
 
             if let Some(strut) = backend.property_ops().get_window_strut_partial(win) {
                 if strut.left > 0 || strut.right > 0 || strut.top > 0 || strut.bottom > 0 {
-                    let changed = self.external_struts.get(&win).map(|(s, _)| s) != Some(&strut);
                     let host = self.strut_host_monitor(backend, win);
-                    self.external_struts.insert(win, (strut, host));
+                    let changed = self.cache_external_strut(win, strut, host);
                     if changed {
                         info!(
                             "[strut] Updated external strut for {:?}: top={} bottom={} left={} right={}",
@@ -1931,6 +1943,7 @@ mod tests {
             external_struts: HashMap::new(),
             ipc_server: None,
             update_readiness: None,
+            async_update_notifier: None,
             config_reload_tracker: crate::jwm::lifecycle::ConfigReloadTracker::new(None),
             config_last_modified: None,
             config_reload_debounce: None,
@@ -2342,6 +2355,19 @@ mod tests {
         assert!(error.to_string().contains("without reaching enabled state"));
         assert!(!backend.compositor_enabled);
         assert_eq!(backend.compositor_transitions, [true]);
+        assert_eq!(jwm.features.compositor_transition.attempts, 1);
+        assert_eq!(
+            jwm.features.compositor_transition.last_requested_active,
+            Some(true)
+        );
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(false));
+        assert!(
+            jwm.features
+                .compositor_transition
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("without reaching enabled state"))
+        );
     }
 
     #[test]
@@ -2389,6 +2415,12 @@ mod tests {
 
         assert!(!backend.compositor_enabled);
         assert_eq!(backend.compositor_transitions, [false]);
+        assert_eq!(jwm.features.compositor_transition.attempts, 1);
+        assert_eq!(
+            jwm.features.compositor_transition.last_requested_active,
+            Some(false)
+        );
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(true));
         assert_eq!(
             *backend
                 .window_ops
@@ -2415,6 +2447,19 @@ mod tests {
         assert_eq!(backend.compositor_pip_updates, [(window, true)]);
         assert_eq!(backend.compositor_config_applies, 1);
         assert_eq!(backend.compositor_monitor_updates, 1);
+        assert_eq!(jwm.features.compositor_transition.attempts, 2);
+        assert_eq!(
+            jwm.features.compositor_transition.last_requested_active,
+            Some(true)
+        );
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(true));
+        assert!(
+            jwm.features
+                .compositor_transition
+                .last_attempt_unix_ms
+                .is_some()
+        );
+        assert_eq!(jwm.features.compositor_transition.last_error, None);
     }
 
     #[test]
@@ -2499,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn compositor_enable_reconciles_later_clients_after_one_window_error() {
+    fn compositor_enable_presentation_failure_is_reported_after_reconciling_later_clients() {
         use crate::core::models::WMClient;
 
         let (mut jwm, _first, first_window) = jwm_with_transition_client();
@@ -2516,10 +2561,33 @@ mod tests {
             .fail_decoration_once
             .store(true, AtomicOrdering::Relaxed);
 
-        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
-            .expect("one disappearing/broken client must not strand later windows");
+        let error = jwm
+            .togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect_err("a partially reconciled enable must not be acknowledged as successful");
 
         assert!(backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [true]);
+        assert!(error.to_string().contains("decoration failure"));
+        assert_eq!(jwm.features.compositor_transition.attempts, 1);
+        assert_eq!(
+            jwm.features.compositor_transition.last_requested_active,
+            Some(true)
+        );
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(false));
+        assert!(
+            jwm.features
+                .compositor_transition
+                .last_error
+                .as_deref()
+                .is_some_and(|error| {
+                    error.contains("compositor is enabled") && error.contains("decoration failure")
+                })
+        );
+        // The backend already reached ON before the client presentation error.
+        // Keep it usable by replaying runtime state even though the caller sees
+        // the partial failure.
+        assert_eq!(backend.compositor_config_applies, 1);
+        assert_eq!(backend.compositor_monitor_updates, 1);
         let attempts = backend
             .window_ops
             .decoration_styles
@@ -3827,6 +3895,50 @@ mod tests {
 // EventHandler trait 实现 - 事件循环主处理器
 // =================================================================================
 impl Jwm {
+    fn background_job_readiness_is_complete(&self) -> bool {
+        use crate::jwm::features::connectivity::BackgroundJob;
+
+        self.features
+            .control_snapshot_job
+            .as_ref()
+            .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .connectivity_poll
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .wifi_scan
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .wifi_connect
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .bluetooth_scan
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .bluetooth_action
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .wallpaper_theme
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+            && self
+                .features
+                .launcher_catalog_job
+                .as_ref()
+                .is_none_or(BackgroundJob::readiness_is_covered)
+    }
+
     fn maintenance_next_wakeup_at(&self, now: std::time::Instant) -> std::time::Duration {
         let mut next = Some(self.config_reload_next_wakeup(now));
         if let Some(picker) = self.layout_picker_wakeup(now) {
@@ -4087,6 +4199,15 @@ impl EventHandler for Jwm {
 
     fn update(&mut self, backend: &mut dyn Backend) -> Result<(), BackendError> {
         let now = std::time::Instant::now();
+        // Clear the counted completion level before inspecting any worker
+        // queues. A worker that publishes after this point leaves the eventfd
+        // readable for a follow-up update, so no completion can be swallowed
+        // by a drain that ran after its queue was already checked.
+        if let Some(notifier) = self.async_update_notifier.as_ref()
+            && let Err(error) = notifier.drain()
+        {
+            log::warn!("could not drain async update notifier; restoring timer fallback: {error}");
+        }
         // Backends without SIGCHLD still reap exact child handles, but the
         // supervisor rate-limits this insurance path instead of issuing one
         // wait syscall per live application on every frame/update tick.
@@ -4135,7 +4256,10 @@ impl EventHandler for Jwm {
         if let Some(readiness) = self.update_readiness.as_mut()
             && let Err(error) = readiness.drain()
         {
-            log::warn!("could not drain update readiness hub: {error}");
+            if let Some(notifier) = self.async_update_notifier.as_ref() {
+                notifier.mark_unhealthy();
+            }
+            log::warn!("could not drain update readiness hub; restoring timer fallback: {error}");
         }
 
         backend.window_ops().flush()?;
@@ -4178,6 +4302,27 @@ impl EventHandler for Jwm {
                 None
             }
         }
+    }
+
+    fn async_update_notifier(
+        &self,
+    ) -> Option<crate::backend::update_notifier::AsyncUpdateNotifier> {
+        self.async_update_notifier.clone()
+    }
+
+    fn async_update_readiness_healthy(&self) -> bool {
+        self.async_update_notifier
+            .as_ref()
+            .is_some_and(crate::backend::update_notifier::AsyncUpdateNotifier::is_healthy)
+            && self
+                .ipc_server
+                .as_ref()
+                .is_none_or(crate::ipc_server::IpcServer::readiness_is_healthy)
+            && self
+                .secondary_bars
+                .values()
+                .all(|bar| bar.command_notifier.is_some())
+            && self.background_job_readiness_is_complete()
     }
 
     fn render_compositor_immediate(&mut self, backend: &mut dyn Backend) {

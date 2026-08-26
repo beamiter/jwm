@@ -748,7 +748,7 @@ impl Jwm {
                     {
                         NetworkRowAction::OpenPicker => {
                             if let Some(scan) = connectivity::start_scan() {
-                                self.features.wifi_scan = Some(scan);
+                                self.features.wifi_scan = Some(self.track_background_job(scan));
                                 self.features.system_ui_return_to_hub = true;
                                 self.features.system_ui =
                                     crate::jwm::features::SystemUiState::wifi_picker(
@@ -784,7 +784,8 @@ impl Jwm {
                     ) {
                         BluetoothRowAction::OpenPicker => {
                             if let Some(scan) = connectivity::start_device_scan() {
-                                self.features.bluetooth_scan = Some(scan);
+                                self.features.bluetooth_scan =
+                                    Some(self.track_background_job(scan));
                                 self.features.system_ui_return_to_hub = true;
                                 self.features.system_ui =
                                     crate::jwm::features::SystemUiState::bluetooth_picker(
@@ -1011,7 +1012,7 @@ impl Jwm {
         } else if !prompting && keysym == keys::KEY_r {
             match crate::jwm::features::connectivity::start_scan() {
                 Some(scan) => {
-                    self.features.wifi_scan = Some(scan);
+                    self.features.wifi_scan = Some(self.track_background_job(scan));
                     self.features.system_ui.set_wifi_message("Scanning\u{2026}");
                 }
                 None => self
@@ -1039,7 +1040,7 @@ impl Jwm {
         } else if keysym == keys::KEY_r {
             match crate::jwm::features::connectivity::start_device_scan() {
                 Some(scan) => {
-                    self.features.bluetooth_scan = Some(scan);
+                    self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     self.features
                         .system_ui
                         .set_bluetooth_message("Reading devices\u{2026}");

@@ -368,10 +368,23 @@ fn sanitize_live_data(query: &str, data: &mut Value) {
             };
             *reason = Value::String(if text.starts_with("last configuration reload failed:") {
                 "last configuration reload failed (detail redacted)".to_string()
+            } else if text.starts_with("last compositor transition failed:") {
+                "last compositor transition failed (detail redacted)".to_string()
             } else {
                 sanitize_reported_value(text)
             });
         }
+    }
+
+    if let Some(transition) = data
+        .get_mut("compositor_transition")
+        .and_then(Value::as_object_mut)
+    {
+        let error_present = transition
+            .get("last_error")
+            .is_some_and(|error| !error.is_null());
+        transition.insert("last_error".to_string(), Value::Null);
+        transition.insert("last_error_present".to_string(), Value::Bool(error_present));
     }
 
     let Some(config) = data.get_mut("config").and_then(Value::as_object_mut) else {
@@ -669,13 +682,18 @@ SECRET_TOKEN=do-not-copy
     }
 
     #[test]
-    fn live_status_drops_config_paths_issue_details_and_reload_errors() {
+    fn live_status_drops_config_paths_issue_details_and_runtime_errors() {
         let mut status = json!({
             "health": {
                 "reasons": [
                     "configuration has 1 error(s)",
-                    "last configuration reload failed: /home/alice/private"
+                    "last configuration reload failed: /home/alice/private",
+                    "last compositor transition failed: /home/alice/gpu-state"
                 ]
+            },
+            "compositor_transition": {
+                "attempts": 1,
+                "last_error": "failed under /home/alice"
             },
             "config": {
                 "path": "/home/alice/.config/jwm/config_x11.toml",
@@ -694,9 +712,15 @@ SECRET_TOKEN=do-not-copy
         assert!(status["config"]["diagnostics"].get("issues").is_none());
         assert_eq!(status["config"]["reload"]["last_error"], Value::Null);
         assert_eq!(status["config"]["reload"]["last_error_present"], true);
+        assert_eq!(status["compositor_transition"]["last_error"], Value::Null);
+        assert_eq!(status["compositor_transition"]["last_error_present"], true);
         assert_eq!(
             status["health"]["reasons"][1],
             "last configuration reload failed (detail redacted)"
+        );
+        assert_eq!(
+            status["health"]["reasons"][2],
+            "last compositor transition failed (detail redacted)"
         );
     }
 

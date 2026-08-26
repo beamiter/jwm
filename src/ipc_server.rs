@@ -610,6 +610,9 @@ pub struct IpcServer {
     /// before polling so fairness does not depend on `HashMap` iteration order.
     next_poll_client: u64,
     readiness: Option<IpcReadiness>,
+    /// Once any readiness operation fails, polling remains the only complete
+    /// delivery guarantee for the rest of this server's lifetime.
+    readiness_healthy: bool,
 }
 
 /// Parsed & validated message from a client, ready to process.
@@ -649,6 +652,7 @@ impl IpcServer {
             }
         };
         info!("[ipc] listening on {}", path.display());
+        let readiness_healthy = readiness.is_some();
         Ok(Self {
             listener,
             socket_path: path,
@@ -657,6 +661,7 @@ impl IpcServer {
             next_id: 1,
             next_poll_client: 1,
             readiness,
+            readiness_healthy,
         })
     }
 
@@ -683,10 +688,15 @@ impl IpcServer {
             .map(|readiness| readiness.epoll.0.as_fd())
     }
 
+    pub(crate) fn readiness_is_healthy(&self) -> bool {
+        self.readiness_healthy
+    }
+
     fn drain_readiness(&mut self) {
         if let Some(readiness) = self.readiness.as_mut()
             && let Err(error) = readiness.drain()
         {
+            self.readiness_healthy = false;
             warn!("[ipc] could not drain readiness hub: {error}");
         }
     }
@@ -708,6 +718,7 @@ impl IpcServer {
                             if let Some(readiness) = self.readiness.as_ref()
                                 && let Err(error) = readiness.add_client(id, &client)
                             {
+                                self.readiness_healthy = false;
                                 warn!(
                                     "[ipc] client {id} readiness registration failed; retaining timer fallback: {error}"
                                 );
@@ -813,6 +824,7 @@ impl IpcServer {
             if let Some(readiness) = self.readiness.as_ref()
                 && let Err(error) = readiness.sync_client_interest(id, client)
             {
+                self.readiness_healthy = false;
                 warn!("[ipc] client {id} readiness update failed: {error}");
             }
         }
@@ -826,6 +838,7 @@ impl IpcServer {
             && let Some(readiness) = self.readiness.as_mut()
             && let Err(error) = readiness.arm_continuation()
         {
+            self.readiness_healthy = false;
             warn!("[ipc] could not arm buffered-work continuation: {error}");
         }
 
@@ -842,6 +855,7 @@ impl IpcServer {
             } else if let Some(readiness) = self.readiness.as_ref()
                 && let Err(error) = readiness.sync_client_interest(client_id, client)
             {
+                self.readiness_healthy = false;
                 warn!("[ipc] client {client_id} readiness update failed: {error}");
             }
         }
@@ -869,6 +883,7 @@ impl IpcServer {
                 if let Some(readiness) = self.readiness.as_ref()
                     && let Err(error) = readiness.sync_client_interest(id, client)
                 {
+                    self.readiness_healthy = false;
                     warn!("[ipc] client {id} readiness update failed: {error}");
                 }
             }
@@ -935,6 +950,7 @@ mod tests {
             next_id: 1,
             next_poll_client: 1,
             readiness,
+            readiness_healthy: true,
         }
     }
 

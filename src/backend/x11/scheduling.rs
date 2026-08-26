@@ -2,18 +2,37 @@
 
 use std::time::{Duration, Instant};
 
-/// Safety cadence while clipboard and generic worker completion still poll.
+/// Safety cadence retained whenever async readiness is unavailable or fails.
 pub(crate) const IDLE_UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 /// Cadence for handler-owned and compositor-owned continuous frame work.
 pub(crate) const ACTIVE_UPDATE_INTERVAL: Duration = Duration::from_millis(16);
 
 #[must_use]
-pub(crate) const fn update_interval(frame_work_pending: bool) -> Duration {
+pub(crate) const fn update_interval(
+    frame_work_pending: bool,
+    idle_poll_required: bool,
+) -> Option<Duration> {
     if frame_work_pending {
-        ACTIVE_UPDATE_INTERVAL
+        Some(ACTIVE_UPDATE_INTERVAL)
+    } else if idle_poll_required {
+        Some(IDLE_UPDATE_INTERVAL)
     } else {
-        IDLE_UPDATE_INTERVAL
+        None
     }
+}
+
+/// Only a native, fully readiness-driven session may drop the safety poll.
+///
+/// Composited sessions intentionally retain their existing idle cadence.
+/// Registration failure and a notifier whose write/drain path failed both
+/// restore the old 20 ms timer immediately on the next scheduling decision.
+#[must_use]
+pub(crate) const fn idle_poll_required(
+    compositor_active: bool,
+    handler_readiness_registered: bool,
+    async_update_readiness_healthy: bool,
+) -> bool {
+    compositor_active || !handler_readiness_registered || !async_update_readiness_healthy
 }
 
 /// Keep the update clock anchored to its previous deadline.
@@ -27,14 +46,15 @@ pub(crate) fn next_update_deadline(
     previous_deadline: Instant,
     now: Instant,
     frame_work_pending: bool,
+    idle_poll_required: bool,
     handler_wakeup: Option<Duration>,
 ) -> Instant {
-    let cadence = previous_deadline
-        .checked_add(update_interval(frame_work_pending))
-        .map_or(now, |next| next.max(now));
-    handler_wakeup
-        .and_then(|delay| now.checked_add(delay))
-        .map_or(cadence, |deadline| cadence.min(deadline))
+    let cadence = update_interval(frame_work_pending, idle_poll_required).map(|interval| {
+        previous_deadline
+            .checked_add(interval)
+            .map_or(now, |next| next.max(now))
+    });
+    joined_deadline(cadence, handler_wakeup, now)
 }
 
 /// Fresh candidate after a non-timer event or a readiness-driven update.
@@ -42,14 +62,28 @@ pub(crate) fn next_update_deadline(
 pub(crate) fn requested_update_deadline(
     now: Instant,
     frame_work_pending: bool,
+    idle_poll_required: bool,
     handler_wakeup: Option<Duration>,
 ) -> Instant {
-    let cadence = now
-        .checked_add(update_interval(frame_work_pending))
-        .unwrap_or(now);
-    handler_wakeup
-        .and_then(|delay| now.checked_add(delay))
-        .map_or(cadence, |deadline| cadence.min(deadline))
+    let cadence = update_interval(frame_work_pending, idle_poll_required)
+        .map(|interval| now.checked_add(interval).unwrap_or(now));
+    joined_deadline(cadence, handler_wakeup, now)
+}
+
+fn joined_deadline(
+    cadence: Option<Instant>,
+    handler_wakeup: Option<Duration>,
+    now: Instant,
+) -> Instant {
+    let handler = handler_wakeup.and_then(|delay| now.checked_add(delay));
+    match (cadence, handler) {
+        (Some(cadence), Some(handler)) => cadence.min(handler),
+        (Some(cadence), None) => cadence,
+        (None, Some(handler)) => handler,
+        // Generic handlers that advertise neither readiness nor a deadline
+        // are kept safe even if a caller supplied an inconsistent policy.
+        (None, None) => now.checked_add(IDLE_UPDATE_INTERVAL).unwrap_or(now),
+    }
 }
 
 /// Return a deadline that needs to be installed in the timer.
@@ -105,7 +139,7 @@ mod tests {
             dispatch_timeout(true, true, None),
             Some(ACTIVE_UPDATE_INTERVAL)
         );
-        assert_eq!(update_interval(true), ACTIVE_UPDATE_INTERVAL);
+        assert_eq!(update_interval(true, false), Some(ACTIVE_UPDATE_INTERVAL));
         assert_eq!(
             dispatch_timeout(false, true, Some(Duration::from_secs(1))),
             Some(ACTIVE_UPDATE_INTERVAL)
@@ -120,19 +154,19 @@ mod tests {
             Some(deadline)
         );
         assert_eq!(dispatch_timeout(false, false, None), None);
-        assert_eq!(update_interval(false), IDLE_UPDATE_INTERVAL);
+        assert_eq!(update_interval(false, true), Some(IDLE_UPDATE_INTERVAL));
     }
 
     #[test]
     fn update_deadline_does_not_sleep_again_after_a_blocking_swap() {
         let start = Instant::now();
         assert_eq!(
-            next_update_deadline(start, start + Duration::from_millis(4), true, None),
+            next_update_deadline(start, start + Duration::from_millis(4), true, false, None),
             start + ACTIVE_UPDATE_INTERVAL
         );
         let returned_after_vblank = start + Duration::from_millis(17);
         assert_eq!(
-            next_update_deadline(start, returned_after_vblank, true, None),
+            next_update_deadline(start, returned_after_vblank, true, false, None),
             returned_after_vblank
         );
     }
@@ -141,11 +175,11 @@ mod tests {
     fn handler_deadlines_join_the_absolute_frame_clock() {
         let now = Instant::now();
         assert_eq!(
-            requested_update_deadline(now, false, Some(Duration::from_millis(7))),
+            requested_update_deadline(now, false, true, Some(Duration::from_millis(7))),
             now + Duration::from_millis(7)
         );
         assert_eq!(
-            requested_update_deadline(now, true, Some(Duration::from_secs(1))),
+            requested_update_deadline(now, true, false, Some(Duration::from_secs(1))),
             now + ACTIVE_UPDATE_INTERVAL
         );
         assert_eq!(
@@ -153,9 +187,47 @@ mod tests {
                 now,
                 now + Duration::from_millis(4),
                 false,
+                true,
                 Some(Duration::from_millis(3)),
             ),
             now + Duration::from_millis(7)
+        );
+    }
+
+    #[test]
+    fn fully_ready_native_idle_uses_the_real_maintenance_deadline() {
+        let now = Instant::now();
+        assert!(!idle_poll_required(false, true, true));
+        assert_eq!(update_interval(false, false), None);
+        assert_eq!(
+            requested_update_deadline(now, false, false, Some(Duration::from_secs(3))),
+            now + Duration::from_secs(3)
+        );
+        assert_eq!(
+            next_update_deadline(
+                now,
+                now + Duration::from_millis(4),
+                false,
+                false,
+                Some(Duration::from_secs(3)),
+            ),
+            now + Duration::from_secs(3) + Duration::from_millis(4)
+        );
+    }
+
+    #[test]
+    fn compositor_or_readiness_failure_restores_the_idle_safety_poll() {
+        for required in [
+            idle_poll_required(true, true, true),
+            idle_poll_required(false, false, true),
+            idle_poll_required(false, true, false),
+        ] {
+            assert!(required);
+        }
+        let now = Instant::now();
+        assert_eq!(
+            requested_update_deadline(now, false, true, Some(Duration::from_secs(3))),
+            now + IDLE_UPDATE_INTERVAL
         );
     }
 
@@ -214,10 +286,12 @@ mod tests {
         ] {
             assert!(backend.contains("scheduling::dispatch_timeout("));
             assert!(backend.contains("scheduling::next_update_deadline("));
+            assert!(backend.contains("scheduling::idle_poll_required("));
             assert!(backend.contains("scheduling::timer_rearm_deadline("));
             assert!(backend.contains("register_dispatcher("));
             assert!(backend.contains("TimeoutAction::ToInstant("));
             assert!(backend.contains("handler.duplicate_update_readiness_fd()"));
+            assert!(backend.contains("handler.async_update_readiness_healthy()"));
             assert!(backend.contains("data.update_requested = true"));
             assert!(!backend.contains("Duration::from_millis(1)"));
             assert!(!backend.contains("TimeoutAction::ToDuration"));

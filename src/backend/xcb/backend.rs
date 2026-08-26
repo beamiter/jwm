@@ -838,6 +838,7 @@ struct XcbLoopData<'a> {
     compositor_frame_consumed_this_dispatch: bool,
     update_requested: bool,
     update_ran_this_dispatch: bool,
+    handler_readiness_registered: bool,
 }
 
 /// Bound the amount of XCB work performed in one calloop dispatch.  libxcb may
@@ -2544,6 +2545,10 @@ impl Backend for XcbBackend {
     }
 
     fn run(&mut self, handler: &mut dyn EventHandler) -> XcbResult<()> {
+        let async_update_notifier = handler.async_update_notifier();
+        if let Some(clipboard) = self.clipboard.as_ref() {
+            clipboard.set_update_notifier(async_update_notifier);
+        }
         let mut event_loop: EventLoop<XcbLoopData> = EventLoop::try_new()?;
         let loop_signal = event_loop.get_signal();
         self.compositor_loop_signal = Some(loop_signal.clone());
@@ -2595,19 +2600,24 @@ impl Backend for XcbBackend {
             })
             .map_err(|e| BackendError::Message(format!("Failed to insert Signal source: {e}")))?;
 
-        if let Some(readiness_fd) = handler.duplicate_update_readiness_fd()
-            && let Err(error) = handle.insert_source(
+        let handler_readiness_registered = match handler.duplicate_update_readiness_fd() {
+            Some(readiness_fd) => match handle.insert_source(
                 calloop::generic::Generic::new(readiness_fd, Interest::READ, Mode::Level),
                 |_, _, data| {
                     data.update_requested = true;
                     Ok(PostAction::Continue)
                 },
-            )
-        {
-            log::warn!(
-                "Failed to insert handler readiness source: {error}. Falling back to timer polling."
-            );
-        }
+            ) {
+                Ok(_) => true,
+                Err(error) => {
+                    log::warn!(
+                        "Failed to insert handler readiness source: {error}. Falling back to timer polling."
+                    );
+                    false
+                }
+            },
+            None => false,
+        };
 
         let update_timer = Dispatcher::new(
             Timer::from_duration(scheduling::IDLE_UPDATE_INTERVAL),
@@ -2631,10 +2641,16 @@ impl Backend for XcbBackend {
                 let frame_work_pending =
                     data.handler.needs_tick() || data.backend.compositor_needs_render();
                 let handler_wakeup = data.handler.next_wakeup();
+                let idle_poll_required = scheduling::idle_poll_required(
+                    data.backend.has_compositor(),
+                    data.handler_readiness_registered,
+                    data.handler.async_update_readiness_healthy(),
+                );
                 TimeoutAction::ToInstant(scheduling::next_update_deadline(
                     deadline,
                     std::time::Instant::now(),
                     frame_work_pending,
+                    idle_poll_required,
                     handler_wakeup,
                 ))
             },
@@ -2711,6 +2727,7 @@ impl Backend for XcbBackend {
             compositor_frame_consumed_this_dispatch: false,
             update_requested: false,
             update_ran_this_dispatch: false,
+            handler_readiness_registered,
         };
         while !data.should_exit {
             data.compositor_frame_consumed_this_dispatch = false;
@@ -2759,11 +2776,17 @@ impl Backend for XcbBackend {
                 let frame_work_pending =
                     data.handler.needs_tick() || data.backend.compositor_needs_render();
                 let handler_wakeup = data.handler.next_wakeup();
+                let idle_poll_required = scheduling::idle_poll_required(
+                    data.backend.has_compositor(),
+                    data.handler_readiness_registered,
+                    data.handler.async_update_readiness_healthy(),
+                );
                 let candidate = post_update_anchor.map_or_else(
                     || {
                         scheduling::requested_update_deadline(
                             now,
                             frame_work_pending,
+                            idle_poll_required,
                             handler_wakeup,
                         )
                     },
@@ -2772,6 +2795,7 @@ impl Backend for XcbBackend {
                             anchor,
                             now,
                             frame_work_pending,
+                            idle_poll_required,
                             handler_wakeup,
                         )
                     },

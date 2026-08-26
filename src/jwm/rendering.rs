@@ -223,6 +223,13 @@ impl Jwm {
             return Ok(false);
         }
         let now = Instant::now();
+        let attempt_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+        self.features
+            .compositor_transition
+            .begin(enabled, attempt_unix_ms);
 
         // Stage native borders/animation geometry behind the overlay, then
         // flush before XComposite exposes the real window tree.
@@ -233,6 +240,7 @@ impl Jwm {
                         "could not restore composited client presentation after failed staging: {rollback}"
                     );
                 }
+                self.features.compositor_transition.fail(error.to_string());
                 return Err(error);
             }
         }
@@ -263,6 +271,7 @@ impl Jwm {
                         "could not restore composited client presentation after failed disable: {rollback}"
                     );
                 }
+                self.features.compositor_transition.fail(error.to_string());
                 return Err(error);
             }
             Ok(_) if after != enabled => {
@@ -273,10 +282,12 @@ impl Jwm {
                         "could not restore composited client presentation after refused disable: {rollback}"
                     );
                 }
-                return Err(BackendError::Message(format!(
+                let error = BackendError::Message(format!(
                     "backend reported compositor transition without reaching {} state",
                     if enabled { "enabled" } else { "disabled" }
-                )));
+                ));
+                self.features.compositor_transition.fail(error.to_string());
+                return Err(error);
             }
             Ok(_) => {}
         }
@@ -285,10 +296,23 @@ impl Jwm {
             if let Err(error) = self.sync_x11_client_presentation(backend, true, now) {
                 // A disappearing client must not tear the newly created
                 // compositor back down; its lifecycle event will retire it.
-                log::warn!("could not fully switch clients to composited presentation: {error}");
+                // The renderer is nevertheless only partially reconciled, so
+                // do not publish this hand-off as a success or acknowledge it
+                // to the caller. Replay the remaining runtime state first so
+                // the compositor that is now active is as coherent as possible.
+                let transition_error = BackendError::Message(format!(
+                    "compositor is enabled, but X11 presentation reconciliation failed: {error}"
+                ));
+                log::warn!("{transition_error}");
+                self.replay_compositor_runtime_state(backend, now);
+                self.features
+                    .compositor_transition
+                    .fail(transition_error.to_string());
+                return Err(transition_error);
             }
             self.replay_compositor_runtime_state(backend, now);
         }
+        self.features.compositor_transition.succeed();
         Ok(after != before)
     }
 

@@ -80,6 +80,10 @@ struct Watcher {
 pub(crate) struct Clipboard {
     captured: std::sync::mpsc::Receiver<String>,
     serve: std::sync::mpsc::Sender<String>,
+    #[cfg(feature = "backend-x11rb")]
+    notifier: std::sync::Arc<
+        std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
+    >,
 }
 
 impl Clipboard {
@@ -92,6 +96,8 @@ impl Clipboard {
         let display = display.map(str::to_string);
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
+        let notifier = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_notifier = std::sync::Arc::clone(&notifier);
         // Build the watcher on the thread that will own it: RustConnection is
         // not Sync, and nothing outside the thread may touch it.
         let (ready_tx, ready) = std::sync::mpsc::channel();
@@ -100,7 +106,7 @@ impl Clipboard {
             .spawn(move || match Watcher::new(display.as_deref()) {
                 Ok(mut watcher) => {
                     let _ = ready_tx.send(Ok(()));
-                    watcher.run(&captured_tx, &serve_rx);
+                    watcher.run(&captured_tx, &serve_rx, &worker_notifier);
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -111,7 +117,12 @@ impl Clipboard {
         ready
             .recv()
             .map_err(|_| "clipboard thread died during startup".to_string())??;
-        Ok(Self { captured, serve })
+        Ok(Self {
+            captured,
+            serve,
+            #[cfg(feature = "backend-x11rb")]
+            notifier,
+        })
     }
 
     /// Text copied since the last call, oldest first.
@@ -124,6 +135,28 @@ impl Clipboard {
     #[cfg(feature = "backend-x11rb")]
     pub(crate) fn set_text(&self, text: &str) -> bool {
         self.serve.send(text.to_string()).is_ok()
+    }
+
+    /// Attach captures to the owning handler after that handler has created
+    /// its aggregate readiness fd. The watcher connection starts earlier than
+    /// JWM, so attaching itself emits one conservative wake to cover a capture
+    /// that may already be queued.
+    #[cfg(feature = "backend-x11rb")]
+    pub(crate) fn set_update_notifier(
+        &self,
+        notifier: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
+    ) {
+        let wake = {
+            let mut slot = self
+                .notifier
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = notifier;
+            slot.clone()
+        };
+        if let Some(notifier) = wake {
+            notifier.notify();
+        }
     }
 
     /// Split into halves that can live on different threads.
@@ -254,6 +287,7 @@ impl Watcher {
         &mut self,
         captured: &std::sync::mpsc::Sender<String>,
         serve: &std::sync::mpsc::Receiver<String>,
+        notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     ) {
         const IDLE: std::time::Duration = std::time::Duration::from_millis(20);
         loop {
@@ -267,7 +301,7 @@ impl Watcher {
             while let Ok(Some(event)) = self.conn.poll_for_event() {
                 idle = false;
                 if let Some(text) = self.handle(&event)
-                    && captured.send(text).is_err()
+                    && !publish_capture(captured, notifier, text)
                 {
                     return;
                 }
@@ -498,6 +532,26 @@ impl Watcher {
     }
 }
 
+fn publish_capture(
+    captured: &std::sync::mpsc::Sender<String>,
+    notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
+    text: String,
+) -> bool {
+    // Channel publication happens first. Once the eventfd is readable the
+    // handler must be able to drain this text without another timer tick.
+    if captured.send(text).is_err() {
+        return false;
+    }
+    let notifier = notifier
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(notifier) = notifier {
+        notifier.notify();
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +572,16 @@ mod tests {
         // every other copy, because a late reply from the previous owner was
         // read as the new owner's target list.
         assert_ne!(Conversion::TargetList, Conversion::Text);
+    }
+
+    #[test]
+    fn capture_is_queued_before_its_completion_wake() {
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        let slot = std::sync::Mutex::new(Some(notifier.clone()));
+        let (send, receive) = std::sync::mpsc::channel();
+
+        assert!(publish_capture(&send, &slot, "ready".to_string()));
+        assert_eq!(notifier.drain().unwrap(), 1);
+        assert_eq!(receive.try_recv().unwrap(), "ready");
     }
 }

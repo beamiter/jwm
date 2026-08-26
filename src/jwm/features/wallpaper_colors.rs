@@ -386,7 +386,8 @@ impl crate::jwm::Jwm {
         // Claimed before the work starts, so the config apply this extraction
         // ends in does not start another one for the same picture.
         self.features.themed_wallpaper = wallpaper;
-        self.features.wallpaper_theme = Some(start_extraction(path));
+        let job = start_extraction(path);
+        self.features.wallpaper_theme = Some(self.track_background_job(job));
     }
 
     /// Adopt a finished extraction. Called from the frame tick.

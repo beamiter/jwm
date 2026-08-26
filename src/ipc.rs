@@ -383,6 +383,17 @@ pub struct RuntimeFeatureStates {
     pub annotation: bool,
 }
 
+/// Last runtime compositor hand-off as observed by the WM. This remains
+/// available when the renderer is absent, unlike renderer-owned metrics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CompositorTransitionStatus {
+    pub attempts: u64,
+    pub last_requested_active: Option<bool>,
+    pub last_attempt_unix_ms: Option<u64>,
+    pub last_success: Option<bool>,
+    pub last_error: Option<String>,
+}
+
 /// Backend-neutral live status. New fields may be added within a schema
 /// version; incompatible changes require incrementing `schema_version`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -406,6 +417,7 @@ pub struct RuntimeStatusV1 {
     pub compositor_configured: bool,
     /// True while native mode has leased the compositor for a shell panel.
     pub compositor_temporary: bool,
+    pub compositor_transition: CompositorTransitionStatus,
     pub features: RuntimeFeatureStates,
     pub compositor_metrics: Option<Value>,
 }
@@ -1275,6 +1287,13 @@ mod tests {
             compositor_active: false,
             compositor_configured: false,
             compositor_temporary: false,
+            compositor_transition: CompositorTransitionStatus {
+                attempts: 2,
+                last_requested_active: Some(false),
+                last_attempt_unix_ms: Some(1_234),
+                last_success: Some(true),
+                last_error: None,
+            },
             features: RuntimeFeatureStates {
                 do_not_disturb: false,
                 screenshot: false,
@@ -1298,6 +1317,13 @@ mod tests {
         assert_eq!(json["compositor_active"], false);
         assert_eq!(json["compositor_configured"], false);
         assert_eq!(json["compositor_temporary"], false);
+        assert_eq!(json["compositor_transition"]["attempts"], 2);
+        assert_eq!(
+            json["compositor_transition"]["last_requested_active"],
+            false
+        );
+        assert_eq!(json["compositor_transition"]["last_success"], true);
+        assert!(json["compositor_transition"]["last_error"].is_null());
         assert_eq!(json["features"]["overview"], true);
         assert!(json["compositor_metrics"].is_null());
     }

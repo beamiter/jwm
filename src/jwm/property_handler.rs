@@ -2,10 +2,12 @@
 //!
 //! 这个模块包含所有窗口属性变化的处理函数
 
-use crate::backend::api::{AllowedAction, Backend};
+use crate::backend::api::{AllowedAction, Backend, WindowType};
 use crate::backend::common_define::WindowId;
+use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::jwm::Jwm;
+use crate::jwm::rules::RuleMatcher;
 use crate::jwm::types::STEXT_MAX_LEN;
 use log::debug;
 
@@ -220,6 +222,12 @@ impl Jwm {
             );
         }
 
+        // Window-type changes can transfer frame ownership too (notably
+        // Normal <-> Dock/Desktop and late popup classification). Converge the
+        // native border in the same event instead of leaving the previous
+        // type's server border installed until an unrelated focus/layout pass.
+        self.reconcile_client_decoration_hints(backend, client_key)?;
+
         if let Some(client) = self.state.clients.get(client_key) {
             debug!("Window type updated for window {:?}", client.win);
         }
@@ -297,25 +305,23 @@ impl Jwm {
         backend: &mut dyn Backend,
         client_key: ClientKey,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let win = self
-            .state
-            .clients
-            .get(client_key)
-            .map(|c| c.win)
-            .ok_or("Client not found")?;
-
-        if let Some(motif) = backend.property_ops().get_motif_hints(win) {
-            if let Some(client) = self.state.clients.get_mut(client_key) {
-                client.state.no_decorations = motif.decorations_none();
-                if client.state.no_decorations {
-                    client.geometry.border_w = 0;
-                }
-            }
-        }
-        Ok(())
+        self.reconcile_client_decoration_hints(backend, client_key)
     }
 
     pub(crate) fn handle_gtk_frame_extents_change(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.reconcile_client_decoration_hints(backend, client_key)
+    }
+
+    /// Recompute client-side decoration ownership from both X11 hint sources.
+    /// Either property can be deleted while the other remains, so handling
+    /// them independently leaves stale borderless state forever. Apply the
+    /// result to the real X border immediately; in native mode there is no
+    /// compositor frame that could hide a one-event delay.
+    fn reconcile_client_decoration_hints(
         &mut self,
         backend: &mut dyn Backend,
         client_key: ClientKey,
@@ -327,12 +333,79 @@ impl Jwm {
             .map(|c| c.win)
             .ok_or("Client not found")?;
 
-        if let Some(_extents) = backend.property_ops().get_gtk_frame_extents(win) {
-            if let Some(client) = self.state.clients.get_mut(client_key) {
-                client.state.no_decorations = true;
+        let motif_borderless = backend
+            .property_ops()
+            .get_motif_hints(win)
+            .is_some_and(|motif| motif.decorations_none());
+        let gtk_client_frame = backend.property_ops().get_gtk_frame_extents(win).is_some();
+        let hinted_borderless = motif_borderless || gtk_client_frame;
+        let popup_like = RuleMatcher::is_popup_like(backend, win);
+        let window_types = backend.property_ops().get_window_types(win);
+        let structural_borderless = window_types
+            .iter()
+            .any(|window_type| matches!(window_type, WindowType::Dock | WindowType::Desktop));
+        let configured_border = CONFIG.load().border_px() as i32;
+        let (monitor, is_fullscreen) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| (client.mon, client.state.is_fullscreen))
+            .ok_or("Client not found")?;
+        let desired_return_border = if hinted_borderless || structural_borderless || popup_like {
+            0
+        } else {
+            configured_border
+        };
+
+        let changed = if let Some(client) = self.state.clients.get_mut(client_key) {
+            let previous = (
+                client.state.no_decorations,
+                client.geometry.border_w,
+                client.geometry.old_border_w,
+            );
+            client.state.no_decorations = hinted_borderless;
+            if is_fullscreen {
                 client.geometry.border_w = 0;
+                client.geometry.old_border_w = desired_return_border;
+            } else {
+                client.geometry.border_w = desired_return_border;
             }
+            previous
+                != (
+                    client.state.no_decorations,
+                    client.geometry.border_w,
+                    client.geometry.old_border_w,
+                )
+        } else {
+            false
+        };
+        if !changed {
+            return Ok(());
         }
+
+        // Tiled clients may have smart-border zero on a single-client tag;
+        // let the normal layout policy refine the configured return width
+        // before publishing the final native decoration.
+        self.arrange(backend, monitor);
+        let (border, focused) = self
+            .state
+            .clients
+            .get(client_key)
+            .map(|client| {
+                (
+                    client.geometry.border_w.max(0) as u32,
+                    self.get_selected_client_key() == Some(client_key),
+                )
+            })
+            .ok_or("Client not found")?;
+        self.update_client_decoration(backend, client_key, focused)?;
+        if let Err(error) = backend
+            .property_ops()
+            .set_frame_extents(win, border, border, border, border)
+        {
+            log::warn!("could not refresh frame extents for {win:?}: {error}");
+        }
+        backend.compositor_force_full_redraw();
         Ok(())
     }
 

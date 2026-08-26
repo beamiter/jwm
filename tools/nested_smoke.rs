@@ -12,6 +12,7 @@
 //! processes and sockets.
 
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -133,6 +134,11 @@ pub const MATRIX: &[StepSpec] = &[
         timeout: Duration::from_secs(5),
     },
     StepSpec {
+        name: "compositor_toggle_cycle",
+        required: true,
+        timeout: Duration::from_secs(30),
+    },
+    StepSpec {
         name: "window_lifecycle",
         required: false,
         timeout: Duration::from_secs(25),
@@ -250,6 +256,11 @@ pub fn child_env_overrides(
             if let Some(display) = nested_x11_display {
                 set.push(("DISPLAY".to_string(), display.to_string()));
             }
+            // Xephyr reliably exposes the GLX pixmap path, while its EGL
+            // extension string commonly lacks image-pixmap import. Pin the
+            // nested fixture to GLX so an OFF -> ON transition exercises a
+            // real compositor instead of host-dependent EGL probing.
+            set.push(("JWM_COMPOSITOR_API".to_string(), "glx".to_string()));
             remove.push("WAYLAND_DISPLAY");
         }
     }
@@ -477,6 +488,109 @@ struct WindowGeometry {
     y: i32,
     w: i32,
     h: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct X11ServerWindowObservation {
+    geometry: WindowGeometry,
+    viewable: bool,
+    has_non_black_pixels: bool,
+}
+
+fn xwd_header_u32(bytes: &[u8], index: usize) -> Option<u32> {
+    let offset = index.checked_mul(4)?;
+    let field: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_be_bytes(field))
+}
+
+/// Validate an XWD client capture and prove that its drawable contains at
+/// least one non-black pixel. This catches the most damaging handoff failure:
+/// a logically mapped client whose server-side drawable has gone black.
+fn xwd_window_pixels(bytes: &[u8]) -> Result<(u32, u32, bool), String> {
+    if !xwd_signature_valid(bytes) {
+        return Err("invalid XWD header".to_string());
+    }
+    let header_size = usize::try_from(xwd_header_u32(bytes, 0).unwrap_or_default())
+        .map_err(|_| "XWD header size overflowed usize")?;
+    let pixmap_width = xwd_header_u32(bytes, 4).ok_or("XWD omitted pixmap width")?;
+    let pixmap_height = xwd_header_u32(bytes, 5).ok_or("XWD omitted pixmap height")?;
+    let bits_per_pixel = xwd_header_u32(bytes, 11).ok_or("XWD omitted bits per pixel")?;
+    let bytes_per_line =
+        usize::try_from(xwd_header_u32(bytes, 12).ok_or("XWD omitted bytes per line")?)
+            .map_err(|_| "XWD row stride overflowed usize")?;
+    let color_count = usize::try_from(xwd_header_u32(bytes, 19).ok_or("XWD omitted colors")?)
+        .map_err(|_| "XWD color count overflowed usize")?;
+    let window_width = xwd_header_u32(bytes, 20).ok_or("XWD omitted window width")?;
+    let window_height = xwd_header_u32(bytes, 21).ok_or("XWD omitted window height")?;
+    if pixmap_width == 0 || pixmap_height == 0 || window_width == 0 || window_height == 0 {
+        return Err("XWD captured an empty drawable".to_string());
+    }
+    let pixel_bytes = usize::try_from(bits_per_pixel.div_ceil(8))
+        .map_err(|_| "XWD pixel width overflowed usize")?;
+    if pixel_bytes == 0 || pixel_bytes > 8 {
+        return Err(format!("unsupported XWD bits_per_pixel={bits_per_pixel}"));
+    }
+    let visible_row_bytes = usize::try_from(pixmap_width)
+        .ok()
+        .and_then(|width| width.checked_mul(pixel_bytes))
+        .ok_or("XWD visible row size overflowed")?;
+    if visible_row_bytes > bytes_per_line {
+        return Err(format!(
+            "XWD visible row is wider than its stride ({visible_row_bytes}>{bytes_per_line})"
+        ));
+    }
+    let pixel_offset = color_count
+        .checked_mul(12)
+        .and_then(|colors| header_size.checked_add(colors))
+        .ok_or("XWD pixel offset overflowed")?;
+    let payload_size = usize::try_from(pixmap_height)
+        .ok()
+        .and_then(|height| bytes_per_line.checked_mul(height))
+        .ok_or("XWD payload size overflowed")?;
+    let payload = bytes
+        .get(
+            pixel_offset
+                ..pixel_offset
+                    .checked_add(payload_size)
+                    .ok_or("XWD end overflowed")?,
+        )
+        .ok_or("XWD pixel payload is truncated")?;
+    let has_non_black_pixels = payload.chunks_exact(bytes_per_line).any(|row| {
+        row[..visible_row_bytes]
+            .chunks_exact(pixel_bytes)
+            .any(|pixel| pixel.iter().any(|byte| *byte != 0))
+    });
+    Ok((window_width, window_height, has_non_black_pixels))
+}
+
+fn parse_xwininfo_observation(output: &str) -> Result<(WindowGeometry, bool), String> {
+    let field = |name: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name))
+            .and_then(|value| value.strip_prefix(':'))
+            .map(str::trim)
+            .ok_or_else(|| format!("xwininfo omitted {name}"))
+    };
+    let integer = |name: &str| -> Result<i32, String> {
+        field(name)?
+            .parse::<i32>()
+            .map_err(|error| format!("xwininfo returned invalid {name}: {error}"))
+    };
+    let border = integer("Border width")?;
+    let geometry = WindowGeometry {
+        // xwininfo reports the translated inner origin. Convert it back to
+        // the outer server geometry used by JWM's configure requests.
+        x: integer("Absolute upper-left X")?
+            .checked_sub(border)
+            .ok_or("xwininfo X coordinate underflowed")?,
+        y: integer("Absolute upper-left Y")?
+            .checked_sub(border)
+            .ok_or("xwininfo Y coordinate underflowed")?,
+        w: integer("Width")?,
+        h: integer("Height")?,
+    };
+    Ok((geometry, field("Map State")? == "IsViewable"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -947,6 +1061,7 @@ fn run_backend(kind: NestedBackendKind, options: &NestedSmokeOptions) -> RunRepo
             "startup" => run_startup_step(spec, &mut context),
             "ipc_health" => run_ipc_health_step(spec, &context),
             "config_reload" => run_config_reload_step(spec, &context),
+            "compositor_toggle_cycle" => run_compositor_toggle_cycle_step(spec, &context, options),
             "window_lifecycle" => run_window_lifecycle_step(spec, &context, options),
             "screenshot_capture" => run_screenshot_step(spec, &context),
             "policy_scenario" => {
@@ -1106,6 +1221,7 @@ fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
             return Ok((child, display));
         }
         if let Ok(Some(status)) = child.try_wait() {
+            remove_display_artifacts(&display);
             return Err(io::Error::other(format!(
                 "Xephyr exited during startup ({status}); see xephyr.log"
             )));
@@ -1114,6 +1230,7 @@ fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
     }
     let _ = child.kill();
     let _ = child.wait();
+    remove_display_artifacts(&display);
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!("Xephyr did not create {display} within {XEPHYR_START_TIMEOUT:?}"),
@@ -1427,6 +1544,791 @@ fn run_config_reload_step(spec: &StepSpec, context: &RunContext) -> StepReport {
             required: spec.required,
             duration_ms: elapsed_ms(started),
             detail: "reload_config acknowledged".to_string(),
+            action: None,
+        },
+        Err(error) => step_fail(spec, started, error, context),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompositorTransitionObservation {
+    attempts: u64,
+    last_requested_active: Option<bool>,
+    last_attempt_unix_ms: Option<u64>,
+    last_success: Option<bool>,
+    last_error_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompositorRuntimeStatus {
+    active: bool,
+    configured: bool,
+    temporary: bool,
+    transition: CompositorTransitionObservation,
+}
+
+fn parse_compositor_runtime_status(
+    response: &serde_json::Value,
+) -> Result<CompositorRuntimeStatus, String> {
+    let data = response
+        .get("data")
+        .ok_or_else(|| format!("get_status omitted data: {response}"))?;
+    let required_bool = |name: &str| {
+        data.get(name)
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| format!("get_status omitted boolean {name}: {response}"))
+    };
+    let transition = data
+        .get("compositor_transition")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("get_status omitted compositor_transition: {response}"))?;
+    let optional_bool = |name: &str| {
+        let value = transition
+            .get(name)
+            .ok_or_else(|| format!("compositor_transition omitted {name}: {response}"))?;
+        if value.is_null() {
+            Ok(None)
+        } else {
+            value.as_bool().map(Some).ok_or_else(|| {
+                format!("compositor_transition {name} is neither boolean nor null: {response}")
+            })
+        }
+    };
+    let last_attempt = transition
+        .get("last_attempt_unix_ms")
+        .ok_or_else(|| format!("compositor_transition omitted last_attempt_unix_ms: {response}"))?;
+    let last_attempt_unix_ms = if last_attempt.is_null() {
+        None
+    } else {
+        Some(last_attempt.as_u64().ok_or_else(|| {
+            format!("compositor_transition last_attempt_unix_ms is invalid: {response}")
+        })?)
+    };
+    let last_error = transition
+        .get("last_error")
+        .ok_or_else(|| format!("compositor_transition omitted last_error: {response}"))?;
+    if !last_error.is_null() && !last_error.is_string() {
+        return Err(format!(
+            "compositor_transition last_error is neither string nor null: {response}"
+        ));
+    }
+    Ok(CompositorRuntimeStatus {
+        active: required_bool("compositor_active")?,
+        configured: required_bool("compositor_configured")?,
+        temporary: required_bool("compositor_temporary")?,
+        transition: CompositorTransitionObservation {
+            attempts: transition
+                .get("attempts")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("compositor_transition omitted u64 attempts: {response}"))?,
+            last_requested_active: optional_bool("last_requested_active")?,
+            last_attempt_unix_ms,
+            last_success: optional_bool("last_success")?,
+            last_error_present: !last_error.is_null(),
+        },
+    })
+}
+
+fn query_compositor_runtime_status(socket: &Path) -> Result<CompositorRuntimeStatus, String> {
+    ipc_query(socket, "get_status").and_then(|response| parse_compositor_runtime_status(&response))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToggleWindow {
+    /// Stable JWM-internal identifier used by IPC.
+    id: u64,
+    /// Raw X11 XID discovered independently from the Xephyr root tree.
+    x11_id: Option<u64>,
+    geometry: WindowGeometry,
+}
+
+fn managed_window_ids(windows: &serde_json::Value) -> Result<HashSet<u64>, String> {
+    let entries = windows
+        .as_array()
+        .ok_or("get_windows returned a non-array payload")?;
+    entries
+        .iter()
+        .map(|window| {
+            window["id"]
+                .as_u64()
+                .ok_or_else(|| format!("managed window has no u64 id: {window}"))
+        })
+        .collect()
+}
+
+/// Pick one newly mapped, physically visible client. Prefer the focused
+/// client when a toolkit maps more than one top-level window, otherwise use
+/// the stable transport-local id ordering.
+fn select_toggle_window(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+    baseline_ids: &HashSet<u64>,
+) -> Result<ToggleWindow, String> {
+    let entries = windows
+        .as_array()
+        .ok_or("get_windows returned a non-array payload")?;
+    let mut candidates: Vec<(bool, ToggleWindow)> = entries
+        .iter()
+        .filter_map(|window| {
+            let id = window["id"].as_u64()?;
+            if baseline_ids.contains(&id) || window["is_minimized"].as_bool() != Some(false) {
+                return None;
+            }
+            let geometry = window_geometry(window)?;
+            geometry_intersects_monitor(geometry, monitors).then_some((
+                window["is_focused"].as_bool() == Some(true),
+                ToggleWindow {
+                    id,
+                    x11_id: None,
+                    geometry,
+                },
+            ))
+        })
+        .collect();
+    candidates.sort_by_key(|(focused, window)| (!*focused, window.id));
+    candidates
+        .first()
+        .map(|(_, window)| *window)
+        .ok_or("no newly mapped, non-minimized window intersects a live monitor".to_string())
+}
+
+fn wait_for_toggle_window(
+    socket: &Path,
+    deadline: Instant,
+    baseline_ids: &HashSet<u64>,
+) -> Result<ToggleWindow, String> {
+    let mut previous = None;
+    loop {
+        let windows = ipc_query(socket, "get_windows")?;
+        let monitors = ipc_query(socket, "get_monitors")?;
+        let rejection =
+            match select_toggle_window(&windows["data"], &monitors["data"], baseline_ids) {
+                Ok(window) if previous == Some(window) => return Ok(window),
+                Ok(window) => {
+                    previous = Some(window);
+                    format!(
+                        "window 0x{:x} at {:?} was observed only once",
+                        window.id, window.geometry
+                    )
+                }
+                Err(error) => {
+                    previous = None;
+                    error
+                }
+            };
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "toggle-cycle client did not stabilize before the phase deadline: {rejection}"
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn toggle_window_is_unchanged_and_visible(
+    windows: &serde_json::Value,
+    monitors: &serde_json::Value,
+    target: ToggleWindow,
+) -> bool {
+    let Some(window) = window_by_id(windows, target.id) else {
+        return false;
+    };
+    let Some(geometry) = window_geometry(window) else {
+        return false;
+    };
+    window["is_minimized"].as_bool() == Some(false)
+        && geometry == target.geometry
+        && geometry_intersects_monitor(geometry, monitors)
+}
+
+fn wait_for_child_exit(
+    child: &mut Child,
+    deadline: Instant,
+    command: &str,
+) -> Result<std::process::ExitStatus, String> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{command} exceeded the compositor phase deadline"));
+            }
+            Err(error) => return Err(format!("wait for {command}: {error}")),
+        }
+    }
+}
+
+fn run_xwininfo(
+    context: &RunContext,
+    arguments: &[&str],
+    deadline: Instant,
+    stem: &str,
+) -> Result<String, String> {
+    let display = context
+        .nested_x11_display
+        .as_deref()
+        .ok_or("no nested Xephyr display recorded for physical window validation")?;
+    let info_path = context.runtime_dir.join(format!("{stem}.xwininfo"));
+    let error_path = context.runtime_dir.join(format!("{stem}.xwininfo.stderr"));
+    let info_file = fs::File::create(&info_path)
+        .map_err(|error| format!("create xwininfo observation: {error}"))?;
+    let error_file = fs::File::create(&error_path)
+        .map_err(|error| format!("create xwininfo error log: {error}"))?;
+    let mut xwininfo = Command::new("xwininfo")
+        .args(["-display", display])
+        .args(arguments)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(info_file)
+        .stderr(error_file)
+        .spawn()
+        .map_err(|error| format!("spawn xwininfo: {error}"))?;
+    let status = wait_for_child_exit(&mut xwininfo, deadline, "xwininfo")?;
+    if !status.success() {
+        let detail = fs::read_to_string(&error_path)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        return Err(if detail.is_empty() {
+            format!("xwininfo exited with {status}")
+        } else {
+            format!("xwininfo exited with {status}: {detail}")
+        });
+    }
+    fs::read_to_string(&info_path).map_err(|error| format!("read xwininfo observation: {error}"))
+}
+
+fn x11_tree_window_ids(context: &RunContext, deadline: Instant) -> Result<HashSet<u64>, String> {
+    let tree = run_xwininfo(context, &["-root", "-tree"], deadline, "root-tree")?;
+    Ok(tree
+        .lines()
+        .filter_map(|line| line.trim().split_whitespace().next())
+        .filter_map(|token| token.strip_prefix("0x"))
+        .filter_map(|hex| u64::from_str_radix(hex, 16).ok())
+        .collect())
+}
+
+fn x11_window_geometry_and_map_state(
+    context: &RunContext,
+    x11_id: u64,
+    deadline: Instant,
+) -> Result<(WindowGeometry, bool), String> {
+    let id = format!("0x{x11_id:x}");
+    let info = run_xwininfo(context, &["-id", &id, "-stats"], deadline, "toggle-window")?;
+    parse_xwininfo_observation(&info)
+}
+
+/// Resolve JWM's transport-independent ID to the raw XID without trusting
+/// backend logs or implementation details: diff the Xephyr root tree and
+/// require a stable, viewable window at the exact managed geometry.
+fn resolve_toggle_window_x11_id(
+    context: &RunContext,
+    mut target: ToggleWindow,
+    baseline_x11_ids: &HashSet<u64>,
+    deadline: Instant,
+) -> Result<ToggleWindow, String> {
+    let mut previous = None;
+    let mut rejection = "no new X11 window observed".to_string();
+    while Instant::now() < deadline {
+        let mut candidates = Vec::new();
+        for x11_id in x11_tree_window_ids(context, deadline)? {
+            if baseline_x11_ids.contains(&x11_id) {
+                continue;
+            }
+            let probe_deadline = std::cmp::min(deadline, Instant::now() + Duration::from_secs(2));
+            match x11_window_geometry_and_map_state(context, x11_id, probe_deadline) {
+                Ok((geometry, true)) if geometry == target.geometry => candidates.push(x11_id),
+                Ok((geometry, viewable)) => {
+                    rejection = format!(
+                        "new XID 0x{x11_id:x} had geometry {geometry:?}, viewable={viewable}"
+                    );
+                }
+                Err(error) => rejection = format!("probe XID 0x{x11_id:x}: {error}"),
+            }
+        }
+        candidates.sort_unstable();
+        let candidate = candidates.first().copied();
+        if candidate.is_some() && candidate == previous {
+            target.x11_id = candidate;
+            return Ok(target);
+        }
+        previous = candidate;
+        if candidate.is_none() {
+            previous = None;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    Err(format!(
+        "could not resolve JWM window {} to a stable native XID: {rejection}",
+        target.id
+    ))
+}
+
+/// Observe the client independently through the X server. IPC state alone is
+/// insufficient here: a broken Composite handoff can leave the model correct
+/// while the real window is unmapped, moved, or backed by an all-black image.
+fn observe_x11_server_window(
+    context: &RunContext,
+    target: ToggleWindow,
+    deadline: Instant,
+) -> Result<X11ServerWindowObservation, String> {
+    let display = context
+        .nested_x11_display
+        .as_deref()
+        .ok_or("no nested Xephyr display recorded for physical window validation")?;
+    let x11_id = target
+        .x11_id
+        .ok_or("toggle-cycle target has no resolved native XID")?;
+    let id = format!("0x{x11_id:x}");
+    let (geometry, viewable) = x11_window_geometry_and_map_state(context, x11_id, deadline)?;
+
+    let shot = context.runtime_dir.join("toggle-window.xwd");
+    let _ = fs::remove_file(&shot);
+    let mut xwd = Command::new("xwd")
+        .args([
+            "-display", display, "-id", &id, "-silent", "-nobdrs", "-out",
+        ])
+        .arg(&shot)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("spawn xwd: {error}"))?;
+    let status = wait_for_child_exit(&mut xwd, deadline, "xwd")?;
+    if !status.success() {
+        return Err(format!("xwd exited with {status}"));
+    }
+    let bytes = fs::read(&shot).map_err(|error| format!("read xwd observation: {error}"))?;
+    let (width, height, has_non_black_pixels) = xwd_window_pixels(&bytes)?;
+    let captured_geometry = (
+        i32::try_from(width).map_err(|_| "XWD width exceeded i32")?,
+        i32::try_from(height).map_err(|_| "XWD height exceeded i32")?,
+    );
+    if captured_geometry != (geometry.w, geometry.h) {
+        return Err(format!(
+            "XWD geometry {captured_geometry:?} disagreed with xwininfo {}x{}",
+            geometry.w, geometry.h
+        ));
+    }
+    Ok(X11ServerWindowObservation {
+        geometry,
+        viewable,
+        has_non_black_pixels,
+    })
+}
+
+/// Wait for two consecutive observations of the requested compositor state.
+/// When a client target is supplied, every observation also proves that the
+/// same managed window remains non-minimized and unchanged in IPC, is
+/// `IsViewable` at its exact server geometry, and still exposes non-black
+/// pixels through XGetImage (`xwd`).
+fn wait_for_compositor_phase(
+    context: &RunContext,
+    socket: &Path,
+    deadline: Instant,
+    expected_active: bool,
+    expected_configured: bool,
+    expected_attempts: u64,
+    expect_completed_transition: bool,
+    target: Option<ToggleWindow>,
+) -> Result<(), String> {
+    let mut consecutive = 0u8;
+    loop {
+        let status = query_compositor_runtime_status(socket)?;
+        let (window_converged, physical_observation) = if let Some(target) = target {
+            let windows = ipc_query(socket, "get_windows")?;
+            let monitors = ipc_query(socket, "get_monitors")?;
+            let logical =
+                toggle_window_is_unchanged_and_visible(&windows["data"], &monitors["data"], target);
+            match observe_x11_server_window(context, target, deadline) {
+                Ok(physical) => (
+                    logical
+                        && physical.viewable
+                        && physical.geometry == target.geometry
+                        && physical.has_non_black_pixels,
+                    format!("{physical:?}"),
+                ),
+                Err(error) => (false, format!("error={error}")),
+            }
+        } else {
+            (true, "not-requested".to_string())
+        };
+        let converged = status.active == expected_active
+            && status.configured == expected_configured
+            && !status.temporary
+            && status.transition.attempts == expected_attempts
+            && (!expect_completed_transition
+                || (status.transition.last_requested_active == Some(expected_active)
+                    && status.transition.last_attempt_unix_ms.is_some()
+                    && status.transition.last_success == Some(true)
+                    && !status.transition.last_error_present))
+            && window_converged;
+        let observation = format!(
+            "active={}, configured={}, temporary={}, transition={:?}, window_converged={window_converged}, physical={physical_observation}",
+            status.active, status.configured, status.temporary, status.transition,
+        );
+        if converged {
+            consecutive += 1;
+            if consecutive >= 2 {
+                return Ok(());
+            }
+        } else {
+            consecutive = 0;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "compositor did not converge to active={expected_active}, configured={expected_configured}, temporary=false, attempts={expected_attempts}: {observation}"
+            ));
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn restore_compositor_state(
+    context: &RunContext,
+    socket: &Path,
+    configured: bool,
+    desired_active: bool,
+    deadline: Instant,
+    target: Option<ToggleWindow>,
+) -> Result<u64, String> {
+    let status = query_compositor_runtime_status(socket)?;
+    if status.active == desired_active && !status.temporary {
+        return Ok(status.transition.attempts);
+    }
+    let expected_attempts = status
+        .transition
+        .attempts
+        .checked_add(1)
+        .ok_or("compositor transition attempt counter overflowed during state restoration")?;
+    ipc_command(socket, "togglecompositor")?;
+    wait_for_compositor_phase(
+        context,
+        socket,
+        deadline,
+        desired_active,
+        configured,
+        expected_attempts,
+        true,
+        target,
+    )?;
+    Ok(expected_attempts)
+}
+
+fn run_compositor_toggle_cycle_step(
+    spec: &StepSpec,
+    context: &RunContext,
+    options: &NestedSmokeOptions,
+) -> StepReport {
+    let started = Instant::now();
+    if context.kind.family() != NestedFamily::X11 {
+        return StepReport {
+            name: spec.name,
+            status: StepStatus::Skip,
+            required: spec.required,
+            duration_ms: elapsed_ms(started),
+            detail: "runtime compositor toggling applies to the X11 transports".to_string(),
+            action: None,
+        };
+    }
+    for command in ["xwininfo", "xwd"] {
+        if !command_in_path(command) {
+            return step_fail(
+                spec,
+                started,
+                format!("{command} is required for physical X11 handoff validation"),
+                context,
+            );
+        }
+    }
+    let Some(argv) = resolve_client_argv(context.kind, options) else {
+        return StepReport {
+            name: spec.name,
+            status: StepStatus::Skip,
+            required: spec.required,
+            duration_ms: elapsed_ms(started),
+            detail: format!(
+                "no toggle-cycle client found (probed: {})",
+                client_candidates(context.kind.family()).join(", ")
+            ),
+            action: None,
+        };
+    };
+    let socket = context.socket_path();
+    let deadline = started + spec.timeout;
+    let initial = match query_compositor_runtime_status(&socket) {
+        Ok(status) => status,
+        Err(error) => return step_fail(spec, started, error, context),
+    };
+    if initial.temporary {
+        return step_fail(
+            spec,
+            started,
+            "get_status reported a temporary compositor lease without a system UI client"
+                .to_string(),
+            context,
+        );
+    }
+    let configured = initial.configured;
+    let baseline_attempts = initial.transition.attempts;
+    let mut expected_attempts = baseline_attempts;
+    let baseline_windows = match ipc_query(&socket, "get_windows")
+        .and_then(|response| managed_window_ids(&response["data"]))
+    {
+        Ok(ids) => ids,
+        Err(error) => return step_fail(spec, started, error, context),
+    };
+    let baseline_x11_ids = match x11_tree_window_ids(context, deadline) {
+        Ok(ids) => ids,
+        Err(error) => return step_fail(spec, started, error, context),
+    };
+
+    // The contract is explicitly OFF -> ON -> OFF. Normalize an initially
+    // enabled session first while still retaining its configured target for
+    // all subsequent assertions.
+    if initial.active {
+        let normalized = ipc_command(&socket, "togglecompositor").and_then(|_| {
+            expected_attempts = expected_attempts
+                .checked_add(1)
+                .ok_or("compositor transition attempt counter overflowed")?;
+            wait_for_compositor_phase(
+                context,
+                &socket,
+                deadline,
+                false,
+                configured,
+                expected_attempts,
+                true,
+                None,
+            )
+        });
+        if let Err(error) = normalized {
+            let restoration = restore_compositor_state(
+                context,
+                &socket,
+                configured,
+                initial.active,
+                Instant::now() + Duration::from_secs(5),
+                None,
+            );
+            return step_fail(
+                spec,
+                started,
+                match restoration {
+                    Ok(_) => format!("could not establish native OFF baseline: {error}"),
+                    Err(restore_error) => format!(
+                        "could not establish native OFF baseline: {error}; original compositor state restoration failed: {restore_error}"
+                    ),
+                },
+                context,
+            );
+        }
+    } else if let Err(error) = wait_for_compositor_phase(
+        context,
+        &socket,
+        deadline,
+        false,
+        configured,
+        expected_attempts,
+        false,
+        None,
+    ) {
+        return step_fail(spec, started, error, context);
+    }
+
+    let mut client = match spawn_nested_client(context.kind, &argv, context) {
+        Ok(child) => child,
+        Err(error) => {
+            let restoration = restore_compositor_state(
+                context,
+                &socket,
+                configured,
+                initial.active,
+                Instant::now() + Duration::from_secs(5),
+                None,
+            );
+            let error = match restoration {
+                Ok(_) => error,
+                Err(restore_error) => {
+                    format!(
+                        "{error}; original compositor state restoration failed: {restore_error}"
+                    )
+                }
+            };
+            return step_fail(spec, started, error, context);
+        }
+    };
+    let logical_target = match wait_for_toggle_window(&socket, deadline, &baseline_windows) {
+        Ok(target) => target,
+        Err(error) => {
+            let _ = client.kill();
+            let _ = client.wait();
+            let restoration = restore_compositor_state(
+                context,
+                &socket,
+                configured,
+                initial.active,
+                Instant::now() + Duration::from_secs(5),
+                None,
+            );
+            let error = match restoration {
+                Ok(_) => error,
+                Err(restore_error) => {
+                    format!(
+                        "{error}; original compositor state restoration failed: {restore_error}"
+                    )
+                }
+            };
+            return step_fail(spec, started, error, context);
+        }
+    };
+    let target =
+        match resolve_toggle_window_x11_id(context, logical_target, &baseline_x11_ids, deadline) {
+            Ok(target) => target,
+            Err(error) => {
+                let _ = client.kill();
+                let _ = client.wait();
+                let restoration = restore_compositor_state(
+                    context,
+                    &socket,
+                    configured,
+                    initial.active,
+                    Instant::now() + Duration::from_secs(5),
+                    None,
+                );
+                let error = match restoration {
+                    Ok(_) => error,
+                    Err(restore_error) => {
+                        format!(
+                            "{error}; original compositor state restoration failed: {restore_error}"
+                        )
+                    }
+                };
+                return step_fail(spec, started, error, context);
+            }
+        };
+
+    let outcome = (|| {
+        wait_for_compositor_phase(
+            context,
+            &socket,
+            deadline,
+            false,
+            configured,
+            expected_attempts,
+            initial.active,
+            Some(target),
+        )?;
+        for round in 1..=2 {
+            for active in [true, false] {
+                ipc_command(&socket, "togglecompositor").map_err(|error| {
+                    format!(
+                        "round {round} {} IPC failed: {error}",
+                        if active { "OFF->ON" } else { "ON->OFF" }
+                    )
+                })?;
+                expected_attempts = expected_attempts
+                    .checked_add(1)
+                    .ok_or("compositor transition attempt counter overflowed")?;
+                wait_for_compositor_phase(
+                    context,
+                    &socket,
+                    deadline,
+                    active,
+                    configured,
+                    expected_attempts,
+                    true,
+                    Some(target),
+                )
+                .map_err(|error| {
+                    format!(
+                        "round {round} {} convergence failed: {error}",
+                        if active { "OFF->ON" } else { "ON->OFF" }
+                    )
+                })?;
+            }
+        }
+        Ok::<(), String>(())
+    })();
+
+    // Restore the exact pre-step runtime state on both success and failure so
+    // later lifecycle/screenshot steps cannot inherit this diagnostic's
+    // normalization choice. A successful restoration also advances the
+    // expected telemetry count when the run originally started ON.
+    let restoration_target = outcome.is_ok().then_some(target);
+    let restoration = restore_compositor_state(
+        context,
+        &socket,
+        configured,
+        initial.active,
+        Instant::now() + Duration::from_secs(5),
+        restoration_target,
+    );
+    if let Ok(attempts) = &restoration {
+        expected_attempts = *attempts;
+    }
+    let outcome = match (outcome, restoration) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(restore_error)) => Err(format!(
+            "{error}; original compositor state restoration failed: {restore_error}"
+        )),
+    };
+
+    // Close exactly the window we mapped before terminating the launcher
+    // process. This also handles clients that fork away from their parent.
+    let focused_target = ipc_roundtrip(
+        &socket,
+        &serde_json::json!({"command": "focus_window", "args": {"id": target.id}}),
+    )
+    .and_then(|response| expect_success("focus_window", response))
+    .is_ok();
+    // Never let a failed focus request turn the generic kill command into a
+    // request against some unrelated fixture window.
+    if focused_target {
+        let _ = ipc_command(&socket, "killclient");
+    }
+    let _ = client.kill();
+    let _ = client.wait();
+    let cleanup_deadline = std::cmp::min(deadline, Instant::now() + Duration::from_secs(2));
+    let cleanup = match poll_until(cleanup_deadline, || {
+        let response = ipc_query(&socket, "get_windows")?;
+        let windows = response["data"]
+            .as_array()
+            .ok_or_else(|| format!("get_windows returned a non-array payload: {response}"))?;
+        Ok(!windows
+            .iter()
+            .any(|window| window["id"].as_u64() == Some(target.id)))
+    }) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!(
+            "toggle-cycle window 0x{:x} survived cleanup",
+            target.id
+        )),
+        Err(error) => Err(format!("toggle-cycle cleanup observation failed: {error}")),
+    };
+    let outcome = match (outcome, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error}; {cleanup_error}")),
+    };
+
+    match outcome {
+        Ok(()) => StepReport {
+            name: spec.name,
+            status: StepStatus::Pass,
+            required: spec.required,
+            duration_ms: elapsed_ms(started),
+            detail: format!(
+                "2x OFF->ON->OFF converged and restored initial_active={} with configured={configured}, temporary=false, attempts={expected_attempts} (+{}), final transition successful/error-free; JWM window 0x{:x}/XID 0x{:x} stayed logically and physically visible at {:?}",
+                initial.active,
+                expected_attempts.saturating_sub(baseline_attempts),
+                target.id,
+                target.x11_id.unwrap_or_default(),
+                target.geometry
+            ),
             action: None,
         },
         Err(error) => step_fail(spec, started, error, context),
@@ -2217,6 +3119,7 @@ mod tests {
                 "startup",
                 "ipc_health",
                 "config_reload",
+                "compositor_toggle_cycle",
                 "window_lifecycle",
                 "screenshot_capture",
                 "policy_scenario",
@@ -2235,6 +3138,7 @@ mod tests {
         assert!(step_spec("startup").unwrap().required);
         assert!(step_spec("ipc_health").unwrap().required);
         assert!(step_spec("config_reload").unwrap().required);
+        assert!(step_spec("compositor_toggle_cycle").unwrap().required);
         assert!(step_spec("clean_shutdown").unwrap().required);
         assert!(!step_spec("window_lifecycle").unwrap().required);
         assert!(!step_spec("screenshot_capture").unwrap().required);
@@ -2308,6 +3212,7 @@ mod tests {
             );
             assert!(set.contains(&("JWM_BACKEND".to_string(), backend.to_string())));
             assert!(set.contains(&("DISPLAY".to_string(), ":91".to_string())));
+            assert!(set.contains(&("JWM_COMPOSITOR_API".to_string(), "glx".to_string())));
             assert_private_user_dirs(&set);
             assert!(remove.contains(&"WAYLAND_DISPLAY"));
         }
@@ -2341,6 +3246,119 @@ mod tests {
                 .unwrap_err()
                 .contains("current_strength")
         );
+    }
+
+    #[test]
+    fn compositor_status_parser_requires_all_three_boolean_states() {
+        let response = serde_json::json!({
+            "success": true,
+            "data": {
+                "compositor_active": true,
+                "compositor_configured": false,
+                "compositor_temporary": false,
+                "compositor_transition": {
+                    "attempts": 7,
+                    "last_requested_active": true,
+                    "last_attempt_unix_ms": 1234,
+                    "last_success": true,
+                    "last_error": null,
+                },
+            }
+        });
+        assert_eq!(
+            parse_compositor_runtime_status(&response).unwrap(),
+            CompositorRuntimeStatus {
+                active: true,
+                configured: false,
+                temporary: false,
+                transition: CompositorTransitionObservation {
+                    attempts: 7,
+                    last_requested_active: Some(true),
+                    last_attempt_unix_ms: Some(1234),
+                    last_success: Some(true),
+                    last_error_present: false,
+                },
+            }
+        );
+        for missing in [
+            "compositor_active",
+            "compositor_configured",
+            "compositor_temporary",
+        ] {
+            let mut malformed = response.clone();
+            malformed["data"].as_object_mut().unwrap().remove(missing);
+            assert!(
+                parse_compositor_runtime_status(&malformed)
+                    .unwrap_err()
+                    .contains(missing)
+            );
+        }
+        for missing in [
+            "attempts",
+            "last_requested_active",
+            "last_attempt_unix_ms",
+            "last_success",
+            "last_error",
+        ] {
+            let mut malformed = response.clone();
+            malformed["data"]["compositor_transition"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(
+                parse_compositor_runtime_status(&malformed)
+                    .unwrap_err()
+                    .contains(missing)
+            );
+        }
+    }
+
+    #[test]
+    fn toggle_window_selection_and_convergence_require_real_visibility() {
+        let baseline = HashSet::from([10]);
+        let monitors = serde_json::json!([
+            {"x": 0, "y": 0, "w": 1920, "h": 1080},
+        ]);
+        let windows = serde_json::json!([
+            {"id": 10, "is_focused": false, "is_minimized": false,
+             "x": 0, "y": 0, "w": 100, "h": 100},
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": 100, "y": 50, "w": 900, "h": 700},
+            {"id": 30, "is_focused": false, "is_minimized": false,
+             "x": 200, "y": 100, "w": 500, "h": 400},
+        ]);
+        let target = select_toggle_window(&windows, &monitors, &baseline).unwrap();
+        assert_eq!(
+            target,
+            ToggleWindow {
+                id: 20,
+                x11_id: None,
+                geometry: WindowGeometry {
+                    x: 100,
+                    y: 50,
+                    w: 900,
+                    h: 700,
+                },
+            }
+        );
+        assert!(toggle_window_is_unchanged_and_visible(
+            &windows, &monitors, target
+        ));
+
+        let moved = serde_json::json!([
+            {"id": 20, "is_focused": true, "is_minimized": false,
+             "x": 101, "y": 50, "w": 900, "h": 700},
+        ]);
+        assert!(!toggle_window_is_unchanged_and_visible(
+            &moved, &monitors, target
+        ));
+        let minimized = serde_json::json!([
+            {"id": 20, "is_focused": false, "is_minimized": true,
+             "x": -2000, "y": 50, "w": 900, "h": 700},
+        ]);
+        assert!(!toggle_window_is_unchanged_and_visible(
+            &minimized, &monitors, target
+        ));
     }
 
     #[test]
@@ -2599,6 +3617,52 @@ mod tests {
         assert!(!xwd_signature_valid(&header));
         // Too short.
         assert!(!xwd_signature_valid(&[0u8; 50]));
+    }
+
+    #[test]
+    fn physical_x11_observation_parses_geometry_map_state_and_pixels() {
+        let info = r#"
+xwininfo: Window id: 0x20000c "fixture"
+
+  Absolute upper-left X:  102
+  Absolute upper-left Y:  52
+  Width: 900
+  Height: 700
+  Border width: 2
+  Map State: IsViewable
+"#;
+        assert_eq!(
+            parse_xwininfo_observation(info).unwrap(),
+            (
+                WindowGeometry {
+                    x: 100,
+                    y: 50,
+                    w: 900,
+                    h: 700,
+                },
+                true,
+            )
+        );
+
+        let mut xwd = vec![0u8; 108];
+        for (index, value) in [
+            (0usize, 100u32),
+            (1, 7),
+            (4, 2),
+            (5, 1),
+            (11, 32),
+            (12, 8),
+            (19, 0),
+            (20, 2),
+            (21, 1),
+        ] {
+            xwd[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+        }
+        xwd[104] = 0x7f;
+        assert_eq!(xwd_window_pixels(&xwd).unwrap(), (2, 1, true));
+        xwd[104] = 0;
+        assert_eq!(xwd_window_pixels(&xwd).unwrap(), (2, 1, false));
+        assert!(xwd_window_pixels(&xwd[..104]).is_err());
     }
 
     #[test]

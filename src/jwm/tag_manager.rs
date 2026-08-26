@@ -1215,4 +1215,40 @@ mod tests {
         assert!(type_snapshot.is_floating);
         assert_eq!(type_snapshot.minimized_order, 203);
     }
+
+    #[test]
+    fn dynamic_normal_to_desktop_transition_stays_structurally_borderless() {
+        let mut backend = DockSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let window = WindowId::from_raw(0x903);
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+        let mut peer = WMClient::new(WindowId::from_raw(0x904));
+        peer.mon = Some(monitor);
+        peer.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        let peer_key = jwm.insert_client(peer);
+        jwm.attach_to_monitor(peer_key, monitor);
+
+        *backend.property_ops.window_types.lock().unwrap() = vec![WindowType::Normal];
+        jwm.handle_window_type_change(&mut backend, client_key)
+            .unwrap();
+        assert_eq!(
+            jwm.state.clients[client_key].geometry.border_w,
+            crate::config::CONFIG.load().border_px() as i32,
+            "the normal state establishes the ordinary server border"
+        );
+
+        *backend.property_ops.window_types.lock().unwrap() = vec![WindowType::Desktop];
+        jwm.handle_window_type_change(&mut backend, client_key)
+            .unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        assert!(client.state.is_floating);
+        assert!(client.state.never_focus);
+        assert_eq!(client.geometry.border_w, 0);
+    }
 }

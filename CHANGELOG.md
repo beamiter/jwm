@@ -73,10 +73,13 @@ monorepo use independent Semantic Versions.
   the current physical animation geometry; on re-enable it restores borderless
   input geometry and replays monitor, window-group, urgent, PiP, HUD,
   magnifier, peek and Night Light state. Compositor-only modal modes are
-  quiesced before teardown, failed transitions are reported to IPC callers,
-  and `JWM_COMPOSITOR` keeps precedence across config reloads. `get_status`
+  quiesced before teardown, and failed transitions — including partial enable
+  failures after presentation reconciliation — are reported to IPC callers.
+  `JWM_COMPOSITOR` keeps precedence across config reloads. `get_status`
   now reports actual, configured and temporary-lease compositor state without
-  requiring callers to infer it from optional metrics.
+  requiring callers to infer it from optional metrics, and retains the last
+  hand-off target, attempt time, outcome and error even when no renderer
+  exists to publish metrics.
 - Native X11 interaction now has shared, overflow-safe move and eight-edge
   resize geometry in both XCB and X11RB, including fixed opposite edges and a
   1 px minimum. Unfocused urgent windows receive an attention border without the
@@ -84,6 +87,26 @@ monorepo use independent Semantic Versions.
   preserving a silent-cycle fallback. Runtime X11RB overlay hit testing and
   HDR setup now follow compositor recreation; XComposite teardown also releases
   the overlay by its root and cleans a failed selection-owner acquisition.
+- Idle native X11 sessions now wake on counted readiness from IPC, status-bar
+  commands, shell background jobs and clipboard captures instead of polling at
+  20 ms. The old safety cadence remains automatic whenever a compositor is
+  active or any notifier cannot be created, registered, drained or signalled.
+- Native window admission parks new clients beyond the complete desktop with
+  overflow-safe geometry, applies Motif/GTK client-decoration ownership before
+  first map and reconciles it live, and keeps Dock/Desktop windows borderless.
+  Smart borders and fullscreen round-trips no longer resurrect a server frame
+  around client-decorated windows. Strut ownership is recomputed when a panel
+  moves between outputs or the monitor topology changes, rather than retaining
+  a stale output key.
+  Multi-output struts are calculated from all four desktop edges with bounded
+  arithmetic, so right/bottom panels and hostile properties cannot collapse a
+  work area below one pixel.
+- The nested X11 smoke matrix now performs two real compositor OFF/ON cycles
+  for both X11RB and XCB, checking transition telemetry, JWM identity and the
+  independently discovered native XID at every phase. Two consecutive probes
+  require the X window to remain `IsViewable`, keep exact server geometry and
+  expose non-black XWD pixels; the diagnostic restores the compositor state it
+  found so later lifecycle, screenshot and policy steps remain isolated.
 - Explicit non-D65 surface and output descriptions now pass through a Bradford
   chromatic-adaptation transform between RGB→XYZ and XYZ→RGB. Neutral colors
   remain neutral across white points, D65 sRGB/BT.2020 matrices retain their

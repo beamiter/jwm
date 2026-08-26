@@ -69,9 +69,45 @@ pub use system_ui::{
     ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState,
 };
 
+/// Durable diagnostics for runtime compositor hand-offs.
+///
+/// This is deliberately WM-owned rather than renderer-owned: a failed enable
+/// can leave no renderer from which IPC could retrieve the failure details.
+#[derive(Debug, Default)]
+pub struct CompositorTransitionState {
+    pub attempts: u64,
+    pub last_requested_active: Option<bool>,
+    pub last_attempt_unix_ms: Option<u64>,
+    pub last_success: Option<bool>,
+    pub last_error: Option<String>,
+}
+
+impl CompositorTransitionState {
+    pub(crate) fn begin(&mut self, requested_active: bool, unix_ms: Option<u64>) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.last_requested_active = Some(requested_active);
+        self.last_attempt_unix_ms = unix_ms;
+        self.last_success = None;
+        self.last_error = None;
+    }
+
+    pub(crate) fn succeed(&mut self) {
+        self.last_success = Some(true);
+        self.last_error = None;
+    }
+
+    pub(crate) fn fail(&mut self, error: impl Into<String>) {
+        self.last_success = Some(false);
+        self.last_error = Some(error.into());
+    }
+}
+
 /// 所有特性的组合状态
 #[derive(Debug, Default)]
 pub struct FeatureStates {
+    /// Runtime compositor hand-off diagnostics retained even while the
+    /// renderer is absent.
+    pub compositor_transition: CompositorTransitionState,
     pub audio_recording: AudioRecordingState,
     pub capture: CaptureInteractionState,
     /// A request that needs the pointer, parked until whoever holds it — a
@@ -200,5 +236,42 @@ impl FeatureStates {
     /// 切换 Expose 模式
     pub fn toggle_expose(&mut self) {
         self.expose_active = !self.expose_active;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompositorTransitionState;
+
+    #[test]
+    fn compositor_transition_state_replaces_stale_failure_on_next_attempt() {
+        let mut state = CompositorTransitionState::default();
+
+        state.begin(true, Some(10));
+        state.fail("renderer unavailable");
+        assert_eq!(state.attempts, 1);
+        assert_eq!(state.last_success, Some(false));
+        assert_eq!(state.last_error.as_deref(), Some("renderer unavailable"));
+
+        state.begin(false, Some(20));
+        assert_eq!(state.attempts, 2);
+        assert_eq!(state.last_requested_active, Some(false));
+        assert_eq!(state.last_attempt_unix_ms, Some(20));
+        assert_eq!(state.last_success, None);
+        assert_eq!(state.last_error, None);
+
+        state.succeed();
+        assert_eq!(state.last_success, Some(true));
+        assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn compositor_transition_attempt_counter_saturates() {
+        let mut state = CompositorTransitionState {
+            attempts: u64::MAX,
+            ..CompositorTransitionState::default()
+        };
+        state.begin(true, None);
+        assert_eq!(state.attempts, u64::MAX);
     }
 }

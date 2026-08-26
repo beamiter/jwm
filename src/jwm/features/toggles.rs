@@ -268,14 +268,13 @@ impl Jwm {
             return;
         }
         let epoch = self.features.control_snapshot_epoch;
-        self.features.control_snapshot_job = Some(
-            crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
-                (
-                    epoch,
-                    crate::jwm::features::system_controls::ControlCenterSnapshot::read(),
-                )
-            }),
-        );
+        let job = crate::jwm::features::connectivity::BackgroundJob::spawn(move || {
+            (
+                epoch,
+                crate::jwm::features::system_controls::ControlCenterSnapshot::read(),
+            )
+        });
+        self.features.control_snapshot_job = Some(self.track_background_job(job));
     }
 
     fn mutate_control_snapshot(
@@ -374,8 +373,8 @@ impl Jwm {
                 now,
             )
         {
-            self.features.launcher_catalog_job =
-                Some(crate::jwm::features::system_ui::start_application_discovery());
+            let job = crate::jwm::features::system_ui::start_application_discovery();
+            self.features.launcher_catalog_job = Some(self.track_background_job(job));
         }
 
         let indexing = self.features.launcher_catalog.is_empty()
@@ -725,7 +724,7 @@ impl Jwm {
             return Err("no NetworkManager to scan with (nmcli not available)".into());
         };
         self.prepare_system_ui(backend, "the Wi-Fi picker", true)?;
-        self.features.wifi_scan = Some(scan);
+        self.features.wifi_scan = Some(self.track_background_job(scan));
         self.features.system_ui =
             crate::jwm::features::SystemUiState::wifi_picker("Scanning\u{2026}");
         self.sync_system_ui(backend);
@@ -866,7 +865,7 @@ impl Jwm {
             return Err("no bluetoothctl to list devices with".into());
         };
         self.prepare_system_ui(backend, "the Bluetooth picker", true)?;
-        self.features.bluetooth_scan = Some(scan);
+        self.features.bluetooth_scan = Some(self.track_background_job(scan));
         self.features.system_ui =
             crate::jwm::features::SystemUiState::bluetooth_picker("Reading devices\u{2026}");
         self.sync_system_ui(backend);
@@ -905,7 +904,7 @@ impl Jwm {
                     log::info!("Bluetooth: {address} done");
                     // Re-read so the row shows the state that actually took.
                     if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
-                        self.features.bluetooth_scan = Some(scan);
+                        self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     }
                     self.refresh_connectivity();
                 }
@@ -930,9 +929,8 @@ impl Jwm {
         self.features
             .system_ui
             .set_bluetooth_message(format!("{action}ing\u{2026}"));
-        self.features.bluetooth_action = Some(
-            crate::jwm::features::connectivity::start_device_action(&address, action),
-        );
+        let job = crate::jwm::features::connectivity::start_device_action(&address, action);
+        self.features.bluetooth_action = Some(self.track_background_job(job));
         self.sync_system_ui(backend);
     }
 
@@ -1018,11 +1016,8 @@ impl Jwm {
         self.features
             .system_ui
             .set_wifi_message(format!("Connecting to {ssid}\u{2026}"));
-        self.features.wifi_connect = Some(connectivity::start_connect(
-            &ssid,
-            &plan,
-            passphrase.clone(),
-        ));
+        let job = connectivity::start_connect(&ssid, &plan, passphrase.clone());
+        self.features.wifi_connect = Some(self.track_background_job(job));
         if let Some(secret) = passphrase.as_mut() {
             // The worker owns its own copy; wipe ours rather than dropping it.
             unsafe { secret.as_bytes_mut().fill(0) };

@@ -910,7 +910,11 @@ impl Jwm {
                 }
                 client.state.is_fullscreen = true;
                 client.state.old_state = client.state.is_floating;
-                client.geometry.old_border_w = client.geometry.border_w;
+                client.geometry.old_border_w = if client.state.no_decorations {
+                    0
+                } else {
+                    client.geometry.border_w
+                };
                 client.geometry.border_w = 0;
                 client.state.is_floating = true;
             }
@@ -958,7 +962,11 @@ impl Jwm {
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.is_fullscreen = false;
                 client.state.is_floating = client.state.old_state;
-                client.geometry.border_w = client.geometry.old_border_w;
+                client.geometry.border_w = if client.state.no_decorations {
+                    0
+                } else {
+                    client.geometry.old_border_w
+                };
                 let target = Rect::new(
                     client.geometry.old_x,
                     client.geometry.old_y,
@@ -1426,8 +1434,12 @@ impl Jwm {
             c.state.is_dock = is_dock;
             c.state.dock_layer_info = if is_dock { layer_info } else { None };
 
-            if is_popup_like || is_desktop {
+            if is_popup_like || is_desktop || is_dock {
                 c.state.is_floating = true;
+
+                if is_desktop || is_dock {
+                    c.geometry.border_w = 0;
+                }
 
                 if types.contains(&WindowType::Notification)
                     || types.contains(&WindowType::Tooltip)
@@ -1935,8 +1947,11 @@ mod tests {
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyInputOps, DummyKeyOps, DummyOutputOps,
     };
+    use crate::core::layout::LayoutEnum;
     use crate::core::models::WMClient;
+    use crate::jwm::types::WMArgEnum;
     use std::any::Any;
+    use std::rc::Rc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
@@ -3950,6 +3965,66 @@ mod tests {
             backend.window_ops.get_geometry(window).unwrap(),
             jwm.desktop_left_edge()
         ));
+    }
+
+    #[test]
+    fn csd_stays_borderless_across_smart_borders_and_fullscreen_round_trip() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let (_, csd) = add_mode_client(
+            &mut jwm,
+            WindowId::from_raw(0x504e),
+            Rect::new(80, 90, 720, 500),
+            false,
+            false,
+        );
+        let (_, peer) = add_mode_client(
+            &mut jwm,
+            WindowId::from_raw(0x504f),
+            Rect::new(820, 90, 720, 500),
+            false,
+            false,
+        );
+        jwm.state.clients[csd].state.no_decorations = true;
+        jwm.state.clients[csd].geometry.border_w = 0;
+
+        let tileable = jwm.collect_tileable_clients(monitor);
+        assert_eq!(tileable.len(), 2);
+        let (effective_border, _) = jwm.apply_smart_borders(monitor, &tileable);
+        assert_eq!(jwm.state.clients[csd].geometry.border_w, 0);
+        assert_eq!(jwm.state.clients[peer].geometry.border_w, effective_border);
+
+        // Model stale geometry left by an older smart-border pass. Entering
+        // fullscreen must not preserve it as the CSD client's return border.
+        jwm.state.clients[csd].geometry.border_w = effective_border.max(1);
+        jwm.setfullscreen(&mut backend, csd, true).unwrap();
+        assert_eq!(jwm.state.clients[csd].geometry.old_border_w, 0);
+        jwm.setfullscreen(&mut backend, csd, false).unwrap();
+        assert_eq!(jwm.state.clients[csd].geometry.border_w, 0);
+    }
+
+    #[test]
+    fn fullscreen_layout_exit_without_arrange_keeps_csd_borderless() {
+        let mut backend = MinimizeSpyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let (_, csd) = add_mode_client(
+            &mut jwm,
+            WindowId::from_raw(0x5050),
+            Rect::new(120, 100, 800, 560),
+            false,
+            false,
+        );
+        jwm.state.clients[csd].state.no_decorations = true;
+        jwm.state.clients[csd].geometry.border_w = 0;
+        jwm.state.monitors[monitor].lt = Rc::new(LayoutEnum::FULLSCREEN);
+        jwm.state.monitors[monitor].set_selected_client_for_current_tag(None);
+
+        jwm.setlayout(&mut backend, &WMArgEnum::Layout(Rc::new(LayoutEnum::TILE)))
+            .unwrap();
+
+        assert_eq!(jwm.state.clients[csd].geometry.border_w, 0);
     }
 
     #[test]

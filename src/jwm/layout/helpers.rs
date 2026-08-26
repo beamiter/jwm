@@ -78,7 +78,14 @@ impl Jwm {
         let effective_gap = if is_single { 0 } else { monitor_gap };
         for &(key, _, _) in clients {
             if let Some(client) = self.state.clients.get_mut(key) {
-                client.geometry.border_w = effective_border;
+                // A client-side frame owns the decoration permanently. Smart
+                // borders may remove a server border, but must never add one
+                // back merely because another tiled client appeared.
+                client.geometry.border_w = if client.state.no_decorations {
+                    0
+                } else {
+                    effective_border
+                };
             }
         }
         (effective_border, effective_gap)

@@ -44,6 +44,9 @@ enum Conversion {
 pub(crate) struct Clipboard {
     captured: std::sync::mpsc::Receiver<String>,
     serve: std::sync::mpsc::Sender<String>,
+    notifier: std::sync::Arc<
+        std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
+    >,
 }
 
 impl Clipboard {
@@ -51,13 +54,15 @@ impl Clipboard {
     pub(crate) fn start() -> Result<Self, String> {
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
+        let notifier = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_notifier = std::sync::Arc::clone(&notifier);
         let (ready_tx, ready) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("jwm-clipboard".to_string())
             .spawn(move || match Watcher::new() {
                 Ok(mut watcher) => {
                     let _ = ready_tx.send(Ok(()));
-                    watcher.run(&captured_tx, &serve_rx);
+                    watcher.run(&captured_tx, &serve_rx, &worker_notifier);
                 }
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -68,7 +73,11 @@ impl Clipboard {
         ready
             .recv()
             .map_err(|_| "clipboard thread died during startup".to_string())??;
-        Ok(Self { captured, serve })
+        Ok(Self {
+            captured,
+            serve,
+            notifier,
+        })
     }
 
     /// Text copied since the last call, oldest first.
@@ -79,6 +88,25 @@ impl Clipboard {
     /// Offer `text` to other applications.
     pub(crate) fn set_text(&self, text: &str) -> bool {
         self.serve.send(text.to_string()).is_ok()
+    }
+
+    pub(crate) fn set_update_notifier(
+        &self,
+        notifier: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
+    ) {
+        let wake = {
+            let mut slot = self
+                .notifier
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *slot = notifier;
+            slot.clone()
+        };
+        if let Some(notifier) = wake {
+            // Also covers a capture queued between backend construction and
+            // event-loop registration.
+            notifier.notify();
+        }
     }
 }
 
@@ -171,6 +199,7 @@ impl Watcher {
         &mut self,
         captured: &std::sync::mpsc::Sender<String>,
         serve: &std::sync::mpsc::Receiver<String>,
+        notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     ) {
         loop {
             match serve.try_recv() {
@@ -183,7 +212,7 @@ impl Watcher {
             while let Ok(Some(event)) = self.conn.poll_for_event() {
                 idle = false;
                 if let Some(text) = self.handle(&event)
-                    && captured.send(text).is_err()
+                    && !publish_capture(captured, notifier, text)
                 {
                     return;
                 }
@@ -387,6 +416,24 @@ impl Watcher {
     }
 }
 
+fn publish_capture(
+    captured: &std::sync::mpsc::Sender<String>,
+    notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
+    text: String,
+) -> bool {
+    if captured.send(text).is_err() {
+        return false;
+    }
+    let notifier = notifier
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(notifier) = notifier {
+        notifier.notify();
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +446,16 @@ mod tests {
     #[test]
     fn conversions_are_routed_by_the_replys_own_target() {
         assert_ne!(Conversion::TargetList, Conversion::Text);
+    }
+
+    #[test]
+    fn capture_is_queued_before_its_completion_wake() {
+        let notifier = crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap();
+        let slot = std::sync::Mutex::new(Some(notifier.clone()));
+        let (send, receive) = std::sync::mpsc::channel();
+
+        assert!(publish_capture(&send, &slot, "ready".to_string()));
+        assert_eq!(notifier.drain().unwrap(), 1);
+        assert_eq!(receive.try_recv().unwrap(), "ready");
     }
 }

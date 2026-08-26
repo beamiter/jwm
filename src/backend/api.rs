@@ -2570,6 +2570,23 @@ pub trait EventHandler {
         None
     }
 
+    /// Notifier attached to every handler-owned worker queue that is polled
+    /// from [`EventHandler::update`]. X11 backends also attach it to their
+    /// clipboard watcher. Returning `Some` promises that its fd is aggregated
+    /// into [`EventHandler::duplicate_update_readiness_fd`].
+    fn async_update_notifier(
+        &self,
+    ) -> Option<crate::backend::update_notifier::AsyncUpdateNotifier> {
+        None
+    }
+
+    /// Whether completion signalling is still usable. An unexpected eventfd
+    /// write failure revokes the readiness promise so X11 immediately returns
+    /// to its conservative idle polling policy.
+    fn async_update_readiness_healthy(&self) -> bool {
+        false
+    }
+
     /// Immediately render the compositor if it has pending damage.
     /// Called from the event loop right after processing X events to
     /// minimise visual latency for rapidly-updating overlay windows
