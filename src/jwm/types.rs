@@ -211,6 +211,17 @@ pub struct SecondaryBarInstance {
     pub next_health_check: Instant,
 }
 
+impl SecondaryBarInstance {
+    /// A present descriptor is not sufficient: its bridge worker may have
+    /// exited after registration.  Scheduling may drop the idle safety poll
+    /// only while the worker still promises to publish command readiness.
+    pub(crate) fn command_readiness_is_healthy(&self) -> bool {
+        self.command_notifier
+            .as_ref()
+            .is_some_and(SharedEventNotifier::is_healthy)
+    }
+}
+
 impl Drop for SecondaryBarInstance {
     fn drop(&mut self) {
         if let Some(notifier) = self.command_notifier.as_ref() {

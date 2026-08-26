@@ -15,7 +15,8 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -503,6 +504,20 @@ fn xwd_header_u32(bytes: &[u8], index: usize) -> Option<u32> {
     Some(u32::from_be_bytes(field))
 }
 
+fn xwd_pixel_value(pixel: &[u8], byte_order: u32) -> Result<u32, String> {
+    match byte_order {
+        // X11 LSBFirst / MSBFirst. XWD file headers are always big-endian,
+        // but the captured ZPixmap rows retain the server image byte order.
+        0 => Ok(pixel.iter().enumerate().fold(0u32, |value, (shift, byte)| {
+            value | (u32::from(*byte) << (shift * 8))
+        })),
+        1 => Ok(pixel
+            .iter()
+            .fold(0u32, |value, byte| (value << 8) | u32::from(*byte))),
+        other => Err(format!("unsupported XWD byte_order={other}")),
+    }
+}
+
 /// Validate an XWD client capture and prove that its drawable contains at
 /// least one non-black pixel. This catches the most damaging handoff failure:
 /// a logically mapped client whose server-side drawable has gone black.
@@ -512,23 +527,50 @@ fn xwd_window_pixels(bytes: &[u8]) -> Result<(u32, u32, bool), String> {
     }
     let header_size = usize::try_from(xwd_header_u32(bytes, 0).unwrap_or_default())
         .map_err(|_| "XWD header size overflowed usize")?;
+    let pixmap_format = xwd_header_u32(bytes, 2).ok_or("XWD omitted pixmap format")?;
     let pixmap_width = xwd_header_u32(bytes, 4).ok_or("XWD omitted pixmap width")?;
     let pixmap_height = xwd_header_u32(bytes, 5).ok_or("XWD omitted pixmap height")?;
+    let x_offset = xwd_header_u32(bytes, 6).ok_or("XWD omitted X offset")?;
+    let byte_order = xwd_header_u32(bytes, 7).ok_or("XWD omitted byte order")?;
     let bits_per_pixel = xwd_header_u32(bytes, 11).ok_or("XWD omitted bits per pixel")?;
     let bytes_per_line =
         usize::try_from(xwd_header_u32(bytes, 12).ok_or("XWD omitted bytes per line")?)
             .map_err(|_| "XWD row stride overflowed usize")?;
     let color_count = usize::try_from(xwd_header_u32(bytes, 19).ok_or("XWD omitted colors")?)
         .map_err(|_| "XWD color count overflowed usize")?;
+    let red_mask = xwd_header_u32(bytes, 14).ok_or("XWD omitted red mask")?;
+    let green_mask = xwd_header_u32(bytes, 15).ok_or("XWD omitted green mask")?;
+    let blue_mask = xwd_header_u32(bytes, 16).ok_or("XWD omitted blue mask")?;
     let window_width = xwd_header_u32(bytes, 20).ok_or("XWD omitted window width")?;
     let window_height = xwd_header_u32(bytes, 21).ok_or("XWD omitted window height")?;
     if pixmap_width == 0 || pixmap_height == 0 || window_width == 0 || window_height == 0 {
         return Err("XWD captured an empty drawable".to_string());
     }
-    let pixel_bytes = usize::try_from(bits_per_pixel.div_ceil(8))
-        .map_err(|_| "XWD pixel width overflowed usize")?;
-    if pixel_bytes == 0 || pixel_bytes > 8 {
+    // The byte-wise decoder below is only valid for packed ZPixmap rows.
+    // Xephyr's default TrueColor visual uses this representation; reject
+    // planar/sub-byte captures instead of accidentally inspecting padding.
+    if pixmap_format != 2 || x_offset != 0 {
+        return Err(format!(
+            "unsupported XWD pixel layout: format={pixmap_format}, xoffset={x_offset}"
+        ));
+    }
+    if !(8..=32).contains(&bits_per_pixel) || bits_per_pixel % 8 != 0 {
         return Err(format!("unsupported XWD bits_per_pixel={bits_per_pixel}"));
+    }
+    let pixel_bytes =
+        usize::try_from(bits_per_pixel / 8).map_err(|_| "XWD pixel width overflowed usize")?;
+    let rgb_mask = red_mask | green_mask | blue_mask;
+    if rgb_mask == 0 {
+        return Err("XWD visual has no RGB masks".to_string());
+    }
+    if (red_mask & green_mask) != 0 || (red_mask & blue_mask) != 0 || (green_mask & blue_mask) != 0
+    {
+        return Err("XWD RGB masks overlap".to_string());
+    }
+    if bits_per_pixel < 32 && (rgb_mask >> bits_per_pixel) != 0 {
+        return Err(format!(
+            "XWD RGB masks exceed bits_per_pixel={bits_per_pixel}"
+        ));
     }
     let visible_row_bytes = usize::try_from(pixmap_width)
         .ok()
@@ -555,11 +597,15 @@ fn xwd_window_pixels(bytes: &[u8]) -> Result<(u32, u32, bool), String> {
                     .ok_or("XWD end overflowed")?,
         )
         .ok_or("XWD pixel payload is truncated")?;
-    let has_non_black_pixels = payload.chunks_exact(bytes_per_line).any(|row| {
-        row[..visible_row_bytes]
-            .chunks_exact(pixel_bytes)
-            .any(|pixel| pixel.iter().any(|byte| *byte != 0))
-    });
+    let mut has_non_black_pixels = false;
+    'rows: for row in payload.chunks_exact(bytes_per_line) {
+        for pixel in row[..visible_row_bytes].chunks_exact(pixel_bytes) {
+            if xwd_pixel_value(pixel, byte_order)? & rgb_mask != 0 {
+                has_non_black_pixels = true;
+                break 'rows;
+            }
+        }
+    }
     Ok((window_width, window_height, has_non_black_pixels))
 }
 
@@ -1004,6 +1050,9 @@ struct RunContext {
     xephyr: Option<Child>,
     /// `DISPLAY` value of that Xephyr server (e.g. `:91`).
     nested_x11_display: Option<String>,
+    /// Advisory reservation preventing concurrent smoke runs from choosing the
+    /// same explicitly empty X11 display slot.
+    xephyr_display_guard: Option<fs::File>,
 }
 
 impl RunContext {
@@ -1134,19 +1183,32 @@ fn prepare_run_context(
     options: &NestedSmokeOptions,
 ) -> io::Result<RunContext> {
     let runtime_dir = create_private_runtime_dir(kind)?;
-    let (xephyr, nested_x11_display) = if kind.family() == NestedFamily::X11 {
+    let log_path = runtime_dir.join("jwm.log");
+    let log_file = match fs::File::create(&log_path) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&runtime_dir);
+            return Err(error);
+        }
+    };
+    let log_stdout = match log_file.try_clone() {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&runtime_dir);
+            return Err(error);
+        }
+    };
+    let (xephyr, nested_x11_display, xephyr_display_guard) = if kind.family() == NestedFamily::X11 {
         match spawn_xephyr(&runtime_dir) {
-            Ok((child, display)) => (Some(child), Some(display)),
+            Ok((child, display, guard)) => (Some(child), Some(display), Some(guard)),
             Err(error) => {
                 let _ = fs::remove_dir_all(&runtime_dir);
                 return Err(error);
             }
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
-    let log_path = runtime_dir.join("jwm.log");
-    let log_file = fs::File::create(&log_path)?;
     let (set, remove) = child_env_overrides(
         kind,
         &runtime_dir,
@@ -1157,7 +1219,7 @@ fn prepare_run_context(
     let mut command = Command::new(&options.jwm_binary);
     command
         .stdin(Stdio::null())
-        .stdout(log_file.try_clone()?)
+        .stdout(log_stdout)
         .stderr(log_file)
         .env("RUST_LOG", "info");
     for (key, value) in set {
@@ -1170,8 +1232,7 @@ fn prepare_run_context(
         Ok(child) => child,
         Err(error) => {
             if let Some(mut xephyr) = xephyr {
-                let _ = xephyr.kill();
-                let _ = xephyr.wait();
+                terminate_xephyr(&mut xephyr);
             }
             let _ = fs::remove_dir_all(&runtime_dir);
             return Err(io::Error::new(
@@ -1187,25 +1248,33 @@ fn prepare_run_context(
         log_path,
         xephyr,
         nested_x11_display,
+        xephyr_display_guard,
     })
 }
 
 const XEPHYR_SCREEN: &str = "1280x800";
 const XEPHYR_START_TIMEOUT: Duration = Duration::from_secs(5);
+const XEPHYR_TERM_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Boot a private Xephyr server on a free display and wait (bounded) for its
-/// socket. The fixed screen size keeps X11-transport geometry deterministic.
-fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
-    let Some(number) = find_free_x11_display() else {
+/// Boot a private Xephyr server and wait (bounded) for it to report readiness
+/// through our private pipe. We explicitly select a display whose lock and
+/// socket are absent while holding a JWM advisory reservation: Xorg never sees
+/// or attempts to reclaim a pre-existing cross-namespace lock.
+fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String, fs::File)> {
+    let Some((number, guard)) = reserve_x11_display() else {
         return Err(io::Error::new(
             io::ErrorKind::AddrInUse,
-            "no free X display number in :80..=:99 for Xephyr",
+            "no conservatively free X display number in :80..=:99 for Xephyr",
         ));
     };
     let display = format!(":{number}");
+    let (display_read, display_write) =
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_NONBLOCK).map_err(io::Error::from)?;
+    let display_fd = display_write.as_raw_fd().to_string();
     let log = fs::File::create(runtime_dir.join("xephyr.log"))?;
     let mut child = Command::new("Xephyr")
         .arg(&display)
+        .args(["-displayfd", &display_fd])
         .args(["-screen", XEPHYR_SCREEN, "-nolisten", "tcp"])
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
@@ -1214,77 +1283,181 @@ fn spawn_xephyr(runtime_dir: &Path) -> io::Result<(Child, String)> {
         .map_err(|error| {
             io::Error::new(error.kind(), format!("could not launch Xephyr: {error}"))
         })?;
-    let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+    // Only the exec'd Xephyr retains the write end. EOF therefore means that
+    // exact child exited or closed its readiness channel without succeeding.
+    drop(display_write);
+    let mut display_read = fs::File::from(display_read);
+    let mut output = Vec::with_capacity(16);
     let deadline = Instant::now() + XEPHYR_START_TIMEOUT;
     while Instant::now() < deadline {
-        if socket.exists() {
-            return Ok((child, display));
+        let mut chunk = [0u8; 16];
+        let mut reached_eof = false;
+        loop {
+            match display_read.read(&mut chunk) {
+                Ok(0) => {
+                    reached_eof = true;
+                    break;
+                }
+                Ok(count) => {
+                    output.extend_from_slice(&chunk[..count]);
+                    if output.len() > 32 {
+                        terminate_xephyr(&mut child);
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Xephyr returned an oversized -displayfd response",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    terminate_xephyr(&mut child);
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("could not read Xephyr -displayfd response: {error}"),
+                    ));
+                }
+            }
+        }
+        match parse_displayfd_output(&output) {
+            Ok(Some(reported)) if reported == number => return Ok((child, display, guard)),
+            Ok(Some(reported)) => {
+                terminate_xephyr(&mut child);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Xephyr reported display :{reported}, expected reserved display :{number}"
+                    ),
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                terminate_xephyr(&mut child);
+                return Err(error);
+            }
         }
         if let Ok(Some(status)) = child.try_wait() {
-            remove_display_artifacts(&display);
             return Err(io::Error::other(format!(
                 "Xephyr exited during startup ({status}); see xephyr.log"
             )));
         }
+        if reached_eof {
+            terminate_xephyr(&mut child);
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Xephyr closed -displayfd without reporting a display; see xephyr.log",
+            ));
+        }
         std::thread::sleep(POLL_INTERVAL);
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    remove_display_artifacts(&display);
+    terminate_xephyr(&mut child);
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
-        format!("Xephyr did not create {display} within {XEPHYR_START_TIMEOUT:?}"),
+        format!("Xephyr did not report a display within {XEPHYR_START_TIMEOUT:?}"),
     ))
 }
 
-/// First free display number in `:80..=:99`. A slot is free when it has no
-/// lock file, or a lock whose owning process is dead — Xephyr killed with
-/// SIGKILL cannot remove its own lock/socket, so stale artifacts would
-/// otherwise exhaust the range. A reclaimed slot's stale lock and socket are
-/// removed so a fresh Xephyr can bind it.
-fn find_free_x11_display() -> Option<u32> {
-    (80..=99).find(|&number| reclaim_if_free(number))
-}
-
-/// True when display `number` is free, cleaning up any stale artifacts first.
-fn reclaim_if_free(number: u32) -> bool {
-    let lock = format!("/tmp/.X{number}-lock");
-    let socket = format!("/tmp/.X11-unix/X{number}");
-    match lock_owner_pid(Path::new(&lock)) {
-        // A live X server owns this slot.
-        Some(pid) if process_is_alive(pid) => false,
-        // Stale lock from a crashed/killed server: reclaim it.
-        Some(_) => {
-            let _ = fs::remove_file(&lock);
-            let _ = fs::remove_file(&socket);
-            true
-        }
-        // No lock; clear any orphaned socket so Xephyr can bind cleanly.
-        None => {
-            let _ = fs::remove_file(&socket);
-            true
+/// Reserve the first display whose standard X lock and socket are both absent.
+/// A persistent, per-slot advisory guard serializes cooperating smoke runs;
+/// the guard file itself is never unlinked, avoiding another shared-path race.
+fn reserve_x11_display() -> Option<(u32, fs::File)> {
+    for number in 80..=99 {
+        let guard_path = PathBuf::from(format!("/tmp/.jwm-nested-smoke-X{number}.guard"));
+        let Some(guard) = try_lock_display_guard(&guard_path) else {
+            continue;
+        };
+        let lock = PathBuf::from(format!("/tmp/.X{number}-lock"));
+        let socket = PathBuf::from(format!("/tmp/.X11-unix/X{number}"));
+        if artifacts_are_absent(&lock, &socket) {
+            return Some((number, guard));
         }
     }
+    None
 }
 
-/// PID recorded in an X lock file (`%10d\n`), if the file exists and parses.
-fn lock_owner_pid(lock: &Path) -> Option<u32> {
-    fs::read_to_string(lock).ok()?.trim().parse::<u32>().ok()
+fn try_lock_display_guard(path: &Path) -> Option<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return None;
+    }
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    locked.then_some(file)
 }
 
-/// Whether a process is still alive (Linux `/proc` presence).
-fn process_is_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+/// Treat every object and every inspection error as occupied. In particular,
+/// a broken symlink must not look like a free X lock or socket.
+fn artifacts_are_absent(lock: &Path, socket: &Path) -> bool {
+    [lock, socket].into_iter().all(|path| {
+        matches!(
+            fs::symlink_metadata(path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        )
+    })
 }
 
-/// Remove the lock and socket for a display we created, so killing Xephyr
-/// (even with SIGKILL) never leaks a slot.
-fn remove_display_artifacts(display: &str) {
-    let Some(number) = display.strip_prefix(':') else {
-        return;
+fn parse_displayfd_output(bytes: &[u8]) -> io::Result<Option<u32>> {
+    let Some(line_end) = bytes.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
     };
-    let _ = fs::remove_file(format!("/tmp/.X{number}-lock"));
-    let _ = fs::remove_file(format!("/tmp/.X11-unix/X{number}"));
+    if bytes[line_end + 1..]
+        .iter()
+        .any(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Xephyr returned trailing data after its -displayfd response",
+        ));
+    }
+    let line = std::str::from_utf8(&bytes[..line_end]).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Xephyr returned non-UTF-8 -displayfd data: {error}"),
+        )
+    })?;
+    let number = line.trim().parse::<u32>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Xephyr returned an invalid display number {line:?}: {error}"),
+        )
+    })?;
+    Ok(Some(number))
+}
+
+/// Ask Xephyr to shut down cleanly so Xorg removes its own lock and socket.
+/// If it ignores SIGTERM, fall back to `Child::kill`; never unlink shared X11
+/// paths ourselves because pathname/PID checks cannot close namespace/TOCTOU
+/// races against another server.
+fn terminate_xephyr(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if let Ok(raw_pid) = i32::try_from(child.id()) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw_pid),
+            nix::sys::signal::Signal::SIGTERM,
+        );
+        let deadline = Instant::now() + XEPHYR_TERM_TIMEOUT;
+        while Instant::now() < deadline {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => std::thread::sleep(POLL_INTERVAL),
+                Err(_) => break,
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn create_private_runtime_dir(kind: NestedBackendKind) -> io::Result<PathBuf> {
@@ -3036,16 +3209,10 @@ fn kill_child(context: &mut RunContext) {
     }
     // The private Xephyr server has no purpose once jwm is gone.
     if let Some(mut xephyr) = context.xephyr.take() {
-        if matches!(xephyr.try_wait(), Ok(None)) {
-            let _ = xephyr.kill();
-        }
-        let _ = xephyr.wait();
-        // SIGKILL leaves Xephyr's lock and socket behind; remove them so the
-        // display slot does not leak across runs.
-        if let Some(display) = context.nested_x11_display.take() {
-            remove_display_artifacts(&display);
-        }
+        terminate_xephyr(&mut xephyr);
     }
+    context.nested_x11_display.take();
+    context.xephyr_display_guard.take();
 }
 
 fn command_in_path(command: &str) -> bool {
@@ -3620,7 +3787,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_x11_observation_parses_geometry_map_state_and_pixels() {
+    fn physical_x11_observation_parses_geometry_and_map_state() {
         let info = r#"
 xwininfo: Window id: 0x20000c "fixture"
 
@@ -3643,52 +3810,100 @@ xwininfo: Window id: 0x20000c "fixture"
                 true,
             )
         );
+    }
 
-        let mut xwd = vec![0u8; 108];
+    fn truecolor_xwd(byte_order: u32, row: [u8; 12]) -> Vec<u8> {
+        let mut xwd = vec![0u8; 112];
         for (index, value) in [
             (0usize, 100u32),
             (1, 7),
+            (2, 2),
             (4, 2),
             (5, 1),
+            (6, 0),
+            (7, byte_order),
             (11, 32),
-            (12, 8),
+            (12, 12),
+            (14, 0x00ff_0000),
+            (15, 0x0000_ff00),
+            (16, 0x0000_00ff),
             (19, 0),
             (20, 2),
             (21, 1),
         ] {
             xwd[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
         }
-        xwd[104] = 0x7f;
-        assert_eq!(xwd_window_pixels(&xwd).unwrap(), (2, 1, true));
-        xwd[104] = 0;
-        assert_eq!(xwd_window_pixels(&xwd).unwrap(), (2, 1, false));
+        xwd[100..].copy_from_slice(&row);
+        xwd
+    }
+
+    #[test]
+    fn xwd_truecolor_detection_ignores_unused_alpha_and_row_padding() {
+        // Little-endian ZPixmap: the fourth byte is outside all RGB masks.
+        // The last four bytes are row padding and must also be ignored.
+        let mut little = truecolor_xwd(0, [0, 0, 0, 0xff, 0, 0, 0, 0x80, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(xwd_window_pixels(&little).unwrap(), (2, 1, false));
+        little[102] = 0x7f;
+        assert_eq!(xwd_window_pixels(&little).unwrap(), (2, 1, true));
+
+        // Big-endian ZPixmap places the unused high byte first. Confirm that
+        // only the masked red/green/blue bytes can make the image non-black.
+        let mut big = truecolor_xwd(1, [0xff, 0, 0, 0, 0x80, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(xwd_window_pixels(&big).unwrap(), (2, 1, false));
+        big[101] = 0x7f;
+        assert_eq!(xwd_window_pixels(&big).unwrap(), (2, 1, true));
+    }
+
+    #[test]
+    fn xwd_truecolor_detection_rejects_ambiguous_or_truncated_layouts() {
+        let mut xwd = truecolor_xwd(0, [0; 12]);
         assert!(xwd_window_pixels(&xwd[..104]).is_err());
+
+        // Without masks there is no sound way to distinguish RGB from an
+        // alpha/unused byte, so fail the observation instead of guessing.
+        for index in [14usize, 15, 16] {
+            xwd[index * 4..index * 4 + 4].copy_from_slice(&0u32.to_be_bytes());
+        }
+        assert!(
+            xwd_window_pixels(&xwd)
+                .unwrap_err()
+                .contains("no RGB masks")
+        );
     }
 
     #[test]
-    fn a_lock_owned_by_a_live_process_is_not_reclaimed() {
-        // Our own PID is alive, so a slot it "owns" must read as taken.
-        assert!(process_is_alive(std::process::id()));
+    fn displayfd_output_requires_one_complete_numeric_line() {
+        assert_eq!(parse_displayfd_output(b"").unwrap(), None);
+        assert_eq!(parse_displayfd_output(b"81").unwrap(), None);
+        assert_eq!(parse_displayfd_output(b" 81 \n").unwrap(), Some(81));
+        assert_eq!(
+            parse_displayfd_output(b"4294967295\n").unwrap(),
+            Some(u32::MAX)
+        );
+        assert!(parse_displayfd_output(b"not-a-display\n").is_err());
+        assert!(parse_displayfd_output(b"81\n82\n").is_err());
     }
 
     #[test]
-    fn a_lock_owned_by_a_dead_pid_is_stale() {
-        // PID 1 (init) is always alive; a very high PID is almost certainly
-        // free. The liveness check underpins stale-lock reclamation.
-        assert!(process_is_alive(1));
-        assert!(!process_is_alive(u32::MAX));
-    }
-
-    #[test]
-    fn lock_owner_pid_parses_the_x_lock_format() {
-        let dir = std::env::temp_dir().join(format!("jwm-lockfmt-{}", std::process::id()));
+    fn display_reservation_is_exclusive_and_artifact_checks_are_conservative() {
+        let dir = std::env::temp_dir().join(format!("jwm-display-guard-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create test dir");
+        fs::create_dir_all(&dir).expect("create display guard test dir");
+        let guard_path = dir.join("guard");
         let lock = dir.join("lock");
-        // X writes the PID space-padded to 10 columns with a trailing newline.
-        fs::write(&lock, b"    364726\n").expect("write lock");
-        assert_eq!(lock_owner_pid(&lock), Some(364726));
-        assert_eq!(lock_owner_pid(&dir.join("absent")), None);
+        let socket = dir.join("socket");
+
+        let guard = try_lock_display_guard(&guard_path).expect("acquire first reservation");
+        assert!(try_lock_display_guard(&guard_path).is_none());
+        drop(guard);
+        assert!(try_lock_display_guard(&guard_path).is_some());
+
+        assert!(artifacts_are_absent(&lock, &socket));
+        std::os::unix::fs::symlink(dir.join("missing"), &lock).unwrap();
+        assert!(!artifacts_are_absent(&lock, &socket));
+        fs::remove_file(&lock).unwrap();
+        fs::write(&socket, b"foreign socket placeholder").unwrap();
+        assert!(!artifacts_are_absent(&lock, &socket));
         let _ = fs::remove_dir_all(&dir);
     }
 

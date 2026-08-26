@@ -2,7 +2,7 @@
 //!
 //! 这个模块包含所有窗口属性变化的处理函数
 
-use crate::backend::api::{AllowedAction, Backend, WindowType};
+use crate::backend::api::{AllowedAction, Backend};
 use crate::backend::common_define::WindowId;
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
@@ -339,11 +339,9 @@ impl Jwm {
             .is_some_and(|motif| motif.decorations_none());
         let gtk_client_frame = backend.property_ops().get_gtk_frame_extents(win).is_some();
         let hinted_borderless = motif_borderless || gtk_client_frame;
-        let popup_like = RuleMatcher::is_popup_like(backend, win);
         let window_types = backend.property_ops().get_window_types(win);
-        let structural_borderless = window_types
-            .iter()
-            .any(|window_type| matches!(window_type, WindowType::Dock | WindowType::Desktop));
+        let popup_like = RuleMatcher::types_are_popup_like(&window_types);
+        let structural_borderless = RuleMatcher::is_structurally_borderless(&window_types);
         let configured_border = CONFIG.load().border_px() as i32;
         let (monitor, is_fullscreen) = self
             .state

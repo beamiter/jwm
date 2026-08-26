@@ -13,6 +13,34 @@ use log::info;
 pub struct RuleMatcher;
 
 impl RuleMatcher {
+    pub(crate) const fn is_popup_like_type(window_type: WindowType) -> bool {
+        matches!(
+            window_type,
+            WindowType::Dialog
+                | WindowType::PopupMenu
+                | WindowType::DropdownMenu
+                | WindowType::Tooltip
+                | WindowType::Notification
+                | WindowType::Combo
+                | WindowType::Dnd
+                | WindowType::Utility
+                | WindowType::Splash
+        )
+    }
+
+    pub(crate) fn types_are_popup_like(types: &[WindowType]) -> bool {
+        types.iter().copied().any(Self::is_popup_like_type)
+    }
+
+    /// Window classes whose protocol role owns the whole top-level surface.
+    /// They never receive a WM-managed server border, regardless of client
+    /// ConfigureRequest traffic or smart-border/layout transitions.
+    pub(crate) fn is_structurally_borderless(types: &[WindowType]) -> bool {
+        types
+            .iter()
+            .any(|window_type| matches!(window_type, WindowType::Dock | WindowType::Desktop))
+    }
+
     /// 检查规则是否匹配给定的窗口属性
     ///
     /// # 参数
@@ -57,20 +85,9 @@ impl RuleMatcher {
     pub fn is_popup_like(backend: &mut dyn Backend, win: WindowId) -> bool {
         let types = backend.property_ops().get_window_types(win);
         for t in types {
-            match t {
-                WindowType::Dialog
-                | WindowType::PopupMenu
-                | WindowType::DropdownMenu
-                | WindowType::Tooltip
-                | WindowType::Notification
-                | WindowType::Combo
-                | WindowType::Dnd
-                | WindowType::Utility
-                | WindowType::Splash => {
-                    info!("Window {:?} is popup-like type: {:?}", win, t);
-                    return true;
-                }
-                _ => {}
+            if Self::is_popup_like_type(t) {
+                info!("Window {:?} is popup-like type: {:?}", win, t);
+                return true;
             }
         }
         false
@@ -248,6 +265,29 @@ mod tests {
         assert!(!RuleMatcher::should_auto_float("name", "", ""));
         assert!(!RuleMatcher::should_auto_float("", "class", ""));
         assert!(!RuleMatcher::should_auto_float("", "", "instance"));
+    }
+
+    #[test]
+    fn dock_and_desktop_types_are_structurally_borderless() {
+        assert!(RuleMatcher::is_structurally_borderless(&[
+            WindowType::Desktop
+        ]));
+        assert!(RuleMatcher::is_structurally_borderless(&[
+            WindowType::Normal,
+            WindowType::Dock,
+        ]));
+        assert!(!RuleMatcher::is_structurally_borderless(&[
+            WindowType::Normal,
+            WindowType::Dialog,
+        ]));
+        assert!(RuleMatcher::types_are_popup_like(&[
+            WindowType::Normal,
+            WindowType::Notification,
+        ]));
+        assert!(!RuleMatcher::types_are_popup_like(&[
+            WindowType::Normal,
+            WindowType::Toolbar,
+        ]));
     }
 
     #[test]

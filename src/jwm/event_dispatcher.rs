@@ -2092,6 +2092,41 @@ mod tests {
     }
 
     #[test]
+    fn partial_system_ui_enable_is_owned_by_the_lease_and_restored_to_native() {
+        let (mut jwm, _client, _window) = jwm_with_transition_client();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend.x11_client_list = true;
+        backend
+            .window_ops
+            .fail_decoration_once
+            .store(true, AtomicOrdering::Relaxed);
+
+        jwm.app_launcher(&mut backend, &WMArgEnum::Int(0))
+            .expect("a backend that reached ON can still host the panel");
+
+        assert!(backend.compositor_enabled);
+        assert!(jwm.features.system_ui.is_active());
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true]);
+        assert_eq!(jwm.features.compositor_transition.attempts, 1);
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(false));
+
+        jwm.close_system_ui(&mut backend);
+
+        assert!(!backend.compositor_enabled);
+        assert!(!jwm.features.system_ui.is_active());
+        assert!(!jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true, false]);
+        assert_eq!(jwm.features.compositor_transition.attempts, 2);
+        assert_eq!(
+            jwm.features.compositor_transition.last_requested_active,
+            Some(false)
+        );
+        assert_eq!(jwm.features.compositor_transition.last_success, Some(true));
+    }
+
+    #[test]
     fn a_ui_action_closes_the_panel_it_opened_and_replaces_anyone_else_s() {
         let mut jwm = empty_jwm();
         let mut backend = RenderSpyBackend::new();
@@ -3465,6 +3500,63 @@ mod tests {
     }
 
     #[test]
+    fn stopped_bar_notifier_revokes_async_readiness_and_is_removed() {
+        let mut jwm = empty_jwm();
+        jwm.async_update_notifier =
+            Some(crate::backend::update_notifier::AsyncUpdateNotifier::new().unwrap());
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = format!(
+            "/tmp/jwm-bar-readiness-health-{}-{nonce}",
+            std::process::id()
+        );
+        let ring = std::sync::Arc::new(
+            xbar_core::shared_structures::SharedRingBufferOptions::new()
+                .command_capacity(8)
+                .adaptive_poll_spins(0)
+                .create(&path)
+                .unwrap(),
+        );
+        let notifier =
+            xbar_core::SharedEventNotifier::for_commands(std::sync::Arc::clone(&ring), true)
+                .unwrap();
+        let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
+        child.wait().unwrap();
+        let now = std::time::Instant::now();
+        jwm.secondary_bars.insert(
+            5,
+            crate::jwm::types::SecondaryBarInstance {
+                monitor_id: 5,
+                shmem: ring,
+                command_notifier: Some(notifier),
+                pid: child.id(),
+                child,
+                client_key: None,
+                window: Some(WindowId::from_raw(0x505)),
+                has_focus: false,
+                last_spawn: now,
+                next_health_check: now + std::time::Duration::from_secs(1),
+            },
+        );
+
+        assert!(<Jwm as EventHandler>::async_update_readiness_healthy(&jwm));
+        jwm.secondary_bars[&5]
+            .command_notifier
+            .as_ref()
+            .unwrap()
+            .request_shutdown();
+        assert!(
+            !<Jwm as EventHandler>::async_update_readiness_healthy(&jwm),
+            "a stopped bridge must restore the X11 idle safety poll"
+        );
+
+        jwm.process_commands_from_status_bar(&mut RenderSpyBackend::new());
+        assert!(jwm.secondary_bars[&5].command_notifier.is_none());
+    }
+
+    #[test]
     fn orphan_bar_is_retired_before_a_mapping_bar_blocks_creation() {
         let mut jwm = empty_jwm();
         let mut monitor = jwm.createmon(true);
@@ -4321,7 +4413,7 @@ impl EventHandler for Jwm {
             && self
                 .secondary_bars
                 .values()
-                .all(|bar| bar.command_notifier.is_some())
+                .all(crate::jwm::types::SecondaryBarInstance::command_readiness_is_healthy)
             && self.background_job_readiness_is_complete()
     }
 

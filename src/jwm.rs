@@ -1783,6 +1783,12 @@ impl Jwm {
             // arriving after this point either joins this drain or causes the
             // futex worker to publish a fresh eventfd level.
             let notifier_failed = bar.command_notifier.as_ref().is_some_and(|notifier| {
+                if !notifier.is_healthy() {
+                    warn!(
+                        "[process_commands] bar {source_monitor} notifier worker stopped; restoring timer fallback"
+                    );
+                    return true;
+                }
                 notifier.drain().is_err_and(|error| {
                     warn!(
                         "[process_commands] failed to drain bar {source_monitor} notifier; restoring timer fallback: {error}"

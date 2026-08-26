@@ -84,10 +84,10 @@ impl NotifierChange<'_> {
 /// [`crate::BarRuntime`]'s current shared transport.
 ///
 /// Call [`Self::sync`] after servicing the runtime. A changed transport
-/// generation replaces the notifier, while a disconnected runtime removes
-/// it. Notifier construction has strong failure semantics: if creating the
-/// replacement fails, the existing notifier and observed generation are left
-/// unchanged so a later call retries the same generation.
+/// generation or an unhealthy worker replaces the notifier, while a
+/// disconnected runtime removes it. Notifier construction has strong failure
+/// semantics: if creating the replacement fails, the existing notifier and
+/// observed generation are left unchanged so a later call retries.
 #[derive(Debug)]
 pub struct TransportNotifierSlot {
     generation: u64,
@@ -147,8 +147,12 @@ impl TransportNotifierSlot {
     {
         let generation = runtime.transport_generation();
         let transport = runtime.transport();
-        let state_matches =
-            generation == self.generation && transport.is_some() == self.notifier.is_some();
+        let notifier_matches_transport = match (transport, self.notifier.as_ref()) {
+            (Some(_), Some(notifier)) => notifier.is_healthy(),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        let state_matches = generation == self.generation && notifier_matches_transport;
         if state_matches {
             return Ok(NotifierChange::Unchanged);
         }
@@ -185,8 +189,30 @@ impl TransportNotifierSlot {
 pub struct SharedEventNotifier {
     fd: OwnedFd,
     stop: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     non_blocking: bool,
+}
+
+/// Marks every worker exit before publishing one final level notification.
+///
+/// The release-store happens before the eventfd write so an event loop woken
+/// by this guard observes the revoked readiness promise.  The guard also runs
+/// while unwinding a worker panic.
+struct WorkerExitSignal {
+    fd: RawFd,
+    healthy: Arc<AtomicBool>,
+}
+
+impl Drop for WorkerExitSignal {
+    fn drop(&mut self) {
+        self.healthy.store(false, Ordering::Release);
+        if let Err(error) = write_eventfd(self.fd, 1)
+            && error.raw_os_error() != Some(libc::EAGAIN)
+        {
+            warn!("shared notifier could not publish worker exit: {error}");
+        }
+    }
 }
 
 impl SharedEventNotifier {
@@ -218,18 +244,27 @@ impl SharedEventNotifier {
         let fd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
+        let healthy = Arc::new(AtomicBool::new(true));
+        let worker_healthy = Arc::clone(&healthy);
 
         // Safety invariant: `Drop` joins `worker` before `fd` is dropped, so
         // this descriptor stays valid for the entire closure lifetime.
         let worker_fd = fd.as_raw_fd();
         let worker = thread::Builder::new()
             .name(channel.thread_name().into())
-            .spawn(move || worker_loop(buffer, worker_fd, worker_stop, channel));
+            .spawn(move || {
+                let _exit_signal = WorkerExitSignal {
+                    fd: worker_fd,
+                    healthy: worker_healthy,
+                };
+                worker_loop(buffer, worker_fd, worker_stop, channel);
+            });
 
         match worker {
             Ok(worker) => Ok(Self {
                 fd,
                 stop,
+                healthy,
                 worker: Some(worker),
                 non_blocking,
             }),
@@ -263,9 +298,13 @@ impl SharedEventNotifier {
                 match error.raw_os_error() {
                     Some(libc::EINTR) => continue,
                     Some(libc::EAGAIN) => return Ok(total),
-                    _ => return Err(error),
+                    _ => {
+                        self.healthy.store(false, Ordering::Release);
+                        return Err(error);
+                    }
                 }
             }
+            self.healthy.store(false, Ordering::Release);
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "short read from eventfd",
@@ -276,12 +315,21 @@ impl SharedEventNotifier {
     /// Ask the worker to stop. The worker is joined when this handle is
     /// dropped; repeated calls are harmless.
     pub fn request_shutdown(&self) {
+        self.healthy.store(false, Ordering::Release);
         self.stop.store(true, Ordering::Release);
     }
 
     #[must_use]
     pub fn is_shutdown_requested(&self) -> bool {
         self.stop.load(Ordering::Acquire)
+    }
+
+    /// Whether the worker can still uphold this descriptor's readiness
+    /// promise.  Any worker exit, explicit shutdown, or eventfd drain failure
+    /// revokes it permanently for this notifier instance.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
     }
 }
 
@@ -332,7 +380,10 @@ fn worker_loop(
                                 match error.raw_os_error() {
                                     Some(libc::EAGAIN) => {}
                                     Some(libc::EBADF) => return,
-                                    _ => warn!("shared notifier eventfd write failed: {error}"),
+                                    _ => {
+                                        warn!("shared notifier eventfd write failed: {error}");
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -341,7 +392,7 @@ fn worker_loop(
                                 return;
                             }
                             warn!("shared notifier eventfd poll failed: {error}");
-                            break;
+                            return;
                         }
                     }
                     thread::sleep(LEVEL_RECHECK);
@@ -601,9 +652,24 @@ mod tests {
                 .expect("open command observer"),
         );
         let notifier = SharedEventNotifier::for_commands(observer, true).unwrap();
+        assert!(notifier.is_healthy());
 
         let started = std::time::Instant::now();
         owner.destroy().unwrap();
+        let mut descriptor = libc::pollfd {
+            fd: notifier.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut descriptor, 1, 2_000) },
+            1,
+            "worker exit must wake an event loop so it can restore timer polling"
+        );
+        assert!(
+            !notifier.is_healthy(),
+            "the terminal wake must publish health loss first"
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while !notifier.worker.as_ref().unwrap().is_finished()
             && std::time::Instant::now() < deadline
@@ -611,6 +677,7 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         assert!(notifier.worker.as_ref().unwrap().is_finished());
+        assert_eq!(notifier.drain().unwrap(), 1);
         assert!(
             started.elapsed() < Duration::from_millis(300),
             "destroy should wake the command futex without accumulating wait slices"
@@ -740,6 +807,51 @@ mod tests {
         assert_ne!(replacement_fd, initial_fd);
         assert_eq!(slot.generation(), replacement_generation);
         assert_eq!(slot.notifier().unwrap().as_raw_fd(), replacement_fd);
+
+        drop(slot);
+        drop(runtime);
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn notifier_slot_replaces_an_unhealthy_worker_without_a_generation_change() {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/tmp/xbar-core-notifier-slot-health-{}-{sequence}",
+            std::process::id()
+        );
+        let owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&path)
+            .expect("create isolated shared ring");
+        let transport = crate::SharedTransport::open(&path).unwrap();
+        let runtime =
+            crate::BarRuntime::with_transport(crate::ModelConfig::default(), Some(transport))
+                .unwrap();
+        let mut slot = TransportNotifierSlot::new(true);
+
+        let generation = runtime.transport_generation();
+        let initial_fd = match slot.sync(&runtime).unwrap() {
+            NotifierChange::Replaced { fd, .. } => fd.as_raw_fd(),
+            change => panic!("expected initial replacement, got {change:?}"),
+        };
+        slot.notifier().unwrap().request_shutdown();
+        assert!(!slot.notifier().unwrap().is_healthy());
+
+        let replacement_fd = match slot.sync(&runtime).unwrap() {
+            NotifierChange::Replaced {
+                generation: replaced_generation,
+                fd,
+            } => {
+                assert_eq!(replaced_generation, generation);
+                fd.as_raw_fd()
+            }
+            change => panic!("expected health replacement, got {change:?}"),
+        };
+        assert_ne!(replacement_fd, initial_fd);
+        assert_eq!(slot.generation(), generation);
+        assert!(slot.notifier().unwrap().is_healthy());
 
         drop(slot);
         drop(runtime);

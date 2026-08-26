@@ -18,8 +18,30 @@ use crate::jwm::features::screenshot::{
     ScreenshotAnnotation, ScreenshotTool, ToolbarCommand, marker_ink,
 };
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
+use crate::jwm::rules::RuleMatcher;
 use crate::jwm::types::{WMArgEnum, WMClickType, WMFuncType};
 use log::{error, info};
+
+const MAX_X11_CONFIGURE_VALUE: u32 = u16::MAX as u32;
+
+fn bounded_configure_dimension(value: u32) -> i32 {
+    value.clamp(1, MAX_X11_CONFIGURE_VALUE) as i32
+}
+
+fn bounded_configure_border(value: u32) -> i32 {
+    value.min(MAX_X11_CONFIGURE_VALUE) as i32
+}
+
+fn clamp_configure_axis(position: i32, total: i32, origin: i32, span: i32) -> i32 {
+    let minimum = i64::from(origin);
+    let maximum = minimum + i64::from(span.max(0)) - i64::from(total.max(0));
+    let clamped = if minimum <= maximum {
+        i64::from(position).clamp(minimum, maximum)
+    } else {
+        minimum
+    };
+    clamped.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
 
 /// A rectangle from two corners in any order, as `[x, y, w, h]`.
 fn normalized_rect(from: (f32, f32), to: (f32, f32)) -> [f32; 4] {
@@ -2228,15 +2250,24 @@ impl Jwm {
             return self.configure_client(backend, client_key);
         }
 
-        let is_popup = self.is_popup_like(backend, client_key);
         let mask = ConfigWindowBits::from_bits_truncate(mask_bits);
 
-        let is_dock = self
+        let (win, is_dock, no_decorations) = self
             .state
             .clients
             .get(client_key)
-            .map(|client| client.state.is_dock)
-            .unwrap_or(false);
+            .map(|client| {
+                (
+                    client.win,
+                    client.state.is_dock,
+                    client.state.no_decorations,
+                )
+            })
+            .ok_or("Client not found")?;
+        let window_types = backend.property_ops().get_window_types(win);
+        let is_popup = RuleMatcher::types_are_popup_like(&window_types);
+        let wm_owns_border =
+            no_decorations || is_popup || RuleMatcher::is_structurally_borderless(&window_types);
 
         if is_dock {
             if let Some(client) = self.state.clients.get(client_key) {
@@ -2267,9 +2298,9 @@ impl Jwm {
 
         if mask.contains(ConfigWindowBits::BORDER_WIDTH) {
             if let Some(border) = req.border_width {
-                if !is_popup {
+                if !wm_owns_border {
                     if let Some(client) = self.state.clients.get_mut(client_key) {
-                        client.geometry.border_w = border as i32;
+                        client.geometry.border_w = bounded_configure_border(border);
                     }
                 }
             }
@@ -2308,33 +2339,29 @@ impl Jwm {
                 if mask.contains(ConfigWindowBits::X) {
                     if let Some(x) = req.x {
                         client.geometry.old_x = client.geometry.x;
-                        client.geometry.x = mx + x;
+                        // ConfigureRequest coordinates for a managed top-level
+                        // X11 window are relative to its parent (the root), so
+                        // they are already in global desktop coordinates.
+                        client.geometry.x = x;
                     }
                 }
                 if mask.contains(ConfigWindowBits::Y) {
                     if let Some(y) = req.y {
                         client.geometry.old_y = client.geometry.y;
-                        client.geometry.y = my + y;
+                        client.geometry.y = y;
                     }
                 }
                 if mask.contains(ConfigWindowBits::WIDTH) {
                     if let Some(w) = req.width {
                         client.geometry.old_w = client.geometry.w;
-                        client.geometry.w = w as i32;
+                        client.geometry.w = bounded_configure_dimension(w);
                     }
                 }
                 if mask.contains(ConfigWindowBits::HEIGHT) {
                     if let Some(h) = req.height {
                         client.geometry.old_h = client.geometry.h;
-                        client.geometry.h = h as i32;
+                        client.geometry.h = bounded_configure_dimension(h);
                     }
-                }
-
-                if (client.geometry.x + client.geometry.w) > mx + mw && client.state.is_floating {
-                    client.geometry.x = mx + (mw / 2 - client.total_width() / 2);
-                }
-                if (client.geometry.y + client.geometry.h) > my + mh && client.state.is_floating {
-                    client.geometry.y = my + (mh / 2 - client.total_height() / 2);
                 }
 
                 // Defer workarea clamping until after we release the mutable borrow.
@@ -2392,34 +2419,23 @@ impl Jwm {
                                     parent.total_height(),
                                 );
 
-                                let left = clamp.x.max(parent_rect.x);
-                                let top = clamp.y.max(parent_rect.y);
-                                let right = (clamp.x + clamp.w).min(parent_rect.x + parent_rect.w);
-                                let bottom = (clamp.y + clamp.h).min(parent_rect.y + parent_rect.h);
-                                let w = (right - left).max(0);
-                                let h = (bottom - top).max(0);
+                                let left = i64::from(clamp.x.max(parent_rect.x));
+                                let top = i64::from(clamp.y.max(parent_rect.y));
+                                let right = (i64::from(clamp.x) + i64::from(clamp.w))
+                                    .min(i64::from(parent_rect.x) + i64::from(parent_rect.w));
+                                let bottom = (i64::from(clamp.y) + i64::from(clamp.h))
+                                    .min(i64::from(parent_rect.y) + i64::from(parent_rect.h));
+                                let w = (right - left).clamp(0, i64::from(i32::MAX)) as i32;
+                                let h = (bottom - top).clamp(0, i64::from(i32::MAX)) as i32;
                                 if w > 0 && h > 0 {
-                                    clamp = Rect::new(left, top, w, h);
+                                    clamp = Rect::new(left as i32, top as i32, w, h);
                                 }
                             }
                         }
                     }
 
-                    let min_x = clamp.x;
-                    let max_x = clamp.x + clamp.w - total_w;
-                    let clamped_x = if min_x <= max_x {
-                        x.clamp(min_x, max_x)
-                    } else {
-                        min_x
-                    };
-
-                    let min_y = clamp.y;
-                    let max_y = clamp.y + clamp.h - total_h;
-                    let clamped_y = if min_y <= max_y {
-                        y.clamp(min_y, max_y)
-                    } else {
-                        min_y
-                    };
+                    let clamped_x = clamp_configure_axis(x, total_w, clamp.x, clamp.w);
+                    let clamped_y = clamp_configure_axis(y, total_h, clamp.y, clamp.h);
 
                     if let Some(client) = self.state.clients.get_mut(client_key) {
                         client.geometry.x = clamped_x;
@@ -2428,11 +2444,17 @@ impl Jwm {
                 }
 
                 if let Some(client) = self.state.clients.get(client_key) {
+                    let border_width = if backend.has_compositor() {
+                        0
+                    } else {
+                        client.geometry.border_w.max(0) as u32
+                    };
                     let changes = WindowChanges {
                         x: Some(client.geometry.x),
                         y: Some(client.geometry.y),
                         width: Some(client.geometry.w as u32),
                         height: Some(client.geometry.h as u32),
+                        border_width: Some(border_width),
                         ..Default::default()
                     };
                     backend.window_ops().apply_window_changes(win, changes)?;
@@ -2448,21 +2470,8 @@ impl Jwm {
                     .monitor_work_area(mon_key)
                     .unwrap_or(Rect::new(mx, my, mw, mh));
 
-                let min_x = clamp.x;
-                let max_x = clamp.x + clamp.w - total_w;
-                let clamped_x = if min_x <= max_x {
-                    x.clamp(min_x, max_x)
-                } else {
-                    min_x
-                };
-
-                let min_y = clamp.y;
-                let max_y = clamp.y + clamp.h - total_h;
-                let clamped_y = if min_y <= max_y {
-                    y.clamp(min_y, max_y)
-                } else {
-                    min_y
-                };
+                let clamped_x = clamp_configure_axis(x, total_w, clamp.x, clamp.w);
+                let clamped_y = clamp_configure_axis(y, total_h, clamp.y, clamp.h);
 
                 if let Some(client) = self.state.clients.get_mut(client_key) {
                     if client.state.is_floating && !client.state.is_fullscreen {
@@ -2480,11 +2489,17 @@ impl Jwm {
 
             if self.is_client_visible_by_key(client_key) {
                 if let Some(client) = self.state.clients.get(client_key) {
+                    let border_width = if backend.has_compositor() {
+                        0
+                    } else {
+                        client.geometry.border_w.max(0) as u32
+                    };
                     let changes = WindowChanges {
                         x: Some(client.geometry.x),
                         y: Some(client.geometry.y),
                         width: Some(client.geometry.w as u32),
                         height: Some(client.geometry.h as u32),
+                        border_width: Some(border_width),
                         ..Default::default()
                     };
                     backend
@@ -2609,6 +2624,7 @@ mod tests {
     #[derive(Default)]
     struct ConfigureReplyWindowOps {
         replies: Mutex<Vec<ConfigureReply>>,
+        applied: Mutex<Vec<(WindowId, WindowChanges)>>,
     }
 
     impl WindowOps for ConfigureReplyWindowOps {
@@ -2697,9 +2713,13 @@ mod tests {
 
         fn apply_window_changes(
             &self,
-            _win: WindowId,
-            _changes: WindowChanges,
+            win: WindowId,
+            changes: WindowChanges,
         ) -> Result<(), BackendError> {
+            self.applied
+                .lock()
+                .expect("applied changes lock")
+                .push((win, changes));
             Ok(())
         }
     }
@@ -2792,6 +2812,28 @@ mod tests {
         }
     }
 
+    fn add_floating_configure_client(
+        jwm: &mut Jwm,
+        window: WindowId,
+        monitor: crate::core::models::MonitorKey,
+        border_w: i32,
+        no_decorations: bool,
+    ) -> crate::core::models::ClientKey {
+        let mut client = WMClient::new(window);
+        client.mon = Some(monitor);
+        client.state.tags = jwm.state.monitors[monitor].get_active_tags();
+        client.state.is_floating = true;
+        client.state.no_decorations = no_decorations;
+        client.geometry.x = jwm.state.monitors[monitor].geometry.m_x + 80;
+        client.geometry.y = jwm.state.monitors[monitor].geometry.m_y + 120;
+        client.geometry.w = 640;
+        client.geometry.h = 480;
+        client.geometry.border_w = border_w;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, monitor);
+        client_key
+    }
+
     fn assert_fullscreen_configure_request_is_rejected(hidden: bool) {
         let mut backend = ConfigureReplyBackend::new();
         let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
@@ -2876,6 +2918,133 @@ mod tests {
     #[test]
     fn hidden_fullscreen_rejects_configure_without_losing_parked_geometry() {
         assert_fullscreen_configure_request_is_rejected(true);
+    }
+
+    #[test]
+    fn floating_configure_coordinates_stay_root_relative_on_a_secondary_monitor() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        {
+            let geometry = &mut jwm.state.monitors[monitor].geometry;
+            geometry.m_x = 1920;
+            geometry.m_y = 0;
+            geometry.m_w = 1920;
+            geometry.m_h = 1080;
+            geometry.w_x = 1920;
+            geometry.w_y = 0;
+            geometry.w_w = 1920;
+            geometry.w_h = 1080;
+        }
+        let window = WindowId::from_raw(0x7f03);
+        let client_key = add_floating_configure_client(&mut jwm, window, monitor, 3, false);
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X | ConfigWindowBits::Y).bits(),
+            WindowChanges {
+                x: Some(2240),
+                y: Some(180),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        assert_eq!((client.geometry.x, client.geometry.y), (2240, 180));
+        let applied = backend
+            .window_ops
+            .applied
+            .lock()
+            .expect("applied changes lock");
+        let (_, changes) = applied.last().expect("floating configure commit");
+        assert_eq!((changes.x, changes.y), (Some(2240), Some(180)));
+    }
+
+    #[test]
+    fn floating_border_request_commits_natively_but_csd_keeps_border_ownership() {
+        for (no_decorations, initial, expected) in [(false, 3, 11), (true, 0, 0)] {
+            let mut backend = ConfigureReplyBackend::new();
+            let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+            let monitor = jwm.state.monitor_order[0];
+            let window = WindowId::from_raw(if no_decorations { 0x7f05 } else { 0x7f04 });
+            let client_key =
+                add_floating_configure_client(&mut jwm, window, monitor, initial, no_decorations);
+
+            jwm.handle_regular_configure_request_params(
+                &mut backend,
+                client_key,
+                ConfigWindowBits::BORDER_WIDTH.bits(),
+                WindowChanges {
+                    border_width: Some(11),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            assert_eq!(jwm.state.clients[client_key].geometry.border_w, expected);
+            let applied = backend
+                .window_ops
+                .applied
+                .lock()
+                .expect("applied changes lock");
+            let (_, changes) = applied.last().expect("floating configure commit");
+            assert_eq!(changes.border_width, Some(expected as u32));
+        }
+    }
+
+    #[test]
+    fn hostile_configure_values_are_bounded_and_clamped_without_overflow() {
+        let mut backend = ConfigureReplyBackend::new();
+        let mut jwm = Jwm::new_with_runtime_backend(&mut backend, "test").unwrap();
+        let monitor = jwm.state.monitor_order[0];
+        let work_area = jwm.monitor_work_area(monitor).unwrap();
+        let window = WindowId::from_raw(0x7f06);
+        let client_key = add_floating_configure_client(&mut jwm, window, monitor, 3, false);
+
+        jwm.handle_regular_configure_request_params(
+            &mut backend,
+            client_key,
+            (ConfigWindowBits::X
+                | ConfigWindowBits::Y
+                | ConfigWindowBits::WIDTH
+                | ConfigWindowBits::HEIGHT
+                | ConfigWindowBits::BORDER_WIDTH)
+                .bits(),
+            WindowChanges {
+                x: Some(i32::MAX),
+                y: Some(i32::MIN),
+                width: Some(u32::MAX),
+                height: Some(u32::MAX),
+                border_width: Some(u32::MAX),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let client = &jwm.state.clients[client_key];
+        assert_eq!(
+            (client.geometry.x, client.geometry.y),
+            (work_area.x, work_area.y)
+        );
+        assert_eq!(
+            (
+                client.geometry.w,
+                client.geometry.h,
+                client.geometry.border_w
+            ),
+            (u16::MAX as i32, u16::MAX as i32, u16::MAX as i32)
+        );
+        let applied = backend
+            .window_ops
+            .applied
+            .lock()
+            .expect("applied changes lock");
+        let (_, changes) = applied.last().expect("bounded configure commit");
+        assert_eq!(changes.width, Some(u16::MAX as u32));
+        assert_eq!(changes.height, Some(u16::MAX as u32));
+        assert_eq!(changes.border_width, Some(u16::MAX as u32));
     }
 
     #[test]

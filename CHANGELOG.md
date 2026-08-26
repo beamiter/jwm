@@ -75,6 +75,9 @@ monorepo use independent Semantic Versions.
   magnifier, peek and Night Light state. Compositor-only modal modes are
   quiesced before teardown, and failed transitions — including partial enable
   failures after presentation reconciliation — are reported to IPC callers.
+  If such a partial enable was requested for a native-mode shell panel, the
+  panel now adopts the already-running renderer as its temporary lease so its
+  close/error path always restores compositor OFF instead of leaking it ON.
   `JWM_COMPOSITOR` keeps precedence across config reloads. `get_status`
   now reports actual, configured and temporary-lease compositor state without
   requiring callers to infer it from optional metrics, and retains the last
@@ -91,6 +94,11 @@ monorepo use independent Semantic Versions.
   commands, shell background jobs and clipboard captures instead of polling at
   20 ms. The old safety cadence remains automatic whenever a compositor is
   active or any notifier cannot be created, registered, drained or signalled.
+  A status-bar bridge worker now revokes its health promise and sends one final
+  eventfd wake on every exit path, including unwinding, so JWM immediately
+  removes the dead notifier and restores the safety cadence. Bar frontends
+  also replace an unhealthy notifier within the same transport generation,
+  instead of waiting for a reconnect before event-driven updates recover.
 - Native window admission parks new clients beyond the complete desktop with
   overflow-safe geometry, applies Motif/GTK client-decoration ownership before
   first map and reconciles it live, and keeps Dock/Desktop windows borderless.
@@ -98,6 +106,13 @@ monorepo use independent Semantic Versions.
   around client-decorated windows. Strut ownership is recomputed when a panel
   moves between outputs or the monitor topology changes, rather than retaining
   a stale output key.
+  Floating ConfigureRequest coordinates remain root-relative on offset and
+  negative-origin outputs, requested dimensions are bounded to the X11 wire
+  range with overflow-safe workarea clamping, and native border changes are
+  committed to the server without letting CSD, popup, Dock or Desktop windows
+  regain a WM border. Explicit taskbar, launcher and IPC restores also reject
+  stale layout-generated `EnterNotify` focus for a bounded 300 ms window, so
+  focus-follows-mouse cannot immediately undo a successful activation.
   Multi-output struts are calculated from all four desktop edges with bounded
   arithmetic, so right/bottom panels and hostile properties cannot collapse a
   work area below one pixel.
@@ -105,8 +120,13 @@ monorepo use independent Semantic Versions.
   for both X11RB and XCB, checking transition telemetry, JWM identity and the
   independently discovered native XID at every phase. Two consecutive probes
   require the X window to remain `IsViewable`, keep exact server geometry and
-  expose non-black XWD pixels; the diagnostic restores the compositor state it
-  found so later lifecycle, screenshot and policy steps remain isolated.
+  expose non-black XWD RGB pixels; decoding follows the visual masks and byte
+  order so alpha/unused bytes and row padding cannot fake visibility. The
+  Xephyr harness reserves only displays with no lock or socket, confirms
+  readiness through a private `-displayfd` pipe, shuts the server down
+  gracefully and never guesses ownership or unlinks shared X11 artifacts.
+  The diagnostic restores the compositor state it found so later lifecycle,
+  screenshot and policy steps remain isolated.
 - Explicit non-D65 surface and output descriptions now pass through a Bradford
   chromatic-adaptation transform between RGB→XYZ and XYZ→RGB. Neutral colors
   remain neutral across white points, D65 sRGB/BT.2020 matrices retain their

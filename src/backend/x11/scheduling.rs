@@ -232,6 +232,22 @@ mod tests {
     }
 
     #[test]
+    fn bar_worker_health_loss_rearms_the_idle_safety_poll() {
+        let now = Instant::now();
+        let long_idle_deadline = now + Duration::from_secs(3);
+        let poll_required = idle_poll_required(false, true, false);
+        let fallback =
+            requested_update_deadline(now, false, poll_required, Some(Duration::from_secs(3)));
+
+        assert_eq!(fallback, now + IDLE_UPDATE_INTERVAL);
+        assert_eq!(
+            timer_rearm_deadline(Some(long_idle_deadline), fallback, false),
+            Some(fallback),
+            "an observed worker failure must tighten an already-armed maintenance timer"
+        );
+    }
+
+    #[test]
     fn events_only_tighten_but_completed_updates_can_reset() {
         let now = Instant::now();
         let current = now + Duration::from_millis(8);
@@ -291,7 +307,13 @@ mod tests {
             assert!(backend.contains("register_dispatcher("));
             assert!(backend.contains("TimeoutAction::ToInstant("));
             assert!(backend.contains("handler.duplicate_update_readiness_fd()"));
-            assert!(backend.contains("handler.async_update_readiness_healthy()"));
+            assert_eq!(
+                backend
+                    .matches("handler.async_update_readiness_healthy()")
+                    .count(),
+                2,
+                "timer callbacks and post-dispatch rearming must both observe health"
+            );
             assert!(backend.contains("data.update_requested = true"));
             assert!(!backend.contains("Duration::from_millis(1)"));
             assert!(!backend.contains("TimeoutAction::ToDuration"));

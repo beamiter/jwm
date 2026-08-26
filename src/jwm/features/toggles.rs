@@ -1205,6 +1205,20 @@ impl Jwm {
                     )
                     .into());
                 }
+                // The backend can reach ON and then report a trailing client
+                // presentation failure. The reconciler deliberately surfaces
+                // that partial failure, but abandoning the opener here would
+                // leave an unowned compositor running forever: no panel would
+                // exist to drive the normal lease-release path. Keep the
+                // renderer as this panel's temporary lease, continue with the
+                // grabs, and let close/failure cleanup return the session to
+                // native mode.
+                Err(error) if backend.has_compositor() => {
+                    self.features.system_ui_temporary_compositor = true;
+                    log::warn!(
+                        "Compositor partially enabled for {label}; retaining it as a temporary lease: {error}"
+                    );
+                }
                 Err(error) => {
                     return Err(format!("could not start compositor for {label}: {error}").into());
                 }
