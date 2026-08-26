@@ -71,9 +71,10 @@ bar with it.
 layout_picker = true   # default
 ```
 
-Turning it off makes `cyclelayout` switch silently again. The picker also stands
-aside when there is no compositor to draw it, so a cycle key never becomes a
-key that does nothing.
+Turning it off makes `cyclelayout` switch silently again. In a deliberately
+non-composited X11 session the picker temporarily leases JWM's compositor for
+the panel and restores native mode when it closes. If the renderer cannot be
+started, the layout still cycles silently, so the key never becomes a no-op.
 
 `layout_picker` is bindable and dispatchable in its own right; its integer
 argument is the step taken as it opens, so `0` opens the strip on the current

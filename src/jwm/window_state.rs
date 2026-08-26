@@ -4,6 +4,7 @@ use crate::backend::api::{
     StackMode, WindowChanges, WindowType,
 };
 use crate::backend::common_define::{SchemeType, WindowId};
+use crate::config::CONFIG;
 use crate::core::models::{ClientKey, WMClient};
 use crate::core::types::Rect;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -26,6 +27,20 @@ pub(super) const MAX_RECOVERED_MINIMIZED_ORDER: u64 = (1_u64 << 48) - 1;
 
 pub(super) const fn minimized_order_is_safe_to_recover(order: u64) -> bool {
     order >= 1 && order <= MAX_RECOVERED_MINIMIZED_ORDER
+}
+
+pub(super) const fn client_decoration_scheme(
+    is_focused: bool,
+    is_urgent: bool,
+    attention_enabled: bool,
+) -> SchemeType {
+    if is_focused {
+        SchemeType::Sel
+    } else if is_urgent && attention_enabled {
+        SchemeType::Urgent
+    } else {
+        SchemeType::Norm
+    }
 }
 
 fn minimized_order_transition(current: u64) -> Option<(u64, u64)> {
@@ -768,8 +783,8 @@ impl Jwm {
         client_key: ClientKey,
         is_focused: bool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (win, border_w) = if let Some(client) = self.state.clients.get(client_key) {
-            (client.win, client.geometry.border_w)
+        let (win, border_w, is_urgent) = if let Some(client) = self.state.clients.get(client_key) {
+            (client.win, client.geometry.border_w, client.state.is_urgent)
         } else {
             return Err("Client not found".into());
         };
@@ -780,11 +795,11 @@ impl Jwm {
             border_w as u32
         };
 
-        let scheme = if is_focused {
-            SchemeType::Sel
-        } else {
-            SchemeType::Norm
-        };
+        let scheme = client_decoration_scheme(
+            is_focused,
+            is_urgent,
+            CONFIG.load().behavior().attention_animation,
+        );
         if let Ok(pixel) = backend.color_allocator().get_border_pixel_of(scheme) {
             backend
                 .window_ops()
@@ -1337,6 +1352,9 @@ impl Jwm {
 
         if backend.has_compositor() {
             backend.compositor_set_window_urgent(win, urgent);
+        } else {
+            let is_focused = self.get_selected_client_key() == Some(client_key);
+            self.update_client_decoration(backend, client_key, is_focused)?;
         }
         Ok(win)
     }
@@ -1832,8 +1850,28 @@ impl Jwm {
 mod urgency_tests {
     use super::{
         EXHAUSTED_MINIMIZED_ORDER, MAX_MINIMIZED_RESTORE_ORDER, MAX_RECOVERED_MINIMIZED_ORDER,
-        minimized_order_is_safe_to_recover, minimized_order_transition, wm_hint_urgency_policy,
+        client_decoration_scheme, minimized_order_is_safe_to_recover, minimized_order_transition,
+        wm_hint_urgency_policy,
     };
+    use crate::backend::common_define::SchemeType;
+
+    #[test]
+    fn native_decoration_prioritizes_focus_then_urgency() {
+        assert_eq!(client_decoration_scheme(true, true, true), SchemeType::Sel);
+        assert_eq!(client_decoration_scheme(true, false, true), SchemeType::Sel);
+        assert_eq!(
+            client_decoration_scheme(false, true, true),
+            SchemeType::Urgent
+        );
+        assert_eq!(
+            client_decoration_scheme(false, false, true),
+            SchemeType::Norm
+        );
+        assert_eq!(
+            client_decoration_scheme(false, true, false),
+            SchemeType::Norm
+        );
+    }
 
     #[test]
     fn wm_hint_policy_only_writes_when_an_urgent_hint_is_suppressed() {

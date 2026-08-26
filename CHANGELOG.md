@@ -68,6 +68,22 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- X11 compositor OFF/ON is now a checked presentation hand-off instead of a
+  renderer-only toggle. Before native exposure JWM flushes real borders and
+  the current physical animation geometry; on re-enable it restores borderless
+  input geometry and replays monitor, window-group, urgent, PiP, HUD,
+  magnifier, peek and Night Light state. Compositor-only modal modes are
+  quiesced before teardown, failed transitions are reported to IPC callers,
+  and `JWM_COMPOSITOR` keeps precedence across config reloads. `get_status`
+  now reports actual, configured and temporary-lease compositor state without
+  requiring callers to infer it from optional metrics.
+- Native X11 interaction now has shared, overflow-safe move and eight-edge
+  resize geometry in both XCB and X11RB, including fixed opposite edges and a
+  1 px minimum. Unfocused urgent windows receive an attention border without the
+  compositor, and the layout picker can temporarily lease the renderer while
+  preserving a silent-cycle fallback. Runtime X11RB overlay hit testing and
+  HDR setup now follow compositor recreation; XComposite teardown also releases
+  the overlay by its root and cleans a failed selection-owner acquisition.
 - Explicit non-D65 surface and output descriptions now pass through a Bradford
   chromatic-adaptation transform between RGB→XYZ and XYZ→RGB. Neutral colors
   remain neutral across white points, D65 sRGB/BT.2020 matrices retain their

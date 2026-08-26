@@ -116,23 +116,42 @@ where
         let sel_win = self
             .generate_id()
             .map_err(|e| format!("generate_id for CM selection owner: {e}"))?;
-        self.create_window(
-            0,
-            sel_win,
-            root,
-            0,
-            0,
-            1,
-            1,
-            0,
-            xproto::WindowClass::INPUT_ONLY,
-            0,
-            &xproto::CreateWindowAux::default(),
-        )
-        .map_err(|e| format!("create CM selection owner window: {e}"))?;
-        self.set_selection_owner(sel_win, cm_atom, x11rb::CURRENT_TIME)
-            .map_err(|e| format!("set_selection_owner {sel_name}: {e}"))?;
-        let _ = self.flush();
+        let create_cookie = self
+            .create_window(
+                0,
+                sel_win,
+                root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                xproto::WindowClass::INPUT_ONLY,
+                0,
+                &xproto::CreateWindowAux::default(),
+            )
+            .map_err(|e| format!("create CM selection owner window: {e}"))?;
+        create_cookie
+            .check()
+            .map_err(|e| format!("create CM selection owner reply: {e}"))?;
+
+        let claim = self
+            .set_selection_owner(sel_win, cm_atom, x11rb::CURRENT_TIME)
+            .map_err(|e| format!("set_selection_owner {sel_name}: {e}"))
+            .and_then(|cookie| {
+                cookie
+                    .check()
+                    .map_err(|e| format!("set_selection_owner reply {sel_name}: {e}"))
+            })
+            .and_then(|()| {
+                self.flush()
+                    .map_err(|e| format!("flush selection owner {sel_name}: {e}"))
+            });
+        if let Err(error) = claim {
+            let _ = self.destroy_window(sel_win);
+            let _ = self.flush();
+            return Err(error);
+        }
         log::info!(
             "compositor: claimed {} selection (owner=0x{:x})",
             sel_name,
@@ -223,8 +242,8 @@ where
             .map_err(|e| format!("unredirect_subwindows: {e}"))
     }
 
-    fn release_overlay_window(&self, overlay_window: u32) -> Result<(), String> {
-        self.composite_release_overlay_window(overlay_window)
+    fn release_overlay_window(&self, root: u32) -> Result<(), String> {
+        self.composite_release_overlay_window(root)
             .map(|_| ())
             .map_err(|e| format!("release_overlay_window: {e}"))
     }

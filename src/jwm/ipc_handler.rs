@@ -2603,6 +2603,12 @@ impl Jwm {
         let monitors = self.query_monitors().len();
         let workspaces = self.query_workspaces().len();
         let uptime_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let configured_compositor = CONFIG.load().compositor_enabled();
+        let compositor_configured = if matches!(self.runtime_backend.as_str(), "x11rb" | "xcb") {
+            crate::config::effective_x11_compositor_enabled(configured_compositor)
+        } else {
+            configured_compositor
+        };
 
         RuntimeStatusV1 {
             schema_version: 1,
@@ -2622,6 +2628,9 @@ impl Jwm {
                 workspaces,
             },
             config,
+            compositor_active: backend.has_compositor(),
+            compositor_configured,
+            compositor_temporary: self.features.system_ui_temporary_compositor,
             features: RuntimeFeatureStates {
                 do_not_disturb: self.do_not_disturb,
                 screenshot: self.features.screenshot.active,

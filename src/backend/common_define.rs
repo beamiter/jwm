@@ -117,6 +117,24 @@ impl ArgbColor {
         Self::new(255, red, green, blue)
     }
 
+    /// Convert normalized RGBA components into JWM's packed ARGB color.
+    #[must_use]
+    pub fn from_rgba_f32([red, green, blue, alpha]: [f32; 4]) -> Self {
+        fn component(value: f32) -> u8 {
+            if value.is_finite() {
+                (value.clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                0
+            }
+        }
+        Self::new(
+            component(alpha),
+            component(red),
+            component(green),
+            component(blue),
+        )
+    }
+
     pub fn from_hex(hex: &str, alpha: u8) -> Result<Self, Box<dyn std::error::Error>> {
         let (r, g, b) = parse_hex_color(hex)?;
         Ok(Self::new(alpha, r, g, b))
@@ -265,6 +283,23 @@ bitflags! {
         const FOCUS_CHANGE         = 1 << 8;
         const SUBSTRUCTURE_NOTIFY  = 1 << 9;
         const KEY_RELEASE         = 1 << 10;
+    }
+}
+
+#[cfg(test)]
+mod color_tests {
+    use super::ArgbColor;
+
+    #[test]
+    fn normalized_rgba_conversion_rounds_and_clamps_components() {
+        assert_eq!(
+            ArgbColor::from_rgba_f32([1.2, 0.5, -0.1, 1.0]).components(),
+            (255, 255, 128, 0)
+        );
+        assert_eq!(
+            ArgbColor::from_rgba_f32([f32::NAN, 0.0, 0.0, f32::INFINITY]).components(),
+            (0, 0, 0, 0)
+        );
     }
 }
 

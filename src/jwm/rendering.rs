@@ -1,5 +1,6 @@
 use crate::backend::api::Backend;
-use crate::backend::common_define::{SchemeType, WindowId};
+use crate::backend::common_define::{Pixel, SchemeType, WindowId};
+use crate::backend::error::BackendError;
 use crate::config::CONFIG;
 use crate::core::models::ClientKey;
 use crate::core::types::Rect;
@@ -62,6 +63,233 @@ impl Jwm {
             crate::jwm::features::power::POLL_INTERVAL
                 .saturating_sub(now.saturating_duration_since(last))
         })
+    }
+
+    /// Apply the X11 presentation contract for one compositor mode.
+    ///
+    /// Native mode needs server-side borders and, for animations, the sampled
+    /// visual rectangle as the real window geometry. Composited mode keeps X
+    /// borders at zero and places animated input windows at their logical
+    /// target while the renderer interpolates the pixels independently.
+    fn sync_x11_client_presentation(
+        &self,
+        backend: &mut dyn Backend,
+        composited: bool,
+        now: Instant,
+    ) -> Result<(), BackendError> {
+        if !backend.capabilities().supports_client_list {
+            return Ok(());
+        }
+
+        let focused = self.get_selected_client_key();
+        let attention_enabled = CONFIG.load().behavior().attention_animation;
+        let entries: Vec<_> = self
+            .state
+            .clients
+            .iter()
+            .map(|(client_key, client)| {
+                let border = if composited {
+                    0
+                } else {
+                    client.geometry.border_w.max(0) as u32
+                };
+                let scheme = super::window_state::client_decoration_scheme(
+                    focused == Some(client_key),
+                    client.state.is_urgent,
+                    attention_enabled,
+                );
+                // Hidden/Iconic clients have already crossed the checked
+                // parking barrier. Never let a retained visual animation move
+                // their real X window back out of that safe native slot.
+                let animation_rect = (!client.state.is_hidden)
+                    .then(|| self.animations.active.get(&client_key))
+                    .flatten()
+                    .map(|animation| {
+                        if composited {
+                            Rect::new(
+                                client.geometry.x,
+                                client.geometry.y,
+                                client.geometry.w,
+                                client.geometry.h,
+                            )
+                        } else {
+                            animation.sample(now).0
+                        }
+                    });
+                (client.win, border, scheme, animation_rect)
+            })
+            .collect();
+
+        let mut failures = Vec::new();
+        let mut pixels: HashMap<SchemeType, Option<Pixel>> = HashMap::new();
+        for &(_, _, scheme, _) in &entries {
+            if let std::collections::hash_map::Entry::Vacant(entry) = pixels.entry(scheme) {
+                match backend.color_allocator().get_border_pixel_of(scheme) {
+                    Ok(pixel) => {
+                        entry.insert(Some(pixel));
+                    }
+                    Err(error) => {
+                        failures.push(format!("allocate {scheme:?} border: {error}"));
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
+
+        for (window, border, scheme, animation_rect) in entries {
+            if let Some(pixel) = pixels.get(&scheme).copied().flatten()
+                && let Err(error) = backend
+                    .window_ops()
+                    .set_decoration_style(window, border, pixel)
+            {
+                failures.push(format!("decorate {window:?}: {error}"));
+            }
+            if let Some(rect) = animation_rect {
+                if let Err(error) = backend.window_ops().configure(
+                    window,
+                    rect.x,
+                    rect.y,
+                    rect.w.max(1) as u32,
+                    rect.h.max(1) as u32,
+                    border,
+                ) {
+                    failures.push(format!("configure {window:?}: {error}"));
+                }
+            }
+        }
+        if let Err(error) = backend.window_ops().flush() {
+            failures.push(format!("flush X11 presentation: {error}"));
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(BackendError::Message(format!(
+                "X11 presentation reconciliation had {} failure(s): {}",
+                failures.len(),
+                failures.join("; ")
+            )))
+        }
+    }
+
+    fn replay_compositor_runtime_state(&mut self, backend: &mut dyn Backend, now: Instant) {
+        backend.compositor_apply_config();
+        self.refresh_compositor_monitors(backend);
+        backend.compositor_set_window_groups(self.build_window_groups());
+
+        let window_states: Vec<_> = self
+            .state
+            .clients
+            .values()
+            .map(|client| (client.win, client.state.is_urgent, client.state.is_pip))
+            .collect();
+        for (window, urgent, pip) in window_states {
+            backend.compositor_set_window_urgent(window, urgent);
+            backend.compositor_set_window_pip(window, pip);
+        }
+
+        backend.compositor_set_debug_hud(self.debug_hud_on);
+        backend.compositor_set_debug_hud_extended(self.debug_hud_on);
+        backend.compositor_set_magnifier(self.features.magnifier.enabled);
+        backend.compositor_set_peek_mode(self.features.peek_active);
+
+        let behavior = CONFIG.load().behavior().clone();
+        let temperature = match self.night_light_override {
+            Some(true) => behavior.night_light_temp,
+            Some(false) => 0.0,
+            None if behavior.night_light => Self::compute_night_light_temp(
+                &behavior.night_light_start,
+                &behavior.night_light_end,
+                behavior.night_light_temp,
+                behavior.night_light_transition_mins,
+            ),
+            None => 0.0,
+        };
+        backend.compositor_set_color_temperature(temperature);
+        self.last_night_light_update = Some(now);
+        self.reapply_idle_dim(backend);
+        backend.compositor_force_full_redraw();
+    }
+
+    /// Change compositor mode while keeping native X11 presentation and
+    /// JWM-owned renderer state coherent across the hand-off.
+    pub(crate) fn set_compositor_enabled_reconciled(
+        &mut self,
+        backend: &mut dyn Backend,
+        enabled: bool,
+    ) -> Result<bool, BackendError> {
+        let before = backend.has_compositor();
+        if before == enabled {
+            return Ok(false);
+        }
+        let now = Instant::now();
+
+        // Stage native borders/animation geometry behind the overlay, then
+        // flush before XComposite exposes the real window tree.
+        if !enabled {
+            if let Err(error) = self.sync_x11_client_presentation(backend, false, now) {
+                if let Err(rollback) = self.sync_x11_client_presentation(backend, true, now) {
+                    log::warn!(
+                        "could not restore composited client presentation after failed staging: {rollback}"
+                    );
+                }
+                return Err(error);
+            }
+        }
+
+        let transition = backend.set_compositor_enabled(enabled);
+        let after = backend.has_compositor();
+        match transition {
+            Err(error) => {
+                // A backend error can theoretically arrive after its mode bit
+                // changed (for example a trailing flush failure). Keep the
+                // observed presentation coherent even though the caller still
+                // receives the error.
+                if after == enabled {
+                    if enabled {
+                        if let Err(sync_error) =
+                            self.sync_x11_client_presentation(backend, true, now)
+                        {
+                            log::warn!(
+                                "could not fully switch clients to composited presentation after a partial enable: {sync_error}"
+                            );
+                        }
+                        self.replay_compositor_runtime_state(backend, now);
+                    }
+                } else if !enabled
+                    && let Err(rollback) = self.sync_x11_client_presentation(backend, true, now)
+                {
+                    log::warn!(
+                        "could not restore composited client presentation after failed disable: {rollback}"
+                    );
+                }
+                return Err(error);
+            }
+            Ok(_) if after != enabled => {
+                if !enabled
+                    && let Err(rollback) = self.sync_x11_client_presentation(backend, true, now)
+                {
+                    log::warn!(
+                        "could not restore composited client presentation after refused disable: {rollback}"
+                    );
+                }
+                return Err(BackendError::Message(format!(
+                    "backend reported compositor transition without reaching {} state",
+                    if enabled { "enabled" } else { "disabled" }
+                )));
+            }
+            Ok(_) => {}
+        }
+
+        if enabled {
+            if let Err(error) = self.sync_x11_client_presentation(backend, true, now) {
+                // A disappearing client must not tear the newly created
+                // compositor back down; its lifecycle event will retire it.
+                log::warn!("could not fully switch clients to composited presentation: {error}");
+            }
+            self.replay_compositor_runtime_state(backend, now);
+        }
+        Ok(after != before)
     }
 
     pub(super) fn render_pending_frame(&mut self, backend: &mut dyn Backend) {
@@ -428,9 +656,12 @@ impl Jwm {
             )?;
 
             // 分离装饰设置
-            let border_color = backend
-                .color_allocator()
-                .get_border_pixel_of(SchemeType::Norm)?;
+            let scheme = super::window_state::client_decoration_scheme(
+                self.get_selected_client_key() == Some(client_key),
+                client.state.is_urgent,
+                CONFIG.load().behavior().attention_animation,
+            );
+            let border_color = backend.color_allocator().get_border_pixel_of(scheme)?;
             backend
                 .window_ops()
                 .set_decoration_style(client.win, x11_bw, border_color)?;

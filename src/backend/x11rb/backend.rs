@@ -13,7 +13,10 @@ use crate::backend::error::BackendError;
 use calloop::signals::{Signal, Signals};
 use std::any::Any;
 use std::env;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU32, Ordering as AtomicOrdering},
+};
 use x11rb::connection::Connection;
 use x11rb::connection::RequestConnection;
 use x11rb::protocol::randr::ConnectionExt as RandrExt;
@@ -37,6 +40,9 @@ use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
+use crate::backend::x11::wm::interactive_resize::{
+    interactive_move_origin, interactive_resize_geometry,
+};
 use crate::backend::x11::wm::managed_unmap::{ManagedUnmapTracker, SharedManagedUnmaps};
 use crate::backend::x11::wm::{SUPPORTED_EWMH_FEATURES, primary_refresh};
 
@@ -84,6 +90,8 @@ pub struct X11rbBackend {
     color_allocator: Box<dyn ColorAllocator>,
 
     _init_event_source: Option<X11EventSource>,
+    /// Live overlay identity consumed by the already-registered event source.
+    event_overlay_x11: Arc<AtomicU32>,
 
     interaction: Option<X11Interaction>,
 
@@ -383,9 +391,9 @@ impl X11rbBackend {
         // through the configured GLX/OpenGL or EGL/GLES platform. GLX still requires
         // direct rendering; `compositor_api = "auto"` can probe EGL before GLX.
         // Enabled via config.toml [behavior] compositor = true, or env JWM_COMPOSITOR=1.
-        let compositor_enabled = env::var("JWM_COMPOSITOR")
-            .map(|v| v == "1")
-            .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
+        let compositor_enabled = crate::config::effective_x11_compositor_enabled(
+            crate::config::CONFIG.load().compositor_enabled(),
+        );
 
         // P4: Query primary monitor refresh rate before compositor init
         let refresh = primary_refresh(&OutputOps::enumerate_outputs(output_ops.as_ref()));
@@ -428,12 +436,14 @@ impl X11rbBackend {
             None
         };
 
-        let overlay_x11 = compositor.as_ref().map(|c| c.overlay_window());
+        let event_overlay_x11 = Arc::new(AtomicU32::new(
+            compositor.as_ref().map_or(0, |c| c.overlay_window()),
+        ));
         let event_source = X11EventSource::new(
             conn.clone(),
             atoms.clone(),
             screen.root,
-            overlay_x11,
+            Arc::clone(&event_overlay_x11),
             ids.clone(),
             managed_unmaps.clone(),
         );
@@ -458,6 +468,7 @@ impl X11rbBackend {
             cursor_provider,
             color_allocator,
             _init_event_source: Some(event_source),
+            event_overlay_x11,
             interaction: None,
             compositor,
             compositor_desired: X11CompositorDesiredState::default(),
@@ -901,8 +912,11 @@ impl Backend for X11rbBackend {
                     self.replay_compositor_desired_state(&mut compositor);
                     self.register_existing_windows_with_compositor(&mut compositor);
 
+                    self.event_overlay_x11
+                        .store(compositor.overlay_window(), AtomicOrdering::Release);
                     self.compositor = Some(compositor);
                     self.service_pending_iconify_admissions();
+                    self.compositor_auto_configure_hdr();
                     Ok(true)
                 }
                 Err(e) => {
@@ -916,6 +930,7 @@ impl Backend for X11rbBackend {
             self.prepare_iconify_compositor_disable()?;
             log::info!("Compositor disabled at runtime");
             self.compositor.take(); // Drop triggers cleanup
+            self.event_overlay_x11.store(0, AtomicOrdering::Release);
             Ok(true)
         }
     }
@@ -1223,8 +1238,7 @@ impl Backend for X11rbBackend {
 
             match state.action {
                 InteractionAction::Move => {
-                    let new_x = state.start_geom.x + dx;
-                    let new_y = state.start_geom.y + dy;
+                    let (new_x, new_y) = interactive_move_origin(state.start_geom, dx, dy);
                     if Self::debug_drag_enabled() {
                         log::debug!(
                             "[drag] motion(move) win={:?} start=({},{}) dxdy=({},{}) -> pos=({},{}) keep_size=({}x{})",
@@ -1243,35 +1257,39 @@ impl Backend for X11rbBackend {
                     state.current_y = new_y;
                     self.window_ops.set_position(state.win, new_x, new_y)?;
                 }
-                InteractionAction::Resize(_) => {
-                    let new_w = (state.start_geom.w as i32 + dx).max(1) as u32;
-                    let new_h = (state.start_geom.h as i32 + dy).max(1) as u32;
+                InteractionAction::Resize(edge) => {
+                    let geometry = interactive_resize_geometry(state.start_geom, edge, dx, dy);
 
                     if Self::debug_drag_enabled() {
                         log::debug!(
-                            "[drag] motion(resize) win={:?} start_size=({}x{}) dxdy=({},{}) -> size=({}x{}) pos=({},{}) border={}",
+                            "[drag] motion(resize) win={:?} edge={:?} start=({},{},{}x{}) dxdy=({},{}) -> geometry=({},{},{}x{}) border={}",
                             state.win,
+                            edge,
+                            state.start_geom.x,
+                            state.start_geom.y,
                             state.start_geom.w,
                             state.start_geom.h,
                             dx,
                             dy,
-                            new_w,
-                            new_h,
-                            state.start_geom.x,
-                            state.start_geom.y,
-                            state.start_geom.border
+                            geometry.x,
+                            geometry.y,
+                            geometry.w,
+                            geometry.h,
+                            geometry.border
                         );
                     }
 
-                    state.current_w = new_w;
-                    state.current_h = new_h;
+                    state.current_x = geometry.x;
+                    state.current_y = geometry.y;
+                    state.current_w = geometry.w;
+                    state.current_h = geometry.h;
                     self.window_ops.configure(
                         state.win,
-                        state.start_geom.x,
-                        state.start_geom.y,
-                        new_w,
-                        new_h,
-                        state.start_geom.border,
+                        geometry.x,
+                        geometry.y,
+                        geometry.w,
+                        geometry.h,
+                        geometry.border,
                     )?;
                 }
                 // 追踪模式:窗口不动,Jwm 拿根坐标决定何时升级/如何预览。
@@ -1343,7 +1361,7 @@ impl Backend for X11rbBackend {
                 self.conn.clone(),
                 self.atoms.clone(),
                 self.screen.root,
-                self.compositor.as_ref().map(|c| c.overlay_window()),
+                Arc::clone(&self.event_overlay_x11),
                 self.ids.clone(),
                 self.managed_unmaps.clone(),
             )
@@ -2528,7 +2546,10 @@ mod cursor {
 mod event_source {
     use std::collections::VecDeque;
     use std::os::unix::io::{AsRawFd, BorrowedFd};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
     use x11rb::connection::Connection;
     use x11rb::errors::ConnectionError;
     use x11rb::protocol::{Event as XEvent, xproto};
@@ -2554,6 +2575,10 @@ mod event_source {
     /// or before_sleep's synthetic readiness resumes the remaining queue.
     const X11_EVENT_RAW_POLL_LIMIT: usize = 64;
     const X11_EVENT_DISPATCH_LIMIT: usize = 64;
+
+    fn is_background_event_window(root_x11: u32, overlay: u32, event_window: u32) -> bool {
+        event_window == root_x11 || (overlay != 0 && overlay == event_window)
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum X11RawPoll<T> {
@@ -2593,7 +2618,7 @@ mod event_source {
         conn: Arc<RustConnection>,
         atoms: Atoms,
         root_x11: u32,
-        overlay_x11: Option<u32>,
+        overlay_x11: Arc<AtomicU32>,
         ids: X11IdRegistry,
         managed_unmaps: SharedManagedUnmaps,
         // Events produced beyond the single one returned by map_event (e.g. a
@@ -2609,7 +2634,7 @@ mod event_source {
             conn: Arc<RustConnection>,
             atoms: Atoms,
             root_x11: u32,
-            overlay_x11: Option<u32>,
+            overlay_x11: Arc<AtomicU32>,
             ids: X11IdRegistry,
             managed_unmaps: SharedManagedUnmaps,
         ) -> Self {
@@ -2625,22 +2650,16 @@ mod event_source {
             }
         }
 
-        fn hit_target_from_event_window(&self, event_window: u32) -> HitTarget {
-            if event_window == self.root_x11 || self.overlay_x11 == Some(event_window) {
+        fn hit_target_from_pointer_event(&self, event_window: u32, child: u32) -> HitTarget {
+            let overlay = self.overlay_x11.load(Ordering::Acquire);
+            let event_is_background =
+                is_background_event_window(self.root_x11, overlay, event_window);
+            if event_is_background && child != 0 && (overlay == 0 || overlay != child) {
+                HitTarget::Surface(self.ids.intern(child))
+            } else if event_is_background {
                 HitTarget::Background { output: None }
             } else {
                 HitTarget::Surface(self.ids.intern(event_window))
-            }
-        }
-
-        fn hit_target_from_pointer_event(&self, event_window: u32, child: u32) -> HitTarget {
-            if (event_window == self.root_x11 || self.overlay_x11 == Some(event_window))
-                && child != 0
-                && self.overlay_x11 != Some(child)
-            {
-                HitTarget::Surface(self.ids.intern(child))
-            } else {
-                self.hit_target_from_event_window(event_window)
             }
         }
 
@@ -3146,9 +3165,36 @@ mod event_source {
     #[cfg(test)]
     mod tests {
         use super::{
-            X11_EVENT_RAW_POLL_LIMIT, X11BoundedPoll, X11RawPoll, poll_mapped_event_with_budget,
+            X11_EVENT_RAW_POLL_LIMIT, X11BoundedPoll, X11RawPoll, is_background_event_window,
+            poll_mapped_event_with_budget,
         };
         use std::collections::VecDeque;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[test]
+        fn event_hit_testing_observes_runtime_overlay_replacement() {
+            let overlay = AtomicU32::new(0);
+
+            let current = overlay.load(Ordering::Acquire);
+            assert!(is_background_event_window(0x10, current, 0x10));
+            assert!(!is_background_event_window(0x10, current, 0x20));
+
+            overlay.store(0x20, Ordering::Release);
+            let current = overlay.load(Ordering::Acquire);
+            assert!(is_background_event_window(0x10, current, 0x20));
+            assert!(!is_background_event_window(0x10, current, 0x30));
+
+            // A later compositor generation can receive a different XID; the
+            // registered event source must follow it without re-registration.
+            overlay.store(0x30, Ordering::Release);
+            let current = overlay.load(Ordering::Acquire);
+            assert!(!is_background_event_window(0x10, current, 0x20));
+            assert!(is_background_event_window(0x10, current, 0x30));
+
+            overlay.store(0, Ordering::Release);
+            let current = overlay.load(Ordering::Acquire);
+            assert!(!is_background_event_window(0x10, current, 0x30));
+        }
 
         #[test]
         fn ignored_x11_events_consume_the_raw_fairness_budget() {

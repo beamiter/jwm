@@ -26,6 +26,9 @@ use crate::backend::x11::scheduling;
 use crate::backend::x11::wm::compositor_delegation::X11CompositorDesiredState;
 use crate::backend::x11::wm::event_bridge::{CompositorEventSources, compositor_event_ops};
 use crate::backend::x11::wm::iconify::IconifyCoordinator;
+use crate::backend::x11::wm::interactive_resize::{
+    interactive_move_origin, interactive_resize_geometry,
+};
 use crate::backend::x11::wm::managed_unmap::{
     ManagedUnmapDisposition, ManagedUnmapTracker, SharedManagedUnmaps,
 };
@@ -1202,9 +1205,9 @@ impl XcbBackend {
                 | xcb::randr::NotifyMask::CRTC_CHANGE,
         }));
 
-        let compositor_enabled = env::var("JWM_COMPOSITOR")
-            .map(|v| v == "1")
-            .unwrap_or_else(|_| crate::config::CONFIG.load().compositor_enabled());
+        let compositor_enabled = crate::config::effective_x11_compositor_enabled(
+            crate::config::CONFIG.load().compositor_enabled(),
+        );
 
         let refresh = primary_refresh(&output_ops.enumerate_outputs());
         log::info!(
@@ -2450,8 +2453,8 @@ impl Backend for XcbBackend {
             let dy = (y - state.start_root_y) as i32;
             match state.action {
                 InteractionAction::Move => {
-                    state.current_x = state.start_geom.x + dx;
-                    state.current_y = state.start_geom.y + dy;
+                    (state.current_x, state.current_y) =
+                        interactive_move_origin(state.start_geom, dx, dy);
                     if Self::debug_drag_enabled() {
                         log::debug!(
                             "[drag] motion(move) win={:?} start=({},{}) dxdy=({},{}) -> pos=({},{}) keep_size=({}x{})",
@@ -2469,31 +2472,37 @@ impl Backend for XcbBackend {
                     self.window_ops
                         .set_position(state.win, state.current_x, state.current_y)?;
                 }
-                InteractionAction::Resize(_) => {
-                    state.current_w = (state.start_geom.w as i32 + dx).max(1) as u32;
-                    state.current_h = (state.start_geom.h as i32 + dy).max(1) as u32;
+                InteractionAction::Resize(edge) => {
+                    let geometry = interactive_resize_geometry(state.start_geom, edge, dx, dy);
+                    state.current_x = geometry.x;
+                    state.current_y = geometry.y;
+                    state.current_w = geometry.w;
+                    state.current_h = geometry.h;
                     if Self::debug_drag_enabled() {
                         log::debug!(
-                            "[drag] motion(resize) win={:?} start_size=({}x{}) dxdy=({},{}) -> size=({}x{}) pos=({},{}) border={}",
+                            "[drag] motion(resize) win={:?} edge={:?} start=({},{},{}x{}) dxdy=({},{}) -> geometry=({},{},{}x{}) border={}",
                             state.win,
+                            edge,
+                            state.start_geom.x,
+                            state.start_geom.y,
                             state.start_geom.w,
                             state.start_geom.h,
                             dx,
                             dy,
+                            state.current_x,
+                            state.current_y,
                             state.current_w,
                             state.current_h,
-                            state.start_geom.x,
-                            state.start_geom.y,
-                            state.start_geom.border
+                            geometry.border
                         );
                     }
                     self.window_ops.configure(
                         state.win,
-                        state.start_geom.x,
-                        state.start_geom.y,
+                        state.current_x,
+                        state.current_y,
                         state.current_w,
                         state.current_h,
-                        state.start_geom.border,
+                        geometry.border,
                     )?;
                 }
                 // 追踪模式:窗口不动,Jwm 拿根坐标决定何时升级/如何预览。
@@ -5592,7 +5601,9 @@ mod parity_tests {
 
     const X11RB_BACKEND_SRC: &str = include_str!("../x11rb/backend.rs");
     const X11RB_MOD_SRC: &str = include_str!("../x11rb/mod.rs");
+    const X11RB_ADAPTERS_SRC: &str = include_str!("../x11rb/shared_x11_adapters.rs");
     const XCB_BACKEND_SRC: &str = include_str!("backend.rs");
+    const XCB_COMPOSITOR_PROTOCOL_SRC: &str = include_str!("compositor_protocol.rs");
     const X11_COMPOSITOR_DELEGATION_SRC: &str = include_str!("../x11/wm/compositor_delegation.rs");
     const X11_ICONIFY_SRC: &str = include_str!("../x11/wm/iconify.rs");
     const X11_COMPOSITOR_MOD_SRC: &str = include_str!("../x11/compositor/mod.rs");
@@ -5838,6 +5849,77 @@ mod parity_tests {
                 "{label} must replay Dock/minimized intent, import hidden pixmaps, then service Iconic admission"
             );
         }
+    }
+
+    #[test]
+    fn shared_compositor_teardown_releases_the_overlay_by_root() {
+        let drop_body = impl_body_after(
+            X11_COMPOSITOR_MOD_SRC,
+            "impl<C: CompositorConnection> Drop for Compositor<C>",
+        );
+        assert!(
+            drop_body.contains("self.conn.release_overlay_window(self.root)"),
+            "XCompositeReleaseOverlayWindow takes the root used to acquire the overlay"
+        );
+        assert!(
+            !drop_body.contains("release_overlay_window(self.overlay_window)"),
+            "the returned overlay XID is not a valid release argument"
+        );
+
+        let guard_body = impl_body_after(
+            X11_COMPOSITOR_INIT_SRC,
+            "impl<C: CompositorConnection> Drop for RedirectGuard<C>",
+        );
+        assert!(
+            guard_body.contains("destroy_window_resource(owner)")
+                && guard_body.contains("release_overlay_window(self.root)"),
+            "failed initialization must release both the CM selection owner and overlay reference"
+        );
+    }
+
+    #[test]
+    fn both_x11_transports_destroy_a_partially_claimed_cm_owner() {
+        let x11rb_claim =
+            impl_body_after(X11RB_ADAPTERS_SRC, "fn claim_compositor_selection_owner");
+        assert!(
+            x11rb_claim.contains("destroy_window(sel_win)"),
+            "x11rb must destroy an owner window when selection claim/flush fails"
+        );
+
+        let xcb_claim = impl_body_after(
+            XCB_COMPOSITOR_PROTOCOL_SRC,
+            "pub(crate) fn claim_compositor_selection",
+        );
+        assert!(
+            xcb_claim.contains("DestroyWindow")
+                && xcb_claim.contains("window: owner_window")
+                && xcb_claim.contains("return Err(error)"),
+            "xcb must destroy an owner window when selection claim/flush fails"
+        );
+    }
+
+    #[test]
+    fn x11rb_runtime_enable_publishes_the_new_overlay_and_reconfigures_hdr() {
+        let body = impl_body_after(X11RB_BACKEND_SRC, "fn set_compositor_enabled");
+        let publish = body
+            .find(".store(compositor.overlay_window(), AtomicOrdering::Release)")
+            .expect("x11rb runtime enable must publish its live overlay to the event source");
+        let install = body
+            .find("self.compositor = Some(compositor)")
+            .expect("x11rb runtime enable must install the compositor");
+        let hdr = body
+            .find("self.compositor_auto_configure_hdr()")
+            .expect("x11rb runtime enable must apply the same HDR policy as startup");
+        assert!(
+            publish < install && install < hdr,
+            "publish overlay identity before events can observe the installed runtime compositor"
+        );
+        assert!(
+            X11RB_BACKEND_SRC.contains("overlay_x11: Arc<AtomicU32>")
+                && X11RB_BACKEND_SRC.contains("overlay_x11.load(Ordering::Acquire)")
+                && body.contains("event_overlay_x11.store(0, AtomicOrdering::Release)"),
+            "the long-lived x11rb event source must read overlay identity dynamically"
+        );
     }
 
     #[test]

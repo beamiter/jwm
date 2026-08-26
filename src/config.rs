@@ -3964,6 +3964,21 @@ impl Config {
     }
 }
 
+/// Resolve the process-lifetime X11 compositor override.
+///
+/// Backends have historically treated any present value other than `1` as
+/// disabled. Keep that contract, but centralize it so a later config reload
+/// cannot silently undo the override that selected the startup mode.
+pub(crate) fn x11_compositor_override(value: Option<&std::ffi::OsStr>) -> Option<bool> {
+    value
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|value| value == "1")
+}
+
+pub(crate) fn effective_x11_compositor_enabled(configured: bool) -> bool {
+    x11_compositor_override(std::env::var_os("JWM_COMPOSITOR").as_deref()).unwrap_or(configured)
+}
+
 #[derive(Debug)]
 pub enum ConfigError {
     Io(std::io::Error),
@@ -4050,8 +4065,21 @@ mod tests {
         WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
         configured_terminal_execution_prefix, key_function_is_repeatable,
         migrate_legacy_terminal_argument, parse_terminal_override, resolve_cursor_size,
-        scene_linear_render_path_requested,
+        scene_linear_render_path_requested, x11_compositor_override,
     };
+
+    #[test]
+    fn x11_compositor_environment_override_has_process_lifetime_precedence() {
+        use std::ffi::OsStr;
+
+        assert_eq!(x11_compositor_override(None), None);
+        assert_eq!(x11_compositor_override(Some(OsStr::new("1"))), Some(true));
+        assert_eq!(x11_compositor_override(Some(OsStr::new("0"))), Some(false));
+        assert_eq!(
+            x11_compositor_override(Some(OsStr::new("false"))),
+            Some(false)
+        );
+    }
 
     fn temporary_config_path(label: &str) -> std::path::PathBuf {
         let sequence = CONFIG_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);

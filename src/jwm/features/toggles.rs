@@ -1199,11 +1199,9 @@ impl Jwm {
             return Ok(true);
         }
         if !backend.has_compositor() {
-            match backend.set_compositor_enabled(true) {
+            match self.set_compositor_enabled_reconciled(backend, true) {
                 Ok(true) if backend.has_compositor() => {
                     self.features.system_ui_temporary_compositor = true;
-                    backend.compositor_apply_config();
-                    self.refresh_compositor_monitors(backend);
                     log::info!("Temporarily enabled compositor for {label}");
                 }
                 Ok(_) => {
@@ -1262,16 +1260,16 @@ impl Jwm {
             return;
         }
 
-        if let Err(error) = self.park_hidden_clients_before_compositor_disable(backend) {
+        if let Err(error) = self.prepare_for_compositor_disable(backend) {
             // Keep the lease flag: the compositor is still the temporary one,
             // and a later close/reload can retry the safe hand-back.
             log::warn!(
-                "Could not restore compositor to OFF after {label}; hidden-window parking barrier failed: {error}"
+                "Could not restore compositor to OFF after {label}; disable preparation failed: {error}"
             );
             return;
         }
 
-        match backend.set_compositor_enabled(false) {
+        match self.set_compositor_enabled_reconciled(backend, false) {
             Ok(true) if !backend.has_compositor() => {
                 self.features.system_ui_temporary_compositor = false;
                 log::info!("Restored compositor to OFF after {label}");
@@ -1576,6 +1574,46 @@ impl Jwm {
         Ok(())
     }
 
+    /// Close compositor-owned modal work before the X11 tree becomes native.
+    /// This is shared by manual toggles, config reload and a temporary system
+    /// UI lease so no path can leave invisible grabs or a 60 Hz phantom mode.
+    pub(crate) fn prepare_for_compositor_disable(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Run the checked barrier before mutating user-visible modes. If one
+        // hidden X11 client cannot be parked safely, the compositor stays on
+        // and overview/recording/etc. remain exactly as the user left them.
+        self.park_hidden_clients_before_compositor_disable(backend)?;
+        if self.features.recording.active {
+            self.stop_recording(backend)?;
+        }
+
+        if self.features.overview.active {
+            self.features.overview.deactivate();
+            backend.compositor_set_overview_mode(false, &[]);
+            let _ = backend.key_ops().ungrab_keyboard();
+        }
+        if self.features.expose_active {
+            self.apply_expose_action(backend, expose_plan::ExposeAction::Exit { focus: None })?;
+        }
+        if self.features.annotation_active {
+            self.features.annotation_active = false;
+            self.features.annotation_drawing = false;
+            backend.compositor_set_annotation_mode(false);
+            let _ = backend.key_ops().ungrab_keyboard();
+            let _ = backend.input_ops().ungrab_pointer();
+        }
+        if self.features.screenshot.active {
+            self.features.deferred_grab = None;
+            self.cancel_screenshot_select(backend);
+        }
+        if self.features.recording.selecting_region {
+            self.cancel_recording_region_interaction(backend);
+        }
+        Ok(())
+    }
+
     /// 切换合成器开关
     pub fn togglecompositor(
         &mut self,
@@ -1591,13 +1629,11 @@ impl Jwm {
             log::info!("Compositor disable deferred until the system UI closes");
             return Ok(());
         }
-        if !enable && let Err(error) = self.park_hidden_clients_before_compositor_disable(backend) {
-            log::warn!(
-                "Compositor remains ON; hidden-window parking barrier failed before disable: {error}"
-            );
-            return Ok(());
+        if !enable && let Err(error) = self.prepare_for_compositor_disable(backend) {
+            log::warn!("Compositor remains ON; disable preparation failed: {error}");
+            return Err(error);
         }
-        match backend.set_compositor_enabled(enable) {
+        match self.set_compositor_enabled_reconciled(backend, enable) {
             Ok(true) => {
                 self.features.system_ui_temporary_compositor = false;
                 log::info!(
@@ -1610,6 +1646,7 @@ impl Jwm {
             }
             Err(e) => {
                 log::warn!("Failed to toggle compositor: {e}");
+                return Err(e.into());
             }
         }
         Ok(())
@@ -1636,6 +1673,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.debug_hud_on && !backend.has_compositor() {
+            return Err("debug HUD requires an active compositor".into());
+        }
         self.debug_hud_on = !self.debug_hud_on;
         backend.compositor_set_debug_hud(self.debug_hud_on);
         backend.compositor_set_debug_hud_extended(self.debug_hud_on);
@@ -1729,6 +1769,9 @@ impl Jwm {
             CONFIG.load().behavior().overview_enabled,
         ) {
             return Ok(());
+        }
+        if !self.features.overview.active && !backend.has_compositor() {
+            return Err("overview requires an active compositor".into());
         }
         if self.features.overview.active {
             // End overview: focus selected window and promote it to master
@@ -1878,6 +1921,9 @@ impl Jwm {
         backend: &mut dyn Backend,
         _arg: &WMArgEnum,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.features.magnifier.enabled && !backend.has_compositor() {
+            return Err("magnifier requires an active compositor".into());
+        }
         self.features.magnifier.enabled = !self.features.magnifier.enabled;
         backend.compositor_set_magnifier(self.features.magnifier.enabled);
         Ok(())
@@ -1894,6 +1940,9 @@ impl Jwm {
             CONFIG.load().behavior().peek_enabled,
         ) {
             return Ok(());
+        }
+        if !self.features.peek_active && !backend.has_compositor() {
+            return Err("peek requires an active compositor".into());
         }
         self.features.peek_active = !self.features.peek_active;
         backend.compositor_set_peek_mode(self.features.peek_active);
@@ -2468,6 +2517,9 @@ impl Jwm {
             CONFIG.load().behavior().expose_enabled,
         ) {
             return Ok(());
+        }
+        if !self.features.expose_active && !backend.has_compositor() {
+            return Err("expose requires an active compositor".into());
         }
         // Collect windows visible on their monitor; eligibility filtering and
         // the enter/exit decision live in the pure plan.

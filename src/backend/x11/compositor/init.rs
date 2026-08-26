@@ -56,15 +56,19 @@ impl<C: CompositorConnection> Compositor<C> {
             conn: Arc<C>,
             root: u32,
             overlay: Option<u32>,
+            selection_owner: Option<u32>,
             active: bool,
         }
         impl<C: CompositorConnection> Drop for RedirectGuard<C> {
             fn drop(&mut self) {
                 if self.active {
+                    if let Some(owner) = self.selection_owner {
+                        let _ = self.conn.destroy_window_resource(owner);
+                    }
                     let _ = self.conn.paint_root_solid_black(self.root);
                     let _ = self.conn.unredirect_subwindows_manual(self.root);
-                    if let Some(ow) = self.overlay {
-                        let _ = self.conn.release_overlay_window(ow);
+                    if self.overlay.is_some() {
+                        let _ = self.conn.release_overlay_window(self.root);
                     }
                     let _ = self.conn.flush_x11();
                 }
@@ -74,6 +78,7 @@ impl<C: CompositorConnection> Compositor<C> {
             conn: conn.clone(),
             root,
             overlay: None,
+            selection_owner: None,
             active: true,
         };
 
@@ -101,6 +106,7 @@ impl<C: CompositorConnection> Compositor<C> {
         )?;
         let cm_selection_owner =
             conn.claim_compositor_selection_owner(root, graphics.screen_num())?;
+        guard.selection_owner = Some(cm_selection_owner);
         graphics.make_current()?;
 
         log::info!(

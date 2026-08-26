@@ -1194,7 +1194,7 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
         }
         // Undo the MANUAL redirect so the X server renders windows normally again
         let _ = self.conn.unredirect_subwindows_manual(self.root);
-        let _ = self.conn.release_overlay_window(self.overlay_window);
+        let _ = self.conn.release_overlay_window(self.root);
         let _ = self.conn.flush_x11();
         self.graphics.shutdown();
     }

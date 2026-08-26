@@ -15,6 +15,8 @@ pub mod compositor_delegation;
 pub mod event_bridge;
 /// Generation-fenced state machine for true ICCCM Iconic transitions.
 pub(crate) mod iconify;
+/// Overflow-safe geometry calculation for interactive X11 moves and resizes.
+pub(crate) mod interactive_resize;
 /// Sequence-aware classification of JWM-owned X11 unmap requests.
 pub(crate) mod managed_unmap;
 /// Strict codec for JWM's private minimized-client exec-restart snapshot.

@@ -1429,6 +1429,19 @@ impl Jwm {
                 ColorScheme::new(sel_fg, sel_bg, sel_border),
             );
         }
+        if let (Ok(urgent_fg), Ok(urgent_bg)) = (
+            ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque),
+            ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque),
+        ) {
+            alloc.set_scheme(
+                SchemeType::Urgent,
+                ColorScheme::new(
+                    urgent_fg,
+                    urgent_bg,
+                    ArgbColor::from_rgba_f32(cfg.behavior().attention_color),
+                ),
+            );
+        }
         let _ = alloc.allocate_schemes_pixels();
 
         // 3. Re-arrange all monitors (border/gap changes take effect)
@@ -1440,8 +1453,18 @@ impl Jwm {
         // 4. Update decoration on all visible clients
         let sel_ck = self.get_selected_client_key();
 
-        // 5. Toggle compositor if config changed
-        let compositor_wanted = cfg.compositor_enabled();
+        // 5. Apply settings to an already-running compositor before any mode
+        // transition. A newly-created compositor applies config inside the
+        // reconciled hand-off and then replays runtime state; applying config
+        // again afterwards would overwrite Night Light/HUD/idle-dim state.
+        backend.compositor_apply_config();
+
+        // 6. Toggle compositor if config changed
+        let compositor_wanted = if matches!(self.runtime_backend.as_str(), "x11rb" | "xcb") {
+            crate::config::effective_x11_compositor_enabled(cfg.compositor_enabled())
+        } else {
+            cfg.compositor_enabled()
+        };
         let compositor_active = backend.has_compositor();
         if compositor_wanted {
             // A config change to ON converts any system-UI lease into the
@@ -1457,16 +1480,16 @@ impl Jwm {
             log::info!("Deferring compositor disable until the system UI closes");
         } else if !compositor_wanted
             && compositor_active
-            && let Err(error) = self.park_hidden_clients_before_compositor_disable(backend)
+            && let Err(error) = self.prepare_for_compositor_disable(backend)
         {
             // Config reload is another compositor-loss entry point. Keep the
-            // active renderer and its pinned Iconic snapshots when even one
-            // hidden client's real X11 geometry cannot be made safely parked.
+            // active renderer when a modal cleanup, recording finalization or
+            // hidden-client parking barrier could not complete safely.
             log::warn!(
-                "Compositor remains ON after config reload; hidden-window parking barrier failed: {error}"
+                "Compositor remains ON after config reload; disable preparation failed: {error}"
             );
         } else if compositor_wanted != compositor_active {
-            match backend.set_compositor_enabled(compositor_wanted) {
+            match self.set_compositor_enabled_reconciled(backend, compositor_wanted) {
                 Ok(true) => log::info!(
                     "Compositor {}",
                     if compositor_wanted {
@@ -1480,10 +1503,7 @@ impl Jwm {
             }
         }
 
-        // 6. Hot-reload all compositor settings
-        backend.compositor_apply_config();
-
-        // 6b. Hot-reload the cursor theme/size on backends that install a themed
+        // 7. Hot-reload the cursor theme/size on backends that install a themed
         // pointer (X11RB/XCB). When it changed, re-apply the default arrow to the
         // root window so the new shape/size becomes visible immediately.
         match backend.cursor_provider().reload_theme() {
@@ -1509,12 +1529,12 @@ impl Jwm {
             }
         }
 
-        // 7. A new wallpaper means new accent colours, when the user asked for
+        // 8. A new wallpaper means new accent colours, when the user asked for
         // them. The decode runs on a worker; the frame tick adopts the result.
         self.refresh_wallpaper_theme();
 
-        // 8. Step 6 re-sent the configured brightness, which would undo an
-        // idle dim that is still meant to be in effect.
+        // 9. Config application/recreation may resend configured brightness;
+        // preserve an idle dim that is still meant to be in effect.
         self.reapply_idle_dim(backend);
     }
 }

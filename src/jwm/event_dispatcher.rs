@@ -1048,6 +1048,14 @@ impl WMController for Jwm {
                         );
                         if backend.has_compositor() {
                             backend.compositor_set_window_urgent(win, on);
+                        } else {
+                            let focused = self.get_selected_client_key() == Some(ck);
+                            if let Err(error) = self.update_client_decoration(backend, ck, focused)
+                            {
+                                log::warn!(
+                                    "could not update native urgent border for {win:?}: {error}"
+                                );
+                            }
                         }
                         let monitor_num = monitor
                             .and_then(|key| self.state.monitors.get(key))
@@ -1323,7 +1331,7 @@ mod tests {
     };
     use crate::backend::common_define::Pixel;
     use crate::backend::wayland_dummy_ops::{
-        DummyColorAllocator, DummyCursorProvider, DummyKeyOps, DummyOutputOps,
+        DummyColorAllocator, DummyCursorProvider, DummyOutputOps,
     };
     use crate::core::animation::AnimationManager;
     use crate::core::models::ClientKey;
@@ -1447,8 +1455,10 @@ mod tests {
 
     struct MapRestoreWindowOps {
         geometry: Mutex<Geometry>,
+        decoration_styles: Mutex<Vec<(WindowId, u32, Pixel)>>,
         fail_position: AtomicBool,
         fail_configure: AtomicBool,
+        fail_decoration_once: AtomicBool,
         compositor_disable_trace: Mutex<Vec<&'static str>>,
     }
 
@@ -1462,8 +1472,10 @@ mod tests {
                     h: 480,
                     border: 0,
                 }),
+                decoration_styles: Mutex::new(Vec::new()),
                 fail_position: AtomicBool::new(false),
                 fail_configure: AtomicBool::new(false),
+                fail_decoration_once: AtomicBool::new(false),
                 compositor_disable_trace: Mutex::new(Vec::new()),
             }
         }
@@ -1505,10 +1517,20 @@ mod tests {
 
         fn set_decoration_style(
             &self,
-            _win: WindowId,
-            _border_width: u32,
-            _border_color: Pixel,
+            win: WindowId,
+            border_width: u32,
+            border_color: Pixel,
         ) -> Result<(), BackendError> {
+            self.decoration_styles
+                .lock()
+                .expect("decoration styles lock")
+                .push((win, border_width, border_color));
+            if self
+                .fail_decoration_once
+                .swap(false, AtomicOrdering::Relaxed)
+            {
+                return Err(BackendError::Message("injected decoration failure".into()));
+            }
             Ok(())
         }
 
@@ -1615,19 +1637,63 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct GrabSpyKeyOps {
+        keyboard_grabs: AtomicUsize,
+        keyboard_ungrabs: AtomicUsize,
+    }
+
+    impl KeyOps for GrabSpyKeyOps {
+        fn grab_keys(
+            &self,
+            _root: WindowId,
+            _bindings: &[(Mods, KeySym)],
+        ) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn clear_key_grabs(&self, _root: WindowId) -> Result<(), BackendError> {
+            Ok(())
+        }
+
+        fn grab_keyboard(&self, _root: WindowId) -> Result<(), BackendError> {
+            self.keyboard_grabs.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(())
+        }
+
+        fn ungrab_keyboard(&self) -> Result<(), BackendError> {
+            self.keyboard_ungrabs.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(())
+        }
+
+        fn clean_mods(&self, _raw_state: u16) -> Mods {
+            Mods::empty()
+        }
+
+        fn keysym_from_keycode(&mut self, keycode: u8) -> Result<KeySym, BackendError> {
+            Ok(u32::from(keycode))
+        }
+
+        fn clear_cache(&mut self) {}
+    }
+
     struct RenderSpyBackend {
         window_ops: MapRestoreWindowOps,
         input_ops: GrabSpyInputOps,
         property_ops: MapRestorePropertyOps,
         output_ops: DummyOutputOps,
-        key_ops: DummyKeyOps,
+        key_ops: GrabSpyKeyOps,
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
         rendered_frames: usize,
         compositor_enabled: bool,
         compositor_supported: bool,
         compositor_transitions: Vec<bool>,
+        compositor_config_applies: usize,
+        compositor_monitor_updates: usize,
+        compositor_brightness: Vec<f32>,
         compositor_urgency: Vec<(WindowId, bool)>,
+        compositor_pip_updates: Vec<(WindowId, bool)>,
         compositor_minimized_updates: Vec<(WindowId, bool)>,
         compositor_static_ensures: Vec<WindowId>,
         compositor_forgotten_visuals: Vec<WindowId>,
@@ -1645,14 +1711,18 @@ mod tests {
                 input_ops: GrabSpyInputOps::default(),
                 property_ops: MapRestorePropertyOps::new(),
                 output_ops: DummyOutputOps,
-                key_ops: DummyKeyOps,
+                key_ops: GrabSpyKeyOps::default(),
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 rendered_frames: 0,
                 compositor_enabled: true,
                 compositor_supported: true,
                 compositor_transitions: Vec::new(),
+                compositor_config_applies: 0,
+                compositor_monitor_updates: 0,
+                compositor_brightness: Vec::new(),
                 compositor_urgency: Vec::new(),
+                compositor_pip_updates: Vec::new(),
                 compositor_minimized_updates: Vec::new(),
                 compositor_static_ensures: Vec::new(),
                 compositor_forgotten_visuals: Vec::new(),
@@ -1667,9 +1737,21 @@ mod tests {
 
     impl CompositorBenchmark for RenderSpyBackend {}
     impl BackendDiagnostics for RenderSpyBackend {}
-    impl CompositorControl for RenderSpyBackend {}
+    impl CompositorControl for RenderSpyBackend {
+        fn compositor_apply_config(&mut self) {
+            self.compositor_config_applies += 1;
+        }
+
+        fn compositor_set_brightness(&mut self, brightness: f32) {
+            self.compositor_brightness.push(brightness);
+        }
+    }
     impl CompositorMedia for RenderSpyBackend {}
     impl CompositorWorkspaceEffects for RenderSpyBackend {
+        fn compositor_set_monitors(&mut self, _monitors: &[(u32, i32, i32, u32, u32, u32)]) {
+            self.compositor_monitor_updates += 1;
+        }
+
         fn compositor_set_system_ui_hover(&mut self, row: Option<usize>) {
             self.system_ui_hover_updates.push(row);
         }
@@ -1681,6 +1763,10 @@ mod tests {
     impl CompositorWindowEffects for RenderSpyBackend {
         fn compositor_set_window_urgent(&mut self, window: WindowId, urgent: bool) {
             self.compositor_urgency.push((window, urgent));
+        }
+
+        fn compositor_set_window_pip(&mut self, window: WindowId, pip: bool) {
+            self.compositor_pip_updates.push((window, pip));
         }
 
         fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
@@ -1872,6 +1958,23 @@ mod tests {
             last_ping_time: None,
             last_user_activity_time: 0,
         }
+    }
+
+    fn jwm_with_transition_client() -> (Jwm, ClientKey, WindowId) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let window = WindowId::from_raw(0xc011_005e);
+        let mut client = WMClient::new(window);
+        client.geometry.x = 300;
+        client.geometry.y = 200;
+        client.geometry.w = 900;
+        client.geometry.h = 600;
+        client.geometry.border_w = 6;
+        client.state.is_urgent = true;
+        client.state.is_pip = true;
+        let client_key = jwm.insert_client(client);
+        (jwm, client_key, window)
     }
 
     #[test]
@@ -2219,10 +2322,44 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(error.contains("could not start it"));
+        assert!(error.contains("could not start compositor"));
         assert!(!jwm.features.system_ui.is_active());
         assert!(!jwm.features.system_ui_temporary_compositor);
         assert!(!backend.compositor_enabled);
+    }
+
+    #[test]
+    fn failed_direct_compositor_enable_is_reported_to_the_caller() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend.compositor_supported = false;
+
+        let error = jwm
+            .togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect_err("the IPC action must not acknowledge a failed renderer start");
+
+        assert!(error.to_string().contains("without reaching enabled state"));
+        assert!(!backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [true]);
+    }
+
+    #[test]
+    fn compositor_only_visual_modes_cannot_enter_in_native_mode() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+
+        assert!(
+            jwm.toggle_debug_hud(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        assert!(
+            jwm.toggle_magnifier(&mut backend, &WMArgEnum::Int(0))
+                .is_err()
+        );
+        assert!(!jwm.debug_hud_on);
+        assert!(!jwm.features.magnifier.enabled);
     }
 
     #[test]
@@ -2239,6 +2376,229 @@ mod tests {
         jwm.close_system_ui(&mut backend);
         assert!(!backend.compositor_enabled);
         assert_eq!(backend.compositor_transitions, [false]);
+    }
+
+    #[test]
+    fn x11_compositor_transition_swaps_native_borders_and_replays_window_state() {
+        let (mut jwm, _client, window) = jwm_with_transition_client();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(!backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [false]);
+        assert_eq!(
+            *backend
+                .window_ops
+                .decoration_styles
+                .lock()
+                .expect("decoration styles lock"),
+            [(window, 6, Pixel(0))]
+        );
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(backend.compositor_enabled);
+        assert_eq!(backend.compositor_transitions, [false, true]);
+        assert_eq!(
+            *backend
+                .window_ops
+                .decoration_styles
+                .lock()
+                .expect("decoration styles lock"),
+            [(window, 6, Pixel(0)), (window, 0, Pixel(0))]
+        );
+        assert_eq!(backend.compositor_urgency, [(window, true)]);
+        assert_eq!(backend.compositor_pip_updates, [(window, true)]);
+        assert_eq!(backend.compositor_config_applies, 1);
+        assert_eq!(backend.compositor_monitor_updates, 1);
+    }
+
+    #[test]
+    fn x11_compositor_transition_hands_animation_geometry_to_native_and_back() {
+        use crate::core::animation::{AnimationKind, ClientAnimation, Easing};
+        use crate::core::types::Rect;
+
+        let (mut jwm, client, window) = jwm_with_transition_client();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        let from = Rect::new(20, 40, 300, 240);
+        let target = Rect::new(300, 200, 900, 600);
+        jwm.animations.active.insert(
+            client,
+            ClientAnimation {
+                from,
+                to: target,
+                started_at: std::time::Instant::now() - std::time::Duration::from_secs(30),
+                duration: std::time::Duration::from_secs(120),
+                easing: Easing::Linear,
+                kind: AnimationKind::Layout,
+            },
+        );
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        let native = backend.window_ops.get_geometry(window).unwrap();
+        assert!(native.x > from.x && native.x < target.x);
+        assert!(native.y > from.y && native.y < target.y);
+        assert!(native.w > from.w as u32 && native.w < target.w as u32);
+        assert!(native.h > from.h as u32 && native.h < target.h as u32);
+        assert_eq!(native.border, 6);
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        let composited = backend.window_ops.get_geometry(window).unwrap();
+        assert_eq!(composited.x, target.x);
+        assert_eq!(composited.y, target.y);
+        assert_eq!(composited.w, target.w as u32);
+        assert_eq!(composited.h, target.h as u32);
+        assert_eq!(composited.border, 0);
+    }
+
+    #[test]
+    fn failed_native_presentation_staging_attempts_every_client_and_rolls_back() {
+        use crate::core::models::WMClient;
+
+        let (mut jwm, _first, first_window) = jwm_with_transition_client();
+        let second_window = WindowId::from_raw(0xc011_005f);
+        let mut second = WMClient::new(second_window);
+        second.geometry.border_w = 4;
+        jwm.insert_client(second);
+
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        backend
+            .window_ops
+            .fail_decoration_once
+            .store(true, AtomicOrdering::Relaxed);
+
+        let error = jwm
+            .togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect_err("partial native staging must abort and report the transition");
+
+        assert!(error.to_string().contains("decoration failure"));
+        assert!(backend.compositor_enabled);
+        assert!(backend.compositor_transitions.is_empty());
+        let attempts = backend
+            .window_ops
+            .decoration_styles
+            .lock()
+            .expect("decoration styles lock");
+        for (window, native_border) in [(first_window, 6), (second_window, 4)] {
+            assert!(attempts.contains(&(window, native_border, Pixel(0))));
+            assert!(
+                attempts.contains(&(window, 0, Pixel(0))),
+                "rollback must restore the composited border for {window:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compositor_enable_reconciles_later_clients_after_one_window_error() {
+        use crate::core::models::WMClient;
+
+        let (mut jwm, _first, first_window) = jwm_with_transition_client();
+        let second_window = WindowId::from_raw(0xc011_0060);
+        let mut second = WMClient::new(second_window);
+        second.geometry.border_w = 4;
+        jwm.insert_client(second);
+
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        backend.x11_client_list = true;
+        backend
+            .window_ops
+            .fail_decoration_once
+            .store(true, AtomicOrdering::Relaxed);
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect("one disappearing/broken client must not strand later windows");
+
+        assert!(backend.compositor_enabled);
+        let attempts = backend
+            .window_ops
+            .decoration_styles
+            .lock()
+            .expect("decoration styles lock");
+        assert!(attempts.contains(&(first_window, 0, Pixel(0))));
+        assert!(attempts.contains(&(second_window, 0, Pixel(0))));
+    }
+
+    #[test]
+    fn compositor_enable_reapplies_an_existing_idle_dim() {
+        let mut jwm = empty_jwm();
+        let settings = crate::jwm::features::idle::IdleSettings::from_secs(1, 0.25, 0, 0, false);
+        let actions = jwm
+            .idle
+            .poll(&settings, std::time::Duration::from_secs(2), false, false);
+        assert!(
+            actions
+                .iter()
+                .any(|action| matches!(action, crate::jwm::features::idle::IdleAction::Dim(_)))
+        );
+
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(backend.compositor_enabled);
+        assert_eq!(backend.compositor_brightness.len(), 1);
+        assert!(backend.compositor_brightness[0] < 1.0);
+    }
+
+    #[test]
+    fn compositor_disable_closes_overview_and_expose_and_releases_their_grabs() {
+        let mut jwm = empty_jwm();
+        let mut backend = RenderSpyBackend::new();
+        let root = backend.root_window().expect("test backend root");
+
+        jwm.features.overview.active = true;
+        backend.key_ops.grab_keyboard(root).unwrap();
+        jwm.apply_expose_action(
+            &mut backend,
+            crate::jwm::features::ExposeAction::Enter {
+                windows: vec![(WindowId::from_raw(0xe001), 10, 10, 640, 480)],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            backend.key_ops.keyboard_grabs.load(AtomicOrdering::Relaxed),
+            2
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_grabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        assert!(!jwm.features.overview.active);
+        assert!(!jwm.features.expose_active);
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            2
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            1
+        );
+        assert!(!backend.compositor_enabled);
     }
 
     #[test]
@@ -2272,11 +2632,13 @@ mod tests {
             .fail_configure
             .store(true, AtomicOrdering::Relaxed);
 
-        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
-            .unwrap();
+        let error = jwm
+            .togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect_err("a failed parking barrier must be visible to IPC callers");
 
         assert!(backend.compositor_enabled);
         assert!(backend.compositor_transitions.is_empty());
+        assert!(error.to_string().contains("parking failure"));
         assert_eq!(
             *backend
                 .window_ops
@@ -2284,6 +2646,46 @@ mod tests {
                 .lock()
                 .expect("compositor disable trace lock"),
             ["park"]
+        );
+    }
+
+    #[test]
+    fn failed_parking_barrier_preserves_active_compositor_modes() {
+        let (mut jwm, _target, _target_window) = jwm_with_hidden_activation_target();
+        let mut backend = RenderSpyBackend::new();
+        backend.x11_client_list = true;
+        jwm.features.overview.active = true;
+        jwm.apply_expose_action(
+            &mut backend,
+            crate::jwm::features::ExposeAction::Enter {
+                windows: vec![(WindowId::from_raw(0xe002), 20, 20, 500, 400)],
+            },
+        )
+        .unwrap();
+        backend
+            .window_ops
+            .fail_configure
+            .store(true, AtomicOrdering::Relaxed);
+
+        jwm.togglecompositor(&mut backend, &WMArgEnum::Int(0))
+            .expect_err("parking failure must keep the compositor and its modes intact");
+
+        assert!(backend.compositor_enabled);
+        assert!(jwm.features.overview.active);
+        assert!(jwm.features.expose_active);
+        assert_eq!(
+            backend
+                .key_ops
+                .keyboard_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
+        );
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::Relaxed),
+            0
         );
     }
 
@@ -3232,6 +3634,26 @@ mod tests {
 
         assert!(!jwm.features.system_ui.is_active());
         assert_eq!(&current_layout(&jwm), start.cycle_next());
+    }
+
+    #[test]
+    fn native_layout_picker_leases_and_restores_the_compositor() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        backend.compositor_enabled = false;
+        let start = current_layout(&jwm);
+
+        jwm.cyclelayout(&mut backend, &WMArgEnum::Int(1)).unwrap();
+
+        assert!(jwm.features.system_ui.is_layout_picker());
+        assert!(jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true]);
+        assert_eq!(&current_layout(&jwm), start.cycle_next());
+
+        jwm.confirm_layout_picker(&mut backend);
+        assert!(!backend.compositor_enabled);
+        assert!(!jwm.features.system_ui_temporary_compositor);
+        assert_eq!(backend.compositor_transitions, [true, false]);
     }
 
     #[test]

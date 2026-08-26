@@ -993,8 +993,11 @@ impl Jwm {
             s_h,
             backend.root_window()
         );
+        let config = crate::config::CONFIG.load();
+        let colors = config.colors().clone();
+        let attention_color = config.behavior().attention_color;
+        drop(config);
         let alloc = backend.color_allocator();
-        let colors = crate::config::CONFIG.load().colors().clone();
         alloc.set_scheme(
             SchemeType::Norm,
             ColorScheme::new(
@@ -1009,6 +1012,14 @@ impl Jwm {
                 ArgbColor::from_hex(&colors.dark_sea_green2, colors.opaque)?,
                 ArgbColor::from_hex(&colors.pale_turquoise1, colors.opaque)?,
                 ArgbColor::from_hex(&colors.cyan, colors.opaque)?,
+            ),
+        );
+        alloc.set_scheme(
+            SchemeType::Urgent,
+            ColorScheme::new(
+                ArgbColor::from_hex(&colors.dark_sea_green1, colors.opaque)?,
+                ArgbColor::from_hex(&colors.light_sky_blue1, colors.opaque)?,
+                ArgbColor::from_rgba_f32(attention_color),
             ),
         );
         backend.color_allocator().allocate_schemes_pixels()?;

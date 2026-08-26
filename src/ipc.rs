@@ -400,6 +400,12 @@ pub struct RuntimeStatusV1 {
     pub health: RuntimeHealth,
     pub counts: RuntimeCounts,
     pub config: Value,
+    /// Actual renderer state, independent of whether metrics are available.
+    pub compositor_active: bool,
+    /// Effective configured target (including the X11 environment override).
+    pub compositor_configured: bool,
+    /// True while native mode has leased the compositor for a shell panel.
+    pub compositor_temporary: bool,
     pub features: RuntimeFeatureStates,
     pub compositor_metrics: Option<Value>,
 }
@@ -1266,6 +1272,9 @@ mod tests {
                 workspaces: 9,
             },
             config: serde_json::json!({"exists": true}),
+            compositor_active: false,
+            compositor_configured: false,
+            compositor_temporary: false,
             features: RuntimeFeatureStates {
                 do_not_disturb: false,
                 screenshot: false,
@@ -1286,6 +1295,9 @@ mod tests {
         assert_eq!(json["backend"], "wayland-winit");
         assert_eq!(json["health"]["status"], "healthy");
         assert_eq!(json["counts"]["windows"], 3);
+        assert_eq!(json["compositor_active"], false);
+        assert_eq!(json["compositor_configured"], false);
+        assert_eq!(json["compositor_temporary"], false);
         assert_eq!(json["features"]["overview"], true);
         assert!(json["compositor_metrics"].is_null());
     }

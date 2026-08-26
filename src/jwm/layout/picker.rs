@@ -44,13 +44,10 @@ impl Jwm {
     }
 
     /// Whether the film-strip picker should stand in for a silent cycle.
-    fn layout_picker_enabled(&self, backend: &dyn Backend) -> bool {
+    fn layout_picker_enabled(&self, _backend: &dyn Backend) -> bool {
         CONFIG.load().behavior().layout_picker
             && !self.features.system_ui.is_active()
             && self.state.sel_mon.is_some()
-            // A panel nobody can see is worse than no panel: without a
-            // compositor the cycle has to stay silent.
-            && backend.has_compositor()
     }
 
     /// Route a plain layout cycle through the picker when it is available.

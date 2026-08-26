@@ -199,7 +199,8 @@ impl<'a> XcbCompositorProtocol<'a> {
             .map_err(|e| {
                 BackendError::Message(format!("create CM selection owner window failed: {e}"))
             })?;
-        self.conn
+        let claim = self
+            .conn
             .send_and_check_request(&x::SetSelectionOwner {
                 owner: owner_window,
                 selection: selection_atom,
@@ -207,10 +208,19 @@ impl<'a> XcbCompositorProtocol<'a> {
             })
             .map_err(|e| {
                 BackendError::Message(format!("set compositor selection owner failed: {e}"))
-            })?;
-        self.conn.flush().map_err(|e| {
-            BackendError::Message(format!("xcb flush after selection owner failed: {e}"))
-        })?;
+            })
+            .and_then(|()| {
+                self.conn.flush().map_err(|e| {
+                    BackendError::Message(format!("xcb flush after selection owner failed: {e}"))
+                })
+            });
+        if let Err(error) = claim {
+            let _ = self.conn.send_and_check_request(&x::DestroyWindow {
+                window: owner_window,
+            });
+            let _ = self.conn.flush();
+            return Err(error);
+        }
         Ok(owner_window)
     }
 
@@ -364,8 +374,8 @@ impl X11CompositeRedirectOps for XcbCompositorProtocol<'_> {
             .map_err(|e| e.to_string())
     }
 
-    fn release_overlay_window(&self, overlay_window: u32) -> Result<(), String> {
-        XcbCompositorProtocol::release_overlay_window(self, x::Window::new(overlay_window))
+    fn release_overlay_window(&self, root: u32) -> Result<(), String> {
+        XcbCompositorProtocol::release_overlay_window(self, x::Window::new(root))
             .map_err(|e| e.to_string())
     }
 }
@@ -783,11 +793,10 @@ impl X11CompositeRedirectOps for XcbSharedCompositorConnection {
         )
     }
 
-    fn release_overlay_window(&self, overlay_window: u32) -> Result<(), String> {
+    fn release_overlay_window(&self, root: u32) -> Result<(), String> {
         let protocol = self.protocol();
         <XcbCompositorProtocol<'_> as X11CompositeRedirectOps>::release_overlay_window(
-            &protocol,
-            overlay_window,
+            &protocol, root,
         )
     }
 }
