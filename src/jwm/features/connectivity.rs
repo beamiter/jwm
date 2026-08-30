@@ -624,6 +624,24 @@ pub struct BluetoothDevice {
     pub paired: bool,
 }
 
+/// A remembered-device list should be tiny. These bounds keep malformed or
+/// unexpected bluetoothctl output from turning one picker refresh into an
+/// arbitrary number of `bluetoothctl info` child processes.
+const MAX_BLUETOOTH_DEVICES: usize = 64;
+const MAX_BLUETOOTH_DEVICE_LINES: usize = 1024;
+const MAX_BLUETOOTH_DEVICE_NAME_CHARS: usize = 248;
+
+fn is_bluetooth_address(address: &str) -> bool {
+    let mut count = 0;
+    for octet in address.split(':') {
+        if octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        count += 1;
+    }
+    count == 6
+}
+
 /// Parse `bluetoothctl devices`: one `Device <address> <name>` line each.
 ///
 /// Names may contain spaces, so only the first two fields are split off. A
@@ -631,22 +649,31 @@ pub struct BluetoothDevice {
 /// is — it is still the only handle the user has.
 #[must_use]
 pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
-    let mut devices = Vec::new();
-    for line in output.lines() {
+    let mut devices: Vec<BluetoothDevice> = Vec::new();
+    for line in output.lines().take(MAX_BLUETOOTH_DEVICE_LINES) {
+        if devices.len() >= MAX_BLUETOOTH_DEVICES {
+            break;
+        }
         let mut parts = line.trim().splitn(3, ' ');
         if parts.next() != Some("Device") {
             continue;
         }
-        let Some(address) = parts.next().filter(|address| address.contains(':')) else {
+        let Some(address) = parts.next().filter(|address| is_bluetooth_address(address)) else {
             continue;
         };
+        if devices
+            .iter()
+            .any(|device| device.address.eq_ignore_ascii_case(address))
+        {
+            continue;
+        }
         let name = parts.next().unwrap_or(address).trim();
         devices.push(BluetoothDevice {
             address: address.to_string(),
             name: if name.is_empty() {
                 address.to_string()
             } else {
-                name.to_string()
+                name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect()
             },
             connected: false,
             paired: false,
@@ -1319,6 +1346,40 @@ mod tests {
         let output = "Agent registered\nDevice AA:BB:CC:DD:EE:FF Speaker\n[bluetooth]# \n";
         assert_eq!(parse_devices(output).len(), 1);
         assert!(parse_devices("").is_empty());
+    }
+
+    #[test]
+    fn device_list_bounds_the_follow_up_info_fanout() {
+        let output = (0..=MAX_BLUETOOTH_DEVICES)
+            .map(|index| {
+                format!(
+                    "Device 00:00:00:00:{:02X}:{:02X} Device {index}\n",
+                    index / 256,
+                    index % 256
+                )
+            })
+            .collect::<String>();
+        assert_eq!(parse_devices(&output).len(), MAX_BLUETOOTH_DEVICES);
+
+        let chatter = "not a device\n".repeat(MAX_BLUETOOTH_DEVICE_LINES);
+        let after_budget = format!("{chatter}Device AA:BB:CC:DD:EE:FF Too Late\n");
+        assert!(parse_devices(&after_budget).is_empty());
+    }
+
+    #[test]
+    fn device_list_validates_deduplicates_and_bounds_names() {
+        let long_name = "x".repeat(MAX_BLUETOOTH_DEVICE_NAME_CHARS + 20);
+        let output = format!(
+            "Device AA:BB:CC:DD:EE:FF {long_name}\n\
+             Device aa:bb:cc:dd:ee:ff duplicate\n\
+             Device not-an-address invalid\n"
+        );
+        let devices = parse_devices(&output);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(
+            devices[0].name.chars().count(),
+            MAX_BLUETOOTH_DEVICE_NAME_CHARS
+        );
     }
 
     #[test]
