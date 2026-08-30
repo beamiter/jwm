@@ -631,6 +631,13 @@ fn handle_x_event(
     Ok(())
 }
 
+fn destroys_window(event: &xcb::Event, window: x::Window) -> bool {
+    matches!(
+        event,
+        xcb::Event::X(x::Event::DestroyNotify(event)) if event.window() == window
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn drain_x_events(
     gl_state: &GlState,
@@ -638,13 +645,16 @@ fn drain_x_events(
     current_width: &mut u16,
     current_height: &mut u16,
     bar: &mut CairoBar,
-) -> Result<()> {
+) -> Result<bool> {
     loop {
         match window.conn.poll_for_event() {
             Ok(Some(event)) => {
-                handle_x_event(event, gl_state, window, current_width, current_height, bar)?
+                if destroys_window(&event, window.win) {
+                    return Ok(false);
+                }
+                handle_x_event(event, gl_state, window, current_width, current_height, bar)?;
             }
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(true),
             Err(error) => return Err(error.into()),
         }
     }
@@ -827,7 +837,7 @@ fn main() -> Result<()> {
     sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
 
     let mut ready_tokens = Vec::new();
-    loop {
+    'event_loop: loop {
         ready_tokens.clear();
         let now = Instant::now();
         let dock_timeout = bar
@@ -855,13 +865,17 @@ fn main() -> Result<()> {
         }
         for token in &ready_tokens {
             match *token {
-                X_TOKEN => drain_x_events(
-                    &gl_state,
-                    &window,
-                    &mut current_width,
-                    &mut current_height,
-                    &mut bar,
-                )?,
+                X_TOKEN => {
+                    if !drain_x_events(
+                        &gl_state,
+                        &window,
+                        &mut current_width,
+                        &mut current_height,
+                        &mut bar,
+                    )? {
+                        break 'event_loop;
+                    }
+                }
                 TIMER_TOKEN => {
                     if timer.drain()? > 0 {
                         let mut update = bar.tick();
@@ -901,5 +915,26 @@ fn main() -> Result<()> {
                 token => debug!("unexpected epoll token: {token}"),
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::destroys_window;
+    use xcb::{XidNew as _, x};
+
+    #[test]
+    fn only_the_bar_windows_destroy_event_stops_the_loop() {
+        let target = x::Window::new(42);
+        let other = x::Window::new(7);
+        let destroyed = |event, window| {
+            xcb::Event::X(x::Event::DestroyNotify(x::DestroyNotifyEvent::new(
+                event, window,
+            )))
+        };
+
+        assert!(destroys_window(&destroyed(other, target), target));
+        assert!(!destroys_window(&destroyed(target, other), target));
     }
 }

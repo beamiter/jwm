@@ -245,6 +245,13 @@ fn route_pointer_input(
     Ok(pointer_redraw || runtime_redraw)
 }
 
+fn destroys_window(event: &xcb::Event, window: x::Window) -> bool {
+    matches!(
+        event,
+        xcb::Event::X(x::Event::DestroyNotify(event)) if event.window() == window
+    )
+}
+
 fn redraw(
     gpu: &mut WgpuPresenter,
     canvas: &mut CpuCanvas,
@@ -459,7 +466,7 @@ fn main() -> Result<()> {
     sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
 
     let mut ready_tokens = Vec::new();
-    loop {
+    'event_loop: loop {
         ready_tokens.clear();
         let now = Instant::now();
         let dock_timeout = bar
@@ -490,6 +497,9 @@ fn main() -> Result<()> {
                     let Some(x_event) = conn.poll_for_event()? else {
                         break;
                     };
+                    if destroys_window(&x_event, win) {
+                        break 'event_loop;
+                    }
                     let should_redraw = match x_event {
                         xcb::Event::X(x::Event::Expose(event)) => event.count() == 0,
                         xcb::Event::X(x::Event::ConfigureNotify(event))
@@ -594,5 +604,26 @@ fn main() -> Result<()> {
                 token => log::debug!("unexpected epoll token: {token}"),
             }
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::destroys_window;
+    use xcb::{XidNew as _, x};
+
+    #[test]
+    fn only_the_bar_windows_destroy_event_stops_the_loop() {
+        let target = x::Window::new(42);
+        let other = x::Window::new(7);
+        let destroyed = |event, window| {
+            xcb::Event::X(x::Event::DestroyNotify(x::DestroyNotifyEvent::new(
+                event, window,
+            )))
+        };
+
+        assert!(destroys_window(&destroyed(other, target), target));
+        assert!(!destroys_window(&destroyed(target, other), target));
     }
 }
