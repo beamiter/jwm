@@ -15,6 +15,9 @@ use crate::{DirtyBits, ThemeMode};
 /// The command protocol currently uses a 32-bit tag mask.
 pub const MAX_MODEL_TAGS: usize = u32::BITS as usize;
 
+/// Longest accepted chrono format retained and cloned by the clock adapter.
+pub const MAX_MODEL_CLOCK_FORMAT_BYTES: usize = 1_024;
+
 /// Maximum number of per-CPU samples retained in a model snapshot.
 ///
 /// This matches Linux's architectural CPU ceiling while keeping an untrusted
@@ -386,6 +389,15 @@ pub struct ClockState {
     pub minute: String,
     /// Preformatted text with seconds, supplied by the clock adapter.
     pub second: String,
+}
+
+impl ClockState {
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.minute = bounded_model_string(self.minute, MAX_MODEL_DISPLAY_TEXT_BYTES);
+        self.second = bounded_model_string(self.second, MAX_MODEL_DISPLAY_TEXT_BYTES);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -859,6 +871,17 @@ impl ModelConfig {
                 value: self.brightness_step,
             });
         }
+        for (field, format) in [
+            ("clock_minute_format", &self.clock_minute_format),
+            ("clock_second_format", &self.clock_second_format),
+        ] {
+            if format.len() > MAX_MODEL_CLOCK_FORMAT_BYTES {
+                return Err(ModelError::ClockFormatTooLong {
+                    field,
+                    length: format.len(),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -867,6 +890,7 @@ impl ModelConfig {
 pub enum ModelError {
     InvalidTagCount(usize),
     InvalidPercentageStep { field: &'static str, value: u8 },
+    ClockFormatTooLong { field: &'static str, length: usize },
     TagOutOfRange { index: usize, tag_count: usize },
     StaleWmSession { requested: u64, current: u64 },
     StaleMinimizedGeneration { requested: u64, current: u64 },
@@ -883,6 +907,10 @@ impl fmt::Display for ModelError {
             Self::InvalidPercentageStep { field, value } => {
                 write!(f, "{field} must be between 1 and 100, got {value}")
             }
+            Self::ClockFormatTooLong { field, length } => write!(
+                f,
+                "{field} must be at most {MAX_MODEL_CLOCK_FORMAT_BYTES} bytes, got {length}"
+            ),
             Self::TagOutOfRange { index, tag_count } => {
                 write!(
                     f,
@@ -1408,8 +1436,12 @@ impl Default for BarModel {
 }
 
 impl BarModel {
-    pub fn new(config: ModelConfig) -> Result<Self, ModelError> {
+    pub fn new(mut config: ModelConfig) -> Result<Self, ModelError> {
         config.validate()?;
+        config.clock_minute_format =
+            bounded_model_string(config.clock_minute_format, MAX_MODEL_CLOCK_FORMAT_BYTES);
+        config.clock_second_format =
+            bounded_model_string(config.clock_second_format, MAX_MODEL_CLOCK_FORMAT_BYTES);
         Ok(Self {
             wm_available: false,
             wm_sequence: None,
@@ -1688,6 +1720,7 @@ impl BarModel {
     }
 
     fn update_clock(&mut self, clock: ClockState) -> ModelUpdate {
+        let clock = clock.normalized();
         let old_display = if self.show_seconds {
             &self.clock.second
         } else {
@@ -2160,6 +2193,25 @@ mod tests {
                 value: 0
             })
         ));
+        assert!(matches!(
+            BarModel::new(ModelConfig {
+                clock_minute_format: "x".repeat(MAX_MODEL_CLOCK_FORMAT_BYTES + 1),
+                ..ModelConfig::default()
+            }),
+            Err(ModelError::ClockFormatTooLong {
+                field: "clock_minute_format",
+                length
+            }) if length == MAX_MODEL_CLOCK_FORMAT_BYTES + 1
+        ));
+
+        let mut compact_format = String::with_capacity(1_000_000);
+        compact_format.push_str("%H:%M");
+        let model = BarModel::new(ModelConfig {
+            clock_minute_format: compact_format,
+            ..ModelConfig::default()
+        })
+        .unwrap();
+        assert!(model.config().clock_minute_format.capacity() <= MAX_MODEL_CLOCK_FORMAT_BYTES);
     }
 
     #[test]
@@ -2874,6 +2926,32 @@ mod tests {
             .update(BarEvent::User(UserAction::ToggleSeconds))
             .unwrap();
         assert_eq!(model.view().time, "12:34:56");
+    }
+
+    #[test]
+    fn clock_events_bound_text_and_release_oversized_capacity() {
+        let mut model = BarModel::default();
+        let unicode = "€".repeat(MAX_MODEL_DISPLAY_TEXT_BYTES / 3 + 10);
+        let mut short_with_large_capacity = String::with_capacity(1_000_000);
+        short_with_large_capacity.push_str("12:34:56");
+
+        let first = model
+            .update(BarEvent::Clock(ClockState {
+                minute: unicode.clone(),
+                second: short_with_large_capacity,
+            }))
+            .unwrap();
+        let second = model
+            .update(BarEvent::Clock(ClockState {
+                minute: unicode,
+                second: "12:34:56".into(),
+            }))
+            .unwrap();
+
+        assert!(first.dirty.contains(DirtyBits::TIME_CHANGED));
+        assert!(second.dirty.is_empty());
+        assert_eq!(model.view().time.len(), MAX_MODEL_DISPLAY_TEXT_BYTES - 1);
+        assert!(model.clock.second.capacity() <= MAX_MODEL_DISPLAY_TEXT_BYTES);
     }
 
     #[test]
