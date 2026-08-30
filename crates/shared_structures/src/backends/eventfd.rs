@@ -452,6 +452,46 @@ impl EventFdBackend {
         Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
     }
 
+    /// Validate the exact descriptor contract assumed by wait/signal paths.
+    /// In particular, `consume_one_eventfd` relies on EFD_SEMAPHORE so one
+    /// waiter cannot drain notifications reserved for other waiters.
+    fn validate_received_eventfd(fd: &OwnedFd) -> Result<()> {
+        let status_flags = fcntl(fd, FcntlArg::F_GETFL).map_err(Error::other)?;
+        if status_flags & libc::O_NONBLOCK == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "received eventfd is not non-blocking",
+            ));
+        }
+        let descriptor_flags = fcntl(fd, FcntlArg::F_GETFD).map_err(Error::other)?;
+        if descriptor_flags & libc::FD_CLOEXEC == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "received eventfd is not close-on-exec",
+            ));
+        }
+
+        let fdinfo_path = Path::new("/proc/self/fdinfo").join(fd.as_raw_fd().to_string());
+        let fdinfo = std::fs::read_to_string(&fdinfo_path).map_err(|error| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("failed to inspect received eventfd: {error}"),
+            )
+        })?;
+        let uses_semaphore_mode = fdinfo.lines().any(|line| {
+            line.split_once(':').is_some_and(|(key, value)| {
+                key.trim() == "eventfd-semaphore" && value.trim() == "1"
+            })
+        });
+        if !uses_semaphore_mode {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "received descriptor is not an EFD_SEMAPHORE eventfd",
+            ));
+        }
+        Ok(())
+    }
+
     fn spawn_listener_thread(
         sock_path: PathBuf,
         msg_fd: OwnedFd,
@@ -677,6 +717,10 @@ impl EventFdBackend {
                     received_fds.len()
                 ),
             ));
+        }
+
+        for fd in &received_fds {
+            Self::validate_received_eventfd(fd)?;
         }
 
         let mut received_fds = received_fds.into_iter();
@@ -1204,6 +1248,44 @@ mod tests {
         let command_fd = EventFdBackend::create_eventfd_owned().unwrap();
         let raw_fds = [message_fd.as_raw_fd(), command_fd.as_raw_fd()];
         let iov = [IoSlice::new(&[0x00])];
+        let cmsg = [ControlMessage::ScmRights(&raw_fds)];
+
+        let written = sendmsg::<UnixAddr>(
+            sender.as_raw_fd(),
+            &iov,
+            &cmsg,
+            MsgFlags::MSG_NOSIGNAL,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let error = EventFdBackend::try_receive_fds(receiver.as_raw_fd()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn fd_pass_rejects_eventfds_without_semaphore_mode() {
+        let (sender, receiver) = nix::sys::socket::socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        let create_plain_eventfd = || {
+            let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+            assert!(
+                fd >= 0,
+                "eventfd creation failed: {}",
+                Error::last_os_error()
+            );
+            unsafe { OwnedFd::from_raw_fd(fd) }
+        };
+        let message_fd = create_plain_eventfd();
+        let command_fd = create_plain_eventfd();
+        let raw_fds = [message_fd.as_raw_fd(), command_fd.as_raw_fd()];
+        let iov = [IoSlice::new(&[FD_PASS_MARKER])];
         let cmsg = [ControlMessage::ScmRights(&raw_fds)];
 
         let written = sendmsg::<UnixAddr>(
