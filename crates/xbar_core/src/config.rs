@@ -21,6 +21,11 @@ pub const DEFAULT_FONT: &str = "monospace 11";
 /// Configuration is hand-written and should never need an allocation large
 /// enough to disrupt every bar frontend during startup.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_FONT_BYTES: usize = 1024;
+const MAX_ICON_FONT_BYTES: usize = 255;
+const MAX_TAG_LABEL_BYTES: usize = 256;
+const MAX_WALLPAPER_PATH_BYTES: usize = 4 * 1024;
+const MAX_WALLPAPER_MODE_BYTES: usize = 32;
 
 /// Resolved bar configuration ready for a frontend.
 #[derive(Debug, Clone, PartialEq)]
@@ -298,11 +303,13 @@ impl BarConfig {
         if let Ok(font) = std::env::var("XBAR_FONT")
             && !font.is_empty()
         {
+            validate_text_bytes("XBAR_FONT", &font, MAX_FONT_BYTES)?;
             config.font = font;
         }
         if let Ok(icon_font) = std::env::var("XBAR_ICON_FONT")
             && !icon_font.trim().is_empty()
         {
+            validate_text_bytes("XBAR_ICON_FONT", &icon_font, MAX_ICON_FONT_BYTES)?;
             config.presentation.icon_font = Some(icon_font);
         }
         Ok(config)
@@ -339,6 +346,7 @@ impl BarConfig {
                     reason: "font must not be empty",
                 });
             }
+            validate_text_bytes("font", &font, MAX_FONT_BYTES)?;
             config.font = font;
         }
         if let Some(theme) = file.theme {
@@ -451,15 +459,29 @@ impl BarConfig {
             presentation.left_fraction = fraction;
         }
         if let Some(mut labels) = file.presentation.tag_labels {
-            if labels.is_empty() || labels.iter().any(|label| label.trim().is_empty()) {
+            if labels.is_empty() {
                 return Err(ConfigError::InvalidValue {
                     field: "presentation.tag_labels",
                     reason: "labels must be a non-empty list of non-empty strings",
                 });
             }
             // TagId is a u32 bit position, so labels after the model's final
-            // representable tag can never be projected by any frontend.
+            // representable tag can never be projected by any frontend. Drop
+            // them before validation so unreachable junk cannot reject an
+            // otherwise valid configuration.
             labels.truncate(MAX_MODEL_TAGS);
+            if labels.iter().any(|label| label.trim().is_empty()) {
+                return Err(ConfigError::InvalidValue {
+                    field: "presentation.tag_labels",
+                    reason: "labels must be a non-empty list of non-empty strings",
+                });
+            }
+            if let Some(label) = labels
+                .iter()
+                .find(|label| label.len() > MAX_TAG_LABEL_BYTES)
+            {
+                validate_text_bytes("presentation.tag_labels", label, MAX_TAG_LABEL_BYTES)?;
+            }
             presentation.tag_labels = labels;
         }
         if let Some(icon_font) = file.presentation.icon_font {
@@ -469,6 +491,7 @@ impl BarConfig {
                     reason: "icon_font must name a font family",
                 });
             }
+            validate_text_bytes("presentation.icon_font", &icon_font, MAX_ICON_FONT_BYTES)?;
             presentation.icon_font = Some(icon_font);
         }
 
@@ -527,19 +550,23 @@ fn glass_from_file(file: FileGlass) -> Result<GlassConfig, ConfigError> {
                 reason: "path must not be empty",
             });
         }
-        Some(path) => Some(PathBuf::from(path)),
+        Some(path) => {
+            validate_text_bytes("glass.wallpaper", &path, MAX_WALLPAPER_PATH_BYTES)?;
+            Some(PathBuf::from(path))
+        }
         None => None,
     };
-    if let Some(mode) = &file.wallpaper_mode
-        && !matches!(
+    if let Some(mode) = &file.wallpaper_mode {
+        validate_text_bytes("glass.wallpaper_mode", mode, MAX_WALLPAPER_MODE_BYTES)?;
+        if !matches!(
             mode.trim().to_ascii_lowercase().as_str(),
             "fill" | "fit" | "stretch" | "center"
-        )
-    {
-        return Err(ConfigError::InvalidValue {
-            field: "glass.wallpaper_mode",
-            reason: "must be one of fill, fit, stretch, center",
-        });
+        ) {
+            return Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper_mode",
+                reason: "must be one of fill, fit, stretch, center",
+            });
+        }
     }
     if file.downscale == Some(0) {
         return Err(ConfigError::InvalidValue {
@@ -565,6 +592,20 @@ fn glass_from_file(file: FileGlass) -> Result<GlassConfig, ConfigError> {
         saturation: file.saturation,
         pad: file.pad,
     })
+}
+
+fn validate_text_bytes(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), ConfigError> {
+    if value.len() > max_bytes {
+        return Err(ConfigError::InvalidValue {
+            field,
+            reason: "text exceeds the per-field byte limit",
+        });
+    }
+    Ok(())
 }
 
 fn apply_positive(
@@ -673,6 +714,16 @@ tag_labels = ["a", "b", "c"]
             config.presentation.tag_labels.last().map(String::as_str),
             Some(last.as_str())
         );
+
+        let mut labels = vec!["\"ok\"".to_owned(); MAX_MODEL_TAGS];
+        let unreachable = "x".repeat(MAX_TAG_LABEL_BYTES + 1);
+        labels.push(format!("{unreachable:?}"));
+        let config = BarConfig::from_toml(&format!(
+            "[presentation]\ntag_labels = [{}]",
+            labels.join(",")
+        ))
+        .unwrap();
+        assert_eq!(config.presentation.tag_labels.len(), MAX_MODEL_TAGS);
     }
 
     #[test]
@@ -719,6 +770,51 @@ tag_labels = ["a", "b", "c"]
         assert!(matches!(
             BarConfig::from_toml("theme = \"solarized\""),
             Err(ConfigError::Parse { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_text_fields_are_rejected_before_retention() {
+        let font = "f".repeat(MAX_FONT_BYTES + 1);
+        assert!(matches!(
+            BarConfig::from_toml(&format!("font = {font:?}")),
+            Err(ConfigError::InvalidValue { field: "font", .. })
+        ));
+
+        let tag = "t".repeat(MAX_TAG_LABEL_BYTES + 1);
+        assert!(matches!(
+            BarConfig::from_toml(&format!("[presentation]\ntag_labels = [{tag:?}]")),
+            Err(ConfigError::InvalidValue {
+                field: "presentation.tag_labels",
+                ..
+            })
+        ));
+
+        let icon_font = "i".repeat(MAX_ICON_FONT_BYTES + 1);
+        assert!(matches!(
+            BarConfig::from_toml(&format!("[presentation]\nicon_font = {icon_font:?}")),
+            Err(ConfigError::InvalidValue {
+                field: "presentation.icon_font",
+                ..
+            })
+        ));
+
+        let wallpaper = "w".repeat(MAX_WALLPAPER_PATH_BYTES + 1);
+        assert!(matches!(
+            BarConfig::from_toml(&format!("[glass]\nwallpaper = {wallpaper:?}")),
+            Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper",
+                ..
+            })
+        ));
+
+        let mode = "m".repeat(MAX_WALLPAPER_MODE_BYTES + 1);
+        assert!(matches!(
+            BarConfig::from_toml(&format!("[glass]\nwallpaper_mode = {mode:?}")),
+            Err(ConfigError::InvalidValue {
+                field: "glass.wallpaper_mode",
+                ..
+            })
         ));
     }
 
