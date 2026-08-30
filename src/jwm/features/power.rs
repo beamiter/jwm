@@ -11,6 +11,7 @@
 //! percentage rather than a timer, so a laptop that hovers at 19% is warned
 //! once instead of every poll.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -239,6 +240,50 @@ static PROFILE_TOOL: OnceLock<Option<ProfileTool>> = OnceLock::new();
 
 const PLATFORM_PROFILE: &str = "/sys/firmware/acpi/platform_profile";
 const PLATFORM_PROFILE_CHOICES: &str = "/sys/firmware/acpi/platform_profile_choices";
+const MAX_PROFILE_FILE_BYTES: u64 = 4 * 1024;
+const MAX_PROFILE_SOURCE_ITEMS: usize = 64;
+const MAX_PROFILES: usize = 16;
+const MAX_PROFILE_NAME_BYTES: usize = 64;
+
+fn profile_name(value: &str) -> Option<&str> {
+    let name = value.trim();
+    (!name.is_empty()
+        && name.len() <= MAX_PROFILE_NAME_BYTES
+        && !name
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control()))
+    .then_some(name)
+}
+
+fn read_profile_text(path: impl AsRef<Path>) -> Option<String> {
+    read_profile_text_bounded(path, MAX_PROFILE_FILE_BYTES)
+}
+
+fn read_profile_text_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Option<String> {
+    let mut bytes = Vec::with_capacity(256);
+    std::fs::File::open(path)
+        .ok()?
+        .take(max_bytes.checked_add(1)?)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > usize::try_from(max_bytes).ok()? {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn parse_profile_choices(output: &str) -> Vec<String> {
+    let mut profiles: Vec<String> = Vec::new();
+    for value in output.split_whitespace().take(MAX_PROFILE_SOURCE_ITEMS) {
+        let Some(name) = profile_name(value) else {
+            continue;
+        };
+        if !profiles.iter().any(|profile| profile == name) && profiles.len() < MAX_PROFILES {
+            profiles.push(name.to_string());
+        }
+    }
+    profiles
+}
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let output = super::external_command::output(cmd, args).ok()?;
@@ -252,25 +297,28 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
 /// active one is marked with `*`.
 #[must_use]
 pub fn parse_profile_list(output: &str) -> (Vec<String>, Option<String>) {
-    let mut profiles = Vec::new();
+    let mut profiles: Vec<String> = Vec::new();
     let mut active = None;
-    for line in output.lines() {
+    for line in output.lines().take(MAX_PROFILE_SOURCE_ITEMS) {
         let trimmed = line.trim_start();
         let (marked, rest) = match trimmed.strip_prefix("* ") {
             Some(rest) => (true, rest),
             None => (false, trimmed),
         };
-        let Some(name) = rest.strip_suffix(':') else {
+        let Some(name) = rest.strip_suffix(':').and_then(profile_name) else {
             // Indented driver/degraded detail lines.
             continue;
         };
-        if name.is_empty() || name.contains(char::is_whitespace) {
+        let exists = profiles.iter().any(|profile| profile == name);
+        if !exists && profiles.len() >= MAX_PROFILES {
             continue;
+        }
+        if !exists {
+            profiles.push(name.to_string());
         }
         if marked {
             active = Some(name.to_string());
         }
-        profiles.push(name.to_string());
     }
     (profiles, active)
 }
@@ -299,22 +347,26 @@ pub fn profiles() -> Option<(Vec<String>, String)> {
                 return None;
             }
             let active = active
-                .or_else(|| run("powerprofilesctl", &["get"]).map(|value| value.trim().to_string()))
+                .or_else(|| {
+                    run("powerprofilesctl", &["get"])
+                        .as_deref()
+                        .and_then(profile_name)
+                        .map(str::to_string)
+                })
+                .filter(|name| profiles.contains(name))
                 .unwrap_or_else(|| profiles[0].clone());
             Some((profiles, active))
         }
         ProfileTool::PlatformProfile => {
-            let choices: Vec<String> = std::fs::read_to_string(PLATFORM_PROFILE_CHOICES)
-                .ok()?
-                .split_whitespace()
-                .map(str::to_string)
-                .collect();
+            let choices = parse_profile_choices(&read_profile_text(PLATFORM_PROFILE_CHOICES)?);
             if choices.is_empty() {
                 return None;
             }
-            let active = std::fs::read_to_string(PLATFORM_PROFILE)
-                .ok()
-                .map_or_else(|| choices[0].clone(), |value| value.trim().to_string());
+            let active = read_profile_text(PLATFORM_PROFILE)
+                .as_deref()
+                .and_then(profile_name)
+                .filter(|name| choices.iter().any(|choice| choice == *name))
+                .map_or_else(|| choices[0].clone(), str::to_string);
             Some((choices, active))
         }
     }
@@ -324,6 +376,9 @@ pub fn profiles() -> Option<(Vec<String>, String)> {
 /// leave the row showing what is really in effect.
 #[must_use]
 pub fn set_profile(name: &str) -> bool {
+    let Some(name) = profile_name(name) else {
+        return false;
+    };
     match tool() {
         Some(ProfileTool::PowerProfilesCtl) => run("powerprofilesctl", &["set", name]).is_some(),
         Some(ProfileTool::PlatformProfile) => std::fs::write(PLATFORM_PROFILE, name).is_ok(),
@@ -683,6 +738,70 @@ mod tests {
         let (profiles, active) = parse_profile_list("");
         assert!(profiles.is_empty());
         assert!(active.is_none());
+    }
+
+    #[test]
+    fn profile_sources_bound_items_names_and_duplicates() {
+        let mut output = (0..MAX_PROFILES + 4)
+            .map(|index| format!("  profile-{index:02}:\n"))
+            .collect::<String>();
+        output.push_str("* profile-00:\n");
+        output.push_str("  profile-00:\n");
+        output.push_str(&format!("  {}:\n", "x".repeat(MAX_PROFILE_NAME_BYTES + 1)));
+        output.push_str("  two words:\n");
+        let (profiles, active) = parse_profile_list(&output);
+
+        assert_eq!(profiles.len(), MAX_PROFILES);
+        assert_eq!(active.as_deref(), Some("profile-00"));
+        assert_eq!(
+            profiles.iter().filter(|name| *name == "profile-00").count(),
+            1
+        );
+
+        let choices = (0..MAX_PROFILES + 4)
+            .flat_map(|index| [format!("profile-{index:02}"), "profile-00".to_string()])
+            .collect::<Vec<_>>()
+            .join(" ");
+        let choices = parse_profile_choices(&choices);
+        assert_eq!(choices.len(), MAX_PROFILES);
+        assert_eq!(
+            choices.iter().filter(|name| *name == "profile-00").count(),
+            1
+        );
+
+        let chatter = "not a profile\n".repeat(MAX_PROFILE_SOURCE_ITEMS);
+        assert!(
+            parse_profile_list(&format!("{chatter}  too-late:\n"))
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn profile_files_and_write_names_have_hard_bounds() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-profile-bound-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary directory");
+        let exact = root.join("exact");
+        std::fs::write(&exact, b"balanced").expect("write exact profile file");
+        assert_eq!(
+            read_profile_text_bounded(&exact, 8).as_deref(),
+            Some("balanced")
+        );
+        let oversized = root.join("oversized");
+        std::fs::write(&oversized, b"balanced!").expect("write oversized profile file");
+        assert!(read_profile_text_bounded(&oversized, 8).is_none());
+        std::fs::remove_dir_all(root).expect("remove temporary directory");
+
+        assert!(profile_name("balanced").is_some());
+        assert!(profile_name("two words").is_none());
+        assert!(profile_name("bad\0name").is_none());
+        let long = "x".repeat(MAX_PROFILE_NAME_BYTES + 1);
+        assert!(profile_name(&long).is_none());
+        assert!(!set_profile(&long), "invalid names must not reach a helper");
     }
 
     #[test]
