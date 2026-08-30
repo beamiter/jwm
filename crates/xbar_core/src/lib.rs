@@ -74,11 +74,12 @@ pub use frontend::{
 };
 pub use model::{
     AudioDeviceInfo, AudioState, BarEffect, BarEvent, BarModel, BarSnapshot, BarView, BatteryState,
-    BrightnessState, ClockState, DockItemGeometry, LayoutId, MAX_MODEL_MINIMIZED_WINDOWS,
-    MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE, MINIMIZED_WINDOW_FLAG_URGENT, MediaPlayback,
-    MediaState, MinimizedWindow, ModelConfig, ModelError, ModelUpdate, MonitorGeometry, MonitorId,
-    NetworkState, Percent, PercentError, ShellRoute, SystemDetails, SystemLoadAverage, SystemState,
-    TagId, TagState, UserAction, WindowToken, WmCommand, WmSnapshot,
+    BrightnessState, ClockState, DockItemGeometry, LayoutId, MAX_MODEL_CPU_SAMPLES,
+    MAX_MODEL_MINIMIZED_WINDOWS, MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE,
+    MINIMIZED_WINDOW_FLAG_URGENT, MediaPlayback, MediaState, MinimizedWindow, ModelConfig,
+    ModelError, ModelUpdate, MonitorGeometry, MonitorId, NetworkState, Percent, PercentError,
+    ShellRoute, SystemDetails, SystemLoadAverage, SystemState, TagId, TagState, UserAction,
+    WindowToken, WmCommand, WmSnapshot,
 };
 pub use placement::{
     BarPlacement, DockProperty, DockPropertyValue, DockWindowSpec, EwmhStrut, LayerShellAnchors,

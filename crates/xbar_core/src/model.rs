@@ -15,6 +15,13 @@ use crate::{DirtyBits, ThemeMode};
 /// The command protocol currently uses a 32-bit tag mask.
 pub const MAX_MODEL_TAGS: usize = u32::BITS as usize;
 
+/// Maximum number of per-CPU samples retained in a model snapshot.
+///
+/// This matches Linux's architectural CPU ceiling while keeping an untrusted
+/// provider from making every cloned snapshot retain an arbitrarily large
+/// allocation.
+pub const MAX_MODEL_CPU_SAMPLES: usize = 8_192;
+
 /// A finite percentage in the inclusive `0..=100` range.
 ///
 /// Values are stored as basis points (one hundredth of a percent).  This keeps
@@ -493,6 +500,46 @@ pub struct SystemDetails {
     pub memory_usage_percent: f32,
     pub uptime: u64,
     pub load_average: SystemLoadAverage,
+}
+
+impl SystemDetails {
+    /// Return telemetry with finite, bounded values suitable for long-lived
+    /// model snapshots and deterministic change detection.
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.cpu_usage = self
+            .cpu_usage
+            .into_iter()
+            .take(MAX_MODEL_CPU_SAMPLES)
+            .map(normalized_percent)
+            .collect();
+        self.cpu_average = normalized_percent(self.cpu_average);
+        self.memory_used = self.memory_used.min(self.memory_total);
+        self.memory_available = self.memory_available.min(self.memory_total);
+        self.memory_usage_percent = normalized_percent(self.memory_usage_percent);
+        self.load_average = SystemLoadAverage {
+            one_minute: normalized_load(self.load_average.one_minute),
+            five_minutes: normalized_load(self.load_average.five_minutes),
+            fifteen_minutes: normalized_load(self.load_average.fifteen_minutes),
+        };
+        self
+    }
+}
+
+fn normalized_percent(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn normalized_load(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1631,6 +1678,7 @@ impl BarModel {
     }
 
     fn replace_system_details(&mut self, details: SystemDetails) -> ModelUpdate {
+        let details = details.normalized();
         let changed = self.system_details != details;
         self.system_details = details;
         Self::changed(DirtyBits::SYSTEM_CHANGED, changed)
@@ -2605,6 +2653,43 @@ mod tests {
             .update(BarEvent::SystemDetails(SystemDetails::default()))
             .unwrap();
         assert_eq!(snapshot.system_details.memory_used, 7_000);
+    }
+
+    #[test]
+    fn system_details_are_bounded_and_stable_after_normalization() {
+        let mut model = BarModel::default();
+        let mut cpu_usage = vec![50.0; MAX_MODEL_CPU_SAMPLES + 2];
+        cpu_usage[..3].copy_from_slice(&[f32::NAN, -5.0, 150.0]);
+        let details = SystemDetails {
+            cpu_usage,
+            cpu_average: f32::INFINITY,
+            memory_total: 100,
+            memory_used: 101,
+            memory_available: 102,
+            memory_usage_percent: f32::NAN,
+            uptime: 123,
+            load_average: SystemLoadAverage {
+                one_minute: -1.0,
+                five_minutes: f64::NAN,
+                fifteen_minutes: f64::INFINITY,
+            },
+        };
+
+        let first = model
+            .update(BarEvent::SystemDetails(details.clone()))
+            .unwrap();
+        let second = model.update(BarEvent::SystemDetails(details)).unwrap();
+        let normalized = model.view().system_details;
+
+        assert!(first.dirty.contains(DirtyBits::SYSTEM_CHANGED));
+        assert!(second.dirty.is_empty());
+        assert_eq!(normalized.cpu_usage.len(), MAX_MODEL_CPU_SAMPLES);
+        assert_eq!(&normalized.cpu_usage[..3], &[0.0, 0.0, 100.0]);
+        assert_eq!(normalized.cpu_average, 0.0);
+        assert_eq!(normalized.memory_used, 100);
+        assert_eq!(normalized.memory_available, 100);
+        assert_eq!(normalized.memory_usage_percent, 0.0);
+        assert_eq!(normalized.load_average, SystemLoadAverage::default());
     }
 
     #[test]
