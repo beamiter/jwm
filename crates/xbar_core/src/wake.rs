@@ -353,6 +353,12 @@ impl CoalescedNotifierForwarder {
     pub fn is_finished(&self) -> bool {
         self.worker.as_ref().is_none_or(JoinHandle::is_finished)
     }
+
+    /// Whether both workers can still uphold this forwarder's wake promise.
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        self.status() == WakeWorkerStatus::Running && self.notifier.is_healthy()
+    }
 }
 
 impl Drop for CoalescedNotifierForwarder {
@@ -384,10 +390,11 @@ impl TransportWakeChange {
 /// Reconnect-aware owner for a coalesced transport wake forwarder.
 ///
 /// Frontends call [`Self::sync`] after servicing [`crate::BarRuntime`] and no
-/// longer need to track transport generations themselves. A replacement is
-/// fully constructed before the previous forwarder is dropped. Consequently,
-/// eventfd or thread creation failure leaves the old forwarder and generation
-/// unchanged, and the next call retries the same runtime generation.
+/// longer need to track transport generations or worker health themselves. A
+/// replacement is fully constructed before the previous forwarder is dropped.
+/// Consequently, eventfd or thread creation failure leaves the old forwarder
+/// and generation unchanged, and the next call retries the same runtime
+/// generation.
 #[derive(Debug)]
 pub struct TransportWakeSlot {
     generation: u64,
@@ -452,8 +459,12 @@ impl TransportWakeSlot {
     {
         let generation = runtime.transport_generation();
         let transport = runtime.transport();
-        let state_matches =
-            generation == self.generation && transport.is_some() == self.forwarder.is_some();
+        let forwarder_matches_transport = match (transport, self.forwarder.as_ref()) {
+            (Some(_), Some(forwarder)) => forwarder.is_healthy(),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        let state_matches = generation == self.generation && forwarder_matches_transport;
         if state_matches {
             return Ok(TransportWakeChange::Unchanged);
         }
@@ -739,6 +750,35 @@ mod tests {
         );
         assert_eq!(slot.generation(), replacement_generation);
         assert!(slot.forwarder().is_some());
+
+        drop(slot);
+        drop(runtime);
+        owner.destroy().unwrap();
+    }
+
+    #[test]
+    fn transport_wake_slot_replaces_an_unhealthy_forwarder_in_the_same_generation() {
+        let (path, owner) = test_ring("transport-slot-health");
+        let transport = crate::SharedTransport::open(&path).unwrap();
+        let runtime =
+            crate::BarRuntime::with_transport(crate::ModelConfig::default(), Some(transport))
+                .unwrap();
+        let mut slot = TransportWakeSlot::new(true);
+
+        let generation = runtime.transport_generation();
+        assert_eq!(
+            slot.sync(&runtime, |_ack| true).unwrap(),
+            TransportWakeChange::Replaced { generation }
+        );
+        assert!(slot.forwarder().unwrap().is_healthy());
+        slot.forwarder().unwrap().request_shutdown();
+        assert!(!slot.forwarder().unwrap().is_healthy());
+
+        assert_eq!(
+            slot.sync(&runtime, |_ack| true).unwrap(),
+            TransportWakeChange::Replaced { generation }
+        );
+        assert!(slot.forwarder().unwrap().is_healthy());
 
         drop(slot);
         drop(runtime);
