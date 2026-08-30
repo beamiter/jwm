@@ -3,7 +3,7 @@
 use std::io::{self, Read};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::process::CommandExt as _;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,46 @@ pub(super) fn output_with_input(
     let mut command = Command::new(cmd);
     command.args(args);
     command_output_bounded_with_stdio(&mut command, stdin, false, timeout, stderr_limit)
+}
+
+/// Run a helper whose output is irrelevant, with a hard wall-time limit.
+pub(super) fn status_with_timeout(
+    cmd: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> io::Result<ExitStatus> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A synchronous helper may not leave a background process
+                // running after its direct child has reported completion.
+                kill_process_group(child.id());
+                return Ok(status);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                terminate_child_group(&mut child);
+                return Err(error);
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            terminate_child_group(&mut child);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("helper exceeded {timeout:?}"),
+            ));
+        }
+        thread::sleep(HELPER_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)));
+    }
 }
 
 fn command_output_bounded(
@@ -289,6 +329,18 @@ mod tests {
         }
         let _ = unsafe { libc::kill(descendant as i32, libc::SIGKILL) };
         panic!("helper descendant {descendant} survived its process group");
+    }
+
+    #[test]
+    fn status_helper_preserves_exit_status_and_enforces_timeout() {
+        let status = status_with_timeout("sh", &["-c", "exit 7"], Duration::from_secs(1)).unwrap();
+        assert_eq!(status.code(), Some(7));
+
+        let started = Instant::now();
+        let error = status_with_timeout("sh", &["-c", "exec sleep 10"], Duration::from_millis(25))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     fn process_can_run(pid: u32) -> bool {

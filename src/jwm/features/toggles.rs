@@ -16,6 +16,9 @@ use crate::jwm::types::WMArgEnum;
 use log::{error, info, warn};
 use std::process::Command;
 
+const RECORDING_PROBE_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const RECORDING_CONCAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
     // Config flags gate entry only. An already-active mode must always retain
     // its exit path so it can release input grabs and compositor state.
@@ -72,6 +75,35 @@ fn should_start_control_snapshot(
 
 const fn control_snapshot_epoch_matches(spawn_epoch: u64, current_epoch: u64) -> bool {
     spawn_epoch == current_epoch
+}
+
+fn finalize_concat_segments(
+    list_path: &std::path::Path,
+    list_content: &str,
+    output_path: &str,
+    segments: &[String],
+    run_concat: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    std::fs::write(list_path, list_content)
+        .map_err(|error| format!("cannot write concat list {}: {error}", list_path.display()))?;
+    let result = run_concat(list_path);
+    if let Err(error) = std::fs::remove_file(list_path) {
+        warn!(
+            "[recording] could not remove concat list {}: {error}",
+            list_path.display()
+        );
+    }
+    result?;
+
+    for segment in segments {
+        if std::path::Path::new(segment) == std::path::Path::new(output_path) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(segment) {
+            warn!("[recording] could not remove merged segment {segment}: {error}");
+        }
+    }
+    Ok(())
 }
 
 impl Jwm {
@@ -2433,7 +2465,9 @@ impl Jwm {
         use crate::jwm::features::recording_plan::{FinalizationPlan, plan_finalization};
 
         let plan = plan_finalization(&segments, &output_path);
-        std::thread::spawn(move || {
+        let worker = std::thread::Builder::new()
+            .name("jwm-record-final".to_owned())
+            .spawn(move || {
             match plan {
                 FinalizationPlan::Nothing => return,
                 FinalizationPlan::ValidateSingle { segment, move_to } => {
@@ -2452,8 +2486,10 @@ impl Jwm {
                     let mut ready = false;
                     let mut attempt = 0_u32;
                     while !ready && std::time::Instant::now() < deadline {
-                        ready = std::process::Command::new("ffprobe")
-                            .args([
+                        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                        ready = crate::jwm::features::external_command::status_with_timeout(
+                            "ffprobe",
+                            &[
                                 "-v",
                                 "error",
                                 "-show_entries",
@@ -2461,15 +2497,17 @@ impl Jwm {
                                 "-of",
                                 "default=nw=1",
                                 &segment,
-                            ])
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status()
+                            ],
+                            remaining.min(RECORDING_PROBE_ATTEMPT_TIMEOUT),
+                        )
                             .is_ok_and(|status| status.success());
                         if !ready {
                             let backoff = if attempt < 20 { 50 } else { 500 };
-                            std::thread::sleep(std::time::Duration::from_millis(backoff));
+                            std::thread::sleep(
+                                deadline
+                                    .saturating_duration_since(std::time::Instant::now())
+                                    .min(std::time::Duration::from_millis(backoff)),
+                            );
                             attempt += 1;
                         }
                     }
@@ -2482,11 +2520,20 @@ impl Jwm {
                     }
                     // New recordings are encoded directly at output_path. Keep the
                     // move for old callers that may still pass a separate segment.
-                    if let Some(target) = move_to
-                        && std::fs::rename(&segment, &target).is_err()
-                        && std::fs::copy(&segment, &target).is_ok()
-                    {
-                        let _ = std::fs::remove_file(&segment);
+                    if let Some(target) = move_to {
+                        if let Err(rename_error) = std::fs::rename(&segment, &target) {
+                            if let Err(copy_error) = std::fs::copy(&segment, &target) {
+                                log::error!(
+                                    "[recording] could not move finalized segment {segment} to {target}: rename failed ({rename_error}); copy failed ({copy_error})"
+                                );
+                                return;
+                            }
+                            if let Err(error) = std::fs::remove_file(&segment) {
+                                log::warn!(
+                                    "[recording] copied {segment} to {target} but could not remove the source: {error}"
+                                );
+                            }
+                        }
                     }
                 }
                 FinalizationPlan::ConcatSegments {
@@ -2494,25 +2541,53 @@ impl Jwm {
                     list_content,
                     output_path: concat_output,
                 } => {
-                    // Multiple segments: concat with ffmpeg -c copy
-                    if std::fs::write(&list_path, &list_content).is_ok() {
-                        let _ = std::process::Command::new("ffmpeg")
-                            .args(["-f", "concat", "-safe", "0", "-i"])
-                            .arg(&list_path)
-                            .args(["-c", "copy", "-y", &concat_output])
-                            .stdin(std::process::Stdio::null())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
-                        let _ = std::fs::remove_file(&list_path);
-                    }
-                    for seg in &segments {
-                        let _ = std::fs::remove_file(seg);
+                    let finalized = finalize_concat_segments(
+                        &list_path,
+                        &list_content,
+                        &concat_output,
+                        &segments,
+                        |list_path| {
+                            let list_path = list_path.to_str().ok_or_else(|| {
+                                "concat list path is not valid UTF-8".to_owned()
+                            })?;
+                            let status = crate::jwm::features::external_command::status_with_timeout(
+                                "ffmpeg",
+                                &[
+                                    "-f",
+                                    "concat",
+                                    "-safe",
+                                    "0",
+                                    "-i",
+                                    list_path,
+                                    "-c",
+                                    "copy",
+                                    "-y",
+                                    &concat_output,
+                                ],
+                                RECORDING_CONCAT_TIMEOUT,
+                            )
+                            .map_err(|error| format!("ffmpeg concat failed: {error}"))?;
+                            if status.success() {
+                                Ok(())
+                            } else {
+                                Err(format!("ffmpeg concat exited with {status}"))
+                            }
+                        },
+                    );
+                    if let Err(error) = finalized {
+                        log::error!(
+                            "[recording] {error}; preserving {} source segments",
+                            segments.len()
+                        );
+                        return;
                     }
                 }
             }
             log::info!("[recording] finalized → {output_path}");
         });
+        if let Err(error) = worker {
+            log::error!("[recording] could not start finalization worker: {error}");
+        }
     }
 
     /// 切换 Expose / Mission Control 模式（显示所有窗口缩略图）
@@ -2855,6 +2930,84 @@ mod configured_feature_gate_tests {
         assert!(configured_feature_toggle_allowed(true, true));
         assert!(configured_feature_toggle_allowed(true, false));
         assert!(!configured_feature_toggle_allowed(false, false));
+    }
+}
+
+#[cfg(test)]
+mod recording_finalization_tests {
+    use super::finalize_concat_segments;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "jwm-record-finalize-test-{}-{}",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn failed_concat_preserves_every_source_segment() {
+        let scratch = scratch_dir();
+        let first = scratch.join("first.mp4");
+        let second = scratch.join("second.mp4");
+        let list = scratch.join("output.concat.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+        let segments = vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ];
+
+        let error = finalize_concat_segments(
+            &list,
+            "file 'first.mp4'\nfile 'second.mp4'",
+            &scratch.join("output.mp4").to_string_lossy(),
+            &segments,
+            |_| Err("encoder failed".to_owned()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "encoder failed");
+        assert!(first.is_file());
+        assert!(second.is_file());
+        assert!(!list.exists());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[test]
+    fn successful_concat_removes_inputs_but_never_its_output() {
+        let scratch = scratch_dir();
+        let first = scratch.join("first.mp4");
+        let output = scratch.join("output.mp4");
+        let list = scratch.join("output.concat.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&output, b"existing segment").unwrap();
+        let segments = vec![
+            first.to_string_lossy().into_owned(),
+            output.to_string_lossy().into_owned(),
+        ];
+
+        finalize_concat_segments(
+            &list,
+            "file 'first.mp4'\nfile 'output.mp4'",
+            &output.to_string_lossy(),
+            &segments,
+            |_| {
+                std::fs::write(&output, b"merged").unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(!first.exists());
+        assert_eq!(std::fs::read(&output).unwrap(), b"merged");
+        assert!(!list.exists());
+        std::fs::remove_dir_all(scratch).unwrap();
     }
 }
 
