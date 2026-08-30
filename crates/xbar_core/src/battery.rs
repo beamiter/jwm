@@ -1,7 +1,9 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+const MAX_POWER_SUPPLY_ATTRIBUTE_BYTES: usize = 4 * 1024;
 
 /// Battery state read from `/sys/class/power_supply`.
 ///
@@ -113,19 +115,19 @@ fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
     let mut present = false;
 
     for dir in directories {
-        let kind = fs::read_to_string(dir.join("type")).unwrap_or_default();
+        let kind = read_power_supply_attribute(&dir.join("type")).unwrap_or_default();
         if kind.trim() != "Battery" {
             continue;
         }
 
-        let battery_present =
-            fs::read_to_string(dir.join("present")).map_or(true, |value| value.trim() != "0");
+        let battery_present = read_power_supply_attribute(&dir.join("present"))
+            .map_or(true, |value| value.trim() != "0");
         if !battery_present {
             continue;
         }
 
         present = true;
-        let capacity = fs::read_to_string(dir.join("capacity"))
+        let capacity = read_power_supply_attribute(&dir.join("capacity"))
             .ok()
             .and_then(|s| s.trim().parse::<u8>().ok())
             .map(|c| c.min(100));
@@ -134,7 +136,7 @@ fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
             capacity_count += 1;
         }
 
-        let status = fs::read_to_string(dir.join("status")).unwrap_or_default();
+        let status = read_power_supply_attribute(&dir.join("status")).unwrap_or_default();
         charging |= matches!(status.trim(), "Charging" | "Full");
     }
 
@@ -146,13 +148,29 @@ fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
     })
 }
 
+fn read_power_supply_attribute(path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(MAX_POWER_SUPPLY_ATTRIBUTE_BYTES + 1);
+    let mut input = fs::File::open(path)?.take((MAX_POWER_SUPPLY_ATTRIBUTE_BYTES + 1) as u64);
+    input.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_POWER_SUPPLY_ATTRIBUTE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "power-supply attribute exceeds read limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{BatterySnapshot, read_battery_from, try_read_battery_from};
+    use super::{
+        BatterySnapshot, MAX_POWER_SUPPLY_ATTRIBUTE_BYTES, read_battery_from,
+        read_power_supply_attribute, try_read_battery_from,
+    };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
@@ -241,6 +259,19 @@ mod tests {
         assert_eq!(
             try_read_battery_from(&missing).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn oversized_attributes_are_rejected_after_a_bounded_read() {
+        let directory = TestDirectory::new();
+        let path = directory.path().join("oversized");
+        fs::write(&path, vec![b'x'; MAX_POWER_SUPPLY_ATTRIBUTE_BYTES * 16])
+            .expect("write oversized attribute");
+
+        assert_eq!(
+            read_power_supply_attribute(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
         );
     }
 }
