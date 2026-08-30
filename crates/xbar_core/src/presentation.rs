@@ -1005,6 +1005,84 @@ pub struct LayoutEngine<M> {
     measurer: M,
 }
 
+/// Geometry shared by Dock reservation and painting. Keeping the capacity
+/// calculation here guarantees that width withheld from status controls can
+/// actually produce at least one shelf slot in [`LayoutEngine::push_dock`].
+#[derive(Debug, Clone, Copy)]
+struct DockMetrics {
+    padding: f32,
+    gap: f32,
+    separator_width: f32,
+    item_height: f32,
+    item_width: f32,
+    peak_scale: f32,
+    slot_width: f32,
+    slot_pitch: f32,
+    fixed_width: f32,
+}
+
+impl DockMetrics {
+    fn new(config: &PresentationConfig, available_height: f32) -> Option<Self> {
+        let padding = finite_non_negative(config.dock_shelf_padding);
+        let gap = finite_non_negative(config.dock_item_gap);
+        let separator_width = finite_non_negative(config.dock_separator_width);
+        let usable_height = (available_height - padding * 2.0).max(0.0);
+        let item_height = finite_non_negative(config.dock_item_size).min(usable_height);
+        if item_height < 1.0 {
+            return None;
+        }
+
+        let aspect_ratio = if config.dock_item_aspect_ratio.is_finite() {
+            config.dock_item_aspect_ratio.max(1.0)
+        } else {
+            1.0
+        };
+        let configured_scale = if config.dock_hover_scale.is_finite() {
+            config.dock_hover_scale.max(1.0)
+        } else {
+            1.0
+        };
+        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
+        let item_width = item_height * aspect_ratio;
+        let slot_width = item_width * peak_scale;
+        let slot_pitch = slot_width + gap;
+        let fixed_width = padding * 3.0 + separator_width;
+        Some(Self {
+            padding,
+            gap,
+            separator_width,
+            item_height,
+            item_width,
+            peak_scale,
+            slot_width,
+            slot_pitch,
+            fixed_width,
+        })
+    }
+
+    fn minimum_width(self) -> f32 {
+        self.fixed_width + self.slot_width
+    }
+
+    fn slot_capacity(self, available_width: f32) -> usize {
+        let minimum_width = self.minimum_width();
+        if available_width < minimum_width {
+            return 0;
+        }
+        1_usize
+            .saturating_add(((available_width - minimum_width) / self.slot_pitch).floor() as usize)
+    }
+
+    fn width_for_slots(self, slot_count: usize) -> f32 {
+        if slot_count == 0 {
+            return 0.0;
+        }
+        self.fixed_width
+            + slot_count as f32 * self.slot_width
+            + slot_count.saturating_sub(1) as f32 * self.gap
+    }
+}
+
 impl<M> LayoutEngine<M> {
     #[must_use]
     pub const fn new(config: PresentationConfig, measurer: M) -> Self {
@@ -1089,9 +1167,14 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         let mut right_cursor = content_right;
         let mut dock_bounds = None;
         let dock_enabled = self.config.visibility.minimized_windows && view.wm_available;
+        let dock_available_width = (content_right - right_floor).max(0.0);
         let dock_reserve = if dock_enabled {
-            self.preferred_dock_width(minimized_windows.len(), minimized_overflow, bar.height)
-                .min((content_right - right_floor).max(0.0))
+            self.dock_reserve_width(
+                minimized_windows.len(),
+                minimized_overflow,
+                dock_available_width,
+                bar.height,
+            )
         } else {
             0.0
         };
@@ -1350,32 +1433,11 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         interaction: &InteractionState,
         palette: Palette,
     ) -> Option<Rect> {
-        let padding = finite_non_negative(self.config.dock_shelf_padding);
-        let gap = finite_non_negative(self.config.dock_item_gap);
-        let separator_width = finite_non_negative(self.config.dock_separator_width);
-        let usable_height = (available.height - padding * 2.0).max(0.0);
-        let item_height = finite_non_negative(self.config.dock_item_size).min(usable_height);
-        let aspect_ratio = if self.config.dock_item_aspect_ratio.is_finite() {
-            self.config.dock_item_aspect_ratio.max(1.0)
-        } else {
-            1.0
-        };
-        let item_width = item_height * aspect_ratio;
-        if available.is_empty() || item_height < 1.0 {
+        if available.is_empty() {
             return None;
         }
-
-        let configured_scale = if self.config.dock_hover_scale.is_finite() {
-            self.config.dock_hover_scale.max(1.0)
-        } else {
-            1.0
-        };
-        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
-        let slot_width = item_width * peak_scale;
-        let slot_pitch = slot_width + gap;
-        let fixed_width = padding * 3.0 + separator_width;
-        let max_slots =
-            (((available.width - fixed_width + gap).max(0.0)) / slot_pitch).floor() as usize;
+        let metrics = DockMetrics::new(&self.config, available.height)?;
+        let max_slots = metrics.slot_capacity(available.width);
         if max_slots == 0 {
             return None;
         }
@@ -1388,9 +1450,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         let visible = &controls[first..];
         let slot_count = visible.len() + usize::from(show_overflow || empty_fallback);
 
-        let width = fixed_width
-            + slot_count as f32 * slot_width
-            + slot_count.saturating_sub(1) as f32 * gap;
+        let width = metrics.width_for_slots(slot_count);
         let candidate = Rect::new(
             available.right() - width,
             available.y,
@@ -1418,36 +1478,36 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             state: VisualState::default(),
         });
 
-        if separator_width > 0.0 {
-            let x = bounds.x + padding + separator_width * 0.5;
-            let start = Point::new(x, bounds.y + padding);
-            let end = Point::new(x, bounds.bottom() - padding);
+        if metrics.separator_width > 0.0 {
+            let x = bounds.x + metrics.padding + metrics.separator_width * 0.5;
+            let start = Point::new(x, bounds.y + metrics.padding);
+            let end = Point::new(x, bounds.bottom() - metrics.padding);
             scene.nodes.push(SceneNode::Polyline {
                 id: NodeId::DockShelf,
                 bounds: Rect::new(
-                    x - separator_width * 0.5,
+                    x - metrics.separator_width * 0.5,
                     start.y,
-                    separator_width,
+                    metrics.separator_width,
                     (end.y - start.y).max(0.0),
                 ),
                 points: vec![start, end],
                 color: palette.muted_text,
-                width: separator_width,
+                width: metrics.separator_width,
                 state: VisualState::default(),
             });
         }
 
-        let mut slot_x = bounds.x + padding * 2.0 + separator_width;
+        let mut slot_x = bounds.x + metrics.padding * 2.0 + metrics.separator_width;
         let dock_pointer = match interaction.hovered() {
             Some(NodeId::MinimizedWindow(_)) => interaction.pointer(),
             _ => None,
         };
         for control in visible {
             let id = control.id;
-            let center_x = slot_x + slot_width * 0.5;
-            let scale = self.dock_scale(center_x, peak_scale, dock_pointer);
-            let width = item_width * scale;
-            let height = item_height * scale;
+            let center_x = slot_x + metrics.slot_width * 0.5;
+            let scale = self.dock_scale(center_x, metrics.peak_scale, dock_pointer);
+            let width = metrics.item_width * scale;
+            let height = metrics.item_height * scale;
             let item_bounds = Rect::new(
                 center_x - width * 0.5,
                 bounds.y + (bounds.height - height) * 0.5,
@@ -1506,21 +1566,21 @@ impl<M: TextMeasurer> LayoutEngine<M> {
                 scroll_up: bindings.scroll_up,
                 scroll_down: bindings.scroll_down,
             });
-            slot_x += slot_pitch;
+            slot_x += metrics.slot_pitch;
         }
 
         if show_overflow {
             let overflow_bounds = Rect::new(
-                slot_x + (slot_width - item_width) * 0.5,
-                bounds.y + (bounds.height - item_height) * 0.5,
-                item_width,
-                item_height,
+                slot_x + (metrics.slot_width - metrics.item_width) * 0.5,
+                bounds.y + (bounds.height - metrics.item_height) * 0.5,
+                metrics.item_width,
+                metrics.item_height,
             );
             scene.nodes.push(SceneNode::Text {
                 id: NodeId::DockShelf,
                 bounds: overflow_bounds,
                 text: "…".to_owned(),
-                size: (item_height * 0.65).max(1.0),
+                size: (metrics.item_height * 0.65).max(1.0),
                 color: palette.muted_text,
                 align: TextAlign::Center,
                 state: VisualState::default(),
@@ -1530,41 +1590,22 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         Some(bounds)
     }
 
-    fn preferred_dock_width(
+    fn dock_reserve_width(
         &self,
         item_count: usize,
         upstream_overflow: bool,
+        available_width: f32,
         available_height: f32,
     ) -> f32 {
-        let padding = finite_non_negative(self.config.dock_shelf_padding);
-        let gap = finite_non_negative(self.config.dock_item_gap);
-        let separator_width = finite_non_negative(self.config.dock_separator_width);
-        let usable_height = (available_height - padding * 2.0).max(0.0);
-        let item_height = finite_non_negative(self.config.dock_item_size).min(usable_height);
-        if item_height < 1.0 {
+        let Some(metrics) = DockMetrics::new(&self.config, available_height) else {
+            return 0.0;
+        };
+        if metrics.slot_capacity(available_width) == 0 {
             return 0.0;
         }
-        let aspect_ratio = if self.config.dock_item_aspect_ratio.is_finite() {
-            self.config.dock_item_aspect_ratio.max(1.0)
-        } else {
-            1.0
-        };
-        let configured_scale = if self.config.dock_hover_scale.is_finite() {
-            self.config.dock_hover_scale.max(1.0)
-        } else {
-            1.0
-        };
-        let peak_scale = configured_scale.min((usable_height / item_height).max(1.0));
-        let slot_width = item_height * aspect_ratio * peak_scale;
         let slot_count =
             item_count.saturating_add(usize::from(upstream_overflow || item_count == 0));
-        if slot_count == 0 {
-            return 0.0;
-        }
-        padding * 3.0
-            + separator_width
-            + slot_count as f32 * slot_width
-            + slot_count.saturating_sub(1) as f32 * gap
+        metrics.width_for_slots(slot_count).min(available_width)
     }
 
     fn dock_scale(&self, center_x: f32, peak_scale: f32, pointer: Option<Point>) -> f32 {
@@ -2124,6 +2165,34 @@ mod tests {
                 } if fill.alpha == 0.0
             )
         }));
+    }
+
+    #[test]
+    fn sub_slot_dock_does_not_starve_status() {
+        let tags = Vec::new();
+        let mut engine = dock_engine();
+        engine.config_mut().visibility.clock = true;
+
+        // With the default 38 px geometry, the Dock needs 48.85 logical px
+        // for its fixed chrome and first peak-sized slot. A 100 px viewport
+        // leaves only 46.4 px in the right partition, so the unusable shelf
+        // must not reserve that partition away from the clock.
+        let narrow = engine.build(
+            view(&tags, ""),
+            Size::new(100.0, 38.0),
+            &InteractionState::default(),
+        );
+        assert!(narrow.hits.iter().any(|hit| hit.id == NodeId::Clock));
+        assert_eq!(narrow.bounds_for(NodeId::DockShelf), None);
+
+        // Six more pixels put the right partition safely beyond the one-slot
+        // threshold. Reservation and painting now agree, so the shelf appears.
+        let one_slot = engine.build(
+            view(&tags, ""),
+            Size::new(106.0, 38.0),
+            &InteractionState::default(),
+        );
+        assert!(one_slot.bounds_for(NodeId::DockShelf).is_some());
     }
 
     #[test]
