@@ -1,5 +1,5 @@
 // benches/stress_test.rs
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{criterion_group, BatchSize, BenchmarkId, Criterion};
 use shared_structures::{SharedCommand, SharedMessage, SharedRingBuffer, SharedRingBufferOptions};
 
 fn create_default(
@@ -879,4 +879,11 @@ criterion_group!(
     bench_backpressure_handling,
     bench_read_latest_under_load,
 );
-criterion_main!(stress_tests);
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+criterion::criterion_main!(stress_tests);
+
+// A featureless build has no synchronization backend to stress. Keep the
+// all-targets test matrix executable without turning that intentional state
+// into a benchmark-time panic.
+#[cfg(not(any(feature = "futex", feature = "semaphore", feature = "eventfd")))]
+fn main() {}

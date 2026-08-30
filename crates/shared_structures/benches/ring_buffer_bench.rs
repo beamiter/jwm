@@ -1,5 +1,5 @@
 // benches/ring_buffer_bench.rs
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 use std::io::ErrorKind;
 use std::ops::Deref;
@@ -934,4 +934,12 @@ criterion_group!(
     bench_strategy_command_latency,
     bench_strategy_spsc_throughput,
 );
-criterion_main!(benches);
+#[cfg(any(feature = "futex", feature = "semaphore", feature = "eventfd"))]
+criterion::criterion_main!(benches);
+
+// `cargo test --all-targets` executes Criterion harnesses. A featureless
+// build deliberately has no usable SyncStrategy, so there is nothing to
+// benchmark and the target should exit successfully instead of unwrapping
+// `Unsupported` from the first fixture.
+#[cfg(not(any(feature = "futex", feature = "semaphore", feature = "eventfd")))]
+fn main() {}
