@@ -13,7 +13,7 @@ log = "0.4.33"
 pango = "0.22.8"
 raw-window-handle = "0.6"
 softbuffer = "0.4.8"
-tao = "0.36.0"
+tao = "0.37.0"
 x11rb = "0.14"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = [
     "clock-chrono",
