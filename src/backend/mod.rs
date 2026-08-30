@@ -35,6 +35,7 @@ pub mod compositor_font;
 // Backend-independent process RSS + CPU sampler used by the debug HUD.
 pub mod sys_stats;
 // Bounded regular-file reader shared by both compositor shader reload paths.
+#[cfg(any(feature = "x11-backends", feature = "backend-wayland-udev"))]
 pub(crate) mod shader_source;
 #[doc(hidden)]
 pub mod update_notifier;
