@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::ThemeMode;
+use crate::model::MAX_MODEL_TAGS;
 use crate::presentation::PresentationConfig;
 
 /// Default font when neither the config file nor `XBAR_FONT` specifies one.
@@ -449,13 +450,16 @@ impl BarConfig {
             }
             presentation.left_fraction = fraction;
         }
-        if let Some(labels) = file.presentation.tag_labels {
+        if let Some(mut labels) = file.presentation.tag_labels {
             if labels.is_empty() || labels.iter().any(|label| label.trim().is_empty()) {
                 return Err(ConfigError::InvalidValue {
                     field: "presentation.tag_labels",
                     reason: "labels must be a non-empty list of non-empty strings",
                 });
             }
+            // TagId is a u32 bit position, so labels after the model's final
+            // representable tag can never be projected by any frontend.
+            labels.truncate(MAX_MODEL_TAGS);
             presentation.tag_labels = labels;
         }
         if let Some(icon_font) = file.presentation.icon_font {
@@ -651,6 +655,23 @@ tag_labels = ["a", "b", "c"]
         assert_eq!(
             config.presentation.item_gap,
             PresentationConfig::default().item_gap
+        );
+    }
+
+    #[test]
+    fn tag_labels_beyond_the_model_capacity_are_not_retained() {
+        let labels = (0..MAX_MODEL_TAGS + 4)
+            .map(|index| format!(r#""tag-{index}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let config =
+            BarConfig::from_toml(&format!("[presentation]\ntag_labels = [{labels}]")).unwrap();
+
+        assert_eq!(config.presentation.tag_labels.len(), MAX_MODEL_TAGS);
+        let last = format!("tag-{}", MAX_MODEL_TAGS - 1);
+        assert_eq!(
+            config.presentation.tag_labels.last().map(String::as_str),
+            Some(last.as_str())
         );
     }
 
