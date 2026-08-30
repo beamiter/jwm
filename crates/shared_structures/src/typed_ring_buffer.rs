@@ -435,11 +435,11 @@ fn read_flink_os_id(path: &Path) -> Result<String> {
 
 fn open_shmem_from_flink(path: &Path, operation: &str) -> Result<Shmem> {
     let os_id = read_flink_os_id(path)?;
-    // Supplying both values keeps the flink attached to `Shmem` for stale
-    // owner cleanup while making the dependency open the already validated
-    // identifier instead of reopening and reading the pathname itself.
+    // Open only by the validated identifier. Attaching `path` to Shmem would
+    // make a later `set_owner(true)` unlink that pathname unconditionally,
+    // even if another creator had replaced the flink in the meantime. The
+    // wrapper retains the path and compare-removes it explicitly on reclaim.
     ShmemConf::new()
-        .flink(path)
         .os_id(&os_id)
         .open()
         .map_err(|error| map_shmem_error(operation, error))
@@ -470,6 +470,7 @@ const _: () = assert!(
 
 struct ReclaimableLegacyMapping {
     shmem: Shmem,
+    flink_path: PathBuf,
     version: u64,
     creator_pid: u32,
 }
@@ -508,6 +509,7 @@ fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLega
 
     Ok(Some(ReclaimableLegacyMapping {
         shmem,
+        flink_path,
         version,
         creator_pid,
     }))
@@ -610,6 +612,14 @@ fn remove_matching_flink(path: &Path, os_id: &str) {
     if file.take(limit).read_to_end(&mut contents).is_ok() && contents == os_id.as_bytes() {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Remove the public name only if it still points at this mapping, then take
+/// ownership of the OS object so dropping `shmem` reclaims crash residue.
+fn prepare_stale_mapping_reclaim(shmem: &mut Shmem, flink_path: &Path) {
+    let os_id = shmem.get_os_id().to_owned();
+    remove_matching_flink(flink_path, &os_id);
+    shmem.set_owner(true);
 }
 
 /// 跨进程方向锁的 RAII guard。
@@ -1152,7 +1162,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
         Ok(Self {
             shmem,
-            flink_path: None,
+            // `Shmem` was deliberately opened by os-id only. Retain the
+            // validated pathname here so stale reclaim can compare-remove it;
+            // ordinary opener Drop never unlinks this field.
+            flink_path: Some(flink_path),
             header,
             message_slots,
             command_slots,
@@ -1198,11 +1211,14 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                             "reclaiming stale shared ring buffer {path}: creator {} is gone",
                             buffer.creator_pid()
                         );
-                        // The original owner is gone, so also assume ownership
-                        // of the OS mapping and let Shmem remove both it and the
-                        // flink. Otherwise every recovered crash leaks a
-                        // /dev/shm/shmem_* object.
-                        buffer.shmem.set_owner(true);
+                        // Delete the flink only if it still names this stale
+                        // mapping, then take ownership of the OS object. A
+                        // replacement published since open must survive.
+                        let flink_path = buffer
+                            .flink_path
+                            .as_deref()
+                            .ok_or_else(|| Error::other("opened mapping lost its flink path"))?;
+                        prepare_stale_mapping_reclaim(&mut buffer.shmem, flink_path);
                         drop(buffer);
                         if let Some(buffer) = create(&mut may_create)? {
                             return Ok(buffer);
@@ -1239,7 +1255,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         "reclaiming stale shared ring buffer {path}: legacy protocol {} creator {} is gone",
                         legacy.version, legacy.creator_pid
                     );
-                    legacy.shmem.set_owner(true);
+                    prepare_stale_mapping_reclaim(&mut legacy.shmem, &legacy.flink_path);
                     drop(legacy);
                     if let Some(buffer) = create(&mut may_create)? {
                         return Ok(buffer);
@@ -2001,6 +2017,48 @@ mod tests {
         assert!(Path::new(&path).is_file());
         let opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
         assert_eq!(opener, replacement);
+    }
+
+    #[test]
+    fn stale_reclaimer_does_not_unlink_a_flink_replaced_after_open() {
+        const DEAD_PID: u32 = u32::MAX;
+
+        let path = mk_path("reclaim_replaced_flink");
+        let mut stale_creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        // SAFETY: the test has not opened another handle yet and owns the
+        // mapping. This makes the subsequently opened handle reclaimable.
+        unsafe {
+            std::ptr::addr_of_mut!((*stale_creator.header).creator_pid).write(DEAD_PID);
+        }
+        let mut stale_opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
+        assert!(!stale_opener.creator_alive());
+
+        std::fs::remove_file(&path).unwrap();
+        // Isolate this regression from creator-side Drop cleanup: the stale
+        // opener below is the only handle allowed to act on the old pathname.
+        stale_creator.flink_path.take();
+        let replacement: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        assert_ne!(
+            stale_opener.shmem.get_os_id(),
+            replacement.shmem.get_os_id()
+        );
+
+        let stale_flink_path = stale_opener
+            .flink_path
+            .as_deref()
+            .expect("opener must retain its validated flink path");
+        prepare_stale_mapping_reclaim(&mut stale_opener.shmem, stale_flink_path);
+        drop(stale_opener);
+
+        assert!(Path::new(&path).is_file());
+        let replacement_opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
+        assert_eq!(replacement_opener, replacement);
     }
 
     #[test]
