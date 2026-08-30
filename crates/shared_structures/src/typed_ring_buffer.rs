@@ -1446,6 +1446,9 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
     /// 尝试写入一条消息。队列已满时返回 `Ok(false)`。
     ///
+    /// 共享游标距离超过物理容量时返回 `InvalidData`，且不会写入槽位或
+    /// 推进任何游标。
+    ///
     /// 通知后端只是等待优化；通知失败不会把已提交的消息伪装成
     /// 写入失败，避免调用者重试后产生重复消息。
     pub fn try_write_message(&self, payload: &M) -> Result<bool> {
@@ -1471,7 +1474,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Relaxed);
             let read_idx = header.message_read.index.load(Ordering::Acquire);
-            if write_idx.wrapping_sub(read_idx) >= self.buffer_size() {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
+            if pending == self.buffer_size() {
                 return Ok(false);
             }
 
@@ -1491,7 +1500,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         Ok(true)
     }
 
-    /// 写入一条消息；队列满时覆盖最旧的一条待读消息，因此总是成功。
+    /// 写入一条消息；队列满时覆盖最旧的一条待读消息。
+    ///
+    /// 共享游标距离超过物理容量时返回 `InvalidData`，且不会覆盖槽位或
+    /// 推进任何游标。
     ///
     /// 适合"只关心最新状态"的广播场景（与 [`try_read_latest_message`]
     /// 配对）。覆盖通过短暂持有读方向锁推进读游标实现，被覆盖的消息
@@ -1519,11 +1531,23 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Relaxed);
             let read_idx = header.message_read.index.load(Ordering::Acquire);
-            if write_idx.wrapping_sub(read_idx) >= self.buffer_size() {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
+            if pending == self.buffer_size() {
                 // 锁序固定为「写锁 → 读锁」，与其他多锁路径一致，不会死锁。
                 let _read_guard = CursorGuard::acquire(&header.message_read);
                 let read_idx = header.message_read.index.load(Ordering::Relaxed);
-                if write_idx.wrapping_sub(read_idx) >= self.buffer_size() {
+                let pending = checked_pending(
+                    write_idx,
+                    read_idx,
+                    self.buffer_size(),
+                    "message cursor distance exceeds buffer capacity",
+                )?;
+                if pending == self.buffer_size() {
                     header
                         .message_read
                         .index
@@ -1722,7 +1746,8 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
     }
 
-    /// 尝试写入命令。命令队列已满时返回 `Ok(false)`。
+    /// 尝试写入命令。命令队列已满时返回 `Ok(false)`；共享游标距离超过
+    /// 物理容量时返回 `InvalidData`，且不会写入槽位或推进游标。
     pub fn try_send_command(&self, command: C) -> Result<bool> {
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
@@ -1742,7 +1767,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.command_write.index.load(Ordering::Relaxed);
             let read_idx = header.command_read.index.load(Ordering::Acquire);
-            if write_idx.wrapping_sub(read_idx) >= header.command_buffer_size {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                header.command_buffer_size,
+                "command cursor distance exceeds buffer capacity",
+            )?;
+            if pending == header.command_buffer_size {
                 return Ok(false);
             }
 
@@ -2641,6 +2672,119 @@ mod tests {
         }
         assert_eq!(header.command_read.index.load(Ordering::Acquire), 0);
         assert_eq!(ring.try_receive_command().unwrap(), None);
+    }
+
+    #[test]
+    fn typed_writes_reject_cursor_distance_larger_than_capacity_without_mutation() {
+        let path = mk_path("writes_invalid_cursor_distance");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        for value in 0u64..4 {
+            assert!(ring.try_write_message(&value).unwrap());
+            assert!(ring.try_send_command(value + 10).unwrap());
+        }
+
+        let header = ring.header();
+        header.message_write.index.store(8, Ordering::Release);
+        header.command_write.index.store(8, Ordering::Release);
+        header.last_timestamp.store(1, Ordering::Release);
+        // SAFETY: the setup initialized slot zero in both rings, and this test
+        // owns the only handle that accesses their storage.
+        let original_message_slot = unsafe { ring.message_slots.read() };
+        let original_command_slot = unsafe { ring.command_slots.read() };
+
+        let message_result = ring.try_write_message(&99);
+        let overwrite_result = ring.write_message_overwrite(&100);
+        let command_result = ring.try_send_command(109);
+        let message_write_after = header.message_write.index.load(Ordering::Acquire);
+        let message_read_after = header.message_read.index.load(Ordering::Acquire);
+        let command_write_after = header.command_write.index.load(Ordering::Acquire);
+        let command_read_after = header.command_read.index.load(Ordering::Acquire);
+        let timestamp_after = header.last_timestamp.load(Ordering::Acquire);
+        // SAFETY: as above; no concurrent handle can mutate the slots.
+        let message_slot_after = unsafe { ring.message_slots.read() };
+        let command_slot_after = unsafe { ring.command_slots.read() };
+
+        header.message_write.index.store(4, Ordering::Release);
+        header.message_read.index.store(0, Ordering::Release);
+        header.command_write.index.store(4, Ordering::Release);
+        header.command_read.index.store(0, Ordering::Release);
+        // SAFETY: the test still has exclusive access to both initialized slots.
+        unsafe {
+            ring.message_slots.write(original_message_slot);
+            ring.command_slots.write(original_command_slot);
+        }
+
+        for error in [
+            message_result.unwrap_err(),
+            overwrite_result.unwrap_err(),
+            command_result.unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains("cursor distance"));
+        }
+        assert_eq!((message_write_after, message_read_after), (8, 0));
+        assert_eq!((command_write_after, command_read_after), (8, 0));
+        assert_eq!(timestamp_after, 1);
+        assert_eq!(message_slot_after.checksum, original_message_slot.checksum);
+        assert_eq!(message_slot_after.payload, original_message_slot.payload);
+        assert_eq!(command_slot_after.checksum, original_command_slot.checksum);
+        assert_eq!(command_slot_after.payload, original_command_slot.payload);
+    }
+
+    #[test]
+    fn typed_writes_accept_valid_cursor_distance_across_u32_wrap() {
+        const WRAPPED_EMPTY: u32 = u32::MAX - 1;
+
+        let path = mk_path("writes_cursor_wrap");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        let header = ring.header();
+        header
+            .message_write
+            .index
+            .store(WRAPPED_EMPTY, Ordering::Release);
+        header
+            .message_read
+            .index
+            .store(WRAPPED_EMPTY, Ordering::Release);
+        header
+            .command_write
+            .index
+            .store(WRAPPED_EMPTY, Ordering::Release);
+        header
+            .command_read
+            .index
+            .store(WRAPPED_EMPTY, Ordering::Release);
+
+        for value in 10u64..14 {
+            assert!(ring.try_write_message(&value).unwrap());
+        }
+        ring.write_message_overwrite(&14).unwrap();
+        assert_eq!(
+            ring.drain_messages(usize::MAX).unwrap(),
+            vec![11, 12, 13, 14]
+        );
+
+        for value in 20u64..24 {
+            assert!(ring.try_send_command(value).unwrap());
+        }
+        assert!(!ring.try_send_command(24).unwrap());
+        for expected in 20u64..24 {
+            assert_eq!(ring.try_receive_command().unwrap(), Some(expected));
+        }
+        assert_eq!(header.message_write.index.load(Ordering::Acquire), 3);
+        assert_eq!(header.message_read.index.load(Ordering::Acquire), 3);
+        assert_eq!(header.command_write.index.load(Ordering::Acquire), 2);
+        assert_eq!(header.command_read.index.load(Ordering::Acquire), 2);
     }
 
     #[test]
