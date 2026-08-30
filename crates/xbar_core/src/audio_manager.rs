@@ -284,7 +284,7 @@ impl AudioManager {
             ));
         }
 
-        let new_volume = (current_device.volume + step).clamp(0, 100);
+        let new_volume = adjusted_volume(current_device.volume, step);
         self.set_volume(device_name, new_volume, current_device.is_muted)?;
 
         Ok(new_volume)
@@ -391,6 +391,10 @@ fn push_indexed_device(devices: &mut Vec<AudioDevice>, mut device: AudioDevice) 
 
 fn clamp_volume(volume: i32) -> i32 {
     volume.clamp(0, 100)
+}
+
+fn adjusted_volume(current: i32, step: i32) -> i32 {
+    current.saturating_add(step).clamp(0, 100)
 }
 
 fn first_playback_channel(selem: &Selem<'_>) -> Result<SelemChannelId> {
@@ -520,6 +524,14 @@ mod tests {
         update_cached_device(&mut devices, "Master", None, Some(true));
         assert_eq!(devices[0].volume, 0);
         assert!(devices[0].is_muted);
+    }
+
+    #[test]
+    fn volume_adjustment_handles_the_full_action_range() {
+        assert_eq!(adjusted_volume(50, i32::MAX), 100);
+        assert_eq!(adjusted_volume(50, i32::MIN), 0);
+        assert_eq!(adjusted_volume(90, 20), 100);
+        assert_eq!(adjusted_volume(10, -20), 0);
     }
 
     #[test]
