@@ -33,6 +33,10 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
+fn is_terminal_window_event(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -400,7 +404,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            event if is_terminal_window_event(&event) => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
                     self.bar.config_mut().bar_height = height;
@@ -613,4 +617,19 @@ fn main() -> Result<()> {
     );
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_terminal_window_event;
+    use winit::{dpi::PhysicalSize, event::WindowEvent};
+
+    #[test]
+    fn close_request_and_actual_destruction_both_end_the_bar_session() {
+        assert!(is_terminal_window_event(&WindowEvent::CloseRequested));
+        assert!(is_terminal_window_event(&WindowEvent::Destroyed));
+        assert!(!is_terminal_window_event(&WindowEvent::Resized(
+            PhysicalSize::new(1920, 42),
+        )));
+    }
 }

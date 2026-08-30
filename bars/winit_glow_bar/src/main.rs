@@ -34,6 +34,10 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
+fn is_terminal_window_event(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
+}
+
 struct App {
     window: Option<Rc<Window>>,
     window_id: Option<WindowId>,
@@ -344,7 +348,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            event if is_terminal_window_event(&event) => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 self.scale_factor = self
                     .window
@@ -817,4 +821,19 @@ fn main() -> Result<()> {
     );
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_terminal_window_event;
+    use winit::{dpi::PhysicalSize, event::WindowEvent};
+
+    #[test]
+    fn close_request_and_actual_destruction_both_end_the_bar_session() {
+        assert!(is_terminal_window_event(&WindowEvent::CloseRequested));
+        assert!(is_terminal_window_event(&WindowEvent::Destroyed));
+        assert!(!is_terminal_window_event(&WindowEvent::Resized(
+            PhysicalSize::new(1920, 42),
+        )));
+    }
 }
