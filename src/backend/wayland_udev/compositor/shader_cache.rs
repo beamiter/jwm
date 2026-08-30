@@ -159,7 +159,6 @@ impl ShaderCache {
                 if cached.vert_hash == vert_hash && cached.frag_hash == frag_hash {
                     return Ok(cached.program);
                 }
-                gl.DeleteProgram(cached.program);
             }
 
             if self.enabled {
@@ -180,14 +179,16 @@ impl ShaderCache {
                         gl.GetProgramiv(program, ffi::LINK_STATUS, &mut link_status);
 
                         if link_status != 0 {
-                            self.cache.insert(
-                                name.to_string(),
+                            if let Some(replaced) = self.commit_program(
+                                name,
                                 CachedProgram {
                                     program,
                                     vert_hash,
                                     frag_hash,
                                 },
-                            );
+                            ) {
+                                gl.DeleteProgram(replaced);
+                            }
                             return Ok(program);
                         }
 
@@ -203,17 +204,29 @@ impl ShaderCache {
                 self.save_program_binary(gl, program, name, vert_hash, frag_hash);
             }
 
-            self.cache.insert(
-                name.to_string(),
+            if let Some(replaced) = self.commit_program(
+                name,
                 CachedProgram {
                     program,
                     vert_hash,
                     frag_hash,
                 },
-            );
+            ) {
+                gl.DeleteProgram(replaced);
+            }
 
             Ok(program)
         }
+    }
+
+    /// Commit a fully linked replacement and return the superseded GL handle.
+    /// Callers delete that handle only after this map update succeeds, so a
+    /// failed binary load or source compilation leaves the old program valid.
+    fn commit_program(&mut self, name: &str, cached: CachedProgram) -> Option<u32> {
+        let replacement = cached.program;
+        self.cache
+            .insert(name.to_owned(), cached)
+            .and_then(|previous| (previous.program != replacement).then_some(previous.program))
     }
 
     pub(crate) unsafe fn clear(&mut self, gl: &ffi::Gles2) {
@@ -260,7 +273,13 @@ impl ShaderCache {
     ) -> Result<u32, String> {
         unsafe {
             let vert_shader = Self::compile_shader(gl, ffi::VERTEX_SHADER, vert_src)?;
-            let frag_shader = Self::compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src)?;
+            let frag_shader = match Self::compile_shader(gl, ffi::FRAGMENT_SHADER, frag_src) {
+                Ok(shader) => shader,
+                Err(error) => {
+                    gl.DeleteShader(vert_shader);
+                    return Err(error);
+                }
+            };
 
             let program = gl.CreateProgram();
             gl.AttachShader(program, vert_shader);
@@ -478,5 +497,36 @@ mod tests {
         encoded[4..8].copy_from_slice(&SHADER_CACHE_VERSION.to_le_bytes());
         encoded.truncate(SHADER_CACHE_HEADER_BYTES);
         assert_eq!(decode_cached_binary(&encoded, 11, 13), None);
+    }
+
+    #[test]
+    fn program_replacement_keeps_the_old_handle_until_commit() {
+        let directory = temp_cache_dir();
+        let mut cache = ShaderCache::new(directory.clone());
+
+        assert_eq!(
+            cache.commit_program(
+                "panel",
+                CachedProgram {
+                    program: 41,
+                    vert_hash: 1,
+                    frag_hash: 2,
+                }
+            ),
+            None
+        );
+        assert_eq!(cache.cache.get("panel").unwrap().program, 41);
+
+        // Merely preparing a candidate cannot invalidate the committed entry.
+        let candidate = CachedProgram {
+            program: 73,
+            vert_hash: 3,
+            frag_hash: 4,
+        };
+        assert_eq!(cache.cache.get("panel").unwrap().program, 41);
+        assert_eq!(cache.commit_program("panel", candidate), Some(41));
+        assert_eq!(cache.cache.get("panel").unwrap().program, 73);
+
+        fs::remove_dir_all(directory).unwrap();
     }
 }
