@@ -5,7 +5,7 @@ use crate::jwm::features::launcher::LauncherRow;
 use crate::jwm::features::shell_hub::ShellHubRoute;
 use std::cmp::Reverse;
 use std::collections::HashSet;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, OsStr, c_char, c_int, c_void};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read as _;
@@ -3088,42 +3088,56 @@ fn discover_applications() -> Vec<LaunchEntry> {
     }
 
     if let Some(path) = std::env::var_os("PATH") {
-        let mut examined = 0_usize;
-        'path_directories: for dir in std::env::split_paths(&path).take(MAX_PATH_DIRECTORIES) {
-            let Ok(items) = fs::read_dir(dir) else {
-                continue;
-            };
-            for item in items.flatten() {
-                if examined >= MAX_PATH_ENTRIES || entries.len() >= MAX_DISCOVERED_APPLICATIONS {
-                    break 'path_directories;
-                }
-                examined += 1;
-                let name = item.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') || !seen.insert(name.clone()) {
-                    continue;
-                }
-                let Ok(meta) = item.metadata() else { continue };
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
-                        continue;
-                    }
-                }
-                let search = name.to_lowercase();
-                entries.push(LaunchEntry::new(
-                    name.clone(),
-                    vec![name],
-                    // A bare executable on PATH declares nothing, so it is
-                    // launched as-is rather than guessed at.
-                    false,
-                    search,
-                ));
-            }
-        }
+        scan_path_applications(&path, &mut entries, &mut seen);
     }
     entries.sort_by(|left, right| left.sort_key.cmp(&right.sort_key));
     entries
+}
+
+fn scan_path_applications(
+    path: &OsStr,
+    entries: &mut Vec<LaunchEntry>,
+    seen: &mut HashSet<String>,
+) {
+    let mut examined = 0_usize;
+    'path_directories: for dir in std::env::split_paths(path).take(MAX_PATH_DIRECTORIES) {
+        let Ok(items) = fs::read_dir(dir) else {
+            continue;
+        };
+        for item in items.flatten() {
+            if examined >= MAX_PATH_ENTRIES || entries.len() >= MAX_DISCOVERED_APPLICATIONS {
+                break 'path_directories;
+            }
+            examined += 1;
+            let name = item.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || seen.contains(&name) {
+                continue;
+            }
+            let Ok(meta) = item.metadata() else { continue };
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+                    continue;
+                }
+            }
+            // Claim the basename only after this candidate is known to be
+            // executable. A non-executable file earlier in PATH must not
+            // hide a valid program with the same name in a later entry.
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let search = name.to_lowercase();
+            entries.push(LaunchEntry::new(
+                name.clone(),
+                vec![name],
+                // A bare executable on PATH declares nothing, so it is
+                // launched as-is rather than guessed at.
+                false,
+                search,
+            ));
+        }
+    }
 }
 
 fn scan_desktop_dir(
@@ -4305,6 +4319,38 @@ mod tests {
         assert_eq!(budget.desktop_bytes, 8);
 
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn non_executable_path_entry_does_not_hide_a_later_program() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "jwm-path-scan-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let shadow = first.join("bounded-tool");
+        let executable = second.join("bounded-tool");
+        std::fs::write(&shadow, b"not executable").unwrap();
+        std::fs::write(&executable, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths([&first, &second]).unwrap();
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        scan_path_applications(&path, &mut entries, &mut seen);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "bounded-tool");
+        assert_eq!(entries[0].command, ["bounded-tool"]);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
