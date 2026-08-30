@@ -286,21 +286,25 @@ unsafe fn wake_registered_waiters(
 /// 返回 `Ok(true)` 表示消费到一个 token，`Ok(false)` 表示本片段超时。
 /// 整体超时由调用方基于单调钟判定。
 fn wait_one_slice(sem: *mut sem_t, remaining: Option<Duration>) -> Result<bool> {
-    unsafe {
-        loop {
-            match remaining {
-                Some(remaining) => {
-                    let slice = remaining.min(REALTIME_SLICE);
-                    let deadline = SystemTime::now()
-                        .checked_add(slice)
-                        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
-                    let ts = deadline
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| libc::timespec {
-                            tv_sec: d.as_secs() as libc::time_t,
-                            tv_nsec: d.subsec_nanos() as libc::c_long,
-                        })
-                        .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
+    match remaining {
+        Some(remaining) => {
+            let slice = remaining.min(REALTIME_SLICE);
+            let deadline = SystemTime::now()
+                .checked_add(slice)
+                .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
+            let ts = deadline
+                .duration_since(UNIX_EPOCH)
+                .map(|d| libc::timespec {
+                    tv_sec: d.as_secs() as libc::time_t,
+                    tv_nsec: d.subsec_nanos() as libc::c_long,
+                })
+                .map_err(|_| Error::new(ErrorKind::InvalidInput, "Invalid time"))?;
+
+            // Retry EINTR against the same absolute deadline. Recomputing
+            // `now + slice` here would let a signal storm extend a finite wait
+            // indefinitely and prevent the outer monotonic deadline check.
+            unsafe {
+                loop {
                     if sem_timedwait(sem, &ts) == 0 {
                         return Ok(true);
                     }
@@ -312,18 +316,20 @@ fn wait_one_slice(sem: *mut sem_t, remaining: Option<Duration>) -> Result<bool> 
                         _ => return Err(error),
                     }
                 }
-                None => {
-                    if sem_wait(sem) == 0 {
-                        return Ok(true);
-                    }
-
-                    let error = Error::last_os_error();
-                    if error.raw_os_error() != Some(libc::EINTR) {
-                        return Err(error);
-                    }
-                }
             }
         }
+        None => unsafe {
+            loop {
+                if sem_wait(sem) == 0 {
+                    return Ok(true);
+                }
+
+                let error = Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EINTR) {
+                    return Err(error);
+                }
+            }
+        },
     }
 }
 
@@ -331,7 +337,11 @@ fn wait_one_slice(sem: *mut sem_t, remaining: Option<Duration>) -> Result<bool> 
 mod tests {
     use super::*;
     use std::mem::MaybeUninit;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+
+    extern "C" fn noop_signal_handler(_: libc::c_int) {}
 
     #[test]
     fn signal_without_waiters_does_not_accumulate_tokens() {
@@ -361,5 +371,89 @@ mod tests {
     fn channels_occupy_distinct_cache_lines() {
         assert_eq!(std::mem::align_of::<SemaphoreChannel>(), 64);
         assert!(std::mem::offset_of!(SemaphoreHeader, command) >= 64);
+    }
+
+    #[test]
+    fn finite_wait_deadline_survives_repeated_eintr() {
+        const CHILD_MARKER_ENV: &str = "SHARED_STRUCTURES_SEMAPHORE_EINTR_MARKER";
+
+        if let Some(marker) = std::env::var_os(CHILD_MARKER_ENV) {
+            // Signal disposition is process-global, so run the interruption
+            // storm only in this exact child test.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = noop_signal_handler as *const () as usize;
+                action.sa_flags = 0;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(
+                    libc::sigaction(libc::SIGUSR1, &action, std::ptr::null_mut()),
+                    0
+                );
+            }
+
+            let mut storage = Box::new(MaybeUninit::<sem_t>::uninit());
+            let semaphore = storage.as_mut_ptr();
+            assert_eq!(unsafe { sem_init(semaphore, 0, 0) }, 0);
+
+            let semaphore_address = semaphore as usize;
+            let (thread_tx, thread_rx) = mpsc::sync_channel(0);
+            let (result_tx, result_rx) = mpsc::sync_channel(0);
+            let waiter = std::thread::spawn(move || {
+                thread_tx.send(unsafe { libc::pthread_self() }).unwrap();
+                let started = Instant::now();
+                let result = wait_one_slice(
+                    semaphore_address as *mut sem_t,
+                    Some(Duration::from_millis(50)),
+                );
+                result_tx.send((result, started.elapsed())).unwrap();
+            });
+            let waiter_thread = thread_rx.recv().unwrap();
+
+            let signal_deadline = Instant::now() + Duration::from_millis(400);
+            let mut outcome = None;
+            while Instant::now() < signal_deadline {
+                if let Ok(result) = result_rx.try_recv() {
+                    outcome = Some(result);
+                    break;
+                }
+                let _ = unsafe { libc::pthread_kill(waiter_thread, libc::SIGUSR1) };
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            let outcome = outcome.unwrap_or_else(|| {
+                result_rx
+                    .recv_timeout(Duration::from_millis(200))
+                    .expect("semaphore wait stayed blocked after the signal storm")
+            });
+            waiter.join().unwrap();
+            assert_eq!(unsafe { sem_destroy(semaphore) }, 0);
+
+            assert!(
+                !outcome.0.unwrap(),
+                "empty semaphore unexpectedly became ready"
+            );
+            assert!(
+                outcome.1 < Duration::from_millis(250),
+                "EINTR extended a 50ms semaphore slice to {:?}",
+                outcome.1
+            );
+            std::fs::write(marker, b"completed").unwrap();
+            return;
+        }
+
+        let marker = PathBuf::from(format!("/tmp/srb-semaphore-eintr-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let test_name = "backends::semaphore::tests::finite_wait_deadline_survives_repeated_eintr";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_MARKER_ENV, &marker)
+            .status()
+            .unwrap();
+        let child_completed = marker.is_file();
+        let _ = std::fs::remove_file(marker);
+
+        assert!(status.success(), "semaphore EINTR child failed: {status}");
+        assert!(child_completed, "semaphore EINTR child did not run");
     }
 }
