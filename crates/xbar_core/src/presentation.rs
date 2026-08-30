@@ -863,8 +863,9 @@ pub struct PresentationConfig {
     /// Renderer-independent audio icon band policy.
     pub volume_thresholds: VolumeThresholds,
     /// Shell entry points to project, in left-to-right order, when
-    /// [`PresentationVisibility::shell_hub`] is set. Duplicates are kept: a
-    /// host that wants the hub twice is describing its own bar, not an error.
+    /// [`PresentationVisibility::shell_hub`] is set. Repeated routes project
+    /// once at their first configured position so every control keeps a unique
+    /// stable [`NodeId`].
     pub shell_routes: Vec<ShellRoute>,
     pub visibility: PresentationVisibility,
 }
@@ -2419,6 +2420,91 @@ mod tests {
         let inside = Point::new(hub.bounds.x + 1.0, hub.bounds.y + 1.0);
         assert_eq!(
             scene.action_at(inside, PointerAction::Primary),
+            Some(UserAction::OpenShellHub(ShellRoute::Hub))
+        );
+    }
+
+    #[test]
+    fn duplicate_shell_routes_keep_one_stable_hit_and_the_first_order() {
+        let tags = vec![TagState::default(); 4];
+        let unique_config = PresentationConfig {
+            shell_routes: vec![
+                ShellRoute::Notifications,
+                ShellRoute::Hub,
+                ShellRoute::Clipboard,
+            ],
+            ..PresentationConfig::default()
+        };
+        let expected = LayoutEngine::new(unique_config.clone(), ApproximateTextMeasurer::default())
+            .build(
+                view(&tags, ""),
+                Size::new(2400.0, 38.0),
+                &InteractionState::default(),
+            );
+        let duplicate_config = PresentationConfig {
+            shell_routes: vec![
+                ShellRoute::Notifications,
+                ShellRoute::Hub,
+                ShellRoute::Notifications,
+                ShellRoute::Clipboard,
+                ShellRoute::Hub,
+            ],
+            ..unique_config
+        };
+        let scene = LayoutEngine::new(duplicate_config, ApproximateTextMeasurer::default()).build(
+            view(&tags, ""),
+            Size::new(2400.0, 38.0),
+            &InteractionState::default(),
+        );
+
+        assert_eq!(
+            scene, expected,
+            "duplicate configuration must produce the same scene as its first occurrences"
+        );
+        let shell: Vec<_> = scene
+            .hits
+            .iter()
+            .filter(|hit| matches!(hit.id, NodeId::ShellHub(_)))
+            .collect();
+        assert_eq!(
+            shell.iter().map(|hit| hit.id).collect::<Vec<_>>(),
+            [
+                NodeId::ShellHub(ShellRoute::Notifications),
+                NodeId::ShellHub(ShellRoute::Hub),
+                NodeId::ShellHub(ShellRoute::Clipboard),
+            ]
+        );
+        for hit in &shell {
+            let NodeId::ShellHub(route) = hit.id else {
+                unreachable!("the iterator retained only shell hits");
+            };
+            let point = Point::new(
+                hit.bounds.x + hit.bounds.width * 0.5,
+                hit.bounds.y + hit.bounds.height * 0.5,
+            );
+            assert_eq!(scene.hit_test(point).map(|region| region.id), Some(hit.id));
+            assert_eq!(
+                scene.action_at(point, PointerAction::Primary),
+                Some(UserAction::OpenShellHub(route))
+            );
+        }
+
+        let point = |hit: &HitRegion| {
+            Point::new(
+                hit.bounds.x + hit.bounds.width * 0.5,
+                hit.bounds.y + hit.bounds.height * 0.5,
+            )
+        };
+        let mut interaction = InteractionState::default();
+        assert!(interaction.press(&scene, point(shell[0])));
+        assert_eq!(
+            interaction.release(&scene, point(shell[1]), PointerAction::Primary),
+            None,
+            "releasing over another shell cell must not inherit the pressed identity"
+        );
+        assert!(interaction.press(&scene, point(shell[1])));
+        assert_eq!(
+            interaction.release(&scene, point(shell[1]), PointerAction::Primary),
             Some(UserAction::OpenShellHub(ShellRoute::Hub))
         );
     }

@@ -549,7 +549,16 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
         // right-to-left status cluster. They are also the first cells the
         // layout engine drops on a narrow bar, which is the right trade: a
         // clock or a battery reading is worth more width than a launcher.
+        let mut seen_routes = [false; ShellRoute::ALL.len()];
         for &route in &config.shell_routes {
+            let route_index = ShellRoute::ALL
+                .iter()
+                .position(|candidate| *candidate == route)
+                .expect("ShellRoute::ALL must enumerate every route");
+            if seen_routes[route_index] {
+                continue;
+            }
+            seen_routes[route_index] = true;
             status.push(
                 control(
                     NodeId::ShellHub(route),
@@ -1099,6 +1108,51 @@ mod tests {
                 NodeId::ShellHub(ShellRoute::Notifications),
             ],
             "configured routes keep their order at the inner edge of the cluster"
+        );
+    }
+
+    #[test]
+    fn duplicate_shell_routes_project_once_in_first_configured_order() {
+        let snapshot = snapshot();
+        let unique_config = PresentationConfig {
+            shell_routes: vec![
+                ShellRoute::Notifications,
+                ShellRoute::Hub,
+                ShellRoute::Clipboard,
+            ],
+            ..PresentationConfig::default()
+        };
+        let expected = PresentationProjector::project(snapshot.view(), &unique_config);
+        let duplicate_config = PresentationConfig {
+            shell_routes: vec![
+                ShellRoute::Notifications,
+                ShellRoute::Hub,
+                ShellRoute::Notifications,
+                ShellRoute::Clipboard,
+                ShellRoute::Hub,
+            ],
+            ..unique_config
+        };
+        let projected = PresentationProjector::project(snapshot.view(), &duplicate_config);
+
+        assert_eq!(
+            projected, expected,
+            "duplicates must not change the projection produced by the first occurrences"
+        );
+        assert_eq!(
+            projected
+                .status
+                .iter()
+                .filter_map(|control| match control.id {
+                    NodeId::ShellHub(route) => Some(route),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [
+                ShellRoute::Notifications,
+                ShellRoute::Hub,
+                ShellRoute::Clipboard,
+            ]
         );
     }
 
