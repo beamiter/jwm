@@ -674,11 +674,11 @@ fn bounded_control_text(value: String) -> String {
     bounded_control_text_prefix(&value).to_owned()
 }
 
-fn bounded_borrowed_control_text(value: &str) -> String {
+pub(crate) fn bounded_borrowed_control_text(value: &str) -> String {
     bounded_control_text_prefix(value).to_owned()
 }
 
-fn bounded_cow_control_text(value: Cow<'_, str>) -> String {
+pub(crate) fn bounded_cow_control_text(value: Cow<'_, str>) -> String {
     match value {
         Cow::Borrowed(value) => bounded_borrowed_control_text(value),
         Cow::Owned(value) => bounded_control_text(value),

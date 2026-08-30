@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use crate::ThemeMode;
-use crate::controls::{BarPresentation, ControlSpec, PresentationProjector};
+use crate::controls::{
+    BarPresentation, ControlSpec, PresentationProjector, bounded_borrowed_control_text,
+    bounded_cow_control_text,
+};
 use crate::display::{BatteryThresholds, IconSet, UsageThresholds, VolumeThresholds};
 use crate::model::{
     BarView, LayoutId, MAX_MODEL_TAGS, Percent, ShellRoute, TagId, UserAction, WindowToken,
@@ -723,23 +726,21 @@ impl PresentationLabels {
             .filter(|icon| !icon.trim().is_empty())
             .unwrap_or(Self::DEFAULT_SHELL_ROUTE_ICONS[index])
     }
-}
 
-impl From<&IconSet> for PresentationLabels {
-    fn from(icons: &IconSet) -> Self {
+    fn from_icon_set_with(icons: &IconSet, own: impl Fn(&str) -> String) -> Self {
         Self {
-            clock: icons.clock.clone(),
-            screenshot: icons.screenshot.clone(),
-            theme_dark: icons.theme_dark.clone(),
-            theme_light: icons.theme_light.clone(),
-            monitor: icons.monitor.clone(),
-            cpu: icons.cpu.clone(),
-            memory: icons.memory.clone(),
-            audio: icons.volume_high.clone(),
-            muted: icons.volume_muted.clone(),
-            brightness: icons.brightness.clone(),
-            battery: icons.battery.clone(),
-            charging: icons.battery_charging.clone(),
+            clock: own(&icons.clock),
+            screenshot: own(&icons.screenshot),
+            theme_dark: own(&icons.theme_dark),
+            theme_light: own(&icons.theme_light),
+            monitor: own(&icons.monitor),
+            cpu: own(&icons.cpu),
+            memory: own(&icons.memory),
+            audio: own(&icons.volume_high),
+            muted: own(&icons.volume_muted),
+            brightness: own(&icons.brightness),
+            battery: own(&icons.battery),
+            charging: own(&icons.battery_charging),
             network: "\u{f05a9}".to_owned(),
             network_offline: "\u{f05aa}".to_owned(),
             media_playing: "\u{f040a}".to_owned(),
@@ -748,6 +749,16 @@ impl From<&IconSet> for PresentationLabels {
             // bar entry and the page it opens read as one surface.
             shell_routes: PresentationLabels::NERD_FONT_SHELL_ROUTE_ICONS.map(str::to_owned),
         }
+    }
+
+    fn bounded_from_icon_set(icons: &IconSet) -> Self {
+        Self::from_icon_set_with(icons, bounded_borrowed_control_text)
+    }
+}
+
+impl From<&IconSet> for PresentationLabels {
+    fn from(icons: &IconSet) -> Self {
+        Self::from_icon_set_with(icons, str::to_owned)
     }
 }
 
@@ -947,11 +958,14 @@ impl Default for PresentationConfig {
 impl PresentationConfig {
     /// Replace semantic labels and dynamic tag labels from one shared icon
     /// preset while preserving geometry, visibility, and threshold policy.
+    /// Derived visual strings are bounded before they fan out into these
+    /// collections; `icon_set` retains an exact clone for dynamic lookups and
+    /// public configuration inspection.
     pub fn apply_icon_set(&mut self, icons: &IconSet) {
         self.tag_labels = (0..MAX_MODEL_TAGS)
-            .map(|index| icons.tag_icon(index).into_owned())
+            .map(|index| bounded_cow_control_text(icons.tag_icon(index)))
             .collect();
-        self.labels = PresentationLabels::from(icons);
+        self.labels = PresentationLabels::bounded_from_icon_set(icons);
         self.icon_set = Some(icons.clone());
     }
 
@@ -986,14 +1000,14 @@ impl PresentationConfig {
 
         let icons = IconSet::nerd_font();
         if replace_labels {
-            self.labels = PresentationLabels::from(&icons);
+            self.labels = PresentationLabels::bounded_from_icon_set(&icons);
             // Dynamic battery and volume bands are part of the status preset,
             // so activate them only when that half was still stock.
             self.icon_set = Some(icons.clone());
         }
         if replace_tags {
             self.tag_labels = (0..MAX_MODEL_TAGS)
-                .map(|index| icons.tag_icon(index).into_owned())
+                .map(|index| bounded_cow_control_text(icons.tag_icon(index)))
                 .collect();
         }
         true
@@ -2031,6 +2045,41 @@ mod tests {
         assert_eq!(
             config.tag_labels[MAX_MODEL_TAGS - 1],
             MAX_MODEL_TAGS.to_string()
+        );
+    }
+
+    #[test]
+    fn icon_set_application_bounds_derived_string_fanout() {
+        let oversized = "界".repeat(crate::MAX_PROJECTED_CONTROL_TEXT_BYTES * 32);
+        let expected = bounded_borrowed_control_text(&oversized);
+        let mut clock = String::with_capacity(crate::MAX_PROJECTED_CONTROL_TEXT_BYTES * 8);
+        clock.push_str("clock");
+        let icons = IconSet {
+            tags: Vec::with_capacity(crate::MAX_PROJECTED_CONFIG_ITEMS * 8),
+            tag_fallback: crate::TagFallback::Icon(oversized.clone()),
+            cpu: oversized.clone(),
+            clock,
+            monitor_labels: Vec::with_capacity(crate::MAX_PROJECTED_CONFIG_ITEMS * 8),
+            ..IconSet::default()
+        };
+        let directly_converted = PresentationLabels::from(&icons);
+        assert_eq!(directly_converted.cpu, oversized);
+
+        let config = PresentationConfig::default().with_icon_set(&icons);
+
+        assert_eq!(config.tag_labels.len(), MAX_MODEL_TAGS);
+        assert!(config.tag_labels.iter().all(|label| {
+            label == &expected && label.capacity() <= crate::MAX_PROJECTED_CONTROL_TEXT_BYTES
+        }));
+        assert_eq!(config.labels.cpu, expected);
+        assert!(config.labels.cpu.capacity() <= crate::MAX_PROJECTED_CONTROL_TEXT_BYTES);
+        assert_eq!(config.labels.clock, "clock");
+        assert!(config.labels.clock.capacity() <= crate::MAX_PROJECTED_CONTROL_TEXT_BYTES);
+        assert!(icons.clock.capacity() > crate::MAX_PROJECTED_CONTROL_TEXT_BYTES);
+        assert_eq!(
+            config.icon_set.as_ref(),
+            Some(&icons),
+            "the exact public icon set remains available while derived visual strings are bounded"
         );
     }
 
