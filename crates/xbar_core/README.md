@@ -306,7 +306,9 @@ the pill off. Audio control still defaults to `pavucontrol`. Window placement,
 provider effects, and WM commands are rejected as unsupported so another host
 adapter can handle them explicitly. `CommandRunner` reuses `CommandSpec` for output-producing
 host probes, rejects non-zero exits, retains stderr in its error, and never
-invokes a shell implicitly.
+invokes a shell implicitly. Its default runner also enforces a ten-second
+deadline and retains at most one mebibyte from each output stream;
+`output_with_limits` lets a known slower probe choose explicit bounds.
 
 `xbar_tauri::configure` installs the shared runtime worker, managed transport,
 one `xbar-state` event, `dispatch_action`, `frontend_ready`, scale-aware window

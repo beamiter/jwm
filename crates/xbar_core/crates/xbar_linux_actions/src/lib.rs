@@ -12,10 +12,15 @@
 use std::{
     ffi::{OsStr, OsString},
     fmt, io,
+    os::{
+        fd::{AsRawFd as _, RawFd},
+        unix::process::CommandExt as _,
+    },
     path::PathBuf,
-    process::{Child, Command, ExitStatus, Output},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     sync::mpsc,
     thread,
+    time::{Duration, Instant},
 };
 
 use xbar_core::{BarEffect, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate};
@@ -23,6 +28,14 @@ use xbar_core::{BarEffect, MonitorGeometry, PlatformEffectHandler, RuntimeUpdate
 pub mod jwm_ipc;
 
 pub use jwm_ipc::{JwmIpc, JwmIpcError};
+
+/// Maximum wall time used by [`CommandRunner::output`].
+pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum bytes retained from each output stream by [`CommandRunner::output`].
+pub const DEFAULT_COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_DRAIN_BYTES_PER_POLL: usize = 64 * 1024;
 
 /// One executable and its fixed argument list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,15 +73,29 @@ impl CommandSpec {
 /// Failure to run a command whose captured output is required by a host.
 #[derive(Debug)]
 pub enum CommandRunError {
+    /// The executable could not be spawned.
     Spawn {
         program: OsString,
         source: io::Error,
     },
+    /// The executable completed unsuccessfully.
     Exit {
         program: OsString,
         status: ExitStatus,
         stderr: Vec<u8>,
     },
+    /// Capturing or waiting for the child failed.
+    Io {
+        program: OsString,
+        source: io::Error,
+    },
+    /// The child did not complete before its deadline.
+    Timeout {
+        program: OsString,
+        timeout: Duration,
+    },
+    /// Stdout or stderr exceeded its individual retention limit.
+    OutputTooLarge { program: OsString, limit: usize },
 }
 
 impl fmt::Display for CommandRunError {
@@ -90,6 +117,21 @@ impl fmt::Display for CommandRunError {
                 }
                 Ok(())
             }
+            Self::Io { program, source } => write!(
+                f,
+                "failed while running {}: {source}",
+                program.to_string_lossy()
+            ),
+            Self::Timeout { program, timeout } => write!(
+                f,
+                "{} exceeded the {timeout:?} command timeout",
+                program.to_string_lossy()
+            ),
+            Self::OutputTooLarge { program, limit } => write!(
+                f,
+                "{} produced more than {limit} bytes on one output stream",
+                program.to_string_lossy()
+            ),
         }
     }
 }
@@ -97,30 +139,67 @@ impl fmt::Display for CommandRunError {
 impl std::error::Error for CommandRunError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Spawn { source, .. } => Some(source),
-            Self::Exit { .. } => None,
+            Self::Spawn { source, .. } | Self::Io { source, .. } => Some(source),
+            Self::Exit { .. } | Self::Timeout { .. } | Self::OutputTooLarge { .. } => None,
         }
     }
 }
 
-/// Executes one [`CommandSpec`] and captures its complete output.
+/// Executes one [`CommandSpec`] and captures bounded output.
 ///
 /// Unlike [`ProcessActionHandler`], this adapter waits for completion because
 /// callers need stdout before they can update status state. Non-zero exits are
-/// errors and retain stderr for diagnostics. Commands are executed directly,
-/// without a shell or string interpolation.
+/// errors and retain stderr for diagnostics. The default entry point imposes a
+/// wall-time limit and a per-stream byte limit; callers with a known slower
+/// probe can select explicit limits. Commands are executed directly, without a
+/// shell or string interpolation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CommandRunner;
 
 impl CommandRunner {
+    /// Run a command with the default wall-time and per-stream output limits.
     pub fn output(command: &CommandSpec) -> Result<Output, CommandRunError> {
-        let output = Command::new(&command.program)
+        Self::output_with_limits(
+            command,
+            DEFAULT_COMMAND_TIMEOUT,
+            DEFAULT_COMMAND_OUTPUT_LIMIT,
+        )
+    }
+
+    /// Run a command with an explicit deadline and byte limit for each stream.
+    pub fn output_with_limits(
+        command: &CommandSpec,
+        timeout: Duration,
+        output_limit: usize,
+    ) -> Result<Output, CommandRunError> {
+        let mut child = Command::new(&command.program)
             .args(&command.args)
-            .output()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
             .map_err(|source| CommandRunError::Spawn {
                 program: command.program.clone(),
                 source,
             })?;
+        let output =
+            capture_child_output(&mut child, timeout, output_limit).map_err(
+                |error| match error {
+                    CaptureError::Io(source) => CommandRunError::Io {
+                        program: command.program.clone(),
+                        source,
+                    },
+                    CaptureError::Timeout => CommandRunError::Timeout {
+                        program: command.program.clone(),
+                        timeout,
+                    },
+                    CaptureError::OutputTooLarge => CommandRunError::OutputTooLarge {
+                        program: command.program.clone(),
+                        limit: output_limit,
+                    },
+                },
+            )?;
         if output.status.success() {
             Ok(output)
         } else {
@@ -131,6 +210,163 @@ impl CommandRunner {
             })
         }
     }
+}
+
+#[derive(Debug)]
+enum CaptureError {
+    Io(io::Error),
+    Timeout,
+    OutputTooLarge,
+}
+
+fn capture_child_output(
+    child: &mut Child,
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<Output, CaptureError> {
+    let child_id = child.id();
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_child_group(child);
+        return Err(CaptureError::Io(io::Error::other(
+            "command stdout was not captured",
+        )));
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        terminate_child_group(child);
+        return Err(CaptureError::Io(io::Error::other(
+            "command stderr was not captured",
+        )));
+    };
+    if let Err(source) =
+        set_nonblocking(stdout.as_raw_fd()).and_then(|()| set_nonblocking(stderr.as_raw_fd()))
+    {
+        terminate_child_group(child);
+        return Err(CaptureError::Io(source));
+    }
+
+    let started = Instant::now();
+    let mut stdout_bytes = Vec::with_capacity(output_limit.min(4096));
+    let mut stderr_bytes = Vec::with_capacity(output_limit.min(4096));
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut status = None;
+    let result = (|| {
+        loop {
+            if !stdout_eof {
+                let drain = drain_available(&mut stdout, &mut stdout_bytes, output_limit)
+                    .map_err(CaptureError::Io)?;
+                stdout_eof = drain.eof;
+                if drain.oversized {
+                    return Err(CaptureError::OutputTooLarge);
+                }
+            }
+            if !stderr_eof {
+                let drain = drain_available(&mut stderr, &mut stderr_bytes, output_limit)
+                    .map_err(CaptureError::Io)?;
+                stderr_eof = drain.eof;
+                if drain.oversized {
+                    return Err(CaptureError::OutputTooLarge);
+                }
+            }
+
+            if status.is_none() {
+                status = child.try_wait().map_err(CaptureError::Io)?;
+                if status.is_some() {
+                    // A synchronous probe must not leave descendants holding
+                    // its capture pipes open after the direct child exits.
+                    kill_process_group(child_id);
+                }
+            }
+            if stdout_eof
+                && stderr_eof
+                && let Some(status) = status
+            {
+                return Ok(Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+
+            let elapsed = started.elapsed();
+            if elapsed >= timeout {
+                return Err(CaptureError::Timeout);
+            }
+            thread::sleep(COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(elapsed)));
+        }
+    })();
+    if result.is_err() {
+        terminate_child_group(child);
+    }
+    result
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DrainResult {
+    eof: bool,
+    oversized: bool,
+}
+
+fn drain_available(
+    source: &mut impl io::Read,
+    retained: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<DrainResult> {
+    let mut drained = 0;
+    let mut oversized = false;
+    let mut chunk = [0_u8; 4096];
+    while drained < MAX_DRAIN_BYTES_PER_POLL {
+        let request = chunk.len().min(MAX_DRAIN_BYTES_PER_POLL - drained);
+        match source.read(&mut chunk[..request]) {
+            Ok(0) => {
+                return Ok(DrainResult {
+                    eof: true,
+                    oversized,
+                });
+            }
+            Ok(read) => {
+                drained += read;
+                let retain = read.min(limit.saturating_sub(retained.len()));
+                retained.extend_from_slice(&chunk[..retain]);
+                oversized |= retain < read;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(DrainResult {
+                    eof: false,
+                    oversized,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(DrainResult {
+        eof: false,
+        oversized,
+    })
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn kill_process_group(child_id: u32) {
+    if let Ok(process_group) = i32::try_from(child_id) {
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
+}
+
+fn terminate_child_group(child: &mut Child) {
+    kill_process_group(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Where a screenshot request goes.
@@ -564,6 +800,49 @@ mod tests {
             CommandRunError::Exit { status, .. } if status.code() == Some(7)
         ));
         assert!(failed.to_string().contains("failure"));
+    }
+
+    #[test]
+    fn command_runner_bounds_each_output_stream() {
+        let error = CommandRunner::output_with_limits(
+            &CommandSpec::new("/bin/sh").with_args(["-c", "printf 123456789 >&2"]),
+            Duration::from_secs(1),
+            8,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CommandRunError::OutputTooLarge { limit: 8, .. }
+        ));
+    }
+
+    #[test]
+    fn command_runner_enforces_its_deadline_and_reaps_the_group() {
+        let started = Instant::now();
+        let error = CommandRunner::output_with_limits(
+            &CommandSpec::new("/bin/sh").with_args(["-c", "exec sleep 10"]),
+            Duration::from_millis(25),
+            64,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CommandRunError::Timeout { .. }));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn completed_probe_does_not_wait_for_background_pipe_holders() {
+        let started = Instant::now();
+        let output = CommandRunner::output_with_limits(
+            &CommandSpec::new("/bin/sh").with_args(["-c", "sleep 10 &"]),
+            Duration::from_secs(1),
+            64,
+        )
+        .unwrap();
+
+        assert!(output.status.success());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

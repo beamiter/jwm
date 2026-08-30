@@ -34,7 +34,8 @@ launch-error reporting, non-blocking child waiting, and zombie prevention.
 Other effects are returned as explicit errors rather than being silently
 ignored. The same crate's separate `CommandRunner` executes output-producing
 host probes directly (without a shell), accepts only successful exit status,
-and preserves stderr in structured failures.
+preserves bounded stderr in structured failures, and applies explicit output
+and wall-time limits so a broken helper cannot stall or exhaust a frontend.
 
 `xbar_linux_actions::EffectRouter` (0.2) composes that handler with the
 standard Linux host policy for one `RuntimeUpdate`: issues and unhandled
