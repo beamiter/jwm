@@ -285,6 +285,14 @@ impl BufferLayout {
                     "queue capacity does not fit the shared protocol",
                 )
             })?;
+        u32::try_from(size_of::<Slot<M>>())
+            .and(u32::try_from(size_of::<Slot<C>>()))
+            .map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "slot size does not fit the shared protocol",
+                )
+            })?;
 
         let backend_offset =
             checked_align_up(size_of::<GenericHeader>(), strategy.backend_align())?;
@@ -2490,6 +2498,16 @@ mod tests {
         let result = SharedRingBufferOptions::new()
             .adaptive_poll_spins(0)
             .create_typed::<OverAligned, u64>(&path);
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn typed_layout_rejects_slot_size_that_does_not_fit_protocol() {
+        type OversizedPayload = [u8; u32::MAX as usize];
+
+        let result =
+            BufferLayout::calculate::<OversizedPayload, u64>(SyncStrategy::default(), 1, 1);
         assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 
