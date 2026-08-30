@@ -11,6 +11,23 @@
 
 /// Longest track label the control center row shows before ellipsis.
 const MAX_ROW_CHARS: usize = 44;
+/// D-Bus bus names are at most 255 bytes; retaining more cannot identify a
+/// real MPRIS player and only amplifies an untrusted bridge update.
+const MAX_PLAYER_BYTES: usize = 255;
+/// Keep metadata generous for long podcast titles while bounding the state,
+/// OSD label, and status event derived from one bridge message.
+const MAX_METADATA_BYTES: usize = 4 * 1024;
+
+fn bounded_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlaybackStatus {
@@ -285,10 +302,11 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
         return None;
     }
     let text = |key: &str| {
-        args.get(key)
+        let value = args
+            .get(key)
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string()
+            .unwrap_or("");
+        bounded_text(value, MAX_METADATA_BYTES)
     };
     let flag = |key: &str| {
         args.get(key)
@@ -296,7 +314,7 @@ pub fn parse_state_args(args: &serde_json::Value) -> Option<MediaState> {
             .unwrap_or(false)
     };
     Some(MediaState {
-        player: player.to_string(),
+        player: bounded_text(player, MAX_PLAYER_BYTES),
         identity: text("identity"),
         status: PlaybackStatus::from_mpris(
             args.get("status")
@@ -466,6 +484,25 @@ mod tests {
         assert_eq!(parsed.track_label(), "Blue in Green \u{2014} Miles Davis");
         assert!(parsed.can_go_next);
         assert!(!parsed.can_go_previous);
+    }
+
+    #[test]
+    fn state_args_bound_external_text_without_splitting_utf8() {
+        let player = "p".repeat(MAX_PLAYER_BYTES + 10);
+        let metadata = "€".repeat(MAX_METADATA_BYTES / 3 + 10);
+        let parsed = parse_state_args(&serde_json::json!({
+            "player": player,
+            "identity": metadata,
+            "title": metadata,
+            "artist": metadata,
+        }))
+        .expect("bounded player parses");
+
+        assert_eq!(parsed.player.len(), MAX_PLAYER_BYTES);
+        for value in [&parsed.identity, &parsed.title, &parsed.artist] {
+            assert_eq!(value.len(), MAX_METADATA_BYTES - MAX_METADATA_BYTES % 3);
+        }
+        assert!(parsed.track_label().len() <= MAX_METADATA_BYTES * 2 + 5);
     }
 
     #[test]
