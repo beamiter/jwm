@@ -16,6 +16,102 @@ BUILD=1          # 更新后是否编译
 BUILD_ALL=0      # 1 = 已知项目全部编译，不管有没有更新
 BUILD_JOBS=1     # 同时编译几个项目；cargo 内部已经并行，默认串行
 ONLY=""          # 逗号分隔的项目名白名单
+MAX_PARALLEL_JOBS=64
+
+# 名字必须与扫描到的仓库 basename 一致。LifeAI 是给命令行使用的便捷别名，
+# 规范名仍是实际目录 LifeAI.jl。
+KNOWN_TARGETS="jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl"
+INSTALL_TARGETS="anvil ember forge frost jwm"
+
+is_known_target() {
+    case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+is_install_target() {
+    case " $INSTALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+canonical_target_name() {
+    case "$1" in
+        LifeAI) printf '%s\n' 'LifeAI.jl' ;;
+        *)      printf '%s\n' "$1" ;;
+    esac
+}
+
+# -T 白名单；未指定时全部仓库都在范围内。ONLY 在参数预检时已规范化。
+in_scope() {
+    local name="$1" item
+    local -a _only=()
+    [ -z "$ONLY" ] && return 0
+    IFS=',' read -r -a _only <<<"$ONLY"
+    for item in "${_only[@]}"; do
+        [ "$item" = "$name" ] && return 0
+    done
+    return 1
+}
+
+normalize_only() {
+    local raw item normalized="" seen=" "
+    local -a requested=()
+    [ -z "$ONLY" ] && return 0
+    IFS=',' read -r -a requested <<<"$ONLY"
+    for raw in "${requested[@]}"; do
+        # Trim only at the edges; embedded whitespace remains invalid instead
+        # of silently changing a mistyped project name.
+        item="${raw#"${raw%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [ -n "$item" ] || { echo "-T 包含空项目名" >&2; return 1; }
+        item="$(canonical_target_name "$item")"
+        is_known_target "$item" || {
+            echo "-T 包含未知项目: $(sanitize_text "$item")" >&2
+            return 1
+        }
+        case "$seen" in
+            *" $item "*) continue ;;
+        esac
+        seen+="$item "
+        normalized+="${normalized:+,}$item"
+    done
+    ONLY="$normalized"
+}
+
+# Remote commit subjects and filesystem names are not trusted terminal text.
+# Keep ordinary Unicode readable, but make delimiters, backslashes, C0/C1,
+# bidi overrides/isolates and common zero-width/default-ignorable display
+# controls explicit before they enter logs or the pipe-delimited status files.
+# The latter also prevents a repository named `a|FAIL|b` from forging summary
+# columns or visually reordering adjacent trusted text.
+sanitize_text() {
+    local input="$1" output="" character escaped
+    local code index
+    for ((index = 0; index < ${#input}; index++)); do
+        character="${input:index:1}"
+        case "$character" in
+            \\)   output="${output}\\\\"; continue ;;
+            '|')  output+='\x7C'; continue ;;
+        esac
+        printf -v code '%d' "'$character"
+        if ((code < 32 || (code >= 127 && code <= 159) \
+            || code == 0x00AD || code == 0x034F || code == 0x061C \
+            || (code >= 0x115F && code <= 0x1160) \
+            || (code >= 0x17B4 && code <= 0x17B5) \
+            || (code >= 0x180B && code <= 0x180F) \
+            || (code >= 0x200B && code <= 0x200F) \
+            || (code >= 0x2028 && code <= 0x202E) \
+            || (code >= 0x2060 && code <= 0x206F) \
+            || code == 0x3164 || (code >= 0xFE00 && code <= 0xFE0F) \
+            || code == 0xFEFF || code == 0xFFA0 \
+            || (code >= 0x1BCA0 && code <= 0x1BCA3) \
+            || (code >= 0x1D173 && code <= 0x1D17A) \
+            || (code >= 0xE0000 && code <= 0xE0FFF))); then
+            printf -v escaped '\\u{%04X}' "$code"
+            output+="$escaped"
+        else
+            output+="$character"
+        fi
+    done
+    printf '%s' "$output"
+}
 
 # 传给各仓库安装脚本的额外参数，例如 JWM_INSTALL_ARGS='-b xcb_bar --skip-bar'
 # 或 ANVIL_INSTALL_ARGS='--backend cargo --no-desktop'
@@ -45,10 +141,10 @@ usage() {
   -u            双向更新：拉取之后，如本地领先则自动 push 到 upstream
   -q            只输出汇总表
 
-构建选项 (只作用于已知项目: jsh anvil ember frost forge jwm):
+构建选项 (只作用于已知项目: jagent jsh jterm_core anvil ember frost forge jwm cplus LifeAI.jl):
   -B            全部重新构建，不管本次有没有拉到新提交
   -N            不构建，只更新仓库
-  -T 列表       只处理这些项目，逗号分隔，如 -T anvil,jwm
+  -T 列表       只更新和构建这些项目，逗号分隔，如 -T jagent,jwm,LifeAI
   -J N          同时构建几个项目 (默认 1；cargo 内部已经并行)
   -h            显示本帮助
 
@@ -57,25 +153,32 @@ usage() {
 或者产物不存在的项目。
 
 各项目的构建方式并不相同，脚本里按名字分派:
-  anvil, ember,    scripts/install.sh —— 各仓库自带的安装脚本，构建加安装一步到位。
-  forge, frost     后端 (nix / cargo) 由脚本自己按 --backend auto 挑，二进制默认装到
-                   ~/.cargo/bin，装在 $HOME 下，不需要 sudo。
+  anvil,forge       scripts/install.sh —— 后端 (nix / cargo) 由 --backend auto 挑；
+                    anvil 默认装到 ~/.local/bin，forge 默认装到 ~/.cargo/bin。
+  ember,frost       scripts/install.sh —— 默认用 cargo 构建，也可用 --binary 安装
+                    预构建产物；默认装到 ~/.local/bin。这四个目标都不需要 sudo。
   jwm              scripts/install_jwm_scripts.sh —— jwm 没有只编不装的中间态：
                    裸 cargo build 只出根 package 的四个二进制，不编 bar 和
                    jwm-bridge，也不同步到 /usr/local/bin，更新完跑的还是旧的
                    那份。所以这里直接跑安装脚本，它自带构建。需要 sudo。
   jsh              cargo build --target <arch>-unknown-linux-musl (静态 musl)
+  jagent,jterm_core cargo build --release --locked（库 crate）
+  cplus            bash build.sh（仓库自己的 CMake 构建入口）
+  LifeAI.jl        锁定项目环境下 instantiate/precompile 并加载 LifeAI
 
-只有 jsh 是纯编译不安装；要装它请运行 jsh 仓库的 scripts/install-jsh.sh。
+上述 jsh/jagent/jterm_core/cplus/LifeAI.jl 路径只构建或预编译、不安装；
+要装 jsh 请运行其仓库的 scripts/install-jsh.sh。
 产物检测看的是各项目真正落地的位置: jwm 看 /usr/local/bin/jwm，四个终端看
-安装脚本的目标目录 (默认 ~/.cargo/bin/<名字>，跟随 --prefix/--bin-dir/DESTDIR)，
-jsh 看 target 下的 release 产物。
+安装脚本的目标目录（anvil/ember/frost 默认 ~/.local/bin，forge 默认
+~/.cargo/bin；都跟随 --prefix/--bin-dir/DESTDIR），
+jsh/jagent/jterm_core 看 Cargo target 下的 release 产物，cplus 看 build/m；
+LifeAI.jl 的 Julia 预编译缓存没有稳定的仓库内路径，因此只在更新或 -B 时执行。
 
 环境变量:
   ANVIL_INSTALL_ARGS 追加给 anvil/scripts/install.sh 的参数，如 '--backend cargo'
-  EMBER_INSTALL_ARGS 同上，作用于 ember
-  FORGE_INSTALL_ARGS 同上，作用于 forge
-  FROST_INSTALL_ARGS 同上，作用于 frost
+  EMBER_INSTALL_ARGS 追加给 ember/scripts/install.sh，如 '--no-desktop'
+  FORGE_INSTALL_ARGS 追加给 forge/scripts/install.sh，如 '--backend nix'
+  FROST_INSTALL_ARGS 追加给 frost/scripts/install.sh，如 '--binary /path/to/frost'
   JWM_INSTALL_ARGS   追加给 install_jwm_scripts.sh 的参数，如 '-b xcb_bar'
   JSH_INSTALL_TARGET 覆盖 jsh 的 target 三元组，例如 x86_64-unknown-linux-gnu
                      (即明确要求动态 glibc 版本；install-jsh.sh 也认这个变量)
@@ -105,15 +208,38 @@ while getopts ":j:J:T:rmsnPuqBNh" opt; do
     esac
 done
 shift $((OPTIND - 1))
-[ $# -gt 0 ] && ROOT="$1"
+if [ $# -gt 1 ]; then
+    echo "只能指定一个扫描目录" >&2
+    exit 2
+fi
+[ $# -eq 1 ] && ROOT="$1"
 
 if [ ! -d "$ROOT" ]; then
-    echo "目录不存在: $ROOT" >&2
+    echo "目录不存在: $(sanitize_text "$ROOT")" >&2
     exit 2
 fi
 
-case "$JOBS" in ''|*[!0-9]*|0) echo "-j 需要正整数" >&2; exit 2 ;; esac
-case "$BUILD_JOBS" in ''|*[!0-9]*|0) echo "-J 需要正整数" >&2; exit 2 ;; esac
+case "$JOBS" in ''|*[!0-9]*) echo "-j 需要正整数" >&2; exit 2 ;; esac
+case "$BUILD_JOBS" in ''|*[!0-9]*) echo "-J 需要正整数" >&2; exit 2 ;; esac
+if [ "${#JOBS}" -gt 2 ]; then
+    echo "-j 必须在 1..$MAX_PARALLEL_JOBS 之间" >&2
+    exit 2
+fi
+if [ "${#BUILD_JOBS}" -gt 2 ]; then
+    echo "-J 必须在 1..$MAX_PARALLEL_JOBS 之间" >&2
+    exit 2
+fi
+JOBS=$((10#$JOBS))
+BUILD_JOBS=$((10#$BUILD_JOBS))
+if [ "$JOBS" -lt 1 ] || [ "$JOBS" -gt "$MAX_PARALLEL_JOBS" ]; then
+    echo "-j 必须在 1..$MAX_PARALLEL_JOBS 之间" >&2
+    exit 2
+fi
+if [ "$BUILD_JOBS" -lt 1 ] || [ "$BUILD_JOBS" -gt "$MAX_PARALLEL_JOBS" ]; then
+    echo "-J 必须在 1..$MAX_PARALLEL_JOBS 之间" >&2
+    exit 2
+fi
+normalize_only || exit 2
 
 # dry-run 只汇报，不碰工作区，自然也不编译
 [ "$DRY_RUN" -eq 1 ] && BUILD=0
@@ -147,11 +273,21 @@ repos=()
 # ROOT 存绝对路径：默认的 "." 会让汇总里的仓库名也变成 "."
 is_git_repo "$ROOT" && repos+=("$(cd "$ROOT" && pwd)")
 for d in "$ROOT"/*/; do
-    is_git_repo "${d%/}" && repos+=("${d%/}")
+    is_git_repo "${d%/}" && repos+=("$(cd "${d%/}" && pwd)")
 done
 
+# `-T` is an update scope, not merely a build filter.  Filtering before any
+# worker starts guarantees an omitted repository is not even fetched.
+if [ -n "$ONLY" ]; then
+    declare -a selected_repos=()
+    for repo in "${repos[@]}"; do
+        in_scope "$(basename "$repo")" && selected_repos+=("$repo")
+    done
+    repos=("${selected_repos[@]}")
+fi
+
 if [ ${#repos[@]} -eq 0 ]; then
-    echo "在 $ROOT 下没有找到 git 仓库" >&2
+    echo "在 $(sanitize_text "$ROOT") 下没有找到 git 仓库" >&2
     exit 0
 fi
 
@@ -159,18 +295,39 @@ fi
 # 详细日志写入 $WORKDIR/<idx>.log，主进程按顺序回放，避免并发输出交错。
 update_one() {
     local idx="$1" repo="$2"
-    local name log status detail
-    name="$(basename "$repo")"
+    local name log status detail branch_display upstream_display
+    name="$(sanitize_text "$(basename "$repo")")"
     log="$WORKDIR/$idx.log"
     exec 3>"$log"
 
     report() {
-        status="$1"; detail="$2"
+        status="$1"; detail="$(sanitize_text "$2")"
         printf '%s|%s|%s\n' "$status" "$name" "$detail" >"$WORKDIR/$idx.status"
         exec 3>&-
         return 0
     }
     say() { printf '  %s\n' "$*" >&3; }
+    # Fetch/pull/push sideband is controlled by the remote. Replay it as
+    # ordinary text rather than letting a hostile server inject terminal
+    # escapes or forge the updater's pipe-delimited diagnostics. Our own color
+    # sequences never pass through this boundary and therefore remain intact.
+    run_git_logged() {
+        local raw="$WORKDIR/$idx.git-output" rc line
+        : >"$raw"
+        git -c color.ui=false -C "$repo" "$@" >"$raw" 2>&1
+        rc=$?
+        while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$(sanitize_text "$line")" >&3
+        done <"$raw"
+        return "$rc"
+    }
+    append_commit_log() {
+        local range="$1" commit_line
+        while IFS= read -r commit_line; do
+            printf '    %s\n' "$(sanitize_text "$commit_line")" >&3
+        done < <(git -C "$repo" log --oneline --no-decorate --max-count=10 \
+            "$range" 2>/dev/null)
+    }
 
     printf '%s\n' "${C_BLD}==> $name${C_RST}" >&3
 
@@ -185,6 +342,7 @@ update_one() {
         say "${C_YLW}HEAD 处于 detached 状态，跳过${C_RST}"
         report SKIP "detached HEAD"; return
     fi
+    branch_display="$(sanitize_text "$branch")"
 
     if [ -z "$(git -C "$repo" remote)" ]; then
         say "${C_DIM}没有配置 remote，跳过${C_RST}"
@@ -194,7 +352,7 @@ update_one() {
     # fetch
     local fetch_args=(--tags --quiet)
     [ "$PRUNE" -eq 1 ] && fetch_args+=(--prune)
-    if ! git -C "$repo" fetch "${fetch_args[@]}" --all 2>>"$log"; then
+    if ! run_git_logged fetch "${fetch_args[@]}" --all; then
         say "${C_RED}fetch 失败${C_RST}"
         report FAIL "fetch 失败"; return
     fi
@@ -202,16 +360,17 @@ update_one() {
     local upstream
     upstream="$(git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
     if [ -z "$upstream" ]; then
-        say "${C_YLW}分支 $branch 没有 upstream，跳过${C_RST}"
+        say "${C_YLW}分支 $branch_display 没有 upstream，跳过${C_RST}"
         report SKIP "$branch 无 upstream"; return
     fi
+    upstream_display="$(sanitize_text "$upstream")"
 
     local local_sha remote_sha
     local_sha="$(git -C "$repo" rev-parse HEAD)"
     remote_sha="$(git -C "$repo" rev-parse "$upstream")"
 
     if [ "$local_sha" = "$remote_sha" ]; then
-        say "${C_DIM}已是最新 ($branch)${C_RST}"
+        say "${C_DIM}已是最新 ($branch_display)${C_RST}"
         report OK "已最新"; return
     fi
 
@@ -241,7 +400,8 @@ update_one() {
     local stashed=0
     if [ "$need_pull" -eq 1 ] && [ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]; then
         if [ "$STASH" -eq 1 ]; then
-            if git -C "$repo" stash push --include-untracked -m "git-update-all $(date +%F_%T)" >>"$log" 2>&1; then
+            if run_git_logged stash push --include-untracked \
+                -m "git-update-all $(date +%F_%T)"; then
                 stashed=1
                 say "已 stash 本地改动"
             else
@@ -257,9 +417,9 @@ update_one() {
     if [ "$need_pull" -eq 1 ]; then
         local rc=0
         case "$MODE" in
-            ff)     git -C "$repo" merge --ff-only "$upstream" >>"$log" 2>&1 || rc=$? ;;
-            rebase) git -C "$repo" pull --rebase --quiet >>"$log" 2>&1 || rc=$? ;;
-            merge)  git -C "$repo" pull --no-rebase --quiet >>"$log" 2>&1 || rc=$? ;;
+            ff)     run_git_logged merge --ff-only "$upstream" || rc=$? ;;
+            rebase) run_git_logged pull --rebase --quiet || rc=$? ;;
+            merge)  run_git_logged pull --no-rebase --quiet || rc=$? ;;
         esac
 
         if [ "$rc" -ne 0 ]; then
@@ -267,19 +427,19 @@ update_one() {
             [ "$MODE" = "merge" ]  && git -C "$repo" merge --abort  >/dev/null 2>&1
             say "${C_RED}更新失败，已回到更新前状态${C_RST}"
             if [ "$stashed" -eq 1 ]; then
-                git -C "$repo" stash pop >>"$log" 2>&1 && say "已恢复 stash"
+                run_git_logged stash pop && say "已恢复 stash"
             fi
             report FAIL "更新失败"; return
         fi
 
         if [ "$stashed" -eq 1 ]; then
-            if git -C "$repo" stash pop >>"$log" 2>&1; then
+            if run_git_logged stash pop; then
                 say "已恢复 stash"
             else
                 # 保留冲突现场，stash 条目也仍在，由用户决定怎么合
                 say "${C_YLW}stash pop 冲突：工作区有冲突标记，stash 条目未删除，请手动处理${C_RST}"
                 report WARN "已更新但 stash 冲突待处理"
-                git -C "$repo" log --oneline "$local_sha..HEAD" >>"$log" 2>&1
+                append_commit_log "$local_sha..HEAD"
                 return
             fi
         fi
@@ -290,7 +450,7 @@ update_one() {
     if [ "$need_pull" -eq 1 ]; then
         shortstat="$(git -C "$repo" diff --shortstat "$local_sha" "$new_sha" 2>/dev/null | sed 's/^ *//')"
         say "${C_GRN}拉取 $behind 个提交${C_RST} $(git -C "$repo" rev-parse --short "$local_sha")..$(git -C "$repo" rev-parse --short "$new_sha")${shortstat:+  ($shortstat)}"
-        git -C "$repo" log --oneline --no-decorate "$local_sha..$new_sha" 2>/dev/null | head -10 | sed 's/^/    /' >&3
+        append_commit_log "$local_sha..$new_sha"
         pull_msg="拉取 ${behind} 个提交${shortstat:+, $shortstat}"
     fi
 
@@ -299,8 +459,8 @@ update_one() {
         local push_ahead
         push_ahead="$(git -C "$repo" rev-list --count "${upstream}..HEAD" 2>/dev/null || echo 0)"
         if [ "$push_ahead" -gt 0 ]; then
-            if git -C "$repo" push >>"$log" 2>&1; then
-                say "${C_GRN}已推送 $push_ahead 个提交到 $upstream${C_RST}"
+            if run_git_logged push; then
+                say "${C_GRN}已推送 $push_ahead 个提交到 $upstream_display${C_RST}"
                 if [ -n "$pull_msg" ]; then
                     report SYNC "${pull_msg}；推送 ${push_ahead} 个提交"
                 else
@@ -325,26 +485,12 @@ update_one() {
         say "${C_DIM}本地领先 $ahead 个提交，未推送（加 -u 可自动 push）${C_RST}"
         report SKIP "本地领先 $ahead，未推送"
     else
-        say "${C_DIM}已是最新 ($branch)${C_RST}"
+        say "${C_DIM}已是最新 ($branch_display)${C_RST}"
         report OK "已最新"
     fi
 }
 
 # ——— 构建：每个项目的方式都不一样，差异全部集中在下面几个函数里 ———
-
-KNOWN_TARGETS="jsh anvil ember frost forge jwm"
-
-# 这些项目由各自仓库的安装脚本负责“构建 + 安装”，这里不再重复拼 cargo 命令：
-# 后端选择、--locked、feature、desktop 文件等细节都在那些脚本里，抄一份必然会漂。
-INSTALL_TARGETS="anvil ember forge frost jwm"
-
-is_known_target() {
-    case " $KNOWN_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
-}
-
-is_install_target() {
-    case " $INSTALL_TARGETS " in *" $1 "*) return 0 ;; *) return 1 ;; esac
-}
 
 # 四个终端共用同一套 install.sh 接口，额外参数按 <大写名字>_INSTALL_ARGS 取。
 install_args_for() {
@@ -354,9 +500,11 @@ install_args_for() {
 }
 
 # 复刻 anvil/ember/forge/frost install.sh 里 BIN_DIR 的解析：显式 --bin-dir 优先，
-# 其次 --prefix/bin，都没给就是 ~/.cargo/bin；DESTDIR 作为打包用的暂存前缀。
+# 其次 --prefix/bin；anvil/ember/frost 默认 ~/.local/bin，forge 默认
+# ~/.cargo/bin。DESTDIR 作为打包用的暂存前缀。
 install_bin_dir() {
-    local prefix="" bindir=""
+    local name="$1" prefix="" bindir=""
+    shift
     while [ $# -gt 0 ]; do
         case "$1" in
             --bin-dir)   bindir="${2:-}"; shift 2 || break ;;
@@ -370,20 +518,11 @@ install_bin_dir() {
         printf '%s%s\n' "${DESTDIR:-}" "$bindir"
     elif [ -n "$prefix" ]; then
         printf '%s%s/bin\n' "${DESTDIR:-}" "$prefix"
-    else
+    elif [ "$name" = "forge" ]; then
         printf '%s%s/.cargo/bin\n' "${DESTDIR:-}" "$HOME"
+    else
+        printf '%s%s/.local/bin\n' "${DESTDIR:-}" "$HOME"
     fi
-}
-
-# -T 白名单；未指定时全部已知项目都在范围内
-in_scope() {
-    local name="$1" item
-    [ -z "$ONLY" ] && return 0
-    IFS=',' read -r -a _only <<<"$ONLY"
-    for item in "${_only[@]}"; do
-        [ "${item// /}" = "$name" ] && return 0
-    done
-    return 1
 }
 
 # jsh 要编译成哪个 target。空 = 交给 cargo 的默认 target（非 Linux/未知架构）。
@@ -435,43 +574,81 @@ jsh_preflight() {
 # 产物路径，用来判断“没更新但还没构建过”的情况。走安装脚本的项目看安装位置：
 # target/ 里躺着一个二进制不代表它已经装到 PATH 上，看装好的那份才有意义。
 artifact_path() {
-    local name="$1" repo="$2" target_dir
+    local name="$1" repo="$2" target_dir raw_args
+    local -a install_args=()
     if [ "$name" = "jwm" ]; then
         printf '/usr/local/bin/jwm\n'
         return
     fi
     if is_install_target "$name"; then
-        # 分词是故意的：额外参数按空白拆成一个个 argv，和 JWM_INSTALL_ARGS 一致
-        # shellcheck disable=SC2046
-        printf '%s/%s\n' "$(install_bin_dir $(install_args_for "$name"))" "$name"
+        # 环境变量的接口是按空白分 argv；read -a 保留这个契约，但不会像
+        # 未加引号的展开那样把 `*` 再解释成当前目录的文件名。
+        raw_args="$(install_args_for "$name")"
+        [ -z "$raw_args" ] || read -r -a install_args <<<"$raw_args"
+        printf '%s/%s\n' "$(install_bin_dir "$name" "${install_args[@]}")" "$name"
         return
     fi
-    target_dir="${CARGO_TARGET_DIR:-$repo/target}"
+    if [ "$name" = "cplus" ]; then
+        printf '%s/build/m\n' "$repo"
+        return
+    fi
+    if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+        target_dir="$CARGO_TARGET_DIR"
+        case "$target_dir" in
+            /*) ;;
+            *) target_dir="$repo/$target_dir" ;;
+        esac
+    else
+        target_dir="$repo/target"
+    fi
     # 指定了 --target 的话，cargo 会多一层三元组目录
     if [ "$name" = "jsh" ] && [ -n "$JSH_TRIPLE" ]; then
         printf '%s/%s/release/%s\n' "$target_dir" "$JSH_TRIPLE" "$name"
         return
     fi
+    if [ "$name" = "jagent" ] || [ "$name" = "jterm_core" ]; then
+        printf '%s/release/lib%s.rlib\n' "$target_dir" "$name"
+        return
+    fi
     printf '%s/release/%s\n' "$target_dir" "$name"
+}
+
+artifact_is_ready() {
+    local name="$1" repo="$2" artifact
+    # Julia's precompile cache belongs to DEPOT_PATH, not the repository.  A
+    # stable project-local path would be a fake signal, so LifeAI builds after
+    # an update or explicit -B and does not invent an "artifact missing" run.
+    [ "$name" = "LifeAI.jl" ] && return 0
+    artifact="$(artifact_path "$name" "$repo")"
+    case "$name" in
+        jagent|jterm_core) [ -f "$artifact" ] ;;
+        *)                 [ -x "$artifact" ] ;;
+    esac
 }
 
 # 构建命令，一行一个参数（build_one 用 mapfile 读回数组）。
 build_cmd() {
-    local name="$1"
+    local name="$1" raw_args
+    local -a extra_args=()
     case "$name" in
-        # 四个终端各自带 scripts/install.sh，构建加安装一步到位：后端 (nix/cargo)
-        # 由 --backend auto 自己挑，还会装 desktop/AppStream/图标并检查 PATH 遮挡。
-        # 目标是 ~/.cargo/bin，全程在 $HOME 下，不需要 sudo。
+        # 四个终端各自带 scripts/install.sh，构建加安装一步到位。anvil/forge
+        # 自己选择 nix/cargo 后端，ember/frost 选择 cargo 或显式 --binary；脚本
+        # 还负责 desktop/AppStream/图标和 PATH 遮挡检查。目标在用户 HOME 下
+        #（forge 默认 ~/.cargo/bin，其余默认 ~/.local/bin），不需要 sudo。
         anvil|ember|forge|frost)
-            # shellcheck disable=SC2046  # 额外参数按空白拆成一个个 argv，是故意的
-            printf '%s\n' ./scripts/install.sh $(install_args_for "$name")
+            raw_args="$(install_args_for "$name")"
+            [ -z "$raw_args" ] || read -r -a extra_args <<<"$raw_args"
+            printf '%s\n' ./scripts/install.sh
+            [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
         # jwm 只有“安装”这一种做法：根 workspace 的 cargo build 只产出
         # jwm/jwm-tool/jwm-support/jwm-remote，bar 和 jwm-bridge 都不在里面，产物也不会
         # 进 /usr/local/bin，编完了跑的还是旧的那份。所以直接跑安装脚本，
         # 它自带构建（装 bar、bridge、desktop 文件，要 sudo）。
         jwm)
-            printf '%s\n' ./scripts/install_jwm_scripts.sh ${JWM_INSTALL_ARGS}
+            [ -z "$JWM_INSTALL_ARGS" ] || read -r -a extra_args <<<"$JWM_INSTALL_ARGS"
+            printf '%s\n' ./scripts/install_jwm_scripts.sh
+            [ "${#extra_args[@]}" -eq 0 ] || printf '%s\n' "${extra_args[@]}"
             ;;
         # jsh 只编不装：安装形态是静态 musl 二进制，装到哪由 install-jsh.sh 决定。
         jsh)
@@ -480,6 +657,16 @@ build_cmd() {
             else
                 printf '%s\n' cargo build --release --locked
             fi
+            ;;
+        jagent|jterm_core)
+            printf '%s\n' cargo build --release --locked
+            ;;
+        cplus)
+            printf '%s\n' bash ./build.sh
+            ;;
+        LifeAI.jl)
+            printf '%s\n' julia --project=. --startup-file=no --history-file=no \
+                -e 'using Pkg; Pkg.instantiate(); Pkg.precompile(); using LifeAI'
             ;;
     esac
 }
@@ -522,7 +709,7 @@ build_one() {
     fi
 }
 
-printf '%s\n' "${C_BLD}扫描 $ROOT: ${#repos[@]} 个仓库，并发 $JOBS，模式 $MODE$([ $DRY_RUN -eq 1 ] && echo ' (dry-run)')${C_RST}"
+printf '%s\n' "${C_BLD}扫描 $(sanitize_text "$ROOT"): ${#repos[@]} 个仓库，并发 $JOBS，模式 $MODE$([ $DRY_RUN -eq 1 ] && echo ' (dry-run)')${C_RST}"
 
 running=0
 for i in "${!repos[@]}"; do
@@ -541,7 +728,7 @@ summary=()
 declare -a git_st=()
 for i in "${!repos[@]}"; do
     [ "$QUIET" -eq 0 ] && [ -s "$WORKDIR/$i.log" ] && cat "$WORKDIR/$i.log"
-    line="$(cat "$WORKDIR/$i.status" 2>/dev/null || printf 'FAIL|%s|无结果\n' "$(basename "${repos[$i]}")")"
+    line="$(cat "$WORKDIR/$i.status" 2>/dev/null || printf 'FAIL|%s|无结果\n' "$(sanitize_text "$(basename "${repos[$i]}")")")"
     summary+=("$line")
     git_st[$i]="${line%%|*}"
     case "${line%%|*}" in
@@ -589,6 +776,19 @@ if [ "$BUILD" -eq 1 ]; then
             continue
         fi
 
+        # Updating and building are separate trust boundaries.  A repository
+        # can be SKIP/OK while already dirty (for example it has no upstream,
+        # is only ahead, or -s restored the user's stash after a pull).  Never
+        # turn that mixed source tree into an installed release implicitly.
+        if ! worktree_state="$(git -C "${repos[$i]}" status --porcelain 2>/dev/null)"; then
+            printf 'SKIP|%s|无法确认工作区状态，未编译\n' "$name" >"$WORKDIR/b$i.status"
+            continue
+        fi
+        if [ -n "$worktree_state" ]; then
+            printf 'SKIP|%s|工作区脏，未编译\n' "$name" >"$WORKDIR/b$i.status"
+            continue
+        fi
+
         reason=""
         case "$st" in
             UPD|SYNC) reason="有新提交" ;;
@@ -596,7 +796,7 @@ if [ "$BUILD" -eq 1 ]; then
         if [ -z "$reason" ] && [ "$BUILD_ALL" -eq 1 ]; then
             reason="-B 强制"
         fi
-        if [ -z "$reason" ] && [ ! -x "$(artifact_path "$name" "${repos[$i]}")" ]; then
+        if [ -z "$reason" ] && ! artifact_is_ready "$name" "${repos[$i]}"; then
             reason="产物缺失"
         fi
         [ -n "$reason" ] || continue
@@ -617,13 +817,25 @@ if [ "$BUILD" -eq 1 ]; then
         break
     done
 
-    if ! command -v cargo >/dev/null 2>&1 && [ "${#run_idx[@]}" -gt 0 ]; then
-        printf '\n%s\n' "${C_RED}找不到 cargo，跳过全部编译（先装 Rust 工具链，或用 -N 关掉编译）${C_RST}"
-        for i in "${run_idx[@]}"; do
-            printf 'FAIL|%s|没有 cargo\n' "$(basename "${repos[$i]}")" >"$WORKDIR/b$i.status"
-        done
-        run_idx=()
-    fi
+    # 逐项目只检查真正的入口工具。四个终端必须交给 install.sh 自己解析
+    # --backend/--binary：anvil/forge 的 auto 会优先选 nix，而 ember/frost
+    # 也可能安装预构建二进制；在这里一律要求 cargo 会提前否决合法调用。
+    available_idx=()
+    for i in "${run_idx[@]}"; do
+        name="$(basename "${repos[$i]}")"
+        case "$name" in
+            anvil|ember|forge|frost) required_tool="bash" ;;
+            cplus)      required_tool="bash" ;;
+            LifeAI.jl)  required_tool="julia" ;;
+            *)          required_tool="cargo" ;;
+        esac
+        if command -v "$required_tool" >/dev/null 2>&1; then
+            available_idx+=("$i")
+        else
+            printf 'FAIL|%s|没有 %s\n' "$name" "$required_tool" >"$WORKDIR/b$i.status"
+        fi
+    done
+    run_idx=("${available_idx[@]}")
 
     # jwm 的安装脚本要 sudo 往 /usr/local/bin 和 xsessions 里装东西。并发或 -q
     # 模式下子进程的输出全进日志文件，密码提示看不见，表现就是整个脚本卡死；

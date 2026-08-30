@@ -3,7 +3,6 @@
 /video-demo/demo-client/target
 /video-demo/generated
 /video-demo/tmp
-/waterlily/Manifest.toml
 /waterlily/LocalPreferences.toml
 /waterlily/.cuda-toolkit/
 __pycache__/

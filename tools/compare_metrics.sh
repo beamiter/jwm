@@ -1,18 +1,146 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # JWM Metrics Comparison Tool - 性能数据对比分析
 
-set -e
+set -Eeuo pipefail
+
+# JSON numbers always use a dot. LC_ALL would override LC_NUMERIC, so preserve
+# its nonnumeric categories before making Bash printf parse jq deterministically.
+if [[ -n ${LC_ALL:-} ]]; then
+    export LC_CTYPE=$LC_ALL
+    export LC_COLLATE=$LC_ALL
+    export LC_TIME=$LC_ALL
+    export LC_MONETARY=$LC_ALL
+    export LC_MESSAGES=$LC_ALL
+    unset LC_ALL
+fi
+export LC_NUMERIC=C
 
 # 获取当前指标
 get_metrics() {
-    jwm-tool msg get_metrics --raw 2>/dev/null | jq '.data' || echo '{}'
+    local metrics
+    metrics="$(jwm-tool msg get_metrics --raw 2>/dev/null |
+        jq -e '
+            select(type == "object" and .success == true)
+            | .data
+            | select(type == "object")
+            | select([.. | numbers] | all(.[]; isfinite))
+        ')" || return 1
+    [[ -n $metrics ]] || return 1
+    printf '%s\n' "$metrics"
+}
+
+require_commands() {
+    local command
+    for command in "$@"; do
+        command -v "$command" >/dev/null 2>&1 || {
+            echo "❌ 缺少必需命令: $command" >&2
+            return 1
+        }
+    done
+}
+
+validate_metrics() {
+    jq -e '
+        def finite_nonnegative:
+            type == "number" and . >= 0 and . <= 1.7976931348623157e308;
+        def percentage: finite_nonnegative and . <= 100;
+
+        type == "object"
+        and ([
+            .fps, .avg_frame_time_ms, .max_frame_time_ms,
+            .input_latency_avg_ms, .input_latency_p95_ms
+        ] | all(.[]; finite_nonnegative))
+        and ([
+            .gpu_load_percent, .cpu_load_percent,
+            .blur_cache_hit_rate, .dirty_fraction_percent
+        ] | all(.[]; percentage))
+        and (.window_count | finite_nonnegative and floor == .)
+    ' >/dev/null <<<"$1"
+}
+
+subtract_numbers() {
+    if [[ $1 == N/A || $2 == N/A ]]; then
+        printf 'N/A\n'
+    else
+        jq -enr --argjson left "$1" --argjson right "$2" '$left - $right'
+    fi
+}
+
+percent_change() {
+    local change=$1 baseline=$2
+    jq -enr --argjson change "$change" --argjson baseline "$baseline" '
+        if $baseline == 0 then
+            if $change == 0 then 0 else "N/A" end
+        else
+            $change / $baseline * 100
+        end
+    '
+}
+
+format_number() {
+    if [[ $1 == N/A ]]; then
+        printf 'N/A\n'
+    else
+        printf '%.6g\n' "$1"
+    fi
+}
+
+format_signed_number() {
+    if [[ $1 == N/A ]]; then
+        printf 'N/A\n'
+    else
+        printf '%+.6g\n' "$1"
+    fi
+}
+
+format_percent() {
+    if [[ $1 == N/A ]]; then
+        printf 'N/A\n'
+    else
+        printf '%.6g%%\n' "$1"
+    fi
+}
+
+format_signed_percent() {
+    if [[ $1 == N/A ]]; then
+        printf 'N/A\n'
+    else
+        printf '%+.6g%%\n' "$1"
+    fi
+}
+
+trend_label() {
+    local change=$1 better=$2 worse=$3 equal=$4
+    if jq -en --argjson change "$change" '$change > 0' >/dev/null; then
+        printf '%s\n' "$better"
+    elif jq -en --argjson change "$change" '$change < 0' >/dev/null; then
+        printf '%s\n' "$worse"
+    else
+        printf '%s\n' "$equal"
+    fi
+}
+
+frame_interval() {
+    local fps=$1
+    jq -enr --argjson fps "$fps" '
+        if $fps == 0 then "N/A" else 1000 / $fps end
+    '
 }
 
 # 保存指标快照
 save_metrics() {
     local file=$1
-    local m=$(get_metrics)
-    echo "$m" | jq '.' > "$file"
+    local m
+    require_commands jwm-tool jq
+    m="$(get_metrics)" || {
+        echo "❌ 无法从正在运行的 JWM 获取指标" >&2
+        return 1
+    }
+    validate_metrics "$m" || {
+        echo "❌ JWM 返回了无效指标" >&2
+        return 1
+    }
+    jq '.' <<<"$m" > "$file"
     echo "✓ 指标已保存到: $file"
 }
 
@@ -20,38 +148,90 @@ save_metrics() {
 compare_metrics() {
     local baseline_file=$1
     local current_file=$2
+    local baseline current
+    local baseline_fps baseline_avg baseline_max baseline_latency baseline_p95
+    local baseline_gpu baseline_cpu baseline_blur baseline_windows baseline_dirty
+    local current_fps current_avg current_max current_latency current_p95
+    local current_gpu current_cpu current_blur current_windows current_dirty
+    local fps_delta latency_delta gpu_delta blur_delta
+    local fps_change latency_change gpu_change blur_change
+    local fps_pct latency_pct gpu_pct blur_pct
+    local fps_label latency_label gpu_label blur_label
+    local baseline_interval current_interval
+    local interval_delta max_delta avg_delta latency_detail_delta p95_delta
+    local gpu_detail_delta cpu_delta window_delta dirty_delta
+
+    require_commands jq
 
     if [ ! -f "$baseline_file" ] || [ ! -f "$current_file" ]; then
         echo "❌ 错误：基线文件或当前文件不存在"
         echo "使用: $0 save <baseline-file>"
         echo "      $0 compare <baseline-file> <current-file>"
-        exit 1
+        return 1
     fi
 
-    local baseline=$(cat "$baseline_file")
-    local current=$(cat "$current_file")
+    baseline="$(<"$baseline_file")"
+    current="$(<"$current_file")"
+    if ! validate_metrics "$baseline" || ! validate_metrics "$current"; then
+        echo "❌ 指标文件缺少必需的数值字段或不是有效 JSON" >&2
+        return 1
+    fi
 
-    # 提取指标
-    local baseline_fps=$(echo "$baseline" | jq '.fps')
-    local current_fps=$(echo "$current" | jq '.fps')
-    local baseline_latency=$(echo "$baseline" | jq '.input_latency_avg_ms')
-    local current_latency=$(echo "$current" | jq '.input_latency_avg_ms')
-    local baseline_gpu=$(echo "$baseline" | jq '.gpu_load_percent')
-    local current_gpu=$(echo "$current" | jq '.gpu_load_percent')
-    local baseline_blur=$(echo "$baseline" | jq '.blur_cache_hit_rate')
-    local current_blur=$(echo "$current" | jq '.blur_cache_hit_rate')
+    IFS=$'\t' read -r baseline_fps baseline_avg baseline_max \
+        baseline_latency baseline_p95 baseline_gpu baseline_cpu baseline_blur \
+        baseline_windows baseline_dirty < <(
+        jq -r '[
+            .fps, .avg_frame_time_ms, .max_frame_time_ms,
+            .input_latency_avg_ms, .input_latency_p95_ms,
+            .gpu_load_percent, .cpu_load_percent, .blur_cache_hit_rate,
+            .window_count, .dirty_fraction_percent
+        ] | @tsv' <<<"$baseline"
+    )
+    IFS=$'\t' read -r current_fps current_avg current_max \
+        current_latency current_p95 current_gpu current_cpu current_blur \
+        current_windows current_dirty < <(
+        jq -r '[
+            .fps, .avg_frame_time_ms, .max_frame_time_ms,
+            .input_latency_avg_ms, .input_latency_p95_ms,
+            .gpu_load_percent, .cpu_load_percent, .blur_cache_hit_rate,
+            .window_count, .dirty_fraction_percent
+        ] | @tsv' <<<"$current"
+    )
 
     # 计算变化
-    local fps_change=$(echo "scale=2; ($current_fps - $baseline_fps)" | bc)
-    local latency_change=$(echo "scale=2; ($baseline_latency - $current_latency)" | bc)
-    local gpu_change=$(echo "scale=2; ($baseline_gpu - $current_gpu)" | bc)
-    local blur_change=$(echo "scale=2; ($current_blur - $baseline_blur)" | bc)
+    fps_delta="$(subtract_numbers "$current_fps" "$baseline_fps")" || return 1
+    latency_delta="$(subtract_numbers "$baseline_latency" "$current_latency")" || return 1
+    gpu_delta="$(subtract_numbers "$baseline_gpu" "$current_gpu")" || return 1
+    blur_delta="$(subtract_numbers "$current_blur" "$baseline_blur")" || return 1
+    fps_change="$(format_number "$fps_delta")"
+    latency_change="$(format_number "$latency_delta")"
+    gpu_change="$(format_number "$gpu_delta")"
+    blur_change="$(format_number "$blur_delta")"
 
     # 计算百分比变化
-    local fps_pct=$(echo "scale=1; ($fps_change / $baseline_fps * 100)" | bc 2>/dev/null || echo "0")
-    local latency_pct=$(echo "scale=1; ($latency_change / $baseline_latency * 100)" | bc 2>/dev/null || echo "0")
-    local gpu_pct=$(echo "scale=1; (-$gpu_change / $baseline_gpu * 100)" | bc 2>/dev/null || echo "0")
-    local blur_pct=$(echo "scale=1; ($blur_change / $baseline_blur * 100)" | bc 2>/dev/null || echo "0")
+    fps_pct="$(percent_change "$fps_delta" "$baseline_fps")" || return 1
+    latency_pct="$(percent_change "$latency_delta" "$baseline_latency")" || return 1
+    gpu_pct="$(percent_change "$gpu_delta" "$baseline_gpu")" || return 1
+    blur_pct="$(percent_change "$blur_delta" "$baseline_blur")" || return 1
+    fps_pct="$(format_percent "$fps_pct")"
+    latency_pct="$(format_percent "$latency_pct")"
+    gpu_pct="$(format_percent "$gpu_pct")"
+    blur_pct="$(format_percent "$blur_pct")"
+    fps_label="$(trend_label "$fps_delta" '✓ 性能改善' '✗ 性能下降' '→ 性能持平')" || return 1
+    latency_label="$(trend_label "$latency_delta" '✓ 延迟降低' '✗ 延迟增加' '→ 延迟持平')" || return 1
+    gpu_label="$(trend_label "$gpu_delta" '✓ 负载降低' '✗ 负载增加' '→ 负载持平')" || return 1
+    blur_label="$(trend_label "$blur_delta" '✓ 命中率提升' '✗ 命中率下降' '→ 命中率持平')" || return 1
+    baseline_interval="$(frame_interval "$baseline_fps")" || return 1
+    current_interval="$(frame_interval "$current_fps")" || return 1
+    interval_delta="$(subtract_numbers "$current_interval" "$baseline_interval")" || return 1
+    max_delta="$(subtract_numbers "$current_max" "$baseline_max")" || return 1
+    avg_delta="$(subtract_numbers "$current_avg" "$baseline_avg")" || return 1
+    latency_detail_delta="$(subtract_numbers "$current_latency" "$baseline_latency")" || return 1
+    p95_delta="$(subtract_numbers "$current_p95" "$baseline_p95")" || return 1
+    gpu_detail_delta="$(subtract_numbers "$current_gpu" "$baseline_gpu")" || return 1
+    cpu_delta="$(subtract_numbers "$current_cpu" "$baseline_cpu")" || return 1
+    window_delta="$(subtract_numbers "$current_windows" "$baseline_windows")" || return 1
+    dirty_delta="$(subtract_numbers "$current_dirty" "$baseline_dirty")" || return 1
 
     # 输出报告
     cat << EOF
@@ -65,26 +245,26 @@ compare_metrics() {
 【FPS 帧率】
   基线:     $baseline_fps fps
   当前:     $current_fps fps
-  变化:     $fps_change fps ($fps_pct%)
-  $([ $(echo "$fps_change > 0" | bc) -eq 1 ] && echo "✓ 性能改善" || echo "✗ 性能下降")
+  变化:     $fps_change fps ($fps_pct)
+  $fps_label
 
 【输入延迟】
   基线:     ${baseline_latency}ms
   当前:     ${current_latency}ms
-  改善:     $latency_change ms ($latency_pct%)
-  $([ $(echo "$latency_change > 0" | bc) -eq 1 ] && echo "✓ 延迟降低" || echo "✗ 延迟增加")
+  改善:     $latency_change ms ($latency_pct)
+  $latency_label
 
 【GPU 负载】
   基线:     ${baseline_gpu}%
   当前:     ${current_gpu}%
-  降低:     $gpu_change% ($gpu_pct%)
-  $([ $(echo "$gpu_change > 0" | bc) -eq 1 ] && echo "✓ 负载降低" || echo "✗ 负载增加")
+  降低:     $gpu_change% ($gpu_pct)
+  $gpu_label
 
 【Blur 缓存命中率】
   基线:     ${baseline_blur}%
   当前:     ${current_blur}%
-  提升:     $blur_change% ($blur_pct%)
-  $([ $(echo "$blur_change > 0" | bc) -eq 1 ] && echo "✓ 命中率提升" || echo "✗ 命中率下降")
+  提升:     $blur_change% ($blur_pct)
+  $blur_label
 
 ═══════════════════════════════════════════════════════════════════
 
@@ -97,42 +277,52 @@ EOF
     printf "%-35s | %15s | %15s | %15s\n" "指标" "基线" "当前" "变化"
     printf "%-35s | %15s | %15s | %15s\n" "---" "---" "---" "---"
 
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "FPS" "$baseline_fps" "$current_fps" "$fps_change"
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "平均帧时间 (ms)" \
-        "$(echo "1000/$baseline_fps" | bc -l | xargs printf '%.2f')" \
-        "$(echo "1000/$current_fps" | bc -l | xargs printf '%.2f')" \
-        "$(echo "1000/$baseline_fps - 1000/$current_fps" | bc -l | xargs printf '%+.2f')"
+    printf "%-35s | %15s | %15s | %15s\n" "FPS" \
+        "$(format_number "$baseline_fps")" "$(format_number "$current_fps")" \
+        "$(format_signed_number "$fps_delta")"
+    printf "%-35s | %15s | %15s | %15s\n" "理论帧间隔 (ms)" \
+        "$(format_number "$baseline_interval")" \
+        "$(format_number "$current_interval")" \
+        "$(format_signed_number "$interval_delta")"
 
-    local baseline_max=$(echo "$baseline" | jq '.max_frame_time_ms')
-    local current_max=$(echo "$current" | jq '.max_frame_time_ms')
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "最大帧时间 (ms)" "$baseline_max" "$current_max" "$(echo "$current_max - $baseline_max" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "最大帧时间 (ms)" \
+        "$(format_number "$baseline_max")" "$(format_number "$current_max")" \
+        "$(format_signed_number "$max_delta")"
 
-    local baseline_avg=$(echo "$baseline" | jq '.avg_frame_time_ms')
-    local current_avg=$(echo "$current" | jq '.avg_frame_time_ms')
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "平均帧时间 (ms)" "$baseline_avg" "$current_avg" "$(echo "$current_avg - $baseline_avg" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "平均帧时间 (ms)" \
+        "$(format_number "$baseline_avg")" "$(format_number "$current_avg")" \
+        "$(format_signed_number "$avg_delta")"
 
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "平均延迟 (ms)" "$baseline_latency" "$current_latency" "$latency_change"
+    printf "%-35s | %15s | %15s | %15s\n" "平均延迟 (ms)" \
+        "$(format_number "$baseline_latency")" \
+        "$(format_number "$current_latency")" \
+        "$(format_signed_number "$latency_detail_delta")"
 
-    local baseline_p95=$(echo "$baseline" | jq '.input_latency_p95_ms')
-    local current_p95=$(echo "$current" | jq '.input_latency_p95_ms')
-    printf "%-35s | %15.2f | %15.2f | %+15.2f\n" "P95 延迟 (ms)" "$baseline_p95" "$current_p95" "$(echo "$current_p95 - $baseline_p95" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "P95 延迟 (ms)" \
+        "$(format_number "$baseline_p95")" "$(format_number "$current_p95")" \
+        "$(format_signed_number "$p95_delta")"
 
-    printf "%-35s | %15d%% | %15d%% | %+15d%%\n" "GPU 负载" "$baseline_gpu" "$current_gpu" "$(echo "$current_gpu - $baseline_gpu" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "GPU 负载" \
+        "$(format_percent "$baseline_gpu")" "$(format_percent "$current_gpu")" \
+        "$(format_signed_percent "$gpu_detail_delta")"
 
-    printf "%-35s | %15d%% | %15d%% | %+15d%%\n" "CPU 负载" \
-        "$(echo "$baseline" | jq '.cpu_load_percent')" \
-        "$(echo "$current" | jq '.cpu_load_percent')" \
-        "$(echo "$(echo "$current" | jq '.cpu_load_percent') - $(echo "$baseline" | jq '.cpu_load_percent')" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "CPU 负载" \
+        "$(format_percent "$baseline_cpu")" "$(format_percent "$current_cpu")" \
+        "$(format_signed_percent "$cpu_delta")"
 
-    printf "%-35s | %15.1f%% | %15.1f%% | %+15.1f%%\n" "Blur 缓存命中率" "$baseline_blur" "$current_blur" "$blur_change"
+    printf "%-35s | %15s | %15s | %15s\n" "Blur 缓存命中率" \
+        "$(format_percent "$baseline_blur")" "$(format_percent "$current_blur")" \
+        "$(format_signed_percent "$blur_delta")"
 
-    local baseline_windows=$(echo "$baseline" | jq '.window_count')
-    local current_windows=$(echo "$current" | jq '.window_count')
-    printf "%-35s | %15d | %15d | %+15d\n" "窗口数量" "$baseline_windows" "$current_windows" "$(echo "$current_windows - $baseline_windows" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "窗口数量" \
+        "$(format_number "$baseline_windows")" \
+        "$(format_number "$current_windows")" \
+        "$(format_signed_number "$window_delta")"
 
-    local baseline_dirty=$(echo "$baseline" | jq '.dirty_fraction_percent')
-    local current_dirty=$(echo "$current" | jq '.dirty_fraction_percent')
-    printf "%-35s | %15.1f%% | %15.1f%% | %+15.1f%%\n" "脏区域占比" "$baseline_dirty" "$current_dirty" "$(echo "$current_dirty - $baseline_dirty" | bc)"
+    printf "%-35s | %15s | %15s | %15s\n" "脏区域占比" \
+        "$(format_percent "$baseline_dirty")" \
+        "$(format_percent "$current_dirty")" \
+        "$(format_signed_percent "$dirty_delta")"
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════"
@@ -166,65 +356,111 @@ EOF
 
 # 实时监控变化
 monitor_changes() {
+    local interval=${JWM_METRICS_INTERVAL:-1}
+    local limit=${JWM_MONITOR_ITERATIONS:-0}
+    local iteration=0
+    local first current first_fps first_gpu first_latency
+    local current_fps current_gpu current_latency
+    local fps_diff gpu_improvement latency_improvement
+    local fps_marker gpu_marker latency_marker
+
+    require_commands jwm-tool jq
+    [[ $interval =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+        echo "JWM_METRICS_INTERVAL must be a non-negative number." >&2
+        return 2
+    }
+    [[ $limit =~ ^[0-9]+$ ]] || {
+        echo "JWM_MONITOR_ITERATIONS must be a non-negative integer." >&2
+        return 2
+    }
+
     echo "📊 实时性能监控 - 按 Ctrl+C 退出"
     echo "将显示相对于首次快照的变化"
     echo ""
 
     # 获取初始快照
-    local first=$(get_metrics)
-    local first_fps=$(echo "$first" | jq '.fps')
-    local first_gpu=$(echo "$first" | jq '.gpu_load_percent')
-    local first_latency=$(echo "$first" | jq '.input_latency_avg_ms')
+    first="$(get_metrics)" || {
+        echo "❌ 无法从正在运行的 JWM 获取指标" >&2
+        return 1
+    }
+    validate_metrics "$first" || {
+        echo "❌ JWM 返回了无效指标" >&2
+        return 1
+    }
+    IFS=$'\t' read -r first_fps first_gpu first_latency < <(
+        jq -r '[.fps, .gpu_load_percent, .input_latency_avg_ms] | @tsv' <<<"$first"
+    )
 
-    while true; do
-        sleep 1
-        clear
+    while ((limit == 0 || iteration < limit)); do
+        sleep "$interval"
+        if [[ -t 1 ]]; then
+            # Do not depend on TERM/terminfo: a pseudo-terminal may be present
+            # even when launchers deliberately omit TERM.
+            printf '\033[2J\033[H'
+        fi
 
-        local current=$(get_metrics)
-        local current_fps=$(echo "$current" | jq '.fps')
-        local current_gpu=$(echo "$current" | jq '.gpu_load_percent')
-        local current_latency=$(echo "$current" | jq '.input_latency_avg_ms')
+        current="$(get_metrics)" || {
+            echo "❌ 无法从正在运行的 JWM 获取指标" >&2
+            return 1
+        }
+        validate_metrics "$current" || {
+            echo "❌ JWM 返回了无效指标" >&2
+            return 1
+        }
+        IFS=$'\t' read -r current_fps current_gpu current_latency < <(
+            jq -r '[.fps, .gpu_load_percent, .input_latency_avg_ms] | @tsv' <<<"$current"
+        )
 
-        local fps_diff=$(echo "$current_fps - $first_fps" | bc)
-        local gpu_diff=$(echo "$current_gpu - $first_gpu" | bc)
-        local latency_diff=$(echo "$first_latency - $current_latency" | bc)
+        fps_diff="$(subtract_numbers "$current_fps" "$first_fps")" || return 1
+        gpu_improvement="$(subtract_numbers "$first_gpu" "$current_gpu")" || return 1
+        latency_improvement="$(subtract_numbers "$first_latency" "$current_latency")" || return 1
+        fps_marker="$(trend_label "$fps_diff" "📈 +$fps_diff" "📉 $fps_diff" '→ 持平')" || return 1
+        gpu_marker="$(trend_label "$gpu_improvement" "✓ 降低 ${gpu_improvement}%" "✗ 增加 ${gpu_improvement#-}%" '→ 持平')" || return 1
+        latency_marker="$(trend_label "$latency_improvement" "✓ 改善 ${latency_improvement}ms" "✗ 恶化 ${latency_improvement#-}ms" '→ 持平')" || return 1
 
         echo "╔════════════════════════════════════════════════════════════════════╗"
         echo "║           JWM 实时性能监控 - $(date '+%H:%M:%S')                        ║"
         echo "╚════════════════════════════════════════════════════════════════════╝"
         echo ""
-        echo "  FPS:      $current_fps fps    $([ $(echo "$fps_diff > 0" | bc) -eq 1 ] && echo "📈 +$fps_diff" || echo "📉 $fps_diff")"
-        echo "  GPU 负载: ${current_gpu}%     $([ $(echo "$gpu_diff > 0" | bc) -eq 1 ] && echo "📈 +${gpu_diff}%" || echo "📉 ${gpu_diff}%")"
-        echo "  延迟:     ${current_latency}ms    $([ $(echo "$latency_diff > 0" | bc) -eq 1 ] && echo "✓ 改善 -$latency_diff ms" || echo "✗ 恶化 +$latency_diff ms")"
+        echo "  FPS:      $current_fps fps    $fps_marker"
+        echo "  GPU 负载: ${current_gpu}%     $gpu_marker"
+        echo "  延迟:     ${current_latency}ms    $latency_marker"
+        ((iteration += 1))
     done
 }
 
 # 主程序
-case "${1:-help}" in
+command=${1:-help}
+if (($# > 0)); then
+    shift
+fi
+case "$command" in
     save)
-        if [ -z "$2" ]; then
+        if (($# != 1)); then
             echo "❌ 错误：需要指定文件名"
             echo "用法: $0 save <file>"
-            exit 1
+            exit 2
         fi
-        save_metrics "$2"
+        save_metrics "$1"
         ;;
     compare)
-        if [ -z "$2" ] || [ -z "$3" ]; then
+        if (($# != 2)); then
             echo "❌ 错误：需要两个文件进行对比"
             echo "用法: $0 compare <baseline-file> <current-file>"
-            exit 1
+            exit 2
         fi
-        compare_metrics "$2" "$3"
+        compare_metrics "$1" "$2"
         ;;
     monitor)
+        (($# == 0)) || { echo "❌ monitor 不接受位置参数" >&2; exit 2; }
         monitor_changes
         ;;
     -h|--help|help)
+        (($# == 0)) || { echo "❌ help 不接受位置参数" >&2; exit 2; }
         show_help
         ;;
     *)
-        echo "❌ 未知命令: $1"
+        echo "❌ 未知命令: $command"
         show_help
         exit 1
         ;;

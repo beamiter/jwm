@@ -44,6 +44,9 @@ python3 video-demo/runner/run_demo.py --backend x11rb --profile stage2
 ```
 
 The `wm-minimize-restore` scene talks to the demo client's Unix control socket.
+The client binds that socket before publishing its path, restricts it to mode
+`0600`, refuses to replace regular files, symlinks, or an active listener, and
+only removes a stale socket left by an exited client.
 `minimize` emits the ICCCM `WM_CHANGE_STATE/IconicState` request and `restore`
 emits the EWMH `_NET_ACTIVE_WINDOW` request; the runner never substitutes a raw
 X11 unmap. State polling, rather than a fixed delay, verifies that the same

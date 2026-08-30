@@ -2,7 +2,9 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+cd -- "${SCRIPT_DIR}"
 
 usage() {
     echo "Usage: $0 [address|thread|memory ...]"
@@ -48,7 +50,8 @@ if ! cargo +nightly --version >/dev/null 2>&1 || ! rustc +nightly --version >/de
     exit 1
 fi
 
-readonly NIGHTLY_SYSROOT="$(rustc +nightly --print sysroot)"
+NIGHTLY_SYSROOT="$(rustc +nightly --print sysroot)"
+readonly NIGHTLY_SYSROOT
 if [[ ! -d "${NIGHTLY_SYSROOT}/lib/rustlib/src/rust/library" ]]; then
     echo "nightly rust-src is required; run: rustup component add rust-src --toolchain nightly" >&2
     exit 1

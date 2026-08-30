@@ -1,6 +1,8 @@
 use clap::Parser;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -129,101 +131,225 @@ fn colors(theme: &str) -> (u32, u32, u32) {
     }
 }
 
-fn draw<C: Connection>(
-    conn: &C,
+struct DrawingContext<'a, C> {
+    conn: &'a C,
     window: Window,
     gc: Gcontext,
     width: u16,
     height: u16,
-    title: &str,
-    content: &str,
-    theme: &str,
-    phase: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let (bg, accent, fg) = colors(theme);
-    conn.change_gc(
-        gc,
-        &x11rb::protocol::xproto::ChangeGCAux::new().foreground(bg),
-    )?;
-    conn.poly_fill_rectangle(
-        window,
-        gc,
-        &[Rectangle {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        }],
-    )?;
-    conn.change_gc(
-        gc,
-        &x11rb::protocol::xproto::ChangeGCAux::new().foreground(accent),
-    )?;
-    conn.poly_fill_rectangle(
-        window,
-        gc,
-        &[Rectangle {
-            x: 0,
-            y: 0,
-            width,
-            height: 12,
-        }],
-    )?;
-    if content == "grid" || content == "color-test" {
-        let mut lines = Vec::new();
-        for x in (0..width as usize).step_by(48) {
-            lines.push(Rectangle {
-                x: x as i16,
-                y: 0,
-                width: 1,
-                height,
-            });
-        }
-        for y in (0..height as usize).step_by(48) {
-            lines.push(Rectangle {
-                x: 0,
-                y: y as i16,
-                width,
-                height: 1,
-            });
-        }
-        conn.poly_fill_rectangle(window, gc, &lines)?;
-    }
-    if content == "chart" || content == "video" {
-        let x = ((phase as u32 * 7) % width.saturating_sub(100).max(1) as u32) as i16;
-        conn.poly_fill_rectangle(
-            window,
-            gc,
-            &[Rectangle {
-                x,
-                y: (height / 2) as i16,
-                width: 100,
-                height: 60,
-            }],
-        )?;
-    }
-    conn.change_gc(
-        gc,
-        &x11rb::protocol::xproto::ChangeGCAux::new().foreground(fg),
-    )?;
-    let label = format!("{}  |  {}", title, content.to_ascii_uppercase());
-    conn.image_text8(window, gc, 28, 48, label.as_bytes())?;
-    conn.image_text8(
-        window,
-        gc,
-        28,
-        height.saturating_sub(24) as i16,
-        b"JWM AUTOMATION DEMO",
-    )?;
-    conn.flush()?;
-    Ok(())
 }
 
-fn control_server(path: PathBuf, tx: mpsc::Sender<Control>) -> std::io::Result<()> {
-    if path.exists() {
-        std::fs::remove_file(&path)?;
+impl<C: Connection> DrawingContext<'_, C> {
+    fn draw(
+        &self,
+        title: &str,
+        content: &str,
+        theme: &str,
+        phase: u16,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (bg, accent, fg) = colors(theme);
+        self.conn.change_gc(
+            self.gc,
+            &x11rb::protocol::xproto::ChangeGCAux::new().foreground(bg),
+        )?;
+        self.conn.poly_fill_rectangle(
+            self.window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: self.height,
+            }],
+        )?;
+        self.conn.change_gc(
+            self.gc,
+            &x11rb::protocol::xproto::ChangeGCAux::new().foreground(accent),
+        )?;
+        self.conn.poly_fill_rectangle(
+            self.window,
+            self.gc,
+            &[Rectangle {
+                x: 0,
+                y: 0,
+                width: self.width,
+                height: 12,
+            }],
+        )?;
+        if content == "grid" || content == "color-test" {
+            let mut lines = Vec::new();
+            for x in (0..self.width as usize).step_by(48) {
+                lines.push(Rectangle {
+                    x: x as i16,
+                    y: 0,
+                    width: 1,
+                    height: self.height,
+                });
+            }
+            for y in (0..self.height as usize).step_by(48) {
+                lines.push(Rectangle {
+                    x: 0,
+                    y: y as i16,
+                    width: self.width,
+                    height: 1,
+                });
+            }
+            self.conn
+                .poly_fill_rectangle(self.window, self.gc, &lines)?;
+        }
+        if content == "chart" || content == "video" {
+            let x = ((phase as u32 * 7) % self.width.saturating_sub(100).max(1) as u32) as i16;
+            self.conn.poly_fill_rectangle(
+                self.window,
+                self.gc,
+                &[Rectangle {
+                    x,
+                    y: (self.height / 2) as i16,
+                    width: 100,
+                    height: 60,
+                }],
+            )?;
+        }
+        self.conn.change_gc(
+            self.gc,
+            &x11rb::protocol::xproto::ChangeGCAux::new().foreground(fg),
+        )?;
+        let label = format!("{}  |  {}", title, content.to_ascii_uppercase());
+        self.conn
+            .image_text8(self.window, self.gc, 28, 48, label.as_bytes())?;
+        self.conn.image_text8(
+            self.window,
+            self.gc,
+            28,
+            self.height.saturating_sub(24) as i16,
+            b"JWM AUTOMATION DEMO",
+        )?;
+        self.conn.flush()?;
+        Ok(())
     }
-    let listener = UnixListener::bind(&path)?;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+fn control_socket_identity(path: &Path) -> std::io::Result<Option<SocketIdentity>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => {
+            Ok(Some(SocketIdentity::from_metadata(&metadata)))
+        }
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "refusing to replace non-socket control path {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_stale_socket_if_unchanged(path: &Path, expected: SocketIdentity) -> std::io::Result<()> {
+    match control_socket_identity(path)? {
+        Some(current) if current == expected => fs::remove_file(path),
+        None => Ok(()),
+        Some(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "control socket changed while checking whether it was stale: {}",
+                path.display()
+            ),
+        )),
+    }
+}
+
+fn remove_socket_if_owned(path: &Path, expected: SocketIdentity) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata)
+            if metadata.file_type().is_socket()
+                && SocketIdentity::from_metadata(&metadata) == expected =>
+        {
+            fs::remove_file(path)?;
+            Ok(true)
+        }
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+struct ControlSocketGuard {
+    path: PathBuf,
+    identity: SocketIdentity,
+}
+
+impl Drop for ControlSocketGuard {
+    fn drop(&mut self) {
+        let _ = remove_socket_if_owned(&self.path, self.identity);
+    }
+}
+
+fn bind_control_socket(path: &Path) -> std::io::Result<(UnixListener, SocketIdentity)> {
+    if let Some(identity) = control_socket_identity(path)? {
+        match UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("control socket is already active at {}", path.display()),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                remove_stale_socket_if_unchanged(path, identity)?;
+            }
+            // The name disappeared after metadata inspection; binding can
+            // proceed without treating the benign race as an error.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    let listener = UnixListener::bind(path)?;
+    let identity = control_socket_identity(path)?.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("bound control socket disappeared: {}", path.display()),
+        )
+    })?;
+    if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = remove_socket_if_owned(path, identity);
+        return Err(error);
+    }
+    match control_socket_identity(path)? {
+        Some(current) if current == identity => {}
+        _ => {
+            drop(listener);
+            let _ = remove_socket_if_owned(path, identity);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "control socket changed while setting its permissions: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok((listener, identity))
+}
+
+fn control_server(listener: UnixListener, tx: mpsc::Sender<Control>) -> std::io::Result<()> {
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(value) => value,
@@ -328,10 +454,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket = args
         .socket
         .unwrap_or_else(|| PathBuf::from(format!("/tmp/jwm-demo-{}.sock", std::process::id())));
+    // Bind before publishing the path so automation never races the server
+    // thread. Existing regular files and symlinks are never unlinked, while a
+    // stale socket is replaced and immediately restricted to its owner.
+    let (listener, socket_identity) = bind_control_socket(&socket)?;
+    let _socket_guard = ControlSocketGuard {
+        path: socket.clone(),
+        identity: socket_identity,
+    };
     let (tx, rx) = mpsc::channel();
-    let server_socket = socket.clone();
     std::thread::spawn(move || {
-        let _ = control_server(server_socket, tx);
+        let _ = control_server(listener, tx);
     });
     println!(
         "{}",
@@ -342,6 +475,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut phase = 0u16;
     let mut last_frame = Instant::now() - Duration::from_secs(1);
     let mut running = true;
+    let drawing = DrawingContext {
+        conn: &conn,
+        window,
+        gc,
+        width: args.width,
+        height: args.height,
+    };
     while running {
         while let Ok(control) = rx.try_recv() {
             match control {
@@ -379,17 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if last_frame.elapsed() >= Duration::from_millis(if args.animate { 33 } else { 250 }) {
-            draw(
-                &conn,
-                window,
-                gc,
-                args.width,
-                args.height,
-                &title,
-                &args.content,
-                &theme,
-                phase,
-            )?;
+            drawing.draw(&title, &args.content, &theme, phase)?;
             phase = phase.wrapping_add(1);
             last_frame = Instant::now();
         }
@@ -397,13 +527,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     conn.destroy_window(window)?;
     conn.flush()?;
-    let _ = std::fs::remove_file(Path::new(&socket));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn socket_fixture(label: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "jwm-demo-client-{}-{label}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     #[test]
     fn minimize_uses_icccm_change_state_message() {
@@ -434,5 +573,82 @@ mod tests {
             event.data.as_data32(),
             [EWMH_SOURCE_APPLICATION, x11rb::CURRENT_TIME, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn control_socket_is_private_and_does_not_replace_regular_files() {
+        let directory = socket_fixture("control-socket");
+        fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("control.sock");
+
+        fs::write(&path, b"keep me").expect("regular-file fixture");
+        let error = bind_control_socket(&path).expect_err("regular file must be preserved");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&path).expect("preserved fixture"), b"keep me");
+
+        fs::remove_file(&path).expect("remove fixture");
+        let (listener, _) = bind_control_socket(&path).expect("bind private socket");
+        let error = bind_control_socket(&path).expect_err("active socket must not be replaced");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        drop(listener);
+
+        // Once the listener is gone, the filesystem entry is stale and may be
+        // replaced safely by a new owner-private listener.
+        let (listener, _) = bind_control_socket(&path).expect("replace stale socket");
+        let mode = fs::symlink_metadata(&path)
+            .expect("socket metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        drop(listener);
+        fs::remove_file(&path).expect("remove socket");
+        fs::remove_dir(&directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn control_socket_cleanup_preserves_a_replacement_path() {
+        let directory = socket_fixture("cleanup-identity");
+        fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("control.sock");
+        let (listener, identity) = bind_control_socket(&path).expect("bind private socket");
+        let guard = ControlSocketGuard {
+            path: path.clone(),
+            identity,
+        };
+
+        fs::remove_file(&path).expect("unlink bound socket");
+        fs::write(&path, b"replacement").expect("replacement fixture");
+        drop(guard);
+
+        assert_eq!(
+            fs::read(&path).expect("preserved replacement"),
+            b"replacement"
+        );
+        drop(listener);
+        fs::remove_file(&path).expect("remove replacement");
+        fs::remove_dir(&directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn stale_socket_cleanup_rejects_an_identity_change() {
+        let directory = socket_fixture("stale-identity");
+        fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("control.sock");
+        let (listener, identity) = bind_control_socket(&path).expect("bind private socket");
+
+        fs::remove_file(&path).expect("unlink bound socket");
+        fs::write(&path, b"replacement").expect("replacement fixture");
+        let error = remove_stale_socket_if_unchanged(&path, identity)
+            .expect_err("changed path must not be removed");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            fs::read(&path).expect("preserved replacement"),
+            b"replacement"
+        );
+
+        drop(listener);
+        fs::remove_file(&path).expect("remove replacement");
+        fs::remove_dir(&directory).expect("remove fixture directory");
     }
 }

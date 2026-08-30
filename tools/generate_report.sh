@@ -1,58 +1,156 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # JWM Performance Report Generator - 生成完整性能分析报告
 
-set -e
+set -Eeuo pipefail
+
+# JSON numbers always use a dot. LC_ALL would override LC_NUMERIC, so preserve
+# its nonnumeric categories before making Bash printf parse jq deterministically.
+if [[ -n ${LC_ALL:-} ]]; then
+    export LC_CTYPE=$LC_ALL
+    export LC_COLLATE=$LC_ALL
+    export LC_TIME=$LC_ALL
+    export LC_MONETARY=$LC_ALL
+    export LC_MESSAGES=$LC_ALL
+    unset LC_ALL
+fi
+export LC_NUMERIC=C
+
+if (($# > 1)); then
+    echo "用法: $0 [output-directory]" >&2
+    exit 2
+fi
 
 OUTPUT_DIR="${1:-.}"
-REPORT_FILE="$OUTPUT_DIR/jwm_performance_report_$(date +%Y%m%d_%H%M%S).html"
+mkdir -p -- "$OUTPUT_DIR"
+readonly OUTPUT_DIR
+
+require_commands() {
+    local command
+    for command in "$@"; do
+        command -v "$command" >/dev/null 2>&1 || {
+            echo "缺少必需命令: $command" >&2
+            return 1
+        }
+    done
+}
+
+validate_metrics() {
+    jq -e '
+        . as $metrics
+        | def finite_nonnegative($name):
+            ($metrics | has($name))
+            and (($metrics[$name] | type) == "number")
+            and ($metrics[$name] | isfinite)
+            and ($metrics[$name] >= 0);
+          def percentage($name):
+            finite_nonnegative($name) and ($metrics[$name] <= 100);
+          def count($name):
+            finite_nonnegative($name)
+            and (($metrics[$name] | floor) == $metrics[$name]);
+          def typed($name; $expected):
+            ($metrics | has($name))
+            and (($metrics[$name] | type) == $expected);
+          all([
+              "fps", "avg_frame_time_ms", "max_frame_time_ms",
+              "min_frame_time_ms", "input_latency_avg_ms",
+              "input_latency_p50_ms", "input_latency_p95_ms",
+              "input_latency_p99_ms"
+          ][]; finite_nonnegative(.))
+          and all([
+              "gpu_load_percent", "cpu_load_percent", "blur_cache_hit_rate",
+              "temporal_blur_reuse_rate", "dirty_fraction_percent"
+          ][]; percentage(.))
+          and all([
+              "frame_count", "blur_cache_hits", "blur_cache_misses",
+              "temporal_blur_reuse_count", "temporal_blur_total_count",
+              "draw_calls", "texture_memory_bytes", "window_count",
+              "dirty_regions_count", "current_refresh_rate"
+          ][]; count(.))
+          and all(["vrr_enabled", "vrr_active"][]; typed(.; "boolean"))
+          and typed("blur_quality"; "string")
+    ' >/dev/null <<<"$1"
+}
 
 # 函数：获取指标
 get_metrics() {
-    jwm-tool msg get_metrics --raw 2>/dev/null | jq '.data' || echo '{}'
+    local metrics
+    metrics="$(jwm-tool msg get_metrics --raw 2>/dev/null |
+        jq -e '
+            select(type == "object" and .success == true)
+            | .data
+            | select(type == "object")
+            | select([.. | numbers] | all(.[]; isfinite))
+        ')" || return 1
+    [[ -n $metrics ]] || return 1
+    validate_metrics "$metrics" || return 1
+    printf '%s\n' "$metrics"
 }
 
 # 等待样本数据
 collect_samples() {
-    local samples=10
-    local interval=1
+    local samples=${JWM_REPORT_SAMPLES:-10}
+    local interval=${JWM_REPORT_INTERVAL:-1}
     local fps_sum=0
     local frame_time_sum=0
+    local i m fps frame avg_fps avg_frame
 
-    echo "⏳ 收集 $samples 个样本 (每 ${interval}s 一次)..."
+    if [[ ! $samples =~ ^[1-9][0-9]*$ ]]; then
+        echo "JWM_REPORT_SAMPLES must be a positive integer." >&2
+        return 2
+    fi
+    if [[ ! $interval =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "JWM_REPORT_INTERVAL must be a non-negative number." >&2
+        return 2
+    fi
 
-    for i in $(seq 1 $samples); do
-        local m=$(get_metrics)
-        local fps=$(echo "$m" | jq -r '.fps // 0')
-        local frame=$(echo "$m" | jq -r '.avg_frame_time_ms // 0')
+    echo "⏳ 收集 $samples 个样本 (每 ${interval}s 一次)..." >&2
 
-        fps_sum=$(echo "$fps_sum + $fps" | bc)
-        frame_time_sum=$(echo "$frame_time_sum + $frame" | bc)
+    for ((i = 1; i <= samples; i++)); do
+        m="$(get_metrics)" || {
+            echo "无法从正在运行的 JWM 获取指标。" >&2
+            return 1
+        }
+        IFS=$'\t' read -r fps frame < <(
+            jq -er '[.fps, .avg_frame_time_ms]
+                | select(all(.[]; type == "number")) | @tsv' <<<"$m"
+        ) || {
+            echo "JWM 返回了无效的 FPS/帧时间指标。" >&2
+            return 1
+        }
 
-        printf "  [%d/%d] FPS: %.1f, 帧时: %.2fms\n" "$i" "$samples" "$fps" "$frame"
-        [ $i -lt $samples ] && sleep "$interval"
+        fps_sum="$(jq -nr --argjson sum "$fps_sum" --argjson value "$fps" \
+            '$sum + $value')"
+        frame_time_sum="$(jq -nr --argjson sum "$frame_time_sum" \
+            --argjson value "$frame" '$sum + $value')"
+
+        printf "  [%d/%d] FPS: %.1f, 帧时: %.2fms\n" \
+            "$i" "$samples" "$fps" "$frame" >&2
+        if ((i < samples)); then
+            sleep "$interval"
+        fi
     done
 
-    local avg_fps=$(echo "scale=2; $fps_sum / $samples" | bc)
-    local avg_frame=$(echo "scale=2; $frame_time_sum / $samples" | bc)
+    avg_fps="$(jq -nr --argjson sum "$fps_sum" --argjson count "$samples" \
+        '$sum / $count')"
+    avg_frame="$(jq -nr --argjson sum "$frame_time_sum" \
+        --argjson count "$samples" '$sum / $count')"
 
-    echo "✓ 样本收集完成"
-    echo "$avg_fps,$avg_frame"
+    echo "✓ 样本收集完成" >&2
+    printf '%s,%s\n' "$avg_fps" "$avg_frame"
 }
 
 # 生成 HTML 报告
 generate_html_report() {
-    local m=$1
-    local avg_fps=$2
-    local avg_frame=$3
+    local metrics_b64=$1
+    local output_file=$2
 
-    cat > "$REPORT_FILE" << 'EOF'
+    cat > "$output_file" << 'EOF'
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JWM 性能分析报告</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -288,7 +386,24 @@ generate_html_report() {
             <div class="section">
                 <div class="section-title">📊 综合性能评分</div>
                 <div class="performance-score" id="score"></div>
-                <div class="summary-box" id="summary"></div>
+                <div class="summary-box" id="summary">
+                    <div class="summary-item">
+                        <span>当前帧率</span>
+                        <strong id="summary-fps">-</strong>
+                    </div>
+                    <div class="summary-item">
+                        <span>系统负载</span>
+                        <strong id="summary-load">-</strong>
+                    </div>
+                    <div class="summary-item">
+                        <span>平均输入延迟</span>
+                        <strong id="summary-latency">-</strong>
+                    </div>
+                    <div class="summary-item">
+                        <span>Blur 缓存命中率</span>
+                        <strong id="summary-blur">-</strong>
+                    </div>
+                </div>
             </div>
 
             <!-- FPS 和时间指标 -->
@@ -507,7 +622,16 @@ generate_html_report() {
     </div>
 
     <script>
-        const metricsData = METRICS_DATA_PLACEHOLDER;
+        const metricsPayload =
+EOF
+    printf "            '%s';\n" "$metrics_b64" >> "$output_file"
+    cat >> "$output_file" << 'EOF'
+        const metricsBytes = Uint8Array.from(
+            atob(metricsPayload), character => character.charCodeAt(0)
+        );
+        const metricsData = JSON.parse(
+            new TextDecoder('utf-8', { fatal: true }).decode(metricsBytes)
+        );
 
         function formatBytes(bytes) {
             const units = ['B', 'KB', 'MB', 'GB'];
@@ -534,8 +658,8 @@ generate_html_report() {
 
         function updateMetrics() {
             // FPS 指标
-            const fps = metricsData.fps || 0;
-            const avgFrame = metricsData.avg_frame_time_ms || 0;
+            const fps = metricsData.sampled_avg_fps ?? metricsData.fps ?? 0;
+            const avgFrame = metricsData.sampled_avg_frame_time_ms ?? metricsData.avg_frame_time_ms ?? 0;
             const maxFrame = metricsData.max_frame_time_ms || 0;
             const minFrame = metricsData.min_frame_time_ms || 0;
 
@@ -602,38 +726,23 @@ generate_html_report() {
             // VRR
             document.getElementById('vrr-enabled').textContent = metricsData.vrr_enabled ? '✓ 启用' : '✗ 禁用';
             document.getElementById('vrr-active').textContent = metricsData.vrr_active ? '✓ 活跃' : '✗ 不活跃';
-            document.getElementById('refresh-rate').textContent = metricsData.current_refresh_rate + ' Hz';
+            document.getElementById('refresh-rate').textContent = (metricsData.current_refresh_rate || 0) + ' Hz';
 
             // 综合评分
             const score = Math.round(
-                (Math.min(fps / 60 * 100, 100)) * 0.4 +
-                (100 - gpuLoad) * 0.3 +
-                (blurRate) * 0.2 +
-                (Math.min(1 - latencyAvg / 50, 1) * 100) * 0.1
+                Math.max(0, Math.min(fps / 60 * 100, 100)) * 0.4 +
+                Math.max(0, Math.min(100 - gpuLoad, 100)) * 0.3 +
+                Math.max(0, Math.min(blurRate, 100)) * 0.2 +
+                Math.max(0, Math.min(1 - latencyAvg / 50, 1) * 100) * 0.1
             );
 
             document.getElementById('score').textContent = score.toFixed(0) + ' / 100';
 
-            // 汇总
-            const summary = `
-                <div class="summary-item">
-                    <span>当前帧率</span>
-                    <strong>${fps.toFixed(1)} FPS</strong>
-                </div>
-                <div class="summary-item">
-                    <span>系统负载</span>
-                    <strong>GPU ${gpuLoad}% / CPU ${cpuLoad}%</strong>
-                </div>
-                <div class="summary-item">
-                    <span>平均输入延迟</span>
-                    <strong>${latencyAvg.toFixed(2)} ms</strong>
-                </div>
-                <div class="summary-item">
-                    <span>Blur 缓存命中率</span>
-                    <strong>${blurRate.toFixed(1)}%</strong>
-                </div>
-            `;
-            document.getElementById('summary').innerHTML = summary;
+            // 汇总：指标值只通过 textContent 写入 DOM。
+            document.getElementById('summary-fps').textContent = `${fps.toFixed(1)} FPS`;
+            document.getElementById('summary-load').textContent = `GPU ${gpuLoad}% / CPU ${cpuLoad}%`;
+            document.getElementById('summary-latency').textContent = `${latencyAvg.toFixed(2)} ms`;
+            document.getElementById('summary-blur').textContent = `${blurRate.toFixed(1)}%`;
 
             // 优化建议
             const recommendations = [];
@@ -698,6 +807,8 @@ EOF
 }
 
 # 主程序
+require_commands jwm-tool jq base64
+
 echo "🚀 JWM 性能报告生成器"
 echo "====================="
 echo ""
@@ -705,20 +816,45 @@ echo ""
 # 收集样本
 IFS=',' read -r avg_fps avg_frame < <(collect_samples)
 
-# 获取当前指标
-m=$(get_metrics)
+# 获取当前指标，并把采样均值写进报告数据，而不是收集后丢弃。
+m="$(get_metrics)" || {
+    echo "无法从正在运行的 JWM 获取指标。" >&2
+    exit 1
+}
+m="$(jq --argjson avg_fps "$avg_fps" --argjson avg_frame "$avg_frame" \
+    '. + {
+        sampled_avg_fps: $avg_fps,
+        sampled_avg_frame_time_ms: $avg_frame
+    }' <<<"$m")"
 
 echo ""
 echo "📝 生成 HTML 报告..."
 
-# 将指标转为 JavaScript 对象
-metrics_json=$(echo "$m" | jq -c '.')
+# Base64 keeps arbitrary JSON strings from terminating the script element or
+# corrupting a sed replacement. The generated report remains fully offline.
+metrics_b64="$(jq -c '.' <<<"$m" | base64 | tr -d '\n')"
 
-# 生成 HTML，替换占位符
-generate_html_report "$m" "$avg_fps" "$avg_frame"
+# Reserve a unique name, render to a hidden sibling, and publish with one
+# atomic rename. Concurrent invocations cannot overwrite or interleave.
+REPORT_TMP=$(mktemp --tmpdir="$OUTPUT_DIR" '.jwm_performance_report.XXXXXXXX.tmp')
+cleanup_report() {
+    if [[ -n ${REPORT_TMP:-} ]]; then
+        rm -f -- "$REPORT_TMP"
+    fi
+}
+trap cleanup_report EXIT
+report_name=${REPORT_TMP##*/}
+report_token=${report_name#.jwm_performance_report.}
+report_token=${report_token%.tmp}
+REPORT_FILE="$OUTPUT_DIR/jwm_performance_report_$(date +%Y%m%d_%H%M%S)_${report_token}.html"
 
-# 将 metrics 数据插入 HTML
-sed -i "s/METRICS_DATA_PLACEHOLDER/$(echo "$metrics_json" | sed 's/"/\\"/g' | sed 's/$/\\/' | tr '\n' ' ')/g" "$REPORT_FILE"
+# 生成自包含 HTML。
+generate_html_report "$metrics_b64" "$REPORT_TMP"
+# Treat the destination as one path, even if another process races us by
+# creating a directory with the reserved report name.
+mv -T -- "$REPORT_TMP" "$REPORT_FILE"
+REPORT_TMP=
+trap - EXIT
 
 echo "✓ 报告已生成: $REPORT_FILE"
 echo ""

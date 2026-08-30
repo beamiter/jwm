@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # 嵌套(nested)运行 jwm 的 Wayland 后端,方便在现有桌面里测试。
 #
 # 用法:
@@ -31,9 +31,10 @@ case "$backend_arg" in
         ;;
 esac
 
+declare -a build_args=()
 case "$profile" in
-    release) build_flag="--release"; bin="target/release/jwm" ;;
-    debug)   build_flag="";          bin="target/debug/jwm" ;;
+    release) build_args=(--release); bin="target/release/jwm" ;;
+    debug)                            bin="target/debug/jwm" ;;
     *)
         echo "❌ 未知 profile '$profile';可选 debug | release" >&2
         exit 1
@@ -55,7 +56,7 @@ fi
 
 # ---- 构建 --------------------------------------------------------------------
 echo "🔧 构建 jwm ($profile) ..."
-cargo build --locked $build_flag --bin jwm
+cargo build --locked "${build_args[@]}" --bin jwm
 
 # ---- 运行 --------------------------------------------------------------------
 export JWM_BACKEND

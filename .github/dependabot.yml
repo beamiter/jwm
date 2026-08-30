@@ -36,3 +36,60 @@ updates:
       actions:
         patterns:
           - "*"
+
+  - package-ecosystem: cargo
+    directory: /video-demo/demo-client
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:15"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: deps
+    groups:
+      rust-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /bars/tao_pixels_bar
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:25"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: deps
+    groups:
+      rust-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /bars/tao_glow_bar
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:35"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: deps
+    groups:
+      rust-minor-and-patch:
+        update-types:
+          - minor
+          - patch

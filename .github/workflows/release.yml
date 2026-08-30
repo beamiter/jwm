@@ -25,8 +25,9 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Validate tag and jwm version
@@ -64,12 +65,12 @@ jobs:
             shellcheck
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
         with:
           components: clippy,rustfmt
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -91,10 +92,10 @@ jobs:
             backend-x11rb
             backend-xcb
             remote-x11
-            backend-xcb,remote-x11
+            "backend-xcb,remote-x11"
             backend-wayland-udev
             backend-wayland-nested
-            backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter
+            "backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter"
           )
           cargo check --locked --all-targets --no-default-features
           for profile in "${profiles[@]}"; do
@@ -143,7 +144,7 @@ jobs:
           )
 
       - name: Attest archive provenance
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4
         with:
           subject-checksums: dist/SHA256SUMS
 

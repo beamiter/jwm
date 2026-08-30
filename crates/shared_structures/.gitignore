@@ -1,4 +1,7 @@
 /target
+# This is a library subtree: standalone CI intentionally exercises the newest
+# compatible graph. In the JWM monorepo, the tracked root Cargo.lock supplies
+# the reproducible application/release lane.
 Cargo.lock
 **/*.rs.bk
 *.pdb

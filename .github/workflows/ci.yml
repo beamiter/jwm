@@ -27,17 +27,19 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rustfmt
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
         with:
           components: rustfmt
 
-      - name: Install ShellCheck
+      - name: Install shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck
+          sudo apt-get install -y --no-install-recommends jq shellcheck
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -45,8 +47,14 @@ jobs:
       - name: Lint executable Bash scripts
         run: bash scripts/lint-shell.sh
 
+      - name: Exercise offline updater contracts
+        run: bash scripts/test-git-update-all.sh
+
       - name: Exercise release install lifecycle
         run: bash scripts/test-install-lifecycle.sh
+
+      - name: Exercise offline metrics-tool contracts
+        run: bash scripts/test-metrics-tools.sh
 
   check-and-test:
     name: Check, Clippy, and test
@@ -54,7 +62,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -94,12 +104,12 @@ jobs:
             libxrender-dev
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
         with:
           components: clippy
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
 
       - name: Check all targets
         run: cargo check --locked --all-targets
@@ -139,7 +149,9 @@ jobs:
             features: backend-x11rb,backend-xcb,backend-wayland-udev,backend-wayland-nested,alloc-counter
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -179,10 +191,10 @@ jobs:
             libxrender-dev
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           key: profile-${{ matrix.profile.name }}
 
@@ -197,7 +209,9 @@ jobs:
     timeout-minutes: 40
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -216,15 +230,15 @@ jobs:
             libgbm-dev
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: portal
 
       - name: Cache the PipeWire prefix
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: ~/.cache/jwm/pipewire-prefix
           key: pipewire-prefix-${{ runner.os }}-1.2.7
@@ -242,17 +256,19 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       # zbus speaks the D-Bus wire protocol over a socket, so unlike the
       # portal this crate needs no system libraries beyond the toolchain.
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
         with:
           components: rustfmt, clippy
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           workspaces: bridge
 
@@ -271,13 +287,71 @@ jobs:
         working-directory: bridge
         run: cargo test --locked --all-targets
 
+  video-demo:
+    name: Video demo (Rust, Python, and shell)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c  # stable
+        with:
+          components: rustfmt,clippy
+
+      - name: Cache demo-client build data
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: video-demo-client
+          workspaces: video-demo/demo-client -> target
+
+      # actions/setup-python v7.0.0
+      - name: Install Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+
+      - name: Install shell test dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: Check demo-client formatting
+        run: >-
+          cargo fmt --manifest-path video-demo/demo-client/Cargo.toml
+          --all -- --check
+
+      - name: Lint demo-client
+        run: >-
+          cargo clippy --manifest-path video-demo/demo-client/Cargo.toml
+          --all-targets --locked -- -D warnings
+
+      - name: Test demo-client
+        run: >-
+          cargo test --manifest-path video-demo/demo-client/Cargo.toml
+          --all-targets --locked
+
+      - name: Test the Python runner
+        working-directory: video-demo
+        run: python -m unittest discover -s tests -v
+
+      - name: Lint session recovery script
+        run: |
+          bash -n video-demo/scripts/recover-session.sh
+          shellcheck video-demo/scripts/recover-session.sh
+
   msrv:
     name: Minimum supported Rust version
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - name: Check out source
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Linux build dependencies
         run: |
@@ -320,12 +394,12 @@ jobs:
       # pins the developer channel to stable, so the explicit `+1.89.0`
       # override is required here.
       - name: Install minimum supported Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772  # master
         with:
           toolchain: "1.89.0"
 
       - name: Cache Cargo build data
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
 
       - name: Check all targets on the MSRV
         run: cargo +1.89.0 check --locked --all-targets

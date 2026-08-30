@@ -36,10 +36,8 @@ else
 fi
 
 step "2. Introspect the ScreenCast backend interface"
-introspect=$(gdbus introspect --session --dest "$BUS" --object-path "$PATH_OBJ" 2>&1)
-if [[ $? -ne 0 ]]; then
-  bad "introspection failed: $introspect"
-else
+if introspect=$(gdbus introspect --session --dest "$BUS" \
+    --object-path "$PATH_OBJ" 2>&1); then
   for method in CreateSession SelectSources Start OpenPipeWireRemote; do
     if grep -q "$method" <<<"$introspect"; then
       ok "method $method advertised"
@@ -54,6 +52,8 @@ else
       bad "property $prop NOT advertised"
     fi
   done
+else
+  bad "introspection failed: $introspect"
 fi
 
 step "3. Confirm xdg-desktop-portal routes ScreenCast to us"
