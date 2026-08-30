@@ -32,7 +32,15 @@ fn now_millis() -> u64 {
 }
 
 fn copy_utf8_truncated(destination: &mut [u8], value: &str) {
-    let mut len = value.len().min(destination.len().saturating_sub(1));
+    // These arrays are NUL-terminated wire strings. Do not retain an
+    // invisible suffix after an embedded terminator: it would make equal
+    // displayed values have different wire bytes and checksums.
+    let content_len = value
+        .as_bytes()
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(value.len());
+    let mut len = content_len.min(destination.len().saturating_sub(1));
     while !value.is_char_boundary(len) {
         len -= 1;
     }
@@ -848,6 +856,33 @@ mod tests {
         // 只有第 0 字节被写入，第 1 字节应为 0（终止符）
         assert_eq!(mi.client_name[0], b'X');
         assert_eq!(mi.client_name[1], 0);
+    }
+
+    #[test]
+    fn fixed_string_setters_discard_suffix_after_embedded_nul() {
+        let mut monitor = MonitorInfo::default();
+        monitor.set_client_name("界\0hidden");
+        monitor.set_client_app_id("org.example.App\0hidden");
+        monitor.set_ltsymbol("[T]\0hidden");
+        assert_eq!(monitor.client_name_lossy(), "界");
+        assert!(monitor.client_name["界".len()..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert!(monitor.client_app_id[b"org.example.App".len()..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert!(monitor.ltsymbol[b"[T]".len()..]
+            .iter()
+            .all(|byte| *byte == 0));
+
+        let mut window = MinimizedWindowInfo::default();
+        window.set_title("终端\0hidden");
+        window.set_app_id("org.example.Terminal\0hidden");
+        assert_eq!(window.title_lossy(), "终端");
+        assert!(window.title["终端".len()..].iter().all(|byte| *byte == 0));
+        assert!(window.app_id[b"org.example.Terminal".len()..]
+            .iter()
+            .all(|byte| *byte == 0));
     }
 
     #[test]
