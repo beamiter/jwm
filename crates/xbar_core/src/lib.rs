@@ -6,6 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Maximum storage retained for one frontend pixel frame.
+///
+/// Native surface geometry can be compositor-controlled. Keeping one shared
+/// ceiling prevents feature-specific renderers from drifting into different
+/// allocation policies while still accommodating 8K and multi-monitor bars.
+pub const MAX_FRONTEND_FRAME_BYTES: usize = 512 * 1024 * 1024;
+
 pub mod app_icon;
 #[cfg(feature = "provider-alsa")]
 pub mod audio_manager;

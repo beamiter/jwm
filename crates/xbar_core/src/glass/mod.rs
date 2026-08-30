@@ -60,7 +60,7 @@ const BYTES_PER_PIXEL: usize = 4;
 /// it before allocation prevents an anomalous extent from turning a bar
 /// refresh into a multi-gibibyte allocation, while still accommodating 8K and
 /// large multi-monitor strips.
-pub const MAX_GLASS_IMAGE_BYTES: usize = 512 * 1024 * 1024;
+pub const MAX_GLASS_IMAGE_BYTES: usize = crate::MAX_FRONTEND_FRAME_BYTES;
 
 /// Opaque base color for a bar that has no wallpaper to frost, and the color
 /// behind a wallpaper that does not cover the screen.

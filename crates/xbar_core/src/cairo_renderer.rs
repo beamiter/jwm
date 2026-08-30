@@ -1213,17 +1213,13 @@ impl CpuCanvas {
         }
         let reallocated = self.width != physical_width || self.height != physical_height;
         if reallocated {
-            let width = i32::try_from(physical_width)
-                .map_err(|_| anyhow::anyhow!("CPU canvas width does not fit Cairo"))?;
-            let stride = cairo::Format::ARgb32.stride_for_width(physical_width)?;
-            let stride = u32::try_from(stride)
-                .map_err(|_| anyhow::anyhow!("Cairo returned a negative stride for {width}"))?;
-            let size = usize::try_from(stride)
-                .ok()
-                .and_then(|stride| stride.checked_mul(physical_height as usize))
-                .ok_or_else(|| anyhow::anyhow!("CPU canvas size overflow"))?;
-            self.data.clear();
+            let (stride, size) = cpu_canvas_storage(physical_width, physical_height)?;
+            let additional = size.saturating_sub(self.data.len());
+            self.data.try_reserve_exact(additional).map_err(|error| {
+                anyhow::anyhow!("failed to reserve {size}-byte CPU canvas: {error}")
+            })?;
             self.data.resize(size, 0);
+            self.data.fill(0);
             self.width = physical_width;
             self.height = physical_height;
             self.stride = stride;
@@ -1254,6 +1250,25 @@ impl CpuCanvas {
             damage,
         })
     }
+}
+
+fn cpu_canvas_storage(physical_width: u32, physical_height: u32) -> Result<(u32, usize)> {
+    let width = i32::try_from(physical_width)
+        .map_err(|_| anyhow::anyhow!("CPU canvas width does not fit Cairo"))?;
+    let stride = cairo::Format::ARgb32.stride_for_width(physical_width)?;
+    let stride = u32::try_from(stride)
+        .map_err(|_| anyhow::anyhow!("Cairo returned a negative stride for {width}"))?;
+    let size = usize::try_from(stride)
+        .ok()
+        .and_then(|stride| stride.checked_mul(physical_height as usize))
+        .ok_or_else(|| anyhow::anyhow!("CPU canvas size overflow"))?;
+    if size > crate::MAX_FRONTEND_FRAME_BYTES {
+        anyhow::bail!(
+            "CPU canvas needs {size} bytes; frame budget is {} bytes",
+            crate::MAX_FRONTEND_FRAME_BYTES
+        );
+    }
+    Ok((stride, size))
 }
 
 /// Union logical damage regions into one outward-rounded device-pixel rect
@@ -2281,6 +2296,32 @@ mod tests {
             .render_into_bgra(&mut tight, 64, 38, 64 * 4, f64::NAN)
             .unwrap_err();
         assert!(error.to_string().contains("scale factor"));
+    }
+
+    #[test]
+    fn cpu_canvas_rejects_oversized_surface_before_allocation() {
+        let (_, eight_k) = cpu_canvas_storage(7680, 4320).unwrap();
+        assert_eq!(eight_k, 7680_usize * 4320 * 4);
+        assert!(cpu_canvas_storage(u32::from(u16::MAX), u32::from(u16::MAX)).is_err());
+
+        let mut canvas = CpuCanvas {
+            data: vec![0xA5; 16],
+            width: 2,
+            height: 2,
+            stride: 8,
+        };
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            crate::presentation::PresentationConfig::default(),
+            FontDescription::from_string("Sans"),
+        );
+        assert!(
+            canvas
+                .render(&mut bar, u32::from(u16::MAX), u32::from(u16::MAX), 1.0,)
+                .is_err()
+        );
+        assert_eq!((canvas.width, canvas.height, canvas.stride), (2, 2, 8));
+        assert_eq!(canvas.data, vec![0xA5; 16]);
     }
 
     #[test]
