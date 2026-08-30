@@ -269,6 +269,7 @@ struct FileGlass {
 impl BarConfig {
     /// Parse a TOML document, overriding defaults field by field.
     pub fn from_toml(text: &str) -> Result<Self, ConfigError> {
+        validate_config_text_size(text)?;
         Self::from_file_config(
             toml::from_str(text).map_err(|source| ConfigError::Parse { path: None, source })?,
         )
@@ -536,6 +537,16 @@ fn config_too_large() -> io::Error {
         io::ErrorKind::InvalidData,
         format!("configuration exceeds the {MAX_CONFIG_BYTES}-byte limit"),
     )
+}
+
+fn validate_config_text_size(text: &str) -> Result<(), ConfigError> {
+    if text.len() > MAX_CONFIG_BYTES as usize {
+        return Err(ConfigError::InvalidValue {
+            field: "configuration",
+            reason: "document exceeds the one-mebibyte limit",
+        });
+    }
+    Ok(())
 }
 
 /// Validate the `[glass]` section.
@@ -893,6 +904,19 @@ blur_radius = 10
         let error = BarConfig::load(Path::new("/definitely/missing/xbar.toml")).unwrap_err();
         assert!(matches!(error, ConfigError::Read { .. }));
         assert!(error.to_string().contains("/definitely/missing/xbar.toml"));
+    }
+
+    #[test]
+    fn in_memory_documents_share_the_file_size_limit() {
+        let oversized = "#".repeat(MAX_CONFIG_BYTES as usize + 1);
+
+        assert!(matches!(
+            BarConfig::from_toml(&oversized),
+            Err(ConfigError::InvalidValue {
+                field: "configuration",
+                ..
+            })
+        ));
     }
 
     #[test]
