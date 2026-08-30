@@ -524,6 +524,12 @@ struct ReclaimableLegacyMapping {
     creator_pid: u32,
 }
 
+struct ReclaimableCurrentMapping {
+    shmem: Shmem,
+    flink_path: PathBuf,
+    creator_pid: u32,
+}
+
 /// Open just enough of a known legacy mapping to decide whether its creator
 /// has exited. Unknown or malformed versions are never considered reclaimable.
 fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLegacyMapping>> {
@@ -560,6 +566,80 @@ fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLega
         shmem,
         flink_path,
         version,
+        creator_pid,
+    }))
+}
+
+/// Validate a current mapping without attaching its synchronization backend.
+///
+/// This path is intentionally limited to stale recovery. In particular, an
+/// eventfd creator can die after publishing the mapping, leaving no fd-pass
+/// server for the ordinary open path to attach to. Requiring every immutable
+/// v14 layout field to match keeps recovery conservative before consulting the
+/// creator PID.
+fn probe_reclaimable_current_mapping<M: WireSafe, C: WireSafe>(
+    path: &str,
+    expected_strategy: SyncStrategy,
+) -> Result<Option<ReclaimableCurrentMapping>> {
+    let flink_path = absolute_flink_path(path)?;
+    let shmem = open_shmem_from_flink(&flink_path, "failed to probe current shared memory")?;
+
+    if shmem.len() < size_of::<GenericHeader>() {
+        return Ok(None);
+    }
+    let base_ptr = shmem.as_ptr();
+    if (base_ptr as usize) % align_of::<GenericHeader>() != 0 {
+        return Ok(None);
+    }
+
+    let header = base_ptr.cast::<GenericHeader>();
+    // SAFETY: the mapping length and alignment cover the complete header.
+    let magic = unsafe { (*header).magic.load(Ordering::Acquire) };
+    let version = unsafe { (*header).version.load(Ordering::Relaxed) };
+    if magic != RING_BUFFER_MAGIC || version != RING_BUFFER_VERSION {
+        return Ok(None);
+    }
+
+    // SAFETY: all plain fields are inside the checked header and were
+    // published before the Acquire magic load above.
+    let recorded_total = unsafe { std::ptr::addr_of!((*header).total_size).read() };
+    let buffer_size = unsafe { std::ptr::addr_of!((*header).buffer_size).read() as usize };
+    let command_buffer_size =
+        unsafe { std::ptr::addr_of!((*header).command_buffer_size).read() as usize };
+    let backend_id = unsafe { std::ptr::addr_of!((*header).backend_id).read() };
+    let message_slot_size =
+        unsafe { std::ptr::addr_of!((*header).message_slot_size).read() as usize };
+    let command_slot_size =
+        unsafe { std::ptr::addr_of!((*header).command_slot_size).read() as usize };
+    let marker = unsafe { std::ptr::addr_of!((*header).layout_marker).read() };
+    let creator_pid = unsafe { std::ptr::addr_of!((*header).creator_pid).read() };
+    let message_fingerprint = unsafe { std::ptr::addr_of!((*header).message_fingerprint).read() };
+    let command_fingerprint = unsafe { std::ptr::addr_of!((*header).command_fingerprint).read() };
+
+    let layout = match BufferLayout::calculate::<M, C>(
+        expected_strategy,
+        buffer_size,
+        command_buffer_size,
+    ) {
+        Ok(layout) => layout,
+        Err(_) => return Ok(None),
+    };
+    if recorded_total != shmem.len() as u64
+        || recorded_total != layout.total_size as u64
+        || backend_id != expected_strategy.id()
+        || message_slot_size != size_of::<Slot<M>>()
+        || command_slot_size != size_of::<Slot<C>>()
+        || marker != LAYOUT_MARKER
+        || creator_pid == 0
+        || message_fingerprint != M::fingerprint()
+        || command_fingerprint != C::fingerprint()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(ReclaimableCurrentMapping {
+        shmem,
+        flink_path,
         creator_pid,
     }))
 }
@@ -1344,6 +1424,42 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         continue;
                     }
                     return Ok(buffer);
+                }
+                Err(error)
+                    if may_reclaim
+                        && matches!(
+                            error.kind(),
+                            ErrorKind::TimedOut | ErrorKind::NotConnected | ErrorKind::BrokenPipe
+                        ) =>
+                {
+                    let stale =
+                        match probe_reclaimable_current_mapping::<M, C>(path, options.strategy) {
+                            Ok(stale) => stale,
+                            // The failed open may have raced a creator teardown or
+                            // replacement. Retry the public name instead of
+                            // returning the obsolete backend error.
+                            Err(probe_error) if probe_error.kind() == ErrorKind::NotFound => {
+                                continue
+                            }
+                            Err(_) => return Err(error),
+                        };
+                    let Some(mut stale) = stale else {
+                        return Err(error);
+                    };
+                    if process_alive(stale.creator_pid) {
+                        return Err(error);
+                    }
+
+                    may_reclaim = false;
+                    warn!(
+                        "reclaiming stale shared ring buffer {path}: creator {} is gone and its backend is unavailable",
+                        stale.creator_pid
+                    );
+                    prepare_stale_mapping_reclaim(&mut stale.shmem, &stale.flink_path)?;
+                    drop(stale);
+                    if let Some(buffer) = create(&mut may_create)? {
+                        return Ok(buffer);
+                    }
                 }
                 Err(error) if error.kind() == ErrorKind::InvalidData && may_reclaim => {
                     let legacy = match probe_reclaimable_legacy_mapping(path) {
@@ -2841,6 +2957,76 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert!(error.to_string().contains("recorded total size"));
+    }
+
+    #[cfg(feature = "eventfd")]
+    #[test]
+    fn typed_reclaim_stale_recovers_crashed_eventfd_creator() {
+        const CHILD_PATH_ENV: &str = "SHARED_STRUCTURES_CRASHED_EVENTFD_TEST_PATH";
+
+        if let Some(path) = std::env::var_os(CHILD_PATH_ENV) {
+            let path = path.into_string().expect("test path must be UTF-8");
+            let creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+                .strategy(SyncStrategy::EventFd)
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap();
+
+            // Model an abrupt process exit: neither TypedRingBuffer::drop nor
+            // the eventfd listener cleanup is allowed to run.
+            std::mem::forget(creator);
+            return;
+        }
+
+        let path = mk_path("reclaim_crashed_eventfd");
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "srb-eventfd-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&runtime_dir).unwrap();
+        let test_name =
+            "typed_ring_buffer::tests::typed_reclaim_stale_recovers_crashed_eventfd_creator";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_PATH_ENV, &path)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "crashing eventfd child failed: {status}");
+        assert!(Path::new(&path).is_file());
+
+        let reclaimed = SharedRingBufferOptions::new()
+            .strategy(SyncStrategy::EventFd)
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed::<u64, u64>(&path);
+        let replacement = match reclaimed {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                // Keep the regression failure residue-free so the pre-fix
+                // failure can be run repeatedly during development.
+                let mut stale = open_shmem_from_flink(
+                    Path::new(&path),
+                    "failed to clean crashed eventfd test mapping",
+                )
+                .unwrap();
+                prepare_stale_mapping_reclaim(&mut stale, Path::new(&path)).unwrap();
+                drop(stale);
+                let _ = std::fs::remove_dir_all(&runtime_dir);
+                panic!("failed to reclaim crashed eventfd creator: {error}");
+            }
+        };
+
+        assert!(replacement.is_creator());
+        assert_eq!(replacement.creator_pid(), std::process::id());
+        drop(replacement);
+        std::fs::remove_dir_all(runtime_dir).unwrap();
     }
 
     #[test]
