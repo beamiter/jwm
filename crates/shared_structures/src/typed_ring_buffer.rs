@@ -15,7 +15,7 @@ use shared_memory::{Shmem, ShmemConf, ShmemError};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -545,6 +545,16 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
                 Error::new(
                     error.kind(),
                     format!("failed to create flink staging file: {error}"),
+                )
+            })?;
+        // `mode(0o600)` is filtered through the process umask. Normalize the
+        // already-open inode explicitly so even a restrictive umask cannot
+        // publish an unreadable flink. No pathname is public at this point.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| {
+                Error::new(
+                    error.kind(),
+                    format!("failed to set flink staging file permissions: {error}"),
                 )
             })?;
         file.write_all(os_id.as_bytes()).map_err(|error| {
@@ -1965,6 +1975,59 @@ mod tests {
             child_removed_fifo,
             "FIFO child test did not execute the open path"
         );
+    }
+
+    #[test]
+    fn publish_flink_normalizes_permissions_under_restrictive_umask() {
+        const CHILD_PATH_ENV: &str = "SHARED_STRUCTURES_UMASK_FLINK_TEST_PATH";
+
+        if let Some(path) = std::env::var_os(CHILD_PATH_ENV) {
+            let path = path.into_string().expect("test path must be UTF-8");
+            // umask is process-global, so this branch runs only in the exact
+            // child test spawned below, isolated from the parallel harness.
+            // SAFETY: every mode bit is a valid umask bit.
+            let original_umask = unsafe { libc::umask(0) };
+            let mapping = ShmemConf::new().size(4096).create();
+            // SAFETY: restore the mask before inspecting the result or doing
+            // any further filesystem work in the child process.
+            unsafe { libc::umask(original_umask) };
+            let mapping = mapping.unwrap();
+
+            // SAFETY: as above, and the original value is restored before
+            // checking the fallible publication result.
+            let previous_umask = unsafe { libc::umask(0o777) };
+            let published = publish_flink(Path::new(&path), mapping.get_os_id());
+            // SAFETY: restore the process-global mask before continuing.
+            unsafe { libc::umask(previous_umask) };
+            published.unwrap();
+
+            let permissions = std::fs::metadata(&path).unwrap().permissions();
+            let mode = std::os::unix::fs::PermissionsExt::mode(&permissions) & 0o777;
+            assert_eq!(mode, 0o600);
+            let opener = open_shmem_from_flink(Path::new(&path), "test open").unwrap();
+            assert_eq!(opener.get_os_id(), mapping.get_os_id());
+
+            std::fs::remove_file(&path).unwrap();
+            std::fs::write(format!("{path}.completed"), b"completed").unwrap();
+            return;
+        }
+
+        let path = mk_path("restrictive_umask");
+        let marker = format!("{path}.completed");
+        let test_name = "typed_ring_buffer::tests::publish_flink_normalizes_permissions_under_restrictive_umask";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .unwrap();
+
+        let child_ran = Path::new(&marker).is_file();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success(), "restrictive-umask child failed: {status}");
+        assert!(child_ran, "restrictive-umask child test did not execute");
     }
 
     #[test]
