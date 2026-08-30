@@ -118,8 +118,9 @@ fn client_window_info(client: &WMClient, monitor: i32, is_focused: bool) -> Wind
 
 fn recording_file_is_valid(path: &str) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0)
-        && std::process::Command::new("ffprobe")
-            .args([
+        && crate::jwm::features::external_command::status_with_timeout(
+            "ffprobe",
+            &[
                 "-v",
                 "error",
                 "-select_streams",
@@ -129,12 +130,10 @@ fn recording_file_is_valid(path: &str) -> bool {
                 "-of",
                 "default=nw=1:nk=1",
                 path,
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .is_ok_and(|status| status.success())
 }
 
 fn env_flag(name: &str) -> bool {
@@ -1828,12 +1827,11 @@ impl Jwm {
             "get_recording_status" => {
                 let output_path = self.features.recording.output_path.clone();
                 let active = self.features.recording.active;
-                // Validating the file forks ffprobe and blocks this thread on
-                // it, and `stop` deliberately keeps `output_path` so the bar can
-                // still report where the recording went — so an uncached probe
-                // ran on every status poll for the rest of the session. Probe
-                // only while the answer can still change: never during
-                // recording, and never again once the file has passed.
+                // Validation still runs synchronously (with a hard helper
+                // deadline), and `stop` deliberately keeps `output_path` so the
+                // bar can still report where the recording went. Probe only
+                // while the answer can still change: never during recording,
+                // and never again once the file has passed.
                 let finalized = !active
                     && (self.features.recording.finalized
                         || output_path.as_deref().is_some_and(recording_file_is_valid));

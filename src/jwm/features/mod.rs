@@ -19,7 +19,7 @@ pub mod clipboard;
 pub mod connectivity;
 pub mod deferred_grab;
 pub mod expose_plan;
-mod external_command;
+pub(crate) mod external_command;
 pub mod idle;
 pub mod launcher;
 pub mod layout_picker;

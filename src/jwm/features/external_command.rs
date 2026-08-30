@@ -16,7 +16,7 @@ pub(super) fn output(cmd: &str, args: &[&str]) -> io::Result<Output> {
     output_with_limits(cmd, args, HELPER_TIMEOUT, MAX_HELPER_OUTPUT_BYTES)
 }
 
-pub(super) fn output_with_limits(
+pub(crate) fn output_with_limits(
     cmd: &str,
     args: &[&str],
     timeout: Duration,
@@ -42,7 +42,7 @@ pub(super) fn output_with_input(
 }
 
 /// Run a helper whose output is irrelevant, with a hard wall-time limit.
-pub(super) fn status_with_timeout(
+pub(crate) fn status_with_timeout(
     cmd: &str,
     args: &[&str],
     timeout: Duration,

@@ -1380,7 +1380,13 @@ impl Jwm {
                         .system_ui
                         .monitor_layout_xrandr_args()
                         .unwrap_or_default();
-                    match std::process::Command::new("xrandr").args(&args).output() {
+                    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+                    match crate::jwm::features::external_command::output_with_limits(
+                        "xrandr",
+                        &arg_refs,
+                        std::time::Duration::from_secs(5),
+                        64 * 1024,
+                    ) {
                         Ok(output) if output.status.success() => {
                             info!("Applied display layout with xrandr {args:?}");
                             self.close_system_ui(backend);
