@@ -239,6 +239,21 @@ fn deadline_from_timeout(timeout: Option<Duration>) -> Result<Option<Instant>> {
         })
 }
 
+#[inline]
+fn checked_pending(
+    write_idx: u32,
+    read_idx: u32,
+    capacity: u32,
+    invalid_message: &'static str,
+) -> Result<u32> {
+    let pending = write_idx.wrapping_sub(read_idx);
+    if pending > capacity {
+        Err(Error::new(ErrorKind::InvalidData, invalid_message))
+    } else {
+        Ok(pending)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BufferLayout {
     backend_offset: usize,
@@ -1551,7 +1566,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let read_idx = header.message_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
+            if pending == 0 {
                 return Ok(None);
             }
 
@@ -1589,7 +1610,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let read_idx = header.message_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
+            if pending == 0 {
                 return Ok(None);
             }
 
@@ -1629,7 +1656,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let read_idx = header.message_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
+            if pending == 0 {
                 return Ok(None);
             }
 
@@ -1664,13 +1697,12 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let mut read_idx = header.message_read.index.load(Ordering::Relaxed);
-            let pending = write_idx.wrapping_sub(read_idx);
-            if pending > self.buffer_size() {
-                return Err(Error::new(
-                    ErrorKind::InvalidData,
-                    "message cursor distance exceeds buffer capacity",
-                ));
-            }
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                self.buffer_size(),
+                "message cursor distance exceeds buffer capacity",
+            )?;
 
             let mut remaining = pending;
             let mut drained = Vec::new();
@@ -1744,7 +1776,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         unsafe {
             let write_idx = header.command_write.index.load(Ordering::Acquire);
             let read_idx = header.command_read.index.load(Ordering::Relaxed);
-            if read_idx == write_idx {
+            let pending = checked_pending(
+                write_idx,
+                read_idx,
+                header.command_buffer_size,
+                "command cursor distance exceeds buffer capacity",
+            )?;
+            if pending == 0 {
                 return Ok(None);
             }
 
@@ -2519,6 +2557,90 @@ mod tests {
         let error = result.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(read_after_drain, 0, "rejection must not consume any slot");
+    }
+
+    #[test]
+    fn typed_reads_reject_cursor_distance_larger_than_capacity() {
+        let path = mk_path("reads_invalid_cursor_distance");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        for value in 0u64..4 {
+            assert!(ring.try_write_message(&value).unwrap());
+            assert!(ring.try_send_command(value + 10).unwrap());
+        }
+
+        let header = ring.header();
+        header.message_write.index.store(8, Ordering::Release);
+        header.command_write.index.store(8, Ordering::Release);
+
+        let assert_message_cursor_error = |result: Result<Option<u64>>| {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains("message cursor distance"));
+            assert_eq!(header.message_read.index.load(Ordering::Acquire), 0);
+        };
+        assert_message_cursor_error(ring.try_read_next_message());
+        assert_message_cursor_error(ring.try_read_latest_message());
+        assert_message_cursor_error(ring.try_peek_message());
+        let error = ring.try_receive_command().unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("command cursor distance"));
+        assert_eq!(header.command_read.index.load(Ordering::Acquire), 0);
+
+        header.message_write.index.store(4, Ordering::Release);
+        header.command_write.index.store(4, Ordering::Release);
+    }
+
+    #[test]
+    fn typed_reads_accept_valid_cursor_distance_across_u32_wrap() {
+        const WRAPPED_READ_START: u32 = u32::MAX - 3;
+
+        let path = mk_path("reads_cursor_wrap");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .command_capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        for value in 0u64..4 {
+            assert!(ring.try_write_message(&(value + 10)).unwrap());
+            assert!(ring.try_send_command(value + 20).unwrap());
+        }
+
+        let header = ring.header();
+        header
+            .message_read
+            .index
+            .store(WRAPPED_READ_START, Ordering::Release);
+        header.message_write.index.store(0, Ordering::Release);
+        header
+            .command_read
+            .index
+            .store(WRAPPED_READ_START, Ordering::Release);
+        header.command_write.index.store(0, Ordering::Release);
+
+        assert_eq!(ring.try_peek_message().unwrap(), Some(10));
+        assert_eq!(
+            header.message_read.index.load(Ordering::Acquire),
+            WRAPPED_READ_START
+        );
+        assert_eq!(ring.try_read_next_message().unwrap(), Some(10));
+        assert_eq!(
+            header.message_read.index.load(Ordering::Acquire),
+            WRAPPED_READ_START.wrapping_add(1)
+        );
+        assert_eq!(ring.try_read_latest_message().unwrap(), Some(13));
+        assert_eq!(header.message_read.index.load(Ordering::Acquire), 0);
+
+        for expected in 20u64..24 {
+            assert_eq!(ring.try_receive_command().unwrap(), Some(expected));
+        }
+        assert_eq!(header.command_read.index.load(Ordering::Acquire), 0);
+        assert_eq!(ring.try_receive_command().unwrap(), None);
     }
 
     #[test]
