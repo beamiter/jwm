@@ -64,21 +64,29 @@ fn atomic_write_cache_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         ".shader-cache.tmp-{}-{sequence}",
         std::process::id()
     ));
+    replace_cache_file_atomically(path, &temporary, contents)
+}
+
+fn replace_cache_file_atomically(path: &Path, temporary: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut temporary_created = false;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&temporary)?;
+            .open(temporary)?;
+        temporary_created = true;
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(contents)?;
         file.sync_all()?;
-        fs::rename(&temporary, path)?;
+        fs::rename(temporary, path)?;
+        temporary_created = false;
         fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    if result.is_err() && temporary_created {
+        let _ = fs::remove_file(temporary);
     }
     result
 }
@@ -508,6 +516,25 @@ mod tests {
         assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
         assert_eq!(cache.load_cached_binary("linked").unwrap(), binary);
         fs::remove_dir_all(&cache.cache_dir).unwrap();
+    }
+
+    #[test]
+    fn cache_write_does_not_remove_a_colliding_temporary_file() {
+        let directory = tmp_cache_dir();
+        fs::create_dir_all(&directory).unwrap();
+        let temporary = directory.join("existing.tmp");
+        fs::write(&temporary, b"owned elsewhere").unwrap();
+        let destination = directory.join("program.bin");
+
+        assert_eq!(
+            replace_cache_file_atomically(&destination, &temporary, b"compiled")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&temporary).unwrap(), b"owned elsewhere");
+        assert!(!destination.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
