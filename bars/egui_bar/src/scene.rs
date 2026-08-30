@@ -10,12 +10,90 @@ use egui::{
     Color32, ColorImage, Context, CornerRadius, FontFamily, FontId, Id, Painter, Pos2,
     Rect as EguiRect, Shape, Stroke as EguiStroke, StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
+use std::collections::{HashMap, VecDeque};
 use xbar_core::presentation::{
     ImageSource, Rect, Rgba, Scene, SceneNode, Size, TextAlign, TextMeasurer,
 };
 
 const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
 const MAX_SCENE_IMAGE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_SCENE_IMAGE_CACHE_ENTRIES: usize = 128;
+const MAX_SCENE_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Default)]
+struct SceneImageCache {
+    entries: HashMap<u64, (Option<TextureHandle>, usize)>,
+    /// Least-recently-used key first, including failed decodes.
+    recency: VecDeque<u64>,
+    total_bytes: usize,
+}
+
+impl SceneImageCache {
+    fn get(&mut self, key: u64) -> Option<Option<TextureHandle>> {
+        let cached = self.entries.get(&key)?.0.clone();
+        self.mark_recent(key);
+        Some(cached)
+    }
+
+    fn mark_recent(&mut self, key: u64) {
+        let position = self
+            .recency
+            .iter()
+            .position(|candidate| *candidate == key)
+            .expect("a cached egui image has a recency record");
+        self.recency.remove(position);
+        self.recency.push_back(key);
+    }
+
+    fn insert(&mut self, key: u64, texture: Option<TextureHandle>) {
+        let bytes = texture.as_ref().map_or(0, |texture| {
+            let [width, height] = texture.size();
+            width.saturating_mul(height).saturating_mul(4)
+        });
+        self.insert_with_bytes(key, texture, bytes);
+    }
+
+    fn insert_with_bytes(&mut self, key: u64, texture: Option<TextureHandle>, bytes: usize) {
+        if bytes > MAX_SCENE_IMAGE_CACHE_BYTES {
+            return;
+        }
+
+        if let Some((_, previous_bytes)) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous_bytes);
+            let position = self
+                .recency
+                .iter()
+                .position(|candidate| *candidate == key)
+                .expect("a cached egui image has a recency record");
+            self.recency.remove(position);
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_SCENE_IMAGE_CACHE_ENTRIES
+                || self.total_bytes.saturating_add(bytes) > MAX_SCENE_IMAGE_CACHE_BYTES)
+        {
+            let oldest = self
+                .recency
+                .pop_front()
+                .expect("a full egui image cache has an eviction candidate");
+            let (_, evicted_bytes) = self
+                .entries
+                .remove(&oldest)
+                .expect("an egui image eviction candidate is cached");
+            self.total_bytes = self.total_bytes.saturating_sub(evicted_bytes);
+        }
+        self.entries.insert(key, (texture, bytes));
+        self.recency.push_back(key);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        debug_assert_eq!(self.entries.len(), self.recency.len());
+        debug_assert_eq!(
+            self.total_bytes,
+            self.entries
+                .values()
+                .map(|(_, bytes)| *bytes)
+                .sum::<usize>()
+        );
+    }
+}
 
 /// Text metrics for `LayoutEngine`, forwarded to a caller-supplied closure.
 ///
@@ -191,13 +269,16 @@ pub fn paint(painter: &Painter, origin: Pos2, scene: &Scene, style: &SceneStyle)
 
 /// Texture for one scene image, uploaded at most once per file.
 ///
-/// egui hands out no place to keep renderer state across frames, so the handle
-/// lives in the context's own temporary store keyed by the scene's stable image
-/// key. A file that cannot be decoded is remembered as `None`, so a broken icon
-/// costs one failed decode rather than one per frame.
+/// egui hands out no place to keep renderer state across frames, so handles
+/// live in one bounded LRU in the context's temporary store. A file that cannot
+/// be decoded is remembered as `None`, so a broken icon costs one failed decode
+/// rather than one per frame without growing the store forever.
 fn image_texture(ctx: &Context, source: &ImageSource) -> Option<TextureHandle> {
-    let id = Id::new(("xbar-scene-image", source.key));
-    if let Some(cached) = ctx.data(|data| data.get_temp::<Option<TextureHandle>>(id)) {
+    let cache_id = Id::new("xbar-scene-image-cache");
+    if let Some(cached) = ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SceneImageCache>(cache_id)
+            .get(source.key)
+    }) {
         return cached;
     }
     let texture = decode_image(&source.path).map(|image| {
@@ -207,7 +288,10 @@ fn image_texture(ctx: &Context, source: &ImageSource) -> Option<TextureHandle> {
             TextureOptions::LINEAR,
         )
     });
-    ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<SceneImageCache>(cache_id)
+            .insert(source.key, texture.clone());
+    });
     texture
 }
 
@@ -291,5 +375,44 @@ mod tests {
         assert!(decode_image(&small).is_some());
         assert!(decode_image(&oversized).is_none());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn scene_image_cache_bounds_textures_and_failures_with_lru_eviction() {
+        let mut cache = SceneImageCache::default();
+        for key in 0..MAX_SCENE_IMAGE_CACHE_ENTRIES as u64 {
+            cache.insert(key, None);
+        }
+        assert_eq!(cache.entries.len(), MAX_SCENE_IMAGE_CACHE_ENTRIES);
+
+        assert!(matches!(cache.get(0), Some(None)), "a failure is a hit");
+        cache.insert(MAX_SCENE_IMAGE_CACHE_ENTRIES as u64, None);
+        assert_eq!(cache.entries.len(), MAX_SCENE_IMAGE_CACHE_ENTRIES);
+        assert!(cache.entries.contains_key(&0), "the hot entry stays cached");
+        assert!(
+            !cache.entries.contains_key(&1),
+            "the oldest entry is evicted"
+        );
+    }
+
+    #[test]
+    fn scene_image_cache_evicts_by_decoded_byte_budget() {
+        let mut cache = SceneImageCache::default();
+        let half = MAX_SCENE_IMAGE_CACHE_BYTES / 2;
+        cache.insert_with_bytes(0, None, half);
+        cache.insert_with_bytes(1, None, half);
+        assert!(matches!(cache.get(0), Some(None)));
+
+        cache.insert_with_bytes(2, None, 1);
+        assert!(
+            cache.entries.contains_key(&0),
+            "the hot texture is retained"
+        );
+        assert!(
+            !cache.entries.contains_key(&1),
+            "the cold texture frees bytes"
+        );
+        assert!(cache.entries.contains_key(&2));
+        assert!(cache.total_bytes <= MAX_SCENE_IMAGE_CACHE_BYTES);
     }
 }

@@ -8,7 +8,7 @@ use cairo::{Context, Extend, Filter, Format, ImageSurface, LineCap, LineJoin, Op
 use pango::prelude::FontMapExt as _;
 use pango::{FontDescription, Layout};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
@@ -23,6 +23,84 @@ use crate::{
 
 const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
 const MAX_SCENE_IMAGE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_SCENE_IMAGE_CACHE_ENTRIES: usize = 128;
+const MAX_SCENE_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Default)]
+struct SceneImageCache {
+    entries: HashMap<u64, (Option<Rc<ImageSurface>>, usize)>,
+    /// Least-recently-used key first, including failed decodes.
+    recency: VecDeque<u64>,
+    total_bytes: usize,
+}
+
+impl SceneImageCache {
+    fn get(&mut self, key: u64) -> Option<Option<Rc<ImageSurface>>> {
+        let cached = self.entries.get(&key)?.0.clone();
+        self.mark_recent(key);
+        Some(cached)
+    }
+
+    fn mark_recent(&mut self, key: u64) {
+        let position = self
+            .recency
+            .iter()
+            .position(|candidate| *candidate == key)
+            .expect("a cached scene image has a recency record");
+        self.recency.remove(position);
+        self.recency.push_back(key);
+    }
+
+    fn insert(&mut self, key: u64, image: Option<Rc<ImageSurface>>) {
+        let bytes = image.as_ref().map_or(0, |surface| {
+            usize::try_from(surface.stride())
+                .unwrap_or_default()
+                .saturating_mul(usize::try_from(surface.height()).unwrap_or_default())
+        });
+        self.insert_with_bytes(key, image, bytes);
+    }
+
+    fn insert_with_bytes(&mut self, key: u64, image: Option<Rc<ImageSurface>>, bytes: usize) {
+        if bytes > MAX_SCENE_IMAGE_CACHE_BYTES {
+            return;
+        }
+
+        if let Some((_, previous_bytes)) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous_bytes);
+            let position = self
+                .recency
+                .iter()
+                .position(|candidate| *candidate == key)
+                .expect("a cached scene image has a recency record");
+            self.recency.remove(position);
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_SCENE_IMAGE_CACHE_ENTRIES
+                || self.total_bytes.saturating_add(bytes) > MAX_SCENE_IMAGE_CACHE_BYTES)
+        {
+            let oldest = self
+                .recency
+                .pop_front()
+                .expect("a full scene image cache has an eviction candidate");
+            let (_, evicted_bytes) = self
+                .entries
+                .remove(&oldest)
+                .expect("a scene image eviction candidate is cached");
+            self.total_bytes = self.total_bytes.saturating_sub(evicted_bytes);
+        }
+        self.entries.insert(key, (image, bytes));
+        self.recency.push_back(key);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+        debug_assert_eq!(self.entries.len(), self.recency.len());
+        debug_assert_eq!(
+            self.total_bytes,
+            self.entries
+                .values()
+                .map(|(_, bytes)| *bytes)
+                .sum::<usize>()
+        );
+    }
+}
 
 /// Renders a [`Scene`] into an existing Cairo context.
 #[derive(Debug, Clone)]
@@ -37,7 +115,7 @@ pub struct CairoRenderer {
     /// this build cannot decode will not start decoding between two frames,
     /// and retrying it every frame would put image decoding in the hot path
     /// for exactly the icons that never appear.
-    images: RefCell<HashMap<u64, Option<Rc<ImageSurface>>>>,
+    images: RefCell<SceneImageCache>,
 }
 
 impl CairoRenderer {
@@ -46,7 +124,7 @@ impl CairoRenderer {
         Self {
             font,
             background_opacity: None,
-            images: RefCell::new(HashMap::new()),
+            images: RefCell::new(SceneImageCache::default()),
         }
     }
 
@@ -342,8 +420,8 @@ impl CairoRenderer {
     }
 
     fn image_surface(&self, source: &ImageSource) -> Option<Rc<ImageSurface>> {
-        if let Some(cached) = self.images.borrow().get(&source.key) {
-            return cached.clone();
+        if let Some(cached) = self.images.borrow_mut().get(source.key) {
+            return cached;
         }
         let decoded = decode_image(&source.path).map(Rc::new);
         if decoded.is_none() {
@@ -1683,6 +1761,42 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[test]
+    fn scene_image_cache_bounds_successes_and_failures_with_lru_eviction() {
+        let mut cache = SceneImageCache::default();
+        for key in 0..MAX_SCENE_IMAGE_CACHE_ENTRIES as u64 {
+            cache.insert(key, None);
+        }
+        assert_eq!(cache.entries.len(), MAX_SCENE_IMAGE_CACHE_ENTRIES);
+
+        assert!(matches!(cache.get(0), Some(None)), "a failure is a hit");
+        cache.insert(MAX_SCENE_IMAGE_CACHE_ENTRIES as u64, None);
+        assert_eq!(cache.entries.len(), MAX_SCENE_IMAGE_CACHE_ENTRIES);
+        assert!(cache.entries.contains_key(&0), "the hot entry stays cached");
+        assert!(
+            !cache.entries.contains_key(&1),
+            "the oldest entry is evicted"
+        );
+    }
+
+    #[test]
+    fn scene_image_cache_evicts_by_decoded_byte_budget() {
+        let mut cache = SceneImageCache::default();
+        let half = MAX_SCENE_IMAGE_CACHE_BYTES / 2;
+        cache.insert_with_bytes(0, None, half);
+        cache.insert_with_bytes(1, None, half);
+        assert!(matches!(cache.get(0), Some(None)));
+
+        cache.insert_with_bytes(2, None, 1);
+        assert!(cache.entries.contains_key(&0), "the hot image is retained");
+        assert!(
+            !cache.entries.contains_key(&1),
+            "the cold image frees bytes"
+        );
+        assert!(cache.entries.contains_key(&2));
+        assert!(cache.total_bytes <= MAX_SCENE_IMAGE_CACHE_BYTES);
+    }
+
     /// A scene image reaches the surface: decoded, premultiplied the way Cairo
     /// expects, scaled into its bounds, and cached so the second frame costs
     /// nothing.
@@ -1740,7 +1854,7 @@ mod tests {
         surface.flush();
 
         assert_eq!(
-            renderer.images.borrow().len(),
+            renderer.images.borrow().entries.len(),
             2,
             "both the drawable file and the failure are remembered"
         );
