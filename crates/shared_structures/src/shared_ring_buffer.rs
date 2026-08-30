@@ -201,9 +201,16 @@ impl From<&SharedMessage> for WireMessage {
                 | ((status.is_filled as u8) << 2)
                 | ((status.is_occ as u8) << 3);
         }
-        let minimized_windows = message.minimized_windows.map(Into::into);
         let (minimized_count, minimized_flags) =
             normalize_minimized_metadata(message.minimized_count, message.minimized_flags);
+        let mut minimized_windows = [WireMinimizedWindowInfo::default(); MAX_MINIMIZED_WINDOWS];
+        for (destination, source) in minimized_windows
+            .iter_mut()
+            .zip(message.minimized_windows.iter())
+            .take(minimized_count as usize)
+        {
+            *destination = (*source).into();
+        }
         Self {
             timestamp: message.timestamp,
             wm_session_id: message.wm_session_id,
@@ -231,6 +238,14 @@ impl From<WireMessage> for SharedMessage {
     fn from(message: WireMessage) -> Self {
         let (minimized_count, minimized_flags) =
             normalize_minimized_metadata(message.minimized_count, message.minimized_flags);
+        let mut minimized_windows = [MinimizedWindowInfo::default(); MAX_MINIMIZED_WINDOWS];
+        for (destination, source) in minimized_windows
+            .iter_mut()
+            .zip(message.minimized_windows.iter())
+            .take(minimized_count as usize)
+        {
+            *destination = (*source).into();
+        }
         let mut monitor_info = crate::MonitorInfo {
             monitor_num: message.monitor_num,
             monitor_width: message.monitor_width,
@@ -263,7 +278,7 @@ impl From<WireMessage> for SharedMessage {
             monitor_info,
             minimized_count,
             minimized_flags,
-            minimized_windows: message.minimized_windows.map(Into::into),
+            minimized_windows,
         }
     }
 }
@@ -732,6 +747,39 @@ mod tests {
             OTHER_FLAG | crate::MINIMIZED_LIST_FLAG_OVERFLOW
         );
         assert_eq!(outgoing.minimized_windows().len(), MAX_MINIMIZED_WINDOWS);
+    }
+
+    #[test]
+    fn minimized_wire_conversion_clears_entries_beyond_count() {
+        let visible = MinimizedWindowInfo::new(1, 2, 0);
+        let mut stale = MinimizedWindowInfo::new(99, 7, 0);
+        stale.set_title("must not cross the wire");
+
+        let mut outgoing = SharedMessage {
+            minimized_count: 1,
+            ..SharedMessage::default()
+        };
+        outgoing.minimized_windows[0] = visible;
+        outgoing.minimized_windows[1] = stale;
+
+        let mut wire = WireMessage::from(&outgoing);
+        assert_eq!(
+            MinimizedWindowInfo::from(wire.minimized_windows[0]),
+            visible
+        );
+        assert_eq!(
+            MinimizedWindowInfo::from(wire.minimized_windows[1]),
+            MinimizedWindowInfo::default()
+        );
+
+        wire.minimized_windows[1] = stale.into();
+        let incoming = SharedMessage::from(wire);
+        assert_eq!(incoming.minimized_count, 1);
+        assert_eq!(incoming.minimized_windows[0], visible);
+        assert_eq!(
+            incoming.minimized_windows[1],
+            MinimizedWindowInfo::default()
+        );
     }
 
     // ── 创建 / 打开 ──────────────────────────────────────────────────────────
