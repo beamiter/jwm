@@ -167,7 +167,7 @@ impl SoftwarePresenter {
 }
 
 enum Presenter {
-    OpenGl(GlPresenter),
+    OpenGl(Box<GlPresenter>),
     Software(SoftwarePresenter),
 }
 
@@ -222,7 +222,7 @@ impl App {
         let presenter = match GlPresenter::new(&window, physical_size) {
             Ok(presenter) => {
                 info!("OpenGL presenter initialized");
-                Presenter::OpenGl(presenter)
+                Presenter::OpenGl(Box::new(presenter))
             }
             Err(error) => {
                 warn!("OpenGL presenter unavailable ({error:#}); using software fallback");
