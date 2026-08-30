@@ -108,7 +108,7 @@ impl FutexBackend {
                 return Ok(false);
             }
 
-            match gate.register(&has_data) {
+            match gate.register(&has_data)? {
                 RegisterOutcome::DataReady => return Ok(true),
                 RegisterOutcome::Retry => continue,
                 RegisterOutcome::Registered {

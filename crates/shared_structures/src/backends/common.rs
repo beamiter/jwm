@@ -54,25 +54,41 @@ mod waiter_gate {
 
     impl<'a> WaiterGate<'a> {
         /// waiter 侧：执行注册握手。
-        pub(crate) fn register(&self, has_data: impl Fn() -> bool) -> RegisterOutcome<'a> {
+        pub(crate) fn register(
+            &self,
+            has_data: impl Fn() -> bool,
+        ) -> std::io::Result<RegisterOutcome<'a>> {
             let snapshot = self.sequence.load(Ordering::SeqCst);
-            self.waiters.fetch_add(1, Ordering::SeqCst);
+            self.waiters
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiters| {
+                    if waiters < 0 {
+                        None
+                    } else {
+                        waiters.checked_add(1)
+                    }
+                })
+                .map_err(|waiters| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("invalid shared waiter count: {waiters}"),
+                    )
+                })?;
             let registration = WaiterRegistration {
                 waiters: self.waiters,
             };
             if has_data() {
                 drop(registration);
-                return RegisterOutcome::DataReady;
+                return Ok(RegisterOutcome::DataReady);
             }
             if self.sequence.load(Ordering::SeqCst) != snapshot {
                 drop(registration);
-                return RegisterOutcome::Retry;
+                return Ok(RegisterOutcome::Retry);
             }
-            RegisterOutcome::Registered {
+            Ok(RegisterOutcome::Registered {
                 registration,
                 #[cfg(feature = "futex")]
                 snapshot,
-            }
+            })
         }
 
         /// signal 侧：推进 sequence，返回是否需要进入内核唤醒一个等待者。
@@ -85,6 +101,30 @@ mod waiter_gate {
         pub(crate) fn broadcast_count(&self) -> usize {
             self.sequence.fetch_add(1, Ordering::SeqCst);
             self.waiters.load(Ordering::SeqCst).max(0) as usize
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn register_rejects_invalid_waiter_counts_without_wrapping() {
+            for invalid in [-1, i32::MAX] {
+                let sequence = AtomicU32::new(0);
+                let waiters = AtomicI32::new(invalid);
+                let gate = WaiterGate {
+                    sequence: &sequence,
+                    waiters: &waiters,
+                };
+
+                let error = gate
+                    .register(|| false)
+                    .err()
+                    .expect("invalid waiter metadata must be rejected");
+                assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+                assert_eq!(waiters.load(Ordering::SeqCst), invalid);
+            }
         }
     }
 }
