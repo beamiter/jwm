@@ -1291,6 +1291,13 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                 "shared-memory recorded total size does not match mapping length",
             ));
         }
+        let creator_pid = unsafe { std::ptr::addr_of!((*header).creator_pid).read() };
+        if creator_pid == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "shared-memory creator PID must be non-zero",
+            ));
+        }
 
         let backend_id = unsafe { std::ptr::addr_of!((*header).backend_id).read() };
         let strategy = SyncStrategy::from_id(backend_id).ok_or_else(|| {
@@ -2601,6 +2608,35 @@ mod tests {
 
         let replacement = replacement.unwrap();
         assert!(replacement.is_creator());
+    }
+
+    #[test]
+    fn stale_reclaim_rejects_zero_creator_pid_without_replacing_live_mapping() {
+        let path = mk_path("zero_creator_pid");
+        let creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        let original_os_id = creator.shmem.get_os_id().to_owned();
+        let original_creator_pid = creator.creator_pid();
+
+        // Model corrupted immutable metadata. PID zero cannot identify a
+        // userspace creator and must not authorize stale replacement.
+        unsafe {
+            std::ptr::addr_of_mut!((*creator.header).creator_pid).write(0);
+        }
+        let result = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed::<u64, u64>(&path);
+        unsafe {
+            std::ptr::addr_of_mut!((*creator.header).creator_pid).write(original_creator_pid);
+        }
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
+        assert_eq!(opener.shmem.get_os_id(), original_os_id);
     }
 
     #[test]
