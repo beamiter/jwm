@@ -17,7 +17,7 @@ use crate::jwm::geometry::GeometryConstraints;
 use crate::jwm::types::WMArgEnum;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -343,8 +343,22 @@ fn atomic_write_session(path: &Path, contents: &[u8]) -> io::Result<()> {
 }
 
 fn load_session_snapshot(path: &Path) -> Result<SessionSnapshot, Box<dyn std::error::Error>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    // Open once without following a final symlink, then validate and read that
+    // same inode. Reopening by path after validation would let a concurrent
+    // replacement bypass the ownership, mode and size checks below.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    load_open_session_snapshot(file, path)
+}
+
+fn load_open_session_snapshot(
+    file: fs::File,
+    path: &Path,
+) -> Result<SessionSnapshot, Box<dyn std::error::Error>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(format!("session path is not a regular file: {}", path.display()).into());
     }
     if metadata.uid() != unsafe { libc::geteuid() } {
@@ -360,7 +374,20 @@ fn load_session_snapshot(path: &Path) -> Result<SessionSnapshot, Box<dyn std::er
     if metadata.len() > MAX_SESSION_BYTES {
         return Err(format!("session file exceeds the 4 MiB limit: {}", path.display()).into());
     }
-    let json = fs::read_to_string(path)?;
+    // The inode may grow after metadata(); cap the descriptor itself and read
+    // one sentinel byte so an exact-limit file remains distinguishable from
+    // an oversized one.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SESSION_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SESSION_BYTES {
+        return Err(format!("session file exceeds the 4 MiB limit: {}", path.display()).into());
+    }
+    let json = String::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("session file is not valid UTF-8: {error}"),
+        )
+    })?;
     let snapshot = migrate_session_json(&json)
         .map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     Ok(snapshot)
@@ -739,6 +766,26 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         assert!(atomic_write_session(&link, b"replacement").is_err());
         assert_eq!(fs::read_to_string(victim).unwrap(), "unchanged");
+    }
+
+    #[test]
+    fn session_loader_keeps_using_the_inode_it_opened() {
+        let root = TestDir::new("read-inode");
+        let path = root.0.join("state").join("session.json");
+        atomic_write_session(&path, br#"{"version":2,"clients":[]}"#).unwrap();
+
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .unwrap();
+        let original = root.0.join("original.json");
+        fs::rename(&path, &original).unwrap();
+        fs::write(&path, "not JSON").unwrap();
+
+        let snapshot = load_open_session_snapshot(opened, &path).unwrap();
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert!(load_session_snapshot(&path).is_err());
     }
 
     #[test]
