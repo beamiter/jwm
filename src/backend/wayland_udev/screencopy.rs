@@ -4,7 +4,10 @@
 /// The compositor captures the framebuffer during the render loop and copies the data
 /// into the client-provided wl_shm buffer.
 use crate::sync_ext::MutexExt;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use log::{debug, info, warn};
 
@@ -65,6 +68,15 @@ pub struct ScreencopyFrameData {
     pub overlay_cursor: bool,
     pub buffer_info: (u32, u32, u32, wl_shm::Format), // (width, height, stride, format)
     pub pending_queue: PendingScreencopyQueue,
+    /// The protocol defines a frame as single-use. Without this guard, one
+    /// resource can enqueue itself repeatedly before the next render drain.
+    pub copy_requested: AtomicBool,
+}
+
+fn claim_copy_request(copy_requested: &AtomicBool) -> bool {
+    copy_requested
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
 }
 
 // ---- Manager global (zwlr_screencopy_manager_v1) ----------------------------------
@@ -167,6 +179,7 @@ fn handle_capture(
                 overlay_cursor: overlay_cursor != 0,
                 buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
                 pending_queue: pending_queue.clone(),
+                copy_requested: AtomicBool::new(false),
             };
             let frame = data_init.init(frame_new_id, frame_data);
             frame.failed();
@@ -186,6 +199,7 @@ fn handle_capture(
                 overlay_cursor: overlay_cursor != 0,
                 buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
                 pending_queue: pending_queue.clone(),
+                copy_requested: AtomicBool::new(false),
             };
             let frame = data_init.init(frame_new_id, frame_data);
             frame.failed();
@@ -211,6 +225,7 @@ fn handle_capture(
                 overlay_cursor: overlay_cursor != 0,
                 buffer_info: (0, 0, 0, wl_shm::Format::Argb8888),
                 pending_queue: pending_queue.clone(),
+                copy_requested: AtomicBool::new(false),
             };
             let frame = data_init.init(frame_new_id, frame_data);
             frame.failed();
@@ -229,6 +244,7 @@ fn handle_capture(
         overlay_cursor: overlay_cursor != 0,
         buffer_info: (cap_w, cap_h, stride, wl_shm::Format::Argb8888),
         pending_queue,
+        copy_requested: AtomicBool::new(false),
     };
 
     let frame = data_init.init(frame_new_id, frame_data);
@@ -273,12 +289,14 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for JwmWaylandState {
     ) {
         match request {
             zwlr_screencopy_frame_v1::Request::Copy { buffer } => {
-                queue_copy(state, resource, &buffer, data, false);
-                state.needs_redraw = true;
+                if queue_copy(state, resource, &buffer, data, false) {
+                    state.needs_redraw = true;
+                }
             }
             zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => {
-                queue_copy(state, resource, &buffer, data, true);
-                state.needs_redraw = true;
+                if queue_copy(state, resource, &buffer, data, true) {
+                    state.needs_redraw = true;
+                }
             }
             zwlr_screencopy_frame_v1::Request::Destroy => {}
             _ => {}
@@ -292,7 +310,15 @@ fn queue_copy(
     buffer: &WlBuffer,
     data: &ScreencopyFrameData,
     with_damage: bool,
-) {
+) -> bool {
+    if !claim_copy_request(&data.copy_requested) {
+        frame.post_error(
+            zwlr_screencopy_frame_v1::Error::AlreadyUsed,
+            "a screencopy frame accepts exactly one copy request",
+        );
+        return false;
+    }
+
     let output = match data.output.as_ref() {
         Some(o) => o,
         None => {
@@ -300,7 +326,7 @@ fn queue_copy(
             let mut counters = state.capture_counters.lock_safe();
             counters.note_screencopy_failed("screencopy dispatch: missing output");
             frame.failed();
-            return;
+            return false;
         }
     };
     debug!(
@@ -318,6 +344,7 @@ fn queue_copy(
     });
     let mut counters = state.capture_counters.lock_safe();
     counters.note_screencopy_queued();
+    true
 }
 
 // ---- Initialization ---------------------------------------------------------------
@@ -351,7 +378,17 @@ pub fn init_screencopy_manager(dh: &DisplayHandle) -> PendingScreencopyQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::region_is_valid;
+    use super::{claim_copy_request, region_is_valid};
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn a_frame_accepts_exactly_one_copy_request_under_a_flood() {
+        let copy_requested = AtomicBool::new(false);
+        assert!(claim_copy_request(&copy_requested));
+        for _ in 0..10_000 {
+            assert!(!claim_copy_request(&copy_requested));
+        }
+    }
 
     #[test]
     fn negative_dims_are_rejected() {
