@@ -76,6 +76,38 @@ const MAX_FFMPEG_LOG_DETAIL_BYTES: usize = 64 * 1024;
 #[cfg(feature = "media-audio")]
 const FFMPEG_STOP_GRACE: Duration = Duration::from_secs(2);
 
+/// Own an ffmpeg child across every fallible polling path.
+///
+/// `std::process::Child` does not terminate or reap on drop. Without this
+/// guard, an unexpected `try_wait`/wait error could return from the recorder
+/// worker while ffmpeg kept capturing with nobody left to stop it.
+#[cfg(feature = "media-audio")]
+struct FfmpegChild {
+    child: Child,
+}
+
+#[cfg(feature = "media-audio")]
+impl FfmpegChild {
+    fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    fn as_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
+#[cfg(feature = "media-audio")]
+impl Drop for FfmpegChild {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 #[cfg(feature = "media-audio")]
 struct FfmpegLog {
     path: std::path::PathBuf,
@@ -423,7 +455,7 @@ fn capture_with_ffmpeg(
             return Err(error);
         }
     };
-    let mut child = match Command::new("ffmpeg")
+    let child = match Command::new("ffmpeg")
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -437,9 +469,14 @@ fn capture_with_ffmpeg(
             return Err(error);
         }
     };
+    let mut child = FfmpegChild::new(child);
 
     thread::sleep(Duration::from_millis(150));
-    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+    if let Some(status) = child
+        .as_mut()
+        .try_wait()
+        .map_err(|error| error.to_string())?
+    {
         let detail = read_ffmpeg_log_tail(log.path());
         let _ = std::fs::remove_file(path);
         let error = format!(
@@ -453,11 +490,11 @@ fn capture_with_ffmpeg(
 
     loop {
         if stop.load(Ordering::Acquire) {
-            if let Some(mut stdin) = child.stdin.take() {
+            if let Some(mut stdin) = child.as_mut().stdin.take() {
                 let _ = stdin.write_all(b"q\n");
                 let _ = stdin.flush();
             }
-            let status = wait_for_child_with_grace(&mut child, FFMPEG_STOP_GRACE)
+            let status = wait_for_child_with_grace(child.as_mut(), FFMPEG_STOP_GRACE)
                 .map_err(|error| error.to_string())?;
             return if status.success() {
                 Ok(())
@@ -469,7 +506,11 @@ fn capture_with_ffmpeg(
                 ))
             };
         }
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        if let Some(status) = child
+            .as_mut()
+            .try_wait()
+            .map_err(|error| error.to_string())?
+        {
             let detail = read_ffmpeg_log_tail(log.path());
             return Err(format!(
                 "ffmpeg audio recorder stopped unexpectedly ({status}): {}",
@@ -669,6 +710,35 @@ mod tests {
 
         assert!(!status.success());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn ffmpeg_child_guard_terminates_and_reaps_an_early_return() {
+        let child = Command::new("sh")
+            .args(["-c", "exec sleep 10"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        let started = Instant::now();
+
+        drop(FfmpegChild::new(child));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "guard did not terminate the abandoned child promptly"
+        );
+        let mut status = 0;
+        let wait_result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        assert_eq!(wait_result, -1, "abandoned ffmpeg child remained waitable");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "abandoned ffmpeg child was not reaped"
+        );
     }
 
     #[test]
