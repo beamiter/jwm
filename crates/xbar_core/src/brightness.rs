@@ -38,7 +38,14 @@ impl BrightnessManager {
 
     /// Re-read the current brightness, returning a command error to the caller.
     pub fn try_refresh(&mut self) -> io::Result<bool> {
-        let percent = read_brightness_percent();
+        self.try_refresh_with(read_brightness_percent)
+    }
+
+    fn try_refresh_with(
+        &mut self,
+        probe: impl FnOnce() -> io::Result<Option<u8>>,
+    ) -> io::Result<bool> {
+        let percent = probe();
         // Keep failed probes rate-limited just like successful ones.
         self.last_update = Instant::now();
         let percent = percent?;
@@ -146,29 +153,62 @@ fn run_brightnessctl(args: &[&str]) -> io::Result<()> {
 
 fn read_brightness_percent() -> io::Result<Option<u8>> {
     let output = brightnessctl_output(&["-m"])?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_brightness_percent(&stdout))
+    let stdout = std::str::from_utf8(&output.stdout).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("brightnessctl -m returned non-UTF-8 output: {error}"),
+        )
+    })?;
+    parse_brightness_percent(stdout)
 }
 
-fn parse_brightness_percent(output: &str) -> Option<u8> {
-    let line = output.lines().next()?;
-    let field = line.split(',').nth(3)?;
-    field
+fn parse_brightness_percent(output: &str) -> io::Result<Option<u8>> {
+    if output.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let line = output.lines().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "brightnessctl -m returned no device row",
+        )
+    })?;
+    let field = line.split(',').nth(3).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "brightnessctl -m row is missing its percentage field",
+        )
+    })?;
+    let percent = field
         .trim()
-        .strip_suffix('%')?
+        .strip_suffix('%')
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "brightnessctl -m percentage has no percent suffix",
+            )
+        })?
         .parse::<u8>()
-        .ok()
-        .map(|percent| percent.min(100))
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("brightnessctl -m percentage is invalid: {error}"),
+            )
+        })?;
+    Ok(Some(percent.min(100)))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_brightness_percent;
+    use std::io;
+    use std::time::{Duration, Instant};
+
+    use super::{BrightnessManager, parse_brightness_percent};
 
     #[test]
     fn parses_machine_readable_output() {
         let output = "intel_backlight,backlight,48000,42%,120000\n";
-        assert_eq!(parse_brightness_percent(output), Some(42));
+        assert_eq!(parse_brightness_percent(output).unwrap(), Some(42));
     }
 
     #[test]
@@ -177,24 +217,58 @@ mod tests {
             "intel_backlight,backlight,48000,40%,120000\n",
             "leds,led,1,100%,1\n",
         );
-        assert_eq!(parse_brightness_percent(output), Some(40));
+        assert_eq!(parse_brightness_percent(output).unwrap(), Some(40));
+    }
+
+    #[test]
+    fn empty_output_means_no_brightness_device() {
+        assert_eq!(parse_brightness_percent("").unwrap(), None);
+        assert_eq!(parse_brightness_percent(" \n\t").unwrap(), None);
     }
 
     #[test]
     fn rejects_malformed_machine_readable_output() {
-        assert_eq!(parse_brightness_percent(""), None);
-        assert_eq!(
-            parse_brightness_percent("device,backlight,1,not-a-percent,2"),
-            None
-        );
-        assert_eq!(parse_brightness_percent("device,backlight,1,42,2"), None);
+        for output in [
+            "device,backlight,1",
+            "device,backlight,1,not-a-percent,2",
+            "device,backlight,1,42,2",
+        ] {
+            assert_eq!(
+                parse_brightness_percent(output).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
     }
 
     #[test]
     fn clamps_out_of_range_machine_readable_output() {
         assert_eq!(
-            parse_brightness_percent("device,backlight,1,150%,2"),
+            parse_brightness_percent("device,backlight,1,150%,2").unwrap(),
             Some(100)
         );
+    }
+
+    #[test]
+    fn failed_refresh_preserves_the_last_good_value_and_is_rate_limited() {
+        let previous_update = Instant::now();
+        let mut manager = BrightnessManager {
+            percent: Some(42),
+            last_update: previous_update,
+            update_interval: Duration::MAX,
+        };
+
+        let error = manager
+            .try_refresh_with(|| {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "malformed probe",
+                ))
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(manager.percent(), Some(42));
+        assert!(manager.last_update >= previous_update);
+        assert!(!manager.update_if_needed());
     }
 }
