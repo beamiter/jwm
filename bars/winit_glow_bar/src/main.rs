@@ -16,7 +16,7 @@ use winit::{
     window::{Window, WindowAttributes, WindowId},
 };
 use x11rb::rust_connection::RustConnection;
-use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
+use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, MAX_GLASS_IMAGE_BYTES};
 use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
@@ -27,6 +27,35 @@ use xbar_core::{
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+fn bgra_frame_len(width: u32, height: u32) -> Result<usize> {
+    // GL clamps a zero axis to one while creating its initial surface, so
+    // validate that effective allocation as well as non-empty CPU frames.
+    let surface_len = (width.max(1) as usize)
+        .checked_mul(height.max(1) as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("BGRA surface dimensions overflow"))?;
+    if surface_len > MAX_GLASS_IMAGE_BYTES {
+        anyhow::bail!(
+            "BGRA surface needs {surface_len} bytes; frame budget is {MAX_GLASS_IMAGE_BYTES} bytes"
+        );
+    }
+    Ok(if width == 0 || height == 0 {
+        0
+    } else {
+        surface_len
+    })
+}
+
+fn allocate_bgra_frame(width: u32, height: u32) -> Result<Vec<u8>> {
+    let len = bgra_frame_len(width, height)?;
+    let mut frame = Vec::new();
+    frame
+        .try_reserve_exact(len)
+        .map_err(|error| anyhow::anyhow!("failed to reserve {len}-byte BGRA frame: {error}"))?;
+    frame.resize(len, 0);
+    Ok(frame)
+}
 
 #[derive(Debug)]
 enum UserEvent {
@@ -103,6 +132,9 @@ impl App {
     }
 
     fn init_gl(&mut self, window: &Window) -> Result<()> {
+        let initial_size = window.inner_size();
+        let _ = bgra_frame_len(initial_size.width, initial_size.height)
+            .context("initial window surface exceeds the frame budget")?;
         let (display, _config, surface, context, gl) = create_gl_surface(window)?;
 
         let program = build_quad_program(&gl)?;
@@ -140,12 +172,7 @@ impl App {
         let vao = self.vao.expect("GL initialized in resumed");
         let texture = self.texture.expect("GL initialized in resumed");
 
-        let mut frame = vec![
-            0u8;
-            (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4)
-        ];
+        let mut frame = allocate_bgra_frame(width, height)?;
         self.bar.render_into_bgra(
             &mut frame,
             width,
@@ -176,10 +203,17 @@ impl App {
         }
     }
 
-    fn resize_surface(&mut self, size: PhysicalSize<u32>) {
+    fn resize_surface(&mut self, size: PhysicalSize<u32>) -> bool {
+        if let Err(error) = bgra_frame_len(size.width, size.height) {
+            warn!("ignoring oversized bar surface resize: {error:#}");
+            // Stop redraws against the old surface extent until the
+            // compositor supplies a valid size again.
+            self.last_physical_size = PhysicalSize::new(0, 0);
+            return false;
+        }
         self.last_physical_size = size;
         if size.width == 0 || size.height == 0 {
-            return;
+            return false;
         }
         self.logical_size = size.to_logical(self.scale_factor);
         if let (Some(surface), Some(context), Some(gl)) = (
@@ -194,6 +228,7 @@ impl App {
                 gl.viewport(0, 0, size.width as i32, size.height as i32);
             }
         }
+        true
     }
 
     fn handle_pointer_input(&mut self, input: PointerInput) {
@@ -354,16 +389,17 @@ impl ApplicationHandler<UserEvent> for App {
                     .window
                     .as_ref()
                     .map_or(self.scale_factor, |window| window.scale_factor());
-                if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
+                if self.resize_surface(size)
+                    && let Some(height) = logical_bar_height(size.height, self.scale_factor)
+                {
                     self.bar.config_mut().bar_height = height;
                 }
-                self.resize_surface(size);
                 self.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
                 if let Some(window) = &self.window {
-                    self.resize_surface(window.inner_size());
+                    let _ = self.resize_surface(window.inner_size());
                 }
                 if let Some(geometry) = self.bar.runtime().view().geometry {
                     self.apply_monitor_geometry(geometry);
@@ -498,6 +534,8 @@ fn create_gl_surface(
         .map_err(|error| anyhow::anyhow!("failed to create GL context: {error}"))?;
 
     let size = window.inner_size();
+    let _ = bgra_frame_len(size.width, size.height)
+        .context("window surface exceeds the frame budget")?;
     let surface_attributes = SurfaceAttributesBuilder::<WindowSurface>::new()
         .with_srgb(Some(true))
         .build(
@@ -825,7 +863,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal_window_event;
+    use super::{bgra_frame_len, is_terminal_window_event};
     use winit::{dpi::PhysicalSize, event::WindowEvent};
 
     #[test]
@@ -835,5 +873,13 @@ mod tests {
         assert!(!is_terminal_window_event(&WindowEvent::Resized(
             PhysicalSize::new(1920, 42),
         )));
+    }
+
+    #[test]
+    fn oversized_surface_is_rejected_before_frame_allocation() {
+        assert_eq!(bgra_frame_len(7680, 4320).unwrap(), 7680_usize * 4320 * 4);
+        assert_eq!(bgra_frame_len(0, 2160).unwrap(), 0);
+        assert!(bgra_frame_len(u32::from(u16::MAX), u32::from(u16::MAX)).is_err());
+        assert!(bgra_frame_len(0, u32::MAX).is_err());
     }
 }
