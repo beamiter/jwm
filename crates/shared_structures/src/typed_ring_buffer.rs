@@ -1661,14 +1661,24 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             return Ok(Vec::new());
         }
 
-        let mut drained = Vec::new();
         unsafe {
             let write_idx = header.message_write.index.load(Ordering::Acquire);
             let mut read_idx = header.message_read.index.load(Ordering::Relaxed);
-            while read_idx != write_idx && drained.len() < max {
+            let pending = write_idx.wrapping_sub(read_idx);
+            if pending > self.buffer_size() {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "message cursor distance exceeds buffer capacity",
+                ));
+            }
+
+            let mut remaining = pending;
+            let mut drained = Vec::new();
+            while remaining != 0 && drained.len() < max {
                 let slot_idx = (read_idx & self.buffer_mask()) as usize;
                 let slot = self.message_slots.add(slot_idx).read();
                 read_idx = read_idx.wrapping_add(1);
+                remaining -= 1;
                 header.message_read.index.store(read_idx, Ordering::Release);
                 if checksum_of(&slot.payload) == slot.checksum {
                     drained.push(slot.payload);
@@ -1676,8 +1686,8 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                     warn!("skipped a corrupt message slot while draining");
                 }
             }
+            Ok(drained)
         }
-        Ok(drained)
     }
 
     /// 尝试写入命令。命令队列已满时返回 `Ok(false)`。
@@ -2479,6 +2489,36 @@ mod tests {
 
         assert_eq!(ring.try_peek_message().unwrap(), Some(1));
         assert_eq!(ring.drain_messages(usize::MAX).unwrap(), vec![1, 2, 3, 100]);
+    }
+
+    #[test]
+    fn typed_drain_rejects_cursor_distance_larger_than_capacity() {
+        let path = mk_path("drain_invalid_cursor_distance");
+        let ring: TypedRingBuffer<u64, u32> = SharedRingBufferOptions::new()
+            .capacity(4)
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        for value in 0u64..4 {
+            assert!(ring.try_write_message(&value).unwrap());
+        }
+
+        // Model a corrupted shared cursor claiming that the four physical
+        // slots contain two full turns of unread messages.
+        ring.header()
+            .message_write
+            .index
+            .store(8, Ordering::Release);
+        let result = ring.drain_messages(usize::MAX);
+        let read_after_drain = ring.header().message_read.index.load(Ordering::Acquire);
+        ring.header()
+            .message_write
+            .index
+            .store(4, Ordering::Release);
+
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(read_after_drain, 0, "rejection must not consume any slot");
     }
 
     #[test]
