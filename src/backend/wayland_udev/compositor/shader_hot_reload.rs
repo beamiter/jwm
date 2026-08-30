@@ -129,6 +129,6 @@ impl ShaderHotReload {
         self.shaders
             .iter()
             .find(|s| s.name == name)
-            .and_then(|s| std::fs::read_to_string(&s.path).ok())
+            .and_then(|s| crate::backend::shader_source::read_shader_source(&s.path).ok())
     }
 }

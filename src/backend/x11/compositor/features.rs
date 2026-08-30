@@ -972,8 +972,8 @@ impl<C: CompositorConnection> Compositor<C> {
             );
         }
 
-        let file_content =
-            std::fs::read_to_string(path).map_err(|e| format!("read shader file: {e}"))?;
+        let file_content = crate::backend::shader_source::read_shader_source(path)
+            .map_err(|e| format!("read shader file: {e}"))?;
 
         let (vs_src, fs_src) = match name {
             "window" => (shaders::VERTEX_SHADER, file_content.as_str()),
