@@ -46,14 +46,23 @@ impl Default for WireMinimizedWindowInfo {
     }
 }
 
+fn canonicalize_fixed_string<const N: usize>(mut value: [u8; N]) -> [u8; N] {
+    if let Some(terminator) = value.iter().position(|byte| *byte == 0) {
+        value[terminator..].fill(0);
+    } else if let Some(last) = value.last_mut() {
+        *last = 0;
+    }
+    value
+}
+
 impl From<MinimizedWindowInfo> for WireMinimizedWindowInfo {
     fn from(window: MinimizedWindowInfo) -> Self {
         Self {
             window_id: window.window_id,
             monitor_id: window.monitor_id,
             flags: window.flags,
-            title: window.title,
-            app_id: window.app_id,
+            title: canonicalize_fixed_string(window.title),
+            app_id: canonicalize_fixed_string(window.app_id),
         }
     }
 }
@@ -64,8 +73,8 @@ impl From<WireMinimizedWindowInfo> for MinimizedWindowInfo {
             window_id: window.window_id,
             monitor_id: window.monitor_id,
             flags: window.flags,
-            title: window.title,
-            app_id: window.app_id,
+            title: canonicalize_fixed_string(window.title),
+            app_id: canonicalize_fixed_string(window.app_id),
         }
     }
 }
@@ -221,9 +230,9 @@ impl From<&SharedMessage> for WireMessage {
             monitor_x: message.monitor_info.monitor_x,
             monitor_y: message.monitor_info.monitor_y,
             tag_flags,
-            client_name: message.monitor_info.client_name,
-            client_app_id: message.monitor_info.client_app_id,
-            ltsymbol: message.monitor_info.ltsymbol,
+            client_name: canonicalize_fixed_string(message.monitor_info.client_name),
+            client_app_id: canonicalize_fixed_string(message.monitor_info.client_app_id),
+            ltsymbol: canonicalize_fixed_string(message.monitor_info.ltsymbol),
             _reserved: [0; 3],
             layout_count: message.monitor_info.layout_count,
             layout_id: message.monitor_info.layout_id,
@@ -252,9 +261,9 @@ impl From<WireMessage> for SharedMessage {
             monitor_height: message.monitor_height,
             monitor_x: message.monitor_x,
             monitor_y: message.monitor_y,
-            client_name: message.client_name,
-            client_app_id: message.client_app_id,
-            ltsymbol: message.ltsymbol,
+            client_name: canonicalize_fixed_string(message.client_name),
+            client_app_id: canonicalize_fixed_string(message.client_app_id),
+            ltsymbol: canonicalize_fixed_string(message.ltsymbol),
             layout_count: message.layout_count,
             layout_id: message.layout_id,
             ..crate::MonitorInfo::default()
@@ -783,6 +792,56 @@ mod tests {
     }
 
     // ── 创建 / 打开 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn fixed_strings_are_canonicalized_at_the_wire_boundary() {
+        let mut outgoing = SharedMessage {
+            minimized_count: 1,
+            ..SharedMessage::default()
+        };
+        outgoing.monitor_info.client_name[..11].copy_from_slice(b"term\0secret");
+        outgoing.monitor_info.client_app_id.fill(b'a');
+        outgoing.monitor_info.ltsymbol[..9].copy_from_slice(b"[T]\0stale");
+        outgoing.minimized_windows[0].title[..12].copy_from_slice(b"shell\0hidden");
+        outgoing.minimized_windows[0].app_id.fill(b'b');
+
+        let mut wire = WireMessage::from(&outgoing);
+        assert!(wire.client_name[4..].iter().all(|byte| *byte == 0));
+        assert_eq!(wire.client_app_id[crate::MAX_APP_ID_LEN - 1], 0);
+        assert!(wire.ltsymbol[3..].iter().all(|byte| *byte == 0));
+        assert!(wire.minimized_windows[0].title[5..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert_eq!(
+            wire.minimized_windows[0].app_id[crate::MAX_APP_ID_LEN - 1],
+            0
+        );
+
+        wire.client_name[..8].copy_from_slice(b"bar\0leak");
+        wire.client_app_id.fill(b'c');
+        wire.ltsymbol[..8].copy_from_slice(b"[]\0stale");
+        wire.minimized_windows[0].title[..11].copy_from_slice(b"dock\0hidden");
+        wire.minimized_windows[0].app_id.fill(b'd');
+
+        let incoming = SharedMessage::from(wire);
+        assert!(incoming.monitor_info.client_name[3..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert_eq!(
+            incoming.monitor_info.client_app_id[crate::MAX_APP_ID_LEN - 1],
+            0
+        );
+        assert!(incoming.monitor_info.ltsymbol[2..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert!(incoming.minimized_windows[0].title[4..]
+            .iter()
+            .all(|byte| *byte == 0));
+        assert_eq!(
+            incoming.minimized_windows[0].app_id[crate::MAX_APP_ID_LEN - 1],
+            0
+        );
+    }
 
     #[test]
     fn test_create_success() {
