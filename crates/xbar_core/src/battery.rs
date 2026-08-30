@@ -4,6 +4,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 const MAX_POWER_SUPPLY_ATTRIBUTE_BYTES: usize = 4 * 1024;
+const MAX_POWER_SUPPLY_ENTRIES: usize = 64;
 
 /// Battery state read from `/sys/class/power_supply`.
 ///
@@ -105,8 +106,15 @@ fn read_battery_from(base: &Path) -> BatterySnapshot {
 fn try_read_battery_from(base: &Path) -> io::Result<BatterySnapshot> {
     let entries = fs::read_dir(base)?;
     let mut directories: Vec<_> = entries
+        .take(MAX_POWER_SUPPLY_ENTRIES + 1)
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<io::Result<_>>()?;
+    if directories.len() > MAX_POWER_SUPPLY_ENTRIES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "power-supply directory exceeds entry limit",
+        ));
+    }
     directories.sort();
 
     let mut capacity_total = 0_u32;
@@ -168,8 +176,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        BatterySnapshot, MAX_POWER_SUPPLY_ATTRIBUTE_BYTES, read_battery_from,
-        read_power_supply_attribute, try_read_battery_from,
+        BatterySnapshot, MAX_POWER_SUPPLY_ATTRIBUTE_BYTES, MAX_POWER_SUPPLY_ENTRIES,
+        read_battery_from, read_power_supply_attribute, try_read_battery_from,
     };
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
@@ -271,6 +279,27 @@ mod tests {
 
         assert_eq!(
             read_power_supply_attribute(&path).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn power_supply_directory_has_a_hard_entry_budget() {
+        let directory = TestDirectory::new();
+        for index in 0..MAX_POWER_SUPPLY_ENTRIES {
+            fs::create_dir(directory.path().join(format!("supply-{index:03}")))
+                .expect("create power supply entry");
+        }
+
+        assert_eq!(
+            try_read_battery_from(directory.path()).unwrap(),
+            BatterySnapshot::default()
+        );
+
+        fs::create_dir(directory.path().join("supply-over-budget"))
+            .expect("create excess power supply entry");
+        assert_eq!(
+            try_read_battery_from(directory.path()).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
     }
