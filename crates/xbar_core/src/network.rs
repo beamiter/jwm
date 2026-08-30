@@ -17,6 +17,7 @@ use crate::model::NetworkState;
 
 const DEFAULT_ROUTE_PATH: &str = "/proc/net/route";
 const MAX_ROUTE_TABLE_BYTES: u64 = 256 * 1024;
+const MAX_NETWORK_ATTRIBUTE_BYTES: usize = 4 * 1024;
 const ROUTE_FLAG_UP: u32 = 0x0001;
 const ROUTE_FLAG_REJECT: u32 = 0x0200;
 
@@ -129,7 +130,7 @@ impl NetworkMonitor {
                 continue;
             }
             let operstate = self.root.join(&name).join("operstate");
-            let Ok(state) = std::fs::read_to_string(operstate) else {
+            let Ok(state) = read_network_attribute(&operstate) else {
                 continue;
             };
             match state.trim() {
@@ -221,10 +222,24 @@ fn preferred_default_route<'a>(
 }
 
 fn read_counter(path: &Path) -> io::Result<u64> {
-    let text = std::fs::read_to_string(path)?;
+    let text = read_network_attribute(path)?;
     text.trim()
         .parse::<u64>()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_network_attribute(path: &Path) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(MAX_NETWORK_ATTRIBUTE_BYTES + 1);
+    std::fs::File::open(path)?
+        .take((MAX_NETWORK_ATTRIBUTE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_NETWORK_ATTRIBUTE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "network sysfs attribute exceeds read limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn rate(delta: Option<u64>, elapsed_seconds: f64) -> Option<u64> {
@@ -451,6 +466,57 @@ mod tests {
         assert_eq!(
             fixture.monitor().poll().unwrap().interface.as_deref(),
             Some("docker0")
+        );
+    }
+
+    #[test]
+    fn oversized_sysfs_attributes_are_not_accepted() {
+        let fixture = Fixture::new("oversized-attributes");
+        fixture.interface("eth0", "up", 123, 456);
+
+        let mut maximum_state = b"up".to_vec();
+        maximum_state.resize(MAX_NETWORK_ATTRIBUTE_BYTES, b' ');
+        std::fs::write(fixture.root.join("eth0/operstate"), &maximum_state).unwrap();
+        assert_eq!(
+            fixture.monitor().poll().unwrap().interface.as_deref(),
+            Some("eth0"),
+            "the exact byte limit remains valid"
+        );
+
+        maximum_state.push(b' ');
+        std::fs::write(fixture.root.join("eth0/operstate"), maximum_state).unwrap();
+        assert_eq!(
+            fixture.monitor().poll().unwrap(),
+            NetworkState::disconnected(),
+            "a valid prefix must not make an oversized state authoritative"
+        );
+
+        fixture.interface("eth0", "up", 123, 456);
+        let start = Instant::now();
+        let mut monitor = fixture.monitor();
+        assert_eq!(monitor.poll_at(start).unwrap().rx_bytes_per_second, None);
+        let mut oversized_counter = b"123".to_vec();
+        oversized_counter.resize(MAX_NETWORK_ATTRIBUTE_BYTES + 1, b' ');
+        std::fs::write(
+            fixture.root.join("eth0/statistics/rx_bytes"),
+            oversized_counter,
+        )
+        .unwrap();
+        assert_eq!(
+            monitor
+                .poll_at(start + Duration::from_secs(1))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData,
+            "an oversized selected-interface counter must fail the sample"
+        );
+
+        fixture.interface("eth0", "up", 1_123, 456);
+        let resumed = monitor.poll_at(start + Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            resumed.rx_bytes_per_second,
+            Some(500),
+            "a rejected counter must not replace the last good sample"
         );
     }
 }
