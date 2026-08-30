@@ -816,6 +816,28 @@ impl Default for PresentationVisibility {
     }
 }
 
+/// Convert an authoritative physical bar height into logical presentation units.
+///
+/// Window-system scale factors should be positive and finite, but validating
+/// the boundary keeps a malformed platform value out of the long-lived
+/// presentation configuration. Results that cannot remain positive and finite
+/// after conversion to the configuration's `f32` representation are rejected.
+#[must_use]
+pub fn logical_bar_height(physical_height: u32, scale_factor: f64) -> Option<f32> {
+    if physical_height == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return None;
+    }
+
+    let logical_height = f64::from(physical_height) / scale_factor;
+    if !logical_height.is_finite() || logical_height <= 0.0 || logical_height > f64::from(f32::MAX)
+    {
+        return None;
+    }
+
+    let logical_height = logical_height as f32;
+    (logical_height.is_finite() && logical_height > 0.0).then_some(logical_height)
+}
+
 /// Owned visual configuration. Tag labels and layouts are deliberately
 /// dynamic; missing tag labels fall back to one-based numbers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1887,6 +1909,27 @@ mod tests {
     use std::sync::LazyLock;
 
     static SYSTEM_DETAILS: LazyLock<SystemDetails> = LazyLock::new(SystemDetails::default);
+
+    #[test]
+    fn authoritative_physical_height_converts_to_logical_units() {
+        assert_eq!(logical_bar_height(42, 1.0), Some(42.0));
+        assert_eq!(logical_bar_height(84, 2.0), Some(42.0));
+        assert_eq!(logical_bar_height(u32::MAX, 1.0), Some(u32::MAX as f32));
+    }
+
+    #[test]
+    fn invalid_height_or_scale_has_no_logical_height() {
+        assert_eq!(logical_bar_height(0, 1.0), None);
+        for scale_factor in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(logical_bar_height(42, scale_factor), None);
+        }
+    }
+
+    #[test]
+    fn unrepresentable_logical_height_is_rejected() {
+        assert_eq!(logical_bar_height(u32::MAX, f64::MIN_POSITIVE), None);
+        assert_eq!(logical_bar_height(1, f64::MAX), None);
+    }
 
     #[test]
     fn pointer_adapters_reject_unknown_and_zero_motion() {

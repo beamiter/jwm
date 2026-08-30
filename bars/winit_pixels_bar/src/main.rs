@@ -20,7 +20,7 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::Point,
+    presentation::{Point, logical_bar_height},
     render::cairo::{CairoBar, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -112,6 +112,9 @@ impl App {
         else {
             return;
         };
+        if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
+            self.bar.config_mut().bar_height = height;
+        }
         if size.width != self.pixels_width || size.height != self.pixels_height {
             self.resize_pixels(size);
         }
@@ -395,6 +398,9 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
+                    self.bar.config_mut().bar_height = height;
+                }
                 self.resize_pixels(size);
                 self.request_redraw();
             }

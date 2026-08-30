@@ -19,7 +19,7 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::Point,
+    presentation::{Point, logical_bar_height},
     render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -359,6 +359,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(new_size) => {
                 self.last_physical_size = new_size;
+                if let Some(height) = logical_bar_height(new_size.height, self.scale_factor) {
+                    self.bar.config_mut().bar_height = height;
+                }
                 self.logical_size = new_size.to_logical::<f64>(self.scale_factor);
 
                 if let Some(gpu) = self.gpu.as_mut() {

@@ -20,7 +20,7 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::Point,
+    presentation::{Point, logical_bar_height},
     render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -172,6 +172,9 @@ impl App {
 
     fn resize(&mut self, physical_size: PhysicalSize<u32>) {
         self.last_physical_size = physical_size;
+        if let Some(height) = logical_bar_height(physical_size.height, self.scale_factor) {
+            self.bar.config_mut().bar_height = height;
+        }
         self.logical_size = physical_size.to_logical(self.scale_factor);
         if let Err(error) = resize_soft_surface(&mut self.soft_surface, physical_size) {
             warn!("failed to resize softbuffer surface: {error:#}");

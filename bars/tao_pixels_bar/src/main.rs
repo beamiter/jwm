@@ -20,7 +20,7 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PresentationConfig},
+    presentation::{Point, PresentationConfig, logical_bar_height},
     render::cairo::{CairoBar, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
@@ -286,7 +286,7 @@ impl App {
         // standalone default; keeping the presentation config in step avoids
         // drawing a shorter bar into a taller window (and requesting the old
         // height again on the next monitor update).
-        if let Some(height) = logical_bar_height(size, self.scale_factor) {
+        if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
             self.bar.config_mut().bar_height = height;
         }
         if self.pixels_width == size.width && self.pixels_height == size.height {
@@ -461,18 +461,6 @@ impl App {
 /// would stay invisible until the window manager corrects it.
 fn usable_screen_size(size: PhysicalSize<u32>) -> Option<PhysicalSize<u32>> {
     (size.width > 1 && size.height > 1).then_some(size)
-}
-
-/// Convert an authoritative physical ConfigureNotify height into the logical
-/// height used by the bar model. Toolkit scale factors should always be
-/// positive and finite, but rejecting a broken value keeps it out of the
-/// long-lived presentation config.
-fn logical_bar_height(size: PhysicalSize<u32>, scale_factor: f64) -> Option<f32> {
-    if size.height == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
-        return None;
-    }
-    let height = f64::from(size.height) / scale_factor;
-    (height.is_finite() && height > 0.0 && height <= f64::from(f32::MAX)).then_some(height as f32)
 }
 
 /// True when a compositing manager owns the conventional `_NET_WM_CM_Sn`
@@ -716,27 +704,5 @@ mod tests {
         assert_eq!(presentation.labels, stock.labels);
         assert_eq!(presentation.tag_labels, stock.tag_labels);
         assert_eq!(presentation.icon_font, None);
-    }
-
-    #[test]
-    fn configured_window_height_becomes_the_bar_layout_height() {
-        assert_eq!(
-            logical_bar_height(PhysicalSize::new(1920, 42), 1.0),
-            Some(42.0)
-        );
-        assert_eq!(
-            logical_bar_height(PhysicalSize::new(3840, 84), 2.0),
-            Some(42.0)
-        );
-    }
-
-    #[test]
-    fn invalid_configure_height_or_scale_does_not_poison_the_bar_config() {
-        assert_eq!(logical_bar_height(PhysicalSize::new(1920, 0), 1.0), None);
-        assert_eq!(logical_bar_height(PhysicalSize::new(1920, 42), 0.0), None);
-        assert_eq!(
-            logical_bar_height(PhysicalSize::new(1920, 42), f64::NAN),
-            None
-        );
     }
 }
