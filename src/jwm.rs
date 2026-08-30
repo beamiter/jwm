@@ -62,7 +62,7 @@ use std::env;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backend::api::Backend;
 use crate::backend::api::CompositorRect;
@@ -1414,12 +1414,16 @@ impl Jwm {
             );
         }
 
-        let x_running = std::process::Command::new("pgrep")
-            .arg("-f")
-            .arg("X|Xorg")
-            .output()
-            .map(|output| !output.stdout.is_empty())
-            .unwrap_or(false);
+        // This is diagnostic-only startup work: a wedged or unexpectedly
+        // noisy `pgrep` must not delay construction of the window manager.
+        let x_running = crate::external_command::output_with_limits(
+            "pgrep",
+            &["-f", "X|Xorg"],
+            Duration::from_secs(1),
+            4 * 1024,
+        )
+        .map(|output| output.status.success() && !output.stdout.is_empty())
+        .unwrap_or(false);
         info!("X server running: {}", x_running);
     }
 
