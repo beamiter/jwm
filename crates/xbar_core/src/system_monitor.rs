@@ -173,13 +173,8 @@ impl SystemMonitor {
         };
 
         let memory_total = self.system.total_memory();
-        let memory_available = self.system.available_memory();
-        let memory_used = memory_total - memory_available;
-        let memory_usage_percent = if memory_total > 0 {
-            (memory_used as f32 / memory_total as f32) * 100.0
-        } else {
-            0.0
-        };
+        let (memory_available, memory_used, memory_usage_percent) =
+            normalized_memory(memory_total, self.system.available_memory());
 
         let load_average = self.get_load_average();
 
@@ -247,8 +242,8 @@ impl SystemMonitor {
     /// Get memory information
     pub fn get_memory_info(&self) -> MemoryInfo {
         let total = self.system.total_memory();
-        let available = self.system.available_memory();
-        let used = total - available;
+        let (available, used, usage_percent) =
+            normalized_memory(total, self.system.available_memory());
         let free = self.system.free_memory();
 
         MemoryInfo {
@@ -256,11 +251,7 @@ impl SystemMonitor {
             used,
             available,
             free,
-            usage_percent: if total > 0 {
-                (used as f32 / total as f32) * 100.0
-            } else {
-                0.0
-            },
+            usage_percent,
         }
     }
 
@@ -338,6 +329,20 @@ impl Default for SystemMonitor {
     }
 }
 
+fn normalized_memory(total: u64, reported_available: u64) -> (u64, u64, f32) {
+    // Kernel/cgroup counters are sampled separately and may briefly disagree
+    // during a limit change. Keep the public snapshot internally consistent
+    // instead of panicking in debug builds or wrapping in release builds.
+    let available = reported_available.min(total);
+    let used = total - available;
+    let usage_percent = if total == 0 {
+        0.0
+    } else {
+        used as f32 / total as f32 * 100.0
+    };
+    (available, used, usage_percent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,5 +397,14 @@ mod tests {
 
         assert_eq!(monitor.get_cpu_history(), vec![10.0, 20.0, 30.0]);
         assert_eq!(monitor.get_memory_history(), vec![40.0, 50.0, 60.0]);
+    }
+
+    #[test]
+    fn memory_values_remain_consistent_when_available_exceeds_total() {
+        let (available, used, percent) = normalized_memory(100, 40);
+        assert_eq!((available, used), (40, 60));
+        assert!((percent - 60.0).abs() < 0.001);
+        assert_eq!(normalized_memory(100, 101), (100, 0, 0.0));
+        assert_eq!(normalized_memory(0, u64::MAX), (0, 0, 0.0));
     }
 }
