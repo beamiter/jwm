@@ -1171,6 +1171,17 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             ));
         }
 
+        // This invariant is independent of the synchronization strategy. Check
+        // it before classifying a known-but-unavailable backend so a truncated
+        // or otherwise corrupted mapping is never reported as merely unsupported.
+        let recorded_total = unsafe { std::ptr::addr_of!((*header).total_size).read() };
+        if recorded_total != shmem.len() as u64 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "shared-memory recorded total size does not match mapping length",
+            ));
+        }
+
         let backend_id = unsafe { std::ptr::addr_of!((*header).backend_id).read() };
         let strategy = SyncStrategy::from_id(backend_id).ok_or_else(|| {
             let kind = if (1..=3).contains(&backend_id) {
@@ -1210,7 +1221,6 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                     format!("invalid shared-memory layout metadata: {error}"),
                 )
             })?;
-        let recorded_total = unsafe { std::ptr::addr_of!((*header).total_size).read() };
         let message_slot_size =
             unsafe { std::ptr::addr_of!((*header).message_slot_size).read() as usize };
         let command_slot_size =
@@ -2495,6 +2505,36 @@ mod tests {
         // [u32; 2] 与 u64 槽大小相同（16 字节），只有类型指纹能拒绝错配。
         let mismatch = TypedRingBuffer::<[u32; 2], u64>::open_auto(&path, Some(0));
         assert_eq!(mismatch.unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+
+    #[cfg(not(all(feature = "futex", feature = "semaphore", feature = "eventfd")))]
+    #[test]
+    fn typed_open_validates_recorded_length_before_backend_availability() {
+        let path = mk_path("invalid_length_unavailable_backend");
+        let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        let unavailable_backend_id = (1..=3)
+            .find(|id| SyncStrategy::from_id(*id).is_none())
+            .expect("this test only runs when at least one backend is unavailable");
+        let original_backend_id = ring.header().backend_id;
+        let original_total_size = ring.header().total_size;
+
+        // SAFETY: this test owns the only handle that mutates immutable header
+        // metadata and restores it before the creator is dropped.
+        unsafe {
+            std::ptr::addr_of_mut!((*ring.header).backend_id).write(unavailable_backend_id);
+            std::ptr::addr_of_mut!((*ring.header).total_size).write(original_total_size + 1);
+        }
+        let error = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap_err();
+        unsafe {
+            std::ptr::addr_of_mut!((*ring.header).backend_id).write(original_backend_id);
+            std::ptr::addr_of_mut!((*ring.header).total_size).write(original_total_size);
+        }
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(error.to_string().contains("recorded total size"));
     }
 
     #[test]
