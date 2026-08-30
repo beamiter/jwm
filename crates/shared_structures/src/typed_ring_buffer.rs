@@ -216,6 +216,24 @@ pub(crate) fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Convert a caller supplied timeout into a monotonic deadline without
+/// letting `Instant`'s platform-specific range turn a fallible wait API into
+/// a panic.
+fn deadline_from_timeout(timeout: Option<Duration>) -> Result<Option<Instant>> {
+    let Some(timeout) = timeout else {
+        return Ok(None);
+    };
+    Instant::now()
+        .checked_add(timeout)
+        .map(Some)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "timeout exceeds the monotonic clock range",
+            )
+        })
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BufferLayout {
     backend_offset: usize,
@@ -1486,7 +1504,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     }
 
     fn wait_channel(&self, timeout: Option<Duration>, is_message: bool) -> Result<WaitOutcome> {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline_from_timeout(timeout)?;
         loop {
             if self.is_destroyed() {
                 return Ok(WaitOutcome::Destroyed);
@@ -1530,7 +1548,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
     /// 返回 `Ok(None)` 表示超时或缓冲区被销毁；校验和错误原样上抛
     /// （对应的损坏 slot 已被消费）。
     pub fn read_message_timeout(&self, timeout: Option<Duration>) -> Result<Option<M>> {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline_from_timeout(timeout)?;
         loop {
             if let Some(message) = self.try_read_next_message()? {
                 return Ok(Some(message));
@@ -1554,7 +1572,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
 
     /// 阻塞读取一条命令，语义同 [`read_message_timeout`](Self::read_message_timeout)。
     pub fn receive_command_timeout(&self, timeout: Option<Duration>) -> Result<Option<C>> {
-        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = deadline_from_timeout(timeout)?;
         loop {
             if let Some(command) = self.try_receive_command()? {
                 return Ok(Some(command));
@@ -1927,6 +1945,36 @@ mod tests {
             ring.receive_command_timeout(Some(Duration::from_millis(5)))
                 .unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn unrepresentable_timeouts_are_rejected_without_panicking() {
+        let path = mk_path("timeout_overflow");
+        let ring: TypedRingBuffer<u64, u32> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+
+        assert_eq!(
+            ring.wait_message(Some(Duration::MAX)).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            ring.wait_command(Some(Duration::MAX)).unwrap_err().kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            ring.read_message_timeout(Some(Duration::MAX))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            ring.receive_command_timeout(Some(Duration::MAX))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidInput
         );
     }
 
