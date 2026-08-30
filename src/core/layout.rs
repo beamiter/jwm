@@ -35,13 +35,19 @@ pub struct LayoutResult<K> {
     pub rect: Rect,
 }
 
+fn bounded_gap(screen_area: Rect, gap: i32) -> i32 {
+    let shortest_side = screen_area.w.max(0).min(screen_area.h.max(0));
+    gap.clamp(0, shortest_side / 2)
+}
+
 fn usable_area(screen_area: Rect, gap: i32) -> Rect {
-    let gap = gap.max(0);
+    let gap = bounded_gap(screen_area, gap);
+    let inset = gap.saturating_mul(2);
     Rect::new(
-        screen_area.x + gap,
-        screen_area.y + gap,
-        (screen_area.w - 2 * gap).max(1),
-        (screen_area.h - 2 * gap).max(1),
+        screen_area.x.saturating_add(gap),
+        screen_area.y.saturating_add(gap),
+        screen_area.w.saturating_sub(inset).max(1),
+        screen_area.h.saturating_sub(inset).max(1),
     )
 }
 
@@ -446,10 +452,10 @@ pub fn calculate_tile<K: Copy>(
         m_fact,
         gap,
     } = params;
-    let gap = *gap;
+    let gap = bounded_gap(*screen_area, *gap);
 
-    // 外边距：缩小可用区域。gap 过大（> 屏幕一半）时 w/h 会变负，进而让 mw/列宽
-    // 变成负数并产生非法窗口尺寸，这里夹到 >= 0。
+    // 外边距：缩小可用区域。gap 已夹到短边的一半，极端配置会退化成
+    // 中心的一像素可用区，而不会让后续分割算术溢出。
     let area = usable_area(*screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
 
@@ -533,7 +539,7 @@ pub fn calculate_fibonacci<K: Copy>(
         m_fact,
         gap,
     } = params;
-    let gap = *gap;
+    let gap = bounded_gap(*screen_area, *gap);
 
     // 外边距
     let area = usable_area(*screen_area, gap);
@@ -631,7 +637,7 @@ fn centered_columns<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(clients.len());
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
@@ -702,7 +708,7 @@ pub fn calculate_bstack<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(clients.len());
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
@@ -777,7 +783,7 @@ pub fn calculate_grid<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(n);
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
@@ -827,7 +833,7 @@ pub fn calculate_deck<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(clients.len());
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
@@ -899,7 +905,7 @@ pub fn calculate_tatami<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(n);
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     if n > 10 {
         return calculate_grid(params, clients);
@@ -1144,7 +1150,7 @@ pub fn calculate_scrolling<K: Copy>(
         return (results, 0.0);
     }
 
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
     let screen = &params.screen_area;
     let base_col_w = (screen.w as f32 * params.column_width_ratio) as i32;
     let base_col_w = base_col_w.max(1);
@@ -1241,7 +1247,7 @@ pub fn calculate_vstack<K: Copy>(
     }
 
     let mut results = Vec::with_capacity(n);
-    let gap = params.gap;
+    let gap = bounded_gap(params.screen_area, params.gap);
 
     let area = usable_area(params.screen_area, gap);
     let (wx, wy, ww, wh) = (area.x, area.y, area.w, area.h);
@@ -2133,5 +2139,76 @@ mod tests {
         assert!((viewport_x - 210.0).abs() < 1e-6);
         let focused = result.iter().find(|res| res.key == 2).unwrap().rect;
         assert_eq!(focused.x, 200);
+    }
+
+    #[test]
+    fn canonical_layouts_tolerate_extreme_gaps() {
+        let clients: Vec<_> = (0..10).map(|key| client(key, 1.0)).collect();
+
+        for gap in [i32::MAX, i32::MIN] {
+            let params = LayoutParams {
+                screen_area: Rect::new(100, 200, 320, 240),
+                n_master: 1,
+                m_fact: 0.55,
+                gap,
+            };
+
+            for layout in LayoutEnum::all() {
+                let results = match layout.0 {
+                    "tile" => calculate_tile(&params, &clients),
+                    "float" => continue,
+                    "monocle" => calculate_monocle(&params, &clients),
+                    "fibonacci" => calculate_fibonacci(&params, &clients),
+                    "centeredmaster" => calculate_centered_master(&params, &clients),
+                    "bstack" => calculate_bstack(&params, &clients),
+                    "grid" => calculate_grid(&params, &clients),
+                    "deck" => calculate_deck(&params, &clients),
+                    "threecol" => calculate_three_col(&params, &clients),
+                    "tatami" => calculate_tatami(&params, &clients),
+                    "fullscreen" => calculate_fullscreen(&params, &clients),
+                    "scrolling" => continue,
+                    "vstack" => calculate_vstack(&params, &clients),
+                    unknown => panic!("missing extreme-gap coverage for {unknown}"),
+                };
+
+                assert_eq!(results.len(), clients.len(), "{} with gap {gap}", layout.0);
+                assert!(
+                    results
+                        .iter()
+                        .all(|result| result.rect.w > 0 && result.rect.h > 0),
+                    "{} produced a non-positive rectangle with gap {gap}",
+                    layout.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scrolling_tolerates_extreme_gaps() {
+        let columns = vec![
+            vec![client(1, 1.0), client(2, 1.0)],
+            vec![client(3, 1.0), client(4, 1.0)],
+            vec![client(5, 1.0), client(6, 1.0)],
+        ];
+
+        for gap in [i32::MAX, i32::MIN] {
+            let params = ScrollingParams {
+                screen_area: Rect::new(100, 200, 320, 240),
+                column_width_ratio: 0.5,
+                column_width_factors: vec![1.0, 1.5, 0.5],
+                gap,
+                viewport_x: 0.0,
+            };
+
+            let (results, viewport_x) = calculate_scrolling(&params, &columns, 1);
+            assert_eq!(results.len(), 6, "gap {gap}");
+            assert!(viewport_x.is_finite(), "gap {gap}");
+            assert!(
+                results
+                    .iter()
+                    .all(|result| result.rect.w > 0 && result.rect.h > 0),
+                "gap {gap} produced a non-positive rectangle"
+            );
+        }
     }
 }
