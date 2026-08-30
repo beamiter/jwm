@@ -21,6 +21,9 @@ use crate::{
     BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate, UserAction,
 };
 
+const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
+const MAX_SCENE_IMAGE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Renders a [`Scene`] into an existing Cairo context.
 #[derive(Debug, Clone)]
 pub struct CairoRenderer {
@@ -361,7 +364,16 @@ fn log_image_failure(_path: &Path) {}
 
 /// Decode a raster file into a Cairo-native premultiplied surface.
 fn decode_image(path: &Path) -> Option<ImageSurface> {
-    let rgba = image::open(path).ok()?.into_rgba8();
+    let mut reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SCENE_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_SCENE_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_SCENE_IMAGE_ALLOC_BYTES);
+    reader.limits(limits);
+    let rgba = reader.decode().ok()?.into_rgba8();
     let (width, height) = rgba.dimensions();
     let (width, height) = (i32::try_from(width).ok()?, i32::try_from(height).ok()?);
     if width <= 0 || height <= 0 {
@@ -1648,6 +1660,27 @@ mod tests {
 
         let line = pixel(20, 29);
         assert!((line as u8) > ((line >> 16) as u8));
+    }
+
+    #[test]
+    fn scene_image_decoder_rejects_dimensions_far_beyond_a_bar_icon() {
+        let path = std::env::temp_dir().join(format!(
+            "xbar_scene_image_limit_{}_{}.png",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let source = image::RgbaImage::from_pixel(
+            MAX_SCENE_IMAGE_DIMENSION + 1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        );
+        source.save(&path).unwrap();
+
+        assert!(decode_image(&path).is_none());
+        std::fs::remove_file(path).unwrap();
     }
 
     /// A scene image reaches the surface: decoded, premultiplied the way Cairo

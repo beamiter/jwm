@@ -14,6 +14,9 @@ use xbar_core::presentation::{
     ImageSource, Rect, Rgba, Scene, SceneNode, Size, TextAlign, TextMeasurer,
 };
 
+const MAX_SCENE_IMAGE_DIMENSION: u32 = 2_048;
+const MAX_SCENE_IMAGE_ALLOC_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Text metrics for `LayoutEngine`, forwarded to a caller-supplied closure.
 ///
 /// The engine measures text while building the scene, but egui only lends out
@@ -209,7 +212,16 @@ fn image_texture(ctx: &Context, source: &ImageSource) -> Option<TextureHandle> {
 }
 
 fn decode_image(path: &std::path::Path) -> Option<ColorImage> {
-    let rgba = image::open(path).ok()?.into_rgba8();
+    let mut reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_SCENE_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_SCENE_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_SCENE_IMAGE_ALLOC_BYTES);
+    reader.limits(limits);
+    let rgba = reader.decode().ok()?.into_rgba8();
     let size = [rgba.width() as usize, rgba.height() as usize];
     Some(ColorImage::from_rgba_unmultiplied(size, rgba.as_raw()))
 }
@@ -246,4 +258,38 @@ fn radius_to_u8(radius: f32) -> u8 {
         return 0;
     }
     radius.clamp(0.0, 255.0).round() as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_image_decoder_bounds_dimensions_before_texture_upload() {
+        let directory = std::env::temp_dir().join(format!(
+            "egui_bar_image_limit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let small = directory.join("small.png");
+        let oversized = directory.join("oversized.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))
+            .save(&small)
+            .unwrap();
+        image::RgbaImage::from_pixel(
+            MAX_SCENE_IMAGE_DIMENSION + 1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        )
+        .save(&oversized)
+        .unwrap();
+
+        assert!(decode_image(&small).is_some());
+        assert!(decode_image(&oversized).is_none());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
