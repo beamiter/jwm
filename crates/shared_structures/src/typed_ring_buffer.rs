@@ -367,6 +367,27 @@ fn absolute_flink_path(path: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+fn normalize_mapping_permissions(os_id: &str) -> Result<()> {
+    let object_name = os_id.strip_prefix('/').filter(|name| {
+        !name.is_empty() && !name.as_bytes().contains(&b'/') && !name.as_bytes().contains(&0)
+    });
+    let Some(object_name) = object_name else {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory object has an invalid POSIX name",
+        ));
+    };
+    let object_path = Path::new("/dev/shm").join(object_name);
+    std::fs::set_permissions(&object_path, std::fs::Permissions::from_mode(0o600)).map_err(
+        |error| {
+            Error::new(
+                error.kind(),
+                format!("failed to secure shared-memory object: {error}"),
+            )
+        },
+    )
+}
+
 /// Read the mapping identifier from a flink without letting an unexpected
 /// final pathname block the caller or redirect the lookup through a symlink.
 fn read_flink_os_id(path: &Path) -> Result<String> {
@@ -1026,6 +1047,11 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             .size(layout.total_size)
             .create()
             .map_err(|error| map_shmem_error("failed to create shared memory", error))?;
+        // `shm_open` applies the process umask to its requested 0600 mode.
+        // Normalize the real object before publishing its id through the flink,
+        // otherwise a restrictive umask lets the creator map it but prevents
+        // every later opener from obtaining a new descriptor.
+        normalize_mapping_permissions(shmem.get_os_id())?;
 
         let base_ptr = shmem.as_ptr();
         if (base_ptr as usize) % align_of::<GenericHeader>() != 0 {
@@ -2118,6 +2144,55 @@ mod tests {
         let path = mk_path("restrictive_umask");
         let marker = format!("{path}.completed");
         let test_name = "typed_ring_buffer::tests::publish_flink_normalizes_permissions_under_restrictive_umask";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_PATH_ENV, &path)
+            .status()
+            .unwrap();
+
+        let child_ran = Path::new(&marker).is_file();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&marker);
+        assert!(status.success(), "restrictive-umask child failed: {status}");
+        assert!(child_ran, "restrictive-umask child test did not execute");
+    }
+
+    #[cfg(any(feature = "futex", feature = "semaphore"))]
+    #[test]
+    fn mapping_permissions_ignore_restrictive_umask() {
+        const CHILD_PATH_ENV: &str = "SHARED_STRUCTURES_UMASK_MAPPING_TEST_PATH";
+
+        if let Some(path) = std::env::var_os(CHILD_PATH_ENV) {
+            let path = path.into_string().expect("test path must be UTF-8");
+            // umask is process-global, so isolate it in this exact child test.
+            let previous_umask = unsafe { libc::umask(0o777) };
+            let created = SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .create_typed::<u64, u64>(&path);
+            unsafe { libc::umask(previous_umask) };
+
+            let creator = created.unwrap();
+            let object_path = Path::new("/dev/shm").join(
+                creator
+                    .shmem
+                    .get_os_id()
+                    .strip_prefix('/')
+                    .expect("POSIX shared-memory id must begin with a slash"),
+            );
+            let mode = std::fs::metadata(object_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+            TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
+
+            drop(creator);
+            std::fs::write(format!("{path}.completed"), b"completed").unwrap();
+            return;
+        }
+
+        let path = mk_path("mapping_restrictive_umask");
+        let marker = format!("{path}.completed");
+        let test_name = "typed_ring_buffer::tests::mapping_permissions_ignore_restrictive_umask";
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
             .arg(test_name)
