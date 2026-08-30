@@ -253,14 +253,16 @@ pub(crate) fn monitor_id_by_overlap(
     if monitors.is_empty() {
         return None;
     }
-    let wx2 = x + w as i32;
-    let wy2 = y + h as i32;
-    let mut best: Option<(u32, i64)> = None;
+    let (x, y) = (i64::from(x), i64::from(y));
+    let wx2 = x + i64::from(w);
+    let wy2 = y + i64::from(h);
+    let mut best: Option<(u32, u128)> = None;
     for &(id, mx, my, mw, mh) in monitors {
-        let mx2 = mx + mw as i32;
-        let my2 = my + mh as i32;
-        let ix = (wx2.min(mx2) - x.max(mx)).max(0) as i64;
-        let iy = (wy2.min(my2) - y.max(my)).max(0) as i64;
+        let (mx, my) = (i64::from(mx), i64::from(my));
+        let mx2 = mx + i64::from(mw);
+        let my2 = my + i64::from(mh);
+        let ix = (wx2.min(mx2) - x.max(mx)).max(0) as u128;
+        let iy = (wy2.min(my2) - y.max(my)).max(0) as u128;
         let area = ix * iy;
         if area > 0 && best.map_or(true, |(_, ba)| area > ba) {
             best = Some((id, area));
@@ -269,12 +271,46 @@ pub(crate) fn monitor_id_by_overlap(
     if let Some((id, _)) = best {
         return Some(id);
     }
-    let cx = x + w as i32 / 2;
-    let cy = y + h as i32 / 2;
+    let cx = x + i64::from(w) / 2;
+    let cy = y + i64::from(h) / 2;
     for &(id, mx, my, mw, mh) in monitors {
-        if cx >= mx && cx < mx + mw as i32 && cy >= my && cy < my + mh as i32 {
+        let (mx, my) = (i64::from(mx), i64::from(my));
+        if cx >= mx && cx < mx + i64::from(mw) && cy >= my && cy < my + i64::from(mh) {
             return Some(id);
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monitor_id_by_overlap;
+
+    #[test]
+    fn monitor_overlap_prefers_the_largest_area_and_keeps_ties_stable() {
+        let monitors = [(1, 0, 0, 100, 100), (2, 100, 0, 200, 100)];
+        assert_eq!(monitor_id_by_overlap(&monitors, 80, 0, 100, 100), Some(2));
+        assert_eq!(monitor_id_by_overlap(&monitors, 50, 0, 100, 100), Some(1));
+    }
+
+    #[test]
+    fn monitor_overlap_handles_full_width_geometry_without_overflow() {
+        let monitors = [
+            (7, i32::MIN, i32::MIN, u32::MAX, u32::MAX),
+            (8, 0, 0, 10, 10),
+        ];
+        assert_eq!(
+            monitor_id_by_overlap(&monitors, i32::MIN, i32::MIN, u32::MAX, u32::MAX),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn zero_area_window_uses_an_extreme_width_center_safely() {
+        let monitors = [(9, -10, -10, 20, 20)];
+        assert_eq!(
+            monitor_id_by_overlap(&monitors, i32::MIN, 0, u32::MAX, 0),
+            Some(9)
+        );
+    }
 }
