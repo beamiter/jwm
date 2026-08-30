@@ -43,17 +43,25 @@ pub struct ExposeRect {
 
 impl ExposeRect {
     pub fn merge(&self, other: &ExposeRect) -> ExposeRect {
-        let x1 = self.x.min(other.x);
-        let y1 = self.y.min(other.y);
-        let x2 = (self.x + self.width as i32).max(other.x + other.width as i32);
-        let y2 = (self.y + self.height as i32).max(other.y + other.height as i32);
+        let x1 = i64::from(self.x.min(other.x));
+        let y1 = i64::from(self.y.min(other.y));
+        let x2 = (i64::from(self.x) + i64::from(self.width))
+            .max(i64::from(other.x) + i64::from(other.width));
+        let y2 = (i64::from(self.y) + i64::from(self.height))
+            .max(i64::from(other.y) + i64::from(other.height));
         ExposeRect {
-            x: x1,
-            y: y1,
-            width: (x2 - x1) as u32,
-            height: (y2 - y1) as u32,
+            x: x1 as i32,
+            y: y1 as i32,
+            width: u32::try_from(x2 - x1).unwrap_or(u32::MAX),
+            height: u32::try_from(y2 - y1).unwrap_or(u32::MAX),
         }
     }
+}
+
+fn squared_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> u64 {
+    let dx = (i64::from(x1) - i64::from(x2)).unsigned_abs();
+    let dy = (i64::from(y1) - i64::from(y2)).unsigned_abs();
+    dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
 }
 
 /// Coalesces similar events to reduce event processing overhead
@@ -64,7 +72,7 @@ pub struct EventCoalescer {
     motion_queue: VecDeque<MotionEvent>,
     max_queue_size: usize,
     time_threshold: Duration,
-    distance_threshold_sq: i32,
+    distance_threshold_sq: u64,
     // Geometry event coalescing
     pending_geometry: Option<GeometryEvent>,
     last_geometry_emitted: Option<Instant>,
@@ -100,6 +108,7 @@ impl EventCoalescer {
 
     /// Create a new coalescer with custom thresholds
     pub fn with_thresholds(time_ms: u64, distance_px: i32) -> Self {
+        let distance = u64::from(distance_px.unsigned_abs());
         Self {
             last_motion: None,
             last_emitted: None,
@@ -107,7 +116,7 @@ impl EventCoalescer {
             motion_queue: VecDeque::with_capacity(32),
             max_queue_size: 32,
             time_threshold: Duration::from_millis(time_ms),
-            distance_threshold_sq: distance_px * distance_px,
+            distance_threshold_sq: distance * distance,
             pending_geometry: None,
             last_geometry_emitted: None,
             geometry_time_threshold: Duration::from_millis(32),
@@ -128,7 +137,7 @@ impl EventCoalescer {
         // Always pass through if queue empty or time window exceeded or distance threshold exceeded
         if let Some(last) = self.last_emitted {
             let dt = now.duration_since(last.time);
-            let dist_sq = (x - last.x).pow(2) + (y - last.y).pow(2);
+            let dist_sq = squared_distance(x, y, last.x, last.y);
 
             if dt < self.time_threshold && dist_sq < self.distance_threshold_sq {
                 // Within coalescing window: store but don't emit
@@ -340,8 +349,12 @@ impl Default for EventCoalescer {
 
 /// Checks if two events should be considered identical for coalescing
 pub fn events_similar(e1: &MotionEvent, e2: &MotionEvent, threshold: i32) -> bool {
-    let dx = (e1.x - e2.x).abs();
-    let dy = (e1.y - e2.y).abs();
+    if threshold < 0 {
+        return false;
+    }
+    let dx = (i64::from(e1.x) - i64::from(e2.x)).abs();
+    let dy = (i64::from(e1.y) - i64::from(e2.y)).abs();
+    let threshold = i64::from(threshold);
     dx <= threshold && dy <= threshold
 }
 
@@ -405,6 +418,75 @@ mod tests {
         // Third event beyond distance threshold (50px) - passes through
         let e3 = coalescer.coalesce_motion(150, 100);
         assert!(e3.is_some());
+    }
+
+    #[test]
+    fn motion_distance_handles_the_full_coordinate_range() {
+        let mut coalescer = EventCoalescer::with_thresholds(1_000, i32::MAX);
+        assert!(coalescer.coalesce_motion(i32::MIN, i32::MIN).is_some());
+        assert!(coalescer.coalesce_motion(i32::MAX, i32::MAX).is_some());
+
+        let extreme_threshold = EventCoalescer::with_thresholds(1, i32::MIN);
+        assert_eq!(extreme_threshold.distance_threshold_sq, 1_u64 << 62);
+    }
+
+    #[test]
+    fn expose_merge_saturates_unrepresentable_extents() {
+        let near_max = ExposeRect {
+            x: i32::MAX - 10,
+            y: i32::MIN,
+            width: 100,
+            height: 20,
+        };
+        let overlapping = ExposeRect {
+            x: i32::MAX - 5,
+            y: i32::MIN + 5,
+            width: 20,
+            height: 20,
+        };
+        assert_eq!(
+            near_max.merge(&overlapping),
+            ExposeRect {
+                x: i32::MAX - 10,
+                y: i32::MIN,
+                width: 100,
+                height: 25,
+            }
+        );
+
+        let full_span = ExposeRect {
+            x: i32::MIN,
+            y: i32::MIN,
+            width: u32::MAX,
+            height: u32::MAX,
+        }
+        .merge(&ExposeRect {
+            x: i32::MAX,
+            y: i32::MAX,
+            width: u32::MAX,
+            height: u32::MAX,
+        });
+        assert_eq!(full_span.width, u32::MAX);
+        assert_eq!(full_span.height, u32::MAX);
+    }
+
+    #[test]
+    fn event_similarity_handles_extreme_coordinates_and_negative_thresholds() {
+        let now = Instant::now();
+        let low = MotionEvent {
+            x: i32::MIN,
+            y: i32::MIN,
+            time: now,
+        };
+        let high = MotionEvent {
+            x: i32::MAX,
+            y: i32::MAX,
+            time: now,
+        };
+
+        assert!(!events_similar(&low, &high, i32::MAX));
+        assert!(!events_similar(&low, &low, -1));
+        assert!(events_similar(&low, &low, 0));
     }
 
     #[test]
