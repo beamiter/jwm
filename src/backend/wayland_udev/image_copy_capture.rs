@@ -30,6 +30,77 @@ use smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle;
 
 use crate::backend::wayland::state::JwmWaylandState;
 
+type CaptureDamageRect = (i32, i32, i32, i32);
+
+// A client may send damage_buffer any number of times before capture. Keep the
+// request-side state bounded; once the precise list is full, replace it with a
+// bounding rectangle (or full-buffer damage when that rectangle cannot be
+// represented by the protocol's signed coordinates).
+const MAX_DAMAGE_RECTS_PER_FRAME: usize = 64;
+const FULL_BUFFER_DAMAGE: CaptureDamageRect = (0, 0, i32::MAX, i32::MAX);
+
+fn record_damage_rect(damage: &mut Vec<CaptureDamageRect>, rect: CaptureDamageRect) -> bool {
+    let (x, y, width, height) = rect;
+    if x < 0 || y < 0 || width <= 0 || height <= 0 {
+        return false;
+    }
+
+    // A rectangle may satisfy the protocol's per-field constraints while its
+    // far edge lies beyond every representable buffer. Preserve the valid
+    // in-buffer portion without exposing an overflowing endpoint downstream.
+    if i64::from(x) + i64::from(width) > i64::from(i32::MAX)
+        || i64::from(y) + i64::from(height) > i64::from(i32::MAX)
+    {
+        damage.clear();
+        damage.push(FULL_BUFFER_DAMAGE);
+        return true;
+    }
+
+    // Once all addressable buffer pixels are damaged, later rectangles cannot
+    // add useful information.
+    if damage.as_slice() == [FULL_BUFFER_DAMAGE] {
+        return true;
+    }
+
+    if damage.len() < MAX_DAMAGE_RECTS_PER_FRAME {
+        damage.push(rect);
+        return true;
+    }
+
+    // Work in i64 because each individually valid i32 rectangle may extend
+    // beyond i32::MAX when x + width (or y + height) is evaluated.
+    let mut min_x = i64::MAX;
+    let mut min_y = i64::MAX;
+    let mut max_x = 0_i64;
+    let mut max_y = 0_i64;
+    for &(x, y, width, height) in damage.iter().chain(std::iter::once(&rect)) {
+        let x = i64::from(x);
+        let y = i64::from(y);
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x + i64::from(width));
+        max_y = max_y.max(y + i64::from(height));
+    }
+
+    let merged_width = max_x - min_x;
+    let merged_height = max_y - min_y;
+    let merged = match (
+        i32::try_from(min_x),
+        i32::try_from(min_y),
+        i32::try_from(merged_width),
+        i32::try_from(merged_height),
+    ) {
+        (Ok(x), Ok(y), Ok(width), Ok(height)) => (x, y, width, height),
+        // wl_shm and linux-dmabuf buffer dimensions are signed protocol ints,
+        // so this safely over-damages every pixel an attached buffer can have.
+        _ => FULL_BUFFER_DAMAGE,
+    };
+
+    damage.clear();
+    damage.push(merged);
+    true
+}
+
 // --- Source types ---
 
 #[derive(Clone)]
@@ -65,7 +136,7 @@ pub struct CaptureFrameData {
     // moved into the pending queue on the capture request, matching the
     // protocol's attach → damage* → capture ordering.
     pub buffer: Mutex<Option<WlBuffer>>,
-    pub damage: Mutex<Vec<(i32, i32, i32, i32)>>,
+    pub damage: Mutex<Vec<CaptureDamageRect>>,
     pub pending_queue: PendingImageCaptureQueue,
 }
 unsafe impl Send for CaptureFrameData {}
@@ -82,7 +153,7 @@ pub struct PendingImageCapture {
     pub buffer: WlBuffer,
     pub source: CaptureSource,
     pub paint_cursors: bool,
-    pub damage: Vec<(i32, i32, i32, i32)>,
+    pub damage: Vec<CaptureDamageRect>,
 }
 unsafe impl Send for PendingImageCapture {}
 
@@ -472,6 +543,8 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, CaptureSessionData> for JwmWaylandSt
                         source: data.source.clone(),
                         paint_cursors: data.paint_cursors,
                         buffer: Mutex::new(None),
+                        // Allocate lazily so idle frame objects stay cheap; the
+                        // accumulator below still prevents growth past its cap.
                         damage: Mutex::new(Vec::new()),
                         pending_queue,
                     },
@@ -508,8 +581,11 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, CaptureFrameData> for JwmWaylandState 
                 width,
                 height,
             } => {
-                if x >= 0 && y >= 0 && width > 0 && height > 0 {
-                    data.damage.lock_safe().push((x, y, width, height));
+                if !record_damage_rect(&mut data.damage.lock_safe(), (x, y, width, height)) {
+                    resource.post_error(
+                        ext_image_copy_capture_frame_v1::Error::InvalidBufferDamage,
+                        "damage_buffer requires non-negative coordinates and positive dimensions",
+                    );
                 }
             }
             ext_image_copy_capture_frame_v1::Request::Capture => {
@@ -612,5 +688,54 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for JwmWayl
             ext_image_copy_capture_cursor_session_v1::Request::Destroy => {}
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FULL_BUFFER_DAMAGE, MAX_DAMAGE_RECTS_PER_FRAME, record_damage_rect};
+
+    #[test]
+    fn damage_requests_are_bounded_and_preserve_their_union() {
+        let mut damage = Vec::new();
+
+        for x in 0..10_000 {
+            assert!(record_damage_rect(&mut damage, (x, 5, 1, 2)));
+            assert!(damage.len() <= MAX_DAMAGE_RECTS_PER_FRAME);
+        }
+
+        let min_x = damage.iter().map(|rect| rect.0).min().unwrap();
+        let max_x = damage
+            .iter()
+            .map(|rect| i64::from(rect.0) + i64::from(rect.2))
+            .max()
+            .unwrap();
+        assert_eq!(min_x, 0);
+        assert_eq!(max_x, 10_000);
+    }
+
+    #[test]
+    fn unrepresentable_bounding_union_becomes_full_buffer_damage() {
+        let mut damage = Vec::new();
+        assert!(record_damage_rect(
+            &mut damage,
+            (i32::MAX - 1, 0, i32::MAX, 1),
+        ));
+        assert_eq!(damage, [FULL_BUFFER_DAMAGE]);
+
+        // Once full-buffer damage is recorded, a flood remains constant-size.
+        for x in 0..10_000 {
+            assert!(record_damage_rect(&mut damage, (x, x, 1, 1)));
+        }
+        assert_eq!(damage, [FULL_BUFFER_DAMAGE]);
+    }
+
+    #[test]
+    fn invalid_damage_is_rejected_without_mutating_accumulated_state() {
+        let mut damage = vec![(1, 2, 3, 4)];
+        for invalid in [(-1, 0, 1, 1), (0, -1, 1, 1), (0, 0, 0, 1), (0, 0, 1, 0)] {
+            assert!(!record_damage_rect(&mut damage, invalid));
+        }
+        assert_eq!(damage, [(1, 2, 3, 4)]);
     }
 }
