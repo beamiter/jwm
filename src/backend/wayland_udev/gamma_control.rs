@@ -2,8 +2,9 @@
 ///
 /// Allows color temperature tools like gammastep and wlsunset to adjust
 /// display gamma ramps for night light functionality.
-use std::io::Read;
-use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::fs::File;
+use std::io;
+use std::os::unix::fs::FileExt;
 
 use log::{info, warn};
 
@@ -23,6 +24,44 @@ use crate::backend::wayland::state::JwmWaylandState;
 /// values above this are a sign of a buggy KMS or a malicious driver and would
 /// cause `set_gamma` to allocate gigabytes of host memory per call.
 pub(crate) const MAX_GAMMA_SIZE: u32 = 65_536;
+
+/// Read one protocol gamma-table payload without trusting the client fd to be
+/// a blocking-safe stream.
+///
+/// The protocol describes this fd as a memory-mappable, exact-size file. A
+/// pipe or socket is not a valid table and, more importantly, a synchronous
+/// `read_exact` from one would let a client freeze the compositor indefinitely
+/// by retaining its write end. Validate the descriptor before doing any I/O,
+/// then use a positional read so the client's current file offset is ignored.
+fn read_gamma_table(file: &File, expected_bytes: usize) -> io::Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gamma table fd is not a regular file",
+        ));
+    }
+
+    let expected_len = u64::try_from(expected_bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "gamma table length does not fit in u64",
+        )
+    })?;
+    if metadata.len() != expected_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "gamma table has {} bytes, expected {expected_len}",
+                metadata.len()
+            ),
+        ));
+    }
+
+    let mut table = vec![0u8; expected_bytes];
+    file.read_exact_at(&mut table, 0)?;
+    Ok(table)
+}
 
 pub struct GammaControlManagerData;
 unsafe impl Send for GammaControlManagerData {}
@@ -133,12 +172,9 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
         match request {
             zwlr_gamma_control_v1::Request::SetGamma { fd } => {
                 let expected_bytes = (data.gamma_size as usize) * 3 * std::mem::size_of::<u16>();
-                let mut buf = vec![0u8; expected_bytes];
-
-                let raw_fd = fd.as_raw_fd();
-                let mut file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
-                match file.read_exact(&mut buf) {
-                    Ok(()) => {
+                let file = File::from(fd);
+                match read_gamma_table(&file, expected_bytes) {
+                    Ok(buf) => {
                         // wlr-gamma-control wire format is little-endian
                         // (matches DRM's `DRM_MODE_LUT_FORMAT_LE`). Using
                         // `from_ne_bytes` here was wrong on big-endian hosts.
@@ -163,8 +199,6 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
                         warn!("[gamma] failed to read gamma table from fd: {e}");
                     }
                 }
-                // Intentionally leak the File to avoid closing the OwnedFd
-                std::mem::forget(file);
             }
             zwlr_gamma_control_v1::Request::Destroy => {}
             _ => {}
@@ -202,5 +236,59 @@ impl Dispatch<ZwlrGammaControlV1, GammaControlData> for JwmWaylandState {
             gamma_size: data.gamma_size,
             ramp,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_gamma_table;
+    use nix::sys::memfd::{MFdFlags, memfd_create};
+    use nix::unistd::pipe;
+    use std::fs::File;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn gamma_table_reads_exact_memfd_from_zero_offset() {
+        let fd = memfd_create("jwm-gamma-table-test", MFdFlags::MFD_CLOEXEC).unwrap();
+        let mut file = File::from(fd);
+        let payload = [1, 0, 2, 0, 3, 0];
+        file.write_all(&payload).unwrap();
+        file.seek(SeekFrom::End(0)).unwrap();
+
+        assert_eq!(read_gamma_table(&file, payload.len()).unwrap(), payload);
+        assert_eq!(
+            read_gamma_table(&file, payload.len() - 1)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn gamma_table_rejects_open_pipe_without_blocking() {
+        let (read_end, write_end) = pipe().unwrap();
+        let file = File::from(read_end);
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = sender.send(read_gamma_table(&file, 6));
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(error) => {
+                // Unblock a regressed read_exact before failing the test so it
+                // cannot leave a stuck test worker behind.
+                drop(write_end);
+                worker.join().unwrap();
+                panic!("gamma-table pipe read blocked the compositor path: {error}");
+            }
+        };
+        drop(write_end);
+        worker.join().unwrap();
+
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
     }
 }
