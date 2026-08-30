@@ -41,7 +41,7 @@ pub struct AppIcon {
     pub key: u64,
 }
 
-/// Longest absolute icon path retained in model/frontend snapshots.
+/// Longest icon or icon-search path retained in model/frontend state.
 pub const MAX_APP_ICON_PATH_BYTES: usize = 4 * 1024;
 
 impl AppIcon {
@@ -208,16 +208,40 @@ impl IconSearchPaths {
         .bounded()
     }
 
-    fn bounded(mut self) -> Self {
-        self.applications.truncate(MAX_ICON_SEARCH_ROOTS);
-        self.themes.truncate(MAX_ICON_SEARCH_ROOTS);
-        self.flat.truncate(MAX_ICON_SEARCH_ROOTS);
-        self.preferred_themes.retain(|theme| {
-            theme.len() <= MAX_ICON_COMPONENT_BYTES && is_single_path_component(theme)
-        });
-        self.preferred_themes.truncate(MAX_PREFERRED_THEMES);
-        self
+    fn bounded(self) -> Self {
+        Self {
+            applications: bounded_search_paths(self.applications),
+            themes: bounded_search_paths(self.themes),
+            flat: bounded_search_paths(self.flat),
+            preferred_themes: bounded_preferred_themes(self.preferred_themes),
+        }
     }
+}
+
+fn bounded_search_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut bounded = Vec::with_capacity(paths.len().min(MAX_ICON_SEARCH_ROOTS));
+    bounded.extend(
+        paths
+            .into_iter()
+            .take(MAX_ICON_SEARCH_ROOTS)
+            .filter(|path| path.as_os_str().as_encoded_bytes().len() <= MAX_APP_ICON_PATH_BYTES)
+            .map(|path| PathBuf::from(path.as_os_str())),
+    );
+    bounded
+}
+
+fn bounded_preferred_themes(themes: Vec<String>) -> Vec<String> {
+    let mut bounded = Vec::with_capacity(themes.len().min(MAX_PREFERRED_THEMES));
+    bounded.extend(
+        themes
+            .into_iter()
+            .take(MAX_PREFERRED_THEMES)
+            .filter(|theme| {
+                theme.len() <= MAX_ICON_COMPONENT_BYTES && is_single_path_component(theme)
+            })
+            .map(|theme| theme.as_str().to_owned()),
+    );
+    bounded
 }
 
 /// Themes to search before `hicolor`, honouring the one environment variable
@@ -960,6 +984,36 @@ Icon=vscode-new-window
             resolver.icon_file(&"x".repeat(MAX_ICON_COMPONENT_BYTES + 1)),
             None
         );
+    }
+
+    #[test]
+    fn search_collections_release_excess_input_capacity() {
+        let roots = || {
+            let mut root = PathBuf::with_capacity(MAX_APP_ICON_PATH_BYTES * 4);
+            root.push("/icons");
+            let mut roots = Vec::with_capacity(MAX_ICON_SEARCH_ROOTS * 4);
+            roots.push(root);
+            roots.push(PathBuf::from(format!(
+                "/{}",
+                "x".repeat(MAX_APP_ICON_PATH_BYTES + 1)
+            )));
+            roots
+        };
+
+        let mut theme = String::with_capacity(MAX_ICON_COMPONENT_BYTES * 4);
+        theme.push_str("custom");
+        let mut themes = Vec::with_capacity(MAX_PREFERRED_THEMES * 4);
+        themes.push(theme);
+
+        let paths = IconSearchPaths::new(roots(), roots(), roots(), themes);
+
+        for collection in [&paths.applications, &paths.themes, &paths.flat] {
+            assert!(collection.capacity() <= MAX_ICON_SEARCH_ROOTS);
+            assert_eq!(collection.len(), 1);
+            assert!(collection[0].capacity() <= MAX_APP_ICON_PATH_BYTES);
+        }
+        assert!(paths.preferred_themes.capacity() <= MAX_PREFERRED_THEMES);
+        assert!(paths.preferred_themes[0].capacity() <= MAX_ICON_COMPONENT_BYTES);
     }
 
     #[test]
