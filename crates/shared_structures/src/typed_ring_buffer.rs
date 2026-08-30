@@ -597,39 +597,74 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
 /// The final pathname unlink cannot be made compare-and-remove atomically;
 /// callers that externally replace the same pathname must serialize
 /// publication with stale creator teardown to eliminate that residual race.
-fn remove_matching_flink(path: &Path, os_id: &str) {
-    let Some(limit) = os_id
+fn remove_matching_flink(path: &Path, os_id: &str) -> Result<()> {
+    let limit = os_id
         .len()
         .checked_add(1)
         .and_then(|length| u64::try_from(length).ok())
-    else {
-        return;
-    };
-    let Ok(file) = std::fs::OpenOptions::new()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "shared-memory mapping identifier is too long to compare",
+            )
+        })?;
+    let file = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-    else {
-        return;
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(Error::new(
+                error.kind(),
+                format!("failed to inspect shared-memory flink before removal: {error}"),
+            ));
+        }
     };
-    let Ok(metadata) = file.metadata() else {
-        return;
-    };
+    let metadata = file.metadata().map_err(|error| {
+        Error::new(
+            error.kind(),
+            format!("failed to inspect opened shared-memory flink before removal: {error}"),
+        )
+    })?;
     if !metadata.is_file() {
-        return;
-    };
+        return Ok(());
+    }
     let mut contents = Vec::with_capacity(os_id.len());
-    if file.take(limit).read_to_end(&mut contents).is_ok() && contents == os_id.as_bytes() {
-        let _ = std::fs::remove_file(path);
+    file.take(limit)
+        .read_to_end(&mut contents)
+        .map_err(|error| {
+            Error::new(
+                error.kind(),
+                format!("failed to read shared-memory flink before removal: {error}"),
+            )
+        })?;
+    if contents != os_id.as_bytes() {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        // A concurrent remover has already achieved the desired state.
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::new(
+            error.kind(),
+            format!("failed to remove shared-memory flink: {error}"),
+        )),
     }
 }
 
 /// Remove the public name only if it still points at this mapping, then take
 /// ownership of the OS object so dropping `shmem` reclaims crash residue.
-fn prepare_stale_mapping_reclaim(shmem: &mut Shmem, flink_path: &Path) {
+fn prepare_stale_mapping_reclaim(shmem: &mut Shmem, flink_path: &Path) -> Result<()> {
     let os_id = shmem.get_os_id().to_owned();
-    remove_matching_flink(flink_path, &os_id);
+    // Never unlink the OS object while its matching public flink remains:
+    // doing so would leave a durable pathname pointing at a vanished mapping.
+    // Missing/replaced flinks are safe; inspection and unlink failures must be
+    // surfaced to the supervisor so it can retry without corrupting state.
+    remove_matching_flink(flink_path, &os_id)?;
     shmem.set_owner(true);
+    Ok(())
 }
 
 /// 跨进程方向锁的 RAII guard。
@@ -1228,7 +1263,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                             .flink_path
                             .as_deref()
                             .ok_or_else(|| Error::other("opened mapping lost its flink path"))?;
-                        prepare_stale_mapping_reclaim(&mut buffer.shmem, flink_path);
+                        prepare_stale_mapping_reclaim(&mut buffer.shmem, flink_path)?;
                         drop(buffer);
                         if let Some(buffer) = create(&mut may_create)? {
                             return Ok(buffer);
@@ -1265,7 +1300,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         "reclaiming stale shared ring buffer {path}: legacy protocol {} creator {} is gone",
                         legacy.version, legacy.creator_pid
                     );
-                    prepare_stale_mapping_reclaim(&mut legacy.shmem, &legacy.flink_path);
+                    prepare_stale_mapping_reclaim(&mut legacy.shmem, &legacy.flink_path)?;
                     drop(legacy);
                     if let Some(buffer) = create(&mut may_create)? {
                         return Ok(buffer);
@@ -1891,7 +1926,7 @@ impl<M: WireSafe, C: WireSafe> Drop for TypedRingBuffer<M, C> {
         if self.is_creator {
             let _ = self.destroy();
             if let Some(path) = self.flink_path.take() {
-                remove_matching_flink(&path, self.shmem.get_os_id());
+                let _ = remove_matching_flink(&path, self.shmem.get_os_id());
             }
         }
         self.backend.cleanup(self.is_creator);
@@ -2116,12 +2151,57 @@ mod tests {
             .flink_path
             .as_deref()
             .expect("opener must retain its validated flink path");
-        prepare_stale_mapping_reclaim(&mut stale_opener.shmem, stale_flink_path);
+        prepare_stale_mapping_reclaim(&mut stale_opener.shmem, stale_flink_path).unwrap();
         drop(stale_opener);
 
         assert!(Path::new(&path).is_file());
         let replacement_opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
         assert_eq!(replacement_opener, replacement);
+    }
+
+    #[test]
+    fn stale_reclaim_keeps_mapping_when_matching_flink_cannot_be_removed() {
+        const DEAD_PID: u32 = u32::MAX;
+
+        let directory = PathBuf::from(mk_path("reclaim_unlink_denied"));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("ring");
+        let path_string = path.to_str().unwrap();
+        let stale_creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(path_string)
+            .unwrap();
+        let stale_os_id = stale_creator.shmem.get_os_id().to_owned();
+        // SAFETY: the test owns the creator and only immutable opener handles
+        // will access the mapping until this field is restored below.
+        unsafe {
+            std::ptr::addr_of_mut!((*stale_creator.header).creator_pid).write(DEAD_PID);
+        }
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let reclaim_result = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed::<u64, u64>(path_string);
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let error = reclaim_result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        assert!(
+            path.is_file(),
+            "failed reclaim must preserve the public flink"
+        );
+        let opener = TypedRingBuffer::<u64, u64>::open_auto(path_string, Some(0)).unwrap();
+        assert_eq!(opener.shmem.get_os_id(), stale_os_id);
+        drop(opener);
+
+        // Restore ordinary creator teardown so the test cleans up both the
+        // public flink and the OS mapping.
+        unsafe {
+            std::ptr::addr_of_mut!((*stale_creator.header).creator_pid).write(std::process::id());
+        }
+        drop(stale_creator);
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
