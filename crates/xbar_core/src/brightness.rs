@@ -1,8 +1,16 @@
-use std::io;
-use std::process::{Command, Output};
+use std::io::{self, Read};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::process::CommandExt as _;
+use std::process::{Command, Output, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use log::warn;
+
+const BRIGHTNESSCTL_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_BRIGHTNESSCTL_OUTPUT_BYTES: usize = 64 * 1024;
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_DRAIN_BYTES_PER_POLL: usize = 64 * 1024;
 
 /// Backlight brightness, read and controlled through the `brightnessctl` CLI.
 ///
@@ -130,7 +138,13 @@ impl Default for BrightnessManager {
 }
 
 fn brightnessctl_output(args: &[&str]) -> io::Result<Output> {
-    let output = Command::new("brightnessctl").args(args).output()?;
+    let mut command = Command::new("brightnessctl");
+    command.args(args);
+    let output = command_output_bounded(
+        &mut command,
+        BRIGHTNESSCTL_TIMEOUT,
+        MAX_BRIGHTNESSCTL_OUTPUT_BYTES,
+    )?;
     if output.status.success() {
         return Ok(output);
     }
@@ -145,6 +159,111 @@ fn brightnessctl_output(args: &[&str]) -> io::Result<Output> {
     Err(io::Error::other(format!(
         "brightnessctl {args:?} failed ({detail})"
     )))
+}
+
+fn command_output_bounded(
+    command: &mut Command,
+    timeout: Duration,
+    output_limit: usize,
+) -> io::Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // Give the helper its own process group so a timed-out wrapper cannot
+        // leave a descendant holding either capture pipe open.
+        .process_group(0);
+    let mut child = command.spawn()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_child_group(&mut child);
+        return Err(io::Error::other(
+            "brightness helper stdout was not captured",
+        ));
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        terminate_child_group(&mut child);
+        return Err(io::Error::other(
+            "brightness helper stderr was not captured",
+        ));
+    };
+
+    if let Err(error) =
+        set_nonblocking(stdout.as_raw_fd()).and_then(|()| set_nonblocking(stderr.as_raw_fd()))
+    {
+        terminate_child_group(&mut child);
+        return Err(error);
+    }
+
+    let started = Instant::now();
+    let mut stdout_bytes = Vec::with_capacity(output_limit.min(4096));
+    let mut stderr_bytes = Vec::with_capacity(output_limit.min(4096));
+    let result = (|| {
+        loop {
+            drain_available(&mut stdout, &mut stdout_bytes, output_limit)?;
+            drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+
+            if let Some(status) = child.try_wait()? {
+                // Capture whatever was already buffered when the child exited.
+                drain_available(&mut stdout, &mut stdout_bytes, output_limit)?;
+                drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+                return Ok(Output {
+                    status,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
+                });
+            }
+            if started.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("brightness helper exceeded {timeout:?}"),
+                ));
+            }
+            thread::sleep(COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
+        }
+    })();
+    if result.is_err() {
+        terminate_child_group(&mut child);
+    }
+    result
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_available(source: &mut impl Read, retained: &mut Vec<u8>, limit: usize) -> io::Result<()> {
+    let mut drained = 0;
+    let mut chunk = [0_u8; 4096];
+    while drained < MAX_DRAIN_BYTES_PER_POLL {
+        let request = chunk.len().min(MAX_DRAIN_BYTES_PER_POLL - drained);
+        match source.read(&mut chunk[..request]) {
+            Ok(0) => return Ok(()),
+            Ok(read) => {
+                drained += read;
+                let retain = read.min(limit.saturating_sub(retained.len()));
+                retained.extend_from_slice(&chunk[..retain]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn terminate_child_group(child: &mut std::process::Child) {
+    if let Ok(process_group) = i32::try_from(child.id()) {
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn run_brightnessctl(args: &[&str]) -> io::Result<()> {
@@ -201,9 +320,10 @@ fn parse_brightness_percent(output: &str) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use super::{BrightnessManager, parse_brightness_percent};
+    use super::{BrightnessManager, command_output_bounded, parse_brightness_percent};
 
     #[test]
     fn parses_machine_readable_output() {
@@ -270,5 +390,33 @@ mod tests {
         assert_eq!(manager.percent(), Some(42));
         assert!(manager.last_update >= previous_update);
         assert!(!manager.update_if_needed());
+    }
+
+    #[test]
+    fn helper_output_is_bounded_while_the_pipe_is_drained() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2",
+        ]);
+
+        let output = command_output_bounded(&mut command, Duration::from_secs(2), 1024).unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1024);
+        assert_eq!(output.stderr.len(), 1024);
+    }
+
+    #[test]
+    fn helper_runtime_has_a_hard_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10 & wait"]);
+        let started = Instant::now();
+
+        let error =
+            command_output_bounded(&mut command, Duration::from_millis(30), 1024).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }
