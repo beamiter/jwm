@@ -533,7 +533,7 @@ impl EventFdBackend {
         let Ok(client) = socket(
             AddressFamily::Unix,
             SockType::Stream,
-            SockFlag::SOCK_CLOEXEC,
+            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
             None,
         ) else {
             return;
@@ -1110,5 +1110,75 @@ mod tests {
 
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir(&socket_dir);
+    }
+
+    #[test]
+    fn listener_poke_does_not_block_on_a_full_backlog() {
+        let socket_dir = PathBuf::from(format!(
+            "/tmp/srb-eventfd-poke-test-{}-{}",
+            std::process::id(),
+            SOCKET_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("fd.sock");
+        let address = UnixAddr::new(&socket_path).unwrap();
+        let server = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+            None,
+        )
+        .unwrap();
+        bind(server.as_raw_fd(), &address).unwrap();
+        listen(&server, Backlog::new(1).unwrap()).unwrap();
+
+        let mut clients = Vec::new();
+        let mut backlog_is_full = false;
+        for _ in 0..64 {
+            let client = socket(
+                AddressFamily::Unix,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
+                None,
+            )
+            .unwrap();
+            match connect(client.as_raw_fd(), &address) {
+                Ok(()) | Err(Errno::EINPROGRESS | Errno::EALREADY) => clients.push(client),
+                Err(Errno::EAGAIN) => {
+                    backlog_is_full = true;
+                    break;
+                }
+                Err(error) => panic!("failed to saturate Unix socket backlog: {error}"),
+            }
+        }
+        assert!(backlog_is_full, "test did not saturate the listen backlog");
+
+        let poke_path = socket_path.clone();
+        let (finished_tx, finished_rx) = mpsc::sync_channel(0);
+        let poke = std::thread::spawn(move || {
+            EventFdBackend::poke_listener(&poke_path);
+            finished_tx.send(()).unwrap();
+        });
+        let returned_before_drain = finished_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        if !returned_before_drain {
+            // Unblock the pre-fix implementation so a failing regression does
+            // not strand this test process or leave filesystem residue.
+            let accepted = accept4(server.as_raw_fd(), SockFlag::SOCK_CLOEXEC).unwrap();
+            let accepted = unsafe { OwnedFd::from_raw_fd(accepted) };
+            finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("blocked listener poke did not resume after backlog drain");
+            drop(accepted);
+        }
+        poke.join().unwrap();
+
+        drop(clients);
+        drop(server);
+        std::fs::remove_file(&socket_path).unwrap();
+        std::fs::remove_dir(&socket_dir).unwrap();
+        assert!(
+            returned_before_drain,
+            "listener poke blocked while the listen backlog was full"
+        );
     }
 }
