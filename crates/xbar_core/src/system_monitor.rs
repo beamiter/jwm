@@ -2,8 +2,13 @@
 
 use serde::Serialize;
 use std::collections::VecDeque;
+#[cfg(target_os = "linux")]
+use std::io::Read as _;
 use std::time::{Duration, Instant};
 use sysinfo::System;
+
+#[cfg(target_os = "linux")]
+const MAX_LOAD_AVERAGE_BYTES: usize = 4 * 1024;
 
 /// Rolling average calculator
 #[derive(Debug, Clone)]
@@ -196,15 +201,8 @@ impl SystemMonitor {
         // On Linux, we can read from /proc/loadavg
         #[cfg(target_os = "linux")]
         {
-            if let Ok(content) = std::fs::read_to_string("/proc/loadavg") {
-                let parts: Vec<&str> = content.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    return LoadAverage {
-                        one_minute: parts[0].parse().unwrap_or(0.0),
-                        five_minutes: parts[1].parse().unwrap_or(0.0),
-                        fifteen_minutes: parts[2].parse().unwrap_or(0.0),
-                    };
-                }
+            if let Ok(load_average) = read_load_average(std::path::Path::new("/proc/loadavg")) {
+                return load_average;
             }
         }
 
@@ -323,6 +321,42 @@ impl SystemMonitor {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn read_load_average(path: &std::path::Path) -> std::io::Result<LoadAverage> {
+    let mut bytes = Vec::with_capacity(128);
+    std::fs::File::open(path)?
+        .take((MAX_LOAD_AVERAGE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_LOAD_AVERAGE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "load-average input exceeds read limit",
+        ));
+    }
+    let content = std::str::from_utf8(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(parse_load_average(content))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_load_average(content: &str) -> LoadAverage {
+    let mut parts = content.split_whitespace();
+    let Some(one_minute) = parts.next() else {
+        return LoadAverage::default();
+    };
+    let Some(five_minutes) = parts.next() else {
+        return LoadAverage::default();
+    };
+    let Some(fifteen_minutes) = parts.next() else {
+        return LoadAverage::default();
+    };
+    LoadAverage {
+        one_minute: one_minute.parse().unwrap_or(0.0),
+        five_minutes: five_minutes.parse().unwrap_or(0.0),
+        fifteen_minutes: fifteen_minutes.parse().unwrap_or(0.0),
+    }
+}
+
 impl Default for SystemMonitor {
     fn default() -> Self {
         Self::new(6) // Default to 6 samples
@@ -406,5 +440,32 @@ mod tests {
         assert!((percent - 60.0).abs() < 0.001);
         assert_eq!(normalized_memory(100, 101), (100, 0, 0.0));
         assert_eq!(normalized_memory(0, u64::MAX), (0, 0, 0.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn load_average_read_has_an_exact_byte_budget() {
+        let path = std::env::temp_dir().join(format!(
+            "xbar-loadavg-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut content = b"1.25 2.50 3.75".to_vec();
+        content.resize(MAX_LOAD_AVERAGE_BYTES, b' ');
+        std::fs::write(&path, &content).unwrap();
+        assert_eq!(
+            read_load_average(&path).unwrap(),
+            LoadAverage {
+                one_minute: 1.25,
+                five_minutes: 2.5,
+                fifteen_minutes: 3.75,
+            }
+        );
+
+        content.push(b' ');
+        std::fs::write(&path, content).unwrap();
+        let error = read_load_average(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }
