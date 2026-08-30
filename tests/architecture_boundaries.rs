@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use toml::Value;
+
 fn rust_files_below(root: &Path) -> Vec<PathBuf> {
     let mut pending = vec![root.to_path_buf()];
     let mut files = Vec::new();
@@ -92,4 +94,25 @@ fn policy_and_wayland_do_not_reach_into_the_x11_tree_for_shared_algorithms() {
 fn jwm_policy_does_not_import_the_shared_x11_implementation() {
     assert_files_exclude("src/jwm.rs", &["backend::x11::"]);
     assert_files_exclude("src/jwm", &["backend::x11::"]);
+}
+
+#[test]
+fn xbar_transport_selects_only_the_futex_shared_backend() {
+    let manifest = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/xbar_core/Cargo.toml"),
+    )
+    .unwrap();
+    let manifest: Value = toml::from_str(&manifest).unwrap();
+    let dependency = &manifest["dependencies"]["shared_structures"];
+
+    assert_eq!(
+        dependency["default-features"].as_bool(),
+        Some(false),
+        "transport-shared must not enable every shared-memory backend"
+    );
+    assert_eq!(
+        dependency["features"],
+        Value::Array(vec![Value::String("use-futex".into())]),
+        "JWM's transport contract selects only its futex backend"
+    );
 }

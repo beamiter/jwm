@@ -36,7 +36,7 @@ sysinfo = { version = "0.39.6", features = ["multithread"], optional = true }
 # In-tree sibling: the monorepo working tree is the protocol revision, so
 # every consumer of xbar_core resolves the same shared_structures by
 # construction — no tag/rev to keep in sync.
-shared_structures = { path = "../shared_structures", features = ["use-futex"], optional = true }
+shared_structures = { path = "../shared_structures", default-features = false, features = ["use-futex"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 toml = { version = "0.9.8", optional = true }
 
