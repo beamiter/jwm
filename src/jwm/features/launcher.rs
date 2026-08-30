@@ -8,6 +8,11 @@
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Where the usage counts live, under the user's data directory.
 pub const USAGE_FILE: &str = "launcher-usage";
@@ -21,6 +26,38 @@ pub const MAX_TRACKED: usize = 500;
 /// ten thousand times cannot make everything else unreachable for a month
 /// after you stop using it.
 const COUNT_CAP: u32 = 50;
+static USAGE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write_usage(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{USAGE_FILE}.tmp-{}-{sequence}",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        // `mode` is still filtered through the process umask. Set the final
+        // private mode explicitly before the inode becomes visible at `path`.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
 // -------------------------------------------------------------------------
 // Frecency
@@ -125,13 +162,8 @@ impl UsageStore {
     /// ranking update is not worth interrupting a launch over.
     pub fn save(&self, now: u64) {
         let path = usage_path();
-        if let Some(parent) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            log::debug!("launcher: {}: {error}", parent.display());
-            return;
-        }
-        if let Err(error) = std::fs::write(&path, self.serialize(now)) {
+        let serialized = self.serialize(now);
+        if let Err(error) = atomic_write_usage(&path, serialized.as_bytes()) {
             log::debug!("launcher: {}: {error}", path.display());
         }
     }
@@ -788,6 +820,29 @@ mod tests {
             "the freshest entry was dropped"
         );
         assert_eq!(kept.score("app0509", NOW), 0, "the stalest entry was kept");
+    }
+
+    #[test]
+    fn usage_save_replaces_a_symlink_without_touching_its_target() {
+        let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "jwm-launcher-usage-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let victim = root.join("victim");
+        fs::write(&victim, "unchanged").unwrap();
+        let path = root.join(USAGE_FILE);
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        atomic_write_usage(&path, b"3 1800000000 firefox\n").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "unchanged");
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "3 1800000000 firefox\n");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn window(id: u64, title: &str, class: &str) -> WindowEntry {
