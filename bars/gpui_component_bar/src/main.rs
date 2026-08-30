@@ -63,6 +63,23 @@ const TAG_ACCENTS: [u32; 9] = [
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
+#[derive(Default)]
+struct ClickLatch(bool);
+
+impl ClickLatch {
+    fn press(&mut self) {
+        self.0 = true;
+    }
+
+    fn release(&mut self) -> bool {
+        std::mem::take(&mut self.0)
+    }
+
+    fn cancel(&mut self) {
+        self.0 = false;
+    }
+}
+
 struct GpuiComponentBar {
     runtime: BarRuntime,
     process_actions: ProcessActionHandler,
@@ -70,6 +87,7 @@ struct GpuiComponentBar {
     default_size: Option<gpui::Size<Pixels>>,
     last_scale_factor: Option<f32>,
     geometry_dirty: bool,
+    brightness_secondary_click: ClickLatch,
     dock: DockBridge,
     _timer_task: Option<Task<()>>,
     _transport_task: Option<Task<()>>,
@@ -107,6 +125,7 @@ impl GpuiComponentBar {
             default_size: None,
             last_scale_factor: None,
             geometry_dirty: false,
+            brightness_secondary_click: ClickLatch::default(),
             dock: DockBridge::new(),
             _timer_task: None,
             _transport_task: None,
@@ -468,18 +487,30 @@ impl GpuiComponentBar {
         );
 
         let brightness_chip = div()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.dispatch(UserAction::BrightnessUp);
-                    cx.notify();
-                }),
-            )
+            .id("brightness-actions")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.dispatch(UserAction::BrightnessUp);
+                cx.notify();
+            }))
             .on_mouse_down(
                 MouseButton::Right,
+                cx.listener(|this, _, _, _| {
+                    this.brightness_secondary_click.press();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
                 cx.listener(|this, _, _, cx| {
-                    this.dispatch(UserAction::BrightnessDown);
-                    cx.notify();
+                    if this.brightness_secondary_click.release() {
+                        this.dispatch(UserAction::BrightnessDown);
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Right,
+                cx.listener(|this, _, _, _| {
+                    this.brightness_secondary_click.cancel();
                 }),
             )
             .child(Self::chip_button(
@@ -492,13 +523,11 @@ impl GpuiComponentBar {
             ));
 
         let volume_chip = div()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.dispatch(UserAction::ToggleMute);
-                    cx.notify();
-                }),
-            )
+            .id("volume-actions")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.dispatch(UserAction::ToggleMute);
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
                 let delta_y = match event.delta {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
@@ -656,13 +685,10 @@ impl GpuiComponentBar {
                     }
                     cx.notify();
                 }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.dock_restore(binding, cx);
-                        cx.notify();
-                    }),
-                );
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.dock_restore(binding, cx);
+                    cx.notify();
+                }));
             shelf = shelf.child(
                 div()
                     .w(px(DOCK_SLOT_WIDTH))
@@ -876,4 +902,23 @@ fn compositor_active() -> bool {
         .and_then(|cookie| cookie.reply().ok())
         .map(|reply| reply.owner != x11rb::NONE)
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClickLatch;
+
+    #[test]
+    fn click_latch_requires_an_uncancelled_press() {
+        let mut latch = ClickLatch::default();
+        assert!(!latch.release());
+
+        latch.press();
+        assert!(latch.release());
+        assert!(!latch.release());
+
+        latch.press();
+        latch.cancel();
+        assert!(!latch.release());
+    }
 }

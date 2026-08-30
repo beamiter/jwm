@@ -27,9 +27,9 @@ use xbar_core::{
 use xbar_linux_actions::ProcessActionHandler;
 
 use gpui::{
-    App, Bounds, Context, IntoElement, MouseButton, ParentElement, Pixels, Render, Rgba,
-    ScrollDelta, ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, size,
+    App, Bounds, Context, IntoElement, ParentElement, Pixels, Render, Rgba, ScrollDelta,
+    ScrollWheelEvent, SharedString, Styled, Task, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowKind, WindowOptions, div, point, prelude::*, px, size,
 };
 use gpui_platform::application;
 use std::sync::Arc;
@@ -381,15 +381,12 @@ impl GpuiBar {
             .text_size(px(11.))
             .child(icon)
             .hover(|s| s.opacity(0.85))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _ev, _window, cx| {
-                    if let Some(tag) = TagId::new(index) {
-                        this.dispatch_wm(UserAction::ViewTag(tag));
-                    }
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                if let Some(tag) = TagId::new(index) {
+                    this.dispatch_wm(UserAction::ViewTag(tag));
+                }
+                cx.notify();
+            }))
     }
 
     fn render_pill(
@@ -459,20 +456,16 @@ impl GpuiBar {
             .text_color(fg)
             .text_size(px(11.))
             .child(label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.dispatch(UserAction::BrightnessUp);
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _ev, _w, cx| {
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.dispatch(UserAction::BrightnessUp);
+                cx.notify();
+            }))
+            .on_aux_click(cx.listener(|this, event: &gpui::ClickEvent, _w, cx| {
+                if event.is_right_click() {
                     this.dispatch(UserAction::BrightnessDown);
                     cx.notify();
-                }),
-            )
+                }
+            }))
     }
 
     fn render_volume_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -516,13 +509,10 @@ impl GpuiBar {
             .text_color(fg)
             .text_size(px(11.))
             .child(label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.dispatch(UserAction::ToggleMute);
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.dispatch(UserAction::ToggleMute);
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _w, cx| {
                 let delta_y = match event.delta {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y),
@@ -579,15 +569,12 @@ impl GpuiBar {
             .text_size(px(12.))
             .child(ICON_SHELL)
             .hover(move |s| s.bg(hover_bg).border_color(hover_bg))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    if this.runtime.view().wm_available {
-                        this.dispatch(UserAction::OpenShellHub(ShellRoute::Hub));
-                        cx.notify();
-                    }
-                }),
-            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                if this.runtime.view().wm_available {
+                    this.dispatch(UserAction::OpenShellHub(ShellRoute::Hub));
+                    cx.notify();
+                }
+            }))
     }
 
     fn render_screenshot_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -609,13 +596,10 @@ impl GpuiBar {
             .text_size(px(12.))
             .child(ICON_SHOT)
             .hover(move |s| s.bg(hover_bg).border_color(hover_bg))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.dispatch(UserAction::Screenshot);
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.dispatch(UserAction::Screenshot);
+                cx.notify();
+            }))
     }
 
     fn render_time_pill(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -636,13 +620,10 @@ impl GpuiBar {
             .text_color(rgba_alpha(0xFFFFFF, 1.0))
             .text_size(px(11.))
             .child(label)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.dispatch(UserAction::ToggleSeconds);
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.dispatch(UserAction::ToggleSeconds);
+                cx.notify();
+            }))
     }
 
     fn render_layout_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -665,13 +646,10 @@ impl GpuiBar {
             .text_color(rgba_alpha(0xFFFFFF, 1.0))
             .text_size(px(11.))
             .child(self.runtime.view().layout_symbol.to_owned())
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, _w, cx| {
-                    this.dispatch(UserAction::ToggleLayoutSelector);
-                    cx.notify();
-                }),
-            )
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.dispatch(UserAction::ToggleLayoutSelector);
+                cx.notify();
+            }))
     }
 
     fn render_layout_options(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -699,13 +677,10 @@ impl GpuiBar {
                 .text_color(rgba_alpha(0xFFFFFF, 1.0))
                 .text_size(px(11.))
                 .child(sym)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _ev, _w, cx| {
-                        this.dispatch_wm(UserAction::SetLayout(LayoutId(idx)));
-                        cx.notify();
-                    }),
-                );
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    this.dispatch_wm(UserAction::SetLayout(LayoutId(idx)));
+                    cx.notify();
+                }));
             row = row.child(item);
         }
         row
@@ -802,13 +777,10 @@ impl GpuiBar {
                     }
                     cx.notify();
                 }))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
-                        this.dock_restore(binding, cx);
-                        cx.notify();
-                    }),
-                );
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    this.dock_restore(binding, cx);
+                    cx.notify();
+                }));
             shelf = shelf.child(
                 div()
                     .w(px(DOCK_SLOT_WIDTH))
