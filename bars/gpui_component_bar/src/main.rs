@@ -793,6 +793,10 @@ fn monitor_num_to_icon(monitor_num: i32) -> String {
     }
 }
 
+const fn should_quit_after_window_close(remaining_windows: usize) -> bool {
+    remaining_windows == 0
+}
+
 fn main() {
     let shared_path = env::args().skip(1).last().unwrap_or_default();
     let _ = initialize_logging("gpui_component_bar", &shared_path);
@@ -822,6 +826,12 @@ fn main() {
 
     Application::new().run(move |cx: &mut App| {
         init_components(cx);
+        cx.on_window_closed(|cx| {
+            if should_quit_after_window_close(cx.windows().len()) {
+                cx.quit();
+            }
+        })
+        .detach();
         // Root paints the whole window in the component theme's background.
         // Solid mode recolors that sheet to the shared fallback; translucent
         // mode clears it entirely so the panel's own wash is the only alpha
@@ -906,7 +916,7 @@ fn compositor_active() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::ClickLatch;
+    use super::{ClickLatch, should_quit_after_window_close};
 
     #[test]
     fn click_latch_requires_an_uncancelled_press() {
@@ -920,5 +930,11 @@ mod tests {
         latch.press();
         latch.cancel();
         assert!(!latch.release());
+    }
+
+    #[test]
+    fn application_quits_only_after_the_last_window_closes() {
+        assert!(!should_quit_after_window_close(1));
+        assert!(should_quit_after_window_close(0));
     }
 }
