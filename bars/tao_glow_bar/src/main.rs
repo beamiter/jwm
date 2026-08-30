@@ -275,7 +275,12 @@ impl App {
         self.resolve_translucency();
 
         self.presenter
-            .redraw(&mut self.bar, width, height, self.scale_factor)
+            .redraw(&mut self.bar, width, height, self.scale_factor)?;
+        let update = self.bar.take_pending_runtime();
+        if !update.is_empty() {
+            self.handle_runtime_update(update);
+        }
+        Ok(())
     }
 
     fn request_redraw(&self) {

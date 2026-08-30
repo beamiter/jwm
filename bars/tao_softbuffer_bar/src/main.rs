@@ -163,6 +163,10 @@ impl App {
                 .buffer_mut()
                 .map_err(|error| anyhow::anyhow!("failed to complete softbuffer frame: {error}"))?,
         );
+        let update = self.bar.take_pending_runtime();
+        if !update.is_empty() {
+            self.handle_runtime_update(update);
+        }
         Ok(())
     }
 

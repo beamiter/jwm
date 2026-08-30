@@ -136,6 +136,10 @@ impl App {
             _ => target.present(),
         }
         .map_err(|error| anyhow::anyhow!("softbuffer present failed: {error}"))?;
+        let update = self.bar.take_pending_runtime();
+        if !update.is_empty() {
+            self.handle_runtime_update(update);
+        }
         Ok(())
     }
 

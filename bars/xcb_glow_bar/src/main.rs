@@ -136,7 +136,14 @@ impl GlState {
         }
     }
 
-    fn redraw(&self, bar: &mut CairoBar, width: u32, height: u32, scale_factor: f64) -> Result<()> {
+    fn redraw(
+        &self,
+        window: &WindowAdapter<'_>,
+        bar: &mut CairoBar,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+    ) -> Result<()> {
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -147,21 +154,33 @@ impl GlState {
                 .saturating_mul(height as usize)
                 .saturating_mul(4)
         ];
-        bar.render_into_bgra(
-            &mut frame,
-            width,
-            height,
-            width.saturating_mul(4),
-            scale_factor,
-        )?;
-        let _ = bar.runtime_mut().take_changes();
+        loop {
+            bar.render_into_bgra(
+                &mut frame,
+                width,
+                height,
+                width.saturating_mul(4),
+                scale_factor,
+            )?;
 
-        upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
-        draw_fullscreen_quad(&self.gl, self.vao, self.program, self.texture);
+            upload_bgra_frame(&self.gl, self.texture, width, height, &frame);
+            draw_fullscreen_quad(&self.gl, self.vao, self.program, self.texture);
 
-        self.surface
-            .swap_buffers(&self.context)
-            .map_err(|error| anyhow!("swap buffers failed: {error}"))?;
+            self.surface
+                .swap_buffers(&self.context)
+                .map_err(|error| anyhow!("swap buffers failed: {error}"))?;
+
+            let update = bar.take_pending_runtime();
+            let needs_redraw = if update.is_empty() {
+                false
+            } else {
+                window.apply_runtime_update(update)?
+            };
+            let _ = bar.runtime_mut().take_changes();
+            if !needs_redraw {
+                break;
+            }
+        }
 
         Ok(())
     }
@@ -602,6 +621,7 @@ fn handle_x_event(
 
     if should_redraw {
         gl_state.redraw(
+            window,
             bar,
             u32::from(*current_width),
             u32::from(*current_height),
@@ -789,6 +809,7 @@ fn main() -> Result<()> {
     initial_update.merge(bar.poll_transport());
     window.apply_runtime_update(initial_update)?;
     gl_state.redraw(
+        &window,
         &mut bar,
         u32::from(current_width),
         u32::from(current_height),
@@ -823,6 +844,7 @@ fn main() -> Result<()> {
             sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
             if needs_redraw {
                 gl_state.redraw(
+                    &window,
                     &mut bar,
                     u32::from(current_width),
                     u32::from(current_height),
@@ -848,6 +870,7 @@ fn main() -> Result<()> {
                         sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
                         if needs_redraw {
                             gl_state.redraw(
+                                &window,
                                 &mut bar,
                                 u32::from(current_width),
                                 u32::from(current_height),
@@ -864,6 +887,7 @@ fn main() -> Result<()> {
                         sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
                         if needs_redraw {
                             gl_state.redraw(
+                                &window,
                                 &mut bar,
                                 u32::from(current_width),
                                 u32::from(current_height),

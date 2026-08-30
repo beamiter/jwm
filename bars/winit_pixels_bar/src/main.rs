@@ -142,6 +142,10 @@ impl App {
         pixels
             .render()
             .map_err(|error| anyhow::anyhow!("pixels render failed: {error}"))?;
+        let update = self.bar.take_pending_runtime();
+        if !update.is_empty() {
+            self.handle_runtime_update(update);
+        }
         Ok(())
     }
 

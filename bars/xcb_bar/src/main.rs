@@ -422,13 +422,26 @@ fn redraw(
     // One render path serves both modes: the renderer's background opacity,
     // fixed at startup, decides whether the scene lands as a translucent wash
     // for the compositor to blend or as the opaque fallback background.
-    let context = back.ensure_context(cairo_xcb)?;
-    bar.render(context, size)?;
-    let _ = bar.runtime_mut().take_changes();
+    loop {
+        {
+            let context = back.ensure_context(cairo_xcb)?;
+            bar.render(context, size)?;
+        }
+        back.flush();
+        back.blit_to_window(window.conn, window.win, gc)?;
+        window.conn.flush()?;
 
-    back.flush();
-    back.blit_to_window(window.conn, window.win, gc)?;
-    window.conn.flush()?;
+        let update = bar.take_pending_runtime();
+        let needs_redraw = if update.is_empty() {
+            false
+        } else {
+            window.apply_runtime_update(update)?
+        };
+        let _ = bar.runtime_mut().take_changes();
+        if !needs_redraw {
+            break;
+        }
+    }
     Ok(())
 }
 

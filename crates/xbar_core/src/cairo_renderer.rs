@@ -655,6 +655,19 @@ impl CairoBar {
         &self.last_damage
     }
 
+    /// Take runtime work produced internally while rendering.
+    ///
+    /// Rendering synchronizes the Dock presentation and can therefore send
+    /// transport commands. Backpressure, disconnects, model changes, and
+    /// platform effects from those commands are retained here so the existing
+    /// render methods can keep their `Result<()>` signatures. Frontends should
+    /// call this after a frame has been presented successfully and route the
+    /// returned update during the same event-loop turn.
+    #[must_use = "runtime updates can contain redraw work, platform effects, and diagnostics"]
+    pub fn take_pending_runtime(&mut self) -> RuntimeUpdate {
+        std::mem::take(&mut self.pending_runtime)
+    }
+
     /// Render into a caller-owned premultiplied Cairo `ARgb32` byte buffer
     /// (BGRA on little-endian) covering `physical_width x physical_height`
     /// device pixels with `stride` bytes per row.
@@ -2258,7 +2271,32 @@ mod tests {
 
     #[cfg(feature = "transport-shared")]
     #[test]
-    fn cairo_dock_retries_queue_full_and_clears_state_on_disconnect() {
+    fn cairo_dock_render_exposes_fallback_platform_work() {
+        let (mut bar, owner) = transport_dock_bar();
+        drop(bar.runtime_mut().set_transport(None));
+
+        let mut frame = vec![0_u8; 800 * 38 * 4];
+        bar.render_into_bgra(&mut frame, 800, 38, 800 * 4, 1.0)
+            .unwrap();
+
+        let rendered = bar.take_pending_runtime();
+        assert!(!rendered.has_issues());
+        assert_eq!(rendered.platform_effects.len(), 2, "shelf plus one item");
+        assert!(rendered.platform_effects.iter().all(|effect| matches!(
+            effect,
+            crate::BarEffect::WindowManager(crate::WmCommand::SetDockGeometry { .. })
+        )));
+        assert!(
+            bar.take_pending_runtime().is_empty(),
+            "render platform work must be delivered exactly once"
+        );
+
+        owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn cairo_dock_render_updates_are_takeable_and_backpressure_retries() {
         let (mut bar, owner) = transport_dock_bar();
         let filler = crate::WmCommand::SetLayout {
             layout: crate::LayoutId(1),
@@ -2275,14 +2313,19 @@ mod tests {
         bar.render_into_bgra(&mut frame, 800, 38, 800 * 4, 1.0)
             .unwrap();
         assert!(bar.dock_reporter.acknowledged_geometry().is_empty());
+        let rendered = bar.take_pending_runtime();
         assert_eq!(
-            bar.pending_runtime
+            rendered
                 .issues
                 .iter()
                 .filter(|issue| matches!(issue, crate::RuntimeIssue::QueueFull { .. }))
                 .count(),
             1,
             "one failed burst must not emit an issue per item"
+        );
+        assert!(
+            bar.take_pending_runtime().is_empty(),
+            "render updates must be delivered exactly once"
         );
         assert_eq!(drain_dock_commands(&owner).len(), owner.command_capacity());
 
@@ -2293,8 +2336,8 @@ mod tests {
                 .iter()
                 .filter(|issue| matches!(issue, crate::RuntimeIssue::QueueFull { .. }))
                 .count(),
-            1,
-            "the original backpressure remains observable"
+            0,
+            "a taken render issue must not be replayed by a later service turn"
         );
         let retry_at = bar
             .next_dock_deadline(Instant::now())
@@ -2317,7 +2360,16 @@ mod tests {
         assert!(bar.dock_reporter.acknowledged_preview().is_none());
         assert!(bar.dock_reporter.desired_geometry().is_empty());
         assert!(bar.dock_reporter.acknowledged_geometry().is_empty());
-        assert!(bar.pending_runtime.has_issues());
+        let disconnected = bar.take_pending_runtime();
+        assert!(disconnected.has_issues());
+        assert!(
+            disconnected.needs_redraw(),
+            "disconnect model changes must reach the frontend frame scheduler"
+        );
+        assert!(
+            bar.take_pending_runtime().is_empty(),
+            "disconnect diagnostics must also be delivered exactly once"
+        );
     }
 
     fn scene_background(scene: &Scene) -> Rgba {

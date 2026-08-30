@@ -168,6 +168,10 @@ impl App {
             .as_mut()
             .expect("GPU presence checked above")
             .present_bgra(frame.data, frame.stride, damage)?;
+        let update = self.bar.take_pending_runtime();
+        if !update.is_empty() {
+            self.handle_runtime_update(update);
+        }
         Ok(())
     }
 

@@ -248,19 +248,32 @@ fn route_pointer_input(
 fn redraw(
     gpu: &mut WgpuPresenter,
     canvas: &mut CpuCanvas,
+    window: &WindowAdapter<'_>,
     width: u16,
     height: u16,
     bar: &mut CairoBar,
 ) -> Result<()> {
-    let frame = canvas.render(bar, u32::from(width), u32::from(height), 1.0)?;
-    let _ = bar.runtime_mut().take_changes();
-    let damage = frame.damage.map(|rect| PresentRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-    });
-    gpu.present_bgra(frame.data, frame.stride, damage)?;
+    loop {
+        let frame = canvas.render(bar, u32::from(width), u32::from(height), 1.0)?;
+        let damage = frame.damage.map(|rect| PresentRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        });
+        gpu.present_bgra(frame.data, frame.stride, damage)?;
+
+        let update = bar.take_pending_runtime();
+        let needs_redraw = if update.is_empty() {
+            false
+        } else {
+            window.apply_runtime_update(update)?
+        };
+        let _ = bar.runtime_mut().take_changes();
+        if !needs_redraw {
+            break;
+        }
+    }
     Ok(())
 }
 
@@ -429,6 +442,7 @@ fn main() -> Result<()> {
     redraw(
         &mut gpu,
         &mut canvas,
+        &window,
         current_width,
         current_height,
         &mut bar,
@@ -462,6 +476,7 @@ fn main() -> Result<()> {
                 redraw(
                     &mut gpu,
                     &mut canvas,
+                    &window,
                     current_width,
                     current_height,
                     &mut bar,
@@ -533,6 +548,7 @@ fn main() -> Result<()> {
                         redraw(
                             &mut gpu,
                             &mut canvas,
+                            &window,
                             current_width,
                             current_height,
                             &mut bar,
@@ -549,6 +565,7 @@ fn main() -> Result<()> {
                             redraw(
                                 &mut gpu,
                                 &mut canvas,
+                                &window,
                                 current_width,
                                 current_height,
                                 &mut bar,
@@ -566,6 +583,7 @@ fn main() -> Result<()> {
                             redraw(
                                 &mut gpu,
                                 &mut canvas,
+                                &window,
                                 current_width,
                                 current_height,
                                 &mut bar,
