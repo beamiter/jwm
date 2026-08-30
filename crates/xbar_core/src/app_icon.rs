@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Icon file resolved for one application identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -210,7 +210,10 @@ impl AppIconResolver {
     /// icon to show.
     pub fn resolve(&mut self, app_id: &str) -> Option<&AppIcon> {
         let app_id = app_id.trim();
-        if app_id.is_empty() {
+        // A compositor identity names an application, never a filesystem
+        // path. Reject separators and `..` before it is joined beneath an
+        // applications or icon root.
+        if !is_single_path_component(app_id) {
             return None;
         }
         if !self.cache.contains_key(app_id) {
@@ -277,12 +280,16 @@ impl AppIconResolver {
         if candidate.is_absolute() {
             return is_supported_raster(candidate).then(|| AppIcon::new(candidate.to_path_buf()));
         }
+        if !is_single_path_component(icon) {
+            return None;
+        }
 
         let themes = self
             .paths
             .preferred_themes
             .iter()
             .map(String::as_str)
+            .filter(|theme| is_single_path_component(theme))
             .chain(["hicolor"]);
         for theme in themes {
             for root in &self.paths.themes {
@@ -390,6 +397,17 @@ fn is_supported_raster(path: &Path) -> bool {
                 .any(|supported| extension.eq_ignore_ascii_case(supported))
         })
         && path.is_file()
+}
+
+/// True when `value` can be appended beneath a search root without changing
+/// directories. App ids, relative icon names and theme names are identifiers,
+/// not relative paths.
+fn is_single_path_component(value: &str) -> bool {
+    let mut components = Path::new(value).components();
+    matches!(
+        components.next(),
+        Some(Component::Normal(component)) if component == OsStr::new(value)
+    ) && components.next().is_none()
 }
 
 /// Desktop-entry file names an application identity may be filed under.
@@ -624,6 +642,31 @@ Icon=vscode-new-window
         );
         assert_eq!(resolver.resolve(""), None);
         assert_eq!(resolver.resolve("   "), None);
+    }
+
+    #[test]
+    fn application_id_cannot_escape_the_applications_directory() {
+        let tree = Tree::new("identity_traversal");
+        tree.file("escape.desktop", "[Desktop Entry]\nIcon=escaped\n");
+        tree.file("pixmaps/escaped.png", "icon");
+
+        let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
+        assert_eq!(resolver.resolve("../escape"), None);
+        assert_eq!(resolver.resolve("subdir/escape"), None);
+        assert_eq!(resolver.resolve("escape/"), None);
+    }
+
+    #[test]
+    fn relative_icon_name_cannot_escape_an_icon_root() {
+        let tree = Tree::new("icon_traversal");
+        tree.file(
+            "applications/unsafe.desktop",
+            "[Desktop Entry]\nIcon=../outside\n",
+        );
+        tree.file("outside.png", "icon");
+
+        let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
+        assert_eq!(resolver.resolve("unsafe"), None);
     }
 
     #[test]
