@@ -6,7 +6,7 @@
 //! this module opens a window, touches ALSA/sysfs, starts a process, or writes
 //! to shared memory.
 
-use std::{collections::HashSet, fmt};
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -267,6 +267,7 @@ pub const MINIMIZED_WINDOW_FLAG_PREVIEW_AVAILABLE: u32 = 1 << 0;
 pub const MINIMIZED_WINDOW_FLAG_URGENT: u32 = 1 << 1;
 /// Protocol-aligned upper bound retained even without the shared feature.
 pub const MAX_MODEL_MINIMIZED_WINDOWS: usize = 16;
+const MAX_WM_MINIMIZED_INPUTS: usize = MAX_MODEL_MINIMIZED_WINDOWS * 16;
 
 /// One window currently collected by the bar's minimized-window shelf.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1245,6 +1246,40 @@ impl BarSnapshot {
     }
 }
 
+fn normalize_wm_tags(tags: Vec<TagState>, tag_count: usize) -> Vec<TagState> {
+    let mut normalized = Vec::with_capacity(tag_count);
+    normalized.extend(tags.into_iter().take(tag_count));
+    normalized.resize(tag_count, TagState::default());
+    normalized
+}
+
+fn normalize_minimized_windows(
+    windows: Vec<MinimizedWindow>,
+    upstream_overflow: bool,
+) -> (Vec<MinimizedWindow>, bool) {
+    let mut normalized = Vec::with_capacity(windows.len().min(MAX_MODEL_MINIMIZED_WINDOWS));
+    let mut overflow = upstream_overflow;
+    for (input_index, window) in windows.into_iter().enumerate() {
+        if input_index == MAX_WM_MINIMIZED_INPUTS {
+            overflow = true;
+            break;
+        }
+        if window.token.get() == 0
+            || normalized
+                .iter()
+                .any(|kept: &MinimizedWindow| kept.token == window.token)
+        {
+            continue;
+        }
+        if normalized.len() == MAX_MODEL_MINIMIZED_WINDOWS {
+            overflow = true;
+            break;
+        }
+        normalized.push(window);
+    }
+    (normalized, overflow)
+}
+
 /// Canonical backend-independent model. All fields are private so invariants
 /// remain stable as additional frontends adopt it.
 #[derive(Debug, Clone)]
@@ -1428,20 +1463,9 @@ impl BarModel {
     }
 
     fn update_wm(&mut self, mut snapshot: WmSnapshot) -> ModelUpdate {
-        snapshot
-            .tags
-            .resize(self.config.tag_count, TagState::default());
-        snapshot.tags.truncate(self.config.tag_count);
-        let mut seen_windows = HashSet::new();
-        snapshot
-            .minimized_windows
-            .retain(|window| window.token.get() != 0 && seen_windows.insert(window.token));
-        if snapshot.minimized_windows.len() > MAX_MODEL_MINIMIZED_WINDOWS {
-            snapshot
-                .minimized_windows
-                .truncate(MAX_MODEL_MINIMIZED_WINDOWS);
-            snapshot.minimized_overflow = true;
-        }
+        snapshot.tags = normalize_wm_tags(snapshot.tags, self.config.tag_count);
+        (snapshot.minimized_windows, snapshot.minimized_overflow) =
+            normalize_minimized_windows(snapshot.minimized_windows, snapshot.minimized_overflow);
 
         let mut dirty = DirtyBits::default();
         let next_active = snapshot
@@ -2177,6 +2201,24 @@ mod tests {
             MAX_MODEL_MINIMIZED_WINDOWS
         );
         assert!(model.view().minimized_overflow);
+    }
+
+    #[test]
+    fn wm_snapshot_normalization_bounds_unreachable_input() {
+        let tags = vec![TagState::default(); MAX_MODEL_TAGS * 8];
+        assert_eq!(normalize_wm_tags(tags, 3).len(), 3);
+
+        let duplicates = (0..=MAX_WM_MINIMIZED_INPUTS)
+            .map(|index| MinimizedWindow {
+                token: WindowToken(1),
+                title: format!("duplicate-{index}"),
+                ..MinimizedWindow::default()
+            })
+            .collect();
+        let (windows, overflow) = normalize_minimized_windows(duplicates, false);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].title, "duplicate-0");
+        assert!(overflow, "unexamined input must be reported as truncated");
     }
 
     #[test]
