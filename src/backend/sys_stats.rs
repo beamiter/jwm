@@ -7,10 +7,49 @@
 //! Sampling is throttled (>= 250 ms between reads) to keep per-frame overhead
 //! negligible. Errors keep the previous values rather than panicking.
 
-use std::fs;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read};
 use std::time::{Duration, Instant};
 
 const MIN_SAMPLE_INTERVAL_MS: u64 = 250;
+const MAX_PROC_STATUS_BYTES: u64 = 256 * 1024;
+const MAX_PROC_STAT_LINE_BYTES: u64 = 64 * 1024;
+
+fn read_utf8_bounded(input: impl Read, max_bytes: u64) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096) as usize);
+    input
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proc input exceeds its byte limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_utf8_line_bounded(input: impl BufRead, max_bytes: u64) -> io::Result<String> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096) as usize);
+    input
+        .take(max_bytes.saturating_add(1))
+        .read_until(b'\n', &mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proc line exceeds its byte limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn read_proc_text(path: &str, max_bytes: u64) -> io::Result<String> {
+    read_utf8_bounded(File::open(path)?, max_bytes)
+}
+
+fn read_proc_first_line(path: &str, max_bytes: u64) -> io::Result<String> {
+    read_utf8_line_bounded(BufReader::new(File::open(path)?), max_bytes)
+}
 
 pub struct SysStatsSampler {
     last_sample_at: Option<Instant>,
@@ -44,16 +83,16 @@ impl SysStatsSampler {
         }
         self.last_sample_at = Some(now);
 
-        if let Ok(status) = fs::read_to_string("/proc/self/status") {
+        if let Ok(status) = read_proc_text("/proc/self/status", MAX_PROC_STATUS_BYTES) {
             if let Some(kib) = parse_vmrss_kib(&status) {
                 self.rss_mib = kib as f32 / 1024.0;
             }
         }
 
-        let proc_j = fs::read_to_string("/proc/self/stat")
+        let proc_j = read_proc_first_line("/proc/self/stat", MAX_PROC_STAT_LINE_BYTES)
             .ok()
             .and_then(|s| parse_self_stat_jiffies(&s));
-        let total_j = fs::read_to_string("/proc/stat")
+        let total_j = read_proc_first_line("/proc/stat", MAX_PROC_STAT_LINE_BYTES)
             .ok()
             .and_then(|s| parse_proc_stat_cpu_total(&s));
 
@@ -107,12 +146,12 @@ pub(crate) fn parse_vmrss_kib(status: &str) -> Option<u64> {
 pub(crate) fn parse_self_stat_jiffies(stat: &str) -> Option<u64> {
     let close = stat.rfind(')')?;
     let after = &stat[close + 1..];
-    let fields: Vec<&str> = after.split_whitespace().collect();
+    let mut fields = after.split_whitespace();
     // After the `)`, the next field is index 3 (state). utime = field 14,
     // stime = field 15. Offsets into `fields`: 14 - 3 = 11, 15 - 3 = 12.
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-    Some(utime + stime)
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+    utime.checked_add(stime)
 }
 
 /// Sum the first jiffy-bucket line of `/proc/stat` (the aggregate `cpu` line).
@@ -120,9 +159,7 @@ pub(crate) fn parse_proc_stat_cpu_total(stat: &str) -> Option<u64> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
     let mut total: u64 = 0;
     for tok in line.split_whitespace().skip(1) {
-        if let Ok(v) = tok.parse::<u64>() {
-            total = total.saturating_add(v);
-        }
+        total = total.saturating_add(tok.parse::<u64>().ok()?);
     }
     if total == 0 { None } else { Some(total) }
 }
@@ -135,6 +172,38 @@ fn num_cpus_online() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proc_readers_enforce_exact_byte_limits_and_stop_after_the_first_line() {
+        assert_eq!(
+            read_utf8_bounded(std::io::Cursor::new(b"abcd"), 4).unwrap(),
+            "abcd"
+        );
+        assert_eq!(
+            read_utf8_bounded(std::io::Cursor::new(b"abcde"), 4)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            read_utf8_bounded(std::io::Cursor::new([0xff]), 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        assert_eq!(
+            read_utf8_line_bounded(std::io::Cursor::new(b"cpu 1 2\nignored trailing data"), 8)
+                .unwrap(),
+            "cpu 1 2\n"
+        );
+        assert_eq!(
+            read_utf8_line_bounded(std::io::Cursor::new(b"123456789"), 8)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
 
     #[test]
     fn vmrss_extracted_from_status() {
@@ -162,6 +231,12 @@ VmData:\t  100000 kB
     }
 
     #[test]
+    fn self_stat_jiffies_rejects_an_overflowing_sum() {
+        let stat = format!("1 (jwm) R 0 0 0 0 0 0 0 0 0 0 {} 1", u64::MAX);
+        assert_eq!(parse_self_stat_jiffies(&stat), None);
+    }
+
+    #[test]
     fn proc_stat_cpu_total_sums_buckets() {
         let sample = "\
 cpu  100 20 30 5000 10 0 5 0 0 0
@@ -175,6 +250,7 @@ intr 99999
     #[test]
     fn proc_stat_cpu_total_missing_returns_none() {
         assert_eq!(parse_proc_stat_cpu_total("intr 0\nctxt 0\n"), None);
+        assert_eq!(parse_proc_stat_cpu_total("cpu 1 malformed 2\n"), None);
     }
 
     #[test]
