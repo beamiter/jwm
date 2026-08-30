@@ -522,8 +522,6 @@ fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLega
 
 /// Atomically publishes a fully initialized mapping without exposing a partially written flink.
 fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
-    use std::fs::OpenOptions;
-
     let parent = target
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -540,18 +538,28 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
         nonce
     ));
 
+    publish_flink_with_staging(target, &temporary, os_id)
+}
+
+fn publish_flink_with_staging(target: &Path, temporary: &Path, os_id: &str) -> Result<PathBuf> {
+    use std::fs::OpenOptions;
+
+    // A create collision means this pathname belongs to someone else. Return
+    // before entering our cleanup scope so rollback never deletes a staging
+    // file that this invocation did not create.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temporary)
+        .map_err(|error| {
+            Error::new(
+                error.kind(),
+                format!("failed to create flink staging file: {error}"),
+            )
+        })?;
+
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)
-            .map_err(|error| {
-                Error::new(
-                    error.kind(),
-                    format!("failed to create flink staging file: {error}"),
-                )
-            })?;
         // `mode(0o600)` is filtered through the process umask. Normalize the
         // already-open inode explicitly so even a restrictive umask cannot
         // publish an unreadable flink. No pathname is public at this point.
@@ -577,7 +585,7 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
 
         // A hard link is atomic and does not replace an existing target. Because the source is
         // in the same directory, readers can only observe a complete os_id.
-        std::fs::hard_link(&temporary, target).map_err(|error| {
+        std::fs::hard_link(temporary, target).map_err(|error| {
             Error::new(
                 error.kind(),
                 format!("failed to publish shared-memory flink: {error}"),
@@ -586,7 +594,8 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
         Ok(target.to_path_buf())
     })();
 
-    let _ = std::fs::remove_file(&temporary);
+    drop(file);
+    let _ = std::fs::remove_file(temporary);
     result
 }
 
@@ -2044,6 +2053,23 @@ mod tests {
             child_removed_fifo,
             "FIFO child test did not execute the open path"
         );
+    }
+
+    #[test]
+    fn publish_flink_does_not_remove_a_colliding_staging_file() {
+        let directory = PathBuf::from(mk_path("staging_collision"));
+        std::fs::create_dir(&directory).unwrap();
+        let target = directory.join("flink");
+        let staging = directory.join("staging.tmp");
+        std::fs::write(&staging, b"preexisting").unwrap();
+
+        let error = publish_flink_with_staging(&target, &staging, "/mapping-id").unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&staging).unwrap(), b"preexisting");
+        assert!(!target.exists());
+
+        std::fs::remove_file(staging).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
