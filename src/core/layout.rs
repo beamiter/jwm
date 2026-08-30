@@ -46,8 +46,13 @@ fn usable_area(screen_area: Rect, gap: i32) -> Rect {
 }
 
 fn client_rect(x: i32, y: i32, w: i32, h: i32, border_w: i32) -> Rect {
-    let border2 = 2 * border_w.max(0);
-    Rect::new(x, y, (w - border2).max(1), (h - border2).max(1))
+    let border2 = border_w.max(0).saturating_mul(2);
+    Rect::new(
+        x,
+        y,
+        w.saturating_sub(border2).max(1),
+        h.saturating_sub(border2).max(1),
+    )
 }
 
 fn choose_grid_dimensions(n: usize, area: Rect) -> (i32, i32) {
@@ -1985,6 +1990,20 @@ mod tests {
                 assert!(res.rect.w > 0 && res.rect.h > 0);
             }
         }
+    }
+
+    #[test]
+    fn extreme_client_borders_collapse_safely_to_one_pixel() {
+        let p = params(1920, 1080);
+        let clients = [LayoutClient {
+            key: 1,
+            factor: 1.0,
+            border_w: i32::MAX,
+        }];
+
+        let result = calculate_monocle(&p, &clients);
+
+        assert_eq!(result[0].rect, Rect::new(0, 0, 1, 1));
     }
 
     // -----------------------------------------------------------------------
