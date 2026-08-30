@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Read as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +19,23 @@ use std::time::{Duration, Instant};
 /// reuse the last complete catalog; once it expires, the old catalog remains
 /// visible while a worker builds its replacement.
 pub(crate) const APPLICATION_CATALOG_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_APPLICATION_ROOTS: usize = 64;
+const MAX_APPLICATION_DIRECTORIES: usize = 512;
+const MAX_APPLICATION_DIRECTORY_ENTRIES: usize = 8192;
+const MAX_DESKTOP_FILES: usize = 4096;
+const MAX_DESKTOP_FILE_BYTES: u64 = 256 * 1024;
+const MAX_DESKTOP_TOTAL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DISCOVERED_APPLICATIONS: usize = 4096;
+const MAX_PATH_DIRECTORIES: usize = 256;
+const MAX_PATH_ENTRIES: usize = 8192;
+
+#[derive(Default)]
+struct ApplicationScanBudget {
+    directories: usize,
+    directory_entries: usize,
+    desktop_files: usize,
+    desktop_bytes: u64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LaunchEntry {
@@ -3057,18 +3076,28 @@ fn discover_applications() -> Vec<LaunchEntry> {
     roots.extend(
         data_dirs
             .split(':')
+            .take(MAX_APPLICATION_ROOTS.saturating_sub(roots.len()))
             .map(|p| Path::new(p).join("applications")),
     );
+    let mut scan_budget = ApplicationScanBudget::default();
     for root in roots {
-        scan_desktop_dir(&root, &mut entries, &mut seen);
+        scan_desktop_dir(&root, &mut entries, &mut seen, &mut scan_budget);
+        if entries.len() >= MAX_DISCOVERED_APPLICATIONS {
+            break;
+        }
     }
 
     if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
+        let mut examined = 0_usize;
+        'path_directories: for dir in std::env::split_paths(&path).take(MAX_PATH_DIRECTORIES) {
             let Ok(items) = fs::read_dir(dir) else {
                 continue;
             };
             for item in items.flatten() {
+                if examined >= MAX_PATH_ENTRIES || entries.len() >= MAX_DISCOVERED_APPLICATIONS {
+                    break 'path_directories;
+                }
+                examined += 1;
                 let name = item.file_name().to_string_lossy().into_owned();
                 if name.starts_with('.') || !seen.insert(name.clone()) {
                     continue;
@@ -3097,61 +3126,124 @@ fn discover_applications() -> Vec<LaunchEntry> {
     entries
 }
 
-fn scan_desktop_dir(root: &Path, entries: &mut Vec<LaunchEntry>, seen: &mut HashSet<String>) {
-    let Ok(items) = fs::read_dir(root) else {
-        return;
-    };
-    for item in items.flatten() {
-        let path = item.path();
-        if path.is_dir() {
-            scan_desktop_dir(&path, entries, seen);
-            continue;
+fn scan_desktop_dir(
+    root: &Path,
+    entries: &mut Vec<LaunchEntry>,
+    seen: &mut HashSet<String>,
+    budget: &mut ApplicationScanBudget,
+) {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if budget.directories >= MAX_APPLICATION_DIRECTORIES
+            || entries.len() >= MAX_DISCOVERED_APPLICATIONS
+        {
+            return;
         }
-        if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
-            continue;
-        }
-        let Ok(body) = fs::read_to_string(path) else {
+        budget.directories += 1;
+        let Ok(items) = fs::read_dir(directory) else {
             continue;
         };
-        let mut in_entry = false;
-        let mut name = None;
-        let mut exec = None;
-        let mut hidden = false;
-        let mut terminal = false;
-        for line in body.lines() {
-            if line.starts_with('[') {
-                in_entry = line == "[Desktop Entry]";
+        for item in items.flatten() {
+            if entries.len() >= MAX_DISCOVERED_APPLICATIONS
+                || budget.directory_entries >= MAX_APPLICATION_DIRECTORY_ENTRIES
+                || budget.desktop_files >= MAX_DESKTOP_FILES
+                || budget.desktop_bytes >= MAX_DESKTOP_TOTAL_BYTES
+            {
+                return;
+            }
+            budget.directory_entries += 1;
+            let Ok(file_type) = item.file_type() else {
+                continue;
+            };
+            let path = item.path();
+            if file_type.is_dir() {
+                if budget.directories.saturating_add(pending.len()) < MAX_APPLICATION_DIRECTORIES {
+                    pending.push(path);
+                }
                 continue;
             }
-            if !in_entry {
+            // Directory symlinks are deliberately not followed: otherwise a
+            // single `loop -> .` entry recurses until the worker overflows its
+            // stack. Symlinks whose own name ends in `.desktop` are still
+            // accepted when their opened target is a bounded regular file.
+            if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
                 continue;
             }
-            if let Some(v) = line.strip_prefix("Name=") {
-                name.get_or_insert_with(|| v.to_string());
+            let Some(body) = read_desktop_file(&path, budget) else {
+                continue;
+            };
+            let mut in_entry = false;
+            let mut name = None;
+            let mut exec = None;
+            let mut hidden = false;
+            let mut terminal = false;
+            for line in body.lines() {
+                if line.starts_with('[') {
+                    in_entry = line == "[Desktop Entry]";
+                    continue;
+                }
+                if !in_entry {
+                    continue;
+                }
+                if let Some(v) = line.strip_prefix("Name=") {
+                    name.get_or_insert_with(|| v.to_string());
+                }
+                if let Some(v) = line.strip_prefix("Exec=") {
+                    exec = Some(v.to_string());
+                }
+                if matches!(line, "Hidden=true" | "NoDisplay=true") {
+                    hidden = true;
+                }
+                if line == "Terminal=true" {
+                    terminal = true;
+                }
             }
-            if let Some(v) = line.strip_prefix("Exec=") {
-                exec = Some(v.to_string());
+            let (Some(name), Some(exec)) = (name, exec) else {
+                continue;
+            };
+            if hidden || !seen.insert(name.clone()) {
+                continue;
             }
-            if matches!(line, "Hidden=true" | "NoDisplay=true") {
-                hidden = true;
+            let command = parse_exec(&exec);
+            if command.is_empty() {
+                continue;
             }
-            if line == "Terminal=true" {
-                terminal = true;
-            }
+            let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
+            entries.push(LaunchEntry::new(name, command, terminal, search));
         }
-        let (Some(name), Some(exec)) = (name, exec) else {
-            continue;
-        };
-        if hidden || !seen.insert(name.clone()) {
-            continue;
-        }
-        let command = parse_exec(&exec);
-        if command.is_empty() {
-            continue;
-        }
-        let search = format!("{} {}", name.to_lowercase(), exec.to_lowercase());
-        entries.push(LaunchEntry::new(name, command, terminal, search));
     }
+}
+
+fn read_desktop_file(path: &Path, budget: &mut ApplicationScanBudget) -> Option<String> {
+    if budget.desktop_files >= MAX_DESKTOP_FILES || budget.desktop_bytes >= MAX_DESKTOP_TOTAL_BYTES
+    {
+        return None;
+    }
+    budget.desktop_files += 1;
+    let remaining = MAX_DESKTOP_TOTAL_BYTES.saturating_sub(budget.desktop_bytes);
+    let limit = remaining.min(MAX_DESKTOP_FILE_BYTES);
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return None;
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.is_file() || opened_metadata.len() > limit {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(opened_metadata.len() as usize);
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > limit {
+        return None;
+    }
+    budget.desktop_bytes = budget.desktop_bytes.saturating_add(bytes.len() as u64);
+    String::from_utf8(bytes).ok()
 }
 
 fn parse_exec(exec: &str) -> Vec<String> {
@@ -4160,6 +4252,59 @@ mod tests {
             parse_exec("foo --name 'two words' %U"),
             ["foo", "--name", "two words"]
         );
+    }
+
+    #[test]
+    fn desktop_scan_skips_symlink_loops_and_oversized_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-desktop-scan-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("valid.desktop"),
+            "[Desktop Entry]\nName=Bounded App\nExec=bounded-app --safe\n",
+        )
+        .unwrap();
+        std::fs::File::create(root.join("oversized.desktop"))
+            .unwrap()
+            .set_len(MAX_DESKTOP_FILE_BYTES + 1)
+            .unwrap();
+        std::os::unix::fs::symlink(&root, nested.join("loop")).unwrap();
+
+        let mut entries = Vec::new();
+        let mut seen = HashSet::new();
+        let mut budget = ApplicationScanBudget::default();
+        scan_desktop_dir(&root, &mut entries, &mut seen, &mut budget);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Bounded App");
+        assert_eq!(entries[0].command, ["bounded-app", "--safe"]);
+        assert_eq!(budget.directories, 2);
+        assert_eq!(budget.directory_entries, 4);
+        assert_eq!(budget.desktop_files, 2);
+        assert!(budget.desktop_bytes < MAX_DESKTOP_FILE_BYTES);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_desktop_bytes_still_consume_the_global_read_budget() {
+        let path = std::env::temp_dir().join(format!(
+            "jwm-invalid-desktop-{}-{:016x}.desktop",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::write(&path, [0xff; 8]).unwrap();
+        let mut budget = ApplicationScanBudget::default();
+
+        assert!(read_desktop_file(&path, &mut budget).is_none());
+        assert_eq!(budget.desktop_files, 1);
+        assert_eq!(budget.desktop_bytes, 8);
+
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
