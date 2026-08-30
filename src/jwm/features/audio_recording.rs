@@ -15,7 +15,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 #[cfg(feature = "media-audio")]
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "media-audio")]
@@ -73,6 +73,8 @@ fn output_format(path: &Path) -> Result<&str, String> {
 
 #[cfg(feature = "media-audio")]
 const MAX_FFMPEG_LOG_DETAIL_BYTES: usize = 64 * 1024;
+#[cfg(feature = "media-audio")]
+const FFMPEG_STOP_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(feature = "media-audio")]
 struct FfmpegLog {
@@ -151,6 +153,34 @@ fn read_ffmpeg_log_tail_with_limit(path: &Path, limit: usize) -> String {
     } else {
         detail
     }
+}
+
+#[cfg(feature = "media-audio")]
+fn wait_for_child_with_grace(child: &mut Child, grace: Duration) -> std::io::Result<ExitStatus> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        thread::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20)),
+        );
+    }
+
+    // The child may exit between the final try_wait and kill. InvalidInput in
+    // that race still permits wait() to reap the already-finished process.
+    if let Err(error) = child.kill()
+        && error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        return Err(error);
+    }
+    child.wait()
 }
 
 /// Runtime state for the built-in audio recorder.
@@ -423,11 +453,12 @@ fn capture_with_ffmpeg(
 
     loop {
         if stop.load(Ordering::Acquire) {
-            if let Some(stdin) = child.stdin.as_mut() {
+            if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(b"q\n");
                 let _ = stdin.flush();
             }
-            let status = child.wait().map_err(|error| error.to_string())?;
+            let status = wait_for_child_with_grace(&mut child, FFMPEG_STOP_GRACE)
+                .map_err(|error| error.to_string())?;
             return if status.success() {
                 Ok(())
             } else {
@@ -620,6 +651,24 @@ mod tests {
         drop(file);
         drop(log);
         assert!(!path.exists());
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn child_wait_has_a_hard_grace_deadline() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exec sleep 10"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        let status = wait_for_child_with_grace(&mut child, Duration::from_millis(20)).unwrap();
+
+        assert!(!status.success());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
