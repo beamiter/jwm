@@ -78,6 +78,7 @@ const MAX_RASTER_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ICON_SEARCH_ROOTS: usize = 64;
 const MAX_PREFERRED_THEMES: usize = 16;
 const MAX_THEME_SIZE_DIRECTORIES: usize = 256;
+const MAX_ICON_COMPONENT_BYTES: usize = 255;
 
 /// The shared WM protocol stores an application identity in 64 bytes including
 /// its trailing NUL. Keep direct users of the resolver to that same finite key
@@ -145,21 +146,29 @@ impl IconSearchPaths {
                 |value| {
                     std::env::split_paths(&value)
                         .filter(|path| path.is_absolute())
+                        .take(MAX_ICON_SEARCH_ROOTS)
                         .collect()
                 },
             );
 
-        let roots: Vec<PathBuf> = data_home.iter().cloned().chain(data_dirs).collect();
+        let roots: Vec<PathBuf> = data_home
+            .iter()
+            .cloned()
+            .chain(data_dirs)
+            .take(MAX_ICON_SEARCH_ROOTS)
+            .collect();
         Self {
             applications: roots.iter().map(|root| root.join("applications")).collect(),
             themes: home
                 .iter()
                 .map(|home| home.join(".icons"))
                 .chain(roots.iter().map(|root| root.join("icons")))
+                .take(MAX_ICON_SEARCH_ROOTS)
                 .collect(),
             flat: roots.iter().map(|root| root.join("pixmaps")).collect(),
             preferred_themes: preferred_themes_from_environment(),
         }
+        .bounded()
     }
 
     /// Build search paths explicitly, which is what tests and hosts with their
@@ -177,6 +186,18 @@ impl IconSearchPaths {
             flat,
             preferred_themes,
         }
+        .bounded()
+    }
+
+    fn bounded(mut self) -> Self {
+        self.applications.truncate(MAX_ICON_SEARCH_ROOTS);
+        self.themes.truncate(MAX_ICON_SEARCH_ROOTS);
+        self.flat.truncate(MAX_ICON_SEARCH_ROOTS);
+        self.preferred_themes.retain(|theme| {
+            theme.len() <= MAX_ICON_COMPONENT_BYTES && is_single_path_component(theme)
+        });
+        self.preferred_themes.truncate(MAX_PREFERRED_THEMES);
+        self
     }
 }
 
@@ -185,16 +206,17 @@ impl IconSearchPaths {
 fn preferred_themes_from_environment() -> Vec<String> {
     std::env::var("XBAR_ICON_THEME")
         .ok()
-        .into_iter()
-        .flat_map(|value| {
+        .map_or_else(Vec::new, |value| {
             value
                 .split(':')
                 .map(str::trim)
                 .filter(|theme| !theme.is_empty())
+                .filter(|theme| theme.len() <= MAX_ICON_COMPONENT_BYTES)
+                .filter(|theme| is_single_path_component(theme))
+                .take(MAX_PREFERRED_THEMES)
                 .map(str::to_owned)
-                .collect::<Vec<_>>()
+                .collect()
         })
-        .collect()
 }
 
 /// Cached application-identity → icon-file lookup.
@@ -229,7 +251,7 @@ impl AppIconResolver {
     #[must_use]
     pub fn with_paths(paths: IconSearchPaths, preferred_size: u32) -> Self {
         Self {
-            paths,
+            paths: paths.bounded(),
             preferred_size: preferred_size.max(1),
             cache: HashMap::new(),
             cache_recency: VecDeque::new(),
@@ -362,7 +384,7 @@ impl AppIconResolver {
         if candidate.is_absolute() {
             return is_supported_raster(candidate).then(|| AppIcon::new(candidate.to_path_buf()));
         }
-        if !is_single_path_component(icon) {
+        if icon.len() > MAX_ICON_COMPONENT_BYTES || !is_single_path_component(icon) {
             return None;
         }
 
@@ -879,10 +901,44 @@ Icon=vscode-new-window
             vec![tree.0.join("pixmaps")],
             Vec::new(),
         );
+        assert_eq!(paths.applications.len(), MAX_ICON_SEARCH_ROOTS);
 
         let mut resolver = AppIconResolver::with_paths(paths, 24);
         assert_eq!(resolver.resolve("bounded"), None);
         assert!(wanted.is_file(), "the ignored entry's icon must exist");
+    }
+
+    #[test]
+    fn search_collections_are_bounded_before_the_resolver_retains_them() {
+        let roots = |kind: &str| {
+            (0..MAX_ICON_SEARCH_ROOTS + 8)
+                .map(|index| PathBuf::from(format!("/{kind}-{index}")))
+                .collect::<Vec<_>>()
+        };
+        let paths = IconSearchPaths {
+            applications: roots("applications"),
+            themes: roots("themes"),
+            flat: roots("flat"),
+            preferred_themes: (0..MAX_PREFERRED_THEMES + 8)
+                .map(|index| format!("theme-{index}"))
+                .chain(std::iter::once("x".repeat(MAX_ICON_COMPONENT_BYTES + 1)))
+                .collect(),
+        };
+
+        let resolver = AppIconResolver::with_paths(paths, 24);
+
+        assert_eq!(resolver.paths.applications.len(), MAX_ICON_SEARCH_ROOTS);
+        assert_eq!(resolver.paths.themes.len(), MAX_ICON_SEARCH_ROOTS);
+        assert_eq!(resolver.paths.flat.len(), MAX_ICON_SEARCH_ROOTS);
+        assert_eq!(resolver.paths.preferred_themes.len(), MAX_PREFERRED_THEMES);
+        assert_eq!(
+            resolver.paths.preferred_themes.last().map(String::as_str),
+            Some("theme-15")
+        );
+        assert_eq!(
+            resolver.icon_file(&"x".repeat(MAX_ICON_COMPONENT_BYTES + 1)),
+            None
+        );
     }
 
     #[test]
