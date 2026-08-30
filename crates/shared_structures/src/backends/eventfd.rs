@@ -16,7 +16,7 @@ use std::io::{Error, ErrorKind, Result};
 use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -225,11 +225,150 @@ impl EventFdBackend {
                     ));
                 }
             }
-            let buf = &(*header).sock_path;
-            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-            let s = std::str::from_utf8(&buf[..len])
-                .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-            Ok(PathBuf::from(s))
+            Self::decode_header_sock_path(header)
+        }
+    }
+
+    unsafe fn decode_header_sock_path(header: *mut EventFdHeader) -> Result<PathBuf> {
+        // SAFETY: callers provide a live, fully initialized EventFdHeader.
+        let buf = unsafe { &(*header).sock_path };
+        let len = buf.iter().position(|&byte| byte == 0).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "eventfd socket path is not NUL-terminated",
+            )
+        })?;
+        if len == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "eventfd socket path is empty",
+            ));
+        }
+        let path = PathBuf::from(
+            std::str::from_utf8(&buf[..len])
+                .map_err(|error| Error::new(ErrorKind::InvalidData, error))?,
+        );
+        if !path.is_absolute() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "eventfd socket path is not absolute",
+            ));
+        }
+        Ok(path)
+    }
+
+    /// Best-effort removal of the filesystem socket left by an abruptly
+    /// exited creator.
+    ///
+    /// The path comes from shared memory, so validate the exact directory
+    /// shape, ownership, modes, and socket file type before deleting anything.
+    ///
+    /// # Safety
+    ///
+    /// `backend_ptr` must address a fully initialized `EventFdHeader` that
+    /// remains mapped for the duration of this call.
+    pub(crate) unsafe fn cleanup_stale_socket(
+        backend_ptr: *mut u8,
+        creator_pid: u32,
+    ) -> Result<()> {
+        if backend_ptr.is_null() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "eventfd backend pointer is null",
+            ));
+        }
+        let header = backend_ptr.cast::<EventFdHeader>();
+        // SAFETY: guaranteed by the caller contract above.
+        let ready = unsafe { (*header).is_ready.load(Ordering::Acquire) };
+        if !matches!(ready, READY_LISTENING | READY_CLOSED) {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stale eventfd backend has no published socket",
+            ));
+        }
+        // SAFETY: guaranteed by the caller contract above.
+        let socket_path = unsafe { Self::decode_header_sock_path(header)? };
+        if socket_path.file_name().and_then(|name| name.to_str()) != Some("fd.sock") {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stale eventfd socket has an unexpected filename",
+            ));
+        }
+        let socket_dir = socket_path.parent().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidData,
+                "stale eventfd socket has no parent directory",
+            )
+        })?;
+        let directory_name = socket_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "stale eventfd socket directory has an invalid name",
+                )
+            })?;
+        let suffix = directory_name
+            .strip_prefix(&format!("srb-{creator_pid}-"))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "stale eventfd socket directory does not match its creator",
+                )
+            })?;
+        let mut components = suffix.split('-');
+        let timestamp_is_valid = components
+            .next()
+            .is_some_and(|value| value.parse::<u128>().is_ok());
+        let nonce_is_valid = components
+            .next()
+            .is_some_and(|value| value.parse::<u64>().is_ok());
+        if !timestamp_is_valid || !nonce_is_valid || components.next().is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stale eventfd socket directory has an invalid generated name",
+            ));
+        }
+
+        let effective_uid = unsafe { libc::geteuid() };
+        let directory_metadata = match std::fs::symlink_metadata(socket_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if !directory_metadata.is_dir()
+            || directory_metadata.uid() != effective_uid
+            || directory_metadata.mode() & 0o777 != 0o700
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "stale eventfd socket directory failed ownership or mode validation",
+            ));
+        }
+
+        match std::fs::symlink_metadata(&socket_path) {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && metadata.uid() == effective_uid
+                    && metadata.mode() & 0o777 == 0o600 =>
+            {
+                std::fs::remove_file(&socket_path)?;
+            }
+            Ok(_) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "stale eventfd socket failed type, ownership, or mode validation",
+                ));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+
+        match std::fs::remove_dir(socket_dir) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -245,7 +384,7 @@ impl EventFdBackend {
         let base = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .filter(|base| base.is_absolute() && base.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
         let pid = std::process::id();
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

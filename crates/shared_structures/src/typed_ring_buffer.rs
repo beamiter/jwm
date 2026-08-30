@@ -528,6 +528,8 @@ struct ReclaimableCurrentMapping {
     shmem: Shmem,
     flink_path: PathBuf,
     creator_pid: u32,
+    #[cfg(feature = "eventfd")]
+    backend_offset: usize,
 }
 
 /// Open just enough of a known legacy mapping to decide whether its creator
@@ -641,6 +643,8 @@ fn probe_reclaimable_current_mapping<M: WireSafe, C: WireSafe>(
         shmem,
         flink_path,
         creator_pid,
+        #[cfg(feature = "eventfd")]
+        backend_offset: layout.backend_offset,
     }))
 }
 
@@ -1456,6 +1460,24 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         stale.creator_pid
                     );
                     prepare_stale_mapping_reclaim(&mut stale.shmem, &stale.flink_path)?;
+                    #[cfg(feature = "eventfd")]
+                    if options.strategy == SyncStrategy::EventFd {
+                        // SAFETY: the conservative current-mapping probe
+                        // verified the complete layout and backend id, and the
+                        // mapping remains alive in `stale` for this call.
+                        let backend_ptr = unsafe { stale.shmem.as_ptr().add(stale.backend_offset) };
+                        if let Err(cleanup_error) = unsafe {
+                            crate::backends::eventfd::EventFdBackend::cleanup_stale_socket(
+                                backend_ptr,
+                                stale.creator_pid,
+                            )
+                        } {
+                            warn!(
+                                "failed to remove stale eventfd socket while reclaiming {path}: \
+                                 {cleanup_error}"
+                            );
+                        }
+                    }
                     drop(stale);
                     if let Some(buffer) = create(&mut may_create)? {
                         return Ok(buffer);
@@ -3026,7 +3048,15 @@ mod tests {
         assert!(replacement.is_creator());
         assert_eq!(replacement.creator_pid(), std::process::id());
         drop(replacement);
+        let socket_residue: Vec<_> = std::fs::read_dir(&runtime_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
         std::fs::remove_dir_all(runtime_dir).unwrap();
+        assert!(
+            socket_residue.is_empty(),
+            "stale reclaim left eventfd socket residue: {socket_residue:?}"
+        );
     }
 
     #[test]
