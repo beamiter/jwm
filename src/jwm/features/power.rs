@@ -12,7 +12,6 @@
 //! once instead of every poll.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
 /// Warn at these levels, highest first. Crossing one downwards while
@@ -242,7 +241,7 @@ const PLATFORM_PROFILE: &str = "/sys/firmware/acpi/platform_profile";
 const PLATFORM_PROFILE_CHOICES: &str = "/sys/firmware/acpi/platform_profile_choices";
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(cmd).args(args).output().ok()?;
+    let output = super::external_command::output(cmd, args).ok()?;
     if !output.status.success() {
         return None;
     }
