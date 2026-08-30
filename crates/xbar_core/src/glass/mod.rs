@@ -54,6 +54,14 @@ pub use cairo_interop::GlassBackdrop;
 /// Bytes per pixel in every buffer this module touches.
 const BYTES_PER_PIXEL: usize = 4;
 
+/// Largest pixel buffer retained by one [`GlassImage`].
+///
+/// Surface and wallpaper geometry can originate outside the process. Bounding
+/// it before allocation prevents an anomalous extent from turning a bar
+/// refresh into a multi-gibibyte allocation, while still accommodating 8K and
+/// large multi-monitor strips.
+pub const MAX_GLASS_IMAGE_BYTES: usize = 512 * 1024 * 1024;
+
 /// Opaque base color for a bar that has no wallpaper to frost, and the color
 /// behind a wallpaper that does not cover the screen.
 ///
@@ -86,7 +94,7 @@ pub enum GlassError {
         expected: usize,
         got: usize,
     },
-    /// Dimensions that do not fit the platform's address space.
+    /// Dimensions that overflow or exceed the bounded image allocation budget.
     Overflow,
     Io {
         path: PathBuf,
@@ -108,7 +116,12 @@ impl fmt::Display for GlassError {
             Self::BufferTooSmall { expected, got } => {
                 write!(f, "buffer holds {got} bytes, need {expected}")
             }
-            Self::Overflow => write!(f, "glass image dimensions overflow"),
+            Self::Overflow => {
+                write!(
+                    f,
+                    "glass image dimensions overflow or exceed allocation budget"
+                )
+            }
             Self::Io { path, source } => write!(f, "failed to read {}: {source}", path.display()),
             Self::Decode { path, reason } => {
                 write!(f, "failed to decode {}: {reason}", path.display())
@@ -202,10 +215,14 @@ impl GlassImage {
     /// A fully transparent image.
     pub fn new(width: u32, height: u32) -> Result<Self, GlassError> {
         let len = byte_len(width, height)?;
+        let mut data = Vec::new();
+        data.try_reserve_exact(len)
+            .map_err(|_| GlassError::Overflow)?;
+        data.resize(len, 0);
         Ok(Self {
             width,
             height,
-            data: vec![0; len],
+            data,
         })
     }
 
@@ -234,7 +251,10 @@ impl GlassImage {
                 got: data.len(),
             });
         }
-        let mut packed = Vec::with_capacity(tight);
+        let mut packed = Vec::new();
+        packed
+            .try_reserve_exact(tight)
+            .map_err(|_| GlassError::Overflow)?;
         for y in 0..height as usize {
             let start = y * stride;
             packed.extend_from_slice(&data[start..start + row]);
@@ -307,10 +327,16 @@ impl GlassImage {
 }
 
 fn byte_len(width: u32, height: u32) -> Result<usize, GlassError> {
-    (width as usize)
+    let row = (width as usize)
+        .checked_mul(BYTES_PER_PIXEL)
+        .ok_or(GlassError::Overflow)?;
+    let len = row
         .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(BYTES_PER_PIXEL))
-        .ok_or(GlassError::Overflow)
+        .ok_or(GlassError::Overflow)?;
+    if row > MAX_GLASS_IMAGE_BYTES || len > MAX_GLASS_IMAGE_BYTES {
+        return Err(GlassError::Overflow);
+    }
+    Ok(len)
 }
 
 // ---------------- Wallpaper sources ----------------
@@ -1056,6 +1082,16 @@ mod tests {
         assert!(matches!(
             GlassImage::from_bgra(2, 2, stride, &buffer[..stride]),
             Err(GlassError::BufferTooSmall { .. })
+        ));
+    }
+
+    #[test]
+    fn oversized_frontend_images_are_rejected_before_buffer_validation() {
+        let width = u32::try_from(MAX_GLASS_IMAGE_BYTES / BYTES_PER_PIXEL + 1).unwrap();
+
+        assert!(matches!(
+            GlassImage::from_bgra(width, 1, 0, &[]),
+            Err(GlassError::Overflow)
         ));
     }
 
