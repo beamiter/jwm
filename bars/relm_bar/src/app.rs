@@ -1,6 +1,6 @@
 use log::{info, warn};
 use relm4::{
-    ComponentParts, ComponentSender, SimpleComponent,
+    ComponentParts, ComponentSender, Sender, SimpleComponent,
     gtk::{
         self,
         glib::{self, ControlFlow},
@@ -238,16 +238,20 @@ impl AppModel {
 }
 
 fn spawn_runtime_timers(sender: ComponentSender<AppModel>) {
-    let transport_sender = sender.clone();
+    let transport_sender = sender.input_sender().clone();
     glib::timeout_add_local(TRANSPORT_POLL_INTERVAL, move || {
-        transport_sender.input(AppInput::PollTransport);
-        ControlFlow::Continue
+        send_timer_input(&transport_sender, AppInput::PollTransport)
     });
 
-    glib::timeout_add_seconds_local(1, move || {
-        sender.input(AppInput::Tick);
-        ControlFlow::Continue
-    });
+    let tick_sender = sender.input_sender().clone();
+    glib::timeout_add_seconds_local(1, move || send_timer_input(&tick_sender, AppInput::Tick));
+}
+
+fn send_timer_input(sender: &Sender<AppInput>, input: AppInput) -> ControlFlow {
+    match sender.send(input) {
+        Ok(()) => ControlFlow::Continue,
+        Err(_) => ControlFlow::Break,
+    }
 }
 
 /// Kept as the crate's own entry-point log line, so a session log says which
@@ -255,4 +259,25 @@ fn spawn_runtime_timers(sender: ComponentSender<AppModel>) {
 pub fn log_startup(app_id: &str) {
     info!("Starting {BAR_NAME} from the shared presentation projection");
     info!("Application ID: {app_id}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timer_source_stops_when_the_component_input_is_closed() {
+        let (sender, receiver) = relm4::channel();
+        assert!(matches!(
+            send_timer_input(&sender, AppInput::Tick),
+            ControlFlow::Continue
+        ));
+        assert!(matches!(receiver.recv_sync(), Some(AppInput::Tick)));
+
+        drop(receiver);
+        assert!(matches!(
+            send_timer_input(&sender, AppInput::PollTransport),
+            ControlFlow::Break
+        ));
+    }
 }
