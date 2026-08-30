@@ -387,6 +387,24 @@ pub struct WifiNetwork {
     pub in_use: bool,
 }
 
+const MAX_WIFI_SCAN_LINES: usize = 1024;
+const MAX_WIFI_SCAN_LINE_BYTES: usize = 1024;
+const MAX_WIFI_NETWORKS: usize = 256;
+// IEEE 802.11 SSIDs contain at most 32 octets.
+const MAX_WIFI_SSID_BYTES: usize = 32;
+const MAX_WIFI_SECURITY_BYTES: usize = 128;
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 impl WifiNetwork {
     #[must_use]
     pub fn is_open(&self) -> bool {
@@ -505,7 +523,10 @@ impl<T> Drop for BackgroundJob<T> {
 #[must_use]
 pub fn parse_networks(output: &str) -> Vec<WifiNetwork> {
     let mut networks: Vec<WifiNetwork> = Vec::new();
-    for line in output.lines() {
+    for line in output.lines().take(MAX_WIFI_SCAN_LINES) {
+        if line.len() > MAX_WIFI_SCAN_LINE_BYTES {
+            continue;
+        }
         let fields = split_nmcli_fields(line);
         let (Some(in_use), Some(ssid), Some(signal)) =
             (fields.first(), fields.get(1), fields.get(2))
@@ -513,32 +534,29 @@ pub fn parse_networks(output: &str) -> Vec<WifiNetwork> {
             continue;
         };
         let ssid = ssid.trim();
-        if ssid.is_empty() {
+        if ssid.is_empty() || ssid.len() > MAX_WIFI_SSID_BYTES {
             continue;
         }
         let signal = signal.trim().parse::<u8>().unwrap_or(0).min(100);
+        let security = fields.get(3).map_or("", String::as_str).trim();
         let network = WifiNetwork {
             ssid: ssid.to_string(),
             signal,
-            security: fields
-                .get(3)
-                .cloned()
-                .unwrap_or_default()
-                .trim()
-                .to_string(),
+            security: utf8_prefix(security, MAX_WIFI_SECURITY_BYTES).to_string(),
             in_use: in_use.trim() == "*",
         };
-        match networks.iter_mut().find(|other| other.ssid == network.ssid) {
+        if let Some(existing) = networks.iter_mut().find(|other| other.ssid == network.ssid) {
             // Keep the strongest reading, but never lose the fact that one of
             // this network's access points is the one in use.
-            Some(existing) => {
-                existing.in_use |= network.in_use;
-                if network.signal > existing.signal {
-                    existing.signal = network.signal;
-                    existing.security = network.security;
-                }
+            existing.in_use |= network.in_use;
+            if network.signal > existing.signal {
+                existing.signal = network.signal;
+                existing.security = network.security;
             }
-            None => networks.push(network),
+            continue;
+        }
+        if networks.len() < MAX_WIFI_NETWORKS {
+            networks.push(network);
         }
     }
     networks.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
@@ -1256,6 +1274,33 @@ mod tests {
         let networks = parse_networks(" :Mixed:70:WPA1 WPA2\n");
         assert_eq!(networks[0].security, "WPA1 WPA2");
         assert!(!networks[0].is_open());
+    }
+
+    #[test]
+    fn scans_bound_unique_networks_and_input_lines() {
+        let output = (0..MAX_WIFI_NETWORKS + 20)
+            .map(|index| format!(" :net{index}:50:WPA2\n"))
+            .collect::<String>();
+        assert_eq!(parse_networks(&output).len(), MAX_WIFI_NETWORKS);
+
+        let chatter = "not a network\n".repeat(MAX_WIFI_SCAN_LINES);
+        let after_budget = format!("{chatter} :TooLate:80:WPA2\n");
+        assert!(parse_networks(&after_budget).is_empty());
+    }
+
+    #[test]
+    fn scans_reject_impossible_ssids_and_bound_retained_fields() {
+        let valid_ssid = "s".repeat(MAX_WIFI_SSID_BYTES);
+        let invalid_ssid = "s".repeat(MAX_WIFI_SSID_BYTES + 1);
+        let security = "W".repeat(MAX_WIFI_SECURITY_BYTES + 20);
+        let oversized_line = format!(" :oversized:50:{}\n", "W".repeat(MAX_WIFI_SCAN_LINE_BYTES));
+        let output =
+            format!(" :{valid_ssid}:70:{security}\n :{invalid_ssid}:80:WPA2\n{oversized_line}");
+        let networks = parse_networks(&output);
+
+        assert_eq!(networks.len(), 1);
+        assert_eq!(networks[0].ssid, valid_ssid);
+        assert_eq!(networks[0].security.len(), MAX_WIFI_SECURITY_BYTES);
     }
 
     #[test]
