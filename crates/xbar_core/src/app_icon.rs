@@ -41,6 +41,9 @@ pub struct AppIcon {
     pub key: u64,
 }
 
+/// Longest absolute icon path retained in model/frontend snapshots.
+pub const MAX_APP_ICON_PATH_BYTES: usize = 4 * 1024;
+
 impl AppIcon {
     #[must_use]
     pub fn new(path: PathBuf) -> Self {
@@ -50,6 +53,22 @@ impl AppIcon {
             key: hasher.finish(),
             path,
         }
+    }
+
+    /// Canonicalize untrusted snapshot metadata without touching the
+    /// filesystem. File existence and size remain resolver responsibilities.
+    #[must_use]
+    pub fn normalized(self) -> Option<Self> {
+        if !self.path.is_absolute()
+            || self.path.as_os_str().as_encoded_bytes().len() > MAX_APP_ICON_PATH_BYTES
+            || !has_supported_raster_extension(&self.path)
+        {
+            return None;
+        }
+
+        // Rebuild even when the visible path is short so an input PathBuf
+        // with pathological spare capacity cannot be retained by the model.
+        Some(Self::new(PathBuf::from(self.path.as_os_str())))
     }
 }
 
@@ -523,16 +542,18 @@ fn size_rank(size: u32, wanted: u32) -> (u8, u32) {
     }
 }
 
-fn is_supported_raster(path: &Path) -> bool {
-    let supported_extension = path
-        .extension()
+fn has_supported_raster_extension(path: &Path) -> bool {
+    path.extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| {
             RASTER_EXTENSIONS
                 .iter()
                 .any(|supported| extension.eq_ignore_ascii_case(supported))
-        });
-    supported_extension
+        })
+}
+
+fn is_supported_raster(path: &Path) -> bool {
+    has_supported_raster_extension(path)
         && std::fs::metadata(path)
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_RASTER_FILE_BYTES)
 }
@@ -948,5 +969,22 @@ Icon=vscode-new-window
         let other = AppIcon::new(PathBuf::from("/usr/share/icons/b.png"));
         assert_eq!(first.key, second.key);
         assert_ne!(first.key, other.key);
+    }
+
+    #[test]
+    fn snapshot_icons_require_bounded_absolute_raster_paths_and_canonical_keys() {
+        let path = PathBuf::from("/usr/share/icons/app.PNG");
+        let expected = AppIcon::new(path.clone());
+        assert_eq!(AppIcon { path, key: 0 }.normalized(), Some(expected));
+        assert_eq!(
+            AppIcon::new(PathBuf::from("relative/app.png")).normalized(),
+            None
+        );
+        assert_eq!(
+            AppIcon::new(PathBuf::from("/usr/share/icons/app.svg")).normalized(),
+            None
+        );
+        let oversized = PathBuf::from(format!("/{}.png", "x".repeat(MAX_APP_ICON_PATH_BYTES + 1)));
+        assert_eq!(AppIcon::new(oversized).normalized(), None);
     }
 }

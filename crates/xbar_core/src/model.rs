@@ -1571,6 +1571,7 @@ impl BarModel {
 
     /// Attach (or drop) the icon a host resolved for the focused application.
     fn replace_client_icon(&mut self, icon: Option<crate::app_icon::AppIcon>) -> ModelUpdate {
+        let icon = icon.and_then(crate::app_icon::AppIcon::normalized);
         if self.client_icon == icon {
             return ModelUpdate::default();
         }
@@ -2839,6 +2840,41 @@ mod tests {
             view.media.player.as_deref().map(str::len),
             Some(MAX_MODEL_ID_BYTES)
         );
+    }
+
+    #[test]
+    fn client_icons_are_structurally_validated_and_keyed_by_path() {
+        use std::path::PathBuf;
+
+        let mut model = BarModel::default();
+        let path = PathBuf::from("/usr/share/icons/app.png");
+        let first = model
+            .update(BarEvent::ClientIcon(Some(crate::app_icon::AppIcon {
+                path: path.clone(),
+                key: 1,
+            })))
+            .unwrap();
+        let second = model
+            .update(BarEvent::ClientIcon(Some(crate::app_icon::AppIcon {
+                path: path.clone(),
+                key: 2,
+            })))
+            .unwrap();
+
+        assert!(first.dirty.contains(DirtyBits::CLIENT_CHANGED));
+        assert!(second.dirty.is_empty());
+        assert_eq!(
+            model.view().client_icon,
+            Some(&crate::app_icon::AppIcon::new(path))
+        );
+
+        let cleared = model
+            .update(BarEvent::ClientIcon(Some(crate::app_icon::AppIcon::new(
+                PathBuf::from("relative.svg"),
+            ))))
+            .unwrap();
+        assert!(cleared.dirty.contains(DirtyBits::CLIENT_CHANGED));
+        assert!(model.view().client_icon.is_none());
     }
 
     #[test]
