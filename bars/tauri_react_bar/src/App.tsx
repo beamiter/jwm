@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { completeBridgeStartup } from "./bridgeStartup";
 import "./App.css";
 
 interface TagState {
@@ -851,7 +852,6 @@ function App() {
     let unlisten: (() => void) | undefined;
 
     const initialize = async () => {
-      setScaleFactor(await getCurrentWindow().scaleFactor());
       unlisten = await listen<FrontendEnvelope>("xbar-state", (event) => {
         if (cancelled) return;
         if (revision.current !== null && event.payload.revision < revision.current) return;
@@ -863,7 +863,15 @@ function App() {
         unlisten();
         return;
       }
-      await invoke("frontend_ready");
+      await completeBridgeStartup({
+        announceReady: () => invoke("frontend_ready"),
+        queryOptionalValue: () => getCurrentWindow().scaleFactor(),
+        applyOptionalValue: setScaleFactor,
+        reportOptionalError: (error) => {
+          console.error("Failed to query the Tauri window scale factor:", error);
+        },
+        isCancelled: () => cancelled,
+      });
     };
 
     initialize().catch((error) => {
