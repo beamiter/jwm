@@ -6,7 +6,7 @@ use std::ffi::c_void;
 use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use xcb::{self, Xid, x};
 
@@ -435,7 +435,28 @@ fn main() -> Result<()> {
     let mut ready_tokens = Vec::new();
     loop {
         ready_tokens.clear();
-        ready_tokens.extend(epoll.wait()?);
+        let now = Instant::now();
+        let dock_timeout = bar
+            .next_dock_deadline(now)
+            .map(|deadline| deadline.saturating_duration_since(now));
+        ready_tokens.extend(epoll.wait_timeout(dock_timeout)?);
+        if ready_tokens.is_empty() {
+            // Dock retries and moving-preview anchors have sub-second
+            // deadlines independent from the aligned provider timer.
+            let update = bar.poll_transport();
+            let needs_redraw = window.apply_runtime_update(update)?;
+            sync_notifier(&mut notifier_slot, bar.runtime(), &epoll)?;
+            if needs_redraw {
+                redraw(
+                    &mut gpu,
+                    &mut canvas,
+                    current_width,
+                    current_height,
+                    &mut bar,
+                )?;
+            }
+            continue;
+        }
         for token in &ready_tokens {
             match *token {
                 X_TOKEN => loop {
