@@ -38,14 +38,25 @@ pub fn clip_region(
 /// Convert RGBA pixels read by OpenGL (bottom-left origin) to normal image
 /// order in place, without allocating a second full-frame buffer.
 pub fn flip_rgba_vertical(pixels: &mut [u8], width: u32, height: u32) {
-    let row_bytes = width as usize * 4;
-    if row_bytes == 0 || pixels.len() < row_bytes * height as usize {
+    let Some(row_bytes) = usize::try_from(width)
+        .ok()
+        .and_then(|width| width.checked_mul(4))
+    else {
+        return;
+    };
+    let Some(height) = usize::try_from(height).ok() else {
+        return;
+    };
+    let Some(required_bytes) = row_bytes.checked_mul(height) else {
+        return;
+    };
+    if row_bytes == 0 || pixels.len() < required_bytes {
         return;
     }
     let mut row = vec![0; row_bytes];
-    for y in 0..height as usize / 2 {
+    for y in 0..height / 2 {
         let top = y * row_bytes;
-        let bottom = (height as usize - 1 - y) * row_bytes;
+        let bottom = (height - 1 - y) * row_bytes;
         row.copy_from_slice(&pixels[top..top + row_bytes]);
         pixels.copy_within(bottom..bottom + row_bytes, top);
         pixels[bottom..bottom + row_bytes].copy_from_slice(&row);
@@ -74,5 +85,12 @@ mod tests {
         let mut pixels = vec![1, 1, 1, 1, 2, 2, 2, 2];
         flip_rgba_vertical(&mut pixels, 1, 2);
         assert_eq!(pixels, vec![2, 2, 2, 2, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_capture_sizes_without_overflow() {
+        let mut pixels = [1, 2, 3, 4];
+        flip_rgba_vertical(&mut pixels, u32::MAX, u32::MAX);
+        assert_eq!(pixels, [1, 2, 3, 4]);
     }
 }
