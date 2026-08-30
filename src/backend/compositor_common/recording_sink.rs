@@ -13,12 +13,14 @@
 //! degrades to a lower effective capture rate under load, which is what the
 //! user wants; the compositor never waits on the encoder.
 
-use std::io::Write;
-use std::process::Child;
+use std::io::{self, Write};
+use std::os::fd::{AsRawFd as _, RawFd};
+use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Frames allowed to queue ahead of the encoder. Input timestamps come from
 /// `-use_wallclock_as_timestamps 1`, i.e. they are stamped when ffmpeg *reads*
@@ -33,6 +35,15 @@ const QUEUE_DEPTH: usize = 2;
 /// shows up as its own periodic stall.
 const POOL_DEPTH: usize = QUEUE_DEPTH + 2;
 
+/// A healthy encoder consumes one raw frame in far less than this. Bounding a
+/// single write keeps a wedged encoder from pinning its writer thread forever.
+const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Closing stdin normally lets ffmpeg flush and rewrite even a long recording.
+/// A process that ignores EOF is eventually killed rather than leaked forever.
+const ENCODER_FINALIZE_TIMEOUT: Duration = Duration::from_secs(120);
+const PIPE_POLL_SLICE: Duration = Duration::from_millis(20);
+
 /// Ask the kernel for a bigger pipe to the encoder.
 ///
 /// A pipe holds 64 KiB by default, so a 1080p frame is 127 separate blocking
@@ -41,7 +52,6 @@ const POOL_DEPTH: usize = QUEUE_DEPTH + 2;
 /// hiccup before the sink has to start dropping frames. Best effort: the limit
 /// is `/proc/sys/fs/pipe-max-size` and an unprivileged process may not reach it.
 fn widen_pipe(pipe: &std::process::ChildStdin, label: &'static str) {
-    use std::os::fd::AsRawFd;
     const F_SETPIPE_SZ: i32 = 1031;
     const TARGET: i32 = 1024 * 1024;
     // SAFETY: `pipe` owns the descriptor for the duration of the call, and
@@ -50,6 +60,114 @@ fn widen_pipe(pipe: &std::process::ChildStdin, label: &'static str) {
     if applied < 0 {
         log::debug!("{label}: could not widen the encoder pipe; keeping the default size");
     }
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn wait_until_writable(fd: RawFd, remaining: Duration) -> io::Result<()> {
+    let wait = remaining.min(PIPE_POLL_SLICE);
+    let timeout_ms = i32::try_from(wait.as_millis().max(1)).unwrap_or(i32::MAX);
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+    if ready >= 0 {
+        if ready > 0 && poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "encoder stdin closed while waiting to write",
+            ));
+        }
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::Interrupted {
+        // Retry the write in the outer loop, where the frame-wide deadline is
+        // checked. Repeating this poll with a fresh slice could otherwise
+        // extend the deadline under a signal storm.
+        return Ok(());
+    }
+    Err(error)
+}
+
+fn write_frame_with_timeout(
+    pipe: &mut std::process::ChildStdin,
+    mut frame: &[u8],
+    timeout: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !frame.is_empty() {
+        match pipe.write(frame) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "encoder stdin accepted zero bytes",
+                ));
+            }
+            Ok(written) => frame = &frame[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("encoder frame write exceeded {timeout:?}"),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("encoder frame write exceeded {timeout:?}"),
+                    ));
+                }
+                wait_until_writable(pipe.as_raw_fd(), deadline.saturating_duration_since(now))?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_encoder_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(Duration::from_millis(20)),
+        );
+    }
+    let kill_error = child
+        .kill()
+        .err()
+        .filter(|error| error.kind() != io::ErrorKind::InvalidInput);
+    let status = child.wait();
+    kill_error.map_or(status, Err)
 }
 
 /// Owns the encoder child process and the thread that feeds it.
@@ -68,7 +186,23 @@ impl RecordingSink {
     /// Take ownership of `child` and start feeding its stdin from a worker
     /// thread. `frame_size` is the exact byte length of one captured frame;
     /// the encoder reads raw video, so short or long writes desynchronize it.
-    pub fn spawn(mut child: Child, frame_size: usize, label: &'static str) -> Self {
+    pub fn spawn(child: Child, frame_size: usize, label: &'static str) -> Self {
+        Self::spawn_with_timeouts(
+            child,
+            frame_size,
+            label,
+            FRAME_WRITE_TIMEOUT,
+            ENCODER_FINALIZE_TIMEOUT,
+        )
+    }
+
+    fn spawn_with_timeouts(
+        mut child: Child,
+        frame_size: usize,
+        label: &'static str,
+        write_timeout: Duration,
+        finalize_timeout: Duration,
+    ) -> Self {
         let (frames_tx, frames_rx) = sync_channel::<Vec<u8>>(QUEUE_DEPTH);
         let (recycled_tx, recycled_rx) = sync_channel::<Vec<u8>>(POOL_DEPTH);
         let broken = Arc::new(AtomicBool::new(false));
@@ -87,23 +221,33 @@ impl RecordingSink {
                 let Ok(mut child) = child_rx.recv() else {
                     return;
                 };
-                let mut stdin = child.stdin.take();
-                if let Some(pipe) = stdin.as_ref() {
-                    widen_pipe(pipe, label);
+                let Some(mut stdin) = child.stdin.take() else {
+                    log::warn!("{label}: recording encoder stdin was not captured");
+                    writer_broken.store(true, Ordering::Relaxed);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                };
+                widen_pipe(&stdin, label);
+                if let Err(error) = set_nonblocking(stdin.as_raw_fd()) {
+                    log::warn!("{label}: could not make encoder pipe nonblocking: {error}");
+                    writer_broken.store(true, Ordering::Relaxed);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
                 }
+                let mut write_failed = false;
                 while let Ok(frame) = frames_rx.recv() {
-                    if let Some(pipe) = stdin.as_mut()
-                        && let Err(error) = pipe.write_all(&frame)
+                    if let Err(error) = write_frame_with_timeout(&mut stdin, &frame, write_timeout)
                     {
                         log::warn!("{label}: recording encoder write failed: {error}");
                         writer_broken.store(true, Ordering::Relaxed);
-                        // Close the pipe but keep draining the queue. A sink
-                        // that stops receiving would make `submit` report the
-                        // channel full forever, and the compositor would spend
-                        // every capture copying a frame nobody reads.
-                        stdin = None;
+                        write_failed = true;
                     }
                     let _ = recycled_tx.try_send(frame);
+                    if write_failed {
+                        break;
+                    }
                 }
                 // Dropping stdin is what tells ffmpeg to finalize: it flushes
                 // the encoder, writes the moov atom and, with `+faststart`,
@@ -111,7 +255,10 @@ impl RecordingSink {
                 // on the compositor thread is why stopping a long recording no
                 // longer freezes the desktop for seconds.
                 drop(stdin);
-                match child.wait() {
+                if write_failed {
+                    let _ = child.kill();
+                }
+                match wait_for_encoder_with_timeout(&mut child, finalize_timeout) {
                     Ok(status) if !status.success() => {
                         log::warn!("{label}: ffmpeg exited with {status}");
                     }
@@ -122,7 +269,14 @@ impl RecordingSink {
 
         let writer = match writer {
             Ok(handle) => {
-                let _ = child_tx.send(child);
+                if let Err(error) = child_tx.send(child) {
+                    // The writer exited before accepting ownership. Recover
+                    // the Child from SendError instead of dropping it alive.
+                    let mut child = error.0;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    broken.store(true, Ordering::Relaxed);
+                }
                 Some(handle)
             }
             Err(error) => {
@@ -277,6 +431,22 @@ mod tests {
     use super::*;
     use std::process::{Command, Stdio};
 
+    fn assert_process_reaped(pid: u32) {
+        let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        for _ in 0..100 {
+            // A zombie retains its /proc entry, so disappearance proves both
+            // termination and reaping without racing the writer's waitpid.
+            if !proc_path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let mut status = 0;
+        let _ = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        panic!("encoder process {pid} was not reaped promptly");
+    }
+
     /// `cat` stands in for ffmpeg: it reads stdin at whatever rate the writer
     /// thread offers, so the sink's queue never backs up.
     fn sink_over_cat(frame_size: usize) -> RecordingSink {
@@ -351,15 +521,22 @@ mod tests {
         // thread parks inside write_all. The compositor-side submit must stay
         // non-blocking regardless.
         let child = Command::new("sleep")
-            .arg("30")
+            .arg("10")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn sleep");
+        let pid = child.id();
         // One frame larger than a pipe buffer guarantees the writer blocks.
         let frame_size = 256 * 1024;
-        let mut sink = RecordingSink::spawn(child, frame_size, "test");
+        let mut sink = RecordingSink::spawn_with_timeouts(
+            child,
+            frame_size,
+            "test",
+            Duration::from_millis(25),
+            Duration::from_millis(25),
+        );
 
         let started = std::time::Instant::now();
         for _ in 0..64 {
@@ -377,6 +554,34 @@ mod tests {
             "a stalled encoder must show up as dropped frames"
         );
         sink.finish();
+        assert_process_reaped(pid);
+    }
+
+    #[test]
+    fn finish_reaps_an_encoder_that_ignores_stdin_eof() {
+        let child = Command::new("sleep")
+            .arg("10")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let sink = RecordingSink::spawn_with_timeouts(
+            child,
+            16,
+            "test",
+            Duration::from_millis(25),
+            Duration::from_millis(25),
+        );
+
+        let started = Instant::now();
+        sink.finish();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "finish blocked the compositor instead of detaching finalization"
+        );
+        assert_process_reaped(pid);
     }
 
     #[test]
