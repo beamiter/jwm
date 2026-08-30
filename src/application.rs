@@ -41,6 +41,7 @@ pub const BENCHMARK_WARMUP_ENV: &str = "JWM_BENCHMARK_WARMUP";
 const RESTART_MARKER_ENV: &str = "JWM_RESTARTING";
 const DBUS_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
 const DBUS_LAUNCH_OUTPUT_LIMIT: usize = 64 * 1024;
+const DAEMON_QUIT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BOOTSTRAP_BACKOFFS: [Duration; 4] = [
     Duration::from_millis(20),
     Duration::from_millis(50),
@@ -60,6 +61,22 @@ pub fn launch_dbus_session() -> std::io::Result<std::process::Output> {
         DBUS_LAUNCH_TIMEOUT,
         DBUS_LAUNCH_OUTPUT_LIMIT,
     )
+}
+
+fn run_daemon_control_command(
+    command: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    crate::external_command::status_with_timeout(command, args, timeout)
+}
+
+fn request_daemon_shutdown() {
+    match run_daemon_control_command("jwm-tool", &["quit"], DAEMON_QUIT_TIMEOUT) {
+        Ok(status) if status.success() => {}
+        Ok(status) => error!("[application] jwm-tool quit exited with {status}"),
+        Err(error) => error!("[application] failed to quit jwm daemon: {error}"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -819,9 +836,7 @@ pub fn run_with_options(options: ApplicationOptions) -> Result<(), Box<dyn std::
             continue;
         }
 
-        if let Err(error) = Command::new("jwm-tool").arg("quit").spawn() {
-            error!("[application] failed to quit jwm daemon: {error}");
-        }
+        request_daemon_shutdown();
         cleanup_result?;
         return Ok(());
     }
@@ -887,8 +902,8 @@ mod tests {
         ApplicationOptions, BackendChoice, BenchmarkRequest, RESTART_BOOTSTRAP_BACKOFFS,
         RESTART_MARKER_ENV, RestartCommand, RestartPreparationStage, config_path,
         configure_benchmark, decode_restart_handoff, decode_transient_child_restart_handoff,
-        execute_restart_after_cleanup, parse_benchmark, run_restart_bootstrap_with_retry,
-        run_restart_preparation_steps,
+        execute_restart_after_cleanup, parse_benchmark, run_daemon_control_command,
+        run_restart_bootstrap_with_retry, run_restart_preparation_steps,
     };
     use crate::backend::api::CompositorBenchmark;
     use crate::config::BackendFamily;
@@ -900,6 +915,7 @@ mod tests {
     use std::cell::Cell;
     use std::ffi::{OsStr, OsString};
     use std::io;
+    use std::time::Duration;
 
     const APPLICATION_SRC: &str = include_str!("application.rs");
 
@@ -942,6 +958,52 @@ mod tests {
         fn compositor_benchmark_set_auto_exit(&mut self, enabled: bool) {
             self.auto_exit = enabled;
         }
+    }
+
+    #[test]
+    fn daemon_control_command_reaps_its_direct_child() {
+        let marker = std::env::temp_dir().join(format!(
+            "jwm-daemon-control-child-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let status = run_daemon_control_command(
+            "sh",
+            &[
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"",
+                "jwm-daemon-control-test",
+                marker_arg.as_str(),
+            ],
+            Duration::from_secs(1),
+        )
+        .expect("short daemon control command should complete");
+        assert!(status.success());
+
+        let launcher = std::fs::read_to_string(&marker)
+            .expect("launcher wrote its process id")
+            .parse::<libc::pid_t>()
+            .expect("launcher process id should be numeric");
+        std::fs::remove_file(&marker).expect("remove process-id marker");
+        let mut wait_status = 0;
+        let wait_result = unsafe { libc::waitpid(launcher, &mut wait_status, libc::WNOHANG) };
+        assert_eq!(wait_result, -1, "daemon control child remained waitable");
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "daemon control child was not reaped through its Child handle"
+        );
+    }
+
+    #[test]
+    fn daemon_control_command_has_a_hard_deadline() {
+        let started = std::time::Instant::now();
+        let error =
+            run_daemon_control_command("sh", &["-c", "exec sleep 10"], Duration::from_millis(25))
+                .expect_err("stalled daemon control command must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
