@@ -1506,6 +1506,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                             .as_deref()
                             .ok_or_else(|| Error::other("opened mapping lost its flink path"))?;
                         prepare_stale_mapping_reclaim(&mut buffer.shmem, flink_path)?;
+                        // Existing processes can still hold the mapping after
+                        // its public flink is gone. Publish shutdown and wake
+                        // them before a replacement creates a second live queue.
+                        buffer.destroy()?;
                         drop(buffer);
                         if let Some(buffer) = create(&mut may_create)? {
                             return Ok(buffer);
@@ -2852,6 +2856,55 @@ mod tests {
         }
         drop(stale_creator);
         std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn stale_reclaim_destroys_existing_handles_before_replacement() {
+        const DEAD_PID: u32 = u32::MAX;
+
+        let path = mk_path("reclaim_notifies_existing_handles");
+        let stale_creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        let stale_opener =
+            std::sync::Arc::new(TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap());
+        // Model a creator that crashed after other processes attached.
+        unsafe {
+            std::ptr::addr_of_mut!((*stale_creator.header).creator_pid).write(DEAD_PID);
+        }
+
+        let waiter_buffer = std::sync::Arc::clone(&stale_opener);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let waiter = std::thread::spawn(move || {
+            result_tx.send(waiter_buffer.wait_command(None)).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(20));
+
+        let replacement: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed(&path)
+            .unwrap();
+        assert_ne!(
+            stale_creator.shmem.get_os_id(),
+            replacement.shmem.get_os_id()
+        );
+
+        let outcome = result_rx.recv_timeout(Duration::from_millis(500));
+        if outcome.is_err() {
+            // Let the old implementation's stranded waiter exit before the
+            // assertion reports the regression instead of leaking a thread.
+            stale_creator.destroy().unwrap();
+        }
+        waiter.join().unwrap();
+        assert_eq!(
+            outcome
+                .expect("stale reclaim left an existing waiter on the old mapping")
+                .unwrap(),
+            WaitOutcome::Destroyed
+        );
+        assert!(stale_opener.is_destroyed());
     }
 
     #[test]

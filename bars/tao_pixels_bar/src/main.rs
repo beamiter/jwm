@@ -37,6 +37,14 @@ fn is_terminal_window_event(event: &WindowEvent) -> bool {
     matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
 }
 
+fn pixel_frame_bytes(size: PhysicalSize<u32>) -> Option<usize> {
+    let bytes = usize::try_from(size.width)
+        .ok()?
+        .checked_mul(usize::try_from(size.height).ok()?)?
+        .checked_mul(4)?;
+    (bytes <= xbar_core::MAX_FRONTEND_FRAME_BYTES).then_some(bytes)
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -125,6 +133,12 @@ impl App {
         let size = window.inner_size();
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
+        if pixel_frame_bytes(PhysicalSize::new(safe_width, safe_height)).is_none() {
+            anyhow::bail!(
+                "initial {safe_width}x{safe_height} pixels surface exceeds the {}-byte frontend frame budget",
+                xbar_core::MAX_FRONTEND_FRAME_BYTES
+            );
+        }
         let build = |alpha: Option<pixels::wgpu::CompositeAlphaMode>| {
             let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
             let mut builder = PixelsBuilder::new(safe_width, safe_height, surface_texture)
@@ -224,8 +238,11 @@ impl App {
         }
         self.sync_surface_to_window();
 
-        let width = self.last_physical_size.width;
-        let height = self.last_physical_size.height;
+        // A rejected or failed resize must keep drawing against the texture
+        // dimensions pixels actually owns, rather than describing its old
+        // frame buffer with the compositor's newer extent.
+        let width = self.pixels_width;
+        let height = self.pixels_height;
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -284,35 +301,44 @@ impl App {
     }
 
     fn resize_pixels(&mut self, size: PhysicalSize<u32>) {
+        let extent_changed = self.last_physical_size != size;
         self.last_physical_size = size;
         if size.width == 0 || size.height == 0 {
             return;
         }
+        if pixel_frame_bytes(size).is_none() {
+            if extent_changed {
+                warn!(
+                    "ignoring {}x{} pixels resize beyond the {}-byte frontend frame budget",
+                    size.width,
+                    size.height,
+                    xbar_core::MAX_FRONTEND_FRAME_BYTES
+                );
+            }
+            return;
+        }
+        if self.pixels_width != size.width || self.pixels_height != size.height {
+            let Some(pixels) = self.pixels.as_mut() else {
+                return;
+            };
+            if let Err(error) = pixels.resize_surface(size.width, size.height) {
+                warn!("pixels surface resize failed: {error}");
+                return;
+            }
+            if let Err(error) = pixels.resize_buffer(size.width, size.height) {
+                warn!("pixels buffer resize failed: {error}");
+                return;
+            }
+            self.pixels_width = size.width;
+            self.pixels_height = size.height;
+        }
         self.logical_size = size.to_logical(self.scale_factor);
         // The WM's ConfigureNotify is authoritative. JWM deliberately owns
         // the reserved status-bar height, which may differ from xbar_core's
-        // standalone default; keeping the presentation config in step avoids
-        // drawing a shorter bar into a taller window (and requesting the old
-        // height again on the next monitor update).
+        // standalone default; commit it only after the matching pixels frame
+        // buffer is usable.
         if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
             self.bar.config_mut().bar_height = height;
-        }
-        if self.pixels_width == size.width && self.pixels_height == size.height {
-            return;
-        }
-        if let Some(pixels) = self.pixels.as_mut() {
-            let surface_result = pixels.resize_surface(size.width, size.height);
-            let buffer_result = pixels.resize_buffer(size.width, size.height);
-            if let Err(error) = &surface_result {
-                warn!("pixels surface resize failed: {error}");
-            }
-            if let Err(error) = &buffer_result {
-                warn!("pixels buffer resize failed: {error}");
-            }
-            if surface_result.is_ok() && buffer_result.is_ok() {
-                self.pixels_width = size.width;
-                self.pixels_height = size.height;
-            }
         }
     }
 
@@ -674,6 +700,18 @@ mod tests {
         assert!(!is_terminal_window_event(&WindowEvent::Resized(
             PhysicalSize::new(1920, 42),
         )));
+    }
+
+    #[test]
+    fn pixel_frame_budget_rejects_anomalous_compositor_sizes() {
+        assert_eq!(
+            pixel_frame_bytes(PhysicalSize::new(7680, 4320)),
+            Some(7680 * 4320 * 4)
+        );
+        assert_eq!(
+            pixel_frame_bytes(PhysicalSize::new(u32::from(u16::MAX), u32::from(u16::MAX),)),
+            None
+        );
     }
 
     #[test]

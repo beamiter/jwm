@@ -455,7 +455,7 @@ impl EventFdBackend {
     /// Validate the exact descriptor contract assumed by wait/signal paths.
     /// In particular, `consume_one_eventfd` relies on EFD_SEMAPHORE so one
     /// waiter cannot drain notifications reserved for other waiters.
-    fn validate_received_eventfd(fd: &OwnedFd) -> Result<()> {
+    fn validate_received_eventfd(fd: &OwnedFd) -> Result<u64> {
         let status_flags = fcntl(fd, FcntlArg::F_GETFL).map_err(Error::other)?;
         if status_flags & libc::O_NONBLOCK == 0 {
             return Err(Error::new(
@@ -489,7 +489,22 @@ impl EventFdBackend {
                 "received descriptor is not an EFD_SEMAPHORE eventfd",
             ));
         }
-        Ok(())
+        fdinfo
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                if key.trim() == "eventfd-id" {
+                    value.trim().parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    "received eventfd has no valid kernel identity",
+                )
+            })
     }
 
     fn spawn_listener_thread(
@@ -719,8 +734,13 @@ impl EventFdBackend {
             ));
         }
 
-        for fd in &received_fds {
-            Self::validate_received_eventfd(fd)?;
+        let message_eventfd_id = Self::validate_received_eventfd(&received_fds[0])?;
+        let command_eventfd_id = Self::validate_received_eventfd(&received_fds[1])?;
+        if message_eventfd_id == command_eventfd_id {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "message and command channels alias the same eventfd",
+            ));
         }
 
         let mut received_fds = received_fds.into_iter();
@@ -1285,6 +1305,34 @@ mod tests {
         let message_fd = create_plain_eventfd();
         let command_fd = create_plain_eventfd();
         let raw_fds = [message_fd.as_raw_fd(), command_fd.as_raw_fd()];
+        let iov = [IoSlice::new(&[FD_PASS_MARKER])];
+        let cmsg = [ControlMessage::ScmRights(&raw_fds)];
+
+        let written = sendmsg::<UnixAddr>(
+            sender.as_raw_fd(),
+            &iov,
+            &cmsg,
+            MsgFlags::MSG_NOSIGNAL,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let error = EventFdBackend::try_receive_fds(receiver.as_raw_fd()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn fd_pass_rejects_aliased_message_and_command_eventfds() {
+        let (sender, receiver) = nix::sys::socket::socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        let shared_fd = EventFdBackend::create_eventfd_owned().unwrap();
+        let raw_fds = [shared_fd.as_raw_fd(), shared_fd.as_raw_fd()];
         let iov = [IoSlice::new(&[FD_PASS_MARKER])];
         let cmsg = [ControlMessage::ScmRights(&raw_fds)];
 

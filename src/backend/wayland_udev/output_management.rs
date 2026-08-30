@@ -10,7 +10,7 @@ use std::sync::Mutex;
 /// transform. Apply/Test validate the requested configuration against the live
 /// outputs and (for Apply) route an `OutputConfigure` backend event that performs
 /// the real DRM modeset / layout change on the compositor thread.
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use log::{debug, info, warn};
 
@@ -57,12 +57,25 @@ unsafe impl Send for OutputModeData {}
 
 pub struct OutputConfigData {
     pub serial: u32,
+    /// `test` and `apply` consume a configuration even when validation fails.
+    /// Every later request except `destroy` is a protocol error.
+    pub consumed: AtomicBool,
     /// Config-head objects created via `enable_head`.
     pub enabled_heads: Mutex<Vec<ZwlrOutputConfigurationHeadV1>>,
     /// Output names targeted by `disable_head`.
     pub disabled_heads: Mutex<Vec<String>>,
 }
 unsafe impl Send for OutputConfigData {}
+
+fn admit_configuration_request(consumed: &AtomicBool, consumes: bool) -> bool {
+    if consumes {
+        consumed
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    } else {
+        !consumed.load(Ordering::Relaxed)
+    }
+}
 
 #[derive(Default, Clone)]
 pub struct PendingHeadConfig {
@@ -297,6 +310,7 @@ impl Dispatch<ZwlrOutputManagerV1, OutputManagerData> for JwmWaylandState {
                     id,
                     OutputConfigData {
                         serial,
+                        consumed: AtomicBool::new(false),
                         enabled_heads: Mutex::new(Vec::new()),
                         disabled_heads: Mutex::new(Vec::new()),
                     },
@@ -320,6 +334,20 @@ impl Dispatch<ZwlrOutputConfigurationV1, OutputConfigData> for JwmWaylandState {
         _dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        let consumes = matches!(
+            &request,
+            zwlr_output_configuration_v1::Request::Apply
+                | zwlr_output_configuration_v1::Request::Test
+        );
+        let destroys = matches!(&request, zwlr_output_configuration_v1::Request::Destroy);
+        if !destroys && !admit_configuration_request(&data.consumed, consumes) {
+            resource.post_error(
+                zwlr_output_configuration_v1::Error::AlreadyUsed,
+                "output configuration was already applied or tested",
+            );
+            return;
+        }
+
         match request {
             zwlr_output_configuration_v1::Request::EnableHead { id, head } => {
                 let output_name = head
@@ -812,14 +840,29 @@ impl Dispatch<ZwlrOutputModeV1, OutputModeData> for JwmWaylandState {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutputConfigValidationError, adaptive_sync_request_supported, mode_is_change,
-        output_config_leaves_enabled_output, output_extent_is_supported,
+        OutputConfigValidationError, adaptive_sync_request_supported, admit_configuration_request,
+        mode_is_change, output_config_leaves_enabled_output, output_extent_is_supported,
         proposed_output_framebuffer_size,
     };
     use crate::backend::api::OutputConfigChange;
     use smithay::output::Mode as SmithayMode;
     use smithay::utils::Size;
     use std::collections::HashSet;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn test_or_apply_consumes_the_configuration_exactly_once() {
+        let consumed = AtomicBool::new(false);
+
+        // Mutating requests remain valid until test/apply claims the object.
+        assert!(admit_configuration_request(&consumed, false));
+        assert!(admit_configuration_request(&consumed, true));
+
+        for _ in 0..10_000 {
+            assert!(!admit_configuration_request(&consumed, false));
+            assert!(!admit_configuration_request(&consumed, true));
+        }
+    }
 
     fn mode(w: i32, h: i32, refresh: i32) -> SmithayMode {
         SmithayMode {
