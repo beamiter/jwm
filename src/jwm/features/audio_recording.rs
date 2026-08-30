@@ -10,7 +10,9 @@ use alsa::{Direction, ValueOr};
 #[cfg(feature = "media-audio")]
 use std::fs::{File, OpenOptions};
 #[cfg(feature = "media-audio")]
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(feature = "media-audio")]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 #[cfg(feature = "media-audio")]
 use std::process::{Command, Stdio};
@@ -66,6 +68,88 @@ fn output_format(path: &Path) -> Result<&str, String> {
     match format {
         "wav" | "flac" | "opus" | "mp3" => Ok(format),
         _ => Err("audio recording path must end in .wav, .flac, .opus, or .mp3".into()),
+    }
+}
+
+#[cfg(feature = "media-audio")]
+const MAX_FFMPEG_LOG_DETAIL_BYTES: usize = 64 * 1024;
+
+#[cfg(feature = "media-audio")]
+struct FfmpegLog {
+    path: std::path::PathBuf,
+}
+
+#[cfg(feature = "media-audio")]
+impl FfmpegLog {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[cfg(feature = "media-audio")]
+impl Drop for FfmpegLog {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(feature = "media-audio")]
+fn create_ffmpeg_log() -> std::io::Result<(FfmpegLog, File)> {
+    for _ in 0..16 {
+        let nonce = rand::random::<u64>();
+        let path = std::env::temp_dir().join(format!(
+            "jwm-audio-recording-ffmpeg-{}-{nonce:016x}.log",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => {
+                let log = FfmpegLog { path };
+                // A restrictive umask may remove owner bits. Restore the
+                // exact private mode so the parent can reopen the log tail.
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+                return Ok((log, file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique ffmpeg log file",
+    ))
+}
+
+#[cfg(feature = "media-audio")]
+fn read_ffmpeg_log_tail(path: &Path) -> String {
+    read_ffmpeg_log_tail_with_limit(path, MAX_FFMPEG_LOG_DETAIL_BYTES)
+}
+
+#[cfg(feature = "media-audio")]
+fn read_ffmpeg_log_tail_with_limit(path: &Path, limit: usize) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let Ok(length) = file.metadata().map(|metadata| metadata.len()) else {
+        return String::new();
+    };
+    let start = length.saturating_sub(limit as u64);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity(limit.min(length as usize));
+    if file.take(limit as u64).read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    let detail = String::from_utf8_lossy(&bytes).trim().to_string();
+    if start > 0 && !detail.is_empty() {
+        format!("[earlier ffmpeg output omitted] {detail}")
+    } else {
+        detail
     }
 }
 
@@ -301,9 +385,8 @@ fn capture_with_ffmpeg(
     }
     args.push(path.to_string_lossy().into_owned());
 
-    let log_path = format!("/tmp/jwm-audio-recording-ffmpeg-{}.log", std::process::id());
-    let stderr = match File::create(&log_path) {
-        Ok(file) => file,
+    let (log, stderr) = match create_ffmpeg_log() {
+        Ok(log) => log,
         Err(error) => {
             let error = error.to_string();
             let _ = ready.send(Err(error.clone()));
@@ -327,7 +410,7 @@ fn capture_with_ffmpeg(
 
     thread::sleep(Duration::from_millis(150));
     if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-        let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let detail = read_ffmpeg_log_tail(log.path());
         let _ = std::fs::remove_file(path);
         let error = format!(
             "ffmpeg audio recorder exited during startup ({status}): {}",
@@ -346,10 +429,9 @@ fn capture_with_ffmpeg(
             }
             let status = child.wait().map_err(|error| error.to_string())?;
             return if status.success() {
-                let _ = std::fs::remove_file(&log_path);
                 Ok(())
             } else {
-                let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+                let detail = read_ffmpeg_log_tail(log.path());
                 Err(format!(
                     "ffmpeg audio recorder exited with {status}: {}",
                     detail.trim()
@@ -357,7 +439,7 @@ fn capture_with_ffmpeg(
             };
         }
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            let detail = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let detail = read_ffmpeg_log_tail(log.path());
             return Err(format!(
                 "ffmpeg audio recorder stopped unexpectedly ({status}): {}",
                 detail.trim()
@@ -516,6 +598,28 @@ mod tests {
         );
         assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 960);
+    }
+
+    #[cfg(feature = "media-audio")]
+    #[test]
+    fn ffmpeg_log_is_private_temporary_and_reports_only_its_tail() {
+        let (log, mut file) = create_ffmpeg_log().unwrap();
+        let path = log.path().to_path_buf();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        file.write_all(b"old output that must be omitted\nfinal error\n")
+            .unwrap();
+        file.flush().unwrap();
+
+        let detail = read_ffmpeg_log_tail_with_limit(&path, 12);
+        assert!(detail.starts_with("[earlier ffmpeg output omitted]"));
+        assert!(detail.ends_with("final error"));
+
+        drop(file);
+        drop(log);
+        assert!(!path.exists());
     }
 
     #[test]
