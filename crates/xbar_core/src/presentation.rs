@@ -867,7 +867,12 @@ pub struct PresentationConfig {
     pub dock_separator_width: f32,
     /// Preferred fraction reserved for tags/layout before right-side items.
     pub left_fraction: f32,
+    /// Labels are looked up only for the model-bounded visible tag indices;
+    /// unused entries and source-vector spare capacity are never projected.
     pub tag_labels: Vec<String>,
+    /// Ordered layout catalog. Projection inspects at most
+    /// [`crate::MAX_PROJECTED_CONFIG_ITEMS`] entries and keeps the first entry
+    /// for each repeated layout identifier.
     pub layouts: Vec<LayoutChoice>,
     pub labels: PresentationLabels,
     /// Font family that backs private-use icon glyphs, when the host wants a
@@ -887,7 +892,8 @@ pub struct PresentationConfig {
     /// Shell entry points to project, in left-to-right order, when
     /// [`PresentationVisibility::shell_hub`] is set. Repeated routes project
     /// once at their first configured position so every control keeps a unique
-    /// stable [`NodeId`].
+    /// stable [`NodeId`]. Projection inspects at most
+    /// [`crate::MAX_PROJECTED_CONFIG_ITEMS`] entries.
     pub shell_routes: Vec<ShellRoute>,
     pub visibility: PresentationVisibility,
 }
@@ -1028,9 +1034,14 @@ pub struct LayoutEngine<M> {
     measurer: M,
 }
 
+struct LayoutPass<'a, M> {
+    config: &'a PresentationConfig,
+    measurer: &'a M,
+}
+
 /// Geometry shared by Dock reservation and painting. Keeping the capacity
 /// calculation here guarantees that width withheld from status controls can
-/// actually produce at least one shelf slot in [`LayoutEngine::push_dock`].
+/// actually produce at least one shelf slot in the Dock painting pass.
 #[derive(Debug, Clone, Copy)]
 struct DockMetrics {
     padding: f32,
@@ -1135,6 +1146,22 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         viewport: Size,
         interaction: &InteractionState,
     ) -> Scene {
+        build_scene(&self.config, &self.measurer, view, viewport, interaction)
+    }
+}
+
+pub(crate) fn build_scene<M: TextMeasurer>(
+    config: &PresentationConfig,
+    measurer: &M,
+    view: BarView<'_>,
+    viewport: Size,
+    interaction: &InteractionState,
+) -> Scene {
+    LayoutPass { config, measurer }.build(view, viewport, interaction)
+}
+
+impl<M: TextMeasurer> LayoutPass<'_, M> {
+    fn build(&self, view: BarView<'_>, viewport: Size, interaction: &InteractionState) -> Scene {
         let BarPresentation {
             theme,
             tags,
@@ -1145,7 +1172,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
             minimized_windows,
             minimized_overflow,
             status,
-        } = PresentationProjector::project(view, &self.config);
+        } = PresentationProjector::project(view, self.config);
         let viewport = viewport.normalized();
         let clip = Rect::from_size(viewport);
         let bar_height = finite_non_negative(self.config.bar_height).min(viewport.height);
@@ -1459,7 +1486,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         if available.is_empty() {
             return None;
         }
-        let metrics = DockMetrics::new(&self.config, available.height)?;
+        let metrics = DockMetrics::new(self.config, available.height)?;
         let max_slots = metrics.slot_capacity(available.width);
         if max_slots == 0 {
             return None;
@@ -1620,7 +1647,7 @@ impl<M: TextMeasurer> LayoutEngine<M> {
         available_width: f32,
         available_height: f32,
     ) -> f32 {
-        let Some(metrics) = DockMetrics::new(&self.config, available_height) else {
+        let Some(metrics) = DockMetrics::new(self.config, available_height) else {
             return 0.0;
         };
         if metrics.slot_capacity(available_width) == 0 {

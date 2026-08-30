@@ -26,6 +26,14 @@ pub const UNKNOWN_VALUE: &str = "--";
 /// scene. Truncation always stops at a UTF-8 character boundary.
 pub const MAX_PROJECTED_CONTROL_TEXT_BYTES: usize = 256;
 
+/// Maximum number of entries inspected from a sequential, directly mutable
+/// presentation configuration collection during one projection.
+///
+/// The earliest entries retain their configured order and priority. Indexed
+/// collections such as tag and monitor glyphs are instead addressed only by
+/// model-bounded indices, so their unused tail is never projected.
+pub const MAX_PROJECTED_CONFIG_ITEMS: usize = 256;
+
 /// Fixed status controls in the same right-to-left order used by
 /// `LayoutEngine`.
 ///
@@ -319,19 +327,32 @@ impl PresentationProjector {
 /// added — the property `canonical_layout_ids_are_dense_and_appended` pins.
 fn layout_menu(view: BarView<'_>, config: &PresentationConfig) -> Vec<ControlSpec> {
     let offered = view.layout_count;
+    // Public callers can mutate this Vec without passing through config-file
+    // validation. Give the configured prefix stable priority without making a
+    // rejected or duplicate tail an unbounded per-frame scan.
+    let configured = &config.layouts[..config.layouts.len().min(MAX_PROJECTED_CONFIG_ITEMS)];
+    let mut configured_ids = Vec::with_capacity(configured.len());
+    let configured = configured
+        .iter()
+        .filter_map(|layout| {
+            if configured_ids.contains(&layout.id) {
+                return None;
+            }
+            configured_ids.push(layout.id);
+            crate::display::layout_is_offered(layout.id, offered)
+                .then(|| (layout.id, layout.label.clone()))
+        })
+        .collect::<Vec<_>>();
     let extra = crate::display::unknown_layout_ids(offered)
         .map(crate::LayoutId)
         // A host that configured its own catalog may already label an
         // identifier past the canonical table; listing it twice would give one
         // layout two buttons.
-        .filter(|id| !config.layouts.iter().any(|layout| layout.id == *id))
+        .filter(|id| !configured_ids.contains(id))
         .map(|id| (id, crate::display::unknown_layout_label(id)));
 
-    config
-        .layouts
-        .iter()
-        .filter(|layout| crate::display::layout_is_offered(layout.id, offered))
-        .map(|layout| (layout.id, layout.label.clone()))
+    configured
+        .into_iter()
         .chain(extra)
         .take(crate::display::MAX_LAYOUT_CHOICES)
         .map(|(id, label)| {
@@ -564,7 +585,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
         // layout engine drops on a narrow bar, which is the right trade: a
         // clock or a battery reading is worth more width than a launcher.
         let mut seen_routes = [false; ShellRoute::ALL.len()];
-        for &route in &config.shell_routes {
+        for &route in config.shell_routes.iter().take(MAX_PROJECTED_CONFIG_ITEMS) {
             let route_index = ShellRoute::ALL
                 .iter()
                 .position(|candidate| *candidate == route)
@@ -590,6 +611,9 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
                 .with_availability(view.wm_available)
                 .with_enabled(view.wm_available),
             );
+            if seen_routes.iter().all(|seen| *seen) {
+                break;
+            }
         }
     }
 
@@ -1021,6 +1045,88 @@ mod tests {
                 (crate::display::MAX_LAYOUT_CHOICES - 1) as u32
             )))
         );
+    }
+
+    #[test]
+    fn direct_config_collections_project_a_bounded_unique_prefix() {
+        let oversized_capacity = MAX_PROJECTED_CONFIG_ITEMS * 8;
+
+        let mut layouts = Vec::with_capacity(oversized_capacity);
+        layouts.push(LayoutChoice {
+            id: LayoutId(37),
+            label: "first".to_owned(),
+        });
+        layouts.extend((1..MAX_PROJECTED_CONFIG_ITEMS).map(|_| LayoutChoice {
+            id: LayoutId(37),
+            label: "duplicate".to_owned(),
+        }));
+        layouts.push(LayoutChoice {
+            id: LayoutId(38),
+            label: "past-bound".to_owned(),
+        });
+
+        let mut shell_routes = Vec::with_capacity(oversized_capacity);
+        shell_routes.resize(MAX_PROJECTED_CONFIG_ITEMS, ShellRoute::Hub);
+        shell_routes.push(ShellRoute::Notifications);
+
+        let mut tag_labels = Vec::with_capacity(oversized_capacity);
+        tag_labels.resize(MAX_PROJECTED_CONFIG_ITEMS + 1, "tag".to_owned());
+        let mut monitor_labels = Vec::with_capacity(oversized_capacity);
+        monitor_labels.resize(MAX_PROJECTED_CONFIG_ITEMS + 1, "monitor".to_owned());
+
+        let config = PresentationConfig {
+            tag_labels,
+            layouts,
+            shell_routes,
+            icon_set: Some(crate::IconSet {
+                monitor_labels,
+                ..crate::IconSet::default()
+            }),
+            ..PresentationConfig::default()
+        };
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+
+        assert_eq!(projected.tags.len(), snapshot.tags.len());
+        assert_eq!(projected.tags[0].icon, "tag");
+        assert_eq!(by_id(&projected, NodeId::Monitor).value, "monitor");
+        assert_eq!(
+            projected
+                .layout_choices
+                .iter()
+                .map(|choice| (choice.id, choice.value.as_str()))
+                .collect::<Vec<_>>(),
+            [(NodeId::LayoutOption(LayoutId(37)), "first")]
+        );
+        assert_eq!(
+            projected
+                .status
+                .iter()
+                .filter_map(|control| match control.id {
+                    NodeId::ShellHub(route) => Some(route),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            [ShellRoute::Hub]
+        );
+        assert!(config.layouts.capacity() > MAX_PROJECTED_CONFIG_ITEMS);
+        assert!(config.shell_routes.capacity() > MAX_PROJECTED_CONFIG_ITEMS);
+        assert!(config.tag_labels.capacity() > MAX_PROJECTED_CONFIG_ITEMS);
+        assert!(
+            config
+                .icon_set
+                .as_ref()
+                .is_some_and(|icons| icons.monitor_labels.capacity() > MAX_PROJECTED_CONFIG_ITEMS)
+        );
+        for capacity in [
+            projected.tags.capacity(),
+            projected.layout_choices.capacity(),
+            projected.status.capacity(),
+        ] {
+            assert!(capacity <= MAX_PROJECTED_CONFIG_ITEMS);
+        }
     }
 
     /// A window manager that never reports a count — an older one, or a

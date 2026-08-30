@@ -14,8 +14,8 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::presentation::{
-    Damage, ImageSource, InteractionState, LayoutEngine, Point, PointerAction, Rect, Rgba, Scene,
-    SceneNode, Size, Stroke, TextAlign, TextMeasurer,
+    Damage, ImageSource, InteractionState, Point, PointerAction, Rect, Rgba, Scene, SceneNode,
+    Size, Stroke, TextAlign, TextMeasurer, build_scene,
 };
 use crate::{
     BarModel, BarRuntime, BarSnapshot, DockReporter, DockReporterInput, RuntimeUpdate, UserAction,
@@ -720,13 +720,27 @@ impl CairoBar {
         scale_factor: f64,
     ) -> Result<()> {
         let measurer = self.renderer.text_measurer(context);
-        let layout = LayoutEngine::new(self.config.clone(), measurer);
         let mut next_interaction = self.interaction;
-        let mut next_scene = layout.build(self.runtime.view(), viewport, &next_interaction);
+        // PresentationConfig is directly mutable and may own large catalogs.
+        // Borrow it for the frame instead of cloning unused collection tails
+        // before the projector applies its bounded-prefix policy.
+        let mut next_scene = build_scene(
+            &self.config,
+            &measurer,
+            self.runtime.view(),
+            viewport,
+            &next_interaction,
+        );
         if let Some(point) = self.last_pointer
             && next_interaction.update_hover(&next_scene, point)
         {
-            next_scene = layout.build(self.runtime.view(), viewport, &next_interaction);
+            next_scene = build_scene(
+                &self.config,
+                &measurer,
+                self.runtime.view(),
+                viewport,
+                &next_interaction,
+            );
         }
         self.renderer.render_over(context, &next_scene, backdrop)?;
         self.last_damage = next_scene.damage_from(&self.scene);

@@ -54,8 +54,9 @@ pub mod wake;
 pub use shared_structures;
 
 pub use controls::{
-    BarPresentation, ControlSpec, ControlState, InputBindings, MAX_PROJECTED_CONTROL_TEXT_BYTES,
-    PresentationProjector, STATUS_ORDER_RIGHT_TO_LEFT, UNKNOWN_VALUE,
+    BarPresentation, ControlSpec, ControlState, InputBindings, MAX_PROJECTED_CONFIG_ITEMS,
+    MAX_PROJECTED_CONTROL_TEXT_BYTES, PresentationProjector, STATUS_ORDER_RIGHT_TO_LEFT,
+    UNKNOWN_VALUE,
 };
 pub use display::{
     BatteryThresholds, IconSet, LayoutCatalogEntry, MetricTone, TagFallback, ThresholdError,
