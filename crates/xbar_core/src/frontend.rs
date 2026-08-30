@@ -332,12 +332,10 @@ impl SnapshotCursor {
 
         changes |= snapshot_changes(previous, &snapshot);
         if changes.is_empty() {
-            // Opaque metadata such as wm_sequence may advance without a
-            // frontend-observable change. Retain it for the next replay while
-            // suppressing an empty delivery.
-            self.revision = Some(revision);
-            self.previous_snapshot = Some(snapshot);
-            return None;
+            // A complete snapshot changed in a way this version does not yet
+            // classify. Deliver it conservatively so adding a future wire
+            // field cannot silently strand frontend state on an old value.
+            changes = DirtyBits::all();
         }
         self.revision = Some(revision);
         self.previous_snapshot = Some(snapshot.clone());
@@ -410,14 +408,20 @@ pub fn snapshot_changes(previous: &BarSnapshot, current: &BarSnapshot) -> DirtyB
         changes.set(DirtyBits::GEOMETRY_CHANGED);
     }
     if previous.layout_symbol != current.layout_symbol
+        || previous.layout != current.layout
+        || previous.layout_count != current.layout_count
         || previous.layout_selector_open != current.layout_selector_open
     {
         changes.set(DirtyBits::LAYOUT_CHANGED);
     }
-    if previous.client_name != current.client_name {
+    if previous.client_name != current.client_name
+        || previous.client_app_id != current.client_app_id
+        || previous.client_icon != current.client_icon
+    {
         changes.set(DirtyBits::CLIENT_CHANGED);
     }
-    if previous.wm_session_id != current.wm_session_id
+    if previous.wm_sequence != current.wm_sequence
+        || previous.wm_session_id != current.wm_session_id
         || previous.minimized_windows != current.minimized_windows
         || previous.minimized_overflow != current.minimized_overflow
     {
@@ -1033,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_coalesces_opaque_sequence_metadata_but_retains_it_for_replay() {
+    fn cursor_delivers_minimized_epoch_without_upstream_dirty_bits() {
         let state = snapshot();
         let mut cursor = SnapshotCursor::new();
         cursor
@@ -1042,13 +1046,36 @@ mod tests {
 
         let mut metadata_only = state;
         metadata_only.wm_sequence = Some(99);
-        assert!(
-            cursor
-                .update(4, DirtyBits::default(), metadata_only.clone())
-                .is_none()
-        );
+        let update = cursor
+            .update(4, DirtyBits::default(), metadata_only.clone())
+            .expect("a new minimized generation must reach the frontend");
+        assert!(update.changes.contains(DirtyBits::MINIMIZED_CHANGED));
         assert_eq!(cursor.previous_snapshot(), Some(&metadata_only));
         assert_eq!(cursor.replay().unwrap().snapshot.wm_sequence, Some(99));
+    }
+
+    #[test]
+    fn cursor_cache_does_not_retain_direct_input_spare_capacity() {
+        let state = snapshot();
+        let mut cursor = SnapshotCursor::new();
+        cursor
+            .update(1, DirtyBits::default(), state.clone())
+            .unwrap();
+
+        let mut oversized_capacity = String::with_capacity(1_000_000);
+        oversized_capacity.push_str("org.example.Client");
+        let input_capacity = oversized_capacity.capacity();
+        let mut changed = state;
+        changed.client_app_id = oversized_capacity;
+
+        let envelope = cursor
+            .update(2, DirtyBits::default(), changed)
+            .expect("the changed application identity must be delivered");
+        assert!(
+            envelope.snapshot.client_app_id.capacity() >= input_capacity,
+            "the direct input must exercise oversized spare capacity"
+        );
+        assert!(cursor.previous_snapshot().unwrap().client_app_id.capacity() < input_capacity);
     }
 
     #[test]
@@ -1057,6 +1084,15 @@ mod tests {
         let assert_exact = |changed: crate::BarSnapshot, expected| {
             let actual = snapshot_changes(&original, &changed);
             assert_eq!(actual, DirtyBits::new(expected));
+
+            let mut cursor = SnapshotCursor::new();
+            cursor
+                .update(1, DirtyBits::default(), original.clone())
+                .unwrap();
+            let envelope = cursor
+                .update(2, DirtyBits::default(), changed)
+                .expect("every serialized state change must be delivered");
+            assert_eq!(envelope.changes, DirtyBits::new(expected));
         };
 
         let mut changed = original.clone();
@@ -1065,7 +1101,7 @@ mod tests {
 
         let mut changed = original.clone();
         changed.wm_sequence = Some(1);
-        assert_exact(changed, DirtyBits::NONE);
+        assert_exact(changed, DirtyBits::MINIMIZED_CHANGED);
 
         let mut changed = original.clone();
         changed.geometry = Some(MonitorGeometry {
@@ -1081,7 +1117,25 @@ mod tests {
         assert_exact(changed, DirtyBits::LAYOUT_CHANGED);
 
         let mut changed = original.clone();
+        changed.layout = Some(LayoutId(7));
+        assert_exact(changed, DirtyBits::LAYOUT_CHANGED);
+
+        let mut changed = original.clone();
+        changed.layout_count = Some(8);
+        assert_exact(changed, DirtyBits::LAYOUT_CHANGED);
+
+        let mut changed = original.clone();
         changed.client_name = "client".to_owned();
+        assert_exact(changed, DirtyBits::CLIENT_CHANGED);
+
+        let mut changed = original.clone();
+        changed.client_app_id = "org.example.Client".to_owned();
+        assert_exact(changed, DirtyBits::CLIENT_CHANGED);
+
+        let mut changed = original.clone();
+        changed.client_icon = Some(crate::app_icon::AppIcon::new(
+            "/tmp/frontend-client.png".into(),
+        ));
         assert_exact(changed, DirtyBits::CLIENT_CHANGED);
 
         let mut changed = original.clone();
@@ -1125,6 +1179,55 @@ mod tests {
         let mut changed = original.clone();
         changed.battery = BatteryState::present(None, true);
         assert_exact(changed, DirtyBits::BATTERY_CHANGED);
+    }
+
+    #[test]
+    fn delivered_minimized_epoch_drives_the_next_restore_action() {
+        let window = MinimizedWindow {
+            token: WindowToken(17),
+            monitor: MonitorId(2),
+            title: "Editor".into(),
+            app_id: "test".into(),
+            flags: 0,
+        };
+        let wm_snapshot = |sequence| crate::WmSnapshot {
+            sequence: Some(sequence),
+            wm_session_id: 91,
+            minimized_windows: vec![window.clone()],
+            ..crate::WmSnapshot::default()
+        };
+
+        let mut runtime = crate::BarRuntime::default();
+        runtime.apply_event(crate::BarEvent::WindowManager(wm_snapshot(41)));
+        let mut cursor = SnapshotCursor::new();
+        cursor
+            .update(1, DirtyBits::default(), runtime.snapshot())
+            .unwrap();
+
+        runtime.apply_event(crate::BarEvent::WindowManager(wm_snapshot(42)));
+        let envelope = cursor
+            .update(2, DirtyBits::default(), runtime.snapshot())
+            .expect("the new minimized generation must not be swallowed");
+        assert!(envelope.changes.contains(DirtyBits::MINIMIZED_CHANGED));
+
+        let update = ActionRequest::RestoreWindow {
+            window_id: window.token.get(),
+            wm_session_id: envelope.snapshot.wm_session_id,
+            minimized_generation: envelope.snapshot.wm_sequence.unwrap(),
+            geometry: DockItemGeometry::new(1, 2, 27, 18),
+        }
+        .dispatch(&mut runtime)
+        .unwrap();
+        assert!(update.issues.is_empty());
+        assert!(matches!(
+            update.platform_effects.as_slice(),
+            [crate::BarEffect::WindowManager(
+                crate::WmCommand::RestoreWindow {
+                    minimized_generation: 42,
+                    ..
+                }
+            )]
+        ));
     }
 
     #[test]
