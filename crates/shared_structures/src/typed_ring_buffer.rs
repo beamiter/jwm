@@ -326,6 +326,11 @@ fn map_shmem_error(operation: &str, error: ShmemError) -> Error {
         | ShmemError::LinkCreateFailed(source)
         | ShmemError::LinkReadFailed(source)
         | ShmemError::LinkWriteFailed(source) => source.kind(),
+        ShmemError::MapCreateFailed(raw)
+        | ShmemError::MapOpenFailed(raw)
+        | ShmemError::UnknownOsError(raw) => {
+            i32::try_from(*raw).map_or(ErrorKind::Other, |raw| Error::from_raw_os_error(raw).kind())
+        }
         _ => ErrorKind::Other,
     };
     Error::new(kind, format!("{operation}: {error}"))
@@ -2115,6 +2120,25 @@ mod tests {
         assert!(Path::new(&path).is_file());
         let opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
         assert_eq!(opener, replacement);
+    }
+
+    #[test]
+    fn typed_open_preserves_missing_os_mapping_error_kind() {
+        let path = mk_path("missing_os_mapping");
+        let mut creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+
+        // Leave only the public flink behind, modeling the window where an
+        // opener has read its os-id just before the creator unlinks the OS
+        // mapping. The backend and mapping still receive normal owner cleanup.
+        creator.flink_path.take();
+        drop(creator);
+
+        let error = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(error.kind(), ErrorKind::NotFound);
     }
 
     #[test]
