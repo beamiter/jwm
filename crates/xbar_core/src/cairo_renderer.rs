@@ -102,10 +102,20 @@ impl SceneImageCache {
     }
 }
 
+/// `Synchronized(None)` is distinct from a fresh renderer that has not yet
+/// applied the owning bar's automatic icon-font policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppliedIconFont {
+    Unsynchronized,
+    Synchronized(Option<Box<str>>),
+}
+
 /// Renders a [`Scene`] into an existing Cairo context.
 #[derive(Debug, Clone)]
 pub struct CairoRenderer {
+    base_font: FontDescription,
     font: FontDescription,
+    applied_icon_font: AppliedIconFont,
     background_opacity: Option<f64>,
     /// Decoded scene images, keyed by [`ImageSource::key`].
     ///
@@ -121,8 +131,18 @@ pub struct CairoRenderer {
 impl CairoRenderer {
     #[must_use]
     pub fn new(font: FontDescription) -> Self {
+        Self::with_fonts(font.clone(), font, AppliedIconFont::Unsynchronized)
+    }
+
+    fn with_fonts(
+        base_font: FontDescription,
+        font: FontDescription,
+        applied_icon_font: AppliedIconFont,
+    ) -> Self {
         Self {
+            base_font,
             font,
+            applied_icon_font,
             background_opacity: None,
             images: RefCell::new(SceneImageCache::default()),
         }
@@ -136,7 +156,9 @@ impl CairoRenderer {
     /// generic fontconfig sort happens to hand this session.
     #[must_use]
     pub fn with_icon_font(font: FontDescription, configured: Option<&str>) -> Self {
-        Self::new(crate::icon_font::with_icon_fallback(&font, configured))
+        let composed = crate::icon_font::with_icon_fallback(&font, configured);
+        let applied_icon_font = AppliedIconFont::Synchronized(configured.map(Box::<str>::from));
+        Self::with_fonts(font, composed, applied_icon_font)
     }
 
     /// Multiply background-node alpha by `opacity`.
@@ -161,6 +183,17 @@ impl CairoRenderer {
 
     pub fn set_background_opacity(&mut self, opacity: Option<f64>) {
         self.background_opacity = opacity.map(normalize_opacity);
+    }
+
+    fn synchronize_icon_font(&mut self, configured: Option<&str>) {
+        if let AppliedIconFont::Synchronized(applied) = &self.applied_icon_font
+            && applied.as_deref() == configured
+        {
+            return;
+        }
+
+        self.font = crate::icon_font::with_icon_fallback(&self.base_font, configured);
+        self.applied_icon_font = AppliedIconFont::Synchronized(configured.map(Box::<str>::from));
     }
 
     /// Create a text measurer using the exact Pango context associated with
@@ -719,6 +752,8 @@ impl CairoBar {
         backdrop: Option<&ImageSurface>,
         scale_factor: f64,
     ) -> Result<()> {
+        self.renderer
+            .synchronize_icon_font(self.config.icon_font.as_deref());
         let measurer = self.renderer.text_measurer(context);
         let mut next_interaction = self.interaction;
         // PresentationConfig is directly mutable and may own large catalogs.
@@ -2080,6 +2115,115 @@ mod tests {
         let pixel = u32::from_ne_bytes(data[stride + 4..stride + 8].try_into().unwrap());
         assert_eq!((pixel >> 24) as u8, 255);
         assert!((pixel >> 16) as u8 > 240);
+    }
+
+    #[test]
+    fn cairo_bar_rebuilds_icon_font_from_base_after_config_reload() {
+        const INITIAL_ICONS: &str = "Xbar Initial Test Icons";
+        const REPLACEMENT_ICONS: &str = "Xbar Replacement Test Icons";
+
+        let base_font = FontDescription::from_string("Sans Medium 13");
+        let config = crate::presentation::PresentationConfig {
+            icon_font: Some(INITIAL_ICONS.to_owned()),
+            ..crate::presentation::PresentationConfig::default()
+        };
+        let initial_font =
+            crate::icon_font::with_icon_fallback(&base_font, config.icon_font.as_deref());
+        let mut bar = CairoBar::new(BarRuntime::default(), config, base_font.clone());
+        assert_eq!(bar.renderer().font().to_string(), initial_font.to_string());
+
+        let surface = ImageSurface::create(Format::ARgb32, 640, 38).unwrap();
+        let context = Context::new(&surface).unwrap();
+        let viewport = Size::new(640.0, 38.0);
+
+        bar.config_mut().icon_font = Some(REPLACEMENT_ICONS.to_owned());
+        // Direct configuration remains lazy: the renderer switches at the
+        // documented next-render boundary, not while the config is borrowed.
+        assert_eq!(bar.renderer().font().to_string(), initial_font.to_string());
+        bar.render(&context, viewport).unwrap();
+        let replacement_font =
+            crate::icon_font::with_icon_fallback(&base_font, Some(REPLACEMENT_ICONS));
+        assert_eq!(
+            bar.renderer().font().to_string(),
+            replacement_font.to_string()
+        );
+
+        // A second frame with unchanged configuration must leave the exact
+        // composed description stable rather than append the family again.
+        bar.render(&context, viewport).unwrap();
+        assert_eq!(
+            bar.renderer().font().to_string(),
+            replacement_font.to_string()
+        );
+
+        bar.config_mut().icon_font = None;
+        bar.render(&context, viewport).unwrap();
+        let cleared_font = crate::icon_font::with_icon_fallback(&base_font, None);
+        assert_eq!(bar.renderer().font().to_string(), cleared_font.to_string());
+        assert!(
+            !bar.renderer()
+                .font()
+                .family()
+                .unwrap_or_default()
+                .contains(REPLACEMENT_ICONS)
+        );
+
+        bar.render(&context, viewport).unwrap();
+        assert_eq!(bar.renderer().font().to_string(), cleared_font.to_string());
+    }
+
+    #[test]
+    fn cairo_bar_synchronizes_replacement_renderer_for_some_and_none_icon_config() {
+        const CONFIGURED_ICONS: &str = "Xbar Configured Test Icons";
+
+        let config = crate::presentation::PresentationConfig {
+            icon_font: Some(CONFIGURED_ICONS.to_owned()),
+            ..crate::presentation::PresentationConfig::default()
+        };
+        let mut bar = CairoBar::new(
+            BarRuntime::default(),
+            config,
+            FontDescription::from_string("Sans 13"),
+        );
+        let surface = ImageSurface::create(Format::ARgb32, 640, 38).unwrap();
+        let context = Context::new(&surface).unwrap();
+        let viewport = Size::new(640.0, 38.0);
+
+        let replacement_base = FontDescription::from_string("Serif Bold 15");
+        *bar.renderer_mut() = CairoRenderer::new(replacement_base.clone());
+        assert_eq!(
+            bar.renderer().applied_icon_font,
+            AppliedIconFont::Unsynchronized
+        );
+        bar.render(&context, viewport).unwrap();
+        let configured_font =
+            crate::icon_font::with_icon_fallback(&replacement_base, Some(CONFIGURED_ICONS));
+        assert_eq!(
+            bar.renderer().font().to_string(),
+            configured_font.to_string()
+        );
+        assert!(matches!(
+            &bar.renderer().applied_icon_font,
+            AppliedIconFont::Synchronized(Some(applied)) if applied.as_ref() == CONFIGURED_ICONS
+        ));
+
+        bar.config_mut().icon_font = None;
+        let cleared_base = FontDescription::from_string("Monospace Italic 11");
+        *bar.renderer_mut() = CairoRenderer::new(cleared_base.clone());
+        assert_eq!(
+            bar.renderer().applied_icon_font,
+            AppliedIconFont::Unsynchronized
+        );
+        bar.render(&context, viewport).unwrap();
+        let automatic_font = crate::icon_font::with_icon_fallback(&cleared_base, None);
+        assert_eq!(
+            bar.renderer().font().to_string(),
+            automatic_font.to_string()
+        );
+        assert_eq!(
+            bar.renderer().applied_icon_font,
+            AppliedIconFont::Synchronized(None)
+        );
     }
 
     #[test]
