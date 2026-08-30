@@ -1157,7 +1157,7 @@ pub fn calculate_scrolling<K: Copy>(
 
     // Outer margin
     let outer_gap = gap;
-    let avail_h = (screen.h - 2 * outer_gap).max(0);
+    let avail_h = screen.h.saturating_sub(outer_gap.saturating_mul(2)).max(0);
 
     // Calculate total strip width and per-column x positions (in strip space, starting at 0)
     let mut col_positions: Vec<i32> = Vec::with_capacity(columns.len());
@@ -1174,9 +1174,9 @@ pub fn calculate_scrolling<K: Copy>(
         let col_w = col_w.max(1);
         col_positions.push(x_cursor);
         col_widths.push(col_w);
-        x_cursor += col_w;
+        x_cursor = x_cursor.saturating_add(col_w);
         if i + 1 < columns.len() {
-            x_cursor += gap;
+            x_cursor = x_cursor.saturating_add(gap);
         }
     }
 
@@ -1197,35 +1197,37 @@ pub fn calculate_scrolling<K: Copy>(
         // 右侧的列偏移 1px。
         let screen_x = (strip_x as f32 - new_viewport_x + screen.x as f32).round();
 
-        let inner_gaps = (col.len() as i32 - 1).max(0) * gap;
-        let avail_col_h = (avail_h - inner_gaps).max(0);
+        let inner_gap_count = i32::try_from(col.len().saturating_sub(1)).unwrap_or(i32::MAX);
+        let inner_gaps = inner_gap_count.saturating_mul(gap);
+        let avail_col_h = avail_h.saturating_sub(inner_gaps).max(0);
         let mut remaining_fact: f32 = col.iter().map(|client| client.factor.max(0.0)).sum();
 
         let mut y_cursor = 0;
         for (win_idx, client) in col.iter().enumerate() {
-            let remaining = col.len() as i32 - win_idx as i32;
-            let remaining_h = (avail_col_h - y_cursor).max(0);
+            let remaining = i32::try_from(col.len() - win_idx).unwrap_or(i32::MAX);
+            let remaining_h = avail_col_h.saturating_sub(y_cursor).max(0);
             let client_fact = client.factor.max(0.0);
             let h = if remaining_fact > 0.001 {
                 (remaining_h as f32 * (client_fact / remaining_fact)) as i32
             } else {
                 remaining_h / remaining.max(1)
             };
-            let border2 = 2 * client.border_w;
 
-            let win_y = screen.y + outer_gap + y_cursor + win_idx as i32 * gap;
+            let window_offset = i32::try_from(win_idx)
+                .unwrap_or(i32::MAX)
+                .saturating_mul(gap);
+            let win_y = screen
+                .y
+                .saturating_add(outer_gap)
+                .saturating_add(y_cursor)
+                .saturating_add(window_offset);
 
             results.push(LayoutResult {
                 key: client.key,
-                rect: Rect::new(
-                    screen_x as i32,
-                    win_y,
-                    (col_w - border2).max(1),
-                    (h - border2).max(1),
-                ),
+                rect: client_rect(screen_x as i32, win_y, col_w, h, client.border_w),
             });
 
-            y_cursor += h;
+            y_cursor = y_cursor.saturating_add(h);
             remaining_fact -= client_fact;
         }
     }
@@ -2210,5 +2212,30 @@ mod tests {
                 "gap {gap} produced a non-positive rectangle"
             );
         }
+    }
+
+    #[test]
+    fn scrolling_saturates_extreme_origins_offsets_and_borders() {
+        let extreme_client = LayoutClient {
+            key: 1,
+            factor: 1.0,
+            border_w: i32::MAX,
+        };
+        let columns = vec![vec![extreme_client; 4], vec![extreme_client; 4]];
+        let params = ScrollingParams {
+            screen_area: Rect::new(i32::MAX - 4, i32::MAX - 4, i32::MAX, i32::MAX),
+            column_width_ratio: 1.0,
+            column_width_factors: Vec::new(),
+            gap: i32::MAX,
+            viewport_x: 0.0,
+        };
+
+        let (results, viewport_x) = calculate_scrolling(&params, &columns, 1);
+
+        assert_eq!(results.len(), 8);
+        assert!(viewport_x.is_finite());
+        assert!(results.iter().all(|result| {
+            result.rect.y == i32::MAX && result.rect.w == 1 && result.rect.h == 1
+        }));
     }
 }
