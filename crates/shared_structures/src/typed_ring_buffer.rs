@@ -12,9 +12,10 @@ use crate::backends::common::{
 
 use log::warn;
 use shared_memory::{Shmem, ShmemConf, ShmemError};
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -423,7 +424,6 @@ fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLega
 /// Atomically publishes a fully initialized mapping without exposing a partially written flink.
 fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
     use std::fs::OpenOptions;
-    use std::os::unix::fs::OpenOptionsExt;
 
     let parent = target
         .parent()
@@ -479,6 +479,45 @@ fn publish_flink(target: &Path, os_id: &str) -> Result<PathBuf> {
 
     let _ = std::fs::remove_file(&temporary);
     result
+}
+
+/// Remove `path` after verifying that it still names `os_id`.
+///
+/// The creator may outlive its public flink: a supervisor can remove that
+/// link and publish a replacement mapping at the same path. An unconditional
+/// creator-side unlink would then detach the replacement when the stale
+/// creator is eventually dropped. Read at most one byte beyond the expected
+/// identifier so a replaced, unexpectedly large file cannot force an
+/// unbounded allocation during `Drop`. Opening is non-blocking and refuses
+/// symlinks so an unexpected replacement cannot stall or redirect teardown.
+/// The final pathname unlink cannot be made compare-and-remove atomically;
+/// callers that externally replace the same pathname must serialize
+/// publication with stale creator teardown to eliminate that residual race.
+fn remove_matching_flink(path: &Path, os_id: &str) {
+    let Some(limit) = os_id
+        .len()
+        .checked_add(1)
+        .and_then(|length| u64::try_from(length).ok())
+    else {
+        return;
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    if !metadata.is_file() {
+        return;
+    };
+    let mut contents = Vec::with_capacity(os_id.len());
+    if file.take(limit).read_to_end(&mut contents).is_ok() && contents == os_id.as_bytes() {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// 跨进程方向锁的 RAII guard。
@@ -1737,7 +1776,7 @@ impl<M: WireSafe, C: WireSafe> Drop for TypedRingBuffer<M, C> {
         if self.is_creator {
             let _ = self.destroy();
             if let Some(path) = self.flink_path.take() {
-                let _ = std::fs::remove_file(path);
+                remove_matching_flink(&path, self.shmem.get_os_id());
             }
         }
         self.backend.cleanup(self.is_creator);
@@ -1797,6 +1836,28 @@ mod tests {
             }
         );
         assert_eq!(opener.try_receive_command().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn stale_creator_drop_does_not_unlink_a_replacement_mapping() {
+        let path = mk_path("replacement_flink");
+        let first: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+
+        std::fs::remove_file(&path).unwrap();
+        let replacement: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+        assert_ne!(first.shmem.get_os_id(), replacement.shmem.get_os_id());
+
+        drop(first);
+
+        assert!(Path::new(&path).is_file());
+        let opener = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap();
+        assert_eq!(opener, replacement);
     }
 
     #[test]
