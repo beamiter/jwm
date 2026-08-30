@@ -124,10 +124,7 @@ impl SemaphoreBackend {
             match gate.register(&has_data) {
                 RegisterOutcome::DataReady => return Ok(true),
                 RegisterOutcome::Retry => continue,
-                RegisterOutcome::Registered {
-                    registration,
-                    snapshot: _,
-                } => {
+                RegisterOutcome::Registered { registration, .. } => {
                     let wait_result = wait_one_slice(sem_ptr, remaining);
                     drop(registration);
                     match wait_result {

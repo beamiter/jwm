@@ -594,10 +594,7 @@ impl EventFdBackend {
             match gate.register(&has_data) {
                 RegisterOutcome::DataReady => return Ok(true),
                 RegisterOutcome::Retry => continue,
-                RegisterOutcome::Registered {
-                    registration,
-                    snapshot: _,
-                } => {
+                RegisterOutcome::Registered { registration, .. } => {
                     let remaining = timeout.map(|limit| limit.saturating_sub(started.elapsed()));
                     let poll_result = Self::poll_fd(ofd.as_fd(), remaining);
                     drop(registration);

@@ -47,6 +47,7 @@ mod waiter_gate {
         /// 登记成功；`snapshot` 是登记前的 sequence 值（futex 用作比较字）。
         Registered {
             registration: WaiterRegistration<'a>,
+            #[cfg(feature = "futex")]
             snapshot: u32,
         },
     }
@@ -69,6 +70,7 @@ mod waiter_gate {
             }
             RegisterOutcome::Registered {
                 registration,
+                #[cfg(feature = "futex")]
                 snapshot,
             }
         }
