@@ -425,6 +425,15 @@ impl EventFdBackend {
         }
     }
 
+    fn send_eventfds(cli_fd: RawFd, message_fd: RawFd, command_fd: RawFd) -> nix::Result<usize> {
+        let iov = [IoSlice::new(&[0xE5])];
+        let fds = [message_fd, command_fd];
+        let cmsg = [ControlMessage::ScmRights(&fds)];
+        // The opener may disconnect after accept(); report EPIPE to the
+        // listener instead of letting SIGPIPE terminate the creator process.
+        sendmsg::<nix::sys::socket::UnixAddr>(cli_fd, &iov, &cmsg, MsgFlags::MSG_NOSIGNAL, None)
+    }
+
     fn create_eventfd_owned() -> Result<OwnedFd> {
         let flags = libc::EFD_NONBLOCK | libc::EFD_CLOEXEC | libc::EFD_SEMAPHORE;
         let fd = unsafe { libc::eventfd(0, flags) };
@@ -482,17 +491,9 @@ impl EventFdBackend {
                                 log::warn!("rejected eventfd fd-pass connection from another user");
                                 continue;
                             }
-                            let iov = [IoSlice::new(&[0xE5])];
-                            let fds = [msg_fd_raw, cmd_fd_raw];
-                            let cmsg = [ControlMessage::ScmRights(&fds)];
-
-                            if let Err(e) = sendmsg::<nix::sys::socket::UnixAddr>(
-                                cli_fd.as_raw_fd(),
-                                &iov,
-                                &cmsg,
-                                MsgFlags::empty(),
-                                None,
-                            ) {
+                            if let Err(e) =
+                                Self::send_eventfds(cli_fd.as_raw_fd(), msg_fd_raw, cmd_fd_raw)
+                            {
                                 log::warn!("sendmsg(SCM_RIGHTS) failed: {e}");
                             }
                         }
@@ -1180,5 +1181,60 @@ mod tests {
             returned_before_drain,
             "listener poke blocked while the listen backlog was full"
         );
+    }
+
+    #[test]
+    fn fd_pass_does_not_raise_sigpipe_when_opener_disconnects() {
+        const CHILD_MARKER_ENV: &str = "SHARED_STRUCTURES_EVENTFD_SIGPIPE_MARKER";
+
+        if let Some(marker) = std::env::var_os(CHILD_MARKER_ENV) {
+            // Applications may restore SIGPIPE's default disposition. The
+            // backend must suppress it per send instead of relying on Rust's
+            // process-wide startup choice.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+            let (sender, peer) = nix::sys::socket::socketpair(
+                AddressFamily::Unix,
+                SockType::Stream,
+                None,
+                SockFlag::SOCK_CLOEXEC,
+            )
+            .unwrap();
+            drop(peer);
+            let message_fd = EventFdBackend::create_eventfd_owned().unwrap();
+            let command_fd = EventFdBackend::create_eventfd_owned().unwrap();
+
+            let error = EventFdBackend::send_eventfds(
+                sender.as_raw_fd(),
+                message_fd.as_raw_fd(),
+                command_fd.as_raw_fd(),
+            )
+            .unwrap_err();
+            assert_eq!(error, Errno::EPIPE);
+            std::fs::write(marker, b"completed").unwrap();
+            return;
+        }
+
+        let marker = PathBuf::from(format!(
+            "/tmp/srb-eventfd-sigpipe-{}-{}",
+            std::process::id(),
+            SOCKET_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let test_name =
+            "backends::eventfd::tests::fd_pass_does_not_raise_sigpipe_when_opener_disconnects";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_MARKER_ENV, &marker)
+            .status()
+            .unwrap();
+        let child_completed = marker.is_file();
+        let _ = std::fs::remove_file(marker);
+
+        assert!(status.success(), "eventfd SIGPIPE child failed: {status}");
+        assert!(child_completed, "eventfd SIGPIPE child did not run");
     }
 }
