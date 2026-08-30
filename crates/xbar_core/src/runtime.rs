@@ -574,6 +574,12 @@ pub struct BarRuntime {
     transport: Option<SharedTransport>,
     #[cfg(feature = "transport-shared")]
     transport_generation: u64,
+    /// Whether the currently installed transport generation has supplied a
+    /// WM snapshot. The model can still contain an authoritative snapshot
+    /// from the retired generation while a handle is replaced, so
+    /// `model.wm_available` alone must not authorize commands.
+    #[cfg(feature = "transport-shared")]
+    transport_authoritative: bool,
     #[cfg(feature = "transport-shared")]
     transport_recovery: Option<TransportRecoveryState>,
     #[cfg(feature = "transport-shared")]
@@ -614,6 +620,8 @@ impl BarRuntime {
             transport: None,
             #[cfg(feature = "transport-shared")]
             transport_generation: 0,
+            #[cfg(feature = "transport-shared")]
+            transport_authoritative: false,
             #[cfg(feature = "transport-shared")]
             transport_recovery: None,
             #[cfg(feature = "transport-shared")]
@@ -671,14 +679,11 @@ impl BarRuntime {
         if replacing_handle {
             self.bump_transport_generation();
         }
-        if self.transport.is_none() {
-            self.suspend_pending_restore_retries();
-        } else if self.model.view().wm_available && !self.pending_restores.is_empty() {
-            // A replacement channel can have capacity immediately. Preserve
-            // the semantic intents, but do not carry the retired transport's
-            // QueueFull delay into the new generation.
-            self.pending_restore_retry_at = Some(Instant::now());
-        }
+        // A newly installed handle is only connected, not authoritative. Keep
+        // retained restore intents dormant until this generation supplies a
+        // snapshot against which they can be pruned safely.
+        self.transport_authoritative = false;
+        self.suspend_pending_restore_retries();
         if let Some(recovery) = self.transport_recovery.as_mut() {
             if self.transport.is_some() {
                 recovery.next_attempt = None;
@@ -712,7 +717,7 @@ impl BarRuntime {
     #[must_use]
     pub fn transport_status(&self) -> TransportStatus {
         if self.transport.is_some() {
-            if self.model.view().wm_available {
+            if self.transport_authoritative {
                 TransportStatus::Ready
             } else {
                 TransportStatus::Connected
@@ -789,6 +794,16 @@ impl BarRuntime {
     /// Reduce any semantic event and execute every effect supported by the
     /// currently enabled adapters.
     pub fn apply_event(&mut self, event: BarEvent) -> RuntimeUpdate {
+        #[cfg(feature = "transport-shared")]
+        match &event {
+            BarEvent::WindowManager(_) => {
+                self.transport_authoritative = self.transport.is_some();
+            }
+            BarEvent::WindowManagerUnavailable => {
+                self.transport_authoritative = false;
+            }
+            _ => {}
+        }
         let mut update = match self.model.update(event) {
             Ok(update) => self.consume_model_update(update),
             Err(error) => RuntimeUpdate::issue(RuntimeIssue::Model(error)),
@@ -1026,6 +1041,7 @@ impl BarRuntime {
         match SharedTransport::open(&path) {
             Ok(transport) => {
                 self.transport = Some(transport);
+                self.transport_authoritative = false;
                 self.bump_transport_generation();
                 if let Some(recovery) = self.transport_recovery.as_mut() {
                     recovery.next_attempt = None;
@@ -1056,6 +1072,7 @@ impl BarRuntime {
         // stale. Keep the bounded intents dormant until a replacement
         // transport supplies an authoritative projection to prune them.
         self.suspend_pending_restore_retries();
+        self.transport_authoritative = false;
         if self.transport.take().is_some() {
             self.bump_transport_generation();
         }
@@ -1104,6 +1121,11 @@ impl BarRuntime {
 
     fn execute_wm(&mut self, command: WmCommand) -> RuntimeUpdate {
         if !self.model.view().wm_available {
+            return RuntimeUpdate::issue(RuntimeIssue::WindowManagerUnavailable { command });
+        }
+
+        #[cfg(feature = "transport-shared")]
+        if self.transport.is_some() && !self.transport_authoritative {
             return RuntimeUpdate::issue(RuntimeIssue::WindowManagerUnavailable { command });
         }
 
@@ -1206,6 +1228,7 @@ impl BarRuntime {
     fn retry_pending_restores_at(&mut self, now: Instant) -> RuntimeUpdate {
         self.prune_pending_restores();
         if !self.model.view().wm_available
+            || !self.transport_authoritative
             || self.transport.is_none()
             || self.pending_restores.is_empty()
             || self
@@ -2329,6 +2352,98 @@ mod tests {
         assert!(runtime.transport().is_some());
         assert!(!runtime.view().wm_available);
         owner.destroy().unwrap();
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn hot_replacement_is_gated_until_the_new_transport_supplies_a_snapshot() {
+        let sequence = NEXT_TRANSPORT_PATH.fetch_add(1, Ordering::Relaxed);
+        let first_path = format!(
+            "/tmp/xbar-core-runtime-hot-replace-first-{}-{sequence}",
+            std::process::id()
+        );
+        let second_path = format!(
+            "/tmp/xbar-core-runtime-hot-replace-second-{}-{sequence}",
+            std::process::id()
+        );
+        let first_owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&first_path)
+            .expect("create first isolated transport");
+        let second_owner = shared_structures::SharedRingBufferOptions::new()
+            .capacity(8)
+            .adaptive_poll_spins(0)
+            .create(&second_path)
+            .expect("create replacement isolated transport");
+        let mut runtime = BarRuntime::with_transport(
+            ModelConfig::default(),
+            Some(SharedTransport::open(&first_path).unwrap()),
+        )
+        .unwrap();
+        runtime.apply_event(BarEvent::WindowManager(WmSnapshot {
+            sequence: Some(1),
+            monitor: MonitorId(7),
+            layout_symbol: "[]=".to_owned(),
+            ..WmSnapshot::default()
+        }));
+        assert_eq!(runtime.transport_status(), TransportStatus::Ready);
+
+        drop(runtime.set_transport(Some(SharedTransport::open(&second_path).unwrap())));
+
+        assert!(
+            runtime.view().wm_available,
+            "the old projection remains visible until the replacement is polled"
+        );
+        assert_eq!(runtime.transport_status(), TransportStatus::Connected);
+        let blocked_command = WmCommand::ViewTag {
+            tag: TagId::new(0).unwrap(),
+            monitor: MonitorId(7),
+        };
+        let blocked = runtime.dispatch(UserAction::ViewTag(TagId::new(0).unwrap()));
+        assert_eq!(
+            blocked.issues,
+            vec![RuntimeIssue::WindowManagerUnavailable {
+                command: blocked_command
+            }]
+        );
+        assert!(second_owner.try_receive_command().unwrap().is_none());
+
+        let mut monitor_info = shared_structures::MonitorInfo {
+            monitor_num: 9,
+            ..shared_structures::MonitorInfo::default()
+        };
+        monitor_info.set_ltsymbol("[M]");
+        assert!(
+            second_owner
+                .try_write_message(&shared_structures::SharedMessage {
+                    timestamp: 2,
+                    monitor_info,
+                    ..shared_structures::SharedMessage::default()
+                })
+                .unwrap()
+        );
+
+        let refreshed = runtime.poll_transport();
+        assert!(!refreshed.transport_failed());
+        assert_eq!(runtime.transport_status(), TransportStatus::Ready);
+        assert_eq!(runtime.view().monitor, MonitorId(9));
+        assert!(
+            runtime
+                .dispatch(UserAction::ViewTag(TagId::new(0).unwrap()))
+                .is_empty()
+        );
+        let submitted = second_owner
+            .try_receive_command()
+            .unwrap()
+            .expect("the first post-snapshot command reaches the replacement ring");
+        assert_eq!(
+            submitted.get_command_type(),
+            shared_structures::CommandType::ViewTag
+        );
+
+        first_owner.destroy().unwrap();
+        second_owner.destroy().unwrap();
     }
 
     #[test]
