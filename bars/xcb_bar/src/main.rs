@@ -103,6 +103,26 @@ fn find_argb_visual(screen: &x::Screen) -> Option<x::Visualtype> {
 }
 
 // ---------------- XCB back buffer ----------------
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BackBufferResize {
+    width: u16,
+    height: u16,
+}
+
+fn plan_back_buffer_resize(
+    current_width: u16,
+    current_height: u16,
+    requested_width: u16,
+    requested_height: u16,
+) -> Option<BackBufferResize> {
+    (current_width != requested_width || current_height != requested_height).then_some(
+        BackBufferResize {
+            width: requested_width,
+            height: requested_height,
+        },
+    )
+}
+
 struct BackBuffer {
     pixmap: x::Pixmap,
     width: u16,
@@ -120,14 +140,7 @@ impl BackBuffer {
         width: u16,
         height: u16,
     ) -> Result<Self> {
-        let pixmap = conn.generate_id();
-        conn.send_and_check_request(&x::CreatePixmap {
-            depth,
-            pid: pixmap,
-            drawable: x::Drawable::Window(win),
-            width,
-            height,
-        })?;
+        let pixmap = Self::create_pixmap(conn, depth, win, width, height)?;
         Ok(Self {
             pixmap,
             width,
@@ -136,6 +149,29 @@ impl BackBuffer {
             surface: None,
             context: None,
         })
+    }
+
+    fn create_pixmap(
+        conn: &xcb::Connection,
+        depth: u8,
+        win: x::Window,
+        width: u16,
+        height: u16,
+    ) -> Result<x::Pixmap> {
+        let pixmap = conn.generate_id();
+        conn.send_and_check_request(&x::CreatePixmap {
+            depth,
+            pid: pixmap,
+            drawable: x::Drawable::Window(win),
+            width,
+            height,
+        })?;
+        Ok(pixmap)
+    }
+
+    fn free_pixmap(conn: &xcb::Connection, pixmap: x::Pixmap) -> Result<()> {
+        conn.send_and_check_request(&x::FreePixmap { pixmap })?;
+        Ok(())
     }
 
     fn ensure_context<'a>(&'a mut self, cairo_xcb: &CairoXcb) -> Result<&'a Context> {
@@ -170,26 +206,32 @@ impl BackBuffer {
         width: u16,
         height: u16,
     ) -> Result<()> {
-        if self.width == width && self.height == height {
+        let Some(resize) = plan_back_buffer_resize(self.width, self.height, width, height) else {
             return Ok(());
+        };
+
+        // Allocate first so a failed replacement leaves the complete old
+        // buffer — including its live Cairo wrappers — untouched.
+        let replacement = Self::create_pixmap(conn, self.depth, win, resize.width, resize.height)?;
+        let previous = self.pixmap;
+
+        // Cairo's context retains the surface, and the surface borrows the X
+        // drawable. Release them in dependency order while `previous` is
+        // still a valid server resource.
+        drop(self.context.take());
+        drop(self.surface.take());
+
+        if let Err(error) = Self::free_pixmap(conn, previous) {
+            // The old state remains selected when its release is rejected.
+            // Avoid leaking the successfully-created replacement while the
+            // caller reports the X11 failure.
+            let _ = Self::free_pixmap(conn, replacement);
+            return Err(error);
         }
 
-        conn.send_and_check_request(&x::FreePixmap {
-            pixmap: self.pixmap,
-        })?;
-        let pixmap = conn.generate_id();
-        conn.send_and_check_request(&x::CreatePixmap {
-            depth: self.depth,
-            pid: pixmap,
-            drawable: x::Drawable::Window(win),
-            width,
-            height,
-        })?;
-        self.pixmap = pixmap;
-        self.width = width;
-        self.height = height;
-        self.surface = None;
-        self.context = None;
+        self.pixmap = replacement;
+        self.width = resize.width;
+        self.height = resize.height;
         Ok(())
     }
 
@@ -736,5 +778,33 @@ fn main() -> Result<()> {
                 token => debug!("unexpected epoll token: {token}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BackBufferResize, plan_back_buffer_resize};
+
+    #[test]
+    fn identical_dimensions_keep_the_existing_back_buffer() {
+        assert_eq!(plan_back_buffer_resize(1920, 42, 1920, 42), None);
+    }
+
+    #[test]
+    fn either_dimension_change_plans_one_complete_replacement() {
+        assert_eq!(
+            plan_back_buffer_resize(1920, 42, 2560, 42),
+            Some(BackBufferResize {
+                width: 2560,
+                height: 42,
+            })
+        );
+        assert_eq!(
+            plan_back_buffer_resize(2560, 42, 2560, 48),
+            Some(BackBufferResize {
+                width: 2560,
+                height: 48,
+            })
+        );
     }
 }
