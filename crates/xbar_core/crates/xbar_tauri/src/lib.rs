@@ -38,6 +38,12 @@ pub const DEFAULT_GLASS_SELECTOR: &str = ".button-row";
 /// `id` of the style element the bridge owns in the page.
 const GLASS_STYLE_ID: &str = "xbar-glass";
 
+fn is_valid_tauri_identifier(value: &str) -> bool {
+    value
+        .chars()
+        .all(|character| character.is_alphanumeric() || matches!(character, '-' | '/' | ':' | '_'))
+}
+
 /// Configuration shared by all Tauri web-framework frontends.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
@@ -72,8 +78,14 @@ impl BridgeConfig {
         if self.window_label.is_empty() {
             return Err(BridgeConfigError::EmptyWindowLabel);
         }
+        if !is_valid_tauri_identifier(&self.window_label) {
+            return Err(BridgeConfigError::InvalidWindowLabel);
+        }
         if self.state_event.is_empty() {
             return Err(BridgeConfigError::EmptyStateEvent);
+        }
+        if !is_valid_tauri_identifier(&self.state_event) {
+            return Err(BridgeConfigError::InvalidStateEvent);
         }
         if !self.logical_width.is_finite() || self.logical_width <= 0.0 {
             return Err(BridgeConfigError::InvalidLogicalWidth);
@@ -97,7 +109,9 @@ impl BridgeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeConfigError {
     EmptyWindowLabel,
+    InvalidWindowLabel,
     EmptyStateEvent,
+    InvalidStateEvent,
     InvalidLogicalWidth,
     InvalidLogicalHeight,
     ZeroPollInterval,
@@ -109,7 +123,13 @@ impl fmt::Display for BridgeConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyWindowLabel => f.write_str("Tauri bar window label must not be empty"),
+            Self::InvalidWindowLabel => f.write_str(
+                "Tauri bar window label may contain only alphanumeric characters, '-', '/', ':', and '_'",
+            ),
             Self::EmptyStateEvent => f.write_str("Tauri state event must not be empty"),
+            Self::InvalidStateEvent => f.write_str(
+                "Tauri state event may contain only alphanumeric characters, '-', '/', ':', and '_'",
+            ),
             Self::InvalidLogicalWidth => {
                 f.write_str("Tauri baseline width must be finite and greater than zero")
             }
@@ -673,6 +693,22 @@ mod tests {
         let mut config = BridgeConfig::new("");
         config.state_event.clear();
         assert_eq!(config.validate(), Err(BridgeConfigError::EmptyStateEvent));
+
+        let mut config = BridgeConfig::new("");
+        config.window_label = "main.window".to_owned();
+        assert_eq!(
+            config.validate(),
+            Err(BridgeConfigError::InvalidWindowLabel)
+        );
+
+        let mut config = BridgeConfig::new("");
+        config.state_event = "xbar state".to_owned();
+        assert_eq!(config.validate(), Err(BridgeConfigError::InvalidStateEvent));
+
+        let mut config = BridgeConfig::new("");
+        config.window_label = "主窗口/main:1".to_owned();
+        config.state_event = "状态/xbar_state-1".to_owned();
+        config.validate().unwrap();
 
         let mut config = BridgeConfig::new("");
         config.logical_height = f64::NAN;
