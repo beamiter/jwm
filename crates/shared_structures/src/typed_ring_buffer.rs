@@ -847,17 +847,39 @@ impl<'a> CursorGuard<'a> {
     const LIVENESS_CHECK_INTERVAL: u32 = 256;
     const SPIN_LIMIT: u32 = 64;
 
+    #[cfg(all(
+        test,
+        any(feature = "futex", feature = "semaphore", feature = "eventfd")
+    ))]
     pub(crate) fn acquire(cursor: &'a QueueCursor) -> Self {
+        Self::acquire_until(cursor, || false)
+            .expect("non-cancellable cursor acquisition must return a guard")
+    }
+
+    /// Acquire the direction lock, but stop spinning when the owning buffer
+    /// is destroyed. The condition is also rechecked after a successful CAS
+    /// so shutdown cannot strand a contender behind a live/preempted holder.
+    fn acquire_until(cursor: &'a QueueCursor, is_cancelled: impl Fn() -> bool) -> Option<Self> {
         let self_task_id = current_task_id();
         let mut attempts = 0u32;
         loop {
+            if is_cancelled() {
+                return None;
+            }
             match cursor.lock.compare_exchange_weak(
                 0,
                 self_task_id,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Self { lock: &cursor.lock },
+                Ok(_) => {
+                    let guard = Self { lock: &cursor.lock };
+                    if is_cancelled() {
+                        drop(guard);
+                        return None;
+                    }
+                    return Some(guard);
+                }
                 Err(holder) => {
                     attempts = attempts.wrapping_add(1);
                     if holder != 0
@@ -874,11 +896,16 @@ impl<'a> CursorGuard<'a> {
                             )
                             .is_ok()
                     {
+                        let guard = Self { lock: &cursor.lock };
+                        if is_cancelled() {
+                            drop(guard);
+                            return None;
+                        }
                         warn!(
                             "reclaimed shared direction lock from dead task {holder}; \
                              a torn slot, if any, is caught by its checksum"
                         );
-                        return Self { lock: &cursor.lock };
+                        return Some(guard);
                     }
                     if attempts < Self::SPIN_LIMIT {
                         std::hint::spin_loop();
@@ -1632,7 +1659,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         let written_at = now_millis();
 
         let header = self.header();
-        let guard = CursorGuard::acquire(&header.message_write);
+        let Some(guard) = CursorGuard::acquire_until(&header.message_write, || self.is_destroyed())
+        else {
+            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
+        };
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -1689,7 +1719,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         let written_at = now_millis();
 
         let header = self.header();
-        let guard = CursorGuard::acquire(&header.message_write);
+        let Some(guard) = CursorGuard::acquire_until(&header.message_write, || self.is_destroyed())
+        else {
+            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
+        };
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -1705,7 +1738,11 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             )?;
             if pending == self.buffer_size() {
                 // 锁序固定为「写锁 → 读锁」，与其他多锁路径一致，不会死锁。
-                let _read_guard = CursorGuard::acquire(&header.message_read);
+                let Some(_read_guard) =
+                    CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
+                else {
+                    return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
+                };
                 let read_idx = header.message_read.index.load(Ordering::Relaxed);
                 let pending = checked_pending(
                     write_idx,
@@ -1748,7 +1785,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
+        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
+        else {
+            return Ok(None);
+        };
         if self.is_destroyed() {
             return Ok(None);
         }
@@ -1792,7 +1832,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
+        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
+        else {
+            return Ok(None);
+        };
         if self.is_destroyed() {
             return Ok(None);
         }
@@ -1838,7 +1881,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
+        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
+        else {
+            return Ok(None);
+        };
         if self.is_destroyed() {
             return Ok(None);
         }
@@ -1879,7 +1925,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let _guard = CursorGuard::acquire(&header.message_read);
+        let Some(_guard) = CursorGuard::acquire_until(&header.message_read, || self.is_destroyed())
+        else {
+            return Ok(Vec::new());
+        };
         if self.is_destroyed() {
             return Ok(Vec::new());
         }
@@ -1925,7 +1974,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
             payload: command,
         };
         let header = self.header();
-        let guard = CursorGuard::acquire(&header.command_write);
+        let Some(guard) = CursorGuard::acquire_until(&header.command_write, || self.is_destroyed())
+        else {
+            return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
+        };
         if self.is_destroyed() {
             return Err(Error::new(ErrorKind::BrokenPipe, "buffer is destroyed"));
         }
@@ -1965,7 +2017,10 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
 
         let header = self.header();
-        let _guard = CursorGuard::acquire(&header.command_read);
+        let Some(_guard) = CursorGuard::acquire_until(&header.command_read, || self.is_destroyed())
+        else {
+            return Ok(None);
+        };
         if self.is_destroyed() {
             return Ok(None);
         }
@@ -2769,6 +2824,51 @@ mod tests {
 
         assert_eq!(ring.try_peek_message().unwrap(), Some(1));
         assert_eq!(ring.drain_messages(usize::MAX).unwrap(), vec![1, 2, 3, 100]);
+    }
+
+    #[test]
+    fn cursor_lock_wait_stops_after_destroy() {
+        let path = mk_path("cursor_lock_cancel");
+        let ring: std::sync::Arc<TypedRingBuffer<u64, u64>> = std::sync::Arc::new(
+            SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap(),
+        );
+        let held = CursorGuard::acquire(&ring.header().message_write);
+        let entered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+        let waiter_ring = std::sync::Arc::clone(&ring);
+        let waiter_entered = std::sync::Arc::clone(&entered);
+        let waiter = std::thread::spawn(move || {
+            let result = CursorGuard::acquire_until(&waiter_ring.header().message_write, || {
+                waiter_entered.store(true, Ordering::Release);
+                waiter_ring.is_destroyed()
+            });
+            result_tx.send(result.is_none()).unwrap();
+        });
+
+        let entered_deadline = Instant::now() + Duration::from_secs(1);
+        while !entered.load(Ordering::Acquire) && Instant::now() < entered_deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            entered.load(Ordering::Acquire),
+            "waiter did not enter lock acquisition"
+        );
+        ring.destroy().unwrap();
+        let stopped_promptly = result_rx.recv_timeout(Duration::from_millis(250));
+
+        // Always release the lock before joining so the pre-fix regression
+        // cannot leave a detached spinning thread behind after it times out.
+        drop(held);
+        waiter.join().unwrap();
+        assert_eq!(
+            stopped_promptly,
+            Ok(true),
+            "lock contention ignored buffer destruction"
+        );
     }
 
     #[test]
