@@ -18,8 +18,8 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction},
-    render::cairo::{CairoBar, CpuCanvas},
+    presentation::Point,
+    render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 use xbar_present_wgpu::{PresentRect, WgpuPresenter};
@@ -275,9 +275,13 @@ impl App {
         }
     }
 
-    fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
-        let update = self.bar.pointer_action(point, action);
-        self.handle_runtime_update(update);
+    fn handle_pointer_input(&mut self, input: PointerInput) {
+        let update = self.bar.handle_pointer(input);
+        let needs_redraw = update.needs_redraw();
+        self.handle_runtime_update(update.into_runtime());
+        if needs_redraw {
+            self.request_redraw();
+        }
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -389,15 +393,11 @@ impl App {
                 let position = position.to_logical::<f64>(self.scale_factor);
                 let point = Point::new(position.x as f32, position.y as f32);
                 self.last_cursor_pos = Some(point);
-                if self.bar.pointer_motion(point) {
-                    self.request_redraw();
-                }
+                self.handle_pointer_input(PointerInput::Move(point));
             }
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor_pos = None;
-                if self.bar.pointer_leave() {
-                    self.request_redraw();
-                }
+                self.handle_pointer_input(PointerInput::Leave);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 use tao::event::MouseScrollDelta;
@@ -407,24 +407,28 @@ impl App {
                         MouseScrollDelta::PixelDelta(position) => position.y,
                         _ => 0.0,
                     };
-                    if let Some(action) = PointerAction::from_vertical_delta(vertical) {
-                        self.handle_pointer_action(point, action);
-                    }
+                    self.handle_pointer_input(PointerInput::Scroll {
+                        point,
+                        delta_y: vertical,
+                    });
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use tao::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed
-                    && let Some(point) = self.last_cursor_pos
-                {
-                    let action = match button {
-                        MouseButton::Left => Some(PointerAction::Primary),
-                        MouseButton::Right => Some(PointerAction::Secondary),
+                if let Some(point) = self.last_cursor_pos {
+                    let button = match button {
+                        MouseButton::Left => Some(PointerButton::Primary),
+                        MouseButton::Right => Some(PointerButton::Secondary),
                         MouseButton::Middle | MouseButton::Other(_) => None,
                         _ => None,
                     };
-                    if let Some(action) = action {
-                        self.handle_pointer_action(point, action);
+                    let input = button.and_then(|button| match state {
+                        ElementState::Pressed => Some(PointerInput::Press { point, button }),
+                        ElementState::Released => Some(PointerInput::Release { point, button }),
+                        _ => None,
+                    });
+                    if let Some(input) = input {
+                        self.handle_pointer_input(input);
                     }
                 }
             }

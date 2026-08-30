@@ -23,8 +23,8 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction},
-    render::cairo::{CairoBar, CpuCanvas},
+    presentation::Point,
+    render::cairo::{CairoBar, CpuCanvas, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
@@ -289,15 +289,13 @@ impl App {
         self.request_redraw();
     }
 
-    fn update_hover(&mut self, point: Point) {
-        if self.bar.pointer_motion(point) {
+    fn handle_pointer_input(&mut self, input: PointerInput) {
+        let update = self.bar.handle_pointer(input);
+        let needs_redraw = update.needs_redraw();
+        self.handle_runtime_update(update.into_runtime());
+        if needs_redraw {
             self.request_redraw();
         }
-    }
-
-    fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
-        let update = self.bar.pointer_action(point, action);
-        self.handle_runtime_update(update);
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -832,27 +830,28 @@ fn main() -> Result<()> {
                     let logical = position.to_logical::<f64>(app.scale_factor);
                     let point = Point::new(logical.x as f32, logical.y as f32);
                     app.last_cursor_pos = Some(point);
-                    app.update_hover(point);
+                    app.handle_pointer_input(PointerInput::Move(point));
                 }
                 WindowEvent::CursorLeft { .. } => {
                     app.last_cursor_pos = None;
-                    if app.bar.pointer_leave() {
-                        app.request_redraw();
-                    }
+                    app.handle_pointer_input(PointerInput::Leave);
                 }
                 WindowEvent::MouseInput { state, button, .. } => {
                     use tao::event::{ElementState, MouseButton};
-                    if state == ElementState::Pressed
-                        && let Some(point) = app.last_cursor_pos
-                    {
-                        let action = match button {
-                            MouseButton::Left => Some(PointerAction::Primary),
-                            MouseButton::Right => Some(PointerAction::Secondary),
+                    if let Some(point) = app.last_cursor_pos {
+                        let button = match button {
+                            MouseButton::Left => Some(PointerButton::Primary),
+                            MouseButton::Right => Some(PointerButton::Secondary),
                             MouseButton::Middle | MouseButton::Other(_) => None,
                             _ => None,
                         };
-                        if let Some(action) = action {
-                            app.handle_pointer_action(point, action);
+                        let input = button.and_then(|button| match state {
+                            ElementState::Pressed => Some(PointerInput::Press { point, button }),
+                            ElementState::Released => Some(PointerInput::Release { point, button }),
+                            _ => None,
+                        });
+                        if let Some(input) = input {
+                            app.handle_pointer_input(input);
                         }
                     }
                 }
@@ -864,16 +863,7 @@ fn main() -> Result<()> {
                             MouseScrollDelta::PixelDelta(position) => position.y,
                             _ => 0.0,
                         };
-                        let action = if y > 0.0 {
-                            Some(PointerAction::ScrollUp)
-                        } else if y < 0.0 {
-                            Some(PointerAction::ScrollDown)
-                        } else {
-                            None
-                        };
-                        if let Some(action) = action {
-                            app.handle_pointer_action(point, action);
-                        }
+                        app.handle_pointer_input(PointerInput::Scroll { point, delta_y: y });
                     }
                 }
                 _ => {}

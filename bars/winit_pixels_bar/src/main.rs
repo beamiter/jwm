@@ -20,8 +20,8 @@ use xbar_core::{
     AlignedWakeThread, BarPlacement, BarRuntime, RuntimeUpdate, TransportRecoveryConfig,
     TransportWakeSlot, WakeAck,
     logging::init as initialize_logging,
-    presentation::{Point, PointerAction},
-    render::cairo::CairoBar,
+    presentation::Point,
+    render::cairo::{CairoBar, PointerButton, PointerInput},
 };
 use xbar_linux_actions::{EffectRouter, GeometryRequest};
 
@@ -173,9 +173,13 @@ impl App {
         }
     }
 
-    fn handle_pointer_action(&mut self, point: Point, action: PointerAction) {
-        let update = self.bar.pointer_action(point, action);
-        self.handle_runtime_update(update);
+    fn handle_pointer_input(&mut self, input: PointerInput) {
+        let update = self.bar.handle_pointer(input);
+        let needs_redraw = update.needs_redraw();
+        self.handle_runtime_update(update.into_runtime());
+        if needs_redraw {
+            self.request_redraw();
+        }
     }
 
     fn handle_runtime_update(&mut self, update: RuntimeUpdate) {
@@ -408,32 +412,31 @@ impl ApplicationHandler<UserEvent> for App {
                 let position = position.to_logical::<f64>(self.scale_factor);
                 let point = Point::new(position.x as f32, position.y as f32);
                 self.last_cursor_pos = Some(point);
-                if self.bar.pointer_motion(point) {
-                    self.request_redraw();
-                }
+                self.handle_pointer_input(PointerInput::Move(point));
             }
             WindowEvent::CursorLeft { .. } => {
                 self.last_cursor_pos = None;
-                if self.bar.pointer_leave() {
-                    self.request_redraw();
-                }
+                self.handle_pointer_input(PointerInput::Leave);
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::{ElementState, MouseButton};
-                if state == ElementState::Pressed
-                    && let Some(point) = self.last_cursor_pos
-                {
-                    let action = match button {
-                        MouseButton::Left => Some(PointerAction::Primary),
-                        MouseButton::Right => Some(PointerAction::Secondary),
-                        MouseButton::Middle
-                        | MouseButton::Back
-                        | MouseButton::Forward
-                        | MouseButton::Other(_) => None,
+                let Some(point) = self.last_cursor_pos else {
+                    return;
+                };
+                let button = match button {
+                    MouseButton::Left => Some(PointerButton::Primary),
+                    MouseButton::Right => Some(PointerButton::Secondary),
+                    MouseButton::Middle
+                    | MouseButton::Back
+                    | MouseButton::Forward
+                    | MouseButton::Other(_) => None,
+                };
+                if let Some(button) = button {
+                    let input = match state {
+                        ElementState::Pressed => PointerInput::Press { point, button },
+                        ElementState::Released => PointerInput::Release { point, button },
                     };
-                    if let Some(action) = action {
-                        self.handle_pointer_action(point, action);
-                    }
+                    self.handle_pointer_input(input);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -443,9 +446,10 @@ impl ApplicationHandler<UserEvent> for App {
                         MouseScrollDelta::LineDelta(_, value) => f64::from(value),
                         MouseScrollDelta::PixelDelta(position) => position.y,
                     };
-                    if let Some(action) = PointerAction::from_vertical_delta(vertical) {
-                        self.handle_pointer_action(point, action);
-                    }
+                    self.handle_pointer_input(PointerInput::Scroll {
+                        point,
+                        delta_y: vertical,
+                    });
                 }
             }
             WindowEvent::RedrawRequested => {
