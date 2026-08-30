@@ -8,7 +8,19 @@
 
 use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
 use std::collections::{HashMap, HashSet};
+use std::io::Read as _;
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::Path;
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
+
+const FONT_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_FONT_QUERY_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_FONT_FILE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_FONT_DESCRIPTION_BYTES: usize = 1024;
+const MAX_UI_FONT_CACHE_ENTRIES: usize = 4;
+const MAX_FALLBACK_FONT_CACHE_ENTRIES: usize = 8;
+const MAX_FALLBACK_MISS_CACHE_ENTRIES: usize = 4096;
 
 static UI_FONTS: LazyLock<Mutex<HashMap<String, Option<FontArc>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -24,6 +36,73 @@ static FALLBACK_FONTS: LazyLock<Mutex<Vec<FontArc>>> = LazyLock::new(|| Mutex::n
 static FALLBACK_MISSES: LazyLock<Mutex<HashSet<u32>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+fn query_font_path(args: &[&str]) -> Option<String> {
+    let output = crate::external_command::output_with_limits(
+        "fc-match",
+        args,
+        FONT_QUERY_TIMEOUT,
+        MAX_FONT_QUERY_OUTPUT_BYTES,
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+}
+
+fn read_regular_file_bounded(path: &Path, limit: usize) -> Option<Vec<u8>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        // A malicious or raced fontconfig path must not block on a FIFO.
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > u64::try_from(limit).ok()? {
+        return None;
+    }
+
+    let sentinel_limit = u64::try_from(limit).ok()?.checked_add(1)?;
+    let capacity = usize::try_from(metadata.len()).ok()?.min(limit);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(sentinel_limit).read_to_end(&mut bytes).ok()?;
+    (bytes.len() <= limit).then_some(bytes)
+}
+
+fn load_font_file(path: &Path) -> Option<FontArc> {
+    FontArc::try_from_vec(read_regular_file_bounded(path, MAX_FONT_FILE_BYTES)?).ok()
+}
+
+fn cache_ui_font_entry(
+    cache: &mut HashMap<String, Option<FontArc>>,
+    family: String,
+    font: Option<FontArc>,
+) {
+    if cache.len() >= MAX_UI_FONT_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(family, font);
+}
+
+fn remember_fallback_miss_in(cache: &mut HashSet<u32>, codepoint: u32) {
+    if cache.len() >= MAX_FALLBACK_MISS_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(codepoint);
+}
+
+fn remember_fallback_miss(ch: char) {
+    if let Ok(mut misses) = FALLBACK_MISSES.lock() {
+        remember_fallback_miss_in(&mut misses, ch as u32);
+    }
+}
+
 /// The fontconfig pattern that asks for any font covering `ch`.
 ///
 /// Split out because it is the one piece of the fallback path that can be
@@ -34,15 +113,9 @@ fn charset_pattern(ch: char) -> String {
 
 /// Load a font covering `ch`, if fontconfig can find one.
 fn load_fallback_font(ch: char) -> Option<FontArc> {
-    let path = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}\n", &charset_pattern(ch)])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned))
-        .filter(|path| !path.is_empty())?;
-    let font = FontArc::try_from_vec(std::fs::read(path).ok()?).ok()?;
+    let pattern = charset_pattern(ch);
+    let path = query_font_path(&["-f", "%{file}\n", &pattern])?;
+    let font = load_font_file(Path::new(&path))?;
     // fc-match always answers with *something*; only keep it if it actually
     // covers the character we asked about.
     (font.glyph_id(ch).0 != 0).then_some(font)
@@ -65,26 +138,46 @@ fn source_for_char(primary: &FontArc, ch: char) -> GlyphSource {
     if primary.glyph_id(ch).0 != 0 {
         return GlyphSource::Primary;
     }
-    if let Ok(fonts) = FALLBACK_FONTS.lock()
-        && let Some(index) = fonts.iter().position(|font| font.glyph_id(ch).0 != 0)
-    {
-        return GlyphSource::Fallback(index);
-    }
+    let fallback_cache_full = match FALLBACK_FONTS.lock() {
+        Ok(fonts) => {
+            if let Some(index) = fonts.iter().position(|font| font.glyph_id(ch).0 != 0) {
+                return GlyphSource::Fallback(index);
+            }
+            fonts.len() >= MAX_FALLBACK_FONT_CACHE_ENTRIES
+        }
+        Err(_) => return GlyphSource::Missing,
+    };
     if FALLBACK_MISSES
         .lock()
         .is_ok_and(|misses| misses.contains(&(ch as u32)))
     {
         return GlyphSource::Missing;
     }
+    // Entries cannot be evicted: a GlyphSource index may be in use by a
+    // concurrent resolve. Once the small cache is full, remember the miss and
+    // render the primary font's question mark instead of retaining more font
+    // files or repeatedly invoking fontconfig.
+    if fallback_cache_full {
+        remember_fallback_miss(ch);
+        return GlyphSource::Missing;
+    }
     let Some(font) = load_fallback_font(ch) else {
-        if let Ok(mut misses) = FALLBACK_MISSES.lock() {
-            misses.insert(ch as u32);
-        }
+        remember_fallback_miss(ch);
         return GlyphSource::Missing;
     };
     let Ok(mut fonts) = FALLBACK_FONTS.lock() else {
         return GlyphSource::Missing;
     };
+    // Another renderer may have resolved the same script while fontconfig was
+    // running. Reuse its entry and re-check the hard limit under the lock.
+    if let Some(index) = fonts.iter().position(|font| font.glyph_id(ch).0 != 0) {
+        return GlyphSource::Fallback(index);
+    }
+    if fonts.len() >= MAX_FALLBACK_FONT_CACHE_ENTRIES {
+        drop(fonts);
+        remember_fallback_miss(ch);
+        return GlyphSource::Missing;
+    }
     fonts.push(font);
     GlyphSource::Fallback(fonts.len() - 1)
 }
@@ -170,23 +263,22 @@ fn ui_font_family(description: &str) -> String {
 }
 
 fn load_ui_font(description: &str) -> Option<FontArc> {
-    if let Some(cached) = UI_FONTS.lock().ok()?.get(description).cloned() {
-        return cached;
+    if description.len() > MAX_FONT_DESCRIPTION_BYTES {
+        return None;
     }
     let family = ui_font_family(description);
-    let path = std::process::Command::new("fc-match")
-        .args(["-f", "%{file}\n", "--", &family])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned))
-        .filter(|path| !path.is_empty());
+    if let Some(cached) = UI_FONTS.lock().ok()?.get(&family).cloned() {
+        return cached;
+    }
+    let path = query_font_path(&["-f", "%{file}\n", "--", &family]);
     let font = path
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| FontArc::try_from_vec(bytes).ok());
+        .as_deref()
+        .and_then(|path| load_font_file(Path::new(path)));
     if let Ok(mut fonts) = UI_FONTS.lock() {
-        fonts.insert(description.to_owned(), font.clone());
+        if let Some(cached) = fonts.get(&family).cloned() {
+            return cached;
+        }
+        cache_ui_font_entry(&mut fonts, family, font.clone());
     }
     font
 }
@@ -841,6 +933,47 @@ mod tests {
             ui_font_pixel_size("SauceCodePro Nerd Font Regular 11"),
             17.6
         );
+    }
+
+    #[test]
+    fn font_files_are_regular_and_bounded_before_parsing() {
+        let path =
+            std::env::temp_dir().join(format!("jwm-compositor-font-bound-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let payload = vec![0x5a; 17];
+        std::fs::write(&path, &payload).unwrap();
+
+        assert_eq!(
+            read_regular_file_bounded(&path, payload.len()),
+            Some(payload)
+        );
+        assert!(read_regular_file_bounded(&path, 16).is_none());
+        assert!(read_regular_file_bounded(std::env::temp_dir().as_path(), 16).is_none());
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn font_lookup_caches_have_hard_entry_limits() {
+        let mut fonts = HashMap::new();
+        for index in 0..MAX_UI_FONT_CACHE_ENTRIES + 2 {
+            cache_ui_font_entry(&mut fonts, format!("font-{index}"), None);
+        }
+        assert!(fonts.len() <= MAX_UI_FONT_CACHE_ENTRIES);
+        assert!(fonts.contains_key(&format!("font-{}", MAX_UI_FONT_CACHE_ENTRIES + 1)));
+
+        let mut misses = HashSet::new();
+        for codepoint in 0..MAX_FALLBACK_MISS_CACHE_ENTRIES as u32 + 2 {
+            remember_fallback_miss_in(&mut misses, codepoint);
+        }
+        assert!(misses.len() <= MAX_FALLBACK_MISS_CACHE_ENTRIES);
+        assert!(misses.contains(&(MAX_FALLBACK_MISS_CACHE_ENTRIES as u32 + 1)));
+    }
+
+    #[test]
+    fn oversized_font_descriptions_skip_fontconfig_and_caching() {
+        let oversized = "x".repeat(MAX_FONT_DESCRIPTION_BYTES + 1);
+        assert!(load_ui_font(&oversized).is_none());
     }
 
     #[test]
