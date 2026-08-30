@@ -1235,14 +1235,26 @@ impl Config {
                     None,
                 );
             }
-            if chord_config.timeout_ms < 100 {
+            if chord_config.timeout_ms < super::MIN_CHORD_TIMEOUT_MS {
                 diagnostics.warning(
                     "keybindings.chord.timeout_ms",
                     format!(
                         "{}ms is too short for reliable input",
                         chord_config.timeout_ms
                     ),
-                    Some("use at least 100ms".into()),
+                    Some(format!("use at least {}ms", super::MIN_CHORD_TIMEOUT_MS)),
+                );
+            } else if chord_config.timeout_ms > super::MAX_CHORD_TIMEOUT_MS {
+                diagnostics.warning(
+                    "keybindings.chord.timeout_ms",
+                    format!(
+                        "{}ms exceeds the runtime chord timeout limit",
+                        chord_config.timeout_ms
+                    ),
+                    Some(format!(
+                        "the runtime will use at most {}ms",
+                        super::MAX_CHORD_TIMEOUT_MS
+                    )),
                 );
             }
             let leader = canonical_chord(&chord_config.leader_modifier, &chord_config.leader_key);

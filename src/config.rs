@@ -1618,6 +1618,9 @@ pub struct ChordConfig {
     pub bindings: Vec<KeyConfig>,
 }
 
+pub(crate) const MIN_CHORD_TIMEOUT_MS: u64 = 100;
+pub(crate) const MAX_CHORD_TIMEOUT_MS: u64 = 60_000;
+
 fn default_chord_timeout() -> u64 {
     1500
 }
@@ -2811,7 +2814,11 @@ impl Config {
         }
         Some(CompiledChord {
             leader: (leader_mods, leader_sym),
-            timeout: Duration::from_millis(chord.timeout_ms.max(100)),
+            timeout: Duration::from_millis(
+                chord
+                    .timeout_ms
+                    .clamp(MIN_CHORD_TIMEOUT_MS, MAX_CHORD_TIMEOUT_MS),
+            ),
             bindings,
         })
     }
@@ -4093,6 +4100,32 @@ mod tests {
     fn built_in_configuration_has_no_semantic_diagnostics() {
         let diagnostics = Config::default().diagnostics();
         assert!(diagnostics.is_empty(), "{diagnostics}");
+    }
+
+    #[test]
+    fn compiled_chord_timeout_is_bounded_and_reports_excessive_values() {
+        let mut config = Config::default();
+        config.inner.keybindings.chord.leader_key = "space".into();
+
+        for (configured, expected) in [
+            (0, super::MIN_CHORD_TIMEOUT_MS),
+            (1_500, 1_500),
+            (u64::MAX, super::MAX_CHORD_TIMEOUT_MS),
+        ] {
+            config.inner.keybindings.chord.timeout_ms = configured;
+            assert_eq!(
+                config.compile_chord().unwrap().timeout,
+                std::time::Duration::from_millis(expected)
+            );
+        }
+
+        let diagnostics = config.diagnostics();
+        assert!(diagnostics.issues().iter().any(|issue| {
+            issue.path == "keybindings.chord.timeout_ms"
+                && issue
+                    .message
+                    .contains("exceeds the runtime chord timeout limit")
+        }));
     }
 
     #[test]
