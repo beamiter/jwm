@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 
 /// UNIX sockaddr_un 路径上限为 108 字节
 const UNIX_SOCK_MAX: usize = 108;
+/// Linux caps one SCM_RIGHTS transfer at SCM_MAX_FD descriptors. Reserving the
+/// full capacity lets us own and close every fd in an invalid oversized reply.
+const SCM_RIGHTS_MAX_FDS: usize = 253;
 static SOCKET_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// `is_ready` 的取值：0 = 未发布，1 = 可连接，2 = 创建者已关闭。
@@ -618,7 +621,7 @@ impl EventFdBackend {
     fn try_receive_fds(fd: RawFd) -> Result<Option<(OwnedFd, OwnedFd)>> {
         let mut buf = [0u8; 1];
         let mut iov = [IoSliceMut::new(&mut buf)];
-        let mut cmsgspace = nix::cmsg_space!([RawFd; 2]);
+        let mut cmsgspace = nix::cmsg_space!([RawFd; SCM_RIGHTS_MAX_FDS]);
 
         let msg = match recvmsg::<UnixAddr>(
             fd,
@@ -632,9 +635,8 @@ impl EventFdBackend {
             Err(error) => return Err(Error::other(error)),
         };
 
-        // 内核在 recvmsg 返回时已为 SCM_RIGHTS 安装了新描述符。立即转为
-        // OwnedFd，使后续的任何校验错误（包括 MSG_CTRUNC 和额外 fd）都能
-        // 自动关闭已收到的所有 fd。
+        // 缓冲覆盖 Linux 单次 SCM_RIGHTS 的完整上限，因此内核安装的描述符
+        // 都可被迭代。立即转为 OwnedFd，使数量或标志校验失败时也能全部关闭。
         let mut received_fds: Vec<OwnedFd> = Vec::new();
         let cmsgs = msg.cmsgs().map_err(Error::other)?;
         for cmsg in cmsgs {
@@ -1111,6 +1113,75 @@ mod tests {
 
         let _ = std::fs::remove_file(&socket_path);
         let _ = std::fs::remove_dir(&socket_dir);
+    }
+
+    #[test]
+    fn truncated_fd_pass_does_not_leak_received_descriptors() {
+        const CHILD_MARKER_ENV: &str = "SHARED_STRUCTURES_EVENTFD_CTRUNC_MARKER";
+
+        if let Some(marker) = std::env::var_os(CHILD_MARKER_ENV) {
+            let (sender, receiver) = nix::sys::socket::socketpair(
+                AddressFamily::Unix,
+                SockType::Stream,
+                None,
+                SockFlag::SOCK_CLOEXEC,
+            )
+            .unwrap();
+            let sent_fds = [
+                EventFdBackend::create_eventfd_owned().unwrap(),
+                EventFdBackend::create_eventfd_owned().unwrap(),
+                EventFdBackend::create_eventfd_owned().unwrap(),
+            ];
+            let raw_fds = sent_fds.each_ref().map(AsRawFd::as_raw_fd);
+            let before = std::fs::read_dir("/proc/self/fd").unwrap().count();
+
+            for _ in 0..8 {
+                let iov = [IoSlice::new(&[0xE5])];
+                let cmsg = [ControlMessage::ScmRights(&raw_fds)];
+                let written = sendmsg::<UnixAddr>(
+                    sender.as_raw_fd(),
+                    &iov,
+                    &cmsg,
+                    MsgFlags::MSG_NOSIGNAL,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(written, 1);
+                let error = EventFdBackend::try_receive_fds(receiver.as_raw_fd()).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidData);
+            }
+
+            let after = std::fs::read_dir("/proc/self/fd").unwrap().count();
+            assert_eq!(
+                after,
+                before,
+                "truncated SCM_RIGHTS leaked {} descriptors",
+                after.saturating_sub(before)
+            );
+            std::fs::write(marker, b"completed").unwrap();
+            return;
+        }
+
+        let marker = std::env::temp_dir().join(format!(
+            "srb-eventfd-ctrunc-marker-{}-{}",
+            std::process::id(),
+            SOCKET_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let test_name =
+            "backends::eventfd::tests::truncated_fd_pass_does_not_leak_received_descriptors";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_MARKER_ENV, &marker)
+            .status()
+            .unwrap();
+        let child_completed = marker.is_file();
+        let _ = std::fs::remove_file(marker);
+
+        assert!(status.success(), "eventfd CTRUNC child failed: {status}");
+        assert!(child_completed, "eventfd CTRUNC child did not run");
     }
 
     #[test]
