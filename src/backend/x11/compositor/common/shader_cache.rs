@@ -2,10 +2,86 @@ use glow::HasContext;
 /// Shader compilation and caching
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A linked compositor program is normally well below one MiB. Leave ample
+/// driver headroom without allowing a damaged cache entry to consume memory
+/// proportional to an arbitrary file.
+const MAX_SHADER_BINARY_BYTES: u64 = 16 * 1024 * 1024;
+static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn read_cache_file(path: &Path) -> io::Result<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "shader cache entry is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_SHADER_BINARY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shader cache entry exceeds the 16 MiB limit",
+        ));
+    }
+
+    let mut binary = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_SHADER_BINARY_BYTES + 1)
+        .read_to_end(&mut binary)?;
+    if binary.len() as u64 > MAX_SHADER_BINARY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shader cache entry exceeds the 16 MiB limit",
+        ));
+    }
+    Ok(binary)
+}
+
+fn atomic_write_cache_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    if contents.len() as u64 > MAX_SHADER_BINARY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "shader binary exceeds the 16 MiB cache limit",
+        ));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let sequence = CACHE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".shader-cache.tmp-{}-{sequence}",
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
 
 /// Cached compiled shader program
 pub struct CachedProgram {
@@ -269,14 +345,14 @@ impl ShaderCache {
         }
 
         let path = self.cache_dir.join(format!("{}.bin", key));
-        fs::write(path, binary).map_err(|e| format!("save cache: {}", e))?;
+        atomic_write_cache_file(&path, binary).map_err(|e| format!("save cache: {e}"))?;
         Ok(())
     }
 
     /// Load binary from disk cache
     fn load_cached_binary(&self, key: &str) -> Result<Vec<u8>, String> {
         let path = self.cache_dir.join(format!("{}.bin", key));
-        fs::read(path).map_err(|e| format!("load cache: {}", e))
+        read_cache_file(&path).map_err(|e| format!("load cache: {e}"))
     }
 
     /// Clear all cached programs
@@ -318,8 +394,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_cache_dir() -> PathBuf {
+        let sequence = CACHE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut p = std::env::temp_dir();
-        p.push(format!("jwm_shader_cache_test_{}", std::process::id()));
+        p.push(format!(
+            "jwm_shader_cache_test_{}_{sequence}",
+            std::process::id()
+        ));
         p
     }
 
@@ -409,6 +489,50 @@ mod tests {
         }
         // Clean up
         let _ = std::fs::remove_file(cache.cache_dir.join(format!("{}.bin", key)));
+    }
+
+    #[test]
+    fn cache_write_replaces_a_symlink_without_touching_its_target() {
+        let cache = ShaderCache::new(tmp_cache_dir());
+        let victim = cache.cache_dir.join("victim");
+        fs::write(&victim, b"unchanged").unwrap();
+        let path = cache.cache_dir.join("linked.bin");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        let binary = b"\x01\x00\x00\x00compiled";
+        cache.save_cached_binary("linked", binary).unwrap();
+
+        assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(cache.load_cached_binary("linked").unwrap(), binary);
+        fs::remove_dir_all(&cache.cache_dir).unwrap();
+    }
+
+    #[test]
+    fn cache_reads_reject_oversized_and_special_entries() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let cache = ShaderCache::new(tmp_cache_dir());
+        let oversized = cache.cache_dir.join("oversized.bin");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_SHADER_BINARY_BYTES + 1)
+            .unwrap();
+        assert!(cache.load_cached_binary("oversized").is_err());
+
+        let fifo = cache.cache_dir.join("fifo.bin");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        assert!(cache.load_cached_binary("fifo").is_err());
+
+        let target = cache.cache_dir.join("target");
+        fs::write(&target, b"\x01\x00\x00\x00compiled").unwrap();
+        std::os::unix::fs::symlink(&target, cache.cache_dir.join("symlink.bin")).unwrap();
+        assert!(cache.load_cached_binary("symlink").is_err());
+
+        fs::remove_dir_all(&cache.cache_dir).unwrap();
     }
 
     #[test]
