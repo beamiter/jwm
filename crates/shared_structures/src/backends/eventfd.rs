@@ -262,6 +262,13 @@ impl EventFdBackend {
                     format!("failed to create private eventfd socket directory: {error}"),
                 )
             })?;
+        if let Err(error) = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)) {
+            let _ = std::fs::remove_dir(&dir);
+            return Err(Error::new(
+                error.kind(),
+                format!("failed to secure eventfd socket directory: {error}"),
+            ));
+        }
         let sock_path = dir.join("fd.sock");
         Ok((dir, sock_path))
     }
@@ -833,6 +840,56 @@ mod tests {
     use std::mem::MaybeUninit;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
+
+    #[test]
+    fn socket_directory_permissions_ignore_restrictive_umask() {
+        const CHILD_MARKER_ENV: &str = "SHARED_STRUCTURES_EVENTFD_UMASK_MARKER";
+
+        if let Some(marker) = std::env::var_os(CHILD_MARKER_ENV) {
+            // umask is process-global, so exercise it only in this exact child
+            // test, isolated from the parallel parent harness.
+            let previous_umask = unsafe { libc::umask(0o777) };
+            let created = EventFdBackend::create_socket_dir();
+            unsafe { libc::umask(previous_umask) };
+
+            let (directory, socket_path) = created.unwrap();
+            let mode = std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
+            let listener = UnixListener::bind(&socket_path);
+            let bind_error = listener.as_ref().err().map(ToString::to_string);
+
+            // Restore access before assertions so a failing regression does
+            // not leave an unremovable test directory behind.
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            drop(listener);
+            let _ = std::fs::remove_file(&socket_path);
+            std::fs::remove_dir(&directory).unwrap();
+
+            assert_eq!(mode, 0o700);
+            assert!(bind_error.is_none(), "socket bind failed: {bind_error:?}");
+            std::fs::write(marker, b"completed").unwrap();
+            return;
+        }
+
+        let marker = std::env::temp_dir().join(format!(
+            "srb-eventfd-umask-marker-{}-{}",
+            std::process::id(),
+            SOCKET_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let test_name =
+            "backends::eventfd::tests::socket_directory_permissions_ignore_restrictive_umask";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_MARKER_ENV, &marker)
+            .status()
+            .unwrap();
+        let child_completed = marker.is_file();
+        let _ = std::fs::remove_file(marker);
+
+        assert!(status.success(), "restrictive-umask child failed: {status}");
+        assert!(child_completed, "restrictive-umask child did not run");
+    }
 
     #[test]
     fn signal_without_waiters_does_not_accumulate_tokens() {
