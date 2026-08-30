@@ -22,9 +22,12 @@ pub const USAGE_FILE: &str = "launcher-usage";
 /// read than the ranking is worth.
 pub const MAX_TRACKED: usize = 500;
 
-/// One KiB per retained entry is generous for desktop-file IDs while keeping
-/// a damaged or special usage source cheap to reject.
-const MAX_USAGE_BYTES: u64 = MAX_TRACKED as u64 * 1024;
+/// A one-KiB ID plus room for the two counters and separators is generous for
+/// desktop-file IDs while keeping a damaged or special usage source cheap to
+/// reject.
+const MAX_USAGE_ID_BYTES: usize = 1024;
+const MAX_USAGE_ENTRY_BYTES: u64 = MAX_USAGE_ID_BYTES as u64 + 64;
+const MAX_USAGE_BYTES: u64 = MAX_TRACKED as u64 * MAX_USAGE_ENTRY_BYTES;
 
 /// Launches beyond this stop increasing an entry's rank, so an editor opened
 /// ten thousand times cannot make everything else unreachable for a month
@@ -124,7 +127,7 @@ impl UsageStore {
     /// corrupt ranking file must not cost the user their launcher.
     #[must_use]
     pub fn parse(text: &str) -> Self {
-        let mut entries = HashMap::new();
+        let mut entries: HashMap<String, Usage> = HashMap::new();
         for line in text.lines() {
             let mut fields = line.splitn(3, ' ');
             let (Some(count), Some(last_used), Some(id)) =
@@ -138,10 +141,15 @@ impl UsageStore {
             };
             // The id is last precisely because application names contain
             // spaces; everything after the second field is the id.
-            if id.is_empty() {
+            if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES {
                 continue;
             }
-            entries.insert(id.to_string(), Usage { count, last_used });
+            let usage = Usage { count, last_used };
+            if let Some(existing) = entries.get_mut(id) {
+                *existing = usage;
+            } else if entries.len() < MAX_TRACKED {
+                entries.insert(id.to_string(), usage);
+            }
         }
         Self { entries }
     }
@@ -169,9 +177,38 @@ impl UsageStore {
 
     /// Note that `id` was just launched.
     pub fn record(&mut self, id: &str, now: u64) {
-        let usage = self.entries.entry(id.to_string()).or_default();
-        usage.count = usage.count.saturating_add(1);
-        usage.last_used = now;
+        if id.is_empty() || id.len() > MAX_USAGE_ID_BYTES {
+            return;
+        }
+        if let Some(usage) = self.entries.get_mut(id) {
+            usage.count = usage.count.saturating_add(1);
+            usage.last_used = now;
+            return;
+        }
+        self.entries.insert(
+            id.to_string(),
+            Usage {
+                count: 1,
+                last_used: now,
+            },
+        );
+
+        if self.entries.len() > MAX_TRACKED {
+            let least_useful = self
+                .entries
+                .iter()
+                .min_by(|(left_id, left), (right_id, right)| {
+                    score(left, now)
+                        .cmp(&score(right, now))
+                        // Serialization keeps the lexicographically smaller
+                        // ID when scores tie; evict the larger one here too.
+                        .then_with(|| right_id.cmp(left_id))
+                })
+                .map(|(id, _)| id.clone());
+            if let Some(id) = least_useful {
+                self.entries.remove(&id);
+            }
+        }
     }
 
     /// How strongly `id` should be preferred, 0 when it has never been used.
@@ -847,6 +884,33 @@ mod tests {
         assert!(store.score("good", NOW) > 0);
         assert!(store.score("also good", NOW) > 0);
         assert_eq!(store.score("bad", NOW), 0);
+    }
+
+    #[test]
+    fn usage_parse_bounds_unique_entries_and_identifier_size() {
+        let mut text = (0..MAX_TRACKED + 20)
+            .map(|index| format!("1 {NOW} app{index:04}\n"))
+            .collect::<String>();
+        // Existing entries may still be refreshed after the unique-entry
+        // budget is full; only further allocation is refused.
+        text.push_str(&format!("9 {NOW} app0000\n"));
+        let store = UsageStore::parse(&text);
+
+        assert_eq!(store.len(), MAX_TRACKED);
+        assert_eq!(store.entries["app0000"].count, 9);
+        assert_eq!(store.score(&format!("app{MAX_TRACKED:04}"), NOW), 0);
+
+        let oversized = "x".repeat(MAX_USAGE_ID_BYTES + 1);
+        assert!(UsageStore::parse(&format!("1 {NOW} {oversized}\n")).is_empty());
+
+        let mut recorded = UsageStore::default();
+        recorded.record(&oversized, NOW);
+        assert!(recorded.is_empty());
+
+        for index in 0..MAX_TRACKED + 20 {
+            recorded.record(&format!("runtime{index:04}"), NOW - index as u64 * HOUR);
+        }
+        assert_eq!(recorded.len(), MAX_TRACKED);
     }
 
     #[test]
