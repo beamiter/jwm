@@ -1205,34 +1205,57 @@ fn env_flag(name: &str) -> bool {
     std::env::var_os(name).as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
-fn spawn_env_import(vars: &[&str]) {
+const ENV_IMPORT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn run_env_import_command(
+    command: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> io::Result<std::process::ExitStatus> {
+    crate::external_command::status_with_timeout(command, args, timeout)
+}
+
+fn sync_env_import(vars: &[&str]) {
+    // Activated children may be launched immediately after backend setup (or
+    // XWayland readiness), so the import must finish before the caller
+    // continues. Each optional helper retains its own hard deadline.
+    sync_env_import_with(vars, |command, args| {
+        run_env_import_command(command, args, ENV_IMPORT_TIMEOUT)
+    });
+}
+
+fn sync_env_import_with(
+    vars: &[&str],
+    mut run: impl FnMut(&str, &[&str]) -> io::Result<std::process::ExitStatus>,
+) {
     if vars.is_empty() {
         return;
     }
 
-    let mut dbus = std::process::Command::new("dbus-update-activation-environment");
-    dbus.arg("--systemd");
-    for var in vars {
-        dbus.arg(var);
-    }
-    dbus.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Err(err) = dbus.spawn() {
-        log::debug!("[env] dbus-update-activation-environment failed to spawn: {err}");
+    let mut dbus_args = Vec::with_capacity(vars.len() + 1);
+    dbus_args.push("--systemd");
+    dbus_args.extend_from_slice(vars);
+    match run("dbus-update-activation-environment", &dbus_args) {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            log::debug!("[env] dbus-update-activation-environment exited with {status}");
+        }
+        Err(err) => {
+            log::debug!("[env] dbus-update-activation-environment failed: {err}");
+        }
     }
 
-    let mut systemctl = std::process::Command::new("systemctl");
-    systemctl.arg("--user").arg("import-environment");
-    for var in vars {
-        systemctl.arg(var);
-    }
-    systemctl
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Err(err) = systemctl.spawn() {
-        log::debug!("[env] systemctl --user import-environment failed to spawn: {err}");
+    let mut systemctl_args = Vec::with_capacity(vars.len() + 2);
+    systemctl_args.extend(["--user", "import-environment"]);
+    systemctl_args.extend_from_slice(vars);
+    match run("systemctl", &systemctl_args) {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            log::debug!("[env] systemctl --user import-environment exited with {status}");
+        }
+        Err(err) => {
+            log::debug!("[env] systemctl --user import-environment failed: {err}");
+        }
     }
 }
 
@@ -1850,7 +1873,7 @@ impl UdevBackend {
                 }
             }
             ensure_fcitx_env_for_primary_session(nested);
-            spawn_env_import(&[
+            sync_env_import(&[
                 "WAYLAND_DISPLAY",
                 "XDG_CURRENT_DESKTOP",
                 "XDG_SESSION_DESKTOP",
@@ -1901,7 +1924,7 @@ impl UdevBackend {
                             unsafe {
                                 std::env::set_var("DISPLAY", format!(":{display_number}"));
                             }
-                            spawn_env_import(&["DISPLAY"]);
+                            sync_env_import(&["DISPLAY"]);
                             // `start_wm` requires `D: XwmHandler + XWaylandShellHandler + SeatHandler`.
                             // Our `JwmWaylandState` implements all three.
                             let dh = wl_state.display_handle.clone();
@@ -6218,6 +6241,116 @@ fn queue_kms_reinit(shared: &Arc<Mutex<SharedState>>) {
 mod udev_backend_selection_tests {
     use super::*;
     use crate::config::{ArgumentConfig, GestureSwipeConfig};
+
+    fn process_can_run(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(comm_end) = stat.iter().rposition(|byte| *byte == b')') else {
+            return true;
+        };
+        !matches!(
+            stat.get(comm_end + 1..)
+                .and_then(|suffix| suffix.iter().find(|byte| !byte.is_ascii_whitespace())),
+            Some(b'Z' | b'X' | b'x')
+        )
+    }
+
+    #[test]
+    fn environment_import_runs_both_paths_in_order_after_a_failure() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let mut calls: Vec<(String, Vec<String>)> = Vec::new();
+        sync_env_import_with(&["WAYLAND_DISPLAY", "DISPLAY"], |command, args| {
+            calls.push((
+                command.to_string(),
+                args.iter().map(|arg| (*arg).to_string()).collect(),
+            ));
+            if calls.len() == 1 {
+                Err(io::Error::other("offline dbus failure"))
+            } else {
+                Ok(std::process::ExitStatus::from_raw(0))
+            }
+        });
+
+        let owned = |args: &[&str]| {
+            args.iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "dbus-update-activation-environment");
+        assert_eq!(
+            calls[0].1,
+            owned(&["--systemd", "WAYLAND_DISPLAY", "DISPLAY"])
+        );
+        assert_eq!(calls[1].0, "systemctl");
+        assert_eq!(
+            calls[1].1,
+            owned(&["--user", "import-environment", "WAYLAND_DISPLAY", "DISPLAY"])
+        );
+    }
+
+    #[test]
+    fn environment_import_command_has_a_hard_deadline() {
+        let started = Instant::now();
+        let error =
+            run_env_import_command("sh", &["-c", "exec sleep 10"], Duration::from_millis(25))
+                .expect_err("stalled environment importer must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn environment_import_command_reaps_its_launch_tree() {
+        let marker = std::env::temp_dir().join(format!(
+            "jwm-env-import-launch-tree-{}.pid",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let marker_arg = marker.to_string_lossy().into_owned();
+        let status = run_env_import_command(
+            "sh",
+            &[
+                "-c",
+                "sleep 10 & printf '%s %s' \"$$\" \"$!\" > \"$1\"",
+                "jwm-env-import-test",
+                marker_arg.as_str(),
+            ],
+            Duration::from_secs(1),
+        )
+        .expect("short environment importer should complete");
+        assert!(status.success());
+
+        let pids = std::fs::read_to_string(&marker).expect("launcher wrote its process ids");
+        std::fs::remove_file(&marker).expect("remove process-id marker");
+        let mut pids = pids.split_ascii_whitespace().map(|pid| {
+            pid.parse::<u32>()
+                .expect("launcher process id should be numeric")
+        });
+        let launcher = pids.next().expect("direct launcher pid");
+        let descendant = pids.next().expect("background descendant pid");
+        assert!(pids.next().is_none());
+
+        let mut wait_status = 0;
+        let wait_result =
+            unsafe { libc::waitpid(launcher as libc::pid_t, &mut wait_status, libc::WNOHANG) };
+        assert_eq!(wait_result, -1, "direct launcher remained waitable");
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD),
+            "direct launcher was not reaped through its Child handle"
+        );
+
+        for _ in 0..50 {
+            if !process_can_run(descendant) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = unsafe { libc::kill(descendant as libc::pid_t, libc::SIGKILL) };
+        panic!("environment importer descendant {descendant} survived its process group");
+    }
 
     fn color_params(primaries_named: u32, tf_named: u32) -> ParametricParams {
         ParametricParams {
