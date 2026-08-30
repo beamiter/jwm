@@ -1,12 +1,13 @@
 //! sysfs-backed primary-interface network provider.
 //!
 //! Reads `/sys/class/net` directly and consults the bounded IPv4 routing table
-//! in `/proc/net/route`: no netlink socket, daemon, or extra dependency. An up
-//! non-loopback interface carrying the lowest-metric default route is preferred;
-//! when the route table is unavailable or has no eligible default, alphabetical
-//! interface order keeps the fallback deterministic. Rates need two samples of
-//! the same interface; the first sample after startup or an interface change
-//! reports unavailable rates rather than a misleading zero.
+//! in `/proc/net/route`: no netlink socket, daemon, or extra dependency. A
+//! non-loopback interface carrying the lowest-metric default route is preferred,
+//! including virtual devices whose drivers report an `unknown` operational state.
+//! When the route table is unavailable or has no eligible default, genuinely
+//! `up` interfaces precede `unknown` ones and names keep the fallback stable.
+//! Rates need two samples of the same interface; the first sample after startup
+//! or an interface change reports unavailable rates rather than a misleading zero.
 
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -112,7 +113,8 @@ impl NetworkMonitor {
     }
 
     fn primary_interface(&self) -> io::Result<Option<String>> {
-        let mut interfaces: Vec<String> = Vec::new();
+        let mut up_interfaces: Vec<String> = Vec::new();
+        let mut unknown_interfaces: Vec<String> = Vec::new();
         let entries = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -130,10 +132,24 @@ impl NetworkMonitor {
             let Ok(state) = std::fs::read_to_string(operstate) else {
                 continue;
             };
-            if state.trim() == "up" {
-                interfaces.push(name);
+            match state.trim() {
+                "up" => up_interfaces.push(name),
+                // Virtual interfaces such as WireGuard and TUN commonly have
+                // no carrier provider and remain IF_OPER_UNKNOWN while fully
+                // usable. A default route is stronger evidence than that
+                // missing driver signal.
+                "unknown" => unknown_interfaces.push(name),
+                _ => {}
             }
         }
+        up_interfaces.sort();
+        unknown_interfaces.sort();
+        let fallback_interface = up_interfaces
+            .first()
+            .or_else(|| unknown_interfaces.first())
+            .cloned();
+        let mut interfaces = up_interfaces;
+        interfaces.append(&mut unknown_interfaces);
         interfaces.sort();
         if interfaces.is_empty() {
             return Ok(None);
@@ -145,7 +161,7 @@ impl NetworkMonitor {
                 .flatten()
                 .and_then(|table| preferred_default_route(&table, &interfaces).map(str::to_owned))
         });
-        Ok(default_interface.or_else(|| interfaces.into_iter().next()))
+        Ok(default_interface.or(fallback_interface))
     }
 }
 
@@ -380,6 +396,37 @@ mod tests {
         assert_eq!(
             fixture.monitor().poll().unwrap().interface.as_deref(),
             Some("wlan0")
+        );
+    }
+
+    #[test]
+    fn default_route_accepts_unknown_virtual_interfaces_without_weakening_fallback() {
+        let fixture = Fixture::new("unknown-default-route");
+        fixture.interface("eth0", "up", 0, 0);
+        fixture.interface("wg0", "unknown", 0, 0);
+
+        assert_eq!(
+            fixture.monitor().poll().unwrap().interface.as_deref(),
+            Some("eth0"),
+            "without route evidence, a genuinely up interface wins"
+        );
+
+        fixture.route_table(
+            "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n\
+             wg0 00000000 00000000 0001 0 0 50 00000000 0 0 0\n",
+        );
+        assert_eq!(
+            fixture.monitor().poll().unwrap().interface.as_deref(),
+            Some("wg0"),
+            "a default route makes an unknown-state virtual interface authoritative"
+        );
+
+        fixture.interface("eth0", "down", 0, 0);
+        std::fs::remove_file(&fixture.route_path).unwrap();
+        assert_eq!(
+            fixture.monitor().poll().unwrap().interface.as_deref(),
+            Some("wg0"),
+            "an unknown virtual interface is still better than disconnected"
         );
     }
 
