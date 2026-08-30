@@ -6,6 +6,7 @@
 //! config the user believes is active but is not.
 
 use std::fmt;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -15,6 +16,10 @@ use crate::presentation::PresentationConfig;
 
 /// Default font when neither the config file nor `XBAR_FONT` specifies one.
 pub const DEFAULT_FONT: &str = "monospace 11";
+
+/// Configuration is hand-written and should never need an allocation large
+/// enough to disrupt every bar frontend during startup.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 /// Resolved bar configuration ready for a frontend.
 #[derive(Debug, Clone, PartialEq)]
@@ -263,9 +268,9 @@ impl BarConfig {
         )
     }
 
-    /// Read and parse `path`.
+    /// Read and parse a UTF-8 regular file no larger than one mebibyte.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        let text = read_config_text(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
             source,
         })?;
@@ -468,6 +473,44 @@ impl BarConfig {
     }
 }
 
+fn read_config_text(path: &Path) -> io::Result<String> {
+    // Check before opening so an accidentally configured FIFO or device cannot
+    // stall a frontend at startup. Symlinks to ordinary config files continue
+    // to work because `metadata` follows the link.
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return Err(config_too_large());
+    }
+
+    let file = std::fs::File::open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "configuration path is not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(config_too_large());
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn config_too_large() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("configuration exceeds the {MAX_CONFIG_BYTES}-byte limit"),
+    )
+}
+
 /// Validate the `[glass]` section.
 ///
 /// Only the values that would be *meaningless* rather than merely extreme are
@@ -557,6 +600,17 @@ fn apply_non_negative(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEST_PATH: AtomicU64 = AtomicU64::new(0);
+
+    fn test_path(name: &str) -> PathBuf {
+        let sequence = NEXT_TEST_PATH.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "xbar-config-test-{name}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn empty_document_is_exactly_the_default() {
@@ -722,5 +776,39 @@ blur_radius = 10
         let error = BarConfig::load(Path::new("/definitely/missing/xbar.toml")).unwrap_err();
         assert!(matches!(error, ConfigError::Read { .. }));
         assert!(error.to_string().contains("/definitely/missing/xbar.toml"));
+    }
+
+    #[test]
+    fn load_rejects_oversized_files_before_parsing() {
+        let path = test_path("oversized");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CONFIG_BYTES + 1).unwrap();
+
+        let error = BarConfig::load(&path).unwrap_err();
+        let ConfigError::Read { source, .. } = error else {
+            panic!("oversized input should be a read error");
+        };
+        assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+        assert!(source.to_string().contains("byte limit"));
+
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_non_regular_sources_without_opening_them() {
+        use std::os::unix::net::UnixListener;
+
+        let path = test_path("socket");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        let error = BarConfig::load(&path).unwrap_err();
+        let ConfigError::Read { source, .. } = error else {
+            panic!("a socket should be a read error");
+        };
+        assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
+
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
     }
 }
