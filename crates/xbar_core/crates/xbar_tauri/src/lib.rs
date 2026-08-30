@@ -14,8 +14,8 @@ use std::{
 };
 
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Runtime, State, WebviewWindow,
-    Window, WindowEvent,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, RunEvent, Runtime, State,
+    WebviewWindow, Window, WindowEvent,
 };
 use xbar_core::glass::wallpaper::WallpaperFile;
 use xbar_core::glass::{DEFAULT_BACKGROUND_OPACITY, GlassStrip, fallback_rgb};
@@ -166,6 +166,7 @@ pub fn configure<R: Runtime>(
     let setup_config = config.clone();
 
     Ok(builder
+        .plugin(worker_lifecycle_plugin())
         .setup(move |app| setup(app.handle(), setup_config))
         .on_window_event(handle_window_event)
         .invoke_handler(tauri::generate_handler![dispatch_action, frontend_ready]))
@@ -211,17 +212,51 @@ struct WorkerGuard {
     worker: Option<thread::JoinHandle<()>>,
 }
 
+impl WorkerGuard {
+    fn request_stop(&self) {
+        let mut stopped = match self.signal.stopped.lock() {
+            Ok(stopped) => stopped,
+            Err(error) => {
+                log::error!("xbar worker stop lock poisoned during shutdown: {error}");
+                error.into_inner()
+            }
+        };
+        *stopped = true;
+        self.signal.wake.notify_all();
+    }
+}
+
 impl Drop for WorkerGuard {
     fn drop(&mut self) {
-        if let Ok(mut stopped) = self.signal.stopped.lock() {
-            *stopped = true;
-            self.signal.wake.notify_all();
+        self.request_stop();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if worker.thread().id() == thread::current().id() {
+            log::debug!("xbar Tauri worker guard dropped on its worker thread; detaching");
+            return;
         }
-        if let Some(worker) = self.worker.take()
-            && let Err(payload) = worker.join()
-        {
+        if let Err(payload) = worker.join() {
             log::error!("xbar Tauri worker panicked during shutdown: {payload:?}");
         }
+    }
+}
+
+fn worker_lifecycle_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    // The worker owns an AppHandle, so its managed guard cannot be the first
+    // owner to drop. Break that ownership cycle while the app is still alive.
+    tauri::plugin::Builder::new("xbar-worker-lifecycle")
+        .on_event(|app, event| {
+            if matches!(event, RunEvent::Exit) {
+                request_worker_stop(app);
+            }
+        })
+        .build()
+}
+
+fn request_worker_stop<R: Runtime>(manager: &impl Manager<R>) {
+    if let Some(worker) = manager.try_state::<WorkerGuard>() {
+        worker.request_stop();
     }
 }
 
@@ -451,15 +486,19 @@ fn execute_effect<R: Runtime>(
 }
 
 fn handle_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
-    let WindowEvent::ScaleFactorChanged { scale_factor, .. } = event else {
-        return;
-    };
     let Some(state) = window.try_state::<BridgeState>() else {
         return;
     };
     if window.label() != state.inner.config.window_label {
         return;
     }
+    if matches!(event, WindowEvent::Destroyed) {
+        request_worker_stop(window);
+        return;
+    }
+    let WindowEvent::ScaleFactorChanged { scale_factor, .. } = event else {
+        return;
+    };
     let geometry = match state.inner.session.lock() {
         Ok(session) => session.runtime().snapshot().geometry,
         Err(error) => {
@@ -749,6 +788,55 @@ mod tests {
         let guard = session.lock().unwrap();
         assert_eq!(release_session_for_glass(guard), None);
         assert!(session.try_lock().is_ok());
+    }
+
+    #[test]
+    fn worker_stop_wakes_the_waiter_before_drop_joins_it() {
+        let signal = Arc::new(WorkerSignal {
+            stopped: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        let worker_signal = Arc::clone(&signal);
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            let stopped = worker_signal.stopped.lock().unwrap();
+            waiting_tx.send(()).unwrap();
+            let stopped = worker_signal
+                .wake
+                .wait_while(stopped, |stopped| !*stopped)
+                .unwrap();
+            assert!(*stopped);
+        });
+        let guard = WorkerGuard {
+            signal,
+            worker: Some(worker),
+        };
+
+        waiting_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        guard.request_stop();
+        drop(guard);
+    }
+
+    #[test]
+    fn worker_guard_does_not_join_its_own_thread() {
+        let signal = Arc::new(WorkerSignal {
+            stopped: Mutex::new(false),
+            wake: Condvar::new(),
+        });
+        let (guard_tx, guard_rx) = std::sync::mpsc::sync_channel(0);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = thread::spawn(move || {
+            let guard: WorkerGuard = guard_rx.recv().unwrap();
+            drop(guard);
+            done_tx.send(()).unwrap();
+        });
+        let guard = WorkerGuard {
+            signal,
+            worker: Some(worker),
+        };
+
+        guard_tx.send(guard).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     }
 
     #[test]
