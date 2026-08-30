@@ -174,6 +174,7 @@ fn command_output_bounded(
         // leave a descendant holding either capture pipe open.
         .process_group(0);
     let mut child = command.spawn()?;
+    let child_id = child.id();
     let Some(mut stdout) = child.stdout.take() else {
         terminate_child_group(&mut child);
         return Err(io::Error::other(
@@ -197,15 +198,31 @@ fn command_output_bounded(
     let started = Instant::now();
     let mut stdout_bytes = Vec::with_capacity(output_limit.min(4096));
     let mut stderr_bytes = Vec::with_capacity(output_limit.min(4096));
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut status = None;
     let result = (|| {
         loop {
-            drain_available(&mut stdout, &mut stdout_bytes, output_limit)?;
-            drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+            if !stdout_eof {
+                stdout_eof = drain_available(&mut stdout, &mut stdout_bytes, output_limit)?;
+            }
+            if !stderr_eof {
+                stderr_eof = drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+            }
 
-            if let Some(status) = child.try_wait()? {
-                // Capture whatever was already buffered when the child exited.
-                drain_available(&mut stdout, &mut stdout_bytes, output_limit)?;
-                drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+            if status.is_none() {
+                status = child.try_wait()?;
+                if status.is_some() {
+                    // A successful wrapper may have left background helpers
+                    // holding these pipes. They belong to this synchronous
+                    // probe and must not outlive it.
+                    kill_process_group(child_id);
+                }
+            }
+            if stdout_eof
+                && stderr_eof
+                && let Some(status) = status
+            {
                 return Ok(Output {
                     status,
                     stdout: stdout_bytes,
@@ -238,30 +255,39 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
     Ok(())
 }
 
-fn drain_available(source: &mut impl Read, retained: &mut Vec<u8>, limit: usize) -> io::Result<()> {
+/// Drain one non-blocking pipe turn and report whether EOF was observed.
+fn drain_available(
+    source: &mut impl Read,
+    retained: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<bool> {
     let mut drained = 0;
     let mut chunk = [0_u8; 4096];
     while drained < MAX_DRAIN_BYTES_PER_POLL {
         let request = chunk.len().min(MAX_DRAIN_BYTES_PER_POLL - drained);
         match source.read(&mut chunk[..request]) {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(true),
             Ok(read) => {
                 drained += read;
                 let retain = read.min(limit.saturating_sub(retained.len()));
                 retained.extend_from_slice(&chunk[..retain]);
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn kill_process_group(child_id: u32) {
+    if let Ok(process_group) = i32::try_from(child_id) {
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
 }
 
 fn terminate_child_group(child: &mut std::process::Child) {
-    if let Ok(process_group) = i32::try_from(child.id()) {
-        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    }
+    kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -418,5 +444,31 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn successful_wrapper_does_not_leave_a_background_descendant() {
+        let marker = std::env::temp_dir().join(format!(
+            "xbar-brightness-descendant-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "(sleep 0.1; printf leaked > \"$1\") &",
+                "xbar-brightness-test",
+            ])
+            .arg(&marker);
+        let output = command_output_bounded(&mut command, Duration::from_secs(1), 1024).unwrap();
+        assert!(output.status.success());
+
+        std::thread::sleep(Duration::from_millis(300));
+        let leaked = marker.exists();
+        let _ = std::fs::remove_file(marker);
+        assert!(!leaked, "background helper survived its wrapper");
     }
 }
