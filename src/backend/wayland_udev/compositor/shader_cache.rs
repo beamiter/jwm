@@ -293,11 +293,7 @@ impl ShaderCache {
             gl.DeleteShader(frag_shader);
 
             if link_status == 0 {
-                let mut log_len = 0i32;
-                gl.GetProgramiv(program, ffi::INFO_LOG_LENGTH, &mut log_len);
-                let mut log = vec![0u8; log_len as usize];
-                gl.GetProgramInfoLog(program, log_len, &mut log_len, log.as_mut_ptr() as *mut _);
-                log.truncate(log_len as usize);
+                let log = super::read_program_info_log(gl, program);
                 gl.DeleteProgram(program);
                 return Err(format!(
                     "Program link failed: {}",
@@ -327,11 +323,7 @@ impl ShaderCache {
             gl.GetShaderiv(shader, ffi::COMPILE_STATUS, &mut compile_status);
 
             if compile_status == 0 {
-                let mut log_len = 0i32;
-                gl.GetShaderiv(shader, ffi::INFO_LOG_LENGTH, &mut log_len);
-                let mut log = vec![0u8; log_len as usize];
-                gl.GetShaderInfoLog(shader, log_len, &mut log_len, log.as_mut_ptr() as *mut _);
-                log.truncate(log_len as usize);
+                let log = super::read_shader_info_log(gl, shader);
                 gl.DeleteShader(shader);
                 let type_name = if shader_type == ffi::VERTEX_SHADER {
                     "vertex"

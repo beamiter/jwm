@@ -113,6 +113,56 @@ pub(crate) fn ortho(l: f32, r: f32, b: f32, t: f32) -> [f32; 16] {
 // Shader program helper
 // ---------------------------------------------------------------------------
 
+/// Driver diagnostics are useful, but their reported length is not a safe
+/// allocation size. Keep enough context for debugging without allowing a
+/// broken driver to turn a compile failure into an unbounded allocation.
+const MAX_SHADER_INFO_LOG_BYTES: i32 = 1024 * 1024;
+
+fn bounded_info_log_capacity(reported: i32) -> i32 {
+    reported.clamp(1, MAX_SHADER_INFO_LOG_BYTES)
+}
+
+fn truncate_info_log(buffer: &mut Vec<u8>, written: i32) {
+    let written = usize::try_from(written).unwrap_or(0).min(buffer.len());
+    buffer.truncate(written);
+}
+
+unsafe fn read_shader_info_log(gl: &ffi::Gles2, shader: u32) -> Vec<u8> {
+    unsafe {
+        let mut reported = 0i32;
+        gl.GetShaderiv(shader, ffi::INFO_LOG_LENGTH, &mut reported);
+        let capacity = bounded_info_log_capacity(reported);
+        let mut buffer = vec![0u8; capacity as usize];
+        let mut written = 0i32;
+        gl.GetShaderInfoLog(
+            shader,
+            capacity,
+            &mut written,
+            buffer.as_mut_ptr() as *mut _,
+        );
+        truncate_info_log(&mut buffer, written);
+        buffer
+    }
+}
+
+unsafe fn read_program_info_log(gl: &ffi::Gles2, program: u32) -> Vec<u8> {
+    unsafe {
+        let mut reported = 0i32;
+        gl.GetProgramiv(program, ffi::INFO_LOG_LENGTH, &mut reported);
+        let capacity = bounded_info_log_capacity(reported);
+        let mut buffer = vec![0u8; capacity as usize];
+        let mut written = 0i32;
+        gl.GetProgramInfoLog(
+            program,
+            capacity,
+            &mut written,
+            buffer.as_mut_ptr() as *mut _,
+        );
+        truncate_info_log(&mut buffer, written);
+        buffer
+    }
+}
+
 /// Compile a vertex + fragment shader pair and link them into a program.
 pub(crate) unsafe fn create_program(
     gl: &ffi::Gles2,
@@ -137,10 +187,7 @@ pub(crate) unsafe fn create_program(
         let mut status = 0i32;
         gl.GetShaderiv(vs, ffi::COMPILE_STATUS, &mut status);
         if status == 0 {
-            let mut len = 0i32;
-            gl.GetShaderiv(vs, ffi::INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            gl.GetShaderInfoLog(vs, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _);
+            let buf = read_shader_info_log(gl, vs);
             gl.DeleteShader(vs);
             return Err(format!(
                 "Vertex shader compile error: {}",
@@ -159,10 +206,7 @@ pub(crate) unsafe fn create_program(
 
         gl.GetShaderiv(fs, ffi::COMPILE_STATUS, &mut status);
         if status == 0 {
-            let mut len = 0i32;
-            gl.GetShaderiv(fs, ffi::INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            gl.GetShaderInfoLog(fs, len, std::ptr::null_mut(), buf.as_mut_ptr() as *mut _);
+            let buf = read_shader_info_log(gl, fs);
             gl.DeleteShader(vs);
             gl.DeleteShader(fs);
             return Err(format!(
@@ -183,15 +227,7 @@ pub(crate) unsafe fn create_program(
 
         gl.GetProgramiv(program, ffi::LINK_STATUS, &mut status);
         if status == 0 {
-            let mut len = 0i32;
-            gl.GetProgramiv(program, ffi::INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            gl.GetProgramInfoLog(
-                program,
-                len,
-                std::ptr::null_mut(),
-                buf.as_mut_ptr() as *mut _,
-            );
+            let buf = read_program_info_log(gl, program);
             gl.DeleteShader(vs);
             gl.DeleteShader(fs);
             gl.DeleteProgram(program);
@@ -207,6 +243,37 @@ pub(crate) unsafe fn create_program(
         gl.DeleteShader(fs);
 
         Ok(program)
+    }
+}
+
+#[cfg(test)]
+mod shader_info_log_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn reported_driver_lengths_have_a_small_positive_bound() {
+        assert_eq!(bounded_info_log_capacity(i32::MIN), 1);
+        assert_eq!(bounded_info_log_capacity(0), 1);
+        assert_eq!(bounded_info_log_capacity(17), 17);
+        assert_eq!(
+            bounded_info_log_capacity(i32::MAX),
+            MAX_SHADER_INFO_LOG_BYTES
+        );
+    }
+
+    #[test]
+    fn returned_driver_lengths_cannot_expand_or_underflow_the_buffer() {
+        let mut negative = vec![1, 2, 3];
+        truncate_info_log(&mut negative, -1);
+        assert!(negative.is_empty());
+
+        let mut oversized = vec![1, 2, 3];
+        truncate_info_log(&mut oversized, i32::MAX);
+        assert_eq!(oversized, [1, 2, 3]);
+
+        let mut exact = vec![1, 2, 3];
+        truncate_info_log(&mut exact, 2);
+        assert_eq!(exact, [1, 2]);
     }
 }
 
