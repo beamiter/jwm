@@ -39,12 +39,28 @@ pub const BACKEND_ENV: &str = "JWM_BACKEND";
 pub const BENCHMARK_ENV: &str = "JWM_BENCHMARK";
 pub const BENCHMARK_WARMUP_ENV: &str = "JWM_BENCHMARK_WARMUP";
 const RESTART_MARKER_ENV: &str = "JWM_RESTARTING";
+const DBUS_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+const DBUS_LAUNCH_OUTPUT_LIMIT: usize = 64 * 1024;
 const RESTART_BOOTSTRAP_BACKOFFS: [Duration; 4] = [
     Duration::from_millis(20),
     Duration::from_millis(50),
     Duration::from_millis(100),
     Duration::from_millis(200),
 ];
+
+/// Start a private D-Bus session bus and return its shell environment output.
+///
+/// The short-lived launcher is bounded, but a daemon left behind by a
+/// successful launch is intentionally allowed to keep running.
+#[doc(hidden)]
+pub fn launch_dbus_session() -> std::io::Result<std::process::Output> {
+    crate::external_command::daemon_launcher_output_with_limits(
+        "dbus-launch",
+        &["--sh-syntax"],
+        DBUS_LAUNCH_TIMEOUT,
+        DBUS_LAUNCH_OUTPUT_LIMIT,
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BackendChoice {

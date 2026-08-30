@@ -4,13 +4,12 @@
 use clap::Parser;
 use jwm::application::{
     ApplicationOptions, BackendChoice, BenchmarkRequest, config_path, generate_config_templates,
-    run_with_options, validate_config,
+    launch_dbus_session, run_with_options, validate_config,
 };
 use log::{error, info, warn};
 use std::env;
 use std::fmt;
 use std::os::unix::fs::FileTypeExt;
-use std::process::Command;
 use xbar_core::logging::init as initialize_logging;
 
 use jwm::doctor::{DoctorReport, DoctorStatus, diagnose};
@@ -375,7 +374,7 @@ fn ensure_dbus_session() {
     }
 
     info!("[dbus] no session bus found, trying dbus-launch");
-    let output = match Command::new("dbus-launch").arg("--sh-syntax").output() {
+    let output = match launch_dbus_session() {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             warn!("[dbus] dbus-launch exited {:?}", output.status);

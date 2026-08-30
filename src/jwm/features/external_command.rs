@@ -27,6 +27,27 @@ pub(crate) fn output_with_limits(
     command_output_bounded(&mut command, timeout, output_limit)
 }
 
+/// Run a short daemon launcher while preserving descendants only after the
+/// direct launcher exits successfully. Failures, timeouts, and oversized
+/// output still terminate the launcher's entire process group.
+pub(crate) fn daemon_launcher_output_with_limits(
+    cmd: &str,
+    args: &[&str],
+    timeout: Duration,
+    output_limit: usize,
+) -> io::Result<Output> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command_output_bounded_with_policy(
+        &mut command,
+        Stdio::null(),
+        true,
+        timeout,
+        output_limit,
+        SuccessfulDescendants::Preserve,
+    )
+}
+
 /// Run a helper that consumes a caller-provided stdin, discards stdout, and
 /// retains bounded stderr for diagnostics.
 pub(super) fn output_with_input(
@@ -96,6 +117,30 @@ fn command_output_bounded_with_stdio(
     timeout: Duration,
     output_limit: usize,
 ) -> io::Result<Output> {
+    command_output_bounded_with_policy(
+        command,
+        stdin,
+        capture_stdout,
+        timeout,
+        output_limit,
+        SuccessfulDescendants::Terminate,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SuccessfulDescendants {
+    Terminate,
+    Preserve,
+}
+
+fn command_output_bounded_with_policy(
+    command: &mut Command,
+    stdin: Stdio,
+    capture_stdout: bool,
+    timeout: Duration,
+    output_limit: usize,
+    successful_descendants: SuccessfulDescendants,
+) -> io::Result<Output> {
     command.stdin(stdin);
     if capture_stdout {
         command.stdout(Stdio::piped());
@@ -104,8 +149,9 @@ fn command_output_bounded_with_stdio(
     }
     command
         .stderr(Stdio::piped())
-        // Keep every descendant in one group so none can outlive a bounded
-        // helper or keep a capture pipe open after the direct child exits.
+        // Keep every descendant in one group so failure paths can clean the
+        // whole launch tree. The synchronous policy also cleans it after a
+        // successful direct-child exit; daemon launchers deliberately do not.
         .process_group(0);
     let mut child = command.spawn()?;
     let child_id = child.id();
@@ -138,33 +184,61 @@ fn command_output_bounded_with_stdio(
     let mut stdout_eof = !capture_stdout;
     let mut stderr_eof = false;
     let mut status = None;
+    let mut descendants_terminated = false;
     let result = (|| {
         loop {
+            let mut stdout_quiescent = stdout_eof;
             if !stdout_eof {
                 let stdout = stdout
                     .as_mut()
                     .expect("captured stdout remains available until EOF");
                 let drain = drain_available(stdout, &mut stdout_bytes, output_limit)?;
                 stdout_eof = drain.eof;
+                stdout_quiescent = drain.quiescent;
                 if drain.oversized {
                     return Err(output_too_large(output_limit));
                 }
             }
+            let mut stderr_quiescent = stderr_eof;
             if !stderr_eof {
                 let drain = drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
                 stderr_eof = drain.eof;
+                stderr_quiescent = drain.quiescent;
                 if drain.oversized {
                     return Err(output_too_large(output_limit));
                 }
             }
 
+            let completed_before_poll = status.is_some();
             if status.is_none() {
                 status = child.try_wait()?;
-                if status.is_some() {
+            }
+            let completed_during_poll = !completed_before_poll && status.is_some();
+            if let Some(exit_status) = status {
+                let preserve_descendants = successful_descendants
+                    == SuccessfulDescendants::Preserve
+                    && exit_status.success();
+                if preserve_descendants
+                    && !completed_during_poll
+                    && stdout_quiescent
+                    && stderr_quiescent
+                {
+                    // The direct child cannot write after it has exited. A
+                    // second drain after observing that exit therefore
+                    // captures all launcher output without waiting for EOF
+                    // from an intentionally surviving daemon.
+                    return Ok(Output {
+                        status: exit_status,
+                        stdout: stdout_bytes,
+                        stderr: stderr_bytes,
+                    });
+                }
+                if !preserve_descendants && !descendants_terminated {
                     // Any process still holding these pipes is a descendant
                     // of an already-completed synchronous helper. Stop it,
                     // then keep draining until both pipes reach EOF.
                     kill_process_group(child_id);
+                    descendants_terminated = true;
                 }
             }
             if stdout_eof
@@ -218,6 +292,7 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
 struct DrainResult {
     eof: bool,
     oversized: bool,
+    quiescent: bool,
 }
 
 fn drain_available(
@@ -235,6 +310,7 @@ fn drain_available(
                 return Ok(DrainResult {
                     eof: true,
                     oversized,
+                    quiescent: true,
                 });
             }
             Ok(read) => {
@@ -247,6 +323,7 @@ fn drain_available(
                 return Ok(DrainResult {
                     eof: false,
                     oversized,
+                    quiescent: true,
                 });
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -256,6 +333,7 @@ fn drain_available(
     Ok(DrainResult {
         eof: false,
         oversized,
+        quiescent: false,
     })
 }
 
@@ -296,6 +374,84 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "helper was not terminated promptly"
         );
+    }
+
+    #[test]
+    fn daemon_launcher_output_is_bounded() {
+        let error = daemon_launcher_output_with_limits(
+            "sh",
+            &["-c", "printf 123456789"],
+            Duration::from_secs(1),
+            8,
+        )
+        .expect_err("oversized launcher output must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn daemon_launcher_wait_has_a_hard_deadline() {
+        let started = Instant::now();
+        let error = daemon_launcher_output_with_limits(
+            "sh",
+            &["-c", "exec sleep 10"],
+            Duration::from_millis(25),
+            64,
+        )
+        .expect_err("sleeping launcher must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "launcher was not terminated promptly"
+        );
+    }
+
+    #[test]
+    fn successful_daemon_launcher_preserves_background_process() {
+        let started = Instant::now();
+        let output = daemon_launcher_output_with_limits(
+            "sh",
+            &["-c", "sleep 10 & printf %s \"$!\""],
+            Duration::from_secs(1),
+            64,
+        )
+        .expect("successful launcher should not wait for its daemon's pipe handles");
+        assert!(output.status.success());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let descendant = String::from_utf8(output.stdout)
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            process_can_run(descendant),
+            "successful launcher descendant was terminated"
+        );
+        let _ = unsafe { libc::kill(descendant as i32, libc::SIGKILL) };
+    }
+
+    #[test]
+    fn failed_daemon_launcher_stops_background_process() {
+        let output = daemon_launcher_output_with_limits(
+            "sh",
+            &["-c", "sleep 10 & printf %s \"$!\"; exit 7"],
+            Duration::from_secs(1),
+            64,
+        )
+        .expect("failed launcher should still return its bounded output");
+        assert_eq!(output.status.code(), Some(7));
+        let descendant = String::from_utf8(output.stdout)
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+
+        for _ in 0..50 {
+            if !process_can_run(descendant) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = unsafe { libc::kill(descendant as i32, libc::SIGKILL) };
+        panic!("failed launcher descendant {descendant} survived its process group");
     }
 
     #[test]
