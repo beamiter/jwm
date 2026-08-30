@@ -1,4 +1,6 @@
-use std::fs;
+use crate::backend::power_supply::{parse_percentage, read_attribute};
+use std::io;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Power source type detected from sysfs.
@@ -22,24 +24,25 @@ impl BatteryStatus {
 
     /// Read battery status from sysfs. Defaults to AC/100% if paths don't exist.
     pub fn read() -> Self {
-        let capacity = fs::read_to_string(Self::CAPACITY_PATH)
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(100);
+        Self::try_read().unwrap_or(Self {
+            capacity: 100,
+            source: PowerSource::AC,
+        })
+    }
 
-        let source = fs::read_to_string(Self::STATUS_PATH)
-            .ok()
-            .map(|s| {
-                let status = s.trim().to_lowercase();
-                match status.as_str() {
-                    "discharging" => PowerSource::Battery,
-                    "charging" | "full" | "not charging" => PowerSource::AC,
-                    _ => PowerSource::Unknown,
-                }
-            })
-            .unwrap_or(PowerSource::AC);
+    fn try_read() -> io::Result<Self> {
+        Self::try_read_from(Path::new(Self::CAPACITY_PATH), Path::new(Self::STATUS_PATH))
+    }
 
-        Self { capacity, source }
+    fn try_read_from(capacity_path: &Path, status_path: &Path) -> io::Result<Self> {
+        let capacity = parse_percentage(&read_attribute(capacity_path)?)?;
+        let status = read_attribute(status_path)?;
+        let source = match status.trim().to_ascii_lowercase().as_str() {
+            "discharging" => PowerSource::Battery,
+            "charging" | "full" | "not charging" => PowerSource::AC,
+            _ => PowerSource::Unknown,
+        };
+        Ok(Self { capacity, source })
     }
 
     /// Current battery capacity as a percentage (0-100).
@@ -55,6 +58,12 @@ impl BatteryStatus {
     /// Whether the battery level is below the given threshold.
     pub fn is_low(&self, threshold: u32) -> bool {
         self.on_battery() && self.capacity < threshold
+    }
+}
+
+fn replace_battery_on_success(current: &mut BatteryStatus, sample: io::Result<BatteryStatus>) {
+    if let Ok(sample) = sample {
+        *current = sample;
     }
 }
 
@@ -137,7 +146,9 @@ impl PowerSavingManager {
         }
 
         self.last_update = now;
-        self.battery = BatteryStatus::read();
+        // A transient or malformed sysfs sample must not replace the last
+        // coherent battery/source pair with the startup fallback.
+        replace_battery_on_success(&mut self.battery, BatteryStatus::try_read());
 
         let new_profile = Self::select_profile(&self.battery, &self.config);
         if new_profile != self.current_profile {
@@ -219,5 +230,51 @@ impl PowerSavingManager {
         } else {
             PowerProfile::UltraLowPower
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn battery_probe_requires_a_bounded_valid_pair() {
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "jwm-wayland-battery-test-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let capacity = directory.join("capacity");
+        let status = directory.join("status");
+        std::fs::write(&capacity, "73\n").unwrap();
+        std::fs::write(&status, "Discharging\n").unwrap();
+
+        let battery = BatteryStatus::try_read_from(&capacity, &status).unwrap();
+        assert_eq!(battery.capacity(), 73);
+        assert!(battery.on_battery());
+
+        std::fs::write(&capacity, "101\n").unwrap();
+        assert_eq!(
+            BatteryStatus::try_read_from(&capacity, &status)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let mut retained = BatteryStatus {
+            capacity: 22,
+            source: PowerSource::Battery,
+        };
+        replace_battery_on_success(
+            &mut retained,
+            Err(io::Error::new(io::ErrorKind::InvalidData, "bad sample")),
+        );
+        assert_eq!(retained.capacity(), 22);
+        assert!(retained.on_battery());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

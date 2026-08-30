@@ -1,4 +1,5 @@
-use std::fs;
+use crate::backend::power_supply::{parse_nonnegative_finite, parse_percentage, read_attribute};
+use std::io;
 use std::path::Path;
 /// Power Saving Mode (P7D)
 ///
@@ -57,11 +58,13 @@ impl BatteryStatus {
     }
 
     /// Read battery status from sysfs
-    fn read_battery_status() -> Result<BatteryStatus, std::io::Error> {
-        let base_path = "/sys/class/power_supply/BAT0";
+    fn read_battery_status() -> io::Result<BatteryStatus> {
+        Self::read_battery_status_from(Path::new("/sys/class/power_supply/BAT0"))
+    }
 
+    fn read_battery_status_from(base_path: &Path) -> io::Result<BatteryStatus> {
         // Check if battery exists
-        if !Path::new(base_path).exists() {
+        if !base_path.try_exists()? {
             return Ok(BatteryStatus {
                 percentage: 100,
                 source: PowerSource::AC,
@@ -71,11 +74,11 @@ impl BatteryStatus {
         }
 
         // Read capacity (percentage)
-        let capacity_str = fs::read_to_string(format!("{}/capacity", base_path))?;
-        let percentage = capacity_str.trim().parse::<u32>().unwrap_or(100);
+        let capacity_str = read_attribute(&base_path.join("capacity"))?;
+        let percentage = parse_percentage(&capacity_str)?;
 
         // Read status (Charging/Discharging/Full)
-        let status_str = fs::read_to_string(format!("{}/status", base_path))?;
+        let status_str = read_attribute(&base_path.join("status"))?;
         let source = match status_str.trim() {
             "Discharging" => PowerSource::Battery,
             "Charging" | "Full" => PowerSource::AC,
@@ -95,13 +98,10 @@ impl BatteryStatus {
     /// sysfs exposes either charge_* (µAh) + current_now (µA) or energy_* (µWh) +
     /// power_now (µW), depending on the driver. Either pair divides to hours, so
     /// the same arithmetic works once we pick whichever the kernel provides.
-    fn read_time_remaining(base_path: &str, source: PowerSource) -> Option<u32> {
+    fn read_time_remaining(base_path: &Path, source: PowerSource) -> Option<u32> {
         let read = |name: &str| -> Option<f64> {
-            fs::read_to_string(format!("{base_path}/{name}"))
-                .ok()?
-                .trim()
-                .parse::<f64>()
-                .ok()
+            let value = read_attribute(&base_path.join(name)).ok()?;
+            parse_nonnegative_finite(&value)
         };
 
         // (now, full, rate) in consistent units (charge µAh / energy µWh, rate µA / µW).
@@ -120,7 +120,8 @@ impl BatteryStatus {
             PowerSource::Unknown => return None,
         };
 
-        Some((remaining_units / rate * 3600.0) as u32)
+        let seconds = remaining_units / rate * 3600.0;
+        (seconds.is_finite() && seconds <= f64::from(u32::MAX)).then_some(seconds as u32)
     }
 
     /// Check if on battery power
@@ -371,6 +372,19 @@ pub struct PowerRecommendations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    fn battery_directory() -> std::path::PathBuf {
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "jwm-x11-battery-test-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn test_battery_status_creation() {
@@ -405,5 +419,38 @@ mod tests {
 
         assert!(status.is_low(30));
         assert!(!status.is_low(20));
+    }
+
+    #[test]
+    fn battery_probe_rejects_bad_capacity_and_time_samples() {
+        let directory = battery_directory();
+        std::fs::write(directory.join("capacity"), "64\n").unwrap();
+        std::fs::write(directory.join("status"), "Discharging\n").unwrap();
+        std::fs::write(directory.join("charge_now"), "1000\n").unwrap();
+        std::fs::write(directory.join("charge_full"), "2000\n").unwrap();
+        std::fs::write(directory.join("current_now"), "500\n").unwrap();
+
+        let battery = BatteryStatus::read_battery_status_from(&directory).unwrap();
+        assert_eq!(battery.percentage, 64);
+        assert_eq!(battery.source, PowerSource::Battery);
+        assert_eq!(battery.time_remaining, Some(7200));
+
+        std::fs::write(directory.join("capacity"), "101\n").unwrap();
+        assert_eq!(
+            BatteryStatus::read_battery_status_from(&directory)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        std::fs::write(directory.join("capacity"), "64\n").unwrap();
+        std::fs::write(directory.join("current_now"), "NaN\n").unwrap();
+        assert_eq!(
+            BatteryStatus::read_battery_status_from(&directory)
+                .unwrap()
+                .time_remaining,
+            None
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
