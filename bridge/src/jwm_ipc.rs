@@ -10,7 +10,7 @@
 //! * [`subscribe`] — one long-lived connection that streams events, healing
 //!   across compositor restarts with a bounded backoff.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -26,6 +26,49 @@ const RECONNECT_BACKOFF: Duration = Duration::from_secs(2);
 /// receiver also terminates the owning OS thread without waiting for another
 /// compositor event.
 const RECEIVER_CLOSED_POLL: Duration = Duration::from_millis(500);
+/// Mirror of the compositor's per-client IPC buffer ceiling. Keeping the
+/// client side bounded matters too: a stale or replaced socket peer can send
+/// bytes continuously and defeat read timeouts without ever terminating a
+/// newline-delimited frame.
+const MAX_IPC_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Append one newline-delimited frame without ever retaining more than
+/// `limit` bytes. Returns `false` only for a clean EOF with no partial frame.
+///
+/// Bytes already read stay in `frame` when the underlying reader times out;
+/// subscription callers can therefore poll cancellation without corrupting a
+/// fragmented JSON value.
+fn read_bounded_frame<R: BufRead>(
+    reader: &mut R,
+    frame: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<bool> {
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if available.is_empty() {
+            return Ok(!frame.is_empty());
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content_len = newline.unwrap_or(available.len());
+        if frame.len().saturating_add(content_len) > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "jwm IPC frame exceeded limit",
+            ));
+        }
+        frame.extend_from_slice(&available[..content_len]);
+        let consumed = content_len + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(true);
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct JwmIpc {
@@ -77,14 +120,14 @@ impl JwmIpc {
         stream.flush()?;
 
         let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        let mut frame = Vec::with_capacity(4096);
+        if !read_bounded_frame(&mut reader, &mut frame, MAX_IPC_FRAME_BYTES)? {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "jwm closed the socket without responding",
             ));
         }
-        let response: Value = serde_json::from_str(line.trim())
+        let response: Value = serde_json::from_slice(&frame)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         if response
             .get("success")
@@ -159,14 +202,14 @@ fn pump_events(
     log::info!("subscribed to jwm events on {}", ipc.socket().display());
 
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
+    let mut frame = Vec::with_capacity(4096);
     loop {
         if sink.is_closed() {
             return Ok(EventPumpExit::ReceiverClosed);
         }
-        match reader.read_line(&mut line) {
-            Ok(0) => return Ok(EventPumpExit::StreamClosed),
-            Ok(_) => {}
+        match read_bounded_frame(&mut reader, &mut frame, MAX_IPC_FRAME_BYTES) {
+            Ok(false) => return Ok(EventPumpExit::StreamClosed),
+            Ok(true) => {}
             Err(error)
                 if matches!(
                     error.kind(),
@@ -178,12 +221,11 @@ fn pump_events(
             Err(error) => return Err(error),
         }
 
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            line.clear();
+        if frame.iter().all(u8::is_ascii_whitespace) {
+            frame.clear();
             continue;
         }
-        match serde_json::from_str::<Value>(trimmed) {
+        match serde_json::from_slice::<Value>(&frame) {
             // Responses (the subscribe acknowledgement) share the connection;
             // only event frames carry an `event` field.
             Ok(value) if value.get("event").is_some() => {
@@ -194,7 +236,7 @@ fn pump_events(
             Ok(_) => {}
             Err(error) => log::warn!("ignoring malformed jwm event: {error}"),
         }
-        line.clear();
+        frame.clear();
     }
 }
 
@@ -222,10 +264,68 @@ fn socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::sync::mpsc as std_mpsc;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
     const MUST_STILL_BE_BLOCKED: Duration = Duration::from_millis(50);
+
+    #[test]
+    fn bounded_frame_reader_preserves_frame_boundaries() {
+        let mut reader = Cursor::new(b"first\nnext\nunterminated".as_slice());
+        let mut frame = Vec::new();
+
+        assert!(read_bounded_frame(&mut reader, &mut frame, 12).unwrap());
+        assert_eq!(frame, b"first");
+
+        frame.clear();
+        assert!(read_bounded_frame(&mut reader, &mut frame, 12).unwrap());
+        assert_eq!(frame, b"next");
+
+        frame.clear();
+        assert!(read_bounded_frame(&mut reader, &mut frame, 12).unwrap());
+        assert_eq!(frame, b"unterminated");
+
+        frame.clear();
+        assert!(!read_bounded_frame(&mut reader, &mut frame, 12).unwrap());
+    }
+
+    #[test]
+    fn bounded_frame_reader_rejects_oversized_frames_before_retaining_them() {
+        let mut exact_reader = Cursor::new(b"12345678\n".as_slice());
+        let mut exact_frame = Vec::new();
+        assert!(read_bounded_frame(&mut exact_reader, &mut exact_frame, 8).unwrap());
+        assert_eq!(exact_frame, b"12345678");
+
+        let mut reader = Cursor::new(b"123456789\n".as_slice());
+        let mut frame = Vec::new();
+
+        let error = read_bounded_frame(&mut reader, &mut frame, 8).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(frame.len() <= 8);
+    }
+
+    #[test]
+    fn bounded_frame_reader_keeps_partial_data_across_timeouts() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(MUST_STILL_BE_BLOCKED))
+            .unwrap();
+        let mut reader = BufReader::new(reader);
+        let mut frame = Vec::new();
+
+        writer.write_all(b"{\"event\":").unwrap();
+        let error = read_bounded_frame(&mut reader, &mut frame, 64).unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ));
+        assert_eq!(frame, b"{\"event\":");
+
+        writer.write_all(b"\"test\"}\n").unwrap();
+        assert!(read_bounded_frame(&mut reader, &mut frame, 64).unwrap());
+        assert_eq!(frame, br#"{"event":"test"}"#);
+    }
 
     #[test]
     fn a_full_bounded_queue_blocks_until_the_consumer_advances() {
