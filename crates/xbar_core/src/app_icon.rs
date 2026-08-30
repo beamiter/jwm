@@ -67,6 +67,11 @@ const MAX_DESKTOP_ENTRY_BYTES: usize = 256 * 1024;
 const MAX_DESKTOP_SCAN_ENTRIES: usize = 4_096;
 const MAX_DESKTOP_SCAN_BYTES: usize = 8 * 1024 * 1024;
 
+/// A status-bar icon should remain tiny on disk. This deliberately generous
+/// ceiling rejects accidental image archives and hostile compressed inputs
+/// before any renderer-specific decoder sees them.
+const MAX_RASTER_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Search collections ultimately originate in environment variables or host
 /// configuration. Keep every nested walk finite even when those inputs are
 /// pathological.
@@ -339,7 +344,7 @@ impl AppIconResolver {
         for directory in self.paths.flat.iter().take(MAX_ICON_SEARCH_ROOTS) {
             for extension in RASTER_EXTENSIONS {
                 let path = directory.join(format!("{icon}.{extension}"));
-                if path.is_file() {
+                if is_supported_raster(&path) {
                     return Some(AppIcon::new(path));
                 }
             }
@@ -356,7 +361,7 @@ impl AppIconResolver {
                     let directory = layout(theme, &size.directory, category);
                     for extension in RASTER_EXTENSIONS {
                         let path = directory.join(format!("{icon}.{extension}"));
-                        if !path.is_file() {
+                        if !is_supported_raster(&path) {
                             continue;
                         }
                         let better = best.as_ref().is_none_or(|(current, _)| {
@@ -456,14 +461,17 @@ fn size_rank(size: u32, wanted: u32) -> (u8, u32) {
 }
 
 fn is_supported_raster(path: &Path) -> bool {
-    path.extension()
+    let supported_extension = path
+        .extension()
         .and_then(OsStr::to_str)
         .is_some_and(|extension| {
             RASTER_EXTENSIONS
                 .iter()
                 .any(|supported| extension.eq_ignore_ascii_case(supported))
-        })
-        && path.is_file()
+        });
+    supported_extension
+        && std::fs::metadata(path)
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= MAX_RASTER_FILE_BYTES)
 }
 
 /// True when `value` can be appended beneath a search root without changing
@@ -671,6 +679,18 @@ Icon=vscode-new-window
     }
 
     #[test]
+    fn oversized_rasters_are_not_exposed_to_frontend_decoders() {
+        let tree = Tree::new("oversized_raster");
+        let path = tree.0.join("pixmaps/giant.png");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_RASTER_FILE_BYTES + 1).unwrap();
+
+        let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
+        assert_eq!(resolver.resolve("giant"), None);
+    }
+
+    #[test]
     fn a_scalable_only_application_resolves_to_no_icon_rather_than_an_undrawable_file() {
         let tree = Tree::new("scalable");
         tree.file(
@@ -748,17 +768,14 @@ Icon=vscode-new-window
         assert_eq!(resolver.resolve("huge"), None);
     }
 
-    #[cfg(unix)]
     #[test]
     fn non_regular_desktop_entries_are_rejected_before_reading() {
         let tree = Tree::new("special_entry");
-        let path = tree.0.join("applications/socket.desktop");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let path = tree.0.join("applications/directory.desktop");
+        std::fs::create_dir_all(&path).unwrap();
         let mut budget = MAX_DESKTOP_ENTRY_BYTES;
 
         assert_eq!(read_desktop_entry_with_budget(&path, &mut budget), None);
-        drop(listener);
     }
 
     #[test]
