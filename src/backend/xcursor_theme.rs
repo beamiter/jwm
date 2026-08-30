@@ -146,6 +146,14 @@ fn parse_bounded_xcursor(data: &[u8]) -> Option<Vec<Image>> {
     parse_bounded_xcursor_with_limit(data, MAX_XCURSOR_DECODED_RGBA_BYTES)
 }
 
+/// Load one resolved theme path through the shared file and parser limits.
+/// Kept backend-neutral so the DRM/KMS software cursor cannot drift back to
+/// an unbounded decoder while X11 uses the guarded cache below.
+pub(crate) fn load_cursor_images(path: &Path) -> Option<Vec<Image>> {
+    let data = read_xcursor_file(path)?;
+    parse_bounded_xcursor(&data)
+}
+
 /// A cursor image resolved from the theme, in a backend-neutral form.
 ///
 /// `pixels_argb_le` holds premultiplied pixels packed as little-endian ARGB —
@@ -243,10 +251,7 @@ impl XcursorImages {
             let images = self
                 .theme
                 .load_icon(name)
-                .and_then(|path| {
-                    let data = read_xcursor_file(&path)?;
-                    parse_bounded_xcursor(&data)
-                })
+                .and_then(|path| load_cursor_images(&path))
                 .unwrap_or_default();
             self.images.insert(name.to_string(), images);
         }

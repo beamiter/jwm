@@ -1,7 +1,6 @@
 use crate::sync_ext::MutexExt;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,10 +57,7 @@ use crate::backend::api::CompositorRect;
 use crate::backend::common_define::StdCursorKind;
 use crate::backend::error::{BackendErrorContext, ErrorBoundary};
 
-use xcursor::{
-    CursorTheme,
-    parser::{Image, parse_xcursor},
-};
+use xcursor::{CursorTheme, parser::Image};
 
 smithay::backend::renderer::element::render_elements! {
     pub KmsRenderElement<=GlesRenderer>;
@@ -882,7 +878,7 @@ const CURSOR_RECTS: &[(i32, i32, i32, i32)] = &[
     (2, 18, 5, 2),
 ];
 
-use crate::backend::xcursor_theme::cursor_candidates;
+use crate::backend::xcursor_theme::{cursor_candidates, load_cursor_images, pick_nearest_image};
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -1012,28 +1008,11 @@ impl KmsState {
         let images = self
             .cursor_theme
             .load_icon(icon)
-            .and_then(|path| {
-                let mut file = std::fs::File::open(path).ok()?;
-                let mut data = Vec::new();
-                file.read_to_end(&mut data).ok()?;
-                parse_xcursor(&data)
-            })
+            .and_then(|path| load_cursor_images(&path))
             .unwrap_or_default();
 
         self.cursor_images.insert(icon.to_string(), images);
         self.cursor_images.get(icon)
-    }
-
-    fn pick_nearest_image<'a>(images: &'a [Image], target_size: u32) -> Option<&'a Image> {
-        let nearest = images
-            .iter()
-            .min_by_key(|img| (target_size as i32 - img.size as i32).abs())?;
-
-        // If the cursor is animated, multiple frames share width/height.
-        // We don't animate yet; pick the first frame of the nearest size.
-        images
-            .iter()
-            .find(|img| img.width == nearest.width && img.height == nearest.height)
     }
 
     fn cursor_bitmap(&mut self, kind: StdCursorKind, scale: u32) -> Option<CursorBitmap> {
@@ -1049,7 +1028,7 @@ impl KmsState {
             if images.is_empty() {
                 continue;
             }
-            let img = Self::pick_nearest_image(images, target_size)?;
+            let img = pick_nearest_image(images, target_size)?;
             if img.pixels_rgba.is_empty() || img.width == 0 || img.height == 0 {
                 continue;
             }
