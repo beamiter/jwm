@@ -9,6 +9,10 @@ gpui = { git = "https://github.com/zed-industries/zed", branch = "main" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", features = ["wayland", "x11"] }
 
 log = "0.4"
+# zune-core 0.5.2's no-log macros expand to no tokens, while zune-jpeg 0.5.15
+# uses `warn!` as a branch expression. Enable its supported logging path so the
+# transitive image decoder uses expression-safe macros.
+zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
 anyhow = "1"
 xbar_core = { path = "../../crates/xbar_core", default-features = false, features = ["clock-chrono", "config-toml", "glass", "logging-flexi", "provider-alsa", "provider-battery-sysfs", "provider-brightnessctl", "provider-network-sysfs", "provider-system", "transport-shared"] }
 xbar_linux_actions = { path = "../../crates/xbar_core/crates/xbar_linux_actions" }
