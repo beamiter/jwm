@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 /// UNIX sockaddr_un 路径上限为 108 字节
 const UNIX_SOCK_MAX: usize = 108;
+const FD_PASS_MARKER: u8 = 0xE5;
 /// Linux caps one SCM_RIGHTS transfer at SCM_MAX_FD descriptors. Reserving the
 /// full capacity lets us own and close every fd in an invalid oversized reply.
 const SCM_RIGHTS_MAX_FDS: usize = 253;
@@ -429,7 +430,7 @@ impl EventFdBackend {
     }
 
     fn send_eventfds(cli_fd: RawFd, message_fd: RawFd, command_fd: RawFd) -> nix::Result<usize> {
-        let iov = [IoSlice::new(&[0xE5])];
+        let iov = [IoSlice::new(&[FD_PASS_MARKER])];
         let fds = [message_fd, command_fd];
         let cmsg = [ControlMessage::ScmRights(&fds)];
         // The opener may disconnect after accept(); report EPIPE to the
@@ -659,6 +660,12 @@ impl EventFdBackend {
             return Err(Error::new(
                 ErrorKind::InvalidData,
                 "ancillary data truncated",
+            ));
+        }
+        if buf[0] != FD_PASS_MARKER {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("invalid eventfd fd-pass marker: 0x{:02x}", buf[0]),
             ));
         }
 
@@ -1136,7 +1143,7 @@ mod tests {
             let before = std::fs::read_dir("/proc/self/fd").unwrap().count();
 
             for _ in 0..8 {
-                let iov = [IoSlice::new(&[0xE5])];
+                let iov = [IoSlice::new(&[FD_PASS_MARKER])];
                 let cmsg = [ControlMessage::ScmRights(&raw_fds)];
                 let written = sendmsg::<UnixAddr>(
                     sender.as_raw_fd(),
@@ -1182,6 +1189,35 @@ mod tests {
 
         assert!(status.success(), "eventfd CTRUNC child failed: {status}");
         assert!(child_completed, "eventfd CTRUNC child did not run");
+    }
+
+    #[test]
+    fn fd_pass_rejects_an_invalid_protocol_marker() {
+        let (sender, receiver) = nix::sys::socket::socketpair(
+            AddressFamily::Unix,
+            SockType::Stream,
+            None,
+            SockFlag::SOCK_CLOEXEC,
+        )
+        .unwrap();
+        let message_fd = EventFdBackend::create_eventfd_owned().unwrap();
+        let command_fd = EventFdBackend::create_eventfd_owned().unwrap();
+        let raw_fds = [message_fd.as_raw_fd(), command_fd.as_raw_fd()];
+        let iov = [IoSlice::new(&[0x00])];
+        let cmsg = [ControlMessage::ScmRights(&raw_fds)];
+
+        let written = sendmsg::<UnixAddr>(
+            sender.as_raw_fd(),
+            &iov,
+            &cmsg,
+            MsgFlags::MSG_NOSIGNAL,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written, 1);
+
+        let error = EventFdBackend::try_receive_fds(receiver.as_raw_fd()).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
     }
 
     #[test]
