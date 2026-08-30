@@ -18,12 +18,19 @@
 //! says which.
 //!
 //! Everything here is a pure function over the text `/proc` produced, except
-//! three `read_to_string` calls in [`ResourceSampler`]. The awkward parts —
+//! three bounded snapshot reads in [`ResourceSampler`]. The awkward parts —
 //! a counter that went backwards over a suspend, a container with no network
 //! interface, the first sample having no rate to report yet — are settled in
 //! unit tests rather than by watching a panel and hoping.
 
+use std::io::Read;
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+/// More than enough for the aggregate CPU, memory, and network snapshots,
+/// while preventing an unexpected procfs provider from growing one sample
+/// without bound on the compositor thread.
+const MAX_PROC_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 
 /// How often `/proc` is re-read. Fast enough that a download shows up while
 /// you are looking at it, slow enough to be three small reads a minute rather
@@ -434,7 +441,20 @@ impl ResourceSampler {
 /// A `/proc` file that is missing or unreadable is an unanswered question,
 /// not an error: a hardened container can hide any of these.
 fn read(path: &str) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+    read_bounded(path, MAX_PROC_SNAPSHOT_BYTES)
+}
+
+fn read_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Option<String> {
+    let mut bytes = Vec::with_capacity(4096);
+    std::fs::File::open(path)
+        .ok()?
+        .take(max_bytes.checked_add(1)?)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > usize::try_from(max_bytes).ok()? {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 impl crate::jwm::Jwm {
@@ -567,6 +587,24 @@ wlp3s0:2621464347 3965190    0    0    0     0          0         0 5724771402 3
   tun0:     168       3    0    0    0     0          0         0     3414      45    0    0    0     0       0          0
 docker0:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0
 ";
+
+    #[test]
+    fn proc_snapshot_reads_stop_at_the_configured_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-resource-snapshot-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary directory");
+        let exact = root.join("exact");
+        std::fs::write(&exact, b"12345678").expect("write exact snapshot");
+        assert_eq!(read_bounded(&exact, 8).as_deref(), Some("12345678"));
+
+        let oversized = root.join("oversized");
+        std::fs::write(&oversized, b"123456789").expect("write oversized snapshot");
+        assert_eq!(read_bounded(&oversized, 8), None);
+        std::fs::remove_dir_all(root).expect("remove temporary directory");
+    }
 
     #[test]
     fn the_cpu_figure_is_the_machine_and_not_one_core() {
