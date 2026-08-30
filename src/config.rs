@@ -1,9 +1,8 @@
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
-use std::fs;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,6 +43,43 @@ pub(crate) const fn scene_linear_render_path_requested(
 }
 
 static CONFIG_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MAX_CONFIG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_config_text(path: &Path) -> std::io::Result<String> {
+    let file = File::open(path)?;
+    let declared_len = file.metadata()?.len();
+    if declared_len > MAX_CONFIG_FILE_BYTES {
+        return Err(config_file_too_large(path));
+    }
+
+    // Do not rely on metadata alone: the file may grow after metadata() or be
+    // a pseudo-file that reports a zero length. `take` keeps the allocation
+    // bounded even in both cases, while the extra byte distinguishes an exact
+    // limit-sized file from an oversized one.
+    let mut bytes = Vec::with_capacity(declared_len as usize);
+    file.take(MAX_CONFIG_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(config_file_too_large(path));
+    }
+
+    String::from_utf8(bytes).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("configuration is not valid UTF-8: {error}"),
+        )
+    })
+}
+
+fn config_file_too_large(path: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "configuration file exceeds the {MAX_CONFIG_FILE_BYTES}-byte limit: {}",
+            path.display()
+        ),
+    )
+}
 
 fn resolve_cursor_size(configured: u32, environment: Option<&OsStr>) -> u32 {
     if configured != 0 {
@@ -2576,7 +2612,7 @@ impl Config {
     }
 
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let content = fs::read_to_string(path)?;
+        let content = read_config_text(path.as_ref())?;
         let config: TomlConfig = toml::from_str(&content)?;
         let cfg = Self { inner: config };
         let diagnostics = cfg.diagnostics();
@@ -3419,7 +3455,7 @@ impl Config {
         entries: &[LayoutTagConfig],
     ) -> Result<std::time::SystemTime, ConfigError> {
         let path = path.as_ref();
-        let existing = match fs::read_to_string(path) {
+        let existing = match read_config_text(path) {
             Ok(text) => text,
             // No file to preserve: fall back to writing the whole config,
             // which is also what the first start does.
@@ -3681,7 +3717,7 @@ impl Config {
     }
 
     pub fn validate_config_file<P: AsRef<Path>>(path: P) -> Result<ConfigDiagnostics, ConfigError> {
-        let content = fs::read_to_string(path)?;
+        let content = read_config_text(path.as_ref())?;
         let config: TomlConfig = toml::from_str(&content)?;
         Ok(Self { inner: config }.diagnostics())
     }
@@ -4068,8 +4104,8 @@ mod tests {
     use super::{
         ArgumentConfig, ButtonConfig, CONFIG_WRITE_COUNTER, ClientMoveResize, Config,
         ConfigDiagnosticLevel, ConfigError, GestureSwipeConfig, KeyConfig, LayoutTagConfig,
-        MAX_CURSOR_SIZE, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME, TomlConfig,
-        WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
+        MAX_CONFIG_FILE_BYTES, MAX_CURSOR_SIZE, Mods, NewClientPosition, Ordering, STATUS_BAR_NAME,
+        TomlConfig, WallpaperMonitorConfig, WallpaperTagConfig, configured_scratchpad_terminal,
         configured_terminal_execution_prefix, key_function_is_repeatable,
         migrate_legacy_terminal_argument, parse_terminal_override, resolve_cursor_size,
         scene_linear_render_path_requested, x11_compositor_override,
@@ -4880,6 +4916,37 @@ border_px = 3
             Err(error) => error,
         };
         assert!(matches!(error, ConfigError::Validation(_)));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_readers_reject_files_over_the_size_limit() {
+        let path = temporary_config_path("oversized-config");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CONFIG_FILE_BYTES + 1).unwrap();
+
+        let load_error = match Config::load_from_file(&path) {
+            Ok(_) => panic!("oversized configuration unexpectedly loaded"),
+            Err(error) => error,
+        };
+        for error in [
+            load_error,
+            Config::validate_config_file(&path).unwrap_err(),
+            Config::default()
+                .persist_layout_tags_to(&path, &[])
+                .unwrap_err(),
+        ] {
+            let ConfigError::Io(error) = error else {
+                panic!("oversized configuration returned the wrong error: {error}");
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("4194304-byte limit"), "{error}");
+        }
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_CONFIG_FILE_BYTES + 1
+        );
         std::fs::remove_file(path).unwrap();
     }
 
