@@ -9,6 +9,14 @@ use crate::jwm::types::WMArgEnum;
 use log::info;
 use std::rc::Rc;
 
+fn adjusted_n_master(current: u32, delta: i32) -> u32 {
+    current.saturating_add_signed(delta)
+}
+
+fn adjusted_gap(current: i32, delta: i32) -> i32 {
+    current.saturating_add(delta).clamp(0, 100)
+}
+
 impl Jwm {
     pub(crate) fn incnmaster(
         &mut self,
@@ -19,7 +27,7 @@ impl Jwm {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
 
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_n = (monitor.layout.n_master as i32 + i).max(0) as u32;
+                let new_n = adjusted_n_master(monitor.layout.n_master, i);
                 monitor.layout.n_master = new_n;
                 // 关键：调用新方法同步状态
                 monitor.update_current_tag_layout_params();
@@ -111,7 +119,7 @@ impl Jwm {
         if let WMArgEnum::Int(delta) = *arg {
             let sel_mon_key = self.state.sel_mon.ok_or("No monitor selected")?;
             if let Some(monitor) = self.state.monitors.get_mut(sel_mon_key) {
-                let new_gap = (monitor.layout.gap + delta).clamp(0, 100);
+                let new_gap = adjusted_gap(monitor.layout.gap, delta);
                 if new_gap != monitor.layout.gap {
                     monitor.layout.gap = new_gap;
                     monitor.update_current_tag_layout_params();
@@ -420,5 +428,39 @@ impl Jwm {
         } else {
             (false, None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{adjusted_gap, adjusted_n_master};
+
+    #[test]
+    fn adjusted_n_master_preserves_normal_adjustments() {
+        assert_eq!(adjusted_n_master(1, 2), 3);
+        assert_eq!(adjusted_n_master(3, -2), 1);
+        assert_eq!(adjusted_n_master(1, -2), 0);
+    }
+
+    #[test]
+    fn adjusted_n_master_saturates_at_u32_boundaries() {
+        assert_eq!(adjusted_n_master(u32::MAX, i32::MAX), u32::MAX);
+        assert_eq!(adjusted_n_master(0, i32::MIN), 0);
+        assert_eq!(adjusted_n_master(u32::MAX, i32::MIN), i32::MAX as u32);
+    }
+
+    #[test]
+    fn adjusted_gap_preserves_normal_adjustments_and_bounds() {
+        assert_eq!(adjusted_gap(10, 5), 15);
+        assert_eq!(adjusted_gap(10, -20), 0);
+        assert_eq!(adjusted_gap(90, 20), 100);
+    }
+
+    #[test]
+    fn adjusted_gap_handles_i32_extremes_without_overflow() {
+        assert_eq!(adjusted_gap(i32::MAX, i32::MAX), 100);
+        assert_eq!(adjusted_gap(i32::MIN, i32::MIN), 0);
+        assert_eq!(adjusted_gap(i32::MAX, i32::MIN), 0);
+        assert_eq!(adjusted_gap(i32::MIN, i32::MAX), 0);
     }
 }
