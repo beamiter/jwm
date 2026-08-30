@@ -24,7 +24,7 @@
 //! depending on which theme is installed. A scalable-only application falls
 //! back to no icon at all, and the title stands on its own as it did before.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -78,6 +78,18 @@ const MAX_RASTER_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ICON_SEARCH_ROOTS: usize = 64;
 const MAX_PREFERRED_THEMES: usize = 16;
 const MAX_THEME_SIZE_DIRECTORIES: usize = 256;
+
+/// The shared WM protocol stores an application identity in 64 bytes including
+/// its trailing NUL. Keep direct users of the resolver to that same finite key
+/// size so one unusual host cannot turn a cache entry into an arbitrary-sized
+/// allocation.
+const MAX_APP_ID_BYTES: usize = 63;
+
+/// A desktop session normally exposes tens, rather than hundreds, of distinct
+/// application identities. This leaves ample room for that working set while
+/// keeping focus churn from growing both positive and negative answers for the
+/// lifetime of the bar.
+const MAX_APP_ICON_CACHE_ENTRIES: usize = 256;
 
 /// Directory holding one theme's icons at one size.
 ///
@@ -194,6 +206,9 @@ pub struct AppIconResolver {
     /// downscaling keeps more of the artwork than upscaling invents.
     preferred_size: u32,
     cache: HashMap<String, Option<AppIcon>>,
+    /// Least-recently-used key first. An explicit order makes eviction
+    /// independent of `HashMap`'s randomized iteration order.
+    cache_recency: VecDeque<String>,
 }
 
 impl Default for AppIconResolver {
@@ -217,6 +232,7 @@ impl AppIconResolver {
             paths,
             preferred_size: preferred_size.max(1),
             cache: HashMap::new(),
+            cache_recency: VecDeque::new(),
         }
     }
 
@@ -224,6 +240,7 @@ impl AppIconResolver {
     /// up without restarting the bar.
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.cache_recency.clear();
     }
 
     /// Icon for one application identity, resolving it at most once.
@@ -237,14 +254,38 @@ impl AppIconResolver {
         // A compositor identity names an application, never a filesystem
         // path. Reject separators and `..` before it is joined beneath an
         // applications or icon root.
-        if !is_single_path_component(app_id) {
+        if app_id.len() > MAX_APP_ID_BYTES || !is_single_path_component(app_id) {
             return None;
         }
-        if !self.cache.contains_key(app_id) {
+        if self.cache.contains_key(app_id) {
+            self.mark_recent(app_id);
+        } else {
             let resolved = self.lookup(app_id);
+            if self.cache.len() == MAX_APP_ICON_CACHE_ENTRIES {
+                let oldest = self
+                    .cache_recency
+                    .pop_front()
+                    .expect("a full icon cache has an eviction candidate");
+                self.cache.remove(&oldest);
+            }
             self.cache.insert(app_id.to_owned(), resolved);
+            self.cache_recency.push_back(app_id.to_owned());
         }
+        debug_assert_eq!(self.cache.len(), self.cache_recency.len());
         self.cache.get(app_id).and_then(Option::as_ref)
+    }
+
+    fn mark_recent(&mut self, app_id: &str) {
+        let position = self
+            .cache_recency
+            .iter()
+            .position(|cached| cached == app_id)
+            .expect("an icon cache entry has a recency record");
+        let key = self
+            .cache_recency
+            .remove(position)
+            .expect("the recorded icon cache position exists");
+        self.cache_recency.push_back(key);
     }
 
     fn lookup(&self, app_id: &str) -> Option<AppIcon> {
@@ -719,6 +760,50 @@ Icon=vscode-new-window
             resolver.resolve("ghost").map(|icon| icon.path.clone()),
             Some(wanted)
         );
+    }
+
+    #[test]
+    fn cache_is_bounded_and_lru_preserves_a_hot_negative_answer() {
+        let tree = Tree::new("bounded_cache");
+        let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
+
+        assert_eq!(resolver.resolve("hot"), None);
+        for index in 0..MAX_APP_ICON_CACHE_ENTRIES - 1 {
+            assert_eq!(resolver.resolve(&format!("cold-{index}")), None);
+        }
+        assert_eq!(resolver.cache.len(), MAX_APP_ICON_CACHE_ENTRIES);
+
+        // A hit promotes even a negative answer. Installing its icon must not
+        // invalidate that answer, while the oldest cold miss is evicted.
+        let hot_icon = tree.file("pixmaps/hot.png", "icon");
+        assert_eq!(resolver.resolve("hot"), None);
+        assert_eq!(resolver.resolve("overflow"), None);
+        assert_eq!(resolver.cache.len(), MAX_APP_ICON_CACHE_ENTRIES);
+        assert!(resolver.cache.contains_key("hot"));
+        assert!(!resolver.cache.contains_key("cold-0"));
+        assert!(hot_icon.is_file());
+
+        let cold_icon = tree.file("pixmaps/cold-0.png", "icon");
+        assert_eq!(
+            resolver.resolve("cold-0").map(|icon| icon.path.clone()),
+            Some(cold_icon)
+        );
+        assert_eq!(resolver.cache.len(), MAX_APP_ICON_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn identities_larger_than_the_wire_protocol_are_not_cached() {
+        let mut resolver = AppIconResolver::with_paths(
+            IconSearchPaths::new(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            24,
+        );
+        let maximum = "a".repeat(MAX_APP_ID_BYTES);
+        let oversized = "b".repeat(MAX_APP_ID_BYTES + 1);
+
+        assert_eq!(resolver.resolve(&maximum), None);
+        assert!(resolver.cache.contains_key(&maximum));
+        assert_eq!(resolver.resolve(&oversized), None);
+        assert!(!resolver.cache.contains_key(&oversized));
     }
 
     #[test]
