@@ -353,10 +353,19 @@ fn parse_load_average(content: &str) -> LoadAverage {
         return LoadAverage::default();
     };
     LoadAverage {
-        one_minute: one_minute.parse().unwrap_or(0.0),
-        five_minutes: five_minutes.parse().unwrap_or(0.0),
-        fifteen_minutes: fifteen_minutes.parse().unwrap_or(0.0),
+        one_minute: parse_load_value(one_minute),
+        five_minutes: parse_load_value(five_minutes),
+        fifteen_minutes: parse_load_value(fifteen_minutes),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_load_value(field: &str) -> f64 {
+    field
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0)
 }
 
 impl Default for SystemMonitor {
@@ -486,5 +495,23 @@ mod tests {
         let error = read_load_average(&path).unwrap_err();
         let _ = std::fs::remove_file(path);
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn load_average_parser_rejects_non_finite_and_negative_fields() {
+        assert_eq!(
+            parse_load_average("NaN inf -1.0 4/100 123\n"),
+            LoadAverage::default()
+        );
+        assert_eq!(
+            parse_load_average("1.25 malformed 3.75 4/100 123\n"),
+            LoadAverage {
+                one_minute: 1.25,
+                five_minutes: 0.0,
+                fifteen_minutes: 3.75,
+            },
+            "one bad field must not discard the other valid windows"
+        );
     }
 }
