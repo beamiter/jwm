@@ -543,6 +543,8 @@ struct ReclaimableLegacyMapping {
     flink_path: PathBuf,
     version: u64,
     creator_pid: u32,
+    #[cfg(feature = "eventfd")]
+    eventfd_backend_offset: Option<usize>,
 }
 
 struct ReclaimableCurrentMapping {
@@ -585,11 +587,39 @@ fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLega
         return Ok(None);
     }
 
+    #[cfg(feature = "eventfd")]
+    let eventfd_backend_offset = {
+        let backend_id = unsafe { std::ptr::addr_of!((*header).backend_id).read() };
+        if backend_id == SyncStrategy::EventFd.id() {
+            // v13 -> v14 changed only the payload schema; GenericHeader and
+            // backend placement stayed stable. Still bound the computed
+            // extent before handing the pointer to backend cleanup.
+            let offset = match checked_align_up(
+                size_of::<GenericHeader>(),
+                SyncStrategy::EventFd.backend_align(),
+            ) {
+                Ok(offset) => offset,
+                Err(_) => return Ok(None),
+            };
+            let Some(end) = offset.checked_add(SyncStrategy::EventFd.backend_size()) else {
+                return Ok(None);
+            };
+            if end > shmem.len() {
+                return Ok(None);
+            }
+            Some(offset)
+        } else {
+            None
+        }
+    };
+
     Ok(Some(ReclaimableLegacyMapping {
         shmem,
         flink_path,
         version,
         creator_pid,
+        #[cfg(feature = "eventfd")]
+        eventfd_backend_offset,
     }))
 }
 
@@ -1567,6 +1597,23 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         legacy.version, legacy.creator_pid
                     );
                     prepare_stale_mapping_reclaim(&mut legacy.shmem, &legacy.flink_path)?;
+                    #[cfg(feature = "eventfd")]
+                    if let Some(backend_offset) = legacy.eventfd_backend_offset {
+                        // SAFETY: the v13 probe verified the stable header/backend
+                        // placement and bounded the complete EventFdHeader extent.
+                        let backend_ptr = unsafe { legacy.shmem.as_ptr().add(backend_offset) };
+                        if let Err(cleanup_error) = unsafe {
+                            crate::backends::eventfd::EventFdBackend::cleanup_stale_socket(
+                                backend_ptr,
+                                legacy.creator_pid,
+                            )
+                        } {
+                            warn!(
+                                "failed to remove stale v13 eventfd socket while reclaiming \
+                                 {path}: {cleanup_error}"
+                            );
+                        }
+                    }
                     drop(legacy);
                     if let Some(buffer) = create(&mut may_create)? {
                         return Ok(buffer);
@@ -3305,6 +3352,93 @@ mod tests {
         assert!(
             socket_residue.is_empty(),
             "stale reclaim left eventfd socket residue: {socket_residue:?}"
+        );
+    }
+
+    #[cfg(feature = "eventfd")]
+    #[test]
+    fn typed_reclaim_stale_cleans_crashed_v13_eventfd_socket() {
+        const CHILD_PATH_ENV: &str = "SHARED_STRUCTURES_CRASHED_V13_EVENTFD_TEST_PATH";
+
+        if let Some(path) = std::env::var_os(CHILD_PATH_ENV) {
+            let path = path.into_string().expect("test path must be UTF-8");
+            let creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+                .strategy(SyncStrategy::EventFd)
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap();
+            creator
+                .header()
+                .version
+                .store(RECLAIMABLE_LEGACY_VERSION, Ordering::Relaxed);
+
+            // Model a v13 creator crashing without Drop: the flink, POSIX shm
+            // object, and fd-pass socket directory all survive process exit.
+            std::mem::forget(creator);
+            return;
+        }
+
+        let path = mk_path("reclaim_crashed_v13_eventfd");
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "srb-v13-eventfd-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&runtime_dir).unwrap();
+        let test_name =
+            "typed_ring_buffer::tests::typed_reclaim_stale_cleans_crashed_v13_eventfd_socket";
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_PATH_ENV, &path)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "crashing v13 eventfd child failed: {status}"
+        );
+        assert!(Path::new(&path).is_file());
+        assert_eq!(
+            std::fs::read_dir(&runtime_dir).unwrap().count(),
+            1,
+            "crashed creator did not leave the expected socket directory"
+        );
+
+        let reclaimed = SharedRingBufferOptions::new()
+            .strategy(SyncStrategy::EventFd)
+            .adaptive_poll_spins(0)
+            .reclaim_stale(true)
+            .open_or_create_typed::<u64, u64>(&path);
+        let replacement = match reclaimed {
+            Ok(replacement) => replacement,
+            Err(error) => {
+                let mut stale = open_shmem_from_flink(
+                    Path::new(&path),
+                    "failed to clean crashed v13 eventfd test mapping",
+                )
+                .unwrap();
+                prepare_stale_mapping_reclaim(&mut stale, Path::new(&path)).unwrap();
+                drop(stale);
+                let _ = std::fs::remove_dir_all(&runtime_dir);
+                panic!("failed to reclaim crashed v13 eventfd creator: {error}");
+            }
+        };
+
+        assert!(replacement.is_creator());
+        drop(replacement);
+        let socket_residue: Vec<_> = std::fs::read_dir(&runtime_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        std::fs::remove_dir_all(runtime_dir).unwrap();
+        assert!(
+            socket_residue.is_empty(),
+            "v13 stale reclaim left eventfd socket residue: {socket_residue:?}"
         );
     }
 
