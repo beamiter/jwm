@@ -276,8 +276,8 @@ pub const MINIMIZED_WINDOW_FLAG_URGENT: u32 = 1 << 1;
 pub const MAX_MODEL_MINIMIZED_WINDOWS: usize = 16;
 const MAX_WM_MINIMIZED_INPUTS: usize = MAX_MODEL_MINIMIZED_WINDOWS * 16;
 const MAX_MODEL_LAYOUT_SYMBOL_BYTES: usize = 64;
-const MAX_MODEL_WINDOW_TITLE_BYTES: usize = 4 * 1024;
-const MAX_MODEL_APP_ID_BYTES: usize = 255;
+const MAX_MODEL_DISPLAY_TEXT_BYTES: usize = 4 * 1024;
+const MAX_MODEL_ID_BYTES: usize = 255;
 
 /// One window currently collected by the bar's minimized-window shelf.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -477,6 +477,18 @@ pub struct AudioDeviceInfo {
     pub description: String,
     pub has_volume_control: bool,
     pub has_switch_control: bool,
+}
+
+impl AudioDeviceInfo {
+    /// Bound provider-owned labels before they become part of every frontend
+    /// snapshot and normalize the percentage-like volume field.
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        self.name = bounded_model_string(self.name, MAX_MODEL_ID_BYTES);
+        self.description = bounded_model_string(self.description, MAX_MODEL_DISPLAY_TEXT_BYTES);
+        self.volume = self.volume.clamp(0, 100);
+        self
+    }
 }
 
 /// Transport-neutral system load averages.
@@ -690,7 +702,7 @@ impl NetworkState {
         tx_bytes_per_second: Option<u64>,
     ) -> Self {
         Self {
-            interface: Some(interface.into()),
+            interface: Some(bounded_model_string(interface.into(), MAX_MODEL_ID_BYTES)),
             connected: true,
             rx_bytes_per_second,
             tx_bytes_per_second,
@@ -775,7 +787,18 @@ impl MediaState {
     #[must_use]
     pub fn normalized(self) -> Self {
         if self.is_active() {
-            self
+            Self {
+                playback: self.playback,
+                title: self
+                    .title
+                    .map(|value| bounded_model_string(value, MAX_MODEL_DISPLAY_TEXT_BYTES)),
+                artist: self
+                    .artist
+                    .map(|value| bounded_model_string(value, MAX_MODEL_DISPLAY_TEXT_BYTES)),
+                player: self
+                    .player
+                    .map(|value| bounded_model_string(value, MAX_MODEL_ID_BYTES)),
+            }
         } else {
             Self::inactive()
         }
@@ -1337,8 +1360,8 @@ fn normalize_minimized_windows(
             overflow = true;
             break;
         }
-        window.title = bounded_model_string(window.title, MAX_MODEL_WINDOW_TITLE_BYTES);
-        window.app_id = bounded_model_string(window.app_id, MAX_MODEL_APP_ID_BYTES);
+        window.title = bounded_model_string(window.title, MAX_MODEL_DISPLAY_TEXT_BYTES);
+        window.app_id = bounded_model_string(window.app_id, MAX_MODEL_ID_BYTES);
         normalized.push(window);
     }
     (normalized, overflow)
@@ -1533,9 +1556,8 @@ impl BarModel {
         snapshot.layout_symbol =
             bounded_model_string(snapshot.layout_symbol, MAX_MODEL_LAYOUT_SYMBOL_BYTES);
         snapshot.client_name =
-            bounded_model_string(snapshot.client_name, MAX_MODEL_WINDOW_TITLE_BYTES);
-        snapshot.client_app_id =
-            bounded_model_string(snapshot.client_app_id, MAX_MODEL_APP_ID_BYTES);
+            bounded_model_string(snapshot.client_name, MAX_MODEL_DISPLAY_TEXT_BYTES);
+        snapshot.client_app_id = bounded_model_string(snapshot.client_app_id, MAX_MODEL_ID_BYTES);
 
         let mut dirty = DirtyBits::default();
         let next_active = snapshot
@@ -1689,6 +1711,7 @@ impl BarModel {
     }
 
     fn replace_audio_device(&mut self, device: Option<AudioDeviceInfo>) -> ModelUpdate {
+        let device = device.map(AudioDeviceInfo::normalized);
         let changed = self.audio_device != device;
         self.audio_device = device;
         Self::changed(DirtyBits::AUDIO_CHANGED, changed)
@@ -2295,8 +2318,8 @@ mod tests {
     #[test]
     fn wm_snapshot_normalization_bounds_retained_text_and_capacity() {
         let mut model = BarModel::default();
-        let unicode_title = "€".repeat(MAX_MODEL_WINDOW_TITLE_BYTES / 3 + 10);
-        let app_id = "a".repeat(MAX_MODEL_APP_ID_BYTES + 10);
+        let unicode_title = "€".repeat(MAX_MODEL_DISPLAY_TEXT_BYTES / 3 + 10);
+        let app_id = "a".repeat(MAX_MODEL_ID_BYTES + 10);
         let mut layout_symbol = String::with_capacity(1_000_000);
         layout_symbol.push_str("[M]");
 
@@ -2318,16 +2341,13 @@ mod tests {
         let view = model.view();
         assert_eq!(view.layout_symbol, "[M]");
         assert!(model.layout_symbol.capacity() <= MAX_MODEL_LAYOUT_SYMBOL_BYTES);
-        assert_eq!(view.client_name.len(), MAX_MODEL_WINDOW_TITLE_BYTES - 1);
-        assert_eq!(view.client_app_id.len(), MAX_MODEL_APP_ID_BYTES);
+        assert_eq!(view.client_name.len(), MAX_MODEL_DISPLAY_TEXT_BYTES - 1);
+        assert_eq!(view.client_app_id.len(), MAX_MODEL_ID_BYTES);
         assert_eq!(
             view.minimized_windows[0].title.len(),
-            MAX_MODEL_WINDOW_TITLE_BYTES - 1
+            MAX_MODEL_DISPLAY_TEXT_BYTES - 1
         );
-        assert_eq!(
-            view.minimized_windows[0].app_id.len(),
-            MAX_MODEL_APP_ID_BYTES
-        );
+        assert_eq!(view.minimized_windows[0].app_id.len(), MAX_MODEL_ID_BYTES);
     }
 
     #[test]
@@ -2714,6 +2734,59 @@ mod tests {
             .update(BarEvent::SystemDetails(SystemDetails::default()))
             .unwrap();
         assert_eq!(snapshot.system_details.memory_used, 7_000);
+    }
+
+    #[test]
+    fn provider_labels_are_bounded_before_snapshot_retention() {
+        let mut model = BarModel::default();
+        let oversized_id = "i".repeat(MAX_MODEL_ID_BYTES + 10);
+        let oversized_text = "€".repeat(MAX_MODEL_DISPLAY_TEXT_BYTES / 3 + 10);
+
+        model
+            .update(BarEvent::AudioDevice(Some(AudioDeviceInfo {
+                name: oversized_id.clone(),
+                volume: 150,
+                description: oversized_text.clone(),
+                ..AudioDeviceInfo::default()
+            })))
+            .unwrap();
+        model
+            .update(BarEvent::Network(NetworkState::connected(
+                oversized_id.clone(),
+                Some(1),
+                Some(2),
+            )))
+            .unwrap();
+        model
+            .update(BarEvent::Media(MediaState {
+                playback: MediaPlayback::Playing,
+                title: Some(oversized_text.clone()),
+                artist: Some(oversized_text),
+                player: Some(oversized_id),
+            }))
+            .unwrap();
+
+        let view = model.view();
+        let audio = view.audio_device.expect("audio device is retained");
+        assert_eq!(audio.name.len(), MAX_MODEL_ID_BYTES);
+        assert_eq!(audio.volume, 100);
+        assert_eq!(audio.description.len(), MAX_MODEL_DISPLAY_TEXT_BYTES - 1);
+        assert_eq!(
+            view.network.interface.as_deref().map(str::len),
+            Some(MAX_MODEL_ID_BYTES)
+        );
+        assert_eq!(
+            view.media.title.as_deref().map(str::len),
+            Some(MAX_MODEL_DISPLAY_TEXT_BYTES - 1)
+        );
+        assert_eq!(
+            view.media.artist.as_deref().map(str::len),
+            Some(MAX_MODEL_DISPLAY_TEXT_BYTES - 1)
+        );
+        assert_eq!(
+            view.media.player.as_deref().map(str::len),
+            Some(MAX_MODEL_ID_BYTES)
+        );
     }
 
     #[test]
