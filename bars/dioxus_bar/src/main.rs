@@ -8,8 +8,10 @@ use dioxus::{
 };
 use log::{error, info, warn};
 use std::{
-    env,
+    env, io,
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex, OnceLock},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -22,13 +24,16 @@ use xbar_core::{
     MonitorGeometry, Percent, PlatformEffectHandler, RuntimeUpdate, ShellRoute, SystemDetails,
     TagId, TagState, TransportRecoveryConfig, UserAction,
 };
-use xbar_linux_actions::{CommandRunner, CommandSpec, ProcessActionHandler};
+use xbar_linux_actions::ProcessActionHandler;
 
 const STYLE_CSS: &str = include_str!("../assets/style.css");
 
 const BAR_LOGICAL_HEIGHT: f64 = 40.0;
 const TRANSPORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+/// Startup diagnostics must never delay creation of the actual bar for long.
+const STARTUP_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_millis(500);
+const DIAGNOSTIC_CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // ===== Nerd Font 图标（与 tauri_react_bar 对齐） =====
 const TAG_ICONS: &[&str] = &[
@@ -699,6 +704,34 @@ fn shared_path_from_environment() -> String {
         .unwrap_or_default()
 }
 
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<Option<Output>> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(Some);
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            if let Err(kill_error) = child.kill()
+                && child.try_wait()?.is_none()
+            {
+                return Err(kill_error);
+            }
+            child.wait()?;
+            return Ok(None);
+        }
+
+        thread::sleep((timeout - elapsed).min(DIAGNOSTIC_CHILD_POLL_INTERVAL));
+    }
+}
+
 fn main() {
     let shared_path = shared_path_from_environment();
     if let Err(e) = initialize_logging("dioxus_bar", &shared_path) {
@@ -711,14 +744,22 @@ fn main() {
     info!("XDG_SESSION_TYPE: {:?}", env::var("XDG_SESSION_TYPE"));
     info!("DESKTOP_SESSION: {:?}", env::var("DESKTOP_SESSION"));
     info!("XDG_CURRENT_DESKTOP: {:?}", env::var("XDG_CURRENT_DESKTOP"));
-    match CommandRunner::output(&CommandSpec::new("xrandr").with_arg("--current")) {
-        Ok(output) => {
+    let mut xrandr = Command::new("xrandr");
+    xrandr.arg("--current");
+    match command_output_with_timeout(&mut xrandr, STARTUP_DIAGNOSTIC_TIMEOUT) {
+        Ok(Some(output)) if output.status.success() => {
             let output_str = String::from_utf8_lossy(&output.stdout);
             for line in output_str.lines() {
                 if line.contains("primary") || line.contains("*") {
                     info!("Screen info: {}", line.trim());
                 }
             }
+        }
+        Ok(Some(output)) => {
+            log::debug!("xrandr diagnostics exited with {}", output.status);
+        }
+        Ok(None) => {
+            log::debug!("xrandr diagnostics timed out");
         }
         Err(error) => log::debug!("xrandr diagnostics unavailable: {error}"),
     }
@@ -747,6 +788,23 @@ fn main() {
             ),
         )
         .launch(App);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_diagnostic_timeout_kills_and_reaps_the_child() {
+        let mut command = Command::new("sleep");
+        command.arg("30");
+
+        let started = Instant::now();
+        let output = command_output_with_timeout(&mut command, Duration::from_millis(50))
+            .expect("test child can be spawned and reaped");
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 }
 
 #[component]
