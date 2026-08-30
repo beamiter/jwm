@@ -12,7 +12,7 @@ keywords = ["shared-memory", "ipc", "ring-buffer", "linux", "concurrency"]
 categories = ["concurrency", "data-structures", "os::linux-apis"]
 
 [dependencies]
-libc = { version = "0.2.186", optional = true }
+libc = "0.2.186"
 log = "0.4.29"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 rkyv = { version = "0.8", optional = true }
@@ -24,9 +24,9 @@ nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio"], optional
 criterion = "0.8.2"
 
 [features]
-futex = ["dep:libc"]
-semaphore = ["dep:libc"]
-eventfd = ["dep:libc", "dep:nix"]
+futex = []
+semaphore = []
+eventfd = ["dep:nix"]
 # 领域类型的可选序列化 derive；队列传输本身不使用它们。
 serde = ["dep:serde", "dep:serde-big-array"]
 rkyv = ["dep:rkyv"]
