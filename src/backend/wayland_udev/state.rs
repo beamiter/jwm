@@ -5,7 +5,7 @@ use crate::backend::common_define::WindowId;
 use crate::sync_ext::MutexExt;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -3255,7 +3255,7 @@ impl SelectionHandler for JwmWaylandState {
         // A history entry JWM is offering is served here; anything else is
         // XWayland's selection and stays its business.
         if ty == SelectionTarget::Clipboard
-            && let Some(text) = self.clipboard_offered.clone()
+            && let Some(text) = self.clipboard_offered.as_deref()
         {
             write_selection_async(text, fd);
             return;
@@ -3276,20 +3276,188 @@ pub(crate) const CLIPBOARD_OFFER_MIMES: [&str; 4] = [
     "STRING",
 ];
 
+/// A clipboard peer is another Wayland client and is not trusted to consume
+/// or produce its pipe promptly. Keep both the lifetime and the number of the
+/// detached I/O workers bounded so stalled peers cannot exhaust compositor
+/// threads.
+const CLIPBOARD_IO_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CLIPBOARD_IO_WORKERS: usize = 8;
+static ACTIVE_CLIPBOARD_IO_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+struct ClipboardIoPermit<'a>(&'a AtomicUsize);
+
+impl Drop for ClipboardIoPermit<'_> {
+    fn drop(&mut self) {
+        let previous = self.0.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0, "clipboard I/O permit count underflowed");
+    }
+}
+
+fn try_acquire_clipboard_io_permit(
+    active: &AtomicUsize,
+    limit: usize,
+) -> Option<ClipboardIoPermit<'_>> {
+    active
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < limit).then(|| count + 1)
+        })
+        .ok()?;
+    Some(ClipboardIoPermit(active))
+}
+
+fn acquire_clipboard_io_permit() -> Option<ClipboardIoPermit<'static>> {
+    try_acquire_clipboard_io_permit(&ACTIVE_CLIPBOARD_IO_WORKERS, MAX_CLIPBOARD_IO_WORKERS)
+}
+
+fn set_clipboard_fd_nonblocking(fd: std::os::fd::RawFd, nonblocking: bool) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let flags = if nonblocking {
+        flags | libc::O_NONBLOCK
+    } else {
+        flags & !libc::O_NONBLOCK
+    };
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn clipboard_io_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "clipboard transfer deadline expired",
+    )
+}
+
+fn wait_for_clipboard_fd(
+    fd: std::os::fd::RawFd,
+    events: libc::c_short,
+    deadline: Instant,
+) -> std::io::Result<()> {
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(clipboard_io_timeout());
+        };
+        let timeout_ms = i32::try_from(remaining.as_millis().max(1)).unwrap_or(i32::MAX);
+        let mut descriptor = libc::pollfd {
+            fd,
+            events,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if ready > 0 {
+            if descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "clipboard transfer fd became invalid",
+                ));
+            }
+            // POLLERR/POLLHUP are deliberately handed back to read/write so
+            // the ordinary EOF/BrokenPipe result remains authoritative.
+            return Ok(());
+        }
+        if ready == 0 {
+            return Err(clipboard_io_timeout());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+fn write_clipboard_payload(
+    mut file: std::fs::File,
+    mut payload: &[u8],
+    timeout: Duration,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+
+    set_clipboard_fd_nonblocking(file.as_raw_fd(), true)?;
+    let deadline = Instant::now() + timeout;
+    while !payload.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(clipboard_io_timeout());
+        }
+        match file.write(payload) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "clipboard client accepted zero bytes",
+                ));
+            }
+            Ok(written) => payload = &payload[written..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_for_clipboard_fd(file.as_raw_fd(), libc::POLLOUT, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn read_clipboard_payload(
+    mut file: std::fs::File,
+    limit: usize,
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    set_clipboard_fd_nonblocking(file.as_raw_fd(), true)?;
+    let deadline = Instant::now() + timeout;
+    let mut buffer = Vec::with_capacity(limit.min(8 * 1024));
+    let mut chunk = [0u8; 8 * 1024];
+    while buffer.len() < limit {
+        if Instant::now() >= deadline {
+            return Err(clipboard_io_timeout());
+        }
+        let remaining = limit - buffer.len();
+        let request = remaining.min(chunk.len());
+        match file.read(&mut chunk[..request]) {
+            Ok(0) => return Ok(buffer),
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                wait_for_clipboard_fd(file.as_raw_fd(), libc::POLLIN, deadline)?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(buffer)
+}
+
 /// Hand `text` to a client on `fd` without blocking the compositor.
 ///
-/// The reader is another process and may be slow or may never read at all,
-/// so the write happens on a thread that simply goes away if the pipe closes.
-fn write_selection_async(text: String, fd: std::os::fd::OwnedFd) {
-    std::thread::Builder::new()
+/// The reader is another process and may be slow or may never read at all. A
+/// bounded worker keeps that peer off the compositor thread without letting it
+/// pin an unbounded detached thread.
+fn write_selection_async(text: &str, fd: std::os::fd::OwnedFd) {
+    let Some(permit) = acquire_clipboard_io_permit() else {
+        debug!("clipboard: rejecting transfer because all I/O workers are occupied");
+        return;
+    };
+    let text = text.to_owned();
+    let worker = std::thread::Builder::new()
         .name("jwm-clipboard-write".to_string())
         .spawn(move || {
-            use std::io::Write as _;
-            let mut file = std::fs::File::from(fd);
-            let _ = file.write_all(text.as_bytes());
-            let _ = file.flush();
-        })
-        .ok();
+            let _permit = permit;
+            if let Err(error) = write_clipboard_payload(
+                std::fs::File::from(fd),
+                text.as_bytes(),
+                CLIPBOARD_IO_TIMEOUT,
+            ) {
+                debug!("clipboard: client did not consume offered text: {error}");
+            }
+        });
+    if let Err(error) = worker {
+        warn!("clipboard: failed to start selection writer: {error}");
+    }
 }
 
 impl JwmWaylandState {
@@ -3309,6 +3477,10 @@ impl JwmWaylandState {
         let Some(mime) = crate::backend::clipboard_offer::preferred_text_mime(mime_types) else {
             return;
         };
+        let Some(permit) = acquire_clipboard_io_permit() else {
+            debug!("clipboard: skipping capture because all I/O workers are occupied");
+            return;
+        };
         let (read, write) = match std::io::pipe() {
             Ok(pair) => pair,
             Err(error) => {
@@ -3322,16 +3494,19 @@ impl JwmWaylandState {
         }
 
         let captured = std::sync::Arc::clone(&self.clipboard_captured);
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("jwm-clipboard-read".to_string())
             .spawn(move || {
-                use std::io::Read as _;
-                let mut buffer = Vec::new();
-                let reader = std::fs::File::from(std::os::fd::OwnedFd::from(read));
-                // Cap the read: the history refuses anything larger anyway,
-                // and a client could otherwise stream without end.
-                let limit = crate::backend::clipboard_offer::MAX_TEXT_BYTES as u64 + 1;
-                if reader.take(limit).read_to_end(&mut buffer).is_err() {
+                let _permit = permit;
+                let limit = crate::backend::clipboard_offer::MAX_TEXT_BYTES + 1;
+                let Ok(buffer) = read_clipboard_payload(
+                    std::fs::File::from(std::os::fd::OwnedFd::from(read)),
+                    limit,
+                    CLIPBOARD_IO_TIMEOUT,
+                ) else {
+                    return;
+                };
+                if buffer.len() > crate::backend::clipboard_offer::MAX_TEXT_BYTES {
                     return;
                 }
                 let Ok(text) = String::from_utf8(buffer) else {
@@ -3340,8 +3515,10 @@ impl JwmWaylandState {
                 if let Ok(mut captured) = captured.lock() {
                     captured.push(text);
                 }
-            })
-            .ok();
+            });
+        if let Err(error) = worker {
+            warn!("clipboard: failed to start selection reader: {error}");
+        }
     }
 
     /// Text copied since the last call, oldest first.
@@ -4090,5 +4267,101 @@ mod xwayland_legacy_assoc_tests {
     #[test]
     fn unparented_dialog_hint_is_not_popup_like() {
         assert!(!JwmWaylandState::should_honor_dialog_hint(false));
+    }
+}
+
+#[cfg(test)]
+mod clipboard_io_tests {
+    use super::{
+        read_clipboard_payload, set_clipboard_fd_nonblocking, try_acquire_clipboard_io_permit,
+        write_clipboard_payload,
+    };
+    use nix::unistd::pipe;
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn fill_pipe(writer: &mut File) {
+        set_clipboard_fd_nonblocking(writer.as_raw_fd(), true).unwrap();
+        let chunk = [0u8; 4096];
+        loop {
+            match writer.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("could not fill test pipe: {error}"),
+            }
+        }
+        // Model the old implementation precisely: its write_all operated on a
+        // blocking client fd and would park here forever.
+        set_clipboard_fd_nonblocking(writer.as_raw_fd(), false).unwrap();
+    }
+
+    #[test]
+    fn clipboard_write_deadline_retires_a_client_that_never_reads() {
+        let (read_end, write_end) = pipe().unwrap();
+        let mut reader = File::from(read_end);
+        let mut writer = File::from(write_end);
+        fill_pipe(&mut writer);
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = write_clipboard_payload(writer, b"x", Duration::from_millis(40));
+            let _ = sender.send(result);
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(error) => {
+                // Free one pipe slot before failing so a regressed blocking
+                // write cannot leave the test worker behind.
+                let mut slot = [0u8; 4096];
+                reader.read_exact(&mut slot).unwrap();
+                worker.join().unwrap();
+                panic!("clipboard writer did not honor its deadline: {error}");
+            }
+        };
+        worker.join().unwrap();
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn clipboard_read_deadline_retires_an_owner_that_never_writes() {
+        let (read_end, write_end) = pipe().unwrap();
+        let reader = File::from(read_end);
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = read_clipboard_payload(reader, 16, Duration::from_millis(40));
+            let _ = sender.send(result);
+        });
+
+        let result = match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(result) => result,
+            Err(error) => {
+                // Closing the held-open write end releases a regressed
+                // read_to_end before the test reports the failure.
+                drop(write_end);
+                worker.join().unwrap();
+                panic!("clipboard reader did not honor its deadline: {error}");
+            }
+        };
+        drop(write_end);
+        worker.join().unwrap();
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn clipboard_worker_permits_bound_concurrency_and_are_reusable() {
+        let active = AtomicUsize::new(0);
+        let first = try_acquire_clipboard_io_permit(&active, 2).unwrap();
+        let second = try_acquire_clipboard_io_permit(&active, 2).unwrap();
+        assert!(try_acquire_clipboard_io_permit(&active, 2).is_none());
+
+        drop(first);
+        let replacement = try_acquire_clipboard_io_permit(&active, 2).unwrap();
+        drop((second, replacement));
+        assert_eq!(active.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
