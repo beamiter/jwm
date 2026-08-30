@@ -27,6 +27,10 @@ const RING_BUFFER_VERSION: u64 = 14;
 // creator PID lives and could unlink a live mapping.
 const RECLAIMABLE_LEGACY_VERSION: u64 = 13;
 const LAYOUT_MARKER: u32 = 0x5352_4234; // "SRB4"
+/// The dependency's generated identifiers are at most 23 bytes. Leave ample
+/// room for legacy/custom names while bounding malformed flink allocations
+/// before `shm_open` gets a chance to reject the name.
+const MAX_FLINK_OS_ID_LEN: usize = 4096;
 
 /// mmap 对基址的对齐保证（Linux 基础页大小）。payload 对齐超过它时
 /// 无法保证槽位对齐，布局计算直接拒绝。
@@ -350,6 +354,97 @@ fn absolute_flink_path(path: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Read the mapping identifier from a flink without letting an unexpected
+/// final pathname block the caller or redirect the lookup through a symlink.
+fn read_flink_os_id(path: &Path) -> Result<String> {
+    use std::fs::OpenOptions;
+
+    // Reject special files and symlinks before opening them. Repeat the type
+    // check on the fd so a replacement cannot turn this preflight into a
+    // special-file read.
+    let entry_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        Error::new(
+            error.kind(),
+            format!("failed to inspect shared-memory flink: {error}"),
+        )
+    })?;
+    if !entry_metadata.file_type().is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink must be a regular file, not a symlink or special file",
+        ));
+    }
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| {
+            Error::new(
+                error.kind(),
+                format!("failed to open shared-memory flink: {error}"),
+            )
+        })?;
+    let metadata = file.metadata().map_err(|error| {
+        Error::new(
+            error.kind(),
+            format!("failed to inspect opened shared-memory flink: {error}"),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink changed to a non-regular file while opening",
+        ));
+    }
+    if metadata.len() == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink contains an empty mapping identifier",
+        ));
+    }
+    if metadata.len() > MAX_FLINK_OS_ID_LEN as u64 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink mapping identifier is too long",
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_FLINK_OS_ID_LEN + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            Error::new(
+                error.kind(),
+                format!("failed to read shared-memory flink: {error}"),
+            )
+        })?;
+    if bytes.is_empty() || bytes.len() > MAX_FLINK_OS_ID_LEN {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink contains an invalid mapping identifier length",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("shared-memory flink mapping identifier is not UTF-8: {error}"),
+        )
+    })
+}
+
+fn open_shmem_from_flink(path: &Path, operation: &str) -> Result<Shmem> {
+    let os_id = read_flink_os_id(path)?;
+    // Supplying both values keeps the flink attached to `Shmem` for stale
+    // owner cleanup while making the dependency open the already validated
+    // identifier instead of reopening and reading the pathname itself.
+    ShmemConf::new()
+        .flink(path)
+        .os_id(&os_id)
+        .open()
+        .map_err(|error| map_shmem_error(operation, error))
+}
+
 /// Header prefix whose layout is identical in protocols v13 and v14.
 ///
 /// Only fields up to `creator_pid` are represented so legacy recovery does
@@ -383,10 +478,7 @@ struct ReclaimableLegacyMapping {
 /// has exited. Unknown or malformed versions are never considered reclaimable.
 fn probe_reclaimable_legacy_mapping(path: &str) -> Result<Option<ReclaimableLegacyMapping>> {
     let flink_path = absolute_flink_path(path)?;
-    let shmem = ShmemConf::new()
-        .flink(&flink_path)
-        .open()
-        .map_err(|error| map_shmem_error("failed to probe legacy shared memory", error))?;
+    let shmem = open_shmem_from_flink(&flink_path, "failed to probe legacy shared memory")?;
 
     if shmem.len() < size_of::<LegacyV13HeaderPrefix>() {
         return Ok(None);
@@ -933,10 +1025,7 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
         }
         // 与 create 使用同一套路径归一化，避免同一参数在两端解析出不同目标。
         let flink_path = absolute_flink_path(path)?;
-        let shmem = ShmemConf::new()
-            .flink(&flink_path)
-            .open()
-            .map_err(|error| map_shmem_error("failed to open shared memory", error))?;
+        let shmem = open_shmem_from_flink(&flink_path, "failed to open shared memory")?;
 
         if shmem.len() < size_of::<GenericHeader>() {
             return Err(Error::new(
@@ -1806,6 +1895,60 @@ mod tests {
                 .unwrap_or_default()
                 .as_nanos()
         })
+    }
+
+    #[test]
+    fn typed_open_or_create_rejects_fifo_flink_without_blocking() {
+        const CHILD_PATH_ENV: &str = "SHARED_STRUCTURES_FIFO_FLINK_TEST_PATH";
+
+        if let Some(path) = std::env::var_os(CHILD_PATH_ENV) {
+            let path = path.into_string().expect("test path must be UTF-8");
+            let error = SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .open_or_create_typed::<u64, u64>(&path)
+                .unwrap_err();
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            return;
+        }
+
+        let path = mk_path("fifo_flink");
+        let c_path = std::ffi::CString::new(path.clone()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path and the mode value
+        // contains only standard permission bits.
+        let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo failed: {}", Error::last_os_error());
+
+        let test_name =
+            "typed_ring_buffer::tests::typed_open_or_create_rejects_fifo_flink_without_blocking";
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_PATH_ENV, &path)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+
+        let child_removed_fifo = !Path::new(&path).exists();
+        let _ = std::fs::remove_file(&path);
+        let status = status.expect("opening a FIFO flink exceeded the bounded test deadline");
+        assert!(status.success(), "FIFO flink child failed: {status}");
+        assert!(
+            child_removed_fifo,
+            "FIFO child test did not execute the open path"
+        );
     }
 
     #[test]
