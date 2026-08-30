@@ -134,6 +134,7 @@ impl std::error::Error for RuntimeIssue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeConfigError {
     EmptyTransportPath,
+    TransportPathTooLong { length: usize, max: usize },
     ZeroInterval { field: &'static str },
     IntervalTooLarge { field: &'static str },
 }
@@ -142,6 +143,10 @@ impl fmt::Display for RuntimeConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTransportPath => f.write_str("managed transport path must not be empty"),
+            Self::TransportPathTooLong { length, max } => write!(
+                f,
+                "managed transport path is {length} bytes; limit is {max} bytes"
+            ),
             Self::ZeroInterval { field } => write!(f, "{field} must be greater than zero"),
             Self::IntervalTooLarge { field } => {
                 write!(f, "{field} is too large for the monotonic clock")
@@ -158,6 +163,10 @@ pub const DEFAULT_RUNTIME_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// Recommended bounded retry interval for the JWM shared transport.
 #[cfg(feature = "transport-shared")]
 pub const DEFAULT_TRANSPORT_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Longest managed shared-transport path retained and retried by the runtime.
+#[cfg(feature = "transport-shared")]
+pub const MAX_TRANSPORT_PATH_BYTES: usize = 4 * 1024;
 
 /// Retry cadence for restore commands retained after bounded transport
 /// backpressure. Restore is user-critical and must not disappear merely
@@ -311,7 +320,18 @@ impl TransportRecoveryConfig {
         if path.is_empty() {
             return Err(RuntimeConfigError::EmptyTransportPath);
         }
+        if path.len() > MAX_TRANSPORT_PATH_BYTES {
+            return Err(RuntimeConfigError::TransportPathTooLong {
+                length: path.len(),
+                max: MAX_TRANSPORT_PATH_BYTES,
+            });
+        }
         validate_runtime_interval("transport retry interval", retry_interval)?;
+        let path = if path.capacity() > MAX_TRANSPORT_PATH_BYTES {
+            path.as_str().to_owned()
+        } else {
+            path
+        };
         Ok(Self {
             path,
             retry_interval,
@@ -2101,6 +2121,27 @@ mod tests {
                 field: "transport retry interval"
             })
         ));
+    }
+
+    #[cfg(feature = "transport-shared")]
+    #[test]
+    fn managed_transport_config_bounds_retained_path_storage() {
+        let mut compact = String::with_capacity(MAX_TRANSPORT_PATH_BYTES * 4);
+        compact.push_str("/tmp/xbar");
+        let config = TransportRecoveryConfig::with_default_retry(compact).unwrap();
+        assert_eq!(config.path(), "/tmp/xbar");
+        assert!(config.path.capacity() <= MAX_TRANSPORT_PATH_BYTES);
+
+        let maximum = format!("/{}", "x".repeat(MAX_TRANSPORT_PATH_BYTES - 1));
+        assert!(TransportRecoveryConfig::with_default_retry(maximum).is_ok());
+        assert_eq!(
+            TransportRecoveryConfig::with_default_retry("x".repeat(MAX_TRANSPORT_PATH_BYTES + 1))
+                .unwrap_err(),
+            RuntimeConfigError::TransportPathTooLong {
+                length: MAX_TRANSPORT_PATH_BYTES + 1,
+                max: MAX_TRANSPORT_PATH_BYTES,
+            }
+        );
     }
 
     #[cfg(feature = "transport-shared")]

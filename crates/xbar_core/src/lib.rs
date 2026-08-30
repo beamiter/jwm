@@ -93,8 +93,8 @@ pub use runtime::{
 };
 #[cfg(feature = "transport-shared")]
 pub use runtime::{
-    CRITICAL_RESTORE_RETRY_INTERVAL, DEFAULT_TRANSPORT_RETRY_INTERVAL, TransportRecoveryConfig,
-    TransportStatus,
+    CRITICAL_RESTORE_RETRY_INTERVAL, DEFAULT_TRANSPORT_RETRY_INTERVAL, MAX_TRANSPORT_PATH_BYTES,
+    TransportRecoveryConfig, TransportStatus,
 };
 pub use toolkit_dock::{
     DOCK_HOVER_SCALE, DOCK_ITEM_GAP, DOCK_ITEM_HEIGHT, DOCK_ITEM_WIDTH, DOCK_NEIGHBOUR_SCALE,
