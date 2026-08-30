@@ -4,6 +4,8 @@
 //! controls. Renderers remain responsible for geometry, clipping, colors, and
 //! transient pointer interaction.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ThemeMode;
@@ -188,7 +190,7 @@ impl PresentationProjector {
                         config
                             .tag_labels
                             .get(index)
-                            .cloned()
+                            .map(|label| bounded_borrowed_control_text(label))
                             .unwrap_or_else(|| index.saturating_add(1).to_string()),
                         String::new(),
                         None,
@@ -340,7 +342,7 @@ fn layout_menu(view: BarView<'_>, config: &PresentationConfig) -> Vec<ControlSpe
             }
             configured_ids.push(layout.id);
             crate::display::layout_is_offered(layout.id, offered)
-                .then(|| (layout.id, layout.label.clone()))
+                .then(|| (layout.id, bounded_borrowed_control_text(&layout.label)))
         })
         .collect::<Vec<_>>();
     let extra = crate::display::unknown_layout_ids(offered)
@@ -389,7 +391,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.clock {
         status.push(control(
             NodeId::Clock,
-            labels.clock.clone(),
+            bounded_borrowed_control_text(&labels.clock),
             view.time.to_owned(),
             None,
             None,
@@ -404,7 +406,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.screenshot {
         status.push(control(
             NodeId::Screenshot,
-            labels.screenshot.clone(),
+            bounded_borrowed_control_text(&labels.screenshot),
             String::new(),
             None,
             None,
@@ -423,7 +425,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
         };
         status.push(control(
             NodeId::Theme,
-            icon.clone(),
+            bounded_borrowed_control_text(icon),
             String::new(),
             None,
             None,
@@ -437,15 +439,15 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     }
     if visibility.battery {
         let icon = if let Some(icons) = config.icon_set.as_ref() {
-            icons.battery_icon(view.battery).to_owned()
+            icons.battery_icon(view.battery)
         } else if view.battery.present && view.battery.charging {
-            labels.charging.clone()
+            &labels.charging
         } else {
-            labels.battery.clone()
+            &labels.battery
         };
         status.push(control(
             NodeId::Battery,
-            icon,
+            bounded_borrowed_control_text(icon),
             percent_value(view.battery.percent),
             Some(config.battery_thresholds.tone_for(view.battery)),
             None,
@@ -460,7 +462,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.brightness {
         status.push(control(
             NodeId::Brightness,
-            labels.brightness.clone(),
+            bounded_borrowed_control_text(&labels.brightness),
             percent_value(view.brightness.percent),
             view.brightness
                 .percent
@@ -480,15 +482,15 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.audio {
         let level = config.volume_thresholds.level_for(view.audio);
         let icon = if let Some(icons) = config.icon_set.as_ref() {
-            icons.volume_icon(level).to_owned()
+            icons.volume_icon(level)
         } else if view.audio.muted {
-            labels.muted.clone()
+            &labels.muted
         } else {
-            labels.audio.clone()
+            &labels.audio
         };
         status.push(control(
             NodeId::Audio,
-            icon,
+            bounded_borrowed_control_text(icon),
             percent_value(view.audio.volume_percent),
             (level == VolumeLevel::Unavailable).then_some(MetricTone::Unavailable),
             Some(level),
@@ -504,14 +506,14 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     }
     if visibility.network {
         let icon = if view.network.connected {
-            labels.network.clone()
+            &labels.network
         } else {
-            labels.network_offline.clone()
+            &labels.network_offline
         };
         status.push(
             control(
                 NodeId::Network,
-                icon,
+                bounded_borrowed_control_text(icon),
                 network_value(view.network),
                 (!view.network.connected).then_some(MetricTone::Unavailable),
                 None,
@@ -525,7 +527,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.system {
         status.push(control(
             NodeId::Memory,
-            labels.memory.clone(),
+            bounded_borrowed_control_text(&labels.memory),
             percent_value(view.system.memory_percent),
             Some(config.usage_thresholds.tone(view.system.memory_percent)),
             None,
@@ -535,7 +537,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
         ));
         status.push(control(
             NodeId::Cpu,
-            labels.cpu.clone(),
+            bounded_borrowed_control_text(&labels.cpu),
             percent_value(view.system.cpu_percent),
             Some(config.usage_thresholds.tone(view.system.cpu_percent)),
             None,
@@ -546,12 +548,12 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     }
     if visibility.media && view.media.is_active() {
         let icon = match view.media.playback {
-            MediaPlayback::Playing => labels.media_playing.clone(),
-            MediaPlayback::Paused | MediaPlayback::Stopped => labels.media_paused.clone(),
+            MediaPlayback::Playing => &labels.media_playing,
+            MediaPlayback::Paused | MediaPlayback::Stopped => &labels.media_paused,
         };
         status.push(control(
             NodeId::Media,
-            icon,
+            bounded_borrowed_control_text(icon),
             media_value(view.media),
             None,
             None,
@@ -563,12 +565,12 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
     if visibility.monitor {
         let monitor_value = config.icon_set.as_ref().map_or_else(
             || view.monitor.0.to_string(),
-            |icons| icons.monitor_label(view.monitor).into_owned(),
+            |icons| bounded_cow_control_text(icons.monitor_label(view.monitor)),
         );
         status.push(
             control(
                 NodeId::Monitor,
-                labels.monitor.clone(),
+                bounded_borrowed_control_text(&labels.monitor),
                 monitor_value,
                 None,
                 None,
@@ -597,7 +599,7 @@ fn status_controls(view: BarView<'_>, config: &PresentationConfig) -> Vec<Contro
             status.push(
                 control(
                     NodeId::ShellHub(route),
-                    labels.shell_route(route).to_owned(),
+                    bounded_borrowed_control_text(labels.shell_route(route)),
                     String::new(),
                     None,
                     None,
@@ -669,11 +671,26 @@ fn bounded_control_text(value: String) -> String {
         return value;
     }
 
+    bounded_control_text_prefix(&value).to_owned()
+}
+
+fn bounded_borrowed_control_text(value: &str) -> String {
+    bounded_control_text_prefix(value).to_owned()
+}
+
+fn bounded_cow_control_text(value: Cow<'_, str>) -> String {
+    match value {
+        Cow::Borrowed(value) => bounded_borrowed_control_text(value),
+        Cow::Owned(value) => bounded_control_text(value),
+    }
+}
+
+fn bounded_control_text_prefix(value: &str) -> &str {
     let mut end = value.len().min(MAX_PROJECTED_CONTROL_TEXT_BYTES);
     while !value.is_char_boundary(end) {
         end -= 1;
     }
-    value[..end].to_owned()
+    &value[..end]
 }
 
 /// `↓rate ↑rate` with explicit unknowns; rates never display as a healthy 0.
@@ -795,6 +812,7 @@ mod tests {
 
         let icons = crate::IconSet {
             unavailable: oversized.clone(),
+            monitor_labels: vec![oversized.clone(); 3],
             ..crate::IconSet::default()
         };
         let config = PresentationConfig {
@@ -824,6 +842,7 @@ mod tests {
             &layout.value,
             &by_id(&projected, NodeId::Clock).icon,
             &by_id(&projected, NodeId::Battery).icon,
+            &by_id(&projected, NodeId::Monitor).value,
         ];
 
         for text in projected_text {
@@ -838,6 +857,27 @@ mod tests {
             config.icon_set.as_ref().map(|icons| &icons.unavailable),
             Some(&oversized)
         );
+        assert_eq!(
+            config
+                .icon_set
+                .as_ref()
+                .and_then(|icons| icons.monitor_labels.get(2)),
+            Some(&oversized)
+        );
+    }
+
+    #[test]
+    fn borrowed_config_text_allocates_only_its_bounded_utf8_prefix() {
+        let source = "界".repeat(MAX_PROJECTED_CONTROL_TEXT_BYTES * 32);
+        assert!(source.len() > MAX_PROJECTED_CONTROL_TEXT_BYTES * 64);
+
+        let projected = bounded_borrowed_control_text(&source);
+        let expected = bounded_control_text_prefix(&source);
+
+        assert_eq!(projected, expected);
+        assert_eq!(projected.len(), MAX_PROJECTED_CONTROL_TEXT_BYTES - 1);
+        assert!(projected.capacity() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
+        assert!(source.starts_with(&projected));
     }
 
     #[test]
