@@ -282,8 +282,11 @@ fn worker_loop<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner, signal: &Wor
             if let Err(error) = deliver_output(app, inner, output, false) {
                 log::error!("xbar background service failed: {error}");
             }
+            let geometry = release_session_for_glass(session);
             // Cheap unless the wallpaper file or the bar geometry changed.
-            if let Err(error) = refresh_glass(app, inner) {
+            if let Err(error) =
+                refresh_glass(app, &inner.glass, &inner.config.window_label, geometry)
+            {
                 log::warn!("frosted backdrop unavailable: {error}");
             }
             (deadline, inner.config.poll_interval)
@@ -311,6 +314,16 @@ fn worker_loop<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner, signal: &Wor
             }
         }
     }
+}
+
+/// Capture the only session value glass refresh needs and release the worker's
+/// session guard before the refresh phase tries to acquire any other locks.
+fn release_session_for_glass(
+    session: std::sync::MutexGuard<'_, FrontendSession>,
+) -> Option<MonitorGeometry> {
+    let geometry = session.runtime().view().geometry;
+    drop(session);
+    geometry
 }
 
 #[tauri::command]
@@ -476,22 +489,19 @@ fn glass_backdrop() -> Option<GlassBackdrop> {
 /// The stylesheet is injected rather than routed through the frontend so that
 /// all six web frameworks share one implementation; the page keeps ownership
 /// of everything else it draws.
-fn refresh_glass<R: Runtime>(app: &AppHandle<R>, inner: &BridgeInner) -> Result<(), String> {
-    let mut glass = inner
-        .glass
+fn refresh_glass<R: Runtime>(
+    app: &AppHandle<R>,
+    glass_state: &Mutex<Option<GlassBackdrop>>,
+    window_label: &str,
+    geometry: Option<MonitorGeometry>,
+) -> Result<(), String> {
+    let mut glass = glass_state
         .lock()
         .map_err(|error| format!("glass backdrop lock poisoned: {error}"))?;
     let Some(glass) = glass.as_mut() else {
         return Ok(());
     };
-    let window = main_window(app, &inner.config.window_label)?;
-    let geometry = inner
-        .session
-        .lock()
-        .map_err(|error| format!("xbar frontend session lock poisoned: {error}"))?
-        .runtime()
-        .snapshot()
-        .geometry;
+    let window = main_window(app, window_label)?;
     if let Some(geometry) = geometry {
         glass
             .strip
@@ -688,6 +698,21 @@ mod tests {
             PhysicalSize::new(1000, 50)
         );
         assert!(baseline_physical_size(baseline, 0.0).is_err());
+    }
+
+    #[test]
+    fn glass_refresh_input_releases_the_worker_session_guard() {
+        let config = ModelConfig {
+            resolve_client_icons: false,
+            ..ModelConfig::default()
+        };
+        let session = Mutex::new(FrontendSession::new(
+            xbar_core::BarRuntime::new(config).unwrap(),
+        ));
+
+        let guard = session.lock().unwrap();
+        assert_eq!(release_session_for_glass(guard), None);
+        assert!(session.try_lock().is_ok());
     }
 
     #[test]
