@@ -537,13 +537,21 @@ impl WMMonitor {
 
     pub fn intersect_area(&self, x: i32, y: i32, w: i32, h: i32) -> i32 {
         let geom = &self.geometry;
-        std::cmp::max(
-            0,
-            std::cmp::min(x + w, geom.w_x + geom.w_w) - std::cmp::max(x, geom.w_x),
-        ) * std::cmp::max(
-            0,
-            std::cmp::min(y + h, geom.w_y + geom.w_h) - std::cmp::max(y, geom.w_y),
-        )
+        // Geometry can legitimately sit near either end of the signed
+        // coordinate space. Compute both far edges and the area in i64 so an
+        // extreme output/window cannot overflow before the overlap is clamped.
+        let (x, y, w, h) = (i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+        let (wx, wy, ww, wh) = (
+            i64::from(geom.w_x),
+            i64::from(geom.w_y),
+            i64::from(geom.w_w),
+            i64::from(geom.w_h),
+        );
+        let overlap_w = std::cmp::min(x + w, wx + ww) - std::cmp::max(x, wx);
+        let overlap_h = std::cmp::min(y + h, wy + wh) - std::cmp::max(y, wy);
+        let area = overlap_w.max(0).saturating_mul(overlap_h.max(0));
+
+        area.min(i64::from(i32::MAX)) as i32
     }
 
     /// 切换到指定标签，返回新的 cur_tag 索引
@@ -861,6 +869,30 @@ mod tests {
         // Window starts at the right edge → no overlap
         let area = m.intersect_area(100, 0, 100, 100);
         assert_eq!(area, 0);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_handles_extreme_coordinates() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = i32::MAX - 10;
+        m.geometry.w_y = i32::MIN;
+        m.geometry.w_w = 20;
+        m.geometry.w_h = 20;
+
+        let area = m.intersect_area(i32::MAX - 5, i32::MIN + 5, 20, 20);
+        assert_eq!(area, 15 * 15);
+    }
+
+    #[test]
+    fn test_wm_monitor_intersect_area_saturates_large_area() {
+        let mut m = WMMonitor::new();
+        m.geometry.w_x = i32::MIN;
+        m.geometry.w_y = i32::MIN;
+        m.geometry.w_w = i32::MAX;
+        m.geometry.w_h = i32::MAX;
+
+        let area = m.intersect_area(i32::MIN, i32::MIN, i32::MAX, i32::MAX);
+        assert_eq!(area, i32::MAX);
     }
 
     #[test]
