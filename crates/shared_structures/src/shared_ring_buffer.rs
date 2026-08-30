@@ -7,6 +7,7 @@
 use crate::backends::common::SyncStrategy;
 use crate::shared_message::{
     MinimizedWindowInfo, SharedCommand, SharedMessage, TagStatus, MAX_MINIMIZED_WINDOWS, MAX_TAGS,
+    MINIMIZED_LIST_FLAG_OVERFLOW,
 };
 use crate::typed_ring_buffer::{
     SharedRingBufferOptions, SharedRingBufferStats, TypedRingBuffer, WaitOutcome, WireSafe,
@@ -141,6 +142,15 @@ const _: () = assert!(std::mem::size_of::<WireCommand>() == 64);
 // 任意位模式有效；无内部可变性。
 unsafe impl WireSafe for WireCommand {}
 
+fn normalize_minimized_metadata(count: u32, flags: u32) -> (u32, u32) {
+    let maximum = MAX_MINIMIZED_WINDOWS as u32;
+    if count > maximum {
+        (maximum, flags | MINIMIZED_LIST_FLAG_OVERFLOW)
+    } else {
+        (count, flags)
+    }
+}
+
 impl From<SharedCommand> for WireCommand {
     fn from(command: SharedCommand) -> Self {
         Self {
@@ -192,6 +202,8 @@ impl From<&SharedMessage> for WireMessage {
                 | ((status.is_occ as u8) << 3);
         }
         let minimized_windows = message.minimized_windows.map(Into::into);
+        let (minimized_count, minimized_flags) =
+            normalize_minimized_metadata(message.minimized_count, message.minimized_flags);
         Self {
             timestamp: message.timestamp,
             wm_session_id: message.wm_session_id,
@@ -208,8 +220,8 @@ impl From<&SharedMessage> for WireMessage {
             _reserved: [0; 3],
             layout_count: message.monitor_info.layout_count,
             layout_id: message.monitor_info.layout_id,
-            minimized_count: message.minimized_count.min(MAX_MINIMIZED_WINDOWS as u32),
-            minimized_flags: message.minimized_flags,
+            minimized_count,
+            minimized_flags,
             minimized_windows,
         }
     }
@@ -217,6 +229,8 @@ impl From<&SharedMessage> for WireMessage {
 
 impl From<WireMessage> for SharedMessage {
     fn from(message: WireMessage) -> Self {
+        let (minimized_count, minimized_flags) =
+            normalize_minimized_metadata(message.minimized_count, message.minimized_flags);
         let mut monitor_info = crate::MonitorInfo {
             monitor_num: message.monitor_num,
             monitor_width: message.monitor_width,
@@ -247,8 +261,8 @@ impl From<WireMessage> for SharedMessage {
             wm_session_id: message.wm_session_id,
             minimized_generation: message.minimized_generation,
             monitor_info,
-            minimized_count: message.minimized_count.min(MAX_MINIMIZED_WINDOWS as u32),
-            minimized_flags: message.minimized_flags,
+            minimized_count,
+            minimized_flags,
             minimized_windows: message.minimized_windows.map(Into::into),
         }
     }
@@ -691,6 +705,33 @@ mod tests {
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_w), 48);
         assert_eq!(std::mem::offset_of!(WireCommand, anchor_h), 52);
         assert_eq!(std::mem::offset_of!(WireCommand, timestamp), 56);
+    }
+
+    #[test]
+    fn oversized_minimized_count_sets_overflow_during_wire_normalization() {
+        const OTHER_FLAG: u32 = 1 << 7;
+
+        let mut outgoing = SharedMessage {
+            minimized_count: u32::MAX,
+            minimized_flags: OTHER_FLAG,
+            ..SharedMessage::default()
+        };
+        let mut wire = WireMessage::from(&outgoing);
+        assert_eq!(wire.minimized_count, MAX_MINIMIZED_WINDOWS as u32);
+        assert_eq!(
+            wire.minimized_flags,
+            OTHER_FLAG | crate::MINIMIZED_LIST_FLAG_OVERFLOW
+        );
+
+        wire.minimized_count = u32::MAX;
+        wire.minimized_flags = OTHER_FLAG;
+        outgoing = SharedMessage::from(wire);
+        assert_eq!(outgoing.minimized_count, MAX_MINIMIZED_WINDOWS as u32);
+        assert_eq!(
+            outgoing.minimized_flags,
+            OTHER_FLAG | crate::MINIMIZED_LIST_FLAG_OVERFLOW
+        );
+        assert_eq!(outgoing.minimized_windows().len(), MAX_MINIMIZED_WINDOWS);
     }
 
     // ── 创建 / 打开 ──────────────────────────────────────────────────────────
