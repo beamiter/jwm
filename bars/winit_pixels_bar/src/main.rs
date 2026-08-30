@@ -37,6 +37,18 @@ fn is_terminal_window_event(event: &WindowEvent) -> bool {
     matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
 }
 
+fn pixel_frame_bytes(size: PhysicalSize<u32>) -> Option<usize> {
+    let bytes = usize::try_from(size.width)
+        .ok()?
+        .checked_mul(usize::try_from(size.height).ok()?)?
+        .checked_mul(4)?;
+    (bytes <= xbar_core::MAX_FRONTEND_FRAME_BYTES).then_some(bytes)
+}
+
+fn surface_can_present(window_size: PhysicalSize<u32>, surface_size: PhysicalSize<u32>) -> bool {
+    window_size.width != 0 && window_size.height != 0 && window_size == surface_size
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -49,6 +61,8 @@ struct App {
     pixels: Option<Pixels<'static>>,
     pixels_width: u32,
     pixels_height: u32,
+    pixels_surface_width: u32,
+    pixels_surface_height: u32,
     proxy: EventLoopProxy<UserEvent>,
     transport_wake: TransportWakeSlot,
     effects: EffectRouter,
@@ -84,6 +98,8 @@ impl App {
             pixels: None,
             pixels_width: 0,
             pixels_height: 0,
+            pixels_surface_width: 0,
+            pixels_surface_height: 0,
             proxy,
             transport_wake: TransportWakeSlot::new(true),
             effects: EffectRouter::default(),
@@ -116,10 +132,11 @@ impl App {
         else {
             return;
         };
-        if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
-            self.bar.config_mut().bar_height = height;
-        }
-        if size.width != self.pixels_width || size.height != self.pixels_height {
+        if size.width != self.pixels_width
+            || size.height != self.pixels_height
+            || size.width != self.pixels_surface_width
+            || size.height != self.pixels_surface_height
+        {
             self.resize_pixels(size);
         }
     }
@@ -130,8 +147,18 @@ impl App {
         }
         self.sync_surface_to_window();
 
-        let width = self.last_physical_size.width;
-        let height = self.last_physical_size.height;
+        if !surface_can_present(
+            self.last_physical_size,
+            PhysicalSize::new(self.pixels_surface_width, self.pixels_surface_height),
+        ) {
+            return Ok(());
+        }
+
+        // A rejected or failed resize must keep drawing against the texture
+        // dimensions pixels actually owns, rather than describing its old
+        // frame buffer with the compositor's newer extent.
+        let width = self.pixels_width;
+        let height = self.pixels_height;
         if width == 0 || height == 0 {
             return Ok(());
         }
@@ -160,26 +187,43 @@ impl App {
     }
 
     fn resize_pixels(&mut self, size: PhysicalSize<u32>) {
+        let extent_changed = self.last_physical_size != size;
         self.last_physical_size = size;
         if size.width == 0 || size.height == 0 {
             return;
         }
-        self.logical_size = size.to_logical(self.scale_factor);
-        if self.pixels_width == size.width && self.pixels_height == size.height {
+        if pixel_frame_bytes(size).is_none() {
+            if extent_changed {
+                warn!(
+                    "ignoring {}x{} pixels resize beyond the {}-byte frontend frame budget",
+                    size.width,
+                    size.height,
+                    xbar_core::MAX_FRONTEND_FRAME_BYTES
+                );
+            }
             return;
         }
         if let Some(pixels) = self.pixels.as_mut() {
-            let surface_result = pixels.resize_surface(size.width, size.height);
-            let buffer_result = pixels.resize_buffer(size.width, size.height);
-            if let Err(error) = &surface_result {
-                warn!("pixels surface resize failed: {error}");
+            if self.pixels_surface_width != size.width || self.pixels_surface_height != size.height
+            {
+                if let Err(error) = pixels.resize_surface(size.width, size.height) {
+                    warn!("pixels surface resize failed: {error}");
+                    return;
+                }
+                self.pixels_surface_width = size.width;
+                self.pixels_surface_height = size.height;
             }
-            if let Err(error) = &buffer_result {
-                warn!("pixels buffer resize failed: {error}");
-            }
-            if surface_result.is_ok() && buffer_result.is_ok() {
+            if self.pixels_width != size.width || self.pixels_height != size.height {
+                if let Err(error) = pixels.resize_buffer(size.width, size.height) {
+                    warn!("pixels buffer resize failed: {error}");
+                    return;
+                }
                 self.pixels_width = size.width;
                 self.pixels_height = size.height;
+            }
+            self.logical_size = size.to_logical(self.scale_factor);
+            if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
+                self.bar.config_mut().bar_height = height;
             }
         }
     }
@@ -291,6 +335,14 @@ impl ApplicationHandler<UserEvent> for App {
 
         let safe_width = size.width.max(1);
         let safe_height = size.height.max(1);
+        if pixel_frame_bytes(PhysicalSize::new(safe_width, safe_height)).is_none() {
+            warn!(
+                "refusing initial {safe_width}x{safe_height} pixels surface beyond the {}-byte frontend frame budget",
+                xbar_core::MAX_FRONTEND_FRAME_BYTES
+            );
+            event_loop.exit();
+            return;
+        }
         let build = |alpha: Option<pixels::wgpu::CompositeAlphaMode>| {
             let surface_texture = SurfaceTexture::new(safe_width, safe_height, Arc::clone(&window));
             let mut builder = PixelsBuilder::new(safe_width, safe_height, surface_texture)
@@ -372,6 +424,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.pixels_width = safe_width;
         self.pixels_height = safe_height;
+        self.pixels_surface_width = safe_width;
+        self.pixels_surface_height = safe_height;
         self.pixels = Some(pixels);
 
         let tick = self.bar.tick();
@@ -406,9 +460,6 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             event if is_terminal_window_event(&event) => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
-                    self.bar.config_mut().bar_height = height;
-                }
                 self.resize_pixels(size);
                 self.request_redraw();
             }
@@ -621,7 +672,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_terminal_window_event;
+    use super::{is_terminal_window_event, pixel_frame_bytes, surface_can_present};
     use winit::{dpi::PhysicalSize, event::WindowEvent};
 
     #[test]
@@ -631,5 +682,33 @@ mod tests {
         assert!(!is_terminal_window_event(&WindowEvent::Resized(
             PhysicalSize::new(1920, 42),
         )));
+    }
+
+    #[test]
+    fn pixel_frame_budget_rejects_anomalous_compositor_sizes() {
+        assert_eq!(
+            pixel_frame_bytes(PhysicalSize::new(7680, 4320)),
+            Some(7680 * 4320 * 4)
+        );
+        assert_eq!(
+            pixel_frame_bytes(PhysicalSize::new(u32::from(u16::MAX), u32::from(u16::MAX),)),
+            None
+        );
+    }
+
+    #[test]
+    fn presentation_requires_a_nonzero_surface_matching_the_window() {
+        assert!(surface_can_present(
+            PhysicalSize::new(1920, 42),
+            PhysicalSize::new(1920, 42),
+        ));
+        assert!(!surface_can_present(
+            PhysicalSize::new(1920, 42),
+            PhysicalSize::new(1280, 42),
+        ));
+        assert!(!surface_can_present(
+            PhysicalSize::new(0, 0),
+            PhysicalSize::new(1, 1),
+        ));
     }
 }
