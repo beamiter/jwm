@@ -1,7 +1,11 @@
 //! Shared recording encoder selection for all compositor backends.
 
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
+
+const ENCODER_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CAPABILITY_PROBE_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Return whether both the local ALSA device and ffmpeg's ALSA input are
 /// available. Screen recording falls back to video-only when this is false.
@@ -22,16 +26,18 @@ pub fn recording_audio_available(device: &str) -> bool {
 fn ffmpeg_has_alsa_demuxer() -> bool {
     static HAS_ALSA: OnceLock<bool> = OnceLock::new();
     *HAS_ALSA.get_or_init(|| {
-        Command::new("ffmpeg")
-            .args(["-hide_banner", "-demuxers"])
-            .stdin(Stdio::null())
-            .output()
-            .is_ok_and(|output| {
-                output.status.success()
-                    && String::from_utf8_lossy(&output.stdout)
-                        .lines()
-                        .any(|line| line.split_whitespace().any(|field| field == "alsa"))
-            })
+        crate::external_command::output_with_limits(
+            "ffmpeg",
+            &["-hide_banner", "-demuxers"],
+            ENCODER_PROBE_TIMEOUT,
+            MAX_CAPABILITY_PROBE_OUTPUT_BYTES,
+        )
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .any(|line| line.split_whitespace().any(|field| field == "alsa"))
+        })
     })
 }
 
@@ -109,6 +115,7 @@ impl RecordingEncoder {
 /// memoized per configured value and only the first recording pays for it.
 pub fn select_recording_encoder(configured: &str) -> RecordingEncoder {
     static CACHE: OnceLock<Mutex<Option<(String, RecordingEncoder)>>> = OnceLock::new();
+    let configured = canonical_encoder_choice(configured);
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     if let Ok(guard) = cache.lock()
         && let Some((cached_for, encoder)) = guard.as_ref()
@@ -121,6 +128,13 @@ pub fn select_recording_encoder(configured: &str) -> RecordingEncoder {
         *guard = Some((configured.to_string(), encoder));
     }
     encoder
+}
+
+fn canonical_encoder_choice(configured: &str) -> &str {
+    match configured {
+        "nvenc" | "vaapi" | "software" => configured,
+        _ => "auto",
+    }
 }
 
 /// A probe frame large enough for every hardware encoder to accept.
@@ -191,12 +205,7 @@ fn probe_recording_encoder(configured: &str) -> RecordingEncoder {
 }
 
 fn probe(args: &[&str]) -> bool {
-    Command::new("ffmpeg")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+    crate::external_command::status_with_timeout("ffmpeg", args, ENCODER_PROBE_TIMEOUT)
         .is_ok_and(|status| status.success())
 }
 
@@ -303,6 +312,17 @@ mod tests {
             select_recording_encoder("software"),
             RecordingEncoder::Software
         );
+    }
+
+    #[test]
+    fn unknown_encoder_choice_uses_one_bounded_auto_cache_key() {
+        let oversized = "unknown".repeat(1024 * 1024);
+        let canonical = canonical_encoder_choice(&oversized);
+
+        assert_eq!(canonical, "auto");
+        assert_eq!(canonical.len(), 4);
+        assert_eq!(canonical_encoder_choice("auto"), "auto");
+        assert_eq!(canonical_encoder_choice("software"), "software");
     }
 
     #[test]

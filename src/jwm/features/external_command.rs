@@ -1,4 +1,4 @@
-//! Bounded execution for small session helpers used by JWM features.
+//! Bounded execution for small synchronous helpers used by JWM.
 
 use std::io::{self, Read};
 use std::os::fd::AsRawFd as _;
