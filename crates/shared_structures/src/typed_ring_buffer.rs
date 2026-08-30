@@ -171,26 +171,37 @@ fn proc_stat_state(stat: &[u8]) -> Option<u8> {
         .find(|byte| !byte.is_ascii_whitespace())
 }
 
-/// 返回给定 PID 的进程当前是否还能执行用户代码。
+/// 返回给定 Linux 任务 ID（进程 PID 或线程 TID）当前是否还能执行用户代码。
 ///
-/// Linux 会为尚未被父进程 `wait` 的僵尸保留 `/proc/<pid>` 目录；只检查
+/// Linux 会为尚未被父进程 `wait` 的僵尸保留 `/proc/<id>` 目录；只检查
 /// 目录存在会把已经不可能释放方向锁的僵尸误判为存活。因此这里读取
-/// `/proc/<pid>/stat`，把 zombie/dead 状态（Z/X/x）也视为已退出。
+/// `/proc/<id>/stat`，把 zombie/dead 状态（Z/X/x）也视为已退出。
 ///
 /// 防御：`/proc` 不可用、stat 无法读取或内容无法解析时无从可靠判断，
 /// 返回"存活"——夺锁/回收机制退化为纯等待，绝不基于失明的探测误夺
 /// 活锁。跨 PID namespace 部署的前提要求见 SAFETY.md。
 #[inline]
-pub(crate) fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(task_id: u32) -> bool {
     if std::fs::metadata("/proc/self/stat").is_err() {
         return true;
     }
 
-    let stat_path = Path::new("/proc").join(pid.to_string()).join("stat");
+    let stat_path = Path::new("/proc").join(task_id.to_string()).join("stat");
     match std::fs::read(stat_path) {
         Ok(stat) => !matches!(proc_stat_state(&stat), Some(b'Z' | b'X' | b'x')),
         Err(error) if error.kind() == ErrorKind::NotFound => false,
         Err(_) => true,
+    }
+}
+
+#[inline]
+fn current_task_id() -> u32 {
+    // gettid has no failure mode on Linux. Use the syscall directly so the
+    // crate does not acquire a dependency on newer glibc symbol versions.
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) };
+    match u32::try_from(tid) {
+        Ok(tid) if tid != 0 => tid,
+        _ => std::process::id(),
     }
 }
 
@@ -811,11 +822,11 @@ fn prepare_stale_mapping_reclaim(shmem: &mut Shmem, flink_path: &Path) -> Result
 
 /// 跨进程方向锁的 RAII guard。
 ///
-/// 锁字存放持有者 PID（0 表示空闲）。持有者在临界区内崩溃时，其他
-/// 进程会通过 `/proc/<pid>` 探测发现持有者已死并原子夺回锁；半写的
-/// slot 由校验和兜底，未发布的游标推进随崩溃一起丢弃。
+/// 锁字存放持有线程的 Linux TID（0 表示空闲）。线程在临界区内退出时，
+/// 其他线程或进程会通过 `/proc/<tid>` 探测发现持有者已死并原子夺回锁；
+/// 半写的 slot 由校验和兜底，未发布的游标推进随崩溃一起丢弃。
 ///
-/// 已知限制：PID 复用可能让探测误判"仍存活"，代价是退回崩溃前的
+/// 已知限制：TID 复用可能让探测误判"仍存活"，代价是退回崩溃前的
 /// 行为（等待）而不是错误夺锁，安全方向不变。
 pub(crate) struct CursorGuard<'a> {
     lock: &'a AtomicU32,
@@ -827,12 +838,12 @@ impl<'a> CursorGuard<'a> {
     const SPIN_LIMIT: u32 = 64;
 
     pub(crate) fn acquire(cursor: &'a QueueCursor) -> Self {
-        let self_pid = std::process::id();
+        let self_task_id = current_task_id();
         let mut attempts = 0u32;
         loop {
             match cursor.lock.compare_exchange_weak(
                 0,
-                self_pid,
+                self_task_id,
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
@@ -840,21 +851,21 @@ impl<'a> CursorGuard<'a> {
                 Err(holder) => {
                     attempts = attempts.wrapping_add(1);
                     if holder != 0
-                        && holder != self_pid
+                        && holder != self_task_id
                         && attempts % Self::LIVENESS_CHECK_INTERVAL == 0
                         && !process_alive(holder)
                         && cursor
                             .lock
                             .compare_exchange(
                                 holder,
-                                self_pid,
+                                self_task_id,
                                 Ordering::Acquire,
                                 Ordering::Relaxed,
                             )
                             .is_ok()
                     {
                         warn!(
-                            "reclaimed shared direction lock from dead process {holder}; \
+                            "reclaimed shared direction lock from dead task {holder}; \
                              a torn slot, if any, is caught by its checksum"
                         );
                         return Self { lock: &cursor.lock };
@@ -2696,6 +2707,82 @@ mod tests {
 
         assert_eq!(ring.try_peek_message().unwrap(), Some(1));
         assert_eq!(ring.drain_messages(usize::MAX).unwrap(), vec![1, 2, 3, 100]);
+    }
+
+    #[test]
+    fn cursor_lock_owner_identifies_the_holding_thread() {
+        const CHILD_MARKER_ENV: &str = "SHARED_STRUCTURES_THREAD_LOCK_MARKER";
+
+        if let Some(marker) = std::env::var_os(CHILD_MARKER_ENV) {
+            let path = mk_path("thread_lock_owner");
+            let ring: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+                .adaptive_poll_spins(0)
+                .create_typed(&path)
+                .unwrap();
+
+            let holder = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let guard = CursorGuard::acquire(&ring.header().message_write);
+                        let holder = ring.header().message_write.lock.load(Ordering::Acquire);
+                        // Model a thread cancellation/FFI exit that bypasses Rust
+                        // destructors while the rest of the process stays alive.
+                        std::mem::forget(guard);
+                        holder
+                    })
+                    .join()
+                    .unwrap()
+            });
+
+            assert_ne!(
+                holder,
+                std::process::id(),
+                "cursor lock recorded the process instead of its holding thread"
+            );
+            assert!(
+                !process_alive(holder),
+                "exited lock-holder thread is still reported alive"
+            );
+
+            let recovered = CursorGuard::acquire(&ring.header().message_write);
+            drop(recovered);
+            assert_eq!(ring.header().message_write.lock.load(Ordering::Acquire), 0);
+            std::fs::write(marker, b"completed").unwrap();
+            return;
+        }
+
+        let marker = std::env::temp_dir().join(format!(
+            "srb-thread-lock-marker-{}-{}",
+            std::process::id(),
+            FLINK_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let test_name = "typed_ring_buffer::tests::cursor_lock_owner_identifies_the_holding_thread";
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(CHILD_MARKER_ENV, &marker)
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let child_completed = marker.is_file();
+        let _ = std::fs::remove_file(marker);
+
+        let status = status.expect("thread-lock recovery exceeded the bounded test deadline");
+        assert!(status.success(), "thread-lock child failed: {status}");
+        assert!(child_completed, "thread-lock child did not run");
     }
 
     #[test]
