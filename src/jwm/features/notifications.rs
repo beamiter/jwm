@@ -105,17 +105,51 @@ pub struct NotificationCenter {
 }
 
 fn sanitize(text: &str) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.chars().count() <= MAX_TEXT_CHARS {
-        return trimmed.to_string();
+    sanitize_chars(text.chars(), MAX_TEXT_CHARS)
+}
+
+fn sanitize_chars(chars: impl IntoIterator<Item = char>, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
     }
-    let mut out: String = trimmed.chars().take(MAX_TEXT_CHARS - 1).collect();
-    out.push('\u{2026}');
+    let mut out = String::with_capacity(limit);
+    let mut output_chars = 0;
+    // Whitespace cannot be emitted until a later non-whitespace character
+    // proves it is internal rather than trailing. Only a bounded prefix is
+    // needed: once it would cross the visible limit, one more non-whitespace
+    // character is enough to decide the ellipsis.
+    let mut pending_whitespace = Vec::with_capacity(limit + 1);
+
+    for ch in chars {
+        let ch = if ch.is_control() { ' ' } else { ch };
+        if ch.is_whitespace() {
+            if !out.is_empty() && pending_whitespace.len() < limit + 1 - output_chars {
+                pending_whitespace.push(ch);
+            }
+            continue;
+        }
+
+        for whitespace in pending_whitespace.drain(..) {
+            if push_sanitized_char(&mut out, &mut output_chars, whitespace, limit) {
+                return out;
+            }
+        }
+        if push_sanitized_char(&mut out, &mut output_chars, ch, limit) {
+            return out;
+        }
+    }
     out
+}
+
+fn push_sanitized_char(out: &mut String, output_chars: &mut usize, ch: char, limit: usize) -> bool {
+    if *output_chars == limit {
+        let _ = out.pop();
+        out.push('\u{2026}');
+        return true;
+    }
+    out.push(ch);
+    *output_chars += 1;
+    false
 }
 
 /// Trim a sender's action list to what the panel can show and the user can
@@ -128,55 +162,52 @@ fn sanitize(text: &str) -> String {
 /// onto the wrong chip, and a sender that offered a duplicate cannot tell
 /// them apart anyway.
 fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
-    let mut kept: Vec<NotificationAction> = actions
-        .iter()
-        .filter(|action| !action.key.trim().is_empty())
-        .map(|action| {
-            let label = sanitize_label(&action.label);
-            NotificationAction {
-                key: action.key.trim().to_string(),
-                label: if label.is_empty() {
-                    action.key.trim().to_string()
-                } else {
-                    label
-                },
+    sanitize_action_iter(actions.iter())
+}
+
+fn sanitize_action_iter<'a>(
+    actions: impl IntoIterator<Item = &'a NotificationAction>,
+) -> Vec<NotificationAction> {
+    let mut kept = Vec::with_capacity(MAX_ACTIONS);
+    for action in actions {
+        let key = action.key.trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        // Once the visible slots are full, only the first later `default`
+        // can affect the result. Do not sanitize or allocate ignored labels.
+        if kept.len() == MAX_ACTIONS && key != DEFAULT_KEY {
+            continue;
+        }
+        let mut label = sanitize_label(&action.label);
+        if label.is_empty() {
+            // The key remains exact for ActionInvoked, but its fallback label
+            // has the same one-line 20-character contract as any other label.
+            label = sanitize_label(key);
+        }
+        let action = NotificationAction {
+            key: key.to_string(),
+            label,
+        };
+        if kept.len() < MAX_ACTIONS {
+            let is_default = action.key == DEFAULT_KEY;
+            kept.push(action);
+            if kept.len() == MAX_ACTIONS
+                && (is_default || kept.iter().any(|action| action.key == DEFAULT_KEY))
+            {
+                return kept;
             }
-        })
-        .collect();
-    if kept.len() > MAX_ACTIONS {
-        // The reserved key is the one Return runs, so it survives the cap
-        // even when the sender listed it last.
-        //
-        // Rescued out of `kept` rather than out of the caller's list: an
-        // action with no key was already dropped, so the two stopped sharing
-        // indices, and only `kept`'s copy has been through `sanitize_label`.
-        // Indexing the raw list here would both promote the wrong action and
-        // smuggle an uncapped, possibly multi-line label onto the strip.
-        let rescued = kept
-            .iter()
-            .position(|action| action.key == DEFAULT_KEY)
-            .filter(|index| *index >= MAX_ACTIONS)
-            .map(|index| kept[index].clone());
-        kept.truncate(MAX_ACTIONS);
-        if let Some(action) = rescued {
+        } else {
             kept[MAX_ACTIONS - 1] = action;
+            return kept;
         }
     }
     kept
 }
 
 fn sanitize_label(text: &str) -> String {
-    let cleaned: String = text
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    let trimmed = cleaned.trim();
-    if trimmed.chars().count() <= MAX_LABEL_CHARS {
-        return trimmed.to_string();
-    }
-    let mut out: String = trimmed.chars().take(MAX_LABEL_CHARS - 1).collect();
-    out.push('\u{2026}');
-    out
+    sanitize_chars(text.chars(), MAX_LABEL_CHARS)
 }
 
 /// Decode the `actions` argument of a `notify` request.
@@ -191,35 +222,58 @@ fn sanitize_label(text: &str) -> String {
 /// normal.
 #[must_use]
 pub fn parse_action_args(args: &serde_json::Value) -> Vec<NotificationAction> {
-    let flat: Vec<String> = args
+    if let Some(items) = args
         .get("actions")
         .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|item| item.as_str().unwrap_or_default().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    if flat.is_empty() {
-        return args
-            .get("default_action")
-            .and_then(serde_json::Value::as_str)
-            .filter(|key| !key.trim().is_empty())
-            .map(|key| {
-                vec![NotificationAction {
-                    key: key.to_string(),
-                    label: String::new(),
-                }]
-            })
-            .unwrap_or_default();
+        .filter(|items| !items.is_empty())
+    {
+        return parse_flat_actions(items);
     }
-    flat.chunks(2)
-        .map(|pair| NotificationAction {
-            key: pair[0].clone(),
-            label: pair.get(1).cloned().unwrap_or_default(),
+    args.get("default_action")
+        .and_then(serde_json::Value::as_str)
+        .filter(|key| !key.trim().is_empty())
+        .map(|key| {
+            vec![NotificationAction {
+                key: key.to_string(),
+                label: String::new(),
+            }]
         })
-        .collect()
+        .unwrap_or_default()
+}
+
+fn parse_flat_actions(items: &[serde_json::Value]) -> Vec<NotificationAction> {
+    let mut kept = Vec::with_capacity(MAX_ACTIONS);
+    for pair in items.chunks(2) {
+        let key = pair[0].as_str().unwrap_or_default();
+        let trimmed_key = key.trim();
+        if trimmed_key.is_empty() {
+            continue;
+        }
+        if kept.len() == MAX_ACTIONS && trimmed_key != DEFAULT_KEY {
+            continue;
+        }
+        let action = NotificationAction {
+            key: key.to_string(),
+            label: pair
+                .get(1)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        };
+        if kept.len() < MAX_ACTIONS {
+            let is_default = trimmed_key == DEFAULT_KEY;
+            kept.push(action);
+            if kept.len() == MAX_ACTIONS
+                && (is_default || kept.iter().any(|action| action.key.trim() == DEFAULT_KEY))
+            {
+                return kept;
+            }
+        } else {
+            kept[MAX_ACTIONS - 1] = action;
+            return kept;
+        }
+    }
+    kept
 }
 
 /// Where a row's action cursor starts.
@@ -674,6 +728,21 @@ mod tests {
     }
 
     #[test]
+    fn flat_action_parsing_is_bounded_and_rescues_default() {
+        let mut flat = Vec::new();
+        for index in 0..MAX_ACTIONS + 3 {
+            flat.push(serde_json::Value::String(format!("k{index}")));
+            flat.push(serde_json::Value::String(format!("Label {index}")));
+        }
+        flat.push(serde_json::Value::String("default".into()));
+        flat.push(serde_json::Value::String("Activate".into()));
+
+        let parsed = parse_action_args(&serde_json::json!({ "actions": flat }));
+        assert_eq!(parsed.len(), MAX_ACTIONS);
+        assert_eq!(parsed[MAX_ACTIONS - 1], action("default", "Activate"));
+    }
+
+    #[test]
     fn an_action_with_no_key_is_dropped_and_duplicates_are_kept() {
         let kept = sanitize_actions(&[
             action("", "Nowhere"),
@@ -715,6 +784,34 @@ mod tests {
         // which one is selected.
         assert_eq!(default_action_index(&sanitize_actions(&many)), 0);
         assert_eq!(default_action_index(&[]), 0);
+    }
+
+    #[test]
+    fn action_sanitation_stops_after_rescuing_default() {
+        let mut offered: Vec<NotificationAction> = (0..MAX_ACTIONS)
+            .map(|index| action(&format!("k{index}"), &format!("Label {index}")))
+            .collect();
+        offered.push(action("default", "Activate"));
+
+        let source = offered
+            .iter()
+            .chain(std::iter::once_with(|| -> &NotificationAction {
+                panic!("actions were consumed after the final result was fixed")
+            }));
+        let kept = sanitize_action_iter(source);
+        assert_eq!(kept.len(), MAX_ACTIONS);
+        assert_eq!(kept[MAX_ACTIONS - 1], action("default", "Activate"));
+    }
+
+    #[test]
+    fn blank_action_labels_use_a_sanitized_bounded_key() {
+        let key = format!("  open\n{}  ", "界".repeat(MAX_LABEL_CHARS + 8));
+        let kept = sanitize_actions(&[action(&key, " \n ")]);
+
+        assert_eq!(kept[0].key, key.trim());
+        assert_eq!(kept[0].label.chars().count(), MAX_LABEL_CHARS);
+        assert!(kept[0].label.ends_with('\u{2026}'));
+        assert!(!kept[0].label.chars().any(char::is_control));
     }
 
     #[test]
@@ -900,6 +997,31 @@ mod tests {
         assert_eq!(record.summary, "line break");
         assert_eq!(record.body.chars().count(), MAX_TEXT_CHARS);
         assert!(record.body.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn sanitation_preserves_unicode_boundaries_control_mapping_and_trim() {
+        let exact = "界".repeat(MAX_TEXT_CHARS);
+        assert_eq!(sanitize(&exact), exact);
+
+        let over = sanitize(&"界".repeat(MAX_TEXT_CHARS + 1));
+        assert_eq!(over.chars().count(), MAX_TEXT_CHARS);
+        assert!(over.ends_with('\u{2026}'));
+        assert_eq!(sanitize("\u{2003}\nalpha\0beta\t \u{2003}"), "alpha beta");
+    }
+
+    #[test]
+    fn sanitation_stops_consuming_after_the_ellipsis_is_decided() {
+        for limit in [MAX_TEXT_CHARS, MAX_LABEL_CHARS] {
+            let source = std::iter::repeat('x')
+                .take(limit + 1)
+                .chain(std::iter::once_with(|| {
+                    panic!("sanitation consumed input after truncation was decided")
+                }));
+            let shortened = sanitize_chars(source, limit);
+            assert_eq!(shortened.chars().count(), limit);
+            assert!(shortened.ends_with('\u{2026}'));
+        }
     }
 
     #[test]
