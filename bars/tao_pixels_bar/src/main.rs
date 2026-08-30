@@ -33,6 +33,10 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
+fn is_terminal_window_event(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -396,7 +400,7 @@ impl App {
         }
 
         match event {
-            WindowEvent::CloseRequested => return Some(ControlFlow::Exit),
+            event if is_terminal_window_event(&event) => return Some(ControlFlow::Exit),
             WindowEvent::Resized(size) => {
                 self.resize_pixels(size);
                 self.request_redraw();
@@ -661,6 +665,15 @@ mod tests {
 
     fn families(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn close_request_and_actual_destruction_both_end_the_bar_session() {
+        assert!(is_terminal_window_event(&WindowEvent::CloseRequested));
+        assert!(is_terminal_window_event(&WindowEvent::Destroyed));
+        assert!(!is_terminal_window_event(&WindowEvent::Resized(
+            PhysicalSize::new(1920, 42),
+        )));
     }
 
     #[test]

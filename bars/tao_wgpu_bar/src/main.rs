@@ -79,6 +79,10 @@ enum UserEvent {
     SharedUpdated(WakeAck),
 }
 
+fn is_terminal_window_event(event: &WindowEvent) -> bool {
+    matches!(event, WindowEvent::CloseRequested | WindowEvent::Destroyed)
+}
+
 struct App {
     window_id: Option<WindowId>,
     window: Option<Arc<Window>>,
@@ -361,7 +365,7 @@ impl App {
         }
 
         match event {
-            WindowEvent::CloseRequested => return Some(ControlFlow::Exit),
+            event if is_terminal_window_event(&event) => return Some(ControlFlow::Exit),
             WindowEvent::Resized(size) => {
                 self.last_physical_size = size;
                 if let Some(height) = logical_bar_height(size.height, self.scale_factor) {
@@ -540,5 +544,19 @@ fn main() -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("tao event loop exited with status {exit_code}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_request_and_actual_destruction_both_end_the_bar_session() {
+        assert!(is_terminal_window_event(&WindowEvent::CloseRequested));
+        assert!(is_terminal_window_event(&WindowEvent::Destroyed));
+        assert!(!is_terminal_window_event(&WindowEvent::Resized(
+            PhysicalSize::new(1920, 42),
+        )));
     }
 }
