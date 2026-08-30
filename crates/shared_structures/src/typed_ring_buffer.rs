@@ -1311,14 +1311,43 @@ impl<M: WireSafe, C: WireSafe> TypedRingBuffer<M, C> {
                         return Ok(buffer);
                     }
                 }
-                Err(error) if error.kind() == ErrorKind::NotFound && may_create => {
-                    if let Some(buffer) = create(&mut may_create)? {
-                        return Ok(buffer);
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    if !may_create {
+                        // A previous create collision only proves that a
+                        // public name existed at that instant. If the winner
+                        // exits before our next open, authorize another
+                        // exclusive create instead of waiting out the retry
+                        // deadline with a path that is now absent.
+                        let flink_path = absolute_flink_path(path)?;
+                        match std::fs::symlink_metadata(&flink_path) {
+                            Err(inspect_error) if inspect_error.kind() == ErrorKind::NotFound => {
+                                may_create = true;
+                            }
+                            Ok(_) => {}
+                            Err(inspect_error) => {
+                                return Err(Error::new(
+                                    inspect_error.kind(),
+                                    format!(
+                                        "failed to inspect shared-memory flink during retry: \
+                                         {inspect_error}"
+                                    ),
+                                ));
+                            }
+                        }
                     }
+                    if may_create {
+                        if let Some(buffer) = create(&mut may_create)? {
+                            return Ok(buffer);
+                        }
+                    }
+                    if Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    return Err(error);
                 }
                 Err(error)
-                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::NotFound)
-                        && Instant::now() < deadline =>
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
                 {
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -2139,6 +2168,92 @@ mod tests {
         let error = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap_err();
         std::fs::remove_file(&path).unwrap();
         assert_eq!(error.kind(), ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn open_or_create_retries_after_a_raced_flink_disappears() {
+        let path = mk_path("raced_flink_disappears");
+        let mut creator: TypedRingBuffer<u64, u64> = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .create_typed(&path)
+            .unwrap();
+
+        // Keep a dangling flink so the first open sees ENOENT from shm_open
+        // and the first create attempt loses to the still-present pathname.
+        creator.flink_path.take();
+        drop(creator);
+
+        let c_path = std::ffi::CString::new(path.clone()).unwrap();
+        // SAFETY: flags are valid and the returned descriptor is checked.
+        let inotify_fd = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        assert!(
+            inotify_fd >= 0,
+            "inotify_init1 failed: {}",
+            Error::last_os_error()
+        );
+        // SAFETY: `c_path` is NUL-terminated and lives through this call.
+        let watch = unsafe { libc::inotify_add_watch(inotify_fd, c_path.as_ptr(), libc::IN_OPEN) };
+        assert!(
+            watch >= 0,
+            "inotify_add_watch failed: {}",
+            Error::last_os_error()
+        );
+
+        let remove_path = path.clone();
+        let remover = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut open_events = 0;
+            let mut bytes = [0u8; 512];
+            while Instant::now() < deadline {
+                // SAFETY: `bytes` is valid writable storage and `inotify_fd`
+                // remains owned by this thread until the explicit close.
+                let read =
+                    unsafe { libc::read(inotify_fd, bytes.as_mut_ptr().cast(), bytes.len()) };
+                if read > 0 {
+                    let mut offset = 0;
+                    while offset + size_of::<libc::inotify_event>() <= read as usize {
+                        // SAFETY: the bounds check covers the fixed event
+                        // header; inotify records may be unaligned.
+                        let event = unsafe {
+                            bytes
+                                .as_ptr()
+                                .add(offset)
+                                .cast::<libc::inotify_event>()
+                                .read_unaligned()
+                        };
+                        if event.mask & libc::IN_OPEN != 0 {
+                            open_events += 1;
+                        }
+                        offset += size_of::<libc::inotify_event>() + event.len as usize;
+                    }
+                    if open_events >= 2 {
+                        std::fs::remove_file(&remove_path).unwrap();
+                        // SAFETY: this thread exclusively owns the descriptor.
+                        unsafe { libc::close(inotify_fd) };
+                        return;
+                    }
+                } else if read < 0 {
+                    let error = Error::last_os_error();
+                    if error.kind() != ErrorKind::WouldBlock {
+                        // SAFETY: this thread exclusively owns the descriptor.
+                        unsafe { libc::close(inotify_fd) };
+                        panic!("failed to read inotify events: {error}");
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            // SAFETY: this thread exclusively owns the descriptor.
+            unsafe { libc::close(inotify_fd) };
+            panic!("open_or_create did not retry the dangling flink in time");
+        });
+
+        let replacement = SharedRingBufferOptions::new()
+            .adaptive_poll_spins(0)
+            .open_or_create_typed::<u64, u64>(&path);
+        remover.join().unwrap();
+
+        let replacement = replacement.unwrap();
+        assert!(replacement.is_creator());
     }
 
     #[test]
