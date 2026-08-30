@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 /// Icon file resolved for one application identity.
@@ -54,6 +55,24 @@ impl AppIcon {
 
 /// Image extensions a renderer in this workspace can decode.
 const RASTER_EXTENSIONS: [&str; 2] = ["png", "webp"];
+
+/// A desktop entry is configuration, not an arbitrary document. This is well
+/// above the size of ordinary translated entries while keeping a malformed
+/// XDG tree out of the bar's frame path.
+const MAX_DESKTOP_ENTRY_BYTES: usize = 256 * 1024;
+
+/// The StartupWMClass fallback is intentionally bounded: XDG data roots are
+/// user controlled and resolving one focused application must not walk an
+/// unbounded directory or consume an unbounded aggregate amount of input.
+const MAX_DESKTOP_SCAN_ENTRIES: usize = 4_096;
+const MAX_DESKTOP_SCAN_BYTES: usize = 8 * 1024 * 1024;
+
+/// Search collections ultimately originate in environment variables or host
+/// configuration. Keep every nested walk finite even when those inputs are
+/// pathological.
+const MAX_ICON_SEARCH_ROOTS: usize = 64;
+const MAX_PREFERRED_THEMES: usize = 16;
+const MAX_THEME_SIZE_DIRECTORIES: usize = 256;
 
 /// Directory holding one theme's icons at one size.
 ///
@@ -236,27 +255,44 @@ impl AppIconResolver {
 
     /// Contents of the desktop entry describing `app_id`.
     fn desktop_entry_for(&self, app_id: &str) -> Option<String> {
-        for directory in &self.paths.applications {
+        let mut remaining_bytes = MAX_DESKTOP_SCAN_BYTES;
+        for directory in self.paths.applications.iter().take(MAX_ICON_SEARCH_ROOTS) {
+            if remaining_bytes == 0 {
+                break;
+            }
             for name in entry_file_candidates(app_id) {
-                if let Ok(text) = std::fs::read_to_string(directory.join(&name)) {
+                if let Some(text) =
+                    read_desktop_entry_with_budget(&directory.join(&name), &mut remaining_bytes)
+                {
                     return Some(text);
                 }
             }
         }
         // Nothing is named after the window's class, so fall back to the one
-        // field written precisely for this: `StartupWMClass`. This reads every
-        // entry in the directory, which is why the result — including "none" —
-        // is cached by the caller.
-        for directory in &self.paths.applications {
+        // field written precisely for this: `StartupWMClass`. This is the
+        // expensive bounded scan, which is why the result — including "none"
+        // — is cached by the caller.
+        let mut remaining_entries = MAX_DESKTOP_SCAN_ENTRIES;
+        for directory in self.paths.applications.iter().take(MAX_ICON_SEARCH_ROOTS) {
+            if remaining_entries == 0 || remaining_bytes == 0 {
+                break;
+            }
             let Ok(entries) = std::fs::read_dir(directory) else {
                 continue;
             };
-            for entry in entries.flatten() {
+            for entry in entries.take(remaining_entries) {
+                remaining_entries -= 1;
+                let Ok(entry) = entry else {
+                    continue;
+                };
                 let path = entry.path();
                 if path.extension() != Some(OsStr::new("desktop")) {
                     continue;
                 }
-                let Ok(text) = std::fs::read_to_string(&path) else {
+                if remaining_bytes == 0 {
+                    break;
+                }
+                let Some(text) = read_desktop_entry_with_budget(&path, &mut remaining_bytes) else {
                     continue;
                 };
                 if desktop_entry_startup_wm_class(&text)
@@ -288,18 +324,19 @@ impl AppIconResolver {
             .paths
             .preferred_themes
             .iter()
+            .take(MAX_PREFERRED_THEMES)
             .map(String::as_str)
             .filter(|theme| is_single_path_component(theme))
             .chain(["hicolor"]);
         for theme in themes {
-            for root in &self.paths.themes {
+            for root in self.paths.themes.iter().take(MAX_ICON_SEARCH_ROOTS) {
                 if let Some(found) = self.themed_icon(&root.join(theme), icon) {
                     return Some(found);
                 }
             }
         }
 
-        for directory in &self.paths.flat {
+        for directory in self.paths.flat.iter().take(MAX_ICON_SEARCH_ROOTS) {
             for extension in RASTER_EXTENSIONS {
                 let path = directory.join(format!("{icon}.{extension}"));
                 if path.is_file() {
@@ -337,6 +374,35 @@ impl AppIconResolver {
     }
 }
 
+/// Read a regular UTF-8 desktop entry without allowing a device, socket, FIFO
+/// or oversized file to turn synchronous icon lookup into unbounded I/O.
+fn read_desktop_entry_with_budget(path: &Path, remaining: &mut usize) -> Option<String> {
+    let limit = (*remaining).min(MAX_DESKTOP_ENTRY_BYTES);
+    if limit == 0 {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return None;
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    // Re-check the opened descriptor so a replacement with another regular
+    // file cannot bypass the size bound between the pathname checks.
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() || opened.len() > limit as u64 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    let read = file.take(limit as u64 + 1).read_to_end(&mut bytes);
+    *remaining = remaining.saturating_sub(bytes.len());
+    read.ok()?;
+    if bytes.len() > limit {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// One `48x48`-style directory inside a theme.
 struct ThemeSize {
     directory: String,
@@ -349,6 +415,7 @@ fn sizes_in(theme: &Path) -> Vec<ThemeSize> {
         return Vec::new();
     };
     let mut sizes: Vec<ThemeSize> = entries
+        .take(MAX_THEME_SIZE_DIRECTORIES)
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -667,6 +734,53 @@ Icon=vscode-new-window
 
         let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
         assert_eq!(resolver.resolve("unsafe"), None);
+    }
+
+    #[test]
+    fn oversized_desktop_entries_are_not_read_into_the_bar() {
+        let tree = Tree::new("oversized_entry");
+        let mut entry = String::from("[Desktop Entry]\nIcon=secret\n");
+        entry.push_str(&" ".repeat(MAX_DESKTOP_ENTRY_BYTES));
+        tree.file("applications/huge.desktop", &entry);
+        tree.file("pixmaps/secret.png", "icon");
+
+        let mut resolver = AppIconResolver::with_paths(tree.paths(), 24);
+        assert_eq!(resolver.resolve("huge"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_desktop_entries_are_rejected_before_reading() {
+        let tree = Tree::new("special_entry");
+        let path = tree.0.join("applications/socket.desktop");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let mut budget = MAX_DESKTOP_ENTRY_BYTES;
+
+        assert_eq!(read_desktop_entry_with_budget(&path, &mut budget), None);
+        drop(listener);
+    }
+
+    #[test]
+    fn application_root_search_has_one_global_bound() {
+        let tree = Tree::new("bounded_roots");
+        let applications: Vec<_> = (0..=MAX_ICON_SEARCH_ROOTS)
+            .map(|index| tree.0.join(format!("applications-{index}")))
+            .collect();
+        let ignored = applications.last().unwrap().join("bounded.desktop");
+        std::fs::create_dir_all(ignored.parent().unwrap()).unwrap();
+        std::fs::write(&ignored, "[Desktop Entry]\nIcon=secret\n").unwrap();
+        let wanted = tree.file("pixmaps/secret.png", "icon");
+        let paths = IconSearchPaths::new(
+            applications,
+            Vec::new(),
+            vec![tree.0.join("pixmaps")],
+            Vec::new(),
+        );
+
+        let mut resolver = AppIconResolver::with_paths(paths, 24);
+        assert_eq!(resolver.resolve("bounded"), None);
+        assert!(wanted.is_file(), "the ignored entry's icon must exist");
     }
 
     #[test]
