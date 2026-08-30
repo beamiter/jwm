@@ -64,10 +64,11 @@ fn command_output_bounded_with_stdio(
     }
     command
         .stderr(Stdio::piped())
-        // Kill descendants with a timed-out helper so none can keep a capture
-        // pipe open after the command itself has gone away.
+        // Keep every descendant in one group so none can outlive a bounded
+        // helper or keep a capture pipe open after the direct child exits.
         .process_group(0);
     let mut child = command.spawn()?;
+    let child_id = child.id();
     let mut stdout = if capture_stdout {
         let Some(stdout) = child.stdout.take() else {
             terminate_child_group(&mut child);
@@ -94,34 +95,42 @@ fn command_output_bounded_with_stdio(
     let started = Instant::now();
     let mut stdout_bytes = Vec::with_capacity(output_limit.min(4096));
     let mut stderr_bytes = Vec::with_capacity(output_limit.min(4096));
+    let mut stdout_eof = !capture_stdout;
+    let mut stderr_eof = false;
+    let mut status = None;
     let result = (|| {
         loop {
-            let stdout_oversized = match &mut stdout {
-                Some(stdout) => drain_available(stdout, &mut stdout_bytes, output_limit)?,
-                None => false,
-            };
-            let oversized =
-                stdout_oversized | drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
-            if oversized {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("helper output exceeded {output_limit} bytes"),
-                ));
+            if !stdout_eof {
+                let stdout = stdout
+                    .as_mut()
+                    .expect("captured stdout remains available until EOF");
+                let drain = drain_available(stdout, &mut stdout_bytes, output_limit)?;
+                stdout_eof = drain.eof;
+                if drain.oversized {
+                    return Err(output_too_large(output_limit));
+                }
+            }
+            if !stderr_eof {
+                let drain = drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+                stderr_eof = drain.eof;
+                if drain.oversized {
+                    return Err(output_too_large(output_limit));
+                }
             }
 
-            if let Some(status) = child.try_wait()? {
-                let stdout_oversized = match &mut stdout {
-                    Some(stdout) => drain_available(stdout, &mut stdout_bytes, output_limit)?,
-                    None => false,
-                };
-                let oversized = stdout_oversized
-                    | drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
-                if oversized {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("helper output exceeded {output_limit} bytes"),
-                    ));
+            if status.is_none() {
+                status = child.try_wait()?;
+                if status.is_some() {
+                    // Any process still holding these pipes is a descendant
+                    // of an already-completed synchronous helper. Stop it,
+                    // then keep draining until both pipes reach EOF.
+                    kill_process_group(child_id);
                 }
+            }
+            if stdout_eof
+                && stderr_eof
+                && let Some(status) = status
+            {
                 return Ok(Output {
                     status,
                     stdout: stdout_bytes,
@@ -145,6 +154,13 @@ fn command_output_bounded_with_stdio(
     result
 }
 
+fn output_too_large(limit: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("helper output exceeded {limit} bytes"),
+    )
+}
+
 fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
@@ -157,38 +173,60 @@ fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
 }
 
 /// Drain enough each poll that a noisy helper cannot fill its pipes, while
-/// retaining at most `limit` bytes for parsing and error reporting. Returns
-/// whether input beyond the limit was observed.
+/// retaining at most `limit` bytes for parsing and error reporting.
+#[derive(Debug, Clone, Copy)]
+struct DrainResult {
+    eof: bool,
+    oversized: bool,
+}
+
 fn drain_available(
     source: &mut impl Read,
     retained: &mut Vec<u8>,
     limit: usize,
-) -> io::Result<bool> {
+) -> io::Result<DrainResult> {
     let mut drained = 0;
     let mut oversized = false;
     let mut chunk = [0_u8; 4096];
     while drained < MAX_DRAIN_BYTES_PER_POLL {
         let request = chunk.len().min(MAX_DRAIN_BYTES_PER_POLL - drained);
         match source.read(&mut chunk[..request]) {
-            Ok(0) => return Ok(oversized),
+            Ok(0) => {
+                return Ok(DrainResult {
+                    eof: true,
+                    oversized,
+                });
+            }
             Ok(read) => {
                 drained += read;
                 let retain = read.min(limit.saturating_sub(retained.len()));
                 retained.extend_from_slice(&chunk[..retain]);
                 oversized |= retain < read;
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(oversized),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(DrainResult {
+                    eof: false,
+                    oversized,
+                });
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
     }
-    Ok(oversized)
+    Ok(DrainResult {
+        eof: false,
+        oversized,
+    })
+}
+
+fn kill_process_group(child_id: u32) {
+    if let Ok(process_group) = i32::try_from(child_id) {
+        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    }
 }
 
 fn terminate_child_group(child: &mut std::process::Child) {
-    if let Ok(process_group) = i32::try_from(child.id()) {
-        let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
-    }
+    kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -218,5 +256,52 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "helper was not terminated promptly"
         );
+    }
+
+    #[test]
+    fn helper_drains_more_than_one_poll_of_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "yes x | head -c 196608"]);
+        let output = command_output_bounded(&mut command, Duration::from_secs(2), 256 * 1024)
+            .expect("bounded helper output should be complete");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 196_608);
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn completed_helper_stops_descendants_holding_capture_pipes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10 & printf %s \"$!\""]);
+        let output = command_output_bounded(&mut command, Duration::from_secs(1), 64)
+            .expect("the direct helper completed successfully");
+        let descendant = String::from_utf8(output.stdout)
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+
+        for _ in 0..50 {
+            if !process_can_run(descendant) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = unsafe { libc::kill(descendant as i32, libc::SIGKILL) };
+        panic!("helper descendant {descendant} survived its process group");
+    }
+
+    fn process_can_run(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        let Some(comm_end) = stat.iter().rposition(|byte| *byte == b')') else {
+            return true;
+        };
+        !matches!(
+            stat.get(comm_end + 1..)
+                .and_then(|suffix| suffix.iter().find(|byte| !byte.is_ascii_whitespace())),
+            Some(b'Z' | b'X' | b'x')
+        )
     }
 }
