@@ -51,24 +51,28 @@ where
         return Some(configured.to_owned());
     }
 
-    let mut nerd_families: Vec<&str> = available
-        .into_iter()
-        .filter(|family| family.to_lowercase().contains(NERD_FONT_MARKER))
-        .collect();
-    if nerd_families.is_empty() {
-        return None;
+    let mut preferred: Option<(usize, &str)> = None;
+    let mut fallback: Option<&str> = None;
+    for family in available {
+        if !is_nerd_font_family(family) {
+            continue;
+        }
+        if fallback.is_none_or(|current| family < current) {
+            fallback = Some(family);
+        }
+        let Some(rank) = PREFERRED_ICON_FAMILIES
+            .iter()
+            .position(|candidate| family.eq_ignore_ascii_case(candidate))
+        else {
+            continue;
+        };
+        if preferred.is_none_or(|current| (rank, family) < current) {
+            preferred = Some((rank, family));
+        }
     }
-    nerd_families.sort_unstable();
-
-    PREFERRED_ICON_FAMILIES
-        .iter()
-        .find_map(|preferred| {
-            nerd_families
-                .iter()
-                .find(|family| family.eq_ignore_ascii_case(preferred))
-                .copied()
-        })
-        .or_else(|| nerd_families.first().copied())
+    preferred
+        .map(|(_, family)| family)
+        .or(fallback)
         .map(str::to_owned)
 }
 
@@ -90,15 +94,23 @@ pub fn select_installed_nerd_font_family<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
-    let available: Vec<&str> = available.into_iter().collect();
-    let selected = select_icon_family(available.iter().copied(), configured)?;
-    if !selected.to_lowercase().contains(NERD_FONT_MARKER) {
-        return None;
+    if let Some(configured) = configured.map(str::trim).filter(|name| !name.is_empty()) {
+        if !is_nerd_font_family(configured) {
+            return None;
+        }
+        return available
+            .into_iter()
+            .find(|family| family.eq_ignore_ascii_case(configured))
+            .map(str::to_owned);
     }
-    available
-        .into_iter()
-        .find(|family| family.eq_ignore_ascii_case(&selected))
-        .map(str::to_owned)
+    select_icon_family(available, None)
+}
+
+fn is_nerd_font_family(family: &str) -> bool {
+    family
+        .as_bytes()
+        .windows(NERD_FONT_MARKER.len())
+        .any(|window| window.eq_ignore_ascii_case(NERD_FONT_MARKER.as_bytes()))
 }
 
 /// Append `icon` to a Pango family list, keeping `base` in front.
@@ -244,6 +256,28 @@ mod tests {
         );
         assert_eq!(
             select_installed_nerd_font_family(INSTALLED, None),
+            Some("Symbols Nerd Font Mono".to_owned())
+        );
+    }
+
+    #[test]
+    fn installed_selection_does_not_allocate_from_an_iterators_size_hint() {
+        struct MisleadingFamilies(bool);
+
+        impl Iterator for MisleadingFamilies {
+            type Item = &'static str;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                (!std::mem::replace(&mut self.0, true)).then_some("Symbols Nerd Font Mono")
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (usize::MAX, Some(usize::MAX))
+            }
+        }
+
+        assert_eq!(
+            select_installed_nerd_font_family(MisleadingFamilies(false), None),
             Some("Symbols Nerd Font Mono".to_owned())
         );
     }
