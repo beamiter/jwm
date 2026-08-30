@@ -11,11 +11,10 @@
 //! percentage rather than a timer, so a laptop that hovers at 19% is warned
 //! once instead of every poll.
 
-use std::fs::OpenOptions;
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
+
+use super::sysfs::{MAX_ATTRIBUTE_BYTES, bounded_paths, read_text_bounded};
 
 /// Warn at these levels, highest first. Crossing one downwards while
 /// discharging posts one notification.
@@ -23,7 +22,6 @@ const WARN_THRESHOLDS: [u8; 3] = [20, 10, 5];
 /// Percentage points a battery must climb back above a threshold before that
 /// threshold can warn again, so noise around the line does not repeat.
 const REARM_HYSTERESIS: u8 = 5;
-const MAX_SYSFS_ATTRIBUTE_BYTES: u64 = 4 * 1024;
 const MAX_POWER_SUPPLY_ENTRIES: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,31 +149,8 @@ pub fn estimate_minutes(
         .filter(|minutes| *minutes <= 60 * 48)
 }
 
-fn read_regular_text_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Option<String> {
-    let file = OpenOptions::new()
-        .read(true)
-        // A replaced final component must not redirect the probe or block the
-        // window-manager update loop while opening a FIFO/device.
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-
-    let mut bytes = Vec::with_capacity(usize::try_from(max_bytes.min(4096)).ok()?);
-    file.take(max_bytes.checked_add(1)?)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if u64::try_from(bytes.len()).ok()? > max_bytes {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
-}
-
 fn read_field(dir: &Path, name: &str) -> Option<String> {
-    read_regular_text_bounded(dir.join(name), MAX_SYSFS_ATTRIBUTE_BYTES)
-        .map(|value| value.trim().to_string())
+    read_text_bounded(dir.join(name), MAX_ATTRIBUTE_BYTES).map(|value| value.trim().to_string())
 }
 
 fn read_number(dir: &Path, name: &str) -> Option<u64> {
@@ -212,13 +187,7 @@ pub fn read_battery_in(dir: &Path) -> Option<BatteryState> {
 /// that the shell has no use for.
 #[must_use]
 pub fn read_battery() -> Option<BatteryState> {
-    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    let mut dirs: Vec<PathBuf> = entries
-        .take(MAX_POWER_SUPPLY_ENTRIES)
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
-    dirs.sort();
+    let dirs = bounded_paths("/sys/class/power_supply", MAX_POWER_SUPPLY_ENTRIES)?;
     dirs.iter().find_map(|dir| read_battery_in(dir))
 }
 
@@ -287,11 +256,11 @@ fn profile_name(value: &str) -> Option<&str> {
 }
 
 fn read_profile_text(path: impl AsRef<Path>) -> Option<String> {
-    read_profile_text_bounded(path, MAX_SYSFS_ATTRIBUTE_BYTES)
+    read_profile_text_bounded(path, MAX_ATTRIBUTE_BYTES)
 }
 
 fn read_profile_text_bounded(path: impl AsRef<Path>, max_bytes: u64) -> Option<String> {
-    read_regular_text_bounded(path, max_bytes)
+    read_text_bounded(path, max_bytes)
 }
 
 fn parse_profile_choices(output: &str) -> Vec<String> {
@@ -701,22 +670,22 @@ mod tests {
         let oversized = dir.join("oversized");
         std::fs::write(
             &oversized,
-            vec![b'x'; usize::try_from(MAX_SYSFS_ATTRIBUTE_BYTES).unwrap() + 1],
+            vec![b'x'; usize::try_from(MAX_ATTRIBUTE_BYTES).unwrap() + 1],
         )
         .expect("write oversized attribute");
-        assert!(read_regular_text_bounded(&oversized, MAX_SYSFS_ATTRIBUTE_BYTES).is_none());
+        assert!(read_text_bounded(&oversized, MAX_ATTRIBUTE_BYTES).is_none());
 
         let target = dir.join("target");
         std::fs::write(&target, "Battery\n").expect("write symlink target");
         let symlink = dir.join("symlink");
         std::os::unix::fs::symlink(&target, &symlink).expect("create symlink");
-        assert!(read_regular_text_bounded(&symlink, MAX_SYSFS_ATTRIBUTE_BYTES).is_none());
+        assert!(read_text_bounded(&symlink, MAX_ATTRIBUTE_BYTES).is_none());
 
         let fifo = dir.join("fifo");
         let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
         let started = std::time::Instant::now();
-        assert!(read_regular_text_bounded(&fifo, MAX_SYSFS_ATTRIBUTE_BYTES).is_none());
+        assert!(read_text_bounded(&fifo, MAX_ATTRIBUTE_BYTES).is_none());
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "a power-supply FIFO blocked the window-manager update loop"

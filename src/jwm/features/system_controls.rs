@@ -7,8 +7,11 @@
 //! three. All output parsing lives in pure functions so it stays testable
 //! without the tools installed.
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use super::sysfs::{bounded_paths, read_attribute};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioState {
@@ -618,26 +621,44 @@ pub fn device_control_row(direction: AudioDirection, device: Option<&AudioDevice
 // Brightness
 // ---------------------------------------------------------------------------
 
-fn sysfs_backlight() -> Option<std::path::PathBuf> {
-    std::fs::read_dir("/sys/class/backlight")
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
+const MAX_BACKLIGHT_ENTRIES: usize = 64;
+
+fn sysfs_backlight_in(root: &Path) -> Option<PathBuf> {
+    bounded_paths(root, MAX_BACKLIGHT_ENTRIES)?
+        .into_iter()
         .next()
+}
+
+fn sysfs_backlight() -> Option<PathBuf> {
+    sysfs_backlight_in(Path::new("/sys/class/backlight"))
+}
+
+fn brightness_percent_from_raw(current: u32, max: u32) -> Option<u8> {
+    if max == 0 {
+        return None;
+    }
+    let max = u64::from(max);
+    let rounded = (u64::from(current) * 100 + max / 2) / max;
+    Some(rounded.min(100) as u8)
+}
+
+fn raw_brightness_for_percent(percent: u8, max: u32) -> Option<u32> {
+    if max == 0 {
+        return None;
+    }
+    let raw = (u64::from(percent.min(100)) * u64::from(max) + 50) / 100;
+    u32::try_from(raw).ok()
+}
+
+fn sysfs_brightness_percent_in(dir: &Path) -> Option<u8> {
+    let read_u32 =
+        |name: &str| -> Option<u32> { read_attribute(dir.join(name))?.trim().parse().ok() };
+    brightness_percent_from_raw(read_u32("brightness")?, read_u32("max_brightness")?)
 }
 
 fn sysfs_brightness_percent() -> Option<u8> {
     let dir = sysfs_backlight()?;
-    let read_u32 = |name: &str| -> Option<u32> {
-        std::fs::read_to_string(dir.join(name))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
-    };
-    let current = read_u32("brightness")?;
-    let max = read_u32("max_brightness")?.max(1);
-    Some(((current * 100 + max / 2) / max).min(100) as u8)
+    sysfs_brightness_percent_in(&dir)
 }
 
 /// Every `brightnessctl` call is pinned to the backlight class.
@@ -695,18 +716,21 @@ pub fn brightness_percent() -> Option<u8> {
     }
 }
 
-fn sysfs_set_percent(percent: u8) -> Option<u8> {
-    let dir = sysfs_backlight()?;
-    let max: u32 = std::fs::read_to_string(dir.join("max_brightness"))
-        .ok()?
+fn sysfs_set_percent_in(dir: &Path, percent: u8) -> Option<u8> {
+    let max: u32 = read_attribute(dir.join("max_brightness"))?
         .trim()
         .parse()
         .ok()?;
-    let raw = (u32::from(percent.min(100)) * max + 50) / 100;
+    let raw = raw_brightness_for_percent(percent, max)?;
     // Direct sysfs writes need udev backlight permissions; failure falls
     // through to None and the OSD simply is not shown.
     std::fs::write(dir.join("brightness"), raw.to_string()).ok()?;
-    sysfs_brightness_percent()
+    sysfs_brightness_percent_in(dir)
+}
+
+fn sysfs_set_percent(percent: u8) -> Option<u8> {
+    let dir = sysfs_backlight()?;
+    sysfs_set_percent_in(&dir, percent)
 }
 
 /// Adjust the backlight by `delta` percentage points, returning the result.
@@ -998,6 +1022,36 @@ Source #51
             Some(50)
         );
         assert_eq!(parse_brightnessctl("no percent here"), None);
+    }
+
+    #[test]
+    fn sysfs_backlight_probes_are_bounded_deterministic_and_overflow_safe() {
+        let root = std::env::temp_dir().join(format!(
+            "jwm-backlight-bound-{}-{:016x}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let first = root.join("a-panel");
+        let second = root.join("z-panel");
+        std::fs::create_dir_all(&first).expect("create first backlight");
+        std::fs::create_dir_all(&second).expect("create second backlight");
+        assert_eq!(sysfs_backlight_in(&root).as_deref(), Some(first.as_path()));
+
+        std::fs::write(first.join("brightness"), u32::MAX.to_string()).expect("write brightness");
+        std::fs::write(first.join("max_brightness"), u32::MAX.to_string())
+            .expect("write max brightness");
+        assert_eq!(sysfs_brightness_percent_in(&first), Some(100));
+        assert_eq!(sysfs_set_percent_in(&first, 50), Some(50));
+        assert_eq!(
+            std::fs::read_to_string(first.join("brightness")).unwrap(),
+            "2147483648"
+        );
+
+        std::fs::write(first.join("max_brightness"), "0").expect("write invalid maximum");
+        assert_eq!(sysfs_brightness_percent_in(&first), None);
+        assert_eq!(sysfs_set_percent_in(&first, 50), None);
+
+        std::fs::remove_dir_all(root).expect("remove temporary backlights");
     }
 
     #[test]

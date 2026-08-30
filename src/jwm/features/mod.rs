@@ -35,6 +35,7 @@ pub mod resources;
 pub mod screenshot;
 pub mod session;
 pub mod shell_hub;
+mod sysfs;
 pub mod system_controls;
 pub mod system_ui;
 pub mod toggles;
