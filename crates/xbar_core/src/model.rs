@@ -275,6 +275,9 @@ pub const MINIMIZED_WINDOW_FLAG_URGENT: u32 = 1 << 1;
 /// Protocol-aligned upper bound retained even without the shared feature.
 pub const MAX_MODEL_MINIMIZED_WINDOWS: usize = 16;
 const MAX_WM_MINIMIZED_INPUTS: usize = MAX_MODEL_MINIMIZED_WINDOWS * 16;
+const MAX_MODEL_LAYOUT_SYMBOL_BYTES: usize = 64;
+const MAX_MODEL_WINDOW_TITLE_BYTES: usize = 4 * 1024;
+const MAX_MODEL_APP_ID_BYTES: usize = 255;
 
 /// One window currently collected by the bar's minimized-window shelf.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1300,13 +1303,25 @@ fn normalize_wm_tags(tags: Vec<TagState>, tag_count: usize) -> Vec<TagState> {
     normalized
 }
 
+fn bounded_model_string(value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes && value.capacity() <= max_bytes {
+        return value;
+    }
+
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
 fn normalize_minimized_windows(
     windows: Vec<MinimizedWindow>,
     upstream_overflow: bool,
 ) -> (Vec<MinimizedWindow>, bool) {
     let mut normalized = Vec::with_capacity(windows.len().min(MAX_MODEL_MINIMIZED_WINDOWS));
     let mut overflow = upstream_overflow;
-    for (input_index, window) in windows.into_iter().enumerate() {
+    for (input_index, mut window) in windows.into_iter().enumerate() {
         if input_index == MAX_WM_MINIMIZED_INPUTS {
             overflow = true;
             break;
@@ -1322,6 +1337,8 @@ fn normalize_minimized_windows(
             overflow = true;
             break;
         }
+        window.title = bounded_model_string(window.title, MAX_MODEL_WINDOW_TITLE_BYTES);
+        window.app_id = bounded_model_string(window.app_id, MAX_MODEL_APP_ID_BYTES);
         normalized.push(window);
     }
     (normalized, overflow)
@@ -1513,6 +1530,12 @@ impl BarModel {
         snapshot.tags = normalize_wm_tags(snapshot.tags, self.config.tag_count);
         (snapshot.minimized_windows, snapshot.minimized_overflow) =
             normalize_minimized_windows(snapshot.minimized_windows, snapshot.minimized_overflow);
+        snapshot.layout_symbol =
+            bounded_model_string(snapshot.layout_symbol, MAX_MODEL_LAYOUT_SYMBOL_BYTES);
+        snapshot.client_name =
+            bounded_model_string(snapshot.client_name, MAX_MODEL_WINDOW_TITLE_BYTES);
+        snapshot.client_app_id =
+            bounded_model_string(snapshot.client_app_id, MAX_MODEL_APP_ID_BYTES);
 
         let mut dirty = DirtyBits::default();
         let next_active = snapshot
@@ -2267,6 +2290,44 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].title, "duplicate-0");
         assert!(overflow, "unexamined input must be reported as truncated");
+    }
+
+    #[test]
+    fn wm_snapshot_normalization_bounds_retained_text_and_capacity() {
+        let mut model = BarModel::default();
+        let unicode_title = "€".repeat(MAX_MODEL_WINDOW_TITLE_BYTES / 3 + 10);
+        let app_id = "a".repeat(MAX_MODEL_APP_ID_BYTES + 10);
+        let mut layout_symbol = String::with_capacity(1_000_000);
+        layout_symbol.push_str("[M]");
+
+        model
+            .update(BarEvent::WindowManager(WmSnapshot {
+                layout_symbol,
+                client_name: unicode_title.clone(),
+                client_app_id: app_id.clone(),
+                minimized_windows: vec![MinimizedWindow {
+                    token: WindowToken(1),
+                    title: unicode_title,
+                    app_id,
+                    ..MinimizedWindow::default()
+                }],
+                ..WmSnapshot::default()
+            }))
+            .unwrap();
+
+        let view = model.view();
+        assert_eq!(view.layout_symbol, "[M]");
+        assert!(model.layout_symbol.capacity() <= MAX_MODEL_LAYOUT_SYMBOL_BYTES);
+        assert_eq!(view.client_name.len(), MAX_MODEL_WINDOW_TITLE_BYTES - 1);
+        assert_eq!(view.client_app_id.len(), MAX_MODEL_APP_ID_BYTES);
+        assert_eq!(
+            view.minimized_windows[0].title.len(),
+            MAX_MODEL_WINDOW_TITLE_BYTES - 1
+        );
+        assert_eq!(
+            view.minimized_windows[0].app_id.len(),
+            MAX_MODEL_APP_ID_BYTES
+        );
     }
 
     #[test]
