@@ -364,6 +364,25 @@ fn validate_spawn_argument(
     }
 }
 
+fn validate_finite_argument(
+    diagnostics: &mut ConfigDiagnostics,
+    path: &str,
+    argument: &ArgumentConfig,
+) -> bool {
+    let ArgumentConfig::Float(value) = argument else {
+        return true;
+    };
+    if value.is_finite() {
+        return true;
+    }
+    diagnostics.error(
+        path,
+        format!("floating-point argument {value} is not finite"),
+        Some("use a finite numeric value".into()),
+    );
+    false
+}
+
 fn validate_binding(
     config: &Config,
     diagnostics: &mut ConfigDiagnostics,
@@ -393,8 +412,12 @@ fn validate_binding(
             None,
         );
     }
-    let argument_is_valid = binding.function != "spawn"
-        || validate_spawn_argument(diagnostics, &format!("{path}.argument"), &binding.argument);
+    let argument_path = format!("{path}.argument");
+    let argument_is_finite =
+        validate_finite_argument(diagnostics, &argument_path, &binding.argument);
+    let argument_is_valid = argument_is_finite
+        && (binding.function != "spawn"
+            || validate_spawn_argument(diagnostics, &argument_path, &binding.argument));
 
     // These are the same gates used by `Config::convert_key_config`.
     // Invalid entries never reach the runtime binding list and therefore
@@ -1289,7 +1312,12 @@ impl Config {
                     None,
                 );
             }
-            if button.function == "spawn" {
+            let argument_is_finite = validate_finite_argument(
+                &mut diagnostics,
+                &format!("{path}.argument"),
+                &button.argument,
+            );
+            if button.function == "spawn" && argument_is_finite {
                 validate_spawn_argument(
                     &mut diagnostics,
                     &format!("{path}.argument"),
@@ -1622,6 +1650,28 @@ mod tests {
                 .any(|issue| issue.message.contains("sequence key")
                     && issue.message.contains("duplicates"))
         );
+    }
+
+    #[test]
+    fn non_finite_shortcut_arguments_are_configuration_errors() {
+        let mut config = Config::default();
+        let mut key = binding(&["Alt"], "F8", "setcfact");
+        key.argument = ArgumentConfig::Float(f32::NAN);
+        config.inner.keybindings.keys = vec![key];
+        config.inner.mouse_bindings.buttons[0].argument = ArgumentConfig::Float(f32::INFINITY);
+
+        let diagnostics = config.diagnostics();
+
+        for path in [
+            "keybindings.keys[0].argument",
+            "mouse_bindings.buttons[0].argument",
+        ] {
+            assert!(diagnostics.issues().iter().any(|issue| {
+                issue.path == path
+                    && issue.level == ConfigDiagnosticLevel::Error
+                    && issue.message.contains("not finite")
+            }));
+        }
     }
 
     #[test]

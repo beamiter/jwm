@@ -410,6 +410,9 @@ pub(crate) fn scrolling_column_width_rule_for_window(
     rules.iter().find_map(|rule| {
         let (factor, pattern) = rule.split_once(':')?;
         let factor = factor.trim().parse::<f32>().ok()?;
+        if !factor.is_finite() {
+            return None;
+        }
         let pattern = pattern.trim();
         if pattern.is_empty() {
             return None;
@@ -458,5 +461,20 @@ mod tests {
             scrolling_column_width_rule_for_window("", "Tiny", "", &["0.01:Tiny".to_string()]),
             Some(0.25)
         );
+    }
+
+    #[test]
+    fn scrolling_column_width_rule_rejects_non_finite_factors() {
+        for factor in ["NaN", "inf", "-inf"] {
+            assert_eq!(
+                scrolling_column_width_rule_for_window(
+                    "",
+                    "Browser",
+                    "",
+                    &[format!("{factor}:Browser")],
+                ),
+                None
+            );
+        }
     }
 }

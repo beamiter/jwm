@@ -10,6 +10,18 @@ use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::types::WMArgEnum;
 use log::{info, warn};
 
+fn adjusted_client_factor(current: f32, delta: f32) -> Option<f32> {
+    if !current.is_finite() || !delta.is_finite() {
+        return None;
+    }
+    let candidate = if delta.abs() < 0.0001 {
+        1.0
+    } else {
+        current + delta
+    };
+    (candidate.is_finite() && (0.25..=4.0).contains(&candidate)).then_some(candidate)
+}
+
 impl Jwm {
     pub(crate) fn can_focus_switch(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let sel_client_key = self.get_selected_client_key().ok_or("No selected client")?;
@@ -213,6 +225,9 @@ impl Jwm {
         // In scrolling layout, Alt+Shift+h/l focuses columns
         if self.is_scrolling_layout() {
             if let WMArgEnum::Float(f) = arg {
+                if !f.is_finite() {
+                    return Ok(());
+                }
                 let dir = if *f > 0.0 { -1 } else { 1 };
                 return self.scrolling_focus_column(backend, &WMArgEnum::Int(dir));
             }
@@ -230,15 +245,9 @@ impl Jwm {
                 return Ok(());
             };
 
-            let new_fact = if f0.abs() < 0.0001 {
-                1.0
-            } else {
-                f0 + current_fact
-            };
-
-            if new_fact < 0.25 || new_fact > 4.0 {
+            let Some(new_fact) = adjusted_client_factor(current_fact, f0) else {
                 return Ok(());
-            }
+            };
 
             if let Some(client) = self.state.clients.get_mut(client_key) {
                 client.state.client_fact = new_fact;
@@ -983,7 +992,7 @@ impl Jwm {
 
 #[cfg(test)]
 mod tests {
-    use super::ClientKey;
+    use super::{ClientKey, adjusted_client_factor};
     use crate::Jwm;
     use slotmap::SlotMap;
 
@@ -991,6 +1000,18 @@ mod tests {
         let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
         let ks = (0..n).map(|_| sm.insert(())).collect();
         (sm, ks)
+    }
+
+    #[test]
+    fn client_factor_adjustment_rejects_non_finite_state_and_input() {
+        assert_eq!(adjusted_client_factor(1.0, 0.25), Some(1.25));
+        assert_eq!(adjusted_client_factor(2.0, 0.0), Some(1.0));
+        assert_eq!(adjusted_client_factor(1.0, f32::NAN), None);
+        assert_eq!(adjusted_client_factor(f32::NAN, 0.1), None);
+        assert_eq!(adjusted_client_factor(1.0, f32::INFINITY), None);
+        assert_eq!(adjusted_client_factor(f32::MAX, f32::MAX), None);
+        assert_eq!(adjusted_client_factor(0.25, -0.01), None);
+        assert_eq!(adjusted_client_factor(4.0, 0.01), None);
     }
 
     #[test]
