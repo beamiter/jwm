@@ -14,6 +14,7 @@ use std::{
     fmt, io,
     os::{
         fd::{AsRawFd as _, RawFd},
+        unix::ffi::OsStrExt as _,
         unix::process::CommandExt as _,
     },
     path::PathBuf,
@@ -33,6 +34,8 @@ pub use jwm_ipc::{JwmIpc, JwmIpcError};
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum bytes retained from each output stream by [`CommandRunner::output`].
 pub const DEFAULT_COMMAND_OUTPUT_LIMIT: usize = 1024 * 1024;
+/// Maximum UTF-8 byte length used for process waiter thread names.
+pub const MAX_WAITER_THREAD_NAME_BYTES: usize = 15;
 
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_DRAIN_BYTES_PER_POLL: usize = 64 * 1024;
@@ -593,8 +596,8 @@ impl PlatformEffectHandler for ProcessActionHandler {
         {
             return Self::request_jwm_screenshot(socket.as_ref());
         }
-        let command = self.command_for_effect(effect)?.clone();
-        self.launch(&command)
+        let command = self.command_for_effect(effect)?;
+        self.launch(command)
     }
 }
 
@@ -661,7 +664,37 @@ impl EffectRouter {
 }
 
 fn waiter_name(prefix: &str, program: &OsStr) -> String {
-    format!("{prefix}-{}", program.to_string_lossy())
+    let mut name = String::with_capacity(MAX_WAITER_THREAD_NAME_BYTES);
+    push_thread_name_text(&mut name, prefix);
+    if !name.is_empty()
+        && !program.as_bytes().is_empty()
+        && name.len().saturating_add(1) < MAX_WAITER_THREAD_NAME_BYTES
+    {
+        name.push('-');
+    }
+
+    // Inspect only a small prefix before lossy conversion. Invalid UTF-8 can
+    // expand to a three-byte replacement character, so four source bytes per
+    // remaining output byte are already more than enough to fill the budget.
+    let remaining = MAX_WAITER_THREAD_NAME_BYTES.saturating_sub(name.len());
+    let bytes = program.as_bytes();
+    let inspected = bytes.len().min(remaining.saturating_mul(4));
+    push_thread_name_text(&mut name, &String::from_utf8_lossy(&bytes[..inspected]));
+
+    if name.is_empty() {
+        name.push_str("xbar-wait");
+    }
+    name
+}
+
+fn push_thread_name_text(name: &mut String, text: &str) {
+    for character in text.chars() {
+        let character = if character == '\0' { '?' } else { character };
+        if name.len().saturating_add(character.len_utf8()) > MAX_WAITER_THREAD_NAME_BYTES {
+            break;
+        }
+        name.push(character);
+    }
 }
 
 fn reap_child(program: &OsStr, child: &mut Child) {
@@ -770,6 +803,26 @@ mod tests {
 
         assert!(matches!(error, ProcessActionError::Spawn { .. }));
         assert!(error.to_string().contains("failed to launch"));
+    }
+
+    #[test]
+    fn waiter_names_are_bounded_utf8_and_cannot_panic_thread_creation() {
+        let prefix = format!("{}\0ignored", "界".repeat(32));
+        let program = OsStr::new("/usr/bin/program-with-a-long-name");
+        let name = waiter_name(&prefix, program);
+
+        assert!(!name.contains('\0'));
+        assert!(name.len() <= MAX_WAITER_THREAD_NAME_BYTES);
+        assert!(name.is_char_boundary(name.len()));
+
+        let nul_name = waiter_name("w\0", OsStr::new("tool\0name"));
+        assert_eq!(nul_name, "w?-tool?name");
+        thread::Builder::new()
+            .name(nul_name)
+            .spawn(|| {})
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
