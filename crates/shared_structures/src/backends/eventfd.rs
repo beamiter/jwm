@@ -4,10 +4,10 @@
 use super::common::{RegisterOutcome, SyncBackend, WaiterGate};
 use nix::errno::Errno;
 use nix::fcntl::{fcntl, FcntlArg};
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::socket::{
-    accept4, bind, connect, listen, recvmsg, sendmsg, socket, AddressFamily, Backlog,
-    ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockType, UnixAddr,
+    accept4, bind, connect, getsockopt, listen, recvmsg, sendmsg, socket, sockopt, AddressFamily,
+    Backlog, ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockType, UnixAddr,
 };
 use nix::unistd;
 use std::ffi::CString;
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// UNIX sockaddr_un 路径上限为 108 字节
 const UNIX_SOCK_MAX: usize = 108;
@@ -132,7 +132,6 @@ impl EventFdBackend {
     }
 
     fn poll_fd(fd: BorrowedFd<'_>, timeout: Option<Duration>) -> Result<bool> {
-        use nix::poll::PollTimeout;
         let pfd = PollFd::new(fd, PollFlags::POLLIN);
         let to = timeout.map_or(PollTimeout::NONE, |d| {
             // 毫秒数向上取整：剩余不足 1ms 时截断为 0 会让尾段退化成
@@ -146,6 +145,37 @@ impl EventFdBackend {
             Ok(_) => Ok(true),
             Err(Errno::EINTR) => Err(ErrorKind::Interrupted.into()),
             Err(e) => Err(Error::other(e)),
+        }
+    }
+
+    /// Wait for one socket readiness edge without ever extending `deadline`.
+    ///
+    /// `poll(2)` can return early for a signal, and its millisecond timeout is
+    /// rounded up, so every iteration rechecks the same monotonic deadline.
+    fn poll_socket_until(fd: BorrowedFd<'_>, events: PollFlags, deadline: Instant) -> Result<bool> {
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(false);
+            }
+            let remaining = deadline - now;
+            let millis =
+                remaining.as_millis() + u128::from(remaining.subsec_nanos() % 1_000_000 != 0);
+            let timeout = PollTimeout::try_from(millis).unwrap_or(PollTimeout::MAX);
+            let mut descriptor = PollFd::new(fd, events);
+            match poll(std::slice::from_mut(&mut descriptor), timeout) {
+                Ok(0) => {
+                    if Instant::now() >= deadline {
+                        return Ok(false);
+                    }
+                }
+                Ok(_) if descriptor.revents().is_some_and(|ready| !ready.is_empty()) => {
+                    return Ok(true);
+                }
+                Ok(_) => {}
+                Err(Errno::EINTR) => continue,
+                Err(error) => return Err(Error::other(error)),
+            }
         }
     }
 
@@ -366,42 +396,94 @@ impl EventFdBackend {
     }
 
     fn receive_fds_from_server(sock_path: &Path) -> Result<(OwnedFd, OwnedFd)> {
-        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        let deadline = Instant::now() + READY_WAIT_TIMEOUT;
+        let addr = UnixAddr::new(sock_path).map_err(Error::other)?;
+        let mut last_connect_error = None;
         let cli = loop {
-            match socket(
+            if Instant::now() >= deadline {
+                let detail = last_connect_error
+                    .as_ref()
+                    .map_or_else(String::new, |error: &Error| format!(": {error}"));
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    format!("timed out connecting to the eventfd fd-pass socket{detail}"),
+                ));
+            }
+
+            let cli = socket(
                 AddressFamily::Unix,
                 SockType::Stream,
-                SockFlag::SOCK_CLOEXEC,
+                SockFlag::SOCK_CLOEXEC | SockFlag::SOCK_NONBLOCK,
                 None,
-            ) {
-                Ok(cli) => {
-                    let addr = UnixAddr::new(sock_path).map_err(Error::other)?;
-                    match connect(cli.as_raw_fd(), &addr) {
-                        Ok(()) => break cli,
-                        Err(e) => {
-                            if std::time::Instant::now() >= deadline {
-                                return Err(Error::other(e));
-                            }
-                            std::thread::sleep(Duration::from_millis(10));
-                            continue;
-                        }
+            )
+            .map_err(Error::other)?;
+            match connect(cli.as_raw_fd(), &addr) {
+                Ok(()) | Err(Errno::EISCONN) => break cli,
+                Err(Errno::EINPROGRESS | Errno::EALREADY | Errno::EINTR) => {
+                    if !Self::poll_socket_until(cli.as_fd(), PollFlags::POLLOUT, deadline)? {
+                        return Err(Error::new(
+                            ErrorKind::TimedOut,
+                            "timed out connecting to the eventfd fd-pass socket",
+                        ));
                     }
+                    let pending = getsockopt(&cli, sockopt::SocketError).map_err(Error::other)?;
+                    if pending == 0 {
+                        break cli;
+                    }
+                    last_connect_error = Some(Error::from_raw_os_error(pending));
                 }
-                Err(e) => return Err(Error::other(e)),
+                Err(error) => last_connect_error = Some(Error::other(error)),
+            }
+
+            let now = Instant::now();
+            if now < deadline {
+                std::thread::sleep((deadline - now).min(Duration::from_millis(10)));
             }
         };
 
+        loop {
+            if Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "timed out waiting for eventfds from the fd-pass server",
+                ));
+            }
+            match Self::try_receive_fds(cli.as_raw_fd()) {
+                Ok(Some(fds)) => return Ok(fds),
+                Ok(None) => {
+                    if !Self::poll_socket_until(cli.as_fd(), PollFlags::POLLIN, deadline)? {
+                        return Err(Error::new(
+                            ErrorKind::TimedOut,
+                            "timed out waiting for eventfds from the fd-pass server",
+                        ));
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Perform one non-blocking SCM_RIGHTS receive attempt.
+    ///
+    /// `Ok(None)` is the ordinary EAGAIN state; EINTR remains distinct so the
+    /// caller can retry while checking the shared connection deadline.
+    fn try_receive_fds(fd: RawFd) -> Result<Option<(OwnedFd, OwnedFd)>> {
         let mut buf = [0u8; 1];
         let mut iov = [IoSliceMut::new(&mut buf)];
         let mut cmsgspace = nix::cmsg_space!([RawFd; 2]);
 
-        let msg = recvmsg::<UnixAddr>(
-            cli.as_raw_fd(),
+        let msg = match recvmsg::<UnixAddr>(
+            fd,
             &mut iov,
             Some(&mut cmsgspace),
-            MsgFlags::MSG_CMSG_CLOEXEC,
-        )
-        .map_err(Error::other)?;
+            MsgFlags::MSG_CMSG_CLOEXEC | MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(message) => message,
+            Err(Errno::EAGAIN) => return Ok(None),
+            Err(Errno::EINTR) => return Err(ErrorKind::Interrupted.into()),
+            Err(error) => return Err(Error::other(error)),
+        };
 
         // 内核在 recvmsg 返回时已为 SCM_RIGHTS 安装了新描述符。立即转为
         // OwnedFd，使后续的任何校验错误（包括 MSG_CTRUNC 和额外 fd）都能
@@ -444,7 +526,7 @@ impl EventFdBackend {
         let mut received_fds = received_fds.into_iter();
         let owned_msg = received_fds.next().expect("length checked above");
         let owned_cmd = received_fds.next().expect("length checked above");
-        Ok((owned_msg, owned_cmd))
+        Ok(Some((owned_msg, owned_cmd)))
     }
 
     fn wait_on_eventfd(
@@ -752,6 +834,8 @@ impl SyncBackend for EventFdBackend {
 mod tests {
     use super::*;
     use std::mem::MaybeUninit;
+    use std::os::unix::net::UnixListener;
+    use std::sync::mpsc;
 
     #[test]
     fn signal_without_waiters_does_not_accumulate_tokens() {
@@ -772,5 +856,66 @@ mod tests {
 
         assert_eq!(read_result, Err(Errno::EAGAIN));
         assert_eq!(sequence, 2);
+    }
+
+    #[test]
+    fn fd_receive_timeout_covers_a_server_that_accepts_but_never_sends() {
+        let socket_dir = std::env::temp_dir().join(format!(
+            "srb-eventfd-timeout-test-{}-{}",
+            std::process::id(),
+            SOCKET_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&socket_dir).unwrap();
+        let socket_path = socket_dir.join("fd.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (accepted_tx, accepted_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let server = std::thread::spawn(move || {
+            let (accepted, _) = listener.accept().unwrap();
+            accepted_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            drop(accepted);
+        });
+
+        let client_path = socket_path.clone();
+        let (result_tx, result_rx) = mpsc::sync_channel(0);
+        let client = std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = EventFdBackend::receive_fds_from_server(&client_path);
+            result_tx.send((result, started.elapsed())).unwrap();
+        });
+
+        accepted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fake fd-pass server did not accept the client");
+        let outcome = result_rx.recv_timeout(Duration::from_secs(1));
+        let _ = release_tx.send(());
+        server.join().unwrap();
+
+        let (result, elapsed) = match outcome {
+            Ok(outcome) => {
+                client.join().unwrap();
+                outcome
+            }
+            Err(error) => {
+                // Do not let a regression that restores the unbounded recvmsg
+                // block this test process while reporting the bounded failure.
+                drop(client);
+                panic!("fd receive did not honor its deadline: {error}");
+            }
+        };
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(
+            elapsed >= READY_WAIT_TIMEOUT.saturating_sub(Duration::from_millis(20)),
+            "fd receive timed out too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "fd receive exceeded its bounded deadline: {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir(&socket_dir);
     }
 }
