@@ -9,7 +9,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,11 +22,52 @@ pub const USAGE_FILE: &str = "launcher-usage";
 /// read than the ranking is worth.
 pub const MAX_TRACKED: usize = 500;
 
+/// One KiB per retained entry is generous for desktop-file IDs while keeping
+/// a damaged or special usage source cheap to reject.
+const MAX_USAGE_BYTES: u64 = MAX_TRACKED as u64 * 1024;
+
 /// Launches beyond this stop increasing an entry's rank, so an editor opened
 /// ten thousand times cannot make everything else unreachable for a month
 /// after you stop using it.
 const COUNT_CAP: u32 = 50;
 static USAGE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn read_usage(path: &Path) -> io::Result<String> {
+    // O_NONBLOCK matters for a path unexpectedly replaced with a FIFO: the
+    // regular-file check can then reject it without waiting for a writer.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "launcher usage source is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_USAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "launcher usage file exceeds its size limit",
+        ));
+    }
+
+    // Keep the descriptor bounded too: metadata may be stale by the time the
+    // read starts. The sentinel byte distinguishes an exact-limit file.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_USAGE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_USAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "launcher usage file exceeds its size limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
 
 fn atomic_write_usage(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -153,7 +194,11 @@ impl UsageStore {
     /// history, not an error: the launcher works without a ranking.
     #[must_use]
     pub fn load() -> Self {
-        std::fs::read_to_string(usage_path())
+        Self::load_from_path(&usage_path())
+    }
+
+    fn load_from_path(path: &Path) -> Self {
+        read_usage(path)
             .map(|text| Self::parse(&text))
             .unwrap_or_default()
     }
@@ -802,6 +847,34 @@ mod tests {
         assert!(store.score("good", NOW) > 0);
         assert!(store.score("also good", NOW) > 0);
         assert_eq!(store.score("bad", NOW), 0);
+    }
+
+    #[test]
+    fn usage_load_rejects_oversized_files_and_special_sources() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let sequence = USAGE_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "jwm-launcher-load-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+
+        let oversized = root.join("oversized");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_USAGE_BYTES + 1)
+            .unwrap();
+        assert!(UsageStore::load_from_path(&oversized).is_empty());
+
+        let fifo = root.join("fifo");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        // Opening a FIFO for a normal blocking read would hang here until a
+        // writer appeared. The loader must reject it immediately instead.
+        assert!(UsageStore::load_from_path(&fifo).is_empty());
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
