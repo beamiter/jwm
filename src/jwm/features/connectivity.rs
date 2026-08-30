@@ -6,8 +6,21 @@
 //! for Bluetooth — cache the tool that answered, and keep every parser pure so
 //! the output formats are pinned by tests on machines that have neither.
 
-use std::process::Command;
 use std::sync::OnceLock;
+use std::time::Duration;
+
+const CONNECTIVITY_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTIVITY_ACTION_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CONNECTIVITY_OUTPUT_BYTES: usize = 1024 * 1024;
+
+fn connectivity_output(
+    cmd: &str,
+    args: &[&str],
+    timeout: Duration,
+    output_limit: usize,
+) -> std::io::Result<std::process::Output> {
+    super::external_command::output_with_limits(cmd, args, timeout, output_limit)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LinkKind {
@@ -218,7 +231,13 @@ static WIFI_TOOL: OnceLock<Option<WifiTool>> = OnceLock::new();
 static BLUETOOTH_TOOL: OnceLock<Option<BluetoothTool>> = OnceLock::new();
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(cmd).args(args).output().ok()?;
+    let output = connectivity_output(
+        cmd,
+        args,
+        CONNECTIVITY_QUERY_TIMEOUT,
+        MAX_CONNECTIVITY_OUTPUT_BYTES,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -790,10 +809,12 @@ pub fn start_device_action(
 ) -> BackgroundJob<Result<String, String>> {
     let address = address.to_string();
     BackgroundJob::spawn(move || {
-        match Command::new("bluetoothctl")
-            .args([action, &address])
-            .output()
-        {
+        match connectivity_output(
+            "bluetoothctl",
+            &[action, &address],
+            CONNECTIVITY_ACTION_TIMEOUT,
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        ) {
             // bluetoothctl exits 0 even when the attempt failed, so the
             // outcome has to be read out of what it printed.
             Ok(output) => {
@@ -937,22 +958,31 @@ pub fn start_connect(
     let plan = plan.clone();
     BackgroundJob::spawn(move || {
         let output = match plan {
-            ConnectPlan::UseSaved => Command::new("nmcli")
-                .args(["connection", "up", "id", &ssid])
-                .output(),
-            ConnectPlan::Open | ConnectPlan::NeedsPassphrase => Command::new("nmcli")
-                .args(["device", "wifi", "connect", &ssid])
-                .output(),
-            ConnectPlan::WithPassphrase => Command::new("nmcli")
-                .args([
+            ConnectPlan::UseSaved => connectivity_output(
+                "nmcli",
+                &["connection", "up", "id", &ssid],
+                CONNECTIVITY_ACTION_TIMEOUT,
+                MAX_CONNECTIVITY_OUTPUT_BYTES,
+            ),
+            ConnectPlan::Open | ConnectPlan::NeedsPassphrase => connectivity_output(
+                "nmcli",
+                &["device", "wifi", "connect", &ssid],
+                CONNECTIVITY_ACTION_TIMEOUT,
+                MAX_CONNECTIVITY_OUTPUT_BYTES,
+            ),
+            ConnectPlan::WithPassphrase => connectivity_output(
+                "nmcli",
+                &[
                     "device",
                     "wifi",
                     "connect",
                     &ssid,
                     "password",
                     passphrase.as_deref().unwrap_or(""),
-                ])
-                .output(),
+                ],
+                CONNECTIVITY_ACTION_TIMEOUT,
+                MAX_CONNECTIVITY_OUTPUT_BYTES,
+            ),
         };
         match output {
             Ok(output) if output.status.success() => Ok(ssid),
@@ -1589,6 +1619,29 @@ mod tests {
         assert!(message.chars().count() <= 72);
 
         assert_eq!(summarize_nmcli_error(""), "connection failed");
+    }
+
+    #[test]
+    fn connectivity_helpers_bound_stderr_and_wait_time() {
+        let error = connectivity_output(
+            "sh",
+            &["-c", "printf 123456789 >&2"],
+            Duration::from_secs(1),
+            8,
+        )
+        .expect_err("oversized stderr must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        let started = std::time::Instant::now();
+        let error = connectivity_output(
+            "sh",
+            &["-c", "exec sleep 10"],
+            Duration::from_millis(25),
+            64,
+        )
+        .expect_err("sleeping helper must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

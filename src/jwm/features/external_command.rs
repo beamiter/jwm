@@ -13,9 +13,18 @@ const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_DRAIN_BYTES_PER_POLL: usize = 64 * 1024;
 
 pub(super) fn output(cmd: &str, args: &[&str]) -> io::Result<Output> {
+    output_with_limits(cmd, args, HELPER_TIMEOUT, MAX_HELPER_OUTPUT_BYTES)
+}
+
+pub(super) fn output_with_limits(
+    cmd: &str,
+    args: &[&str],
+    timeout: Duration,
+    output_limit: usize,
+) -> io::Result<Output> {
     let mut command = Command::new(cmd);
     command.args(args);
-    command_output_bounded(&mut command, HELPER_TIMEOUT, MAX_HELPER_OUTPUT_BYTES)
+    command_output_bounded(&mut command, timeout, output_limit)
 }
 
 fn command_output_bounded(
