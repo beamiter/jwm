@@ -441,6 +441,41 @@ pub enum PointerInput {
     Scroll { point: Point, delta_y: f64 },
 }
 
+impl PointerInput {
+    /// Translate an X11 core button edge into framework-neutral pointer input.
+    /// Wheel buttons are edge-triggered, so their release events are ignored.
+    #[must_use]
+    pub const fn from_x11_button(point: Point, button: u8, pressed: bool) -> Option<Self> {
+        match (button, pressed) {
+            (1, true) => Some(Self::Press {
+                point,
+                button: PointerButton::Primary,
+            }),
+            (1, false) => Some(Self::Release {
+                point,
+                button: PointerButton::Primary,
+            }),
+            (3, true) => Some(Self::Press {
+                point,
+                button: PointerButton::Secondary,
+            }),
+            (3, false) => Some(Self::Release {
+                point,
+                button: PointerButton::Secondary,
+            }),
+            (4, true) => Some(Self::Scroll {
+                point,
+                delta_y: 1.0,
+            }),
+            (5, true) => Some(Self::Scroll {
+                point,
+                delta_y: -1.0,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Result of processing one [`PointerInput`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PointerUpdate {
@@ -1409,6 +1444,38 @@ mod tests {
 
     #[cfg(feature = "transport-shared")]
     static NEXT_DOCK_TRANSPORT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn x11_pointer_translation_preserves_edges_and_ignores_wheel_release() {
+        let point = Point::new(12.0, 8.0);
+        for (detail, button) in [(1, PointerButton::Primary), (3, PointerButton::Secondary)] {
+            assert_eq!(
+                PointerInput::from_x11_button(point, detail, true),
+                Some(PointerInput::Press { point, button })
+            );
+            assert_eq!(
+                PointerInput::from_x11_button(point, detail, false),
+                Some(PointerInput::Release { point, button })
+            );
+        }
+        assert_eq!(
+            PointerInput::from_x11_button(point, 4, true),
+            Some(PointerInput::Scroll {
+                point,
+                delta_y: 1.0,
+            })
+        );
+        assert_eq!(
+            PointerInput::from_x11_button(point, 5, true),
+            Some(PointerInput::Scroll {
+                point,
+                delta_y: -1.0,
+            })
+        );
+        for (detail, pressed) in [(2, true), (2, false), (4, false), (5, false), (6, true)] {
+            assert_eq!(PointerInput::from_x11_button(point, detail, pressed), None);
+        }
+    }
 
     #[cfg(feature = "transport-shared")]
     fn transport_dock_bar() -> (CairoBar, shared_structures::SharedRingBuffer) {

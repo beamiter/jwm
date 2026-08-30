@@ -25,8 +25,8 @@ use raw_window_handle::{
 
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction};
-use xbar_core::render::cairo::{CairoBar, CpuCanvas};
+use xbar_core::presentation::Point;
+use xbar_core::render::cairo::{CairoBar, CpuCanvas, PointerInput};
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
     NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
@@ -230,6 +230,17 @@ impl WindowAdapter<'_> {
     }
 }
 
+fn route_pointer_input(
+    window: &WindowAdapter<'_>,
+    bar: &mut CairoBar,
+    input: PointerInput,
+) -> Result<bool> {
+    let update = bar.handle_pointer(input);
+    let pointer_redraw = update.needs_redraw();
+    let runtime_redraw = window.apply_runtime_update(update.into_runtime())?;
+    Ok(pointer_redraw || runtime_redraw)
+}
+
 fn redraw(
     gpu: &mut WgpuPresenter,
     canvas: &mut CpuCanvas,
@@ -305,6 +316,7 @@ fn main() -> Result<()> {
     let event_mask = EventMask::EXPOSURE
         | EventMask::STRUCTURE_NOTIFY
         | EventMask::BUTTON_PRESS
+        | EventMask::BUTTON_RELEASE
         | EventMask::POINTER_MOTION
         | EventMask::ENTER_WINDOW
         | EventMask::LEAVE_WINDOW;
@@ -456,25 +468,43 @@ fn main() -> Result<()> {
                                 gpu.resize(u32::from(current_width), u32::from(current_height));
                                 true
                             }
-                            Event::EnterNotify(event) => bar.pointer_motion(Point::new(
-                                f32::from(event.event_x),
-                                f32::from(event.event_y),
-                            )),
-                            Event::MotionNotify(event) => bar.pointer_motion(Point::new(
-                                f32::from(event.event_x),
-                                f32::from(event.event_y),
-                            )),
-                            Event::LeaveNotify(_) => bar.pointer_leave(),
+                            Event::EnterNotify(event) => route_pointer_input(
+                                &window,
+                                &mut bar,
+                                PointerInput::Move(Point::new(
+                                    f32::from(event.event_x),
+                                    f32::from(event.event_y),
+                                )),
+                            )?,
+                            Event::MotionNotify(event) => route_pointer_input(
+                                &window,
+                                &mut bar,
+                                PointerInput::Move(Point::new(
+                                    f32::from(event.event_x),
+                                    f32::from(event.event_y),
+                                )),
+                            )?,
+                            Event::LeaveNotify(_) => {
+                                route_pointer_input(&window, &mut bar, PointerInput::Leave)?
+                            }
                             Event::ButtonPress(event) => {
-                                if let Some(input) = PointerAction::from_x11_button(event.detail) {
-                                    let update = bar.pointer_action(
-                                        Point::new(
-                                            f32::from(event.event_x),
-                                            f32::from(event.event_y),
-                                        ),
-                                        input,
-                                    );
-                                    window.apply_runtime_update(update)?
+                                let point =
+                                    Point::new(f32::from(event.event_x), f32::from(event.event_y));
+                                if let Some(input) =
+                                    PointerInput::from_x11_button(point, event.detail, true)
+                                {
+                                    route_pointer_input(&window, &mut bar, input)?
+                                } else {
+                                    false
+                                }
+                            }
+                            Event::ButtonRelease(event) => {
+                                let point =
+                                    Point::new(f32::from(event.event_x), f32::from(event.event_y));
+                                if let Some(input) =
+                                    PointerInput::from_x11_button(point, event.detail, false)
+                                {
+                                    route_pointer_input(&window, &mut bar, input)?
                                 } else {
                                     false
                                 }

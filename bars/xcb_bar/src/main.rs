@@ -9,8 +9,8 @@ use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd};
 use std::time::{Duration, Instant};
 use xbar_core::glass::DEFAULT_BACKGROUND_OPACITY;
 use xbar_core::linux::{AlignedTimer, Epoll};
-use xbar_core::presentation::{Point, PointerAction, Size};
-use xbar_core::render::cairo::CairoBar;
+use xbar_core::presentation::{Point, Size};
+use xbar_core::render::cairo::{CairoBar, PointerInput};
 use xbar_core::{
     BarPlacement, BarRuntime, DockProperty, DockPropertyValue, DockWindowSpec, MonitorGeometry,
     NotifierChange, RuntimeUpdate, TransportNotifierSlot, TransportRecoveryConfig,
@@ -398,6 +398,17 @@ impl WindowAdapter<'_> {
     }
 }
 
+fn route_pointer_input(
+    window: &WindowAdapter<'_>,
+    bar: &mut CairoBar,
+    input: PointerInput,
+) -> Result<bool> {
+    let update = bar.handle_pointer(input);
+    let pointer_redraw = update.needs_redraw();
+    let runtime_redraw = window.apply_runtime_update(update.into_runtime())?;
+    Ok(pointer_redraw || runtime_redraw)
+}
+
 fn redraw(
     cairo_xcb: &CairoXcb,
     window: &WindowAdapter<'_>,
@@ -449,28 +460,38 @@ fn handle_x_event(
             should_redraw = true;
         }
         xcb::Event::X(x::Event::EnterNotify(event)) => {
-            should_redraw = bar.pointer_motion(Point::new(
-                f32::from(event.event_x()),
-                f32::from(event.event_y()),
-            ));
+            should_redraw = route_pointer_input(
+                window,
+                bar,
+                PointerInput::Move(Point::new(
+                    f32::from(event.event_x()),
+                    f32::from(event.event_y()),
+                )),
+            )?;
         }
         xcb::Event::X(x::Event::LeaveNotify(_)) => {
-            should_redraw = bar.pointer_leave();
+            should_redraw = route_pointer_input(window, bar, PointerInput::Leave)?;
         }
         xcb::Event::X(x::Event::MotionNotify(event)) => {
-            should_redraw = bar.pointer_motion(Point::new(
-                f32::from(event.event_x()),
-                f32::from(event.event_y()),
-            ));
+            should_redraw = route_pointer_input(
+                window,
+                bar,
+                PointerInput::Move(Point::new(
+                    f32::from(event.event_x()),
+                    f32::from(event.event_y()),
+                )),
+            )?;
         }
         xcb::Event::X(x::Event::ButtonPress(event)) => {
-            let button = event.detail();
-            if let Some(input) = PointerAction::from_x11_button(button) {
-                let update = bar.pointer_action(
-                    Point::new(f32::from(event.event_x()), f32::from(event.event_y())),
-                    input,
-                );
-                should_redraw = window.apply_runtime_update(update)?;
+            let point = Point::new(f32::from(event.event_x()), f32::from(event.event_y()));
+            if let Some(input) = PointerInput::from_x11_button(point, event.detail(), true) {
+                should_redraw = route_pointer_input(window, bar, input)?;
+            }
+        }
+        xcb::Event::X(x::Event::ButtonRelease(event)) => {
+            let point = Point::new(f32::from(event.event_x()), f32::from(event.event_y()));
+            if let Some(input) = PointerInput::from_x11_button(point, event.detail(), false) {
+                should_redraw = route_pointer_input(window, bar, input)?;
             }
         }
         _ => {}
@@ -592,6 +613,7 @@ fn main() -> Result<()> {
     let event_mask = x::EventMask::EXPOSURE
         | x::EventMask::STRUCTURE_NOTIFY
         | x::EventMask::BUTTON_PRESS
+        | x::EventMask::BUTTON_RELEASE
         | x::EventMask::POINTER_MOTION
         | x::EventMask::ENTER_WINDOW
         | x::EventMask::LEAVE_WINDOW;
