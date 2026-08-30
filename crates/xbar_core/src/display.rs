@@ -598,6 +598,12 @@ pub const CANONICAL_LAYOUTS: [CanonicalLayout; 13] = [
 /// How many layouts this build of the protocol knows about.
 pub const CANONICAL_LAYOUT_COUNT: usize = CANONICAL_LAYOUTS.len();
 
+/// Maximum number of layout choices a bar will materialize from one window
+/// manager snapshot. A layout menu is interactive UI, not an unbounded wire
+/// dump; this also keeps a malformed `layout_count` from expanding to billions
+/// of synthetic rows.
+pub const MAX_LAYOUT_CHOICES: usize = 256;
+
 /// Owned, serializable layout catalog entry for toolkit and web state stores.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LayoutCatalogEntry {
@@ -654,7 +660,9 @@ pub fn layout_is_offered(id: LayoutId, offered: Option<usize>) -> bool {
 #[must_use]
 pub fn unknown_layout_ids(offered: Option<usize>) -> std::ops::Range<u32> {
     let first_unknown = CANONICAL_LAYOUT_COUNT as u32;
-    let last = offered.map_or(first_unknown, |count| count as u32);
+    let last = offered
+        .unwrap_or(CANONICAL_LAYOUT_COUNT)
+        .min(MAX_LAYOUT_CHOICES) as u32;
     first_unknown..last.max(first_unknown)
 }
 
@@ -852,6 +860,14 @@ mod tests {
         let mut ids: Vec<u32> = CANONICAL_LAYOUTS.iter().map(|layout| layout.id.0).collect();
         ids.sort_unstable();
         assert_eq!(ids, (0..CANONICAL_LAYOUT_COUNT as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn unknown_layout_iteration_is_bounded_for_malformed_counts() {
+        let unknown = unknown_layout_ids(Some(usize::MAX));
+
+        assert_eq!(unknown.len(), MAX_LAYOUT_CHOICES - CANONICAL_LAYOUT_COUNT);
+        assert_eq!(unknown.last(), Some((MAX_LAYOUT_CHOICES - 1) as u32));
     }
 
     /// Both sides index this table by ID, and the bar labels an unknown ID by

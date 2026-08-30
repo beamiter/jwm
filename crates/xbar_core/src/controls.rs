@@ -320,6 +320,7 @@ fn layout_menu(view: BarView<'_>, config: &PresentationConfig) -> Vec<ControlSpe
         .filter(|layout| crate::display::layout_is_offered(layout.id, offered))
         .map(|layout| (layout.id, layout.label.clone()))
         .chain(extra)
+        .take(crate::display::MAX_LAYOUT_CHOICES)
         .map(|(id, label)| {
             control(
                 NodeId::LayoutOption(id),
@@ -894,6 +895,27 @@ mod tests {
                     format!("L{}", known + 1)
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn malformed_layout_counts_cannot_expand_the_menu_without_bound() {
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+        snapshot.layout_count = Some(usize::MAX);
+
+        let projected =
+            PresentationProjector::project(snapshot.view(), &PresentationConfig::default());
+
+        assert_eq!(
+            projected.layout_choices.len(),
+            crate::display::MAX_LAYOUT_CHOICES
+        );
+        assert_eq!(
+            projected.layout_choices.last().map(|choice| choice.id),
+            Some(NodeId::LayoutOption(LayoutId(
+                (crate::display::MAX_LAYOUT_CHOICES - 1) as u32
+            )))
         );
     }
 
