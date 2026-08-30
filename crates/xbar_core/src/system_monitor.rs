@@ -27,8 +27,10 @@ impl RollingAverage {
         }
     }
 
+    /// Add one finite sample. Non-finite provider values are failed samples:
+    /// ignoring them preserves both the last good history and its cached sum.
     pub fn add(&mut self, value: f64) {
-        if self.capacity == 0 {
+        if self.capacity == 0 || !value.is_finite() {
             return;
         }
 
@@ -408,6 +410,23 @@ mod tests {
 
         assert_eq!(average.values().collect::<Vec<_>>(), vec![20.0, 30.0, 40.0]);
         assert_eq!(average.average(), 30.0);
+    }
+
+    #[test]
+    fn rolling_average_ignores_non_finite_samples_and_recovers() {
+        let mut average = RollingAverage::new(2);
+        average.add(10.0);
+        average.add(f64::NAN);
+        average.add(f64::INFINITY);
+        average.add(f64::NEG_INFINITY);
+
+        assert_eq!(average.values().collect::<Vec<_>>(), vec![10.0]);
+        assert_eq!(average.average(), 10.0);
+
+        average.add(20.0);
+        average.add(30.0);
+        assert_eq!(average.values().collect::<Vec<_>>(), vec![20.0, 30.0]);
+        assert_eq!(average.average(), 25.0);
     }
 
     #[test]
