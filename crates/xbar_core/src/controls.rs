@@ -17,6 +17,15 @@ use crate::presentation::{NodeId, PresentationConfig};
 /// Text used when a visible metric has no value.
 pub const UNKNOWN_VALUE: &str = "--";
 
+/// Maximum UTF-8 byte length retained in either text field of a control
+/// produced by [`PresentationProjector`].
+///
+/// [`PresentationConfig`] is a direct Rust API as well as a deserialization
+/// target, so callers can bypass file-format validation. Projection applies
+/// this final bound before renderers clone, measure, or retain the text in a
+/// scene. Truncation always stops at a UTF-8 character boundary.
+pub const MAX_PROJECTED_CONTROL_TEXT_BYTES: usize = 256;
+
 /// Fixed status controls in the same right-to-left order used by
 /// `LayoutEngine`.
 ///
@@ -77,8 +86,12 @@ impl InputBindings {
 pub struct ControlSpec {
     pub id: NodeId,
     /// Glyph or short semantic label, kept separate from the changing value.
+    /// Projected controls retain at most
+    /// [`MAX_PROJECTED_CONTROL_TEXT_BYTES`] UTF-8 bytes here.
     pub icon: String,
     /// Dynamic value text. Unknown visible metrics use [`UNKNOWN_VALUE`].
+    /// Projected controls retain at most
+    /// [`MAX_PROJECTED_CONTROL_TEXT_BYTES`] UTF-8 bytes here.
     pub value: String,
     /// Metric severity when severity applies. Unknown metrics are explicitly
     /// `Some(MetricTone::Unavailable)`; non-metric controls use `None`.
@@ -614,8 +627,8 @@ fn control(
     state.enabled = !bindings.is_empty();
     ControlSpec {
         id,
-        icon,
-        value,
+        icon: bounded_control_text(icon),
+        value: bounded_control_text(value),
         tone,
         volume_level,
         progress,
@@ -623,6 +636,20 @@ fn control(
         state,
         bindings,
     }
+}
+
+fn bounded_control_text(value: String) -> String {
+    if value.len() <= MAX_PROJECTED_CONTROL_TEXT_BYTES
+        && value.capacity() <= MAX_PROJECTED_CONTROL_TEXT_BYTES
+    {
+        return value;
+    }
+
+    let mut end = value.len().min(MAX_PROJECTED_CONTROL_TEXT_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 /// `↓rate ↑rate` with explicit unknowns; rates never display as a healthy 0.
@@ -731,6 +758,83 @@ mod tests {
         assert_eq!(control.text(), "V");
         control.icon = "I".to_owned();
         assert_eq!(control.text(), "I  V");
+    }
+
+    #[test]
+    fn projection_bounds_direct_config_text_at_utf8_boundaries() {
+        let oversized = "界".repeat(MAX_PROJECTED_CONTROL_TEXT_BYTES / 3 + 10);
+        let expected_end = (0..=MAX_PROJECTED_CONTROL_TEXT_BYTES)
+            .rev()
+            .find(|&end| oversized.is_char_boundary(end))
+            .expect("the start of a string is always a character boundary");
+        let expected = &oversized[..expected_end];
+
+        let icons = crate::IconSet {
+            unavailable: oversized.clone(),
+            ..crate::IconSet::default()
+        };
+        let config = PresentationConfig {
+            tag_labels: vec![oversized.clone()],
+            layouts: vec![LayoutChoice {
+                id: LayoutId(37),
+                label: oversized.clone(),
+            }],
+            labels: crate::presentation::PresentationLabels {
+                clock: oversized.clone(),
+                ..crate::presentation::PresentationLabels::default()
+            },
+            icon_set: Some(icons),
+            ..PresentationConfig::default()
+        };
+        let mut snapshot = snapshot();
+        snapshot.layout_selector_open = true;
+
+        let projected = PresentationProjector::project(snapshot.view(), &config);
+        let layout = projected
+            .layout_choices
+            .iter()
+            .find(|choice| choice.id == NodeId::LayoutOption(LayoutId(37)))
+            .expect("configured layout is projected");
+        let projected_text = [
+            &projected.tags[0].icon,
+            &layout.value,
+            &by_id(&projected, NodeId::Clock).icon,
+            &by_id(&projected, NodeId::Battery).icon,
+        ];
+
+        for text in projected_text {
+            assert_eq!(text, expected);
+            assert!(text.len() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
+            assert!(text.capacity() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
+        }
+        assert_eq!(config.tag_labels[0], oversized);
+        assert_eq!(config.layouts[0].label, oversized);
+        assert_eq!(config.labels.clock, oversized);
+        assert_eq!(
+            config.icon_set.as_ref().map(|icons| &icons.unavailable),
+            Some(&oversized)
+        );
+    }
+
+    #[test]
+    fn projection_compacts_short_text_with_oversized_capacity() {
+        let mut oversized_capacity = String::with_capacity(MAX_PROJECTED_CONTROL_TEXT_BYTES * 8);
+        oversized_capacity.push_str("short");
+        assert!(oversized_capacity.capacity() > MAX_PROJECTED_CONTROL_TEXT_BYTES);
+
+        let projected = super::control(
+            NodeId::Clock,
+            oversized_capacity,
+            String::new(),
+            None,
+            None,
+            None,
+            ControlState::default(),
+            InputBindings::default(),
+        );
+
+        assert_eq!(projected.icon, "short");
+        assert!(projected.icon.capacity() <= MAX_PROJECTED_CONTROL_TEXT_BYTES);
     }
 
     #[test]
