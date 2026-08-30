@@ -16,7 +16,27 @@ use log::{error, info, warn};
 use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Output, Stdio};
+use std::time::Duration;
+
+const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CLIPBOARD_HELPER_STDERR_BYTES: usize = 64 * 1024;
+
+fn clipboard_helper_output(
+    program: &str,
+    args: &[&str],
+    input: std::fs::File,
+    timeout: Duration,
+    stderr_limit: usize,
+) -> io::Result<Output> {
+    super::external_command::output_with_input(
+        program,
+        args,
+        Stdio::from(input),
+        timeout,
+        stderr_limit,
+    )
+}
 
 /// Stroke width bounds. The floor keeps a stroke visible; the ceiling keeps a
 /// held-down key from turning the whole selection into one blob.
@@ -1848,12 +1868,13 @@ impl Jwm {
                 }
             };
 
-            let output = Command::new(program)
-                .args(args)
-                .stdin(Stdio::from(file))
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output();
+            let output = clipboard_helper_output(
+                program,
+                args,
+                file,
+                CLIPBOARD_HELPER_TIMEOUT,
+                MAX_CLIPBOARD_HELPER_STDERR_BYTES,
+            );
 
             match output {
                 Ok(output) if output.status.success() => {
@@ -1931,6 +1952,53 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn clipboard_helper_preserves_input_and_bounds_stderr() {
+        let scratch = ScratchDir::new("clipboard-helper-io");
+        let input = scratch.path().join("image.png");
+        std::fs::write(&input, b"png payload").unwrap();
+
+        let output = clipboard_helper_output(
+            "sh",
+            &["-c", "test \"$(cat)\" = 'png payload'; printf 123456789"],
+            std::fs::File::open(&input).unwrap(),
+            Duration::from_secs(1),
+            8,
+        )
+        .expect("stdout is discarded rather than retained");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+
+        let error = clipboard_helper_output(
+            "sh",
+            &["-c", "cat >/dev/null; printf 123456789 >&2"],
+            std::fs::File::open(&input).unwrap(),
+            Duration::from_secs(1),
+            8,
+        )
+        .expect_err("oversized stderr must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn clipboard_helper_wait_has_a_hard_deadline() {
+        let scratch = ScratchDir::new("clipboard-helper-timeout");
+        let input = scratch.path().join("image.png");
+        std::fs::write(&input, b"png payload").unwrap();
+
+        let started = std::time::Instant::now();
+        let error = clipboard_helper_output(
+            "sh",
+            &["-c", "cat >/dev/null; exec sleep 10"],
+            std::fs::File::open(input).unwrap(),
+            Duration::from_millis(25),
+            64,
+        )
+        .expect_err("sleeping clipboard helper must time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

@@ -27,31 +27,66 @@ pub(super) fn output_with_limits(
     command_output_bounded(&mut command, timeout, output_limit)
 }
 
+/// Run a helper that consumes a caller-provided stdin, discards stdout, and
+/// retains bounded stderr for diagnostics.
+pub(super) fn output_with_input(
+    cmd: &str,
+    args: &[&str],
+    stdin: Stdio,
+    timeout: Duration,
+    stderr_limit: usize,
+) -> io::Result<Output> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    command_output_bounded_with_stdio(&mut command, stdin, false, timeout, stderr_limit)
+}
+
 fn command_output_bounded(
     command: &mut Command,
     timeout: Duration,
     output_limit: usize,
 ) -> io::Result<Output> {
+    command_output_bounded_with_stdio(command, Stdio::null(), true, timeout, output_limit)
+}
+
+fn command_output_bounded_with_stdio(
+    command: &mut Command,
+    stdin: Stdio,
+    capture_stdout: bool,
+    timeout: Duration,
+    output_limit: usize,
+) -> io::Result<Output> {
+    command.stdin(stdin);
+    if capture_stdout {
+        command.stdout(Stdio::piped());
+    } else {
+        command.stdout(Stdio::null());
+    }
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Kill descendants with a timed-out helper so none can keep a capture
         // pipe open after the command itself has gone away.
         .process_group(0);
     let mut child = command.spawn()?;
-    let Some(mut stdout) = child.stdout.take() else {
-        terminate_child_group(&mut child);
-        return Err(io::Error::other("helper stdout was not captured"));
+    let mut stdout = if capture_stdout {
+        let Some(stdout) = child.stdout.take() else {
+            terminate_child_group(&mut child);
+            return Err(io::Error::other("helper stdout was not captured"));
+        };
+        Some(stdout)
+    } else {
+        None
     };
     let Some(mut stderr) = child.stderr.take() else {
         terminate_child_group(&mut child);
         return Err(io::Error::other("helper stderr was not captured"));
     };
 
-    if let Err(error) =
-        set_nonblocking(stdout.as_raw_fd()).and_then(|()| set_nonblocking(stderr.as_raw_fd()))
-    {
+    let nonblocking = stdout
+        .as_ref()
+        .map_or(Ok(()), |stdout| set_nonblocking(stdout.as_raw_fd()))
+        .and_then(|()| set_nonblocking(stderr.as_raw_fd()));
+    if let Err(error) = nonblocking {
         terminate_child_group(&mut child);
         return Err(error);
     }
@@ -61,8 +96,12 @@ fn command_output_bounded(
     let mut stderr_bytes = Vec::with_capacity(output_limit.min(4096));
     let result = (|| {
         loop {
-            let oversized = drain_available(&mut stdout, &mut stdout_bytes, output_limit)?
-                | drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
+            let stdout_oversized = match &mut stdout {
+                Some(stdout) => drain_available(stdout, &mut stdout_bytes, output_limit)?,
+                None => false,
+            };
+            let oversized =
+                stdout_oversized | drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
             if oversized {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -71,7 +110,11 @@ fn command_output_bounded(
             }
 
             if let Some(status) = child.try_wait()? {
-                let oversized = drain_available(&mut stdout, &mut stdout_bytes, output_limit)?
+                let stdout_oversized = match &mut stdout {
+                    Some(stdout) => drain_available(stdout, &mut stdout_bytes, output_limit)?,
+                    None => false,
+                };
+                let oversized = stdout_oversized
                     | drain_available(&mut stderr, &mut stderr_bytes, output_limit)?;
                 if oversized {
                     return Err(io::Error::new(
