@@ -21,6 +21,9 @@ const MAX_FONT_DESCRIPTION_BYTES: usize = 1024;
 const MAX_UI_FONT_CACHE_ENTRIES: usize = 4;
 const MAX_FALLBACK_FONT_CACHE_ENTRIES: usize = 8;
 const MAX_FALLBACK_MISS_CACHE_ENTRIES: usize = 4096;
+const MAX_TEXT_INPUT_BYTES: usize = 64 * 1024;
+const MAX_TEXT_TEXTURE_DIMENSION: u32 = 16_384;
+const MAX_TEXT_TEXTURE_BYTES: usize = 64 * 1024 * 1024;
 
 static UI_FONTS: LazyLock<Mutex<HashMap<String, Option<FontArc>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -101,6 +104,17 @@ fn remember_fallback_miss(ch: char) {
     if let Ok(mut misses) = FALLBACK_MISSES.lock() {
         remember_fallback_miss_in(&mut misses, ch as u32);
     }
+}
+
+fn rgba_texture_len(width: u32, height: u32) -> Option<usize> {
+    if width > MAX_TEXT_TEXTURE_DIMENSION || height > MAX_TEXT_TEXTURE_DIMENSION {
+        return None;
+    }
+    let bytes = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?
+        .checked_mul(4)?;
+    (bytes <= MAX_TEXT_TEXTURE_BYTES).then_some(bytes)
 }
 
 /// The fontconfig pattern that asks for any font covering `ch`.
@@ -500,6 +514,9 @@ pub(crate) fn render_ui_text_to_rgba(
     pixel_size: f32,
     fg: [u8; 4],
 ) -> (Vec<u8>, u32, u32) {
+    if text.len() > MAX_TEXT_INPUT_BYTES {
+        return (Vec::new(), 0, 0);
+    }
     let Some(font) = load_ui_font(font_description) else {
         return render_text_to_rgba(text, 2, fg);
     };
@@ -539,11 +556,15 @@ pub(crate) fn render_ui_text_to_rgba(
         .max()
         .unwrap_or(0)
         .saturating_add(TEXT_PAD * 2);
-    let height = (line_height * lines.len().max(1) as f32).ceil() as u32 + TEXT_PAD * 2;
+    let height =
+        ((line_height * lines.len().max(1) as f32).ceil() as u32).saturating_add(TEXT_PAD * 2);
     if width == 0 || height == 0 {
         return (Vec::new(), 0, 0);
     }
-    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    let Some(texture_len) = rgba_texture_len(width, height) else {
+        return (Vec::new(), 0, 0);
+    };
+    let mut pixels = vec![0u8; texture_len];
     for (line_index, line) in resolved.iter().enumerate() {
         let baseline = 2.0 + ascent + line_index as f32 * line_height;
         let mut x = 2.0;
@@ -782,20 +803,43 @@ pub(crate) const FONT_6X10: [u8; 95 * 10] = [
 /// colour set by `fg`. Each glyph is rendered at `scale`x magnification
 /// (e.g. `scale = 2` gives 12x20 effective pixels per character).
 pub(crate) fn render_text_to_rgba(text: &str, scale: u32, fg: [u8; 4]) -> (Vec<u8>, u32, u32) {
-    let char_w = GLYPH_W * scale;
-    let char_h = GLYPH_H * scale;
+    if text.len() > MAX_TEXT_INPUT_BYTES {
+        return (Vec::new(), 0, 0);
+    }
+    let Some(char_w) = GLYPH_W.checked_mul(scale) else {
+        return (Vec::new(), 0, 0);
+    };
+    let Some(char_h) = GLYPH_H.checked_mul(scale) else {
+        return (Vec::new(), 0, 0);
+    };
 
     let lines: Vec<&str> = text.split('\n').collect();
-    let max_cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u32;
-    let num_lines = lines.len() as u32;
+    let Some(max_cols) = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .and_then(|columns| u32::try_from(columns).ok())
+    else {
+        return (Vec::new(), 0, 0);
+    };
+    let Ok(num_lines) = u32::try_from(lines.len()) else {
+        return (Vec::new(), 0, 0);
+    };
 
-    let img_w = max_cols * char_w;
-    let img_h = num_lines * char_h;
+    let Some(img_w) = max_cols.checked_mul(char_w) else {
+        return (Vec::new(), 0, 0);
+    };
+    let Some(img_h) = num_lines.checked_mul(char_h) else {
+        return (Vec::new(), 0, 0);
+    };
     if img_w == 0 || img_h == 0 {
         return (Vec::new(), 0, 0);
     }
 
-    let mut pixels = vec![0u8; (img_w * img_h * 4) as usize];
+    let Some(texture_len) = rgba_texture_len(img_w, img_h) else {
+        return (Vec::new(), 0, 0);
+    };
+    let mut pixels = vec![0u8; texture_len];
 
     for (line_idx, line) in lines.iter().enumerate() {
         for (ci, ch) in line.chars().enumerate() {
@@ -844,6 +888,32 @@ mod tests {
         let (px, w, h) = render_text_to_rgba("", 2, [255, 255, 255, 255]);
         assert!(px.is_empty());
         assert_eq!((w, h), (0, 0));
+    }
+
+    #[test]
+    fn rgba_texture_budget_checks_dimensions_bytes_and_overflow() {
+        assert_eq!(rgba_texture_len(1, 1), Some(4));
+        assert_eq!(rgba_texture_len(4096, 4096), Some(MAX_TEXT_TEXTURE_BYTES));
+        assert!(rgba_texture_len(4097, 4096).is_none());
+        assert!(rgba_texture_len(MAX_TEXT_TEXTURE_DIMENSION + 1, 1).is_none());
+        assert!(rgba_texture_len(u32::MAX, u32::MAX).is_none());
+    }
+
+    #[test]
+    fn oversized_raster_inputs_return_an_empty_texture() {
+        let oversized = "x".repeat(MAX_TEXT_INPUT_BYTES + 1);
+        assert_eq!(
+            render_text_to_rgba(&oversized, 1, [255; 4]),
+            (Vec::new(), 0, 0)
+        );
+        assert_eq!(
+            render_ui_text_to_rgba(&oversized, "monospace 11", 18.0, [255; 4]),
+            (Vec::new(), 0, 0)
+        );
+        assert_eq!(
+            render_text_to_rgba("x", u32::MAX, [255; 4]),
+            (Vec::new(), 0, 0)
+        );
     }
 
     /// The font behind these is whatever the machine has, so the assertions
