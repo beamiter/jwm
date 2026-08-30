@@ -8,10 +8,52 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Includes the four-byte GL binary-format prefix. Real linked programs are
+/// Maximum complete versioned cache envelope. Real linked programs are
 /// normally far smaller, while this still leaves generous driver headroom.
 const MAX_SHADER_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+const SHADER_CACHE_MAGIC: [u8; 4] = *b"JWSC";
+const SHADER_CACHE_VERSION: u32 = 1;
+const SHADER_CACHE_HEADER_BYTES: usize = 4 + 4 + 8 + 8 + 4;
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn encode_cached_binary(
+    format: u32,
+    vert_hash: u64,
+    frag_hash: u64,
+    binary: &[u8],
+) -> Option<Vec<u8>> {
+    let encoded_len = SHADER_CACHE_HEADER_BYTES.checked_add(binary.len())?;
+    if binary.is_empty() || encoded_len as u64 > MAX_SHADER_CACHE_BYTES {
+        return None;
+    }
+
+    let mut encoded = Vec::with_capacity(encoded_len);
+    encoded.extend_from_slice(&SHADER_CACHE_MAGIC);
+    encoded.extend_from_slice(&SHADER_CACHE_VERSION.to_le_bytes());
+    encoded.extend_from_slice(&vert_hash.to_le_bytes());
+    encoded.extend_from_slice(&frag_hash.to_le_bytes());
+    encoded.extend_from_slice(&format.to_le_bytes());
+    encoded.extend_from_slice(binary);
+    Some(encoded)
+}
+
+fn decode_cached_binary(
+    encoded: &[u8],
+    expected_vert_hash: u64,
+    expected_frag_hash: u64,
+) -> Option<(u32, &[u8])> {
+    if encoded.len() <= SHADER_CACHE_HEADER_BYTES
+        || encoded.get(..4)? != SHADER_CACHE_MAGIC
+        || u32::from_le_bytes(encoded.get(4..8)?.try_into().ok()?) != SHADER_CACHE_VERSION
+        || u64::from_le_bytes(encoded.get(8..16)?.try_into().ok()?) != expected_vert_hash
+        || u64::from_le_bytes(encoded.get(16..24)?.try_into().ok()?) != expected_frag_hash
+    {
+        return None;
+    }
+
+    let format = u32::from_le_bytes(encoded.get(24..28)?.try_into().ok()?);
+    Some((format, encoded.get(SHADER_CACHE_HEADER_BYTES..)?))
+}
 
 fn read_cache_file(path: &Path) -> io::Result<Vec<u8>> {
     let file = OpenOptions::new()
@@ -123,10 +165,9 @@ impl ShaderCache {
             if self.enabled {
                 let bin_path = self.cache_dir.join(format!("{}.bin", name));
                 if let Ok(data) = read_cache_file(&bin_path) {
-                    if data.len() > 4 {
-                        let format = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                        let binary = &data[4..];
-
+                    if let Some((format, binary)) =
+                        decode_cached_binary(&data, vert_hash, frag_hash)
+                    {
                         let program = gl.CreateProgram();
                         gl.ProgramBinary(
                             program,
@@ -159,7 +200,7 @@ impl ShaderCache {
             let program = Self::compile_program(gl, vert_src, frag_src)?;
 
             if self.enabled {
-                self.save_program_binary(gl, program, name);
+                self.save_program_binary(gl, program, name, vert_hash, frag_hash);
             }
 
             self.cache.insert(
@@ -289,11 +330,20 @@ impl ShaderCache {
         }
     }
 
-    unsafe fn save_program_binary(&self, gl: &ffi::Gles2, program: u32, name: &str) {
+    unsafe fn save_program_binary(
+        &self,
+        gl: &ffi::Gles2,
+        program: u32,
+        name: &str,
+        vert_hash: u64,
+        frag_hash: u64,
+    ) {
         unsafe {
             let mut binary_len = 0i32;
             gl.GetProgramiv(program, ffi::PROGRAM_BINARY_LENGTH, &mut binary_len);
-            if binary_len <= 0 || binary_len as u64 > MAX_SHADER_CACHE_BYTES - 4 {
+            if binary_len <= 0
+                || binary_len as u64 > MAX_SHADER_CACHE_BYTES - SHADER_CACHE_HEADER_BYTES as u64
+            {
                 return;
             }
 
@@ -314,10 +364,9 @@ impl ShaderCache {
             binary.truncate(actual_len as usize);
 
             let bin_path = self.cache_dir.join(format!("{}.bin", name));
-            let mut data = Vec::with_capacity(4 + binary.len());
-            data.extend_from_slice(&format.to_le_bytes());
-            data.extend_from_slice(&binary);
-            let _ = atomic_write_cache_file(&bin_path, &data);
+            if let Some(data) = encode_cached_binary(format, vert_hash, frag_hash, &binary) {
+                let _ = atomic_write_cache_file(&bin_path, &data);
+            }
         }
     }
 }
@@ -401,5 +450,33 @@ mod tests {
         );
         assert!(!cache.exists());
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn cached_binary_envelope_binds_the_program_to_both_shader_sources() {
+        let encoded = encode_cached_binary(7, 11, 13, b"compiled").unwrap();
+
+        assert_eq!(
+            decode_cached_binary(&encoded, 11, 13),
+            Some((7, b"compiled".as_slice()))
+        );
+        assert_eq!(decode_cached_binary(&encoded, 12, 13), None);
+        assert_eq!(decode_cached_binary(&encoded, 11, 14), None);
+    }
+
+    #[test]
+    fn cached_binary_envelope_rejects_legacy_truncated_and_future_formats() {
+        assert_eq!(
+            decode_cached_binary(b"\x07\x00\x00\x00legacy", 11, 13),
+            None
+        );
+
+        let mut encoded = encode_cached_binary(7, 11, 13, b"compiled").unwrap();
+        encoded[4..8].copy_from_slice(&(SHADER_CACHE_VERSION + 1).to_le_bytes());
+        assert_eq!(decode_cached_binary(&encoded, 11, 13), None);
+
+        encoded[4..8].copy_from_slice(&SHADER_CACHE_VERSION.to_le_bytes());
+        encoded.truncate(SHADER_CACHE_HEADER_BYTES);
+        assert_eq!(decode_cached_binary(&encoded, 11, 13), None);
     }
 }
