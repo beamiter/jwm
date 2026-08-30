@@ -393,11 +393,14 @@ fn absolute_flink_path(path: &str) -> Result<PathBuf> {
     Ok(target)
 }
 
-fn normalize_mapping_permissions(os_id: &str) -> Result<()> {
-    let object_name = os_id.strip_prefix('/').filter(|name| {
+fn posix_shmem_object_name(os_id: &str) -> Option<&str> {
+    os_id.strip_prefix('/').filter(|name| {
         !name.is_empty() && !name.as_bytes().contains(&b'/') && !name.as_bytes().contains(&0)
-    });
-    let Some(object_name) = object_name else {
+    })
+}
+
+fn normalize_mapping_permissions(os_id: &str) -> Result<()> {
+    let Some(object_name) = posix_shmem_object_name(os_id) else {
         return Err(Error::new(
             ErrorKind::InvalidData,
             "shared-memory object has an invalid POSIX name",
@@ -485,12 +488,19 @@ fn read_flink_os_id(path: &Path) -> Result<String> {
             "shared-memory flink contains an invalid mapping identifier length",
         ));
     }
-    String::from_utf8(bytes).map_err(|error| {
+    let os_id = String::from_utf8(bytes).map_err(|error| {
         Error::new(
             ErrorKind::InvalidData,
             format!("shared-memory flink mapping identifier is not UTF-8: {error}"),
         )
-    })
+    })?;
+    if posix_shmem_object_name(&os_id).is_none() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "shared-memory flink contains an invalid POSIX mapping identifier",
+        ));
+    }
+    Ok(os_id)
 }
 
 fn open_shmem_from_flink(path: &Path, operation: &str) -> Result<Shmem> {
@@ -2332,6 +2342,22 @@ mod tests {
             child_removed_fifo,
             "FIFO child test did not execute the open path"
         );
+    }
+
+    #[test]
+    fn typed_open_rejects_malformed_posix_mapping_identifier() {
+        let path = mk_path("malformed_os_id");
+        for identifier in [
+            b"relative-name".as_slice(),
+            b"/nested/name".as_slice(),
+            b"/mapping\0hidden-suffix".as_slice(),
+        ] {
+            std::fs::write(&path, identifier).unwrap();
+            let error = TypedRingBuffer::<u64, u64>::open_auto(&path, Some(0)).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidData);
+            assert!(error.to_string().contains("mapping identifier"));
+        }
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
