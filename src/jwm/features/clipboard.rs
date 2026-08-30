@@ -111,13 +111,44 @@ impl ClipboardHistory {
 /// multi-line and the panel does not wrap.
 #[must_use]
 pub fn preview(text: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_PREVIEW_CHARS {
-        return collapsed;
+    preview_chars(text.chars())
+}
+
+fn preview_chars(chars: impl IntoIterator<Item = char>) -> String {
+    let mut out = String::with_capacity(MAX_PREVIEW_CHARS);
+    let mut output_chars = 0;
+    let mut pending_space = false;
+
+    for ch in chars {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            if push_preview_char(&mut out, &mut output_chars, ' ') {
+                return out;
+            }
+            pending_space = false;
+        }
+        if push_preview_char(&mut out, &mut output_chars, ch) {
+            return out;
+        }
     }
-    let mut out: String = collapsed.chars().take(MAX_PREVIEW_CHARS - 1).collect();
-    out.push('\u{2026}');
     out
+}
+
+/// Append one collapsed character. The first character beyond the visible
+/// limit proves truncation is needed, so replace the last visible character
+/// with an ellipsis and let the caller stop consuming the source immediately.
+fn push_preview_char(out: &mut String, output_chars: &mut usize, ch: char) -> bool {
+    if *output_chars == MAX_PREVIEW_CHARS {
+        let _ = out.pop();
+        out.push('\u{2026}');
+        return true;
+    }
+    out.push(ch);
+    *output_chars += 1;
+    false
 }
 
 /// One picker row: position, a hint of how much was copied, and the preview.
@@ -355,6 +386,22 @@ mod tests {
         let preview = preview(&"x".repeat(MAX_PREVIEW_CHARS + 20));
         assert_eq!(preview.chars().count(), MAX_PREVIEW_CHARS);
         assert!(preview.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn preview_stops_consuming_once_the_ellipsis_is_decided() {
+        let exact = "x".repeat(MAX_PREVIEW_CHARS);
+        assert_eq!(preview(&exact), exact);
+
+        let source =
+            std::iter::repeat('x')
+                .take(MAX_PREVIEW_CHARS + 1)
+                .chain(std::iter::once_with(|| {
+                    panic!("preview consumed input after truncation was decided")
+                }));
+        let shortened = preview_chars(source);
+        assert_eq!(shortened.chars().count(), MAX_PREVIEW_CHARS);
+        assert!(shortened.ends_with('\u{2026}'));
     }
 
     #[test]
