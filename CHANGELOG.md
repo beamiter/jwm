@@ -68,6 +68,14 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- Native X11 clipboard workers now block on the X socket plus an internal
+  eventfd instead of waking on a 20 ms polling cadence. Their final backend or
+  remote-half lease performs a bounded, joined shutdown and hands current text
+  or PNG targets to an existing `CLIPBOARD_MANAGER` through `SAVE_TARGETS`,
+  continuing to serve direct and INCR requests until the manager acknowledges,
+  takes ownership, and every active chunk transfer finishes. With no manager,
+  shutdown remains immediate; retained screenshot sender clones cannot delay
+  it. Recoverable XCB requestor protocol errors also no longer kill the worker.
 - The native X11 clipboard owner now completes the required ICCCM metadata
   contract (`TARGETS`, `TIMESTAMP`, and ordered `MULTIPLE`), acquires ownership
   with a real server timestamp, validates request epochs, and sizes direct and

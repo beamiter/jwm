@@ -15,11 +15,9 @@ use crate::backend::clipboard_offer::{
     X11_INCR_CHUNK_BYTES, X11_MAX_ACTIVE_INCR_BYTES, X11_MAX_MULTIPLE_CONVERSIONS,
     next_x11_incr_chunk_with_limit, x11_selection_time_is_valid,
 };
+use std::os::fd::AsRawFd as _;
 use xcb::x::{self, ATOM_ANY, ATOM_ATOM, ATOM_INTEGER, Atom};
 use xcb::{Connection, Xid};
-
-/// How long the thread sleeps when the connection had nothing to report.
-const IDLE: std::time::Duration = std::time::Duration::from_millis(20);
 
 const MAX_OUTGOING_INCR_TRANSFERS: usize = 32;
 const MAX_OUTGOING_INCR_PER_REQUESTOR: usize = 8;
@@ -28,6 +26,7 @@ const INCOMING_CONVERSION_TIMEOUT: std::time::Duration = std::time::Duration::fr
 const MAX_INCOMING_CHUNK_BYTES: u32 = 1024 * 1024;
 const MAX_TARGET_ATOMS: usize = 256;
 const MAX_TARGET_LIST_BYTES: usize = MAX_TARGET_ATOMS * 4;
+const CLIPBOARD_HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy)]
 struct Atoms {
@@ -37,6 +36,11 @@ struct Atoms {
     timestamp: Atom,
     atom_pair: Atom,
     timestamp_probe: Atom,
+    clipboard_manager: Atom,
+    save_targets: Atom,
+    null: Atom,
+    handoff_property: Atom,
+    handoff_timestamp_probe: Atom,
     utf8_string: Atom,
     text_plain_utf8: Atom,
     text_plain: Atom,
@@ -58,9 +62,44 @@ enum Conversion {
 pub(crate) struct Clipboard {
     captured: std::sync::mpsc::Receiver<String>,
     serve: std::sync::mpsc::Sender<ClipboardOffer>,
+    worker_wake: crate::backend::update_notifier::AsyncUpdateNotifier,
     notifier: std::sync::Arc<
         std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     >,
+    worker: std::sync::Arc<ClipboardWorkerLifetime>,
+}
+
+struct ClipboardWorkerLifetime {
+    shutdown: std::sync::mpsc::Sender<()>,
+    wake: crate::backend::update_notifier::AsyncUpdateNotifier,
+    done: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    join: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for ClipboardWorkerLifetime {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
+        self.wake.notify();
+        let finished = match self
+            .done
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv_timeout(CLIPBOARD_HANDOFF_TIMEOUT + std::time::Duration::from_secs(1))
+        {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+        };
+        let join = self
+            .join
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if finished && let Some(join) = join {
+            let _ = join.join();
+        } else if !finished {
+            log::warn!("clipboard: worker did not stop within the shutdown deadline");
+        }
+    }
 }
 
 impl Clipboard {
@@ -68,29 +107,52 @@ impl Clipboard {
     pub(crate) fn start() -> Result<Self, String> {
         let (captured_tx, captured) = std::sync::mpsc::channel();
         let (serve, serve_rx) = std::sync::mpsc::channel();
+        let (shutdown, shutdown_rx) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let worker_wake = crate::backend::update_notifier::AsyncUpdateNotifier::new()
+            .map_err(|error| format!("create clipboard worker wake fd: {error}"))?;
+        let thread_wake = worker_wake.clone();
         let notifier = std::sync::Arc::new(std::sync::Mutex::new(None));
         let worker_notifier = std::sync::Arc::clone(&notifier);
         let (ready_tx, ready) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
+        let join = std::thread::Builder::new()
             .name("jwm-clipboard".to_string())
-            .spawn(move || match Watcher::new() {
-                Ok(mut watcher) => {
-                    let _ = ready_tx.send(Ok(()));
-                    watcher.run(&captured_tx, &serve_rx, &worker_notifier);
+            .spawn(move || {
+                match Watcher::new() {
+                    Ok(mut watcher) => {
+                        let _ = ready_tx.send(Ok(()));
+                        watcher.run(
+                            &captured_tx,
+                            &serve_rx,
+                            &worker_notifier,
+                            &thread_wake,
+                            &shutdown_rx,
+                        );
+                    }
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                    }
                 }
-                Err(error) => {
-                    let _ = ready_tx.send(Err(error));
-                }
+                thread_wake.mark_unhealthy();
+                let _ = done_tx.send(());
             })
             .map_err(|error| format!("spawn clipboard thread: {error}"))?;
 
         ready
             .recv()
             .map_err(|_| "clipboard thread died during startup".to_string())??;
+        let worker = std::sync::Arc::new(ClipboardWorkerLifetime {
+            shutdown,
+            wake: worker_wake.clone(),
+            done: std::sync::Mutex::new(done),
+            join: std::sync::Mutex::new(Some(join)),
+        });
         Ok(Self {
             captured,
             serve,
+            worker_wake,
             notifier,
+            worker,
         })
     }
 
@@ -104,13 +166,19 @@ impl Clipboard {
         if text.len() > clipboard::MAX_TEXT_BYTES {
             return false;
         }
+        let _keep_worker_alive = &self.worker;
+        if !self.worker_wake.is_healthy() {
+            return false;
+        }
         self.serve
             .send(ClipboardOffer::Text(text.to_string()))
             .is_ok()
+            && self.worker_wake.notify()
     }
 
     pub(crate) fn image_sender(&self) -> ClipboardImageSender {
-        ClipboardImageSender::new(self.serve.clone())
+        let _keep_worker_alive = &self.worker;
+        ClipboardImageSender::new_with_wake(self.serve.clone(), self.worker_wake.clone())
     }
 
     pub(crate) fn set_update_notifier(
@@ -144,6 +212,7 @@ struct Watcher {
     property_payload_bytes: usize,
     capture: Option<CaptureRequest>,
     outgoing_incr: std::collections::HashMap<(x::Window, Atom), OutgoingIncr>,
+    shutting_down: bool,
 }
 
 #[derive(Debug)]
@@ -185,6 +254,7 @@ impl OfferedData {
                 atoms.targets,
                 atoms.multiple,
                 atoms.timestamp,
+                atoms.save_targets,
                 atoms.utf8_string,
                 atoms.text_plain_utf8,
                 atoms.text_plain,
@@ -193,6 +263,7 @@ impl OfferedData {
                 atoms.targets,
                 atoms.multiple,
                 atoms.timestamp,
+                atoms.save_targets,
                 atoms.image_png,
             ],
         }
@@ -209,6 +280,13 @@ impl OfferedData {
             }
             Self::Png(bytes) if target == atoms.image_png => Some(std::sync::Arc::clone(bytes)),
             _ => None,
+        }
+    }
+
+    fn payload_targets(&self, atoms: &Atoms) -> Vec<Atom> {
+        match self {
+            Self::Text(_) => vec![atoms.utf8_string, atoms.text_plain_utf8, atoms.text_plain],
+            Self::Png(_) => vec![atoms.image_png],
         }
     }
 }
@@ -253,6 +331,11 @@ impl Watcher {
             timestamp: intern(&conn, "TIMESTAMP")?,
             atom_pair: intern(&conn, "ATOM_PAIR")?,
             timestamp_probe: intern(&conn, "JWM_CLIPBOARD_TIMESTAMP")?,
+            clipboard_manager: intern(&conn, "CLIPBOARD_MANAGER")?,
+            save_targets: intern(&conn, "SAVE_TARGETS")?,
+            null: intern(&conn, "NULL")?,
+            handoff_property: intern(&conn, "JWM_CLIPBOARD_SAVE_TARGETS")?,
+            handoff_timestamp_probe: intern(&conn, "JWM_CLIPBOARD_HANDOFF_TIMESTAMP")?,
             utf8_string: intern(&conn, "UTF8_STRING")?,
             text_plain_utf8: intern(&conn, "text/plain;charset=utf-8")?,
             text_plain: intern(&conn, "text/plain")?,
@@ -314,6 +397,7 @@ impl Watcher {
             property_payload_bytes,
             capture: None,
             outgoing_incr: std::collections::HashMap::new(),
+            shutting_down: false,
         };
         let cookie = watcher.conn.send_request(&x::GetSelectionOwner {
             selection: watcher.atoms.clipboard,
@@ -334,48 +418,311 @@ impl Watcher {
         captured: &std::sync::mpsc::Sender<String>,
         serve: &std::sync::mpsc::Receiver<ClipboardOffer>,
         notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
+        wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
+        shutdown: &std::sync::mpsc::Receiver<()>,
     ) {
+        let mut serve_connected = true;
+        let mut capture_connected = true;
         loop {
-            match serve.try_recv() {
-                Ok(mut offer) => {
-                    while let Ok(newer) = serve.try_recv() {
-                        offer = newer;
+            let _ = wake.drain();
+            let shutdown_requested = !matches!(
+                shutdown.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            );
+            if serve_connected {
+                match serve.try_recv() {
+                    Ok(mut offer) => {
+                        while let Ok(newer) = serve.try_recv() {
+                            offer = newer;
+                        }
+                        self.take_ownership(offer);
                     }
-                    self.take_ownership(offer);
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        serve_connected = false;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+            if shutdown_requested {
+                self.handoff_to_clipboard_manager(wake);
+                return;
             }
 
             self.expire_outgoing_incr();
 
-            let mut idle = true;
+            let mut handled_event = false;
             for _ in 0..256 {
                 match self.conn.poll_for_event() {
                     Ok(Some(event)) => {
-                        idle = false;
+                        handled_event = true;
                         if let Some(text) = self.handle(&event)
+                            && capture_connected
                             && !publish_capture(captured, notifier, text)
                         {
-                            return;
+                            capture_connected = false;
                         }
                     }
                     Ok(None) => break,
-                    Err(error) => {
+                    Err(xcb::Error::Protocol(error)) => {
+                        log::debug!("clipboard: ignored requestor protocol error: {error}");
+                    }
+                    Err(xcb::Error::Connection(error)) => {
                         log::warn!("clipboard: XCB connection failed: {error}");
                         return;
                     }
                 }
             }
-            if idle {
-                let recently_active = self.outgoing_incr.values().any(|transfer| {
-                    transfer.last_activity.elapsed() < std::time::Duration::from_millis(100)
-                });
-                std::thread::sleep(if recently_active {
-                    std::time::Duration::from_millis(2)
+            if handled_event {
+                continue;
+            }
+            if let Err(error) = self.wait_for_work(wake, None) {
+                log::warn!("clipboard: event wait failed: {error}");
+                return;
+            }
+        }
+    }
+
+    fn wait_for_work(
+        &self,
+        wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
+        deadline: Option<std::time::Instant>,
+    ) -> std::io::Result<()> {
+        let mut descriptors = [
+            libc::pollfd {
+                fd: self.conn.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_fd().as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let ready = unsafe {
+            libc::poll(
+                descriptors.as_mut_ptr(),
+                descriptors.len() as libc::nfds_t,
+                self.next_poll_timeout_ms(deadline),
+            )
+        };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        if descriptors[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "XCB clipboard connection closed",
+            ));
+        }
+        if descriptors[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "clipboard worker wake fd closed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn next_poll_timeout_ms(&self, deadline: Option<std::time::Instant>) -> i32 {
+        let now = std::time::Instant::now();
+        let outgoing = self.outgoing_incr.values().map(|transfer| {
+            OUTGOING_INCR_TIMEOUT
+                .saturating_sub(now.saturating_duration_since(transfer.last_activity))
+        });
+        let incoming = self.capture.as_ref().map(|capture| {
+            INCOMING_CONVERSION_TIMEOUT
+                .saturating_sub(now.saturating_duration_since(capture.last_activity))
+        });
+        let handoff = deadline.map(|deadline| deadline.saturating_duration_since(now));
+        outgoing
+            .chain(incoming)
+            .chain(handoff)
+            .min()
+            .map_or(-1, |remaining| {
+                if remaining.is_zero() {
+                    0
                 } else {
-                    IDLE
-                });
+                    let millis = remaining.as_nanos().div_ceil(1_000_000);
+                    i32::try_from(millis).unwrap_or(i32::MAX)
+                }
+            })
+    }
+
+    fn fresh_handoff_timestamp(
+        &mut self,
+        wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
+        deadline: std::time::Instant,
+    ) -> Option<u32> {
+        self.conn
+            .send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Append,
+                window: self.window,
+                property: self.atoms.handoff_timestamp_probe,
+                r#type: ATOM_INTEGER,
+                data: &[] as &[u8],
+            })
+            .ok()?;
+        self.conn.flush().ok()?;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            let mut handled = false;
+            for _ in 0..256 {
+                let event = match self.conn.poll_for_event() {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(xcb::Error::Protocol(_)) => continue,
+                    Err(xcb::Error::Connection(_)) => return None,
+                };
+                handled = true;
+                if let xcb::Event::X(x::Event::PropertyNotify(property)) = &event
+                    && property.window() == self.window
+                    && property.atom() == self.atoms.handoff_timestamp_probe
+                    && property.state() == x::Property::NewValue
+                {
+                    self.conn.send_request(&x::DeleteProperty {
+                        window: self.window,
+                        property: self.atoms.handoff_timestamp_probe,
+                    });
+                    return Some(property.time());
+                }
+                let _ = self.handle(&event);
+            }
+            if !handled && self.wait_for_work(wake, Some(deadline)).is_err() {
+                return None;
+            }
+        }
+    }
+
+    fn handoff_to_clipboard_manager(
+        &mut self,
+        wake: &crate::backend::update_notifier::AsyncUpdateNotifier,
+    ) {
+        self.shutting_down = true;
+        self.cancel_capture();
+        if self.pending_offer.is_none()
+            && (self.offered.is_none() || !self.is_current_owner(self.window))
+        {
+            return;
+        }
+        let cookie = self.conn.send_request(&x::GetSelectionOwner {
+            selection: self.atoms.clipboard_manager,
+        });
+        let manager = self
+            .conn
+            .wait_for_reply(cookie)
+            .map(|reply| reply.owner())
+            .unwrap_or(x::WINDOW_NONE);
+        if manager == x::WINDOW_NONE {
+            return;
+        }
+        let deadline = std::time::Instant::now() + CLIPBOARD_HANDOFF_TIMEOUT;
+        let Some(timestamp) = self.fresh_handoff_timestamp(wake, deadline) else {
+            return;
+        };
+        if self.pending_offer.is_some() {
+            self.pending_probe_events = 0;
+            self.conn.send_request(&x::DeleteProperty {
+                window: self.window,
+                property: self.atoms.timestamp_probe,
+            });
+            if !self.acquire_pending_ownership(timestamp) {
+                return;
+            }
+        }
+        let Some(offered) = self.offered.as_ref() else {
+            return;
+        };
+        if !self.is_current_owner(self.window) {
+            return;
+        }
+        let targets = offered.payload_targets(&self.atoms);
+        if self
+            .conn
+            .send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: self.window,
+                property: self.atoms.handoff_property,
+                r#type: ATOM_ATOM,
+                data: &targets,
+            })
+            .is_err()
+        {
+            return;
+        }
+        self.conn.send_request(&x::ConvertSelection {
+            requestor: self.window,
+            selection: self.atoms.clipboard_manager,
+            target: self.atoms.save_targets,
+            property: self.atoms.handoff_property,
+            time: timestamp,
+        });
+        if self.conn.flush().is_err() {
+            return;
+        }
+
+        let mut manager_notified = false;
+        let mut protocol_activity = false;
+        let mut provisional_failure = None;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                log::warn!("clipboard: SAVE_TARGETS handoff timed out");
+                return;
+            }
+            self.expire_outgoing_incr();
+            let mut handled = false;
+            for _ in 0..256 {
+                let event = match self.conn.poll_for_event() {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break,
+                    Err(xcb::Error::Protocol(_)) => continue,
+                    Err(xcb::Error::Connection(_)) => return,
+                };
+                handled = true;
+                match &event {
+                    xcb::Event::X(x::Event::SelectionNotify(notify))
+                        if notify.requestor() == self.window
+                            && notify.selection() == self.atoms.clipboard_manager
+                            && notify.target() == self.atoms.save_targets
+                            && notify.time() == timestamp =>
+                    {
+                        if notify.property() == self.atoms.handoff_property {
+                            manager_notified = true;
+                        } else if notify.property() == x::ATOM_NONE {
+                            provisional_failure = Some(std::time::Instant::now());
+                        }
+                    }
+                    xcb::Event::X(x::Event::SelectionRequest(request))
+                        if request.selection() == self.atoms.clipboard =>
+                    {
+                        protocol_activity = true;
+                        self.on_selection_request(request);
+                    }
+                    _ => {
+                        let _ = self.handle(&event);
+                    }
+                }
+            }
+            if (manager_notified || protocol_activity)
+                && !self.is_current_owner(self.window)
+                && self.outgoing_incr.is_empty()
+            {
+                log::debug!("clipboard: SAVE_TARGETS handoff completed");
+                return;
+            }
+            if provisional_failure.is_some_and(|failed_at| {
+                !protocol_activity && failed_at.elapsed() >= std::time::Duration::from_millis(100)
+            }) {
+                return;
+            }
+            if !handled && self.wait_for_work(wake, Some(deadline)).is_err() {
+                return;
             }
         }
     }
@@ -393,7 +740,10 @@ impl Watcher {
             }
             xcb::Event::X(x::Event::PropertyNotify(e)) => self.on_property_notify(e),
             xcb::Event::X(x::Event::SelectionClear(e)) if e.owner() == self.window => {
-                if self.pending_offer.is_none() && !self.is_current_owner(self.window) {
+                if !self.shutting_down
+                    && self.pending_offer.is_none()
+                    && !self.is_current_owner(self.window)
+                {
                     self.offered = None;
                     self.pending_offer = None;
                     self.pending_probe_events = 0;
@@ -420,6 +770,12 @@ impl Watcher {
     /// A new application took the clipboard: ask what it can offer. Ownership
     /// JWM took itself is ignored, so serving an entry does not re-record it.
     fn on_owner_changed(&mut self, owner: x::Window, timestamp: u32, selection_timestamp: u32) {
+        if self.shutting_down {
+            if owner == self.window {
+                self.ownership_time = Some(selection_timestamp);
+            }
+            return;
+        }
         if owner == self.window {
             self.cancel_capture();
             self.ownership_time = Some(selection_timestamp);
@@ -700,8 +1056,12 @@ impl Watcher {
             return;
         }
         self.pending_probe_events = 0;
+        self.acquire_pending_ownership(timestamp);
+    }
+
+    fn acquire_pending_ownership(&mut self, timestamp: u32) -> bool {
         let Some(offer) = self.pending_offer.take() else {
-            return;
+            return self.offered.is_some() && self.is_current_owner(self.window);
         };
         self.offered = Some(offer.into());
         if self
@@ -716,10 +1076,11 @@ impl Watcher {
         {
             self.offered = None;
             self.ownership_time = None;
-            return;
+            return false;
         }
         self.ownership_time = Some(timestamp);
         let _ = self.conn.flush();
+        true
     }
 
     /// Answer a request for the entry JWM is offering.
@@ -781,6 +1142,18 @@ impl Watcher {
                     property,
                     r#type: ATOM_INTEGER,
                     data: &[timestamp],
+                })
+                .is_ok();
+        }
+        if target == self.atoms.save_targets {
+            return self
+                .conn
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: requestor,
+                    property,
+                    r#type: self.atoms.null,
+                    data: &[] as &[u8],
                 })
                 .is_ok();
         }
@@ -1361,6 +1734,8 @@ mod tests {
         let targets = intern(&conn, "TARGETS").unwrap();
         let multiple = intern(&conn, "MULTIPLE").unwrap();
         let timestamp = intern(&conn, "TIMESTAMP").unwrap();
+        let save_targets = intern(&conn, "SAVE_TARGETS").unwrap();
+        let null = intern(&conn, "NULL").unwrap();
         let atom_pair = intern(&conn, "ATOM_PAIR").unwrap();
         let utf8 = intern(&conn, "UTF8_STRING").unwrap();
         let unknown = intern(&conn, "JWM_TEST_UNKNOWN_TARGET").unwrap();
@@ -1404,9 +1779,32 @@ mod tests {
         assert_eq!(reply.r#type(), ATOM_ATOM);
         assert_eq!(reply.format(), 32);
         let advertised = reply.value::<Atom>();
-        for required in [targets, multiple, timestamp, utf8] {
+        for required in [targets, multiple, timestamp, save_targets, utf8] {
             assert!(advertised.contains(&required));
         }
+
+        let save_property = intern(&conn, "JWM_TEST_SAVE_TARGETS").unwrap();
+        let notify = convert_and_wait(
+            &conn,
+            requestor,
+            clipboard,
+            save_targets,
+            save_property,
+            x::CURRENT_TIME,
+        );
+        assert_eq!(notify.property(), save_property);
+        let cookie = conn.send_request(&x::GetProperty {
+            delete: true,
+            window: requestor,
+            property: save_property,
+            r#type: ATOM_ANY,
+            long_offset: 0,
+            long_length: 1,
+        });
+        let reply = conn.wait_for_reply(cookie).unwrap();
+        assert_eq!(reply.r#type(), null);
+        assert_eq!(reply.format(), 8);
+        assert!(reply.value::<u8>().is_empty());
 
         let timestamp_property = intern(&conn, "JWM_TEST_TIMESTAMP").unwrap();
         let notify = convert_and_wait(
@@ -1659,5 +2057,168 @@ mod tests {
         }
         drop(clipboard_watcher);
         std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 server in DISPLAY"]
+    fn native_owner_hands_text_to_clipboard_manager_on_drop() {
+        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clipboard_owner = Clipboard::start().unwrap();
+        assert!(clipboard_owner.set_text("persist across restart"));
+
+        let (manager_ready_tx, manager_ready_rx) = std::sync::mpsc::channel();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let manager = std::thread::spawn(move || {
+            let (conn, screen_num) = Connection::connect(None).unwrap();
+            let root = conn
+                .get_setup()
+                .roots()
+                .nth(screen_num as usize)
+                .unwrap()
+                .root();
+            let clipboard = intern(&conn, "CLIPBOARD").unwrap();
+            let clipboard_manager = intern(&conn, "CLIPBOARD_MANAGER").unwrap();
+            let save_targets = intern(&conn, "SAVE_TARGETS").unwrap();
+            let utf8 = intern(&conn, "UTF8_STRING").unwrap();
+            let data_property = intern(&conn, "JWM_TEST_MANAGER_DATA").unwrap();
+            let window: x::Window = conn.generate_id();
+            conn.send_and_check_request(&x::CreateWindow {
+                depth: 0,
+                wid: window,
+                parent: root,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                border_width: 0,
+                class: x::WindowClass::InputOnly,
+                visual: x::COPY_FROM_PARENT,
+                value_list: &[],
+            })
+            .unwrap();
+            conn.send_and_check_request(&x::SetSelectionOwner {
+                owner: window,
+                selection: clipboard_manager,
+                time: x::CURRENT_TIME,
+            })
+            .unwrap();
+            manager_ready_tx.send(()).unwrap();
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut handoff = None;
+            loop {
+                assert!(std::time::Instant::now() < deadline, "manager timed out");
+                let Some(event) = conn.poll_for_event().unwrap() else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                };
+                match event {
+                    xcb::Event::X(x::Event::SelectionRequest(event))
+                        if event.selection() == clipboard_manager
+                            && event.target() == save_targets =>
+                    {
+                        assert_ne!(event.property(), x::ATOM_NONE);
+                        let cookie = conn.send_request(&x::GetProperty {
+                            delete: false,
+                            window: event.requestor(),
+                            property: event.property(),
+                            r#type: ATOM_ANY,
+                            long_offset: 0,
+                            long_length: 32,
+                        });
+                        let targets = conn.wait_for_reply(cookie).unwrap();
+                        assert_eq!(targets.r#type(), ATOM_ATOM);
+                        assert_eq!(targets.format(), 32);
+                        assert!(targets.value::<Atom>().contains(&utf8));
+                        handoff = Some((event.requestor(), event.property(), event.time()));
+                        conn.send_request(&x::ConvertSelection {
+                            requestor: window,
+                            selection: clipboard,
+                            target: utf8,
+                            property: data_property,
+                            time: event.time(),
+                        });
+                        conn.flush().unwrap();
+                    }
+                    xcb::Event::X(x::Event::SelectionNotify(event))
+                        if event.requestor() == window
+                            && event.selection() == clipboard
+                            && event.target() == utf8 =>
+                    {
+                        assert_eq!(event.property(), data_property);
+                        let cookie = conn.send_request(&x::GetProperty {
+                            delete: true,
+                            window,
+                            property: data_property,
+                            r#type: ATOM_ANY,
+                            long_offset: 0,
+                            long_length: 1024,
+                        });
+                        let data = conn.wait_for_reply(cookie).unwrap();
+                        assert_eq!(data.r#type(), utf8);
+                        assert_eq!(data.format(), 8);
+                        let saved = String::from_utf8(data.value::<u8>().to_vec()).unwrap();
+                        let (requestor, property, time) = handoff.take().unwrap();
+                        conn.send_and_check_request(&x::SetSelectionOwner {
+                            owner: window,
+                            selection: clipboard,
+                            time,
+                        })
+                        .unwrap();
+                        conn.send_request(&x::SendEvent {
+                            propagate: false,
+                            destination: x::SendEventDest::Window(requestor),
+                            event_mask: x::EventMask::NO_EVENT,
+                            event: &x::SelectionNotifyEvent::new(
+                                time,
+                                requestor,
+                                clipboard_manager,
+                                save_targets,
+                                property,
+                            ),
+                        });
+                        conn.flush().unwrap();
+                        let cookie = conn.send_request(&x::GetSelectionOwner {
+                            selection: clipboard,
+                        });
+                        assert_eq!(conn.wait_for_reply(cookie).unwrap().owner(), window);
+                        saved_tx.send(saved).unwrap();
+                        release_rx.recv().unwrap();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        manager_ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        drop(clipboard_owner);
+        assert_eq!(
+            saved_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            "persist across restart"
+        );
+        release_tx.send(()).unwrap();
+        manager.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 server in DISPLAY"]
+    fn native_worker_shutdown_does_not_wait_for_image_sender_clone() {
+        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clipboard = Clipboard::start().unwrap();
+        let image_sender = clipboard.image_sender();
+        let started = std::time::Instant::now();
+        drop(clipboard);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(!image_sender.send_png(vec![1, 2, 3, 4]));
     }
 }

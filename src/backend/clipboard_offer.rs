@@ -151,12 +151,24 @@ pub(crate) enum ClipboardOffer {
 #[derive(Clone, Debug)]
 pub struct ClipboardImageSender {
     sender: std::sync::mpsc::Sender<ClipboardOffer>,
+    wake: Option<crate::backend::update_notifier::AsyncUpdateNotifier>,
 }
 
 impl ClipboardImageSender {
-    #[cfg(any(feature = "backend-x11rb", feature = "backend-xcb", test))]
+    #[cfg(test)]
     pub(crate) fn new(sender: std::sync::mpsc::Sender<ClipboardOffer>) -> Self {
-        Self { sender }
+        Self { sender, wake: None }
+    }
+
+    #[cfg(any(feature = "backend-x11rb", feature = "backend-xcb"))]
+    pub(crate) fn new_with_wake(
+        sender: std::sync::mpsc::Sender<ClipboardOffer>,
+        wake: crate::backend::update_notifier::AsyncUpdateNotifier,
+    ) -> Self {
+        Self {
+            sender,
+            wake: Some(wake),
+        }
     }
 
     /// Queue a complete PNG for native clipboard ownership.
@@ -165,7 +177,11 @@ impl ClipboardImageSender {
         if png.len() > X11_MAX_OFFER_BYTES {
             return false;
         }
-        self.sender.send(ClipboardOffer::Png(png)).is_ok()
+        if self.wake.as_ref().is_some_and(|wake| !wake.is_healthy()) {
+            return false;
+        }
+        let sent = self.sender.send(ClipboardOffer::Png(png)).is_ok();
+        sent && self.wake.as_ref().is_none_or(|wake| wake.notify())
     }
 }
 

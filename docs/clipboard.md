@@ -79,7 +79,12 @@ The X11 watcher runs on **its own X connection and thread**, not the window
 manager's.
 Selection traffic is a conversation with other clients — a conversion waits
 for the owner to answer — and a slow or hostile clipboard owner must never be
-able to delay a frame.
+able to delay a frame. The worker sleeps in one poll over its X socket and an
+internal eventfd, so an idle clipboard has no periodic wakeup. On JWM restart
+or exit it uses `CLIPBOARD_MANAGER`/`SAVE_TARGETS` when a desktop clipboard
+manager exists, continuing to serve direct or INCR requests until that manager
+has taken ownership. The handoff and worker join are bounded, so a broken
+manager or X connection cannot block shutdown indefinitely.
 
 Support by backend:
 
