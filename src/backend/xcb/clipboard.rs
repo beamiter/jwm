@@ -10,7 +10,10 @@
 //! traffic waits on other clients, and the window manager's loop must never
 //! be the thing waiting.
 
-use crate::backend::clipboard_offer as clipboard;
+use crate::backend::clipboard_offer::{
+    self as clipboard, ClipboardImageSender, ClipboardOffer, X11_DIRECT_PROPERTY_BYTES,
+    next_x11_incr_chunk,
+};
 use xcb::x::{self, ATOM_ANY, ATOM_ATOM, ATOM_STRING, Atom};
 use xcb::{Connection, Xid};
 
@@ -20,6 +23,9 @@ const MAX_PROPERTY_BYTES: u32 = clipboard::MAX_TEXT_BYTES as u32;
 /// How long the thread sleeps when the connection had nothing to report.
 const IDLE: std::time::Duration = std::time::Duration::from_millis(20);
 
+const MAX_OUTGOING_INCR_TRANSFERS: usize = 32;
+const OUTGOING_INCR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy)]
 struct Atoms {
     clipboard: Atom,
@@ -27,6 +33,7 @@ struct Atoms {
     utf8_string: Atom,
     text_plain_utf8: Atom,
     text_plain: Atom,
+    image_png: Atom,
     incr: Atom,
     transfer: Atom,
 }
@@ -43,7 +50,7 @@ enum Conversion {
 /// Handle held by the backend.
 pub(crate) struct Clipboard {
     captured: std::sync::mpsc::Receiver<String>,
-    serve: std::sync::mpsc::Sender<String>,
+    serve: std::sync::mpsc::Sender<ClipboardOffer>,
     notifier: std::sync::Arc<
         std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     >,
@@ -87,7 +94,13 @@ impl Clipboard {
 
     /// Offer `text` to other applications.
     pub(crate) fn set_text(&self, text: &str) -> bool {
-        self.serve.send(text.to_string()).is_ok()
+        self.serve
+            .send(ClipboardOffer::Text(text.to_string()))
+            .is_ok()
+    }
+
+    pub(crate) fn image_sender(&self) -> ClipboardImageSender {
+        ClipboardImageSender::new(self.serve.clone())
     }
 
     pub(crate) fn set_update_notifier(
@@ -114,7 +127,61 @@ struct Watcher {
     conn: Connection,
     window: x::Window,
     atoms: Atoms,
-    offered: Option<String>,
+    offered: Option<OfferedData>,
+    outgoing_incr: std::collections::HashMap<(x::Window, Atom), OutgoingIncr>,
+}
+
+#[derive(Clone, Debug)]
+enum OfferedData {
+    Text(std::sync::Arc<[u8]>),
+    Png(std::sync::Arc<[u8]>),
+}
+
+impl From<ClipboardOffer> for OfferedData {
+    fn from(offer: ClipboardOffer) -> Self {
+        match offer {
+            ClipboardOffer::Text(text) => Self::Text(text.into_bytes().into()),
+            ClipboardOffer::Png(png) => Self::Png(png.into()),
+        }
+    }
+}
+
+impl OfferedData {
+    fn targets(&self, atoms: &Atoms) -> Vec<Atom> {
+        match self {
+            Self::Text(_) => vec![
+                atoms.targets,
+                atoms.utf8_string,
+                atoms.text_plain_utf8,
+                atoms.text_plain,
+                ATOM_STRING,
+            ],
+            Self::Png(_) => vec![atoms.targets, atoms.image_png],
+        }
+    }
+
+    fn payload_for(&self, atoms: &Atoms, target: Atom) -> Option<std::sync::Arc<[u8]>> {
+        match self {
+            Self::Text(bytes)
+                if target == atoms.utf8_string
+                    || target == atoms.text_plain_utf8
+                    || target == atoms.text_plain
+                    || target == ATOM_STRING =>
+            {
+                Some(std::sync::Arc::clone(bytes))
+            }
+            Self::Png(bytes) if target == atoms.image_png => Some(std::sync::Arc::clone(bytes)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct OutgoingIncr {
+    target: Atom,
+    data: std::sync::Arc<[u8]>,
+    offset: usize,
+    last_activity: std::time::Instant,
 }
 
 fn intern(conn: &Connection, name: &str) -> Result<Atom, String> {
@@ -148,6 +215,7 @@ impl Watcher {
             utf8_string: intern(&conn, "UTF8_STRING")?,
             text_plain_utf8: intern(&conn, "text/plain;charset=utf-8")?,
             text_plain: intern(&conn, "text/plain")?,
+            image_png: intern(&conn, "image/png")?,
             incr: intern(&conn, "INCR")?,
             transfer: intern(&conn, "JWM_CLIPBOARD")?,
         };
@@ -192,21 +260,24 @@ impl Watcher {
             window,
             atoms,
             offered: None,
+            outgoing_incr: std::collections::HashMap::new(),
         })
     }
 
     fn run(
         &mut self,
         captured: &std::sync::mpsc::Sender<String>,
-        serve: &std::sync::mpsc::Receiver<String>,
+        serve: &std::sync::mpsc::Receiver<ClipboardOffer>,
         notifier: &std::sync::Mutex<Option<crate::backend::update_notifier::AsyncUpdateNotifier>>,
     ) {
         loop {
             match serve.try_recv() {
-                Ok(text) => self.take_ownership(&text),
+                Ok(offer) => self.take_ownership(offer),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             }
+
+            self.expire_outgoing_incr();
 
             let mut idle = true;
             while let Ok(Some(event)) = self.conn.poll_for_event() {
@@ -218,7 +289,11 @@ impl Watcher {
                 }
             }
             if idle {
-                std::thread::sleep(IDLE);
+                std::thread::sleep(if self.outgoing_incr.is_empty() {
+                    IDLE
+                } else {
+                    std::time::Duration::from_millis(2)
+                });
             }
         }
     }
@@ -232,6 +307,10 @@ impl Watcher {
             xcb::Event::X(x::Event::SelectionNotify(e)) => self.on_selection_notify(e),
             xcb::Event::X(x::Event::SelectionRequest(e)) => {
                 self.on_selection_request(e);
+                None
+            }
+            xcb::Event::X(x::Event::PropertyNotify(e)) => {
+                self.on_property_notify(e);
                 None
             }
             xcb::Event::X(x::Event::SelectionClear(e)) if e.owner() == self.window => {
@@ -337,9 +416,9 @@ impl Watcher {
         self.convert(target);
     }
 
-    /// Offer `text` by taking ownership of CLIPBOARD.
-    fn take_ownership(&mut self, text: &str) {
-        self.offered = Some(text.to_string());
+    /// Offer one payload by taking ownership of CLIPBOARD.
+    fn take_ownership(&mut self, offer: ClipboardOffer) {
+        self.offered = Some(offer.into());
         self.conn.send_request(&x::SetSelectionOwner {
             owner: self.window,
             selection: self.atoms.clipboard,
@@ -350,7 +429,7 @@ impl Watcher {
 
     /// Answer a request for the entry JWM is offering.
     fn on_selection_request(&mut self, event: &x::SelectionRequestEvent) {
-        let Some(text) = self.offered.clone() else {
+        let Some(offered) = self.offered.clone() else {
             self.reply(event, x::ATOM_NONE);
             return;
         };
@@ -362,41 +441,152 @@ impl Watcher {
         };
 
         let served = if event.target() == self.atoms.targets {
-            let offered = [
-                self.atoms.targets,
-                self.atoms.utf8_string,
-                self.atoms.text_plain_utf8,
-                self.atoms.text_plain,
-                ATOM_STRING,
-            ];
+            let targets = offered.targets(&self.atoms);
             self.conn
                 .send_and_check_request(&x::ChangeProperty {
                     mode: x::PropMode::Replace,
                     window: event.requestor(),
                     property,
                     r#type: ATOM_ATOM,
-                    data: &offered,
-                })
-                .is_ok()
-        } else if event.target() == self.atoms.utf8_string
-            || event.target() == self.atoms.text_plain_utf8
-            || event.target() == self.atoms.text_plain
-            || event.target() == ATOM_STRING
-        {
-            self.conn
-                .send_and_check_request(&x::ChangeProperty {
-                    mode: x::PropMode::Replace,
-                    window: event.requestor(),
-                    property,
-                    r#type: event.target(),
-                    data: text.as_bytes(),
+                    data: &targets,
                 })
                 .is_ok()
         } else {
-            false
+            offered
+                .payload_for(&self.atoms, event.target())
+                .is_some_and(|data| {
+                    if data.len() <= X11_DIRECT_PROPERTY_BYTES {
+                        self.conn
+                            .send_and_check_request(&x::ChangeProperty {
+                                mode: x::PropMode::Replace,
+                                window: event.requestor(),
+                                property,
+                                r#type: event.target(),
+                                data: data.as_ref(),
+                            })
+                            .is_ok()
+                    } else {
+                        self.begin_outgoing_incr(event.requestor(), property, event.target(), data)
+                    }
+                })
         };
 
         self.reply(event, if served { property } else { x::ATOM_NONE });
+    }
+
+    fn begin_outgoing_incr(
+        &mut self,
+        requestor: x::Window,
+        property: Atom,
+        target: Atom,
+        data: std::sync::Arc<[u8]>,
+    ) -> bool {
+        let key = (requestor, property);
+        if !self.outgoing_incr.contains_key(&key)
+            && self.outgoing_incr.len() >= MAX_OUTGOING_INCR_TRANSFERS
+        {
+            log::warn!("clipboard: refusing INCR transfer; too many requesters are stalled");
+            return false;
+        }
+        let Ok(total) = u32::try_from(data.len()) else {
+            log::warn!("clipboard: refusing INCR transfer larger than 4 GiB");
+            return false;
+        };
+
+        if self
+            .conn
+            .send_and_check_request(&x::ChangeWindowAttributes {
+                window: requestor,
+                value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+            })
+            .is_err()
+            || self
+                .conn
+                .send_and_check_request(&x::ChangeProperty {
+                    mode: x::PropMode::Replace,
+                    window: requestor,
+                    property,
+                    r#type: self.atoms.incr,
+                    data: &[total],
+                })
+                .is_err()
+        {
+            return false;
+        }
+
+        self.outgoing_incr.insert(
+            key,
+            OutgoingIncr {
+                target,
+                data,
+                offset: 0,
+                last_activity: std::time::Instant::now(),
+            },
+        );
+        true
+    }
+
+    fn on_property_notify(&mut self, event: &x::PropertyNotifyEvent) {
+        if event.state() != x::Property::Delete {
+            return;
+        }
+        let key = (event.window(), event.atom());
+        let Some(transfer) = self.outgoing_incr.get_mut(&key) else {
+            return;
+        };
+        let (range, terminal) = next_x11_incr_chunk(transfer.data.len(), &mut transfer.offset);
+        transfer.last_activity = std::time::Instant::now();
+        let target = transfer.target;
+        let data = std::sync::Arc::clone(&transfer.data);
+
+        let sent = self
+            .conn
+            .send_and_check_request(&x::ChangeProperty {
+                mode: x::PropMode::Replace,
+                window: event.window(),
+                property: event.atom(),
+                r#type: target,
+                data: &data[range],
+            })
+            .is_ok();
+        if terminal || !sent {
+            self.outgoing_incr.remove(&key);
+            self.stop_watching_requestor_if_idle(event.window());
+        }
+        let _ = self.conn.flush();
+    }
+
+    fn expire_outgoing_incr(&mut self) {
+        let now = std::time::Instant::now();
+        let expired: Vec<x::Window> = self
+            .outgoing_incr
+            .iter()
+            .filter_map(|(&(window, _), transfer)| {
+                (now.saturating_duration_since(transfer.last_activity) >= OUTGOING_INCR_TIMEOUT)
+                    .then_some(window)
+            })
+            .collect();
+        self.outgoing_incr.retain(|_, transfer| {
+            now.saturating_duration_since(transfer.last_activity) < OUTGOING_INCR_TIMEOUT
+        });
+        for window in expired {
+            self.stop_watching_requestor_if_idle(window);
+        }
+    }
+
+    fn stop_watching_requestor_if_idle(&self, requestor: x::Window) {
+        if self
+            .outgoing_incr
+            .keys()
+            .any(|(window, _)| *window == requestor)
+        {
+            return;
+        }
+        self.conn.send_request(&x::ChangeWindowAttributes {
+            window: requestor,
+            value_list: &[x::Cw::EventMask(x::EventMask::NO_EVENT)],
+        });
+        let _ = self.conn.flush();
     }
 
     fn reply(&self, event: &x::SelectionRequestEvent, property: Atom) {
@@ -438,6 +628,105 @@ fn publish_capture(
 mod tests {
     use super::*;
 
+    fn wait_for_selection_owner(conn: &Connection, selection: Atom) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let cookie = conn.send_request(&x::GetSelectionOwner { selection });
+            if conn
+                .wait_for_reply(cookie)
+                .is_ok_and(|reply| reply.owner() != x::WINDOW_NONE)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native clipboard did not take selection ownership"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn receive_png(
+        conn: &Connection,
+        requestor: x::Window,
+        clipboard: Atom,
+        image_png: Atom,
+        incr: Atom,
+        property: Atom,
+    ) -> (Vec<u8>, Option<u32>) {
+        conn.send_request(&x::ConvertSelection {
+            requestor,
+            selection: clipboard,
+            target: image_png,
+            property,
+            time: x::CURRENT_TIME,
+        });
+        conn.flush().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut bytes = Vec::new();
+        let mut announced = None;
+        let mut incremental = false;
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out receiving native image clipboard"
+            );
+            let Some(event) = conn.poll_for_event().unwrap() else {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            };
+            match event {
+                xcb::Event::X(x::Event::SelectionNotify(event))
+                    if event.requestor() == requestor =>
+                {
+                    assert_ne!(event.property(), x::ATOM_NONE, "selection was refused");
+                    let cookie = conn.send_request(&x::GetProperty {
+                        delete: true,
+                        window: requestor,
+                        property,
+                        r#type: ATOM_ANY,
+                        long_offset: 0,
+                        long_length: u32::MAX,
+                    });
+                    let reply = conn.wait_for_reply(cookie).unwrap();
+                    if reply.r#type() == incr {
+                        let values = reply.value::<u32>();
+                        assert_eq!(values.len(), 1, "INCR must announce one byte count");
+                        announced = Some(values[0]);
+                        incremental = true;
+                    } else {
+                        assert_eq!(reply.r#type(), image_png);
+                        return (reply.value::<u8>().to_vec(), None);
+                    }
+                }
+                xcb::Event::X(x::Event::PropertyNotify(event))
+                    if incremental
+                        && event.window() == requestor
+                        && event.atom() == property
+                        && event.state() == x::Property::NewValue =>
+                {
+                    let cookie = conn.send_request(&x::GetProperty {
+                        delete: true,
+                        window: requestor,
+                        property,
+                        r#type: ATOM_ANY,
+                        long_offset: 0,
+                        long_length: u32::MAX,
+                    });
+                    let reply = conn.wait_for_reply(cookie).unwrap();
+                    assert_eq!(reply.r#type(), image_png);
+                    let chunk = reply.value::<u8>();
+                    if chunk.is_empty() {
+                        return (bytes, announced);
+                    }
+                    bytes.extend_from_slice(chunk);
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn the_property_cap_matches_what_the_history_keeps() {
         assert_eq!(MAX_PROPERTY_BYTES as usize, clipboard::MAX_TEXT_BYTES);
@@ -457,5 +746,51 @@ mod tests {
         assert!(publish_capture(&send, &slot, "ready".to_string()));
         assert_eq!(notifier.drain().unwrap(), 1);
         assert_eq!(receive.try_recv().unwrap(), "ready");
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 server in DISPLAY"]
+    fn native_png_offer_serves_payload_beyond_xclips_one_mib_cliff() {
+        let _serial = crate::backend::clipboard_offer::X11_CLIPBOARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clipboard_owner = Clipboard::start().unwrap();
+        let (conn, screen_num) = Connection::connect(None).unwrap();
+        let root = conn
+            .get_setup()
+            .roots()
+            .nth(screen_num as usize)
+            .unwrap()
+            .root();
+        let clipboard = intern(&conn, "CLIPBOARD").unwrap();
+        let image_png = intern(&conn, "image/png").unwrap();
+        let incr = intern(&conn, "INCR").unwrap();
+        let property = intern(&conn, "JWM_TEST_IMAGE").unwrap();
+        let requestor: x::Window = conn.generate_id();
+        conn.send_and_check_request(&x::CreateWindow {
+            depth: 0,
+            wid: requestor,
+            parent: root,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            border_width: 0,
+            class: x::WindowClass::InputOnly,
+            visual: x::COPY_FROM_PARENT,
+            value_list: &[x::Cw::EventMask(x::EventMask::PROPERTY_CHANGE)],
+        })
+        .unwrap();
+
+        let expected: Vec<u8> = (0..1_053_049).map(|index| index as u8).collect();
+        assert!(clipboard_owner.image_sender().send_png(expected.clone()));
+        wait_for_selection_owner(&conn, clipboard);
+
+        let (actual, announced) =
+            receive_png(&conn, requestor, clipboard, image_png, incr, property);
+        assert_eq!(announced, Some(expected.len() as u32));
+        assert_eq!(actual, expected);
+        drop(clipboard_owner);
+        std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }

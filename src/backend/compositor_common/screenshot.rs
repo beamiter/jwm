@@ -63,9 +63,17 @@ pub(crate) fn save_png_atomically(
     }
 
     let staging_path = screenshot_staging_path(path);
-    let mut staging_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut staging_options = std::fs::OpenOptions::new();
+    staging_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Screenshots can contain credentials and private conversations. The
+        // completed path is a hard link to this inode, so setting the mode at
+        // creation protects both clipboard staging files and saved captures.
+        staging_options.mode(0o600);
+    }
+    let mut staging_file = staging_options
         .open(&staging_path)
         .map_err(image::ImageError::IoError)?;
     let write_result = image::write_buffer_with_format(
@@ -221,6 +229,14 @@ mod tests {
         save_png_atomically(&path, &first, 1, 1).unwrap();
 
         assert!(path.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         assert!(!screenshot_staging_path(&path).exists());
         assert_eq!(image::open(&path).unwrap().to_rgba8().as_raw(), &first);
 

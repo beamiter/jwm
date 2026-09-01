@@ -21,6 +21,8 @@ use std::time::Duration;
 
 const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CLIPBOARD_HELPER_STDERR_BYTES: usize = 64 * 1024;
+const SCREENSHOT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
+const SCREENSHOT_FILE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn clipboard_helper_output(
     program: &str,
@@ -29,7 +31,7 @@ fn clipboard_helper_output(
     timeout: Duration,
     stderr_limit: usize,
 ) -> io::Result<Output> {
-    super::external_command::output_with_input(
+    super::external_command::selection_owner_output_with_input(
         program,
         args,
         Stdio::from(input),
@@ -1312,23 +1314,16 @@ impl Jwm {
         to_clipboard: bool,
     ) {
         let use_wl_copy = Self::is_udev_backend(backend);
+        let image_sender = backend.clipboard_image_sender();
         std::thread::spawn(move || {
-            let mut ready = false;
-            for _ in 0..60 {
-                if std::fs::metadata(&png_path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-                {
-                    ready = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if !ready {
+            if !Self::wait_for_screenshot_file(&png_path) {
                 error!(
                     "[take_screenshot] screenshot file did not appear: {}",
                     png_path
                 );
+                if to_clipboard {
+                    let _ = std::fs::remove_file(&png_path);
+                }
                 return;
             }
 
@@ -1338,7 +1333,7 @@ impl Jwm {
             }
 
             if to_clipboard {
-                Self::copy_image_path_to_clipboard(&png_path, use_wl_copy);
+                Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
             }
         });
     }
@@ -1808,92 +1803,122 @@ impl Jwm {
         }
     }
 
-    /// 使用 xclip 或 wl-copy 将 PNG 图片复制到系统剪贴板
+    /// Publish a PNG through the backend's native clipboard owner.
     ///
-    /// 截图由合成器在下一帧异步捕获，所以 PNG 文件在调用时还不存在。
-    /// 我们启动一个 shell 脚本轮询等待文件出现后再运行剪贴板工具。
+    /// X11 goes straight to JWM's selection thread, including ICCCM INCR for
+    /// large payloads. Wayland keeps `wl-copy` as the platform fallback until
+    /// its data-device offer is routed through the compositor event loop.
     fn copy_image_to_clipboard(backend: &dyn Backend, png_path: &str) {
-        Self::copy_image_path_to_clipboard(png_path, Self::is_udev_backend(backend));
+        Self::copy_image_path_to_clipboard(
+            png_path,
+            backend.clipboard_image_sender(),
+            Self::is_udev_backend(backend),
+        );
     }
 
-    fn copy_image_path_to_clipboard(png_path: &str, use_wl_copy: bool) {
+    fn copy_image_path_to_clipboard(
+        png_path: &str,
+        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
+        use_wl_copy: bool,
+    ) {
         let png_path = png_path.to_string();
         info!("[take_screenshot] clipboard copy scheduled: {}", png_path);
 
         std::thread::spawn(move || {
-            let mut ready = false;
-            for _ in 0..60 {
-                if std::fs::metadata(&png_path)
-                    .map(|m| m.len() > 0)
-                    .unwrap_or(false)
-                {
-                    ready = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            if !ready {
+            if !Self::wait_for_screenshot_file(&png_path) {
                 error!(
                     "[take_screenshot] clipboard source file did not appear: {}",
                     png_path
                 );
+                let _ = std::fs::remove_file(&png_path);
                 return;
             }
-
-            let wl_copy = use_wl_copy && Self::path_has_executable("wl-copy");
-            let xclip = Self::path_has_executable("xclip");
-            let (program, args): (&str, &[&str]) = if wl_copy {
-                ("wl-copy", &["-t", "image/png"])
-            } else if xclip {
-                (
-                    "xclip",
-                    &["-selection", "clipboard", "-t", "image/png", "-i"],
-                )
-            } else {
-                error!(
-                    "[take_screenshot] clipboard copy failed: neither wl-copy nor xclip is available"
-                );
-                return;
-            };
-
-            if use_wl_copy && !wl_copy && xclip {
-                warn!("[take_screenshot] wl-copy not found, falling back to xclip");
-            }
-
-            let file = match std::fs::File::open(&png_path) {
-                Ok(file) => file,
-                Err(e) => {
-                    error!("[take_screenshot] clipboard source open failed: {e}");
-                    return;
-                }
-            };
-
-            let output = clipboard_helper_output(
-                program,
-                args,
-                file,
-                CLIPBOARD_HELPER_TIMEOUT,
-                MAX_CLIPBOARD_HELPER_STDERR_BYTES,
-            );
-
-            match output {
-                Ok(output) if output.status.success() => {
-                    info!("[take_screenshot] copied image to clipboard via {program}");
-                    let _ = std::fs::remove_file(&png_path);
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    error!(
-                        "[take_screenshot] clipboard copy via {program} failed: status={} stderr={}",
-                        output.status,
-                        stderr.trim()
-                    );
-                }
-                Err(e) => {
-                    error!("[take_screenshot] failed to run clipboard helper {program}: {e}");
-                }
-            }
+            Self::publish_image_path_to_clipboard(&png_path, image_sender, use_wl_copy);
         });
+    }
+
+    fn wait_for_screenshot_file(png_path: &str) -> bool {
+        let deadline = std::time::Instant::now() + SCREENSHOT_FILE_TIMEOUT;
+        loop {
+            if std::fs::metadata(png_path)
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            std::thread::sleep(SCREENSHOT_FILE_POLL_INTERVAL.min(remaining));
+        }
+    }
+
+    fn publish_image_path_to_clipboard(
+        png_path: &str,
+        image_sender: Option<crate::backend::clipboard_offer::ClipboardImageSender>,
+        use_wl_copy: bool,
+    ) {
+        if let Some(image_sender) = image_sender {
+            let result = std::fs::read(png_path);
+            // Clipboard staging files contain private screen contents. Once
+            // the bytes are memory-owned, unlink the file on both success and
+            // failure so an unavailable clipboard cannot leak it in /tmp.
+            let _ = std::fs::remove_file(png_path);
+            match result {
+                Ok(png) => {
+                    if image_sender.send_png(png) {
+                        info!("[take_screenshot] copied image to native X11 clipboard");
+                    } else {
+                        error!("[take_screenshot] native X11 clipboard owner is unavailable");
+                    }
+                }
+                Err(error) => {
+                    error!("[take_screenshot] clipboard source read failed: {error}");
+                }
+            }
+            return;
+        }
+
+        if !use_wl_copy || !Self::path_has_executable("wl-copy") {
+            error!("[take_screenshot] clipboard copy failed: native owner unavailable");
+            let _ = std::fs::remove_file(png_path);
+            return;
+        }
+
+        let file = match std::fs::File::open(png_path) {
+            Ok(file) => file,
+            Err(error) => {
+                error!("[take_screenshot] clipboard source open failed: {error}");
+                let _ = std::fs::remove_file(png_path);
+                return;
+            }
+        };
+
+        let output = clipboard_helper_output(
+            "wl-copy",
+            &["-t", "image/png"],
+            file,
+            CLIPBOARD_HELPER_TIMEOUT,
+            MAX_CLIPBOARD_HELPER_STDERR_BYTES,
+        );
+        let _ = std::fs::remove_file(png_path);
+
+        match output {
+            Ok(output) if output.status.success() => {
+                info!("[take_screenshot] copied image to clipboard via wl-copy");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!(
+                    "[take_screenshot] clipboard copy via wl-copy failed: status={} stderr={}",
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            Err(error) => {
+                error!("[take_screenshot] failed to run clipboard helper wl-copy: {error}");
+            }
+        }
     }
 
     fn path_has_executable(bin: &str) -> bool {
@@ -1999,6 +2024,58 @@ mod tests {
         .expect_err("sleeping clipboard helper must time out");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn clipboard_helper_preserves_successful_background_owner() {
+        let scratch = ScratchDir::new("clipboard-helper-owner");
+        let input = scratch.path().join("image.png");
+        let marker = scratch.path().join("owner-finished");
+        std::fs::write(&input, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+        let marker_arg = marker.to_string_lossy().into_owned();
+
+        let output = clipboard_helper_output(
+            "sh",
+            &[
+                "-c",
+                "cat >/dev/null; (sleep 0.05; printf ready > \"$1\") &",
+                "jwm-clipboard-test",
+                &marker_arg,
+            ],
+            std::fs::File::open(input).unwrap(),
+            Duration::from_secs(2),
+            64,
+        )
+        .expect("successful selection launcher should return");
+        assert!(output.status.success());
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(marker).unwrap(), b"ready");
+    }
+
+    #[test]
+    fn native_clipboard_takes_large_png_bytes_and_unlinks_staging_file() {
+        let scratch = ScratchDir::new("native-clipboard-large-png");
+        let input = scratch.path().join("image.png");
+        // Reproduce the observed failure size: just beyond xclip 0.13's
+        // 1,048,575-byte cliff.
+        let expected = vec![0x96; 1_053_049];
+        std::fs::write(&input, &expected).unwrap();
+        let (send, receive) = std::sync::mpsc::channel();
+        let image_sender = crate::backend::clipboard_offer::ClipboardImageSender::new(send);
+
+        Jwm::publish_image_path_to_clipboard(input.to_str().unwrap(), Some(image_sender), false);
+
+        assert!(!input.exists());
+        let crate::backend::clipboard_offer::ClipboardOffer::Png(actual) =
+            receive.recv_timeout(Duration::from_secs(1)).unwrap()
+        else {
+            panic!("native clipboard received a non-PNG offer");
+        };
+        assert_eq!(actual, expected);
     }
 
     #[test]

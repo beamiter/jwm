@@ -237,9 +237,9 @@ removed, so the row never reflows under the pointer.
 
 The status bars' screenshot pill drives exactly this editor over the control
 socket (the `take_screenshot` IPC command) rather than launching an external
-grabber, so it works identically under X11 and Wayland and needs nothing
-installed. `take_screenshot_fullscreen` captures the whole desktop with no
-interaction.
+grabber. X11 clipboard copies are served natively by JWM, including large
+ICCCM INCR transfers; Wayland clipboard copies currently use `wl-copy`.
+`take_screenshot_fullscreen` captures the whole desktop with no interaction.
 
 The X11 compositor freezes the desktop behind the interactive selector/editor
 by default. To keep clients and animations live instead, set this in the

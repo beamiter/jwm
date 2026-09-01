@@ -68,6 +68,13 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- X11 screenshot copies are now owned and served by JWM itself instead of
+  `xclip`. Both x11rb and XCB advertise `image/png`; payloads above the direct
+  property limit use a bounded ICCCM INCR transfer with a real byte-count
+  announcement, delete-driven chunks, and a zero-length terminator. This fixes
+  wide-region PNGs crossing xclip 0.13's roughly 1 MiB failure boundary, and
+  clipboard staging files are private and removed once their bytes are held in
+  memory.
 - X11 compositor OFF/ON is now a checked presentation hand-off instead of a
   renderer-only toggle. Before native exposure JWM flushes real borders and
   the current physical animation geometry; on re-enable it restores borderless

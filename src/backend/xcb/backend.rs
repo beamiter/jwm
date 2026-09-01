@@ -2094,6 +2094,14 @@ impl Backend for XcbBackend {
             .is_some_and(|clipboard| clipboard.set_text(text))
     }
 
+    fn clipboard_image_sender(
+        &self,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardImageSender> {
+        self.clipboard
+            .as_ref()
+            .map(super::clipboard::Clipboard::image_sender)
+    }
+
     fn drain_clipboard(&mut self) -> Vec<String> {
         self.clipboard
             .as_ref()

@@ -48,9 +48,12 @@ pub(crate) fn daemon_launcher_output_with_limits(
     )
 }
 
-/// Run a helper that consumes a caller-provided stdin, discards stdout, and
-/// retains bounded stderr for diagnostics.
-pub(super) fn output_with_input(
+/// Run a selection-owner launcher that consumes caller-provided stdin.
+///
+/// `wl-copy` forks after reading the payload and its successful descendant is
+/// the process that must remain alive to serve paste requests. Failed or
+/// timed-out launchers still have their entire process group terminated.
+pub(super) fn selection_owner_output_with_input(
     cmd: &str,
     args: &[&str],
     stdin: Stdio,
@@ -59,7 +62,14 @@ pub(super) fn output_with_input(
 ) -> io::Result<Output> {
     let mut command = Command::new(cmd);
     command.args(args);
-    command_output_bounded_with_stdio(&mut command, stdin, false, timeout, stderr_limit)
+    command_output_bounded_with_policy(
+        &mut command,
+        stdin,
+        false,
+        timeout,
+        stderr_limit,
+        SuccessfulDescendants::Preserve,
+    )
 }
 
 /// Run a helper whose output is irrelevant, with a hard wall-time limit.

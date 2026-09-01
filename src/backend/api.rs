@@ -2638,6 +2638,19 @@ pub trait Backend:
         false
     }
 
+    /// Return a thread-safe route to the backend's native image clipboard.
+    ///
+    /// Screenshot PNG encoding completes asynchronously, so the producer
+    /// cannot borrow the backend when the bytes become ready. X11 backends
+    /// route this to their dedicated selection-owner thread; unsupported
+    /// backends return `None` and the screenshot feature may use a native
+    /// platform helper instead.
+    fn clipboard_image_sender(
+        &self,
+    ) -> Option<crate::backend::clipboard_offer::ClipboardImageSender> {
+        None
+    }
+
     /// Text copied by other applications since the last call, oldest first.
     /// The backend has already dropped offers marked as secrets and anything
     /// that is not text, so a password never reaches the history.
