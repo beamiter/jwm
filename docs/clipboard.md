@@ -53,7 +53,18 @@ keeps the data and hands it over on request. JWM therefore watches CLIPBOARD
 ownership through XFIXES, asks each new owner for its target list, and only
 requests the payload when that list is text and carries no secret marker.
 Putting an entry back means *becoming* the owner and answering requests for
-as long as JWM holds the selection.
+as long as JWM holds the selection. Each external owner is read through a new
+temporary requestor window, so a late reply from an older owner cannot cross
+into a newer password-manager offer and bypass its secret marker.
+
+The native X11 owner implements the required ICCCM `TARGETS`, `TIMESTAMP`, and
+`MULTIPLE` conversions. It obtains a real server timestamp before every
+ownership change and rejects requests from an older ownership period. Large
+text and `image/png` data uses INCR in both directions: outgoing chunks follow
+the server's advertised request limit, while incoming text is retained only up
+to 256 KiB and oversized transfers are still drained to their terminator so the
+source application is never left blocked. Concurrent and stalled transfers
+have per-client, count, byte, and inactivity bounds.
 
 On Wayland JWM *is* the selection owner's counterpart: a client setting the
 clipboard is announced through smithay's selection handler, and JWM asks that

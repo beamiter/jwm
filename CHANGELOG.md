@@ -68,6 +68,16 @@ monorepo use independent Semantic Versions.
 
 ### Changed
 
+- The native X11 clipboard owner now completes the required ICCCM metadata
+  contract (`TARGETS`, `TIMESTAMP`, and ordered `MULTIPLE`), acquires ownership
+  with a real server timestamp, validates request epochs, and sizes direct and
+  INCR writes from each server's request limit. Clipboard-history reads use a
+  fresh requestor window per owner generation, fail closed when target atoms
+  cannot be classified, and fully drain bounded incoming INCR transfers, so a
+  late old-owner reply cannot cross into a password-manager offer or leave its
+  source blocked. Stalled outgoing transfers also have per-requestor and total
+  byte budgets and fall back to the idle polling cadence after their initial
+  active burst.
 - X11 screenshot copies are now owned and served by JWM itself instead of
   `xclip`. Both x11rb and XCB advertise `image/png`; payloads above the direct
   property limit use a bounded ICCCM INCR transfer with a real byte-count

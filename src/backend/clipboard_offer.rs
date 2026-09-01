@@ -17,29 +17,108 @@ pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 /// Keep direct X11 `ChangeProperty` requests comfortably below the core
 /// protocol limit. Larger payloads use ICCCM INCR, irrespective of whether a
 /// particular server happens to expose BIG-REQUESTS.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
 pub(crate) const X11_DIRECT_PROPERTY_BYTES: usize = 64 * 1024;
 
 /// One INCR property payload. 240 KiB plus the 24-byte ChangeProperty header
 /// remains below the plain X11 262,140-byte request ceiling, while avoiding a
 /// long round-trip train for a full-width high-entropy screenshot.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
 pub(crate) const X11_INCR_CHUNK_BYTES: usize = 240 * 1024;
+
+/// Bound the number of conversions one MULTIPLE request may fan out into.
+/// Real toolkit requests are normally one or two pairs; the larger allowance
+/// keeps compatibility without letting one event monopolize the clipboard
+/// worker or manufacture an unbounded set of INCR transfers.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) const X11_MAX_MULTIPLE_CONVERSIONS: usize = 64;
+
+/// Total byte references retained by active outgoing INCR transfers. Shared
+/// payloads are deliberately counted once per requestor: that conservative
+/// accounting makes many stalled clients hit a deterministic ceiling even
+/// though their `Arc`s point at the same allocation.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) const X11_MAX_ACTIVE_INCR_BYTES: usize = 512 * 1024 * 1024;
+
+/// Largest single payload JWM will offer through X11. This comfortably covers
+/// an uncompressed 8K RGBA frame while bounding memory retained by a corrupt
+/// or accidental producer before any requestor asks for it.
+pub(crate) const X11_MAX_OFFER_BYTES: usize = 512 * 1024 * 1024;
 
 #[cfg(test)]
 pub(crate) static X11_CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Return the next byte range for an outgoing INCR transfer and whether it is
 /// the required zero-length terminator.
-pub(crate) fn next_x11_incr_chunk(
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn next_x11_incr_chunk_with_limit(
     total: usize,
     offset: &mut usize,
+    chunk_bytes: usize,
 ) -> (std::ops::Range<usize>, bool) {
     if *offset >= total {
         return (total..total, true);
     }
     let start = *offset;
-    let end = start.saturating_add(X11_INCR_CHUNK_BYTES).min(total);
+    let end = start.saturating_add(chunk_bytes.max(1)).min(total);
     *offset = end;
     (start..end, false)
+}
+
+/// X11 timestamps are wrapping 32-bit millisecond counters. Treat CurrentTime
+/// as valid for compatibility, otherwise use the ICCCM half-range comparison
+/// to reject a request made before the current ownership began.
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn x11_selection_time_is_valid(request: u32, acquired: Option<u32>) -> bool {
+    request == 0 || acquired.is_none_or(|acquired| (request.wrapping_sub(acquired) as i32) >= 0)
 }
 
 /// Payload JWM asks a backend-owned clipboard worker to serve.
@@ -49,6 +128,15 @@ pub(crate) fn next_x11_incr_chunk(
 /// transports use their existing private clipboard connection instead of
 /// launching `xclip` for screenshots.
 #[derive(Debug)]
+#[cfg_attr(
+    not(any(
+        feature = "backend-x11rb",
+        feature = "backend-xcb",
+        feature = "remote-x11",
+        test
+    )),
+    allow(dead_code)
+)]
 pub(crate) enum ClipboardOffer {
     Text(String),
     Png(Vec<u8>),
@@ -74,6 +162,9 @@ impl ClipboardImageSender {
     /// Queue a complete PNG for native clipboard ownership.
     #[must_use]
     pub fn send_png(&self, png: Vec<u8>) -> bool {
+        if png.len() > X11_MAX_OFFER_BYTES {
+            return false;
+        }
         self.sender.send(ClipboardOffer::Png(png)).is_ok()
     }
 }
@@ -139,7 +230,8 @@ mod tests {
         let mut offset = 0;
         let mut ranges = Vec::new();
         loop {
-            let (range, terminal) = next_x11_incr_chunk(total, &mut offset);
+            let (range, terminal) =
+                next_x11_incr_chunk_with_limit(total, &mut offset, X11_INCR_CHUNK_BYTES);
             ranges.push((range, terminal));
             if terminal {
                 break;
@@ -159,6 +251,39 @@ mod tests {
     #[test]
     fn empty_x11_incr_payload_is_only_a_terminator() {
         let mut offset = 0;
-        assert_eq!(next_x11_incr_chunk(0, &mut offset), (0..0, true));
+        assert_eq!(
+            next_x11_incr_chunk_with_limit(0, &mut offset, X11_INCR_CHUNK_BYTES),
+            (0..0, true)
+        );
+    }
+
+    #[test]
+    fn outgoing_x11_incr_respects_a_small_server_request_limit() {
+        let mut offset = 0;
+        assert_eq!(
+            next_x11_incr_chunk_with_limit(10, &mut offset, 4),
+            (0..4, false)
+        );
+        assert_eq!(
+            next_x11_incr_chunk_with_limit(10, &mut offset, 4),
+            (4..8, false)
+        );
+        assert_eq!(
+            next_x11_incr_chunk_with_limit(10, &mut offset, 4),
+            (8..10, false)
+        );
+    }
+
+    #[test]
+    fn x11_selection_time_validation_handles_current_time_and_wraparound() {
+        assert!(x11_selection_time_is_valid(0, Some(100)));
+        assert!(x11_selection_time_is_valid(100, Some(100)));
+        assert!(x11_selection_time_is_valid(101, Some(100)));
+        assert!(!x11_selection_time_is_valid(99, Some(100)));
+
+        let acquired = u32::MAX - 2;
+        assert!(x11_selection_time_is_valid(1, Some(acquired)));
+        assert!(!x11_selection_time_is_valid(acquired - 1, Some(acquired)));
+        assert!(x11_selection_time_is_valid(42, None));
     }
 }
