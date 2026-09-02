@@ -37,6 +37,27 @@ idle_lock_secs = 600
 Test it once with `jwm-tool msg lock_screen` before trusting a timeout to do
 it while you are away from the keyboard.
 
+### The two guards on the lock stage
+
+A lock timeout is the one stage that can take the session away from the person
+using it, so two rules keep a misconfiguration from locking you out of your own
+desktop:
+
+- **A floor of 30 seconds.** A non-zero `idle_lock_secs` below 30 is raised to
+  30, with one warning in the log. `idle_lock_secs = 1` otherwise re-locks
+  between the keystrokes of the password, and the only way back in is editing
+  the config from behind the lock screen. `0` still switches the stage off
+  outright.
+- **A minute of grace after every unlock.** Typing the password is a statement
+  that somebody is at the keyboard, so the lock stage does not re-arm for 60
+  seconds afterwards. Dimming and the screen-off stage are unaffected.
+
+If a lock cannot be shown — something else holds the pointer grab, a menu is
+open — the attempt is retried every 5 seconds rather than abandoned for the
+rest of the idle period, so a passing grab does not silently leave an
+unattended desk unlocked. The first failure is a warning in the log and the
+repeats are at debug level.
+
 ## Powering the displays down
 
 JWM does not do this itself. Which knob is right depends on the session — `xset

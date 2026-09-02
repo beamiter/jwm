@@ -1080,6 +1080,10 @@ pub struct BehaviorConfig {
     /// default) switches it off: unlocking needs PAM, and a session that
     /// cannot reach PAM would be locked out of itself, so turning this on is
     /// a decision only the user can make.
+    ///
+    /// A non-zero value below
+    /// [`MIN_LOCK_SECS`](crate::jwm::features::idle::MIN_LOCK_SECS) is raised
+    /// to it: a one-second lock re-locks faster than a password can be typed.
     #[serde(default)]
     pub idle_lock_secs: u64,
     /// Seconds of inactivity before `idle_screen_off_command` runs. 0, or an

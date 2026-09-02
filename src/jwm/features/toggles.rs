@@ -1507,8 +1507,15 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // The one UI key that is not a toggle: a lock the lock key could take
         // back off is not a lock. It comes off with the password.
-        if self.features.system_ui.is_active() {
+        if self.features.system_ui.is_locked() {
             return Ok(());
+        }
+        // Another panel is in the way. Reported rather than swallowed: a
+        // caller that believes it locked the session and did not is how a
+        // desk gets left unattended and unlocked, and the idle policy uses
+        // this to try again in a moment.
+        if self.features.system_ui.is_active() {
+            return Err("another system UI panel is open".into());
         }
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.

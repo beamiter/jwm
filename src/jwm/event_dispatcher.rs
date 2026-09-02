@@ -2636,9 +2636,13 @@ mod tests {
     fn compositor_enable_reapplies_an_existing_idle_dim() {
         let mut jwm = empty_jwm();
         let settings = crate::jwm::features::idle::IdleSettings::from_secs(1, 0.25, 0, 0, false);
-        let actions = jwm
-            .idle
-            .poll(&settings, std::time::Duration::from_secs(2), false, false);
+        let actions = jwm.idle.poll(
+            &settings,
+            std::time::Duration::from_secs(2),
+            false,
+            false,
+            std::time::Instant::now(),
+        );
         assert!(
             actions
                 .iter()
