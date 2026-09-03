@@ -483,7 +483,7 @@ where
     /// changes such as selection motion deliberately do not.
     sysui_text_dirty: bool,
 
-    // --- Toast notifications (top-right stacked cards) ---
+    // --- Toast notifications (cards stacked below the bar dock) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
     toast_textures: HashMap<u64, ToastTextureSet>,
     /// Last frame's drawn card geometry (body + action buttons), for

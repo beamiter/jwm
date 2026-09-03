@@ -5272,7 +5272,22 @@ fn event_mask_from_bits(bits: u32) -> x::EventMask {
     if bits & EventMaskBits::KEY_RELEASE.bits() != 0 {
         mask |= x::EventMask::KEY_RELEASE;
     }
+    if bits & EventMaskBits::BUTTON_MOTION.bits() != 0 {
+        mask |= x::EventMask::BUTTON_MOTION;
+    }
     mask
+}
+
+#[cfg(test)]
+mod event_mask_tests {
+    use super::*;
+
+    #[test]
+    fn button_motion_bit_maps_to_the_x11_mask() {
+        let mapped = event_mask_from_bits(EventMaskBits::BUTTON_MOTION.bits());
+        assert!(mapped.contains(x::EventMask::BUTTON_MOTION));
+        assert!(!mapped.contains(x::EventMask::POINTER_MOTION));
+    }
 }
 
 fn mods_to_xcb(mods: Mods) -> x::ModMask {

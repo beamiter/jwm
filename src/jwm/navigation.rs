@@ -1091,8 +1091,12 @@ impl Jwm {
             | EventMaskBits::SUBSTRUCTURE_NOTIFY
             | EventMaskBits::STRUCTURE_NOTIFY
             | EventMaskBits::BUTTON_PRESS
+            // Grab-less drag gestures on the root background (tab strip
+            // reordering) need the release too, not just the press.
+            | EventMaskBits::BUTTON_RELEASE
             | EventMaskBits::KEY_RELEASE
             | EventMaskBits::POINTER_MOTION
+            | EventMaskBits::BUTTON_MOTION
             | EventMaskBits::ENTER_WINDOW
             | EventMaskBits::LEAVE_WINDOW
             | EventMaskBits::PROPERTY_CHANGE)

@@ -262,6 +262,13 @@ pub struct Jwm {
     /// between tags on the same monitor.
     pub scrolling_states: HashMap<(MonitorKey, u32), ScrollingState>,
 
+    /// The tab groups last handed to the compositor. Delivery is gated on
+    /// change so a still desktop pays nothing, while a groups change must
+    /// itself open the render gate: the compositor cannot know the groups
+    /// changed before they are delivered, so its `needs_render` flag alone
+    /// cannot be trusted to carry them.
+    pub(crate) pushed_window_groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+
     /// Night light: last time we updated color temperature
     pub last_night_light_update: Option<std::time::Instant>,
     /// User override for night light: `None` follows the configured
@@ -1154,6 +1161,7 @@ impl Jwm {
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
+            pushed_window_groups: Vec::new(),
             last_night_light_update: None,
             night_light_override: None,
             last_battery_poll: None,

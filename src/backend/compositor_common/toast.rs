@@ -1,9 +1,10 @@
 //! Backend-neutral toast-notification stack.
 //!
-//! Both compositors render toasts as styled cards in the top-right corner;
-//! everything that is not GL — capacity eviction, timeout expiry, the
-//! fade-in/fade-out opacity envelope, and content sanitation — lives here so
-//! the two backends cannot drift.
+//! Both compositors render toasts as styled cards docked under the status
+//! bar — the dynamic-island slot, centred on it — with newer cards stacking
+//! downward; everything that is not GL — capacity eviction, timeout expiry,
+//! the fade-in/fade-out opacity envelope, content sanitation, and the
+//! stacking geometry — lives here so the two backends cannot drift.
 
 use crate::backend::api::{NotificationAction, ToastClick, ToastNotification};
 use crate::backend::compositor_common::dynamic_island::IslandMotion;
@@ -43,6 +44,30 @@ pub(crate) const ACTION_BUTTON_GAP: f32 = 8.0;
 pub(crate) const ACTION_ROW_TOP_GAP: f32 = 10.0;
 /// Extra card height when an action row is present.
 pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H;
+
+/// Gap between two stacked cards, and between the reserved OSD slot and the
+/// first card.
+pub(crate) const STACK_GAP: f32 = 12.0;
+
+/// Offset below the dock where the first card starts. A visible OSD owns the
+/// slot directly under the bar, so the stack begins below its full reserved
+/// height rather than its current sprung height — otherwise every toast below
+/// would jitter while the OSD opens.
+pub(crate) fn stack_start(osd_visible: bool) -> f32 {
+    if osd_visible {
+        super::osd::OSD_CARD_HEIGHT + STACK_GAP
+    } else {
+        0.0
+    }
+}
+
+/// Offset of the card below one whose target height is `target_h`. The target
+/// — not the current sprung height — advances the cursor, so an opening card
+/// already claims its full slot and the cards beneath it never shift while
+/// its spring runs.
+pub(crate) fn stack_next(top: f32, target_h: f32) -> f32 {
+    top + target_h.max(0.0) + STACK_GAP
+}
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(4000);
 const MIN_TIMEOUT: Duration = Duration::from_millis(800);
@@ -613,6 +638,55 @@ mod tests {
         let right = rects[2][0] + rects[2][2];
         assert_eq!(right - 30.0, action_row_width(&widths));
         assert_eq!(action_row_width(&[]), 0.0);
+    }
+
+    #[test]
+    fn stack_offsets_rise_monotonically_without_overlap() {
+        // Two, three, and four cards (the visible cap), with and without the
+        // OSD's reserved slot: every card starts strictly below the previous
+        // card's bottom edge plus the gap.
+        let height_sets: Vec<Vec<f32>> = vec![
+            vec![84.0; 2],
+            vec![84.0, 118.0, 72.0],
+            vec![84.0, 118.0, 72.0, 150.0],
+        ];
+        for heights in height_sets {
+            assert!(heights.len() <= MAX_TOASTS);
+            for osd_visible in [false, true] {
+                let mut top = stack_start(osd_visible);
+                let mut spans = Vec::with_capacity(heights.len());
+                for h in &heights {
+                    spans.push((top, top + h));
+                    top = stack_next(top, *h);
+                }
+                for pair in spans.windows(2) {
+                    let (a_top, a_bottom) = pair[0];
+                    let (b_top, _) = pair[1];
+                    assert!(
+                        b_top > a_top,
+                        "offsets must rise monotonically: {a_top} then {b_top}"
+                    );
+                    assert!(
+                        b_top >= a_bottom + STACK_GAP,
+                        "cards overlap: [{a_top}, {a_bottom}) then {b_top}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stack_start_reserves_the_full_osd_card() {
+        assert_eq!(stack_start(false), 0.0);
+        assert_eq!(
+            stack_start(true),
+            super::super::osd::OSD_CARD_HEIGHT + STACK_GAP
+        );
+        // A zero-height card still advances the cursor by the gap, so two
+        // cards mid-open can never sit on the same line.
+        assert!(stack_next(0.0, 0.0) > 0.0);
+        // A bogus negative height cannot drag the cursor upward.
+        assert_eq!(stack_next(10.0, -5.0), 10.0 + STACK_GAP);
     }
 
     #[test]

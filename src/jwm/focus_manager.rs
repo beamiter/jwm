@@ -1049,6 +1049,7 @@ mod scratchpad_reveal_tests {
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
+            pushed_window_groups: Vec::new(),
             last_night_light_update: None,
             night_light_override: None,
             last_battery_poll: None,

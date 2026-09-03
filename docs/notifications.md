@@ -17,10 +17,14 @@ process, so a wedged session bus can never stall a frame.
 
 ## Toast cards
 
-Cards stack in the top-right corner with the same material styling as the
-modal system UI: rounded panel, gaussian drop shadow, an urgency accent
-stripe, a bright title over a dimmer body, and a fade in/out envelope. At most
-four cards are visible; older cards are evicted first.
+Cards dock under the status bar, centred on it like a dynamic island: the top
+card sits flush with the bar's bottom edge and springs open from a narrow
+seed, and newer cards stack downward beneath it — a visible OSD owns the slot
+directly under the bar, so the stack starts below its reserved height. On an
+output with no bar the stack hangs from the top edge of the screen instead.
+Styling matches the modal system UI: an urgency accent stripe, a bright title
+over a dimmer body, and a fade in/out envelope. At most four cards are
+visible; older cards are evicted first.
 
 While any toast is visible the scene keeps compositing (direct scanout and
 KMS color offload resume once the last card fades out). The modal system UI

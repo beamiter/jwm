@@ -1908,7 +1908,22 @@ mod adapter {
         if (bits & EventMaskBits::KEY_RELEASE.bits()) != 0 {
             m |= EventMask::KEY_RELEASE;
         }
+        if (bits & EventMaskBits::BUTTON_MOTION.bits()) != 0 {
+            m |= EventMask::BUTTON_MOTION;
+        }
         m
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn button_motion_bit_maps_to_the_x11_mask() {
+            let mapped = event_mask_from_generic(EventMaskBits::BUTTON_MOTION.bits());
+            assert!(mapped.contains(EventMask::BUTTON_MOTION));
+            assert!(!mapped.contains(EventMask::POINTER_MOTION));
+        }
     }
 }
 

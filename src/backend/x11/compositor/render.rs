@@ -2781,20 +2781,16 @@ impl<C: CompositorConnection> Compositor<C> {
         let button_hover = self.toast_button_hover;
         let pad = 18.0;
         let pad_left = 30.0;
-        let gap = 12.0;
         let stripe_w = 3.0;
 
-        // The stack hangs off the bar. An OSD owns the slot directly under it,
-        // so reserve its full height rather than its current sprung height —
-        // otherwise every toast below would jitter while the OSD opens.
-        let dock = self.island_dock();
-        let mut top = if self.osd_slot.get().is_some() {
-            crate::backend::compositor_common::osd::OSD_CARD_HEIGHT + gap
-        } else {
-            0.0
-        };
-
         use crate::backend::compositor_common::toast;
+
+        // The stack hangs off the bar; the shared geometry owns the OSD slot
+        // reservation and the per-card offsets so both backends place the
+        // stack identically.
+        let dock = self.island_dock();
+        let mut top = toast::stack_start(self.osd_slot.get().is_some());
+
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
             for (id, notification, alpha) in &toasts {
@@ -2954,7 +2950,7 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                 }
 
-                top += target_h + gap;
+                top = toast::stack_next(top, target_h);
             }
             self.gl.bind_vertex_array(None);
             self.gl.use_program(None);

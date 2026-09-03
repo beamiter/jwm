@@ -283,6 +283,11 @@ bitflags! {
         const FOCUS_CHANGE         = 1 << 8;
         const SUBSTRUCTURE_NOTIFY  = 1 << 9;
         const KEY_RELEASE         = 1 << 10;
+        /// Motion while any button is held. The root window selects this so
+        /// drag gestures that deliberately run without a pointer grab (tab
+        /// strip reordering) still receive MotionNotify under X11; without
+        /// the bit, pressing a button silences plain POINTER_MOTION delivery.
+        const BUTTON_MOTION       = 1 << 11;
     }
 }
 

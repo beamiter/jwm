@@ -1778,6 +1778,7 @@ mod tests {
         cursor_provider: DummyCursorProvider,
         color_allocator: DummyColorAllocator,
         rendered_frames: usize,
+        needs_render: bool,
         compositor_enabled: bool,
         compositor_supported: bool,
         compositor_transitions: Vec<bool>,
@@ -1791,6 +1792,7 @@ mod tests {
         compositor_forgotten_visuals: Vec<WindowId>,
         dock_geometry_updates: Vec<(WindowId, Option<CompositorRect>)>,
         dock_preview_updates: Vec<(Option<WindowId>, Option<CompositorRect>)>,
+        window_groups_pushes: Vec<Vec<crate::backend::compositor_common::window_tabs::TabGroup>>,
         system_ui_hit: SystemUiHitTarget,
         system_ui_hover_updates: Vec<Option<usize>>,
         x11_client_list: bool,
@@ -1807,6 +1809,7 @@ mod tests {
                 cursor_provider: DummyCursorProvider,
                 color_allocator: DummyColorAllocator,
                 rendered_frames: 0,
+                needs_render: true,
                 compositor_enabled: true,
                 compositor_supported: true,
                 compositor_transitions: Vec::new(),
@@ -1820,6 +1823,7 @@ mod tests {
                 compositor_forgotten_visuals: Vec::new(),
                 dock_geometry_updates: Vec::new(),
                 dock_preview_updates: Vec::new(),
+                window_groups_pushes: Vec::new(),
                 system_ui_hit: SystemUiHitTarget::Unavailable,
                 system_ui_hover_updates: Vec::new(),
                 x11_client_list: false,
@@ -1861,6 +1865,13 @@ mod tests {
             self.compositor_pip_updates.push((window, pip));
         }
 
+        fn compositor_set_window_groups(
+            &mut self,
+            groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
+        ) {
+            self.window_groups_pushes.push(groups);
+        }
+
         fn compositor_set_window_minimized(&mut self, window: WindowId, minimized: bool) {
             self.compositor_minimized_updates.push((window, minimized));
         }
@@ -1898,7 +1909,7 @@ mod tests {
         }
 
         fn compositor_needs_render(&self) -> bool {
-            true
+            self.needs_render
         }
     }
 
@@ -2036,6 +2047,7 @@ mod tests {
             override_redirect_windows: HashSet::new(),
             or_window_geometries: HashMap::new(),
             scrolling_states: HashMap::new(),
+            pushed_window_groups: Vec::new(),
             last_night_light_update: None,
             night_light_override: None,
             last_battery_poll: None,
@@ -2119,6 +2131,98 @@ mod tests {
         handler.render_compositor_immediate(&mut backend);
 
         assert_eq!(backend.rendered_frames, 1);
+    }
+
+    /// A window manager with one monitor and two tiled clients sharing its
+    /// tab bar — the least `build_window_groups` needs to produce a group.
+    fn jwm_with_tab_group() -> (Jwm, crate::jwm::MonitorKey, ClientKey, ClientKey) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let monitor_key = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(monitor_key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+
+        let mut keys = Vec::new();
+        for raw in [0x301, 0x302] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.mon = Some(monitor_key);
+            client.state.tags = 0b01;
+            client.geometry.w = 800;
+            client.geometry.h = 600;
+            let client_key = jwm.insert_client(client);
+            jwm.attach_to_monitor(client_key, monitor_key);
+            keys.push(client_key);
+        }
+        (jwm, monitor_key, keys[0], keys[1])
+    }
+
+    #[test]
+    fn window_groups_change_opens_the_render_gate() {
+        let (mut jwm, monitor_key, first, second) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // The X11 regression this guards: window map/unmap frames rendered
+        // from tick_animations consumed the compositor's needs_render flag
+        // without delivering tab groups, so the strip stayed stale until an
+        // unrelated event reopened the gate. A groups change must open it on
+        // its own.
+        backend.needs_render = false;
+
+        jwm.render_pending_frame(&mut backend);
+        assert_eq!(backend.rendered_frames, 1);
+        assert_eq!(backend.window_groups_pushes.len(), 1);
+        assert_eq!(backend.window_groups_pushes[0].len(), 1);
+        assert_eq!(backend.window_groups_pushes[0][0].tabs.len(), 2);
+
+        // Nothing changed: the gate stays closed and a still desktop renders
+        // nothing — the push is change-gated, not per-call.
+        jwm.render_pending_frame(&mut backend);
+        assert_eq!(backend.rendered_frames, 1);
+        assert_eq!(backend.window_groups_pushes.len(), 1);
+
+        // A content-only change (the focused cell moved) still repaints.
+        if let Some(monitor) = jwm.state.monitors.get_mut(monitor_key) {
+            monitor.set_selected_client_for_current_tag(Some(second));
+        }
+        jwm.render_pending_frame(&mut backend);
+        assert_eq!(backend.rendered_frames, 2);
+        assert_eq!(backend.window_groups_pushes.len(), 2);
+        assert!(backend.window_groups_pushes[1][0].tabs[1].active);
+
+        // Dropping below two tiled windows withdraws the bar immediately.
+        jwm.state.clients.remove(second);
+        if let Some(list) = jwm.state.monitor_clients.get_mut(monitor_key) {
+            list.retain(|&key| key != second);
+        }
+        if let Some(monitor) = jwm.state.monitors.get_mut(monitor_key) {
+            monitor.set_selected_client_for_current_tag(Some(first));
+        }
+        jwm.render_pending_frame(&mut backend);
+        assert_eq!(backend.rendered_frames, 3);
+        assert_eq!(backend.window_groups_pushes.len(), 3);
+        assert!(backend.window_groups_pushes[2].is_empty());
+    }
+
+    #[test]
+    fn damage_render_path_delivers_pending_window_groups() {
+        let (mut jwm, ..) = jwm_with_tab_group();
+        let mut backend = RenderSpyBackend::new();
+        // tick_animations renders damage frames without consulting the gate
+        // in render_pending_frame; it must deliver groups before drawing or
+        // the X11 strip lags one change behind.
+        backend.needs_render = true;
+
+        jwm.tick_animations(&mut backend);
+
+        assert_eq!(backend.rendered_frames, 1);
+        assert_eq!(backend.window_groups_pushes.len(), 1);
+        assert_eq!(backend.window_groups_pushes[0][0].tabs.len(), 2);
     }
 
     #[test]

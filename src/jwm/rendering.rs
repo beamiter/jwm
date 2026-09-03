@@ -175,7 +175,12 @@ impl Jwm {
     fn replay_compositor_runtime_state(&mut self, backend: &mut dyn Backend, now: Instant) {
         backend.compositor_apply_config();
         self.refresh_compositor_monitors(backend);
-        backend.compositor_set_window_groups(self.build_window_groups());
+        // The compositor behind this replay may be freshly created with empty
+        // groups, so push unconditionally and keep the delivery cache truthful
+        // for the change-gated syncs that follow.
+        let groups = self.build_window_groups();
+        backend.compositor_set_window_groups(groups.clone());
+        self.pushed_window_groups = groups;
 
         let window_states: Vec<_> = self
             .state
@@ -316,6 +321,25 @@ impl Jwm {
         Ok(after != before)
     }
 
+    /// Hand the compositor the current tab groups when they changed since the
+    /// last delivery. Returns true when new groups were pushed.
+    ///
+    /// The push must not wait on the compositor's `needs_render` flag: that
+    /// flag can only learn about a groups change through this very delivery,
+    /// and damage-driven frames (`tick_animations`) consume it without ever
+    /// delivering. A changed group set is therefore itself a reason to render
+    /// — the compositor answers the push with `needs_render = true`, and the
+    /// caller renders on the same pass.
+    pub(super) fn sync_window_groups(&mut self, backend: &mut dyn Backend) -> bool {
+        let groups = self.build_window_groups();
+        if groups == self.pushed_window_groups {
+            return false;
+        }
+        backend.compositor_set_window_groups(groups.clone());
+        self.pushed_window_groups = groups;
+        true
+    }
+
     pub(super) fn render_pending_frame(&mut self, backend: &mut dyn Backend) {
         if !backend.has_compositor() {
             return;
@@ -325,17 +349,20 @@ impl Jwm {
         if self.animations.has_active() {
             return;
         }
+        // Deliver tab groups before consulting the render gate, and let a
+        // groups change open it: otherwise window add/remove frames rendered
+        // from tick_animations leave the compositor painting a stale strip
+        // until some unrelated event arms `needs_render` again.
+        let groups_changed = self.sync_window_groups(backend);
         // When overview is active the prism rotation runs inside the render
         // pass (tick_overview_prism), but clear_needs_render() after
         // render_frame() wipes the flag it sets.  So we must keep rendering
         // every frame unconditionally while overview is up; vsync provides
         // natural ~60 fps pacing.
-        if !backend.compositor_needs_render() && !self.features.overview.active {
+        if !groups_changed && !backend.compositor_needs_render() && !self.features.overview.active {
             return;
         }
         let scene = self.build_compositor_scene(backend, &HashMap::new());
-        let groups = self.build_window_groups();
-        backend.compositor_set_window_groups(groups);
         let focused = self
             .get_selected_client_key()
             .and_then(|ck| self.state.clients.get(ck))
@@ -433,6 +460,11 @@ impl Jwm {
             if composited && backend.compositor_needs_render() {
                 // No animations but compositor has dirty windows (damage, add/remove, resize)
                 let scene = self.build_compositor_scene(backend, &HashMap::new());
+                // Damage frames are the ones window add/remove actually
+                // produce, so they must carry tab groups too — otherwise the
+                // strip keeps the previous set until render_pending_frame
+                // happens to run with the gate open.
+                self.sync_window_groups(backend);
                 if scene.is_empty() {
                     // Log once per second at most
                     static LAST_EMPTY: std::sync::atomic::AtomicU64 =
@@ -501,6 +533,10 @@ impl Jwm {
         }
 
         if composited {
+            // A layout animation can itself change the tab groups (window
+            // opened/closed under an animated arrange); deliver before the
+            // frame so the strip tracks the layout being animated.
+            self.sync_window_groups(backend);
             let scene = self.build_compositor_scene(backend, &visual_overrides);
             let focused = self
                 .get_selected_client_key()

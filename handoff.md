@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-09-03：UI/UX 八轮（嵌套实测验证 + 三个实测 bug 修复）
+
+前七轮全部经嵌套会话（Xephyr :80 + x11rb + GLX + xdotool 注入）实测，
+截图与 IPC 证据在 /tmp/jwm-uivalidate/shots/。expose 键盘导航、Alt+Tab
+松手提交/Escape 取消/最小化恢复、tags 网格键盘+鼠标、toast 悬停暂停/点击
+关闭/动作按钮、开窗动画中间帧全部 PASS。实测抓出并已修三个 bug：
+
+1. **X11 tab 条窗口增删后不重绘（根因在 WM 侧投递门禁，不在合成器）**。
+   `render_pending_frame` 先过 `compositor_needs_render()` 门再投递 groups，
+   但开窗/关窗帧走 `tick_animations`（渲染但从不投递 groups 且消耗
+   needs_render）——groups 全会话只在第一次 hover 时碰巧送进去一次。修复：
+   groups 投递改为变更门控的 `sync_window_groups()`（`jwm/rendering.rs`），
+   提到门禁之前、并接入 tick_animations 两个渲染点；`pushed_window_groups`
+   缓存保证静止桌面零多余推送（有单测断言）。wayland 无恙的原因是其
+   `compositor_needs_render` 还或了 smithay 的 `needs_redraw`。
+2. **root 事件掩码缺 BUTTON_MOTION 与 BUTTON_RELEASE，tab 拖拽换序在 X11
+   永不生效**。tab 拖拽刻意不走 pointer grab，X 协议下按住按钮的
+   MotionNotify 与 ButtonRelease 都要显式选择。`EventMaskBits` 补
+   `BUTTON_MOTION = 1<<11`（common_define.rs:290），root mask
+   （navigation.rs:1090）补 BUTTON_RELEASE + BUTTON_MOTION，xcb/x11rb 掩码
+   映射各补一位（各有映射单测）。实测拖拽最左格到最右格 → 平铺序正确重排，
+   `commit_window_tab_reorder` 日志命中。普通窗口拖拽走主动 grab（掩码自带）
+   不受影响；wayland motion 恒投递天然无恙。
+3. **toast 重叠假象与几何收口**。报告的「两条 toast 完全重叠」在当前代码
+   不可复现（叠放累加逻辑自 d4d7c0c 起正确），最可能是并行 WIP 构建的瞬态
+   损坏。防御性收口：两端内联的叠放算术抽成 `toast::stack_start`/
+   `stack_next`/`STACK_GAP` 共享纯函数（2/3/4 张卡 × 有无 OSD 的单调不重叠
+   单测）。`docs/notifications.md` 位置表述纠正为「bar 下方居中 dock，
+   dynamic island 式」，清掉三处 stale「top-right」注释。
+
+非阻塞观察（未修）：嵌套环境无 nerd font 时面板图标/箭头显示 `?`（字体
+回退链问题，非代码 bug）；`jwm-tool msg --help` 清单漏列 `notify`；
+`get_workspaces` 的 `tag_index` 是 0 基。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2536 passed / 0 failed；嵌套冒烟矩阵（x11rb/xcb 全步骤）+ 场景实测均过。
+
+---
+
 ## 2026-09-03：UI/UX 七轮（网格总览鼠标支持 v1.1）
 
 1. **tags 网格总览支持鼠标**：hover 移动选中（cell 间死区不动键盘选中）、
