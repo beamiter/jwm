@@ -2,7 +2,9 @@
 ///
 /// Allows game clients to opt into asynchronous page flips (tearing) for reduced
 /// input latency. The compositor stores the per-surface presentation hint and
-/// checks it during the DRM page flip path.
+/// exposes it through telemetry and IPC (`get_tearing_hints`). The DRM page flip
+/// path does not consume the hint yet — frames are always presented without
+/// tearing; the map currently exists so tooling can observe client demand.
 use crate::sync_ext::MutexExt;
 use smithay::reexports::wayland_protocols::wp::tearing_control::v1::server::{
     wp_tearing_control_manager_v1::{self, WpTearingControlManagerV1},

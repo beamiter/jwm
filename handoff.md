@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-09-03：UI/UX 五轮（切换器恢复最小化窗口 / VRR 文档纠偏）
+
+1. **Alt+Tab 切换器纳入最小化窗口**。`switcher_eligible` 不再排除 hidden
+   （最小化客户端保留 tags 且留在 `monitor_stack`，MRU 自然交错，不沉底），
+   行尾带 "[minimised]" 标记（复用 `launcher::window_row` 的既有标记）。
+   提交走三态纯函数 `commit_disposition` → `Focus` / `RestoreAndFocus` /
+   `Cancel`；恢复复用 `set_client_minimized(false)`（dock/launcher 同一条
+   含 reverse Genie 的路径），恢复后照旧 focus+restack。手势中途窗口死掉或
+   tag 失效降级为取消。docs/window-switcher.md 已同步。
+2. **VRR 调查结论与纠偏**（纯文档/注释，无行为变更）。X11 下 per-output
+   VRR 开关**结构性不可行**：X server 持 DRM master，RandR 只暴露只读的
+   connector `vrr_capable`，不存在 X 协议级控制点；两个 X11 后端显式返回
+   `Unsupported` 已是诚实最优。X11 的真实 VRR 故事是 `fullscreen_unredirect`
+   + 驱动侧配置（amdgpu `VariableRefresh`）。修正三处失实表述：
+   `config.rs:567` 注释（X11 侧只驱动 HUD/metrics）、`tearing_control.rs`
+   头注（tearing hint 从未被 page-flip 消费，仅遥测/IPC 可见）、
+   `docs/compatibility.md` 新增 VRR 小节（配置键 + 两后端差异）。
+   **潜在后续项**（未做）：wayland_udev 的 tearing hint map 已在手，若要让
+   游戏真正 async flip，需要在 page-flip 路径消费 hint——这是行为变更，
+   需要真机 VRR 显示器验证，不纳入纯代码轮次。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2502 passed / 0 failed。
+
+---
+
 ## 2026-09-03：UI/UX 四轮（会话 v3 平铺顺序 / 文档补齐 / zoom_to_fit 修正）
 
 1. **会话格式 v3：精确平铺顺序跨重启保留**。`SessionSnapshot` 新增

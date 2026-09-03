@@ -613,9 +613,10 @@ impl Jwm {
     }
 
     /// End the gesture on the highlighted row: close the panel, hand the
-    /// grabs back, and focus the window, the way a tab-bar click does. A row
-    /// whose window died or lost its tag while the modifier was held
-    /// degrades to a cancel.
+    /// grabs back, and focus the window, the way a tab-bar click does. A
+    /// minimized row is restored through the shared transition and then
+    /// focused like any other. A row whose window died, lost its tag, or
+    /// failed its restore while the modifier was held degrades to a cancel.
     pub(crate) fn commit_window_switcher(
         &mut self,
         backend: &mut dyn Backend,
@@ -625,15 +626,52 @@ impl Jwm {
         if !self.features.system_ui.is_window_switcher() {
             return Ok(());
         }
-        let target = switcher::commit_target(
+        let disposition = switcher::commit_disposition(
             self.features.system_ui.selected_switcher_window(),
             |window| {
-                self.wintoclient(WindowId::from_raw(window))
-                    .is_some_and(|client_key| self.is_client_visible_by_key(client_key))
+                let client_key = self.wintoclient(WindowId::from_raw(window))?;
+                if self.is_client_visible_by_key(client_key) {
+                    return Some(switcher::CommitWindowState::Visible);
+                }
+                // Minimized reads as invisible; re-check the rest of the
+                // visibility rule so a mid-gesture tag change still degrades
+                // to a cancel instead of restoring onto a hidden tag.
+                let client = self.state.clients.get(client_key)?;
+                let on_showing_tag = client
+                    .mon
+                    .and_then(|mon_key| self.state.monitors.get(mon_key))
+                    .is_some_and(|monitor| {
+                        client.state.is_sticky || client.state.tags & monitor.get_active_tags() != 0
+                    });
+                (client.state.is_hidden && !client.state.is_swallowed && on_showing_tag)
+                    .then_some(switcher::CommitWindowState::Minimized)
             },
-        )
-        .and_then(|window| self.wintoclient(WindowId::from_raw(window)));
+        );
         self.close_system_ui(backend);
+        let target = match disposition {
+            switcher::CommitDisposition::Focus(window) => {
+                self.wintoclient(WindowId::from_raw(window))
+            }
+            switcher::CommitDisposition::RestoreAndFocus(window) => {
+                match self.wintoclient(WindowId::from_raw(window)) {
+                    // The one restore transition every route shares: ICCCM /
+                    // EWMH state, the checked map, arrange and the reverse
+                    // Genie, then its own focus and restack. A failure — the
+                    // window died mid-gesture, the map was refused — degrades
+                    // the gesture to a cancel.
+                    Some(client_key) => match self.set_client_minimized(backend, client_key, false)
+                    {
+                        Ok(_) => Some(client_key),
+                        Err(error) => {
+                            warn!("[commit_window_switcher] could not restore {window}: {error}");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            }
+            switcher::CommitDisposition::Cancel => None,
+        };
         if let Some(client_key) = target {
             self.focus(backend, Some(client_key))?;
             if let Some(mon_key) = self.state.sel_mon {

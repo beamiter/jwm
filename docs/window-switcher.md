@@ -36,16 +36,21 @@ marker on the other heads.
 
 A window earns a row only when the gesture could actually land on it:
 
-- not minimized — switching to a minimized window would have to restore it
-  first, and the gesture deliberately does not restore;
-- not [swallowed](../README.md) by its terminal, not hidden;
+- not [swallowed](../README.md) by its terminal;
 - sticky, or on one of its monitor's active tags — a scratchpad parked on
   no tag drops out.
+
+Minimized windows keep their rows: they interleave with the visible ones
+in MRU order, carry a `[minimised]` marker, and picking one restores it —
+through the same transition the launcher and the Dock use — before it is
+focused. When the window behind the current one in MRU order is minimized,
+a single tap of `Alt+Tab` therefore restores it; that is intended.
 
 The list is a snapshot taken when the switcher opens: a window created
 mid-gesture gets no row, and one that dies or loses its tag while you hold
 the modifier fails the commit-time re-check and degrades the gesture to a
-cancel rather than focusing nothing.
+cancel rather than focusing nothing. A restore that fails mid-gesture
+degrades the same way.
 
 ## Keys while the panel is up
 

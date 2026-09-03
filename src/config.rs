@@ -565,6 +565,11 @@ pub struct BehaviorConfig {
 
     // --- VRR (Variable Refresh Rate) Support ---
     /// Enable Variable Refresh Rate (VRR/G-Sync/FreeSync) support for game windows.
+    /// On the Wayland/KMS backend this drives the CRTC VRR_ENABLED property for
+    /// outputs. On X11 the X server owns DRM master, so no per-output toggle is
+    /// reachable: this flag only feeds the HUD/metrics "VRR active" state there,
+    /// and actual VRR comes from `fullscreen_unredirect` plus driver-side
+    /// configuration (e.g. amdgpu VariableRefresh).
     #[serde(default = "default_true")]
     pub vrr_enabled: bool,
     /// Minimum FPS for VRR range (Hz).

@@ -14,7 +14,7 @@ use crate::jwm::Jwm;
 
 /// One window the gesture can land on. The list is built once when the
 /// switcher opens: a window created mid-gesture gets no row, and one that
-/// dies mid-gesture is caught by [`commit_target`].
+/// dies mid-gesture is caught by [`commit_disposition`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SwitcherEntry {
     /// Raw window id; the commit path resolves it back through `wintoclient`.
@@ -24,6 +24,8 @@ pub(crate) struct SwitcherEntry {
     /// The owning monitor's number, for the "screen N" marker on other heads.
     pub monitor: i32,
     pub on_selected_monitor: bool,
+    /// Minimized windows keep their row: committing one restores it.
+    pub minimized: bool,
 }
 
 /// The modifiers whose release commits the gesture. Shift is deliberately
@@ -44,19 +46,18 @@ pub(crate) fn modifier_of_keysym(keysym: u32) -> Option<Mods> {
     }
 }
 
-/// Whether a client earns a row: not swallowed, not minimized, and showing
-/// on its monitor right now — sticky, or on one of the active tags. A
-/// scratchpad parked on no tag has `tags == 0` and drops out here, and a
-/// minimized window has no row at all: switching to it would have to
-/// restore it first, which the gesture deliberately does not do.
+/// Whether a client earns a row: not swallowed, and on one of its monitor's
+/// active tags — or sticky, which shows everywhere. Minimized clients keep
+/// their tags, so they stay eligible and interleave with the visible ones
+/// in MRU order; committing such a row restores the window. A scratchpad
+/// parked on no tag has `tags == 0` and drops out here.
 pub(crate) fn switcher_eligible(
     swallowed: bool,
-    hidden: bool,
     sticky: bool,
     tags: u32,
     active_tags: u32,
 ) -> bool {
-    !swallowed && !hidden && (sticky || tags & active_tags != 0)
+    !swallowed && (sticky || tags & active_tags != 0)
 }
 
 /// Where the highlight starts. Forward opens on the *previous* window — one
@@ -70,9 +71,9 @@ pub(crate) fn initial_selection(len: usize, direction: i32) -> Option<usize> {
 }
 
 /// One row's text, in the launcher's window-row format: icon, the title
-/// (capped), the class when it adds information, and a "screen N" marker on
-/// the other heads. Every switcher row is a visible window, so the entry
-/// the row builder sees always says so.
+/// (capped), the class when it adds information, and where the window is
+/// when that is not "right here" — a "minimised" marker on rows a commit
+/// restores, a "screen N" marker on the other heads.
 pub(crate) fn switcher_row(entry: &SwitcherEntry) -> String {
     crate::jwm::features::launcher::window_row(&crate::jwm::features::launcher::WindowEntry {
         id: entry.window,
@@ -81,28 +82,52 @@ pub(crate) fn switcher_row(entry: &SwitcherEntry) -> String {
         instance: String::new(),
         tag: None,
         monitor: entry.monitor,
-        visible: true,
+        visible: !entry.minimized,
         on_selected_monitor: entry.on_selected_monitor,
-        minimized: false,
+        minimized: entry.minimized,
     })
 }
 
-/// What a commit should focus: the selected row's window, provided it still
-/// resolves to a live client that is still visible. The snapshot is frozen
-/// at activation, so a window that closed or lost its tag while the
-/// modifier was held fails the re-check and the gesture degrades to a
-/// cancel.
-pub(crate) fn commit_target(
+/// The commit-time state of a snapshotted window, as the live session
+/// answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitWindowState {
+    /// Still showing — focus it directly.
+    Visible,
+    /// Still minimized — restore it through the shared transition, then focus.
+    Minimized,
+}
+
+/// What a commit should do with the highlighted row. The snapshot is frozen
+/// at activation, so a window that closed or moved off every active tag
+/// while the modifier was held fails the re-check and the gesture degrades
+/// to a cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitDisposition {
+    Focus(u64),
+    RestoreAndFocus(u64),
+    Cancel,
+}
+
+/// Resolve the highlighted row against live state: `window_state` answers
+/// [`CommitWindowState`] for a snapshotted window, `None` when it no longer
+/// resolves to anything switchable.
+pub(crate) fn commit_disposition(
     selected: Option<u64>,
-    alive_and_visible: impl Fn(u64) -> bool,
-) -> Option<u64> {
-    selected.filter(|window| alive_and_visible(*window))
+    window_state: impl Fn(u64) -> Option<CommitWindowState>,
+) -> CommitDisposition {
+    match selected.and_then(|window| window_state(window).map(|state| (window, state))) {
+        Some((window, CommitWindowState::Visible)) => CommitDisposition::Focus(window),
+        Some((window, CommitWindowState::Minimized)) => CommitDisposition::RestoreAndFocus(window),
+        None => CommitDisposition::Cancel,
+    }
 }
 
 impl Jwm {
     /// The most-recently-used windows, selected monitor first — the same
-    /// ordering the launcher's window list uses, minus the windows the
-    /// switcher cannot jump to (minimized, or on an inactive tag).
+    /// ordering the launcher's window list uses, minus only the windows the
+    /// switcher cannot jump to (swallowed, or on an inactive tag). Minimized
+    /// windows keep their MRU place and are restored on commit.
     pub(crate) fn window_switcher_snapshot(&self) -> Vec<SwitcherEntry> {
         let mut ordered: Vec<MonitorKey> = Vec::new();
         // The monitor in front of the user first, so its windows rank ahead
@@ -131,7 +156,6 @@ impl Jwm {
                 };
                 if !switcher_eligible(
                     client.state.is_swallowed,
-                    client.state.is_hidden,
                     client.state.is_sticky,
                     client.state.tags,
                     active_tags,
@@ -144,6 +168,7 @@ impl Jwm {
                     class: client.class.clone(),
                     monitor: monitor.num,
                     on_selected_monitor: Some(monitor_key) == self.state.sel_mon,
+                    minimized: client.state.is_hidden,
                 });
             }
         }
@@ -163,6 +188,7 @@ mod tests {
             class: class.to_string(),
             monitor: 0,
             on_selected_monitor: true,
+            minimized: false,
         }
     }
 
@@ -182,21 +208,19 @@ mod tests {
     }
 
     #[test]
-    fn eligibility_excludes_swallowed_hidden_and_off_tag_windows() {
+    fn eligibility_excludes_swallowed_and_off_tag_windows() {
         // Visible on an active tag.
-        assert!(switcher_eligible(false, false, false, 0b001, 0b001));
+        assert!(switcher_eligible(false, false, 0b001, 0b001));
         // Sticky shows regardless of the tag mask.
-        assert!(switcher_eligible(false, false, true, 0, 0b001));
+        assert!(switcher_eligible(false, true, 0, 0b001));
         // On another tag only.
-        assert!(!switcher_eligible(false, false, false, 0b010, 0b001));
+        assert!(!switcher_eligible(false, false, 0b010, 0b001));
         // Swallowed by its terminal.
-        assert!(!switcher_eligible(true, false, false, 0b001, 0b001));
-        // Minimized.
-        assert!(!switcher_eligible(false, true, false, 0b001, 0b001));
-        // Sticky but minimized still loses: restoring is not switching.
-        assert!(!switcher_eligible(false, true, true, 0b001, 0b001));
+        assert!(!switcher_eligible(true, false, 0b001, 0b001));
         // Scratchpad parked on no tag.
-        assert!(!switcher_eligible(false, false, false, 0, 0b001));
+        assert!(!switcher_eligible(false, false, 0, 0b001));
+        // Minimized state is deliberately not an input: a minimized client
+        // keeps its tags, so it passes the same rule and commit restores it.
     }
 
     #[test]
@@ -278,11 +302,34 @@ mod tests {
     }
 
     #[test]
-    fn commit_target_drops_rows_whose_window_is_gone_or_hidden() {
-        let alive = |window: u64| window == 2;
-        assert_eq!(commit_target(Some(2), alive), Some(2));
-        assert_eq!(commit_target(Some(9), alive), None);
-        assert_eq!(commit_target(None, alive), None);
+    fn switcher_row_marks_a_minimized_window() {
+        let mut minimized = entry(7, "Mail", "mail");
+        minimized.minimized = true;
+        let row = switcher_row(&minimized);
+        assert!(row.contains("minimised"), "{row}");
+    }
+
+    #[test]
+    fn commit_disposition_focuses_visible_restores_minimized_and_cancels_the_gone() {
+        let state = |window: u64| match window {
+            2 => Some(CommitWindowState::Visible),
+            3 => Some(CommitWindowState::Minimized),
+            _ => None,
+        };
+        assert_eq!(
+            commit_disposition(Some(2), state),
+            CommitDisposition::Focus(2)
+        );
+        assert_eq!(
+            commit_disposition(Some(3), state),
+            CommitDisposition::RestoreAndFocus(3)
+        );
+        // The window died — or moved off every active tag — mid-gesture.
+        assert_eq!(
+            commit_disposition(Some(9), state),
+            CommitDisposition::Cancel
+        );
+        assert_eq!(commit_disposition(None, state), CommitDisposition::Cancel);
     }
 
     #[test]
