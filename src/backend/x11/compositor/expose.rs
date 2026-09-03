@@ -1,8 +1,11 @@
 use super::{Compositor, SnapPreview, class_matches_exclude};
+use crate::backend::api::ExposeNavDirection;
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs::{self, TabGroup};
 use crate::backend::compositor_font;
-use crate::backend::x11::compositor_common::expose::{build_expose_entries, tick_expose_entries};
+use crate::backend::x11::compositor_common::expose::{
+    build_expose_entries, expose_grid_cols, move_expose_selection, tick_expose_entries,
+};
 use glow::HasContext;
 
 use super::CompositorConnection;
@@ -192,13 +195,54 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Handle mouse hover in expose mode.
     #[allow(dead_code)]
     pub(super) fn expose_set_hover(&mut self, x: f32, y: f32) {
+        let hit_id = self
+            .expose_entries
+            .iter()
+            .find(|entry| {
+                x >= entry.current_x
+                    && x <= entry.current_x + entry.current_w
+                    && y >= entry.current_y
+                    && y <= entry.current_y + entry.current_h
+            })
+            .map(|entry| entry.id);
+        self.expose_select_id(hit_id);
+    }
+
+    /// Highlight the expose entry for `id` (`None` clears the highlight).
+    /// Mouse hover and keyboard selection share this single highlight.
+    pub(crate) fn expose_select_id(&mut self, id: Option<u32>) {
+        let mut changed = false;
         for entry in &mut self.expose_entries {
-            entry.is_hovered = x >= entry.current_x
-                && x <= entry.current_x + entry.current_w
-                && y >= entry.current_y
-                && y <= entry.current_y + entry.current_h;
+            let should_hover = Some(entry.id) == id;
+            if entry.is_hovered != should_hover {
+                entry.is_hovered = should_hover;
+                changed = true;
+            }
         }
-        self.needs_render = true;
+        if changed {
+            self.needs_render = true;
+        }
+    }
+
+    /// Move the expose highlight one grid step in `dir`.
+    pub(crate) fn expose_move_selection(&mut self, dir: ExposeNavDirection) {
+        let current = self
+            .expose_entries
+            .iter()
+            .position(|entry| entry.is_hovered);
+        let len = self.expose_entries.len();
+        let cols = expose_grid_cols(len, self.screen_w as f32, self.screen_h as f32);
+        let selected = move_expose_selection(current, dir, len, cols)
+            .map(|index| self.expose_entries[index].id);
+        self.expose_select_id(selected);
+    }
+
+    /// The currently highlighted expose entry's window, if any.
+    pub(crate) fn expose_selected(&self) -> Option<u32> {
+        self.expose_entries
+            .iter()
+            .find(|entry| entry.is_hovered)
+            .map(|entry| entry.id)
     }
 
     /// Handle click in expose mode. Returns the x11_win of the clicked window.
@@ -479,6 +523,9 @@ impl<C: CompositorConnection> Compositor<C> {
             return;
         }
         self.window_groups = groups;
+        // Re-derive the hovered cell against the new layout: the tab under
+        // the pointer may sit at another index now, or be gone entirely.
+        self.tab_hover = window_tabs::tab_hover_at(&self.window_groups, self.mouse_x, self.mouse_y);
         // A group change is the only thing that can invalidate a title: the
         // text, the cell width and the focus flag all live in it.
         self.tab_titles_dirty = true;
@@ -591,6 +638,8 @@ impl<C: CompositorConnection> Compositor<C> {
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(ui);
         let accent = self.border_gradient_color_a;
+        let tab_hover = self.tab_hover;
+        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE;
 
         unsafe {
             self.gl.bind_vertex_array(Some(self.quad_vao));
@@ -622,25 +671,53 @@ impl<C: CompositorConnection> Compositor<C> {
                 );
 
                 for (index, tab) in group.tabs.iter().enumerate() {
-                    // Only the focused cell is drawn; the rest are the track
-                    // showing through, which is what makes the focused one
-                    // read as raised out of it.
-                    if !tab.active {
+                    // The focused cell is drawn raised; the hovered one takes
+                    // the same chip at half strength so the pointer's target
+                    // shows without competing with the focus. Anything else
+                    // is the track showing through, which is what makes the
+                    // raised cells read as lifted out of it. A hover index
+                    // that outlived its group simply matches nothing here.
+                    let hovered = tab_hover == Some((group_index, index));
+                    if !tab.active && !hovered {
                         continue;
                     }
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
                     let radius = window_tabs::pill_radius(h);
-                    self.sysui_fill_rounded(x, y, w, h, radius, ui.chip);
-                    self.sysui_fill_rounded(
-                        x,
-                        y,
-                        w,
-                        h,
-                        radius,
-                        [accent[0], accent[1], accent[2], ui.selection_alpha],
-                    );
+                    if tab.active {
+                        self.sysui_fill_rounded(x, y, w, h, radius, ui.chip);
+                        self.sysui_fill_rounded(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                        );
+                    } else {
+                        self.sysui_fill_rounded(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * hover_scale],
+                        );
+                        self.sysui_fill_rounded(
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [
+                                accent[0],
+                                accent[1],
+                                accent[2],
+                                ui.selection_alpha * hover_scale,
+                            ],
+                        );
+                    }
                 }
 
                 let Some(titles) = self.tab_title_textures.get(group_index) else {

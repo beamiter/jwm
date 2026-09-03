@@ -492,6 +492,20 @@ impl WMController for Jwm {
             return;
         }
 
+        // Window-tab reorder drag: its press armed neither a backend
+        // interaction nor `drag_ctl`, so the commit paths below have nothing
+        // to do for it. Commit an activated drag, discard a dormant one (a
+        // plain click), and clear the state either way.
+        if let Some(drag) = self.tab_drag.take() {
+            if drag.activated {
+                let (rx, ry) = self.last_mouse_root;
+                if let Err(e) = self.commit_window_tab_reorder(backend, drag, rx, ry) {
+                    error!("Error committing window tab reorder: {:?}", e);
+                }
+            }
+            return;
+        }
+
         // Query before handle_button_release: the backends drop their
         // interaction state inside that call.
         let interaction_action = backend.interaction_action();
@@ -1915,6 +1929,7 @@ mod tests {
             is_restarting: AtomicBool::new(false),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
+            tab_drag: None,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),

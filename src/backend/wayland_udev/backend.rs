@@ -14,8 +14,9 @@ use crate::backend::api::{
     Backend, BackendDiagnostics, BackendEvent, Capabilities, ColorAllocator, CompositorAnnotation,
     CompositorBenchmark, CompositorControl, CompositorMedia, CompositorRect,
     CompositorWindowEffects, CompositorWorkspaceEffects, CursorProvider, DisplayControl,
-    EventHandler, HitTarget, InputOps, KeyOps, NetWmState, OutputInfo, OutputOps, PropertyOps,
-    RenderScheduler, ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps, WindowType,
+    EventHandler, ExposeNavDirection, HitTarget, InputOps, KeyOps, NetWmState, OutputInfo,
+    OutputOps, PropertyOps, RenderScheduler, ResizeEdge, ScreenInfo, SystemUiOverlay, WindowOps,
+    WindowType,
 };
 use crate::backend::common_define::{KeySym, Mods, OutputId, StdCursorKind, WindowId};
 use crate::backend::error::{BackendContextExt, BackendError, ErrorBoundary};
@@ -3840,6 +3841,15 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
+    fn compositor_click_toast(&mut self, x: f32, y: f32) -> bool {
+        if let Some(compositor) = self.compositor.as_mut() {
+            if compositor.click_toast(x, y) {
+                self.request_render();
+                return true;
+            }
+        }
+        false
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         duration: Duration,
@@ -3938,6 +3948,25 @@ impl CompositorWorkspaceEffects for UdevBackend {
             .as_ref()?
             .expose_click(x, y)
             .map(WindowId::from_raw)
+    }
+
+    fn compositor_expose_move(&mut self, dir: ExposeNavDirection) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.expose_move_selection(dir);
+        }
+    }
+
+    fn compositor_expose_selected(&mut self) -> Option<WindowId> {
+        self.compositor
+            .as_ref()?
+            .expose_selected()
+            .map(WindowId::from_raw)
+    }
+
+    fn compositor_expose_select(&mut self, win: Option<WindowId>) {
+        if let Some(compositor) = self.compositor.as_mut() {
+            compositor.expose_select_id(win.map(|window| window.raw()));
+        }
     }
 }
 

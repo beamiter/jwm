@@ -7,6 +7,9 @@
 pub use crate::backend::compositor_common::expose::{
     ExposeTickResult, build_expose_entries, tick_expose_entries,
 };
+pub(crate) use crate::backend::compositor_common::expose::{
+    expose_grid_cols, move_expose_selection,
+};
 
 /// Expose entry keyed by an X11 window XID.
 pub type ExposeEntry = crate::backend::compositor_common::expose::ExposeEntry<u32>;

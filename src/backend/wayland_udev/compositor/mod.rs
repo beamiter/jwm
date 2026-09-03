@@ -1183,6 +1183,10 @@ pub(crate) struct WaylandCompositor {
     window_groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
     tab_title_textures: Vec<Vec<Option<(u32, u32, u32)>>>,
     tab_titles_dirty: bool,
+    /// The (group, tab) cell under the pointer, if any. Kept out of
+    /// `window_groups` on purpose: a motion event must never force the title
+    /// textures to rebuild, so hover lives here and only costs a repaint.
+    tab_hover: Option<(usize, usize)>,
 
     // Monitors info
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
@@ -1350,6 +1354,11 @@ pub(crate) struct WaylandCompositor {
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
     toast_textures: HashMap<u64, [Option<(u32, u32, u32)>; 2]>,
+    /// Last frame's drawn card rects `(id, [x, y, w, h])`, for hover-pause
+    /// and click-to-dismiss hit-testing.
+    toast_rects: Vec<(u64, [f32; 4])>,
+    /// The hovered card (its timeout is paused); compared before repainting.
+    toast_hover: Option<u64>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, u32, u32, u32)>,
@@ -2532,6 +2541,7 @@ impl WaylandCompositor {
                 window_groups: Vec::new(),
                 tab_title_textures: Vec::new(),
                 tab_titles_dirty: false,
+                tab_hover: None,
 
                 // Monitors
                 monitors: Vec::new(),
@@ -2678,6 +2688,8 @@ impl WaylandCompositor {
                 sysui_text_dirty: true,
                 toast_stack: Default::default(),
                 toast_textures: HashMap::new(),
+                toast_rects: Vec::new(),
+                toast_hover: None,
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
                 osd_texture: None,

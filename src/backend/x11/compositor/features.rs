@@ -236,6 +236,22 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
+    /// Hit-test last frame's toast card rects; a hit dismisses the card.
+    /// Returns true whenever the point lands on a card so the WM swallows
+    /// the click instead of replaying it to the window below.
+    pub(crate) fn click_toast(&mut self, x: f32, y: f32) -> bool {
+        let hit = self.toast_rects.iter().find_map(|(id, rect)| {
+            let [rx, ry, w, h] = *rect;
+            (x >= rx && x <= rx + w && y >= ry && y <= ry + h).then_some(*id)
+        });
+        let Some(id) = hit else {
+            return false;
+        };
+        self.toast_stack.dismiss(id, std::time::Instant::now());
+        self.needs_render = true;
+        true
+    }
+
     pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
         self.osd_slot.show(kind, percent, std::time::Instant::now());
         self.needs_render = true;
@@ -282,6 +298,26 @@ impl<C: CompositorConnection> Compositor<C> {
         }
         if self.expose_active {
             self.expose_set_hover(x, y);
+        }
+        // The tab bar's hover cell follows the same channel: hit-test the
+        // groups and repaint only when the hovered cell actually changes.
+        let tab_hover =
+            crate::backend::compositor_common::window_tabs::tab_hover_at(&self.window_groups, x, y);
+        if tab_hover != self.tab_hover {
+            self.tab_hover = tab_hover;
+            self.needs_render = true;
+        }
+        // Hovering a toast card pauses its timeout; same compare-then-repaint
+        // pattern as the tab bar above.
+        let toast_hover = self.toast_rects.iter().find_map(|(id, rect)| {
+            let [rx, ry, w, h] = *rect;
+            (x >= rx && x <= rx + w && y >= ry && y <= ry + h).then_some(*id)
+        });
+        if toast_hover != self.toast_hover {
+            self.toast_hover = toast_hover;
+            self.toast_stack
+                .set_hovered(toast_hover, std::time::Instant::now());
+            self.needs_render = true;
         }
     }
 

@@ -1193,6 +1193,10 @@ impl Jwm {
         if self.drag_ctl.is_some() {
             self.cancel_pointer_drag(backend);
         }
+        // A tab reorder drag holds no grab, but it is cancelled the same
+        // way — otherwise it would linger past the panel and commit on some
+        // later release.
+        self.tab_drag = None;
 
         // Any other panel still on screen at this point means a hand-over: one
         // shell key pressed while another key's panel was up. The keyboard and
@@ -2646,6 +2650,12 @@ impl Jwm {
             expose_plan::ExposeAction::Enter { windows } => {
                 self.features.expose_active = true;
                 backend.compositor_set_expose_mode(true, windows);
+                // 高亮落在当前聚焦窗口上：进入后直接回车等于回到原窗口。
+                let focused = self
+                    .get_selected_client_key()
+                    .and_then(|ck| self.state.clients.get(ck))
+                    .map(|client| client.win);
+                backend.compositor_expose_select(focused);
                 if let Some(root) = backend.root_window() {
                     let _ = backend.key_ops().grab_keyboard(root);
                 }

@@ -6,6 +6,8 @@
 //! twice (X11 tree and an inline Wayland copy) and had already drifted; this
 //! module is the single canonical implementation.
 
+use crate::backend::api::ExposeNavDirection;
+
 /// Entry for Expose/Mission Control mode.
 pub struct ExposeEntry<Id> {
     pub id: Id,
@@ -27,6 +29,59 @@ pub struct ExposeEntry<Id> {
 pub struct ExposeTickResult {
     pub keep_animating: bool,
     pub clear_entries: bool,
+}
+
+/// Column count of the expose grid for `n` entries on a `screen_w`×`screen_h`
+/// output. Shared by [`build_expose_entries`] and keyboard navigation so the
+/// hit geometry and the arrow-key walk can never disagree on the grid shape.
+pub(crate) fn expose_grid_cols(n: usize, screen_w: f32, screen_h: f32) -> u32 {
+    let screen_w = if screen_w.is_finite() {
+        screen_w.max(1.0)
+    } else {
+        1.0
+    };
+    let screen_h = if screen_h.is_finite() {
+        screen_h.max(1.0)
+    } else {
+        1.0
+    };
+    let screen_aspect = screen_w / screen_h.max(1.0);
+    (((n as f32 * screen_aspect).sqrt()).ceil() as u32).max(1)
+}
+
+/// Move the keyboard selection one step through the expose grid laid out by
+/// [`build_expose_entries`] (row-major order).
+///
+/// No selection yet picks the first entry regardless of direction; movement
+/// clamps at row and grid edges instead of wrapping, and Down onto a short
+/// last row stays put rather than landing past the end.
+pub(crate) fn move_expose_selection(
+    current: Option<usize>,
+    dir: ExposeNavDirection,
+    len: usize,
+    cols: u32,
+) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let cols = cols.max(1) as usize;
+    let idx = match current {
+        None => return Some(0),
+        Some(i) => i.min(len - 1),
+    };
+    let col = idx % cols;
+    let next = match dir {
+        ExposeNavDirection::Left if col == 0 => idx,
+        ExposeNavDirection::Left => idx - 1,
+        ExposeNavDirection::Right if col + 1 >= cols => idx,
+        ExposeNavDirection::Right if idx + 1 >= len => idx,
+        ExposeNavDirection::Right => idx + 1,
+        ExposeNavDirection::Up if idx < cols => idx,
+        ExposeNavDirection::Up => idx - cols,
+        ExposeNavDirection::Down if idx + cols >= len => idx,
+        ExposeNavDirection::Down => idx + cols,
+    };
+    Some(next)
 }
 
 /// Compute Expose/Mission Control targets for a set of window rectangles.
@@ -51,9 +106,7 @@ pub fn build_expose_entries<Id: Copy>(
     } else {
         1.0
     };
-    let screen_aspect = screen_w / screen_h.max(1.0);
-    let cols = ((n as f32 * screen_aspect).sqrt()).ceil() as u32;
-    let cols = cols.max(1);
+    let cols = expose_grid_cols(n, screen_w, screen_h);
     let rows = (n as u32).div_ceil(cols).max(1);
 
     // Leave at least one pixel for every row and column. A configured gap is
@@ -236,6 +289,144 @@ mod tests {
             assert!(entry.target_x >= 0.0 && entry.target_y >= 0.0);
             assert!(entry.target_x + entry.target_w <= 1280.0);
             assert!(entry.target_y + entry.target_h <= 720.0);
+        }
+    }
+
+    #[test]
+    fn expose_move_with_no_selection_starts_at_first_entry() {
+        for dir in [
+            ExposeNavDirection::Left,
+            ExposeNavDirection::Right,
+            ExposeNavDirection::Up,
+            ExposeNavDirection::Down,
+        ] {
+            assert_eq!(move_expose_selection(None, dir, 5, 2), Some(0));
+        }
+        assert_eq!(
+            move_expose_selection(None, ExposeNavDirection::Right, 0, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn expose_move_left_right_clamps_at_row_edges() {
+        // cols=2, len=5: grid is `0 1 / 2 3 / 4`.
+        assert_eq!(
+            move_expose_selection(Some(0), ExposeNavDirection::Left, 5, 2),
+            Some(0)
+        );
+        assert_eq!(
+            move_expose_selection(Some(2), ExposeNavDirection::Left, 5, 2),
+            Some(2)
+        );
+        assert_eq!(
+            move_expose_selection(Some(1), ExposeNavDirection::Left, 5, 2),
+            Some(0)
+        );
+        assert_eq!(
+            move_expose_selection(Some(0), ExposeNavDirection::Right, 5, 2),
+            Some(1)
+        );
+        // Last column of a row stops instead of wrapping to the next row.
+        assert_eq!(
+            move_expose_selection(Some(1), ExposeNavDirection::Right, 5, 2),
+            Some(1)
+        );
+        assert_eq!(
+            move_expose_selection(Some(3), ExposeNavDirection::Right, 5, 2),
+            Some(3)
+        );
+        // Right from the final entry never leaves the grid.
+        assert_eq!(
+            move_expose_selection(Some(4), ExposeNavDirection::Right, 5, 2),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn expose_move_up_down_clamps_at_grid_edges() {
+        // cols=2, len=5: grid is `0 1 / 2 3 / 4`.
+        assert_eq!(
+            move_expose_selection(Some(1), ExposeNavDirection::Up, 5, 2),
+            Some(1)
+        );
+        assert_eq!(
+            move_expose_selection(Some(3), ExposeNavDirection::Up, 5, 2),
+            Some(1)
+        );
+        assert_eq!(
+            move_expose_selection(Some(2), ExposeNavDirection::Down, 5, 2),
+            Some(4)
+        );
+        // The short last row has no cell under 3 or 4, so Down stays put.
+        assert_eq!(
+            move_expose_selection(Some(3), ExposeNavDirection::Down, 5, 2),
+            Some(3)
+        );
+        assert_eq!(
+            move_expose_selection(Some(4), ExposeNavDirection::Down, 5, 2),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn expose_move_single_entry_stays_put() {
+        for dir in [
+            ExposeNavDirection::Left,
+            ExposeNavDirection::Right,
+            ExposeNavDirection::Up,
+            ExposeNavDirection::Down,
+        ] {
+            assert_eq!(move_expose_selection(Some(0), dir, 1, 1), Some(0));
+        }
+    }
+
+    #[test]
+    fn expose_move_treats_zero_cols_as_one_column() {
+        assert_eq!(
+            move_expose_selection(Some(0), ExposeNavDirection::Down, 3, 0),
+            Some(1)
+        );
+        assert_eq!(
+            move_expose_selection(Some(1), ExposeNavDirection::Right, 3, 0),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn expose_grid_cols_matches_build_layout() {
+        for (n, screen_w, screen_h) in [
+            (1usize, 1920.0f32, 1080.0f32),
+            (2, 1920.0, 1080.0),
+            (3, 1920.0, 1080.0),
+            (5, 1920.0, 1080.0),
+            (7, 1080.0, 1920.0),
+            (11, 3440.0, 1440.0),
+        ] {
+            // Identical windows keep every cell of a row/column at the same
+            // target coordinate, so the grid shape is readable off the targets.
+            let windows: Vec<(u32, i32, i32, u32, u32)> =
+                (0..n).map(|i| (i as u32, 0, 0, 100, 100)).collect();
+            let entries = build_expose_entries(screen_w, screen_h, 20.0, &windows);
+            let cols = expose_grid_cols(n, screen_w, screen_h);
+
+            let first_row = entries
+                .iter()
+                .filter(|entry| entry.target_y == entries[0].target_y)
+                .count();
+            assert_eq!(first_row as u32, cols.min(n as u32));
+
+            let mut row_ys: Vec<f32> = entries.iter().map(|entry| entry.target_y).collect();
+            row_ys.sort_by(f32::total_cmp);
+            row_ys.dedup();
+            assert_eq!(row_ys.len() as u32, (n as u32).div_ceil(cols));
+
+            // Vertical moves stay in the column: entry i and i±cols share target_x.
+            if n > cols as usize {
+                let down = move_expose_selection(Some(0), ExposeNavDirection::Down, n, cols)
+                    .expect("non-empty grid keeps a selection");
+                assert_eq!(entries[0].target_x, entries[down].target_x);
+            }
         }
     }
 

@@ -100,6 +100,14 @@ pub(crate) fn palette() -> &'static UiPalette {
     theme().palette()
 }
 
+/// Strength of the tab bar's hover chip relative to the focused cell's: the
+/// hovered cell takes the same chip fill and accent wash at this scale, so
+/// the pointer's target reads as raised without competing with the focus
+/// indicator. The palette carries no hover token of its own — only
+/// [`UiPalette::selection_alpha`] — and one shared scale keeps the two
+/// compositors' bars pixel-identical.
+pub(crate) const TAB_HOVER_ALPHA_SCALE: f32 = 0.5;
+
 /// Extra knobs the frosted-glass surface shader needs. All of them are uniform
 /// inputs; a renderer that cannot supply a backdrop texture falls back to the
 /// plain [`UiPalette`] fills.

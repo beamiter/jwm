@@ -1008,6 +1008,7 @@ mod scratchpad_reveal_tests {
             is_restarting: AtomicBool::new(false),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
+            tab_drag: None,
             message: SharedMessage::default(),
             secondary_bars: HashMap::new(),
             secondary_bar_failures: HashMap::new(),

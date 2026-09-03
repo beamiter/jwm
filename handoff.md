@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-09-03：UI/UX 交互闭环一轮（tabs / toast / expose）
+
+1. **Tab 条 hover 高亮（两后端）**。hover 状态不进 `Tab`/`TabGroup`
+   （避免每个 motion 事件触发全量标题纹理重建），而是照 expose hover 先例放合成器：
+   纯命中 `compositor_common::window_tabs::tab_hover_at`（`window_tabs.rs:229`），
+   两端 `set_mouse_position` 比较置位，`render_tab_bar` 给 hover 的 inactive 格画半强度
+   chip（`ui_theme::TAB_HOVER_ALPHA_SCALE = 0.5`，两端共用同一常量）。
+   `set_window_groups` 变化时用缓存鼠标坐标重算 hover，索引越界天然不命中。
+2. **Tab 中键关闭窗口**。`Jwm::close_window_tab`（`jwm/window_tabs.rs:198`），
+   `input_handler.rs` 的 tab 点击分支按 `MouseButton::from_u8(detail_btn)` 分流：
+   Middle → 关窗（走 `window_ops().close_window`，同 killclient），其余维持 focus。
+   索引→窗口映射由 `window_tab_hit` 直接查 `tab_group_clients` 的 Vec，无 id 跨边界。
+3. **Tab 左键拖拽换序**。WM 侧轻量状态 `tab_drag: Option<TabDragCtl>`
+   （`jwm.rs:144`，永不 arm 后端交互，与 `DragCtl` 互斥）；press 记录起点，
+   motion 过 `drag_threshold_px` 激活（无实时预览），release 经纯函数
+   `plan_tab_reorder`（`window_tabs.rs:325`，同位/组外/越界 clamp 都有回归）在该显示器
+   `monitor_clients` 里 remove+insert 后 `arrange`。release 提交块位于
+   `event_dispatcher.rs:495` 既有 `apply_drag_snap` 路径之前且处理后即 return；
+   打开 system UI 面板时一并清理（`toggles.rs:1196`）。
+4. **Toast 悬停暂停 + 左键点击关闭**。`ToastStack` 新增 `set_hovered`/`dismiss`
+   （`compositor_common/toast.rs:165,186`）：悬停冻结年龄（unpause 时 created 前移
+   结算），点击后 120ms 快速淡出（`TOAST_DISMISS_FADE`）再经 prune 释放纹理，
+   dismiss 优先于 hover。两端合成器每帧在 `render_toasts` 记录 `toast_rects`，
+   hover 走 `set_mouse_position`，点击经新 API `compositor_click_toast(x, y) -> bool`
+   （`api.rs:2346`）；WM 在 `input_handler.rs:2085`（expose 模态分支之后、正常分发
+   之前）对左键调用，命中即吞掉，不会 ReplayPointer 给下面重叠的客户端窗口。
+5. **Expose 键盘导航**。方向键移动高亮、Return/KP_Enter 聚焦退出、Escape 不变；
+   进入时 `compositor_expose_select` 预选当前聚焦窗口（`toggles.rs:2653`），
+   直接回车 = 回到原窗口。网格移动是纯函数
+   `compositor_common::expose::move_expose_selection`（行列边界 clamp 不 wrap，
+   末行不整 Down 不动），cols 公式抽成 `expose_grid_cols` 与 `build_expose_entries`
+   单一来源。键盘选中与鼠标 hover 共享 `is_hovered` 通道；X11 侧 hover 语义顺势
+   统一为「唯一高亮」（原来条目重叠可多个 hovered）。新 API：
+   `compositor_expose_move/_selected/_select`（`api.rs:2388-2396`），
+   id 翻译照 `compositor_expose_click` 既有路径。
+
+验证：`cargo fmt --all -- --check`、`cargo test --lib`（2460 passed / 0 failed）、
+`cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings`、
+`cargo check --locked --all-targets`（默认与 --no-default-features）全绿。
+真机端到端未实测（无显示会话），行为验证全部来自纯函数单测。
+
+**已知边界**（可接受，未列待办）：tab 拖拽激活期间无实时预览；toast 点击只关闭
+不触发通知动作；跨屏释放 tab 若目标组不含被拖窗口则取消（不跨屏移动窗口）。
+
+---
+
 ## 2026-08-22：可靠性、色彩和 CI 闭环
 
 1. 非 D65 显式白点现在经 Bradford CAT 进入目标白点，中性色与 D50↔D65
@@ -260,16 +306,16 @@ bug 整个消掉了 —— 现在没有任何窗口 id 跨过这条边界。
 点左/中/右格分别切到对应窗口；点已激活的格子不动栈序；关到只剩 1 个窗口时预留自动
 收回。`cargo test --lib` 1238 passed。
 
-**剩余项**
+**剩余项**（2026-09-03 核对）
 
-1. **两个后端的标题样式不一致。** X11 的 `render_title_to_pixels`（`x11/compositor/overview.rs`）
-   给标题画了一个深色药丸底 + 2x 放大；wayland 的同名函数（`wayland_udev/compositor/overview.rs`）
-   是 1x 白字无底。两个函数各有自己的字模表，还都被各自的 overview 用着，统一它们
-   要动 overview，所以这次没碰。
+1. ~~两个后端的标题样式不一致~~ **已过时**：两端 `render_tab_bar` 现已统一为
+   ui_theme 卡片+chip 风格；`overview.rs` 的 `render_title_to_pixels` 只服务
+   expose/overview 标签，不再画 tab 标题。真正残留的是 expose/overview 标签在
+   两端的样式差异（X11 深色药丸底+2x / wayland 1x 白字无底）。
 2. **非 ASCII 标题显示为 `?` 或空格。** 两边都是 6x10 ASCII 位图字体，中文标题会整排问号
    （X11）或空格（wayland）。要修就得引入真正的字体栈，是另一个量级的事。
-3. **没有 hover 高亮、没有中键关闭、不能拖拽换序。** 命中测试已经在 WM 手里
-   （`window_tab_at`），加这些只需要在 `on_motion_notify` / 按钮分支上接线。
+3. ~~没有 hover 高亮、没有中键关闭、不能拖拽换序。~~ **已完成**，见 2026-09-03
+   「UI/UX 交互闭环一轮」第 1–3 条。
 4. **`compositor_zoom_to_fit(Option<u32>)`**（`compositor_delegation.rs`）仍是原来那种
    未翻译的裸 u32 形状，`zoom_to_fit` 用 `self.windows.get(&win)` 按 xid 查表。
    目前全仓库没有调用者所以没暴露；接线之前记得先翻译，否则就是刚修掉的那个 bug。

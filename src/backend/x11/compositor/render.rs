@@ -2473,8 +2473,12 @@ impl<C: CompositorConnection> Compositor<C> {
         let removed = self.toast_stack.prune(now);
         self.free_toast_textures(&removed);
         if self.toast_stack.is_empty() {
+            self.toast_rects.clear();
             return;
         }
+        // Rebuilt below from the cards actually drawn this frame, so
+        // hover/click hit-testing never sees stale geometry.
+        self.toast_rects.clear();
 
         let toasts: Vec<(u64, String, String, u8, f32)> = self
             .toast_stack
@@ -2538,6 +2542,7 @@ impl<C: CompositorConnection> Compositor<C> {
                         motion.advance_with_motion(now, target_w, target_h, motion_enabled)
                     });
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
+                self.toast_rects.push((*id, [x, y, card_w, card_h]));
                 // Only the card actually touching the bar squares off; the
                 // dock also refuses to square anything when there is no bar.
                 let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);

@@ -605,6 +605,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
+            fn compositor_click_toast(&mut self, x: f32, y: f32) -> bool {
+                self.compositor
+                    .as_mut()
+                    .is_some_and(|compositor| compositor.click_toast(x, y))
+            }
+
             fn compositor_notify_tag_switch(
                 &mut self,
                 duration: std::time::Duration,
@@ -724,6 +730,29 @@ macro_rules! delegate_compositor_capabilities {
             ) -> Option<crate::backend::common_define::WindowId> {
                 let x11_window = self.compositor.as_mut()?.expose_click(x, y)?;
                 Some(self.ids.$intern_raw(x11_window))
+            }
+
+            fn compositor_expose_move(&mut self, dir: crate::backend::api::ExposeNavDirection) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    compositor.expose_move_selection(dir);
+                }
+            }
+
+            fn compositor_expose_selected(
+                &mut self,
+            ) -> Option<crate::backend::common_define::WindowId> {
+                let x11_window = self.compositor.as_mut()?.expose_selected()?;
+                Some(self.ids.$intern_raw(x11_window))
+            }
+
+            fn compositor_expose_select(
+                &mut self,
+                win: Option<crate::backend::common_define::WindowId>,
+            ) {
+                if let Some(compositor) = self.compositor.as_mut() {
+                    let x11_window = win.and_then(|window| self.ids.x11(window).ok());
+                    compositor.expose_select_id(x11_window);
+                }
             }
         }
 

@@ -2,8 +2,8 @@
 
 use crate::Jwm;
 use crate::backend::api::{
-    AllowMode, Backend, HitTarget, LayoutFilmCell, LayoutFilmstrip, SystemUiOverlay,
-    SystemUiViewport, WindowChanges, WindowType,
+    AllowMode, Backend, ExposeNavDirection, HitTarget, LayoutFilmCell, LayoutFilmstrip,
+    SystemUiOverlay, SystemUiViewport, WindowChanges, WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
@@ -1772,6 +1772,24 @@ impl Jwm {
             if keysym == keys::KEY_Escape {
                 return self.apply_expose_action(backend, expose_plan::plan_escape());
             }
+            if keysym == keys::KEY_Left
+                || keysym == keys::KEY_Right
+                || keysym == keys::KEY_Up
+                || keysym == keys::KEY_Down
+            {
+                let dir = match keysym {
+                    keys::KEY_Left => ExposeNavDirection::Left,
+                    keys::KEY_Right => ExposeNavDirection::Right,
+                    keys::KEY_Up => ExposeNavDirection::Up,
+                    _ => ExposeNavDirection::Down,
+                };
+                backend.compositor_expose_move(dir);
+                return Ok(());
+            }
+            if keysym == keys::KEY_Return || keysym == keys::KEY_KP_Enter {
+                let hit = backend.compositor_expose_selected();
+                return self.apply_expose_action(backend, expose_plan::plan_click(hit));
+            }
             // Fall through to normal keybinding dispatch so Alt+E can toggle off
         }
 
@@ -2064,6 +2082,16 @@ impl Jwm {
             return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
+        // A left-click on a toast card dismisses it. The click is swallowed
+        // here — before any window dispatch — so it is never replayed to the
+        // client underneath the card.
+        if MouseButton::from_u8(detail_btn) == MouseButton::Left {
+            let (rx, ry) = self.last_mouse_root;
+            if backend.compositor_click_toast(rx as f32, ry as f32) {
+                return Ok(());
+            }
+        }
+
         let mut click_type = WMClickType::ClickRootWin;
         let clicked_win: Option<crate::backend::common_define::WindowId> = match target {
             HitTarget::Surface(wid) => Some(wid),
@@ -2093,7 +2121,18 @@ impl Jwm {
                 .input_ops()
                 .get_pointer_position()
                 .unwrap_or(self.last_mouse_root);
-            if self.click_window_tab(backend, x, y)? {
+            if MouseButton::from_u8(detail_btn) == MouseButton::Middle {
+                // Middle-click closes the window the cell stands for.
+                if self.close_window_tab(backend, x, y)? {
+                    return Ok(());
+                }
+            } else if self.click_window_tab(backend, x, y)? {
+                // A left press also arms a reorder drag, committed by the
+                // release if the pointer crosses the drag threshold; any
+                // other button stays a plain focus click.
+                if MouseButton::from_u8(detail_btn) == MouseButton::Left {
+                    self.arm_window_tab_drag(x, y);
+                }
                 return Ok(());
             }
         }
@@ -2202,6 +2241,23 @@ impl Jwm {
         if self.mouse_focus_blocked() {
             return Ok(());
         }
+
+        // A left press on a tab cell turns into a reorder drag once the
+        // pointer crosses the drag threshold; the release commits the new
+        // slot. No live preview — the commit is a single arrange.
+        if let Some(drag) = self.tab_drag.as_mut() {
+            if !drag.activated {
+                let thr = CONFIG.load().drag_threshold_px() as f64;
+                let (dx, dy) = (
+                    root_x as f64 - drag.start_root.0,
+                    root_y as f64 - drag.start_root.1,
+                );
+                if dx * dx + dy * dy >= thr * thr {
+                    drag.activated = true;
+                }
+            }
+        }
+
         // 3. 更新当前鼠标所在的显示器状态
         let new_monitor_key = self.recttomon(backend, root_x as i32, root_y as i32);
         if new_monitor_key != self.state.motion_mon {

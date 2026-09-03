@@ -220,6 +220,18 @@ pub fn tab_rect(bar: Rect, count: usize, index: usize) -> Option<Rect> {
     Some([left, y, (right - left).max(0.0), h])
 }
 
+/// Which tab of which group contains `(px, py)`, if any, as
+/// `(group_index, tab_index)`. The compositors keep the answer as their own
+/// hover state — putting it in [`TabGroup`] would make every motion event
+/// rebuild the baked title textures — so this hit test takes the whole slice
+/// and walks each group with [`tab_at`].
+#[must_use]
+pub fn tab_hover_at(groups: &[TabGroup], px: f32, py: f32) -> Option<(usize, usize)> {
+    groups.iter().enumerate().find_map(|(group_index, group)| {
+        tab_at(group.bar, group.tabs.len(), px, py).map(|tab_index| (group_index, tab_index))
+    })
+}
+
 /// Which cell contains `(px, py)`, if any. Walks the same partition
 /// [`tab_rect`] produces rather than recomputing an index from the fraction,
 /// so the hit test cannot round to a different cell than the one drawn.
@@ -297,6 +309,34 @@ mod tests {
         assert_eq!(tab_at(BAR, 3, x + 1.0, y - 1.0), None);
         assert_eq!(tab_at(BAR, 3, x + 1.0, y + h + 1.0), None);
         assert_eq!(tab_at(BAR, 0, x + 1.0, y + 1.0), None);
+    }
+
+    #[test]
+    fn hover_hit_testing_spans_every_group() {
+        let group = |bar: Rect, count: usize| TabGroup {
+            bar,
+            tabs: (0..count)
+                .map(|index| Tab {
+                    title: format!("tab {index}"),
+                    active: index == 0,
+                })
+                .collect(),
+        };
+        let groups = vec![
+            group([0.0, 0.0, 600.0, 28.0], 3),
+            group([0.0, 100.0, 400.0, 28.0], 2),
+        ];
+
+        // A hit in the first group and in the second, edges included.
+        assert_eq!(tab_hover_at(&groups, 10.0, 10.0), Some((0, 0)));
+        assert_eq!(tab_hover_at(&groups, 550.0, 10.0), Some((0, 2)));
+        assert_eq!(tab_hover_at(&groups, 399.0, 110.0), Some((1, 1)));
+
+        // The gap between the bars, past the second bar's end, and an empty
+        // slice all hit nothing.
+        assert_eq!(tab_hover_at(&groups, 10.0, 50.0), None);
+        assert_eq!(tab_hover_at(&groups, 500.0, 110.0), None);
+        assert_eq!(tab_hover_at(&[], 10.0, 10.0), None);
     }
 
     #[test]

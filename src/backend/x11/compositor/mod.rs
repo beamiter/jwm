@@ -474,6 +474,11 @@ where
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
     toast_textures: HashMap<u64, [Option<(glow::Texture, u32, u32)>; 2]>,
+    /// Last frame's drawn card rects `(id, [x, y, w, h])`, for hover-pause
+    /// and click-to-dismiss hit-testing.
+    toast_rects: Vec<(u64, [f32; 4])>,
+    /// The hovered card (its timeout is paused); compared before repainting.
+    toast_hover: Option<u64>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
@@ -704,6 +709,10 @@ where
     /// when the groups change; see `Compositor::refresh_tab_titles`.
     tab_title_textures: Vec<Vec<Option<(glow::Texture, u32, u32)>>>,
     tab_titles_dirty: bool,
+    /// The (group, tab) cell under the pointer, if any. Kept out of
+    /// `window_groups` on purpose: a motion event must never force the title
+    /// textures to rebuild, so hover lives here and only costs a repaint.
+    tab_hover: Option<(usize, usize)>,
 
     // --- Particle effects ---
     particle_program: glow::Program,

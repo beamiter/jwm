@@ -987,6 +987,16 @@ pub enum OsdKind {
     Media,
 }
 
+/// One keyboard navigation step in Expose / Mission Control, in the grid the
+/// compositor laid out. Left/Right walk the row, Up/Down walk the column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExposeNavDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// One transient notification card the compositor stacks in the top-right
 /// corner. Pushed fire-and-forget; the compositor owns display and expiry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2331,6 +2341,11 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_show_osd(&mut self, _kind: OsdKind, _percent: u8) {}
     /// Show the media OSD card with a track label instead of a value bar.
     fn compositor_show_media_osd(&mut self, _label: &str) {}
+    /// Left-click hit-test against the toast cards drawn last frame. A hit
+    /// dismisses the card and returns true so the WM swallows the click.
+    fn compositor_click_toast(&mut self, _x: f32, _y: f32) -> bool {
+        false
+    }
     fn compositor_notify_tag_switch(
         &mut self,
         _duration: std::time::Duration,
@@ -2369,6 +2384,15 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_expose_click(&mut self, _x: f32, _y: f32) -> Option<WindowId> {
         None
     }
+
+    /// Move the expose highlight one grid step in `dir`; called on arrow keys.
+    fn compositor_expose_move(&mut self, _dir: ExposeNavDirection) {}
+    /// The window currently highlighted in expose, if any.
+    fn compositor_expose_selected(&mut self) -> Option<WindowId> {
+        None
+    }
+    /// Highlight a specific expose entry; `None` clears the highlight.
+    fn compositor_expose_select(&mut self, _win: Option<WindowId>) {}
 }
 
 /// Per-window compositor visual state.

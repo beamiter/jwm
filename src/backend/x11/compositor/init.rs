@@ -1038,6 +1038,8 @@ impl<C: CompositorConnection> Compositor<C> {
             sysui_text_dirty: true,
             toast_stack: Default::default(),
             toast_textures: HashMap::new(),
+            toast_rects: Vec::new(),
+            toast_hover: None,
             osd_slot: Default::default(),
             osd_texture: None,
             hud_text_cache: String::new(),
@@ -1214,6 +1216,7 @@ impl<C: CompositorConnection> Compositor<C> {
             window_groups: Vec::new(),
             tab_title_textures: Vec::new(),
             tab_titles_dirty: false,
+            tab_hover: None,
             // Particle effects
             particle_program,
             particle_uniforms,

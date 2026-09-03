@@ -1,5 +1,7 @@
 use super::render::transform_for_encoded_srgb;
 use super::*;
+use crate::backend::api::ExposeNavDirection;
+use crate::backend::compositor_common::expose::{expose_grid_cols, move_expose_selection};
 use crate::backend::compositor_common::ui_theme;
 use crate::backend::compositor_common::window_tabs;
 use crate::backend::compositor_font;
@@ -532,6 +534,8 @@ impl WaylandCompositor {
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(gl, ui, projection);
         let accent = self.border_gradient_color_a;
+        let tab_hover = self.tab_hover;
+        let hover_scale = ui_theme::TAB_HOVER_ALPHA_SCALE;
 
         let (text_rect, text_proj, text_tex, text_opacity) = unsafe {
             (
@@ -573,26 +577,56 @@ impl WaylandCompositor {
                 );
 
                 for (index, tab) in group.tabs.iter().enumerate() {
-                    // Only the focused cell is drawn; the rest are the track
-                    // showing through, which is what makes the focused one
-                    // read as raised out of it.
-                    if !tab.active {
+                    // The focused cell is drawn raised; the hovered one takes
+                    // the same chip at half strength so the pointer's target
+                    // shows without competing with the focus. Anything else
+                    // is the track showing through, which is what makes the
+                    // raised cells read as lifted out of it. A hover index
+                    // that outlived its group simply matches nothing here.
+                    let hovered = tab_hover == Some((group_index, index));
+                    if !tab.active && !hovered {
                         continue;
                     }
                     let Some([x, y, w, h]) = window_tabs::cell_rect(group.bar, count, index) else {
                         continue;
                     };
                     let radius = window_tabs::pill_radius(h);
-                    self.sysui_fill_rounded(gl, x, y, w, h, radius, ui.chip);
-                    self.sysui_fill_rounded(
-                        gl,
-                        x,
-                        y,
-                        w,
-                        h,
-                        radius,
-                        [accent[0], accent[1], accent[2], ui.selection_alpha],
-                    );
+                    if tab.active {
+                        self.sysui_fill_rounded(gl, x, y, w, h, radius, ui.chip);
+                        self.sysui_fill_rounded(
+                            gl,
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [accent[0], accent[1], accent[2], ui.selection_alpha],
+                        );
+                    } else {
+                        self.sysui_fill_rounded(
+                            gl,
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [ui.chip[0], ui.chip[1], ui.chip[2], ui.chip[3] * hover_scale],
+                        );
+                        self.sysui_fill_rounded(
+                            gl,
+                            x,
+                            y,
+                            w,
+                            h,
+                            radius,
+                            [
+                                accent[0],
+                                accent[1],
+                                accent[2],
+                                ui.selection_alpha * hover_scale,
+                            ],
+                        );
+                    }
                 }
 
                 let Some(titles) = self.tab_title_textures.get(group_index) else {
@@ -642,10 +676,16 @@ impl WaylandCompositor {
 
     pub(crate) fn set_expose_hover(&mut self, x: f32, y: f32) {
         let hit_id = self.expose_hit_test(x, y);
+        self.expose_select_id(hit_id);
+    }
+
+    /// Highlight the expose entry for `id` (`None` clears the highlight).
+    /// Mouse hover and keyboard selection share this single highlight.
+    pub(crate) fn expose_select_id(&mut self, id: Option<u64>) {
         let mut changed = false;
 
         for entry in &mut self.expose_entries {
-            let should_hover = Some(entry.id) == hit_id;
+            let should_hover = Some(entry.id) == id;
             if entry.is_hovered != should_hover {
                 entry.is_hovered = should_hover;
                 changed = true;
@@ -655,6 +695,27 @@ impl WaylandCompositor {
         if changed {
             self.needs_render = true;
         }
+    }
+
+    /// Move the expose highlight one grid step in `dir`.
+    pub(crate) fn expose_move_selection(&mut self, dir: ExposeNavDirection) {
+        let current = self
+            .expose_entries
+            .iter()
+            .position(|entry| entry.is_hovered);
+        let len = self.expose_entries.len();
+        let cols = expose_grid_cols(len, self.screen_w as f32, self.screen_h as f32);
+        let selected = move_expose_selection(current, dir, len, cols)
+            .map(|index| self.expose_entries[index].id);
+        self.expose_select_id(selected);
+    }
+
+    /// The currently highlighted expose entry's window, if any.
+    pub(crate) fn expose_selected(&self) -> Option<u64> {
+        self.expose_entries
+            .iter()
+            .find(|entry| entry.is_hovered)
+            .map(|entry| entry.id)
     }
 }
 

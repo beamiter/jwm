@@ -141,6 +141,11 @@ pub struct Jwm {
     /// drag threshold. See [`mouse_handler::DragCtl`].
     pub(crate) drag_ctl: Option<mouse_handler::DragCtl>,
 
+    /// A left press on a window-tab cell being watched as a reorder drag.
+    /// Never arms a backend interaction, so it cannot collide with
+    /// `drag_ctl`. See [`window_tabs::TabDragCtl`].
+    pub(crate) tab_drag: Option<window_tabs::TabDragCtl>,
+
     pub message: SharedMessage,
 
     // Per-monitor status bars
@@ -1130,6 +1135,7 @@ impl Jwm {
             external_struts: HashMap::new(),
             last_mouse_root: (0.0, 0.0),
             drag_ctl: None,
+            tab_drag: None,
 
             ipc_server,
             update_readiness,
