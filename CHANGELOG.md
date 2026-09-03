@@ -16,8 +16,10 @@ monorepo use independent Semantic Versions.
   tag, and `Esc` or a second `Alt+O` closes without switching.
   `behavior.tags_overview_enabled` (default true) gates entry, and
   configurations snapshotted before the action existed gain the `Alt+O`
-  fallback binding unless they already spend the chord. v1 is keyboard-only
-  and draws wireframes rather than live thumbnails.
+  fallback binding unless they already spend the chord. The grid is
+  pointer-operable too: hovering a cell moves the highlight, clicking a cell
+  jumps to its tag, and clicking the dimmed desktop around the panel cancels.
+  Cells draw wireframes rather than live thumbnails.
 - Native shell cards are now fully pointer-operable on X11 and Wayland:
   hovering an interactive row shows a quiet preview cue, clicking runs the same
   guarded action as `Enter`, the wheel browses lists (and calendar months),

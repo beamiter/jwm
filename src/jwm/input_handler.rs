@@ -1356,8 +1356,10 @@ impl Jwm {
                 }
                 return Ok(());
             }
-            // The tags overview is keyboard-only (v1). Unhandled keys fall
-            // through so the panel's own toggle binding can still close it.
+            // The tags overview answers its own keys here; the pointer paths
+            // live in the dispatcher's motion and button branches. Unhandled
+            // keys fall through so the panel's own toggle binding can still
+            // close it.
             if self.features.system_ui.is_tags_overview() {
                 let handled = match keysym {
                     keys::KEY_Escape => {

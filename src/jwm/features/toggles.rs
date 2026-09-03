@@ -43,6 +43,38 @@ pub(crate) enum ShellEntry {
     Refuse,
 }
 
+/// How much of the pointer a shell panel's grab must deliver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SystemUiPointerGrab {
+    /// Keyboard-only panel: no pointer grab at all.
+    None,
+    /// Modal clicks: button presses and releases.
+    Buttons,
+    /// Buttons plus motion, for a panel that follows the pointer. The mask is
+    /// the expose grab's (`apply_expose_action`): without POINTER_MOTION an
+    /// X11 hover would never reach the WM.
+    ButtonsAndMotion,
+}
+
+impl SystemUiPointerGrab {
+    /// The X11 event mask the grab selects, or `None` when the panel takes no
+    /// pointer grab at all.
+    fn event_mask(self) -> Option<u32> {
+        match self {
+            Self::None => None,
+            Self::Buttons => {
+                Some((EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits())
+            }
+            Self::ButtonsAndMotion => Some(
+                (EventMaskBits::BUTTON_PRESS
+                    | EventMaskBits::BUTTON_RELEASE
+                    | EventMaskBits::POINTER_MOTION)
+                    .bits(),
+            ),
+        }
+    }
+}
+
 /// The one rule every shell panel key follows.
 ///
 /// `Alt+F10` pressed over `Alt+F9`'s calendar dismisses the calendar and opens
@@ -542,7 +574,7 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, |state| in_shell || state.is_control_center()) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "control center", true)?;
+        self.prepare_system_ui(backend, "control center", SystemUiPointerGrab::Buttons)?;
         self.ensure_control_snapshot_refresh(std::time::Instant::now());
         // Open with the cached connectivity reading — read_state() shells out
         // to nmcli and can block for seconds — and re-read in the background;
@@ -588,7 +620,7 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, SystemUiState::is_session_menu) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "session menu", true)?;
+        self.prepare_system_ui(backend, "session menu", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::session_menu();
         self.sync_system_ui(backend);
         Ok(())
@@ -688,7 +720,11 @@ impl Jwm {
             )
             .into());
         }
-        self.prepare_system_ui(backend, "the audio device picker", true)?;
+        self.prepare_system_ui(
+            backend,
+            "the audio device picker",
+            SystemUiPointerGrab::Buttons,
+        )?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::audio_picker(direction, &devices);
         self.sync_system_ui(backend);
@@ -755,7 +791,7 @@ impl Jwm {
         let Some(scan) = crate::jwm::features::connectivity::start_scan() else {
             return Err("no NetworkManager to scan with (nmcli not available)".into());
         };
-        self.prepare_system_ui(backend, "the Wi-Fi picker", true)?;
+        self.prepare_system_ui(backend, "the Wi-Fi picker", SystemUiPointerGrab::Buttons)?;
         self.features.wifi_scan = Some(self.track_background_job(scan));
         self.features.system_ui =
             crate::jwm::features::SystemUiState::wifi_picker("Scanning\u{2026}");
@@ -773,7 +809,11 @@ impl Jwm {
             return Ok(());
         }
         let next = Self::wallpaper_picker_state();
-        self.prepare_system_ui(backend, "the wallpaper picker", true)?;
+        self.prepare_system_ui(
+            backend,
+            "the wallpaper picker",
+            SystemUiPointerGrab::Buttons,
+        )?;
         self.features.system_ui_return_to_hub = false;
         self.features.system_ui = next;
         self.sync_system_ui(backend);
@@ -822,7 +862,11 @@ impl Jwm {
         if !CONFIG.load().behavior().clipboard_history {
             return Err("clipboard history is disabled (behavior.clipboard_history)".into());
         }
-        self.prepare_system_ui(backend, "the clipboard picker", true)?;
+        self.prepare_system_ui(
+            backend,
+            "the clipboard picker",
+            SystemUiPointerGrab::Buttons,
+        )?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::clipboard_picker(&self.features.clipboard);
         self.sync_system_ui(backend);
@@ -877,7 +921,7 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, SystemUiState::is_calendar) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "the calendar", true)?;
+        self.prepare_system_ui(backend, "the calendar", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::calendar(chrono::Local::now().naive_local());
         self.sync_system_ui(backend);
@@ -896,7 +940,11 @@ impl Jwm {
         let Some(scan) = crate::jwm::features::connectivity::start_device_scan() else {
             return Err("no bluetoothctl to list devices with".into());
         };
-        self.prepare_system_ui(backend, "the Bluetooth picker", true)?;
+        self.prepare_system_ui(
+            backend,
+            "the Bluetooth picker",
+            SystemUiPointerGrab::Buttons,
+        )?;
         self.features.bluetooth_scan = Some(self.track_background_job(scan));
         self.features.system_ui =
             crate::jwm::features::SystemUiState::bluetooth_picker("Reading devices\u{2026}");
@@ -1147,9 +1195,9 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         label: &str,
-        grab_pointer: bool,
+        pointer_grab: SystemUiPointerGrab,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if self.prepare_system_ui_inner(backend, label, grab_pointer)? {
+        if self.prepare_system_ui_inner(backend, label, pointer_grab)? {
             return Ok(());
         }
         Err(format!("could not grab pointer for {label}").into())
@@ -1162,7 +1210,7 @@ impl Jwm {
         backend: &mut dyn Backend,
         label: &str,
     ) -> Result<bool, Box<dyn std::error::Error>> {
-        self.prepare_system_ui_inner(backend, label, true)
+        self.prepare_system_ui_inner(backend, label, SystemUiPointerGrab::Buttons)
     }
 
     /// `Ok(false)` means the pointer was not available; the keyboard grab and
@@ -1171,7 +1219,7 @@ impl Jwm {
         &mut self,
         backend: &mut dyn Backend,
         label: &str,
-        grab_pointer: bool,
+        pointer_grab: SystemUiPointerGrab,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         // Never over the lock card. `toggle_off_system_ui` already refuses for
         // every opener that asks it (`ShellEntry::Refuse`), but two openers
@@ -1214,11 +1262,8 @@ impl Jwm {
             // keyboard-only panel taking over from one that held the pointer
             // simply stays more modal than it asked to be, and
             // `close_system_ui` hands both back.)
-            if grab_pointer
-                && !backend.input_ops().grab_pointer(
-                    (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-                    None,
-                )?
+            if let Some(pointer_mask) = pointer_grab.event_mask()
+                && !backend.input_ops().grab_pointer(pointer_mask, None)?
             {
                 // An error rather than `Ok(false)`: that reply promises the
                 // keyboard and any leased compositor have been handed back,
@@ -1268,14 +1313,11 @@ impl Jwm {
             self.release_temporary_system_ui_compositor(backend, label);
             return Err(error.into());
         }
-        if !grab_pointer {
+        let Some(pointer_mask) = pointer_grab.event_mask() else {
             return Ok(true);
-        }
+        };
 
-        match backend.input_ops().grab_pointer(
-            (EventMaskBits::BUTTON_PRESS | EventMaskBits::BUTTON_RELEASE).bits(),
-            None,
-        ) {
+        match backend.input_ops().grab_pointer(pointer_mask, None) {
             Ok(true) => Ok(true),
             // Hand the keyboard straight back: a caller that parks and retries
             // must not sit on it while it waits.
@@ -1435,7 +1477,7 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, SystemUiState::is_notification_center) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "notification center", true)?;
+        self.prepare_system_ui(backend, "notification center", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::notification_center(
             &self.features.notifications,
             crate::jwm::features::notifications::now_unix_ms(),
@@ -1452,7 +1494,11 @@ impl Jwm {
         if self.toggle_off_system_ui(backend, SystemUiState::is_launcher) {
             return Ok(());
         }
-        self.prepare_system_ui(backend, "application launcher", true)?;
+        self.prepare_system_ui(
+            backend,
+            "application launcher",
+            SystemUiPointerGrab::Buttons,
+        )?;
         self.features.system_ui = self.cached_launcher_state();
         self.sync_system_ui(backend);
         Ok(())
@@ -1503,7 +1549,7 @@ impl Jwm {
             return Err("display layout requires at least two active outputs".into());
         }
 
-        self.prepare_system_ui(backend, "display layout", true)?;
+        self.prepare_system_ui(backend, "display layout", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::monitor_layout(entries);
         self.sync_system_ui(backend);
         Ok(())
@@ -1528,7 +1574,7 @@ impl Jwm {
         }
         // On X11, never display a pretend lock if the exclusive keyboard grab
         // failed. Wayland-udev performs interception in its input pipeline.
-        self.prepare_system_ui(backend, "lock screen", true)?;
+        self.prepare_system_ui(backend, "lock screen", SystemUiPointerGrab::Buttons)?;
         self.features.system_ui = crate::jwm::features::SystemUiState::lock();
         self.sync_system_ui(backend);
         Ok(())

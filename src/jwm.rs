@@ -2242,7 +2242,11 @@ impl Jwm {
         ));
         lines.push(format!("{:<28} {}", "Mod1+0", "view all tags"));
 
-        self.prepare_system_ui(backend, "keybinding viewer", false)?;
+        self.prepare_system_ui(
+            backend,
+            "keybinding viewer",
+            crate::jwm::features::toggles::SystemUiPointerGrab::None,
+        )?;
         self.features.system_ui =
             crate::jwm::features::SystemUiState::info("JWM KEYBINDINGS", lines);
         self.sync_system_ui(backend);

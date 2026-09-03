@@ -4,7 +4,7 @@
 //! One cell per tag, each carrying the tag's number and a line-drawn
 //! wireframe of its windows. The panel itself is drawn by the compositors
 //! from [`crate::backend::compositor_common::tags_grid`]; everything that
-//! decides *what* it shows and what a keystroke means lives here.
+//! decides *what* it shows and what a keystroke or a click means lives here.
 //!
 //! Unlike the layout picker nothing is previewed: the desktop behind the
 //! panel never changes while the grid is up, so cancelling is simply closing
@@ -12,12 +12,13 @@
 
 use crate::backend::api::{Backend, ExposeNavDirection, TagsGridCell};
 use crate::backend::compositor_common::expose::{expose_grid_cols, move_expose_selection};
+use crate::backend::compositor_common::tags_grid;
 use crate::config::CONFIG;
 use crate::core::models::MonitorKey;
 use crate::core::types::Rect;
 use crate::jwm::Jwm;
 use crate::jwm::features::SystemUiState;
-use crate::jwm::features::toggles::configured_feature_toggle_allowed;
+use crate::jwm::features::toggles::{SystemUiPointerGrab, configured_feature_toggle_allowed};
 use crate::jwm::types::WMArgEnum;
 
 /// One client's slice of the snapshot, narrow enough for the cell builder to
@@ -113,6 +114,29 @@ pub fn commit_mask(selected: usize, tags_length: usize) -> Option<u32> {
     1u32.checked_shl(selected as u32)
 }
 
+/// What a resolved pointer hit means for the open overview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagsOverviewClick {
+    /// On a cell: select it and commit — the mouse's Return.
+    Commit(usize),
+    /// On the dimmed desktop around the panel: the mouse's Escape.
+    Cancel,
+    /// Inside the panel but on no cell: swallow the press.
+    Keep,
+}
+
+/// Decide a click from its hit-test. A cell always commits; the modal scrim
+/// cancels; the panel's dead space — the title, caption and hint bands and
+/// the gaps between cells — swallows the press, so a click can never fall
+/// through to the desktop the panel is modal over.
+pub fn plan_click(hit: Option<usize>, in_panel: bool) -> TagsOverviewClick {
+    match (hit, in_panel) {
+        (Some(index), _) => TagsOverviewClick::Commit(index),
+        (None, true) => TagsOverviewClick::Keep,
+        (None, false) => TagsOverviewClick::Cancel,
+    }
+}
+
 /// Build one cell per tag from the snapshot.
 ///
 /// Occupied follows the status bar's `calculate_tag_masks`: any window on
@@ -204,7 +228,13 @@ impl Jwm {
             return Ok(());
         }
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
-        self.prepare_system_ui(backend, "tags overview", false)?;
+        // Buttons and motion: the grid follows the pointer, so its grab needs
+        // the expose mask rather than the click-only default.
+        self.prepare_system_ui(
+            backend,
+            "tags overview",
+            SystemUiPointerGrab::ButtonsAndMotion,
+        )?;
         self.features.system_ui =
             SystemUiState::TagsOverview(self.tags_overview_state(sel_mon_key));
         self.sync_system_ui(backend);
@@ -269,6 +299,73 @@ impl Jwm {
         }
         overview.selected = index;
         self.confirm_tags_overview(backend)
+    }
+
+    /// Highlight the cell under the pointer. Mouse and keyboard share the one
+    /// `selected`, so a hover after an arrow walk continues from where the
+    /// keys left off; a miss between cells leaves the selection alone.
+    pub(crate) fn hover_tags_overview(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
+        let Some(index) = self.tags_overview_cell_at(x, y) else {
+            return;
+        };
+        let Some(overview) = self.features.system_ui.tags_overview_mut() else {
+            return;
+        };
+        if overview.selected == index {
+            return;
+        }
+        overview.selected = index;
+        self.sync_system_ui(backend);
+    }
+
+    /// A click commits like Return, cancels like Escape, or dies on the
+    /// panel's dead space — but never reaches the desktop underneath.
+    pub(crate) fn click_tags_overview(
+        &mut self,
+        backend: &mut dyn Backend,
+        x: f64,
+        y: f64,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        match self.tags_overview_click_target(x, y) {
+            // A click on a cell is the digit key with the mouse: select that
+            // tag, then the ordinary commit.
+            Some(TagsOverviewClick::Commit(index)) => {
+                self.jump_tags_overview(backend, index)?;
+            }
+            Some(TagsOverviewClick::Cancel) => self.cancel_tags_overview(backend),
+            Some(TagsOverviewClick::Keep) | None => {}
+        }
+        Ok(())
+    }
+
+    /// The cell a global pointer position sits on, if any. The hit-test reads
+    /// the same geometry the compositors draw: `grid_geometry` over the
+    /// viewport `sync_system_ui` pushes with the overlay and the state's own
+    /// cell count and column count.
+    fn tags_overview_cell_at(&self, x: f64, y: f64) -> Option<usize> {
+        let overview = self.features.system_ui.tags_overview()?;
+        let geometry = tags_grid::grid_geometry(
+            self.system_ui_viewport().rect(),
+            overview.cells.len(),
+            overview.cols,
+        );
+        tags_grid::cell_at(&geometry, x as f32, y as f32)
+    }
+
+    /// A click's full hit-test: the cell under the point and whether the
+    /// panel card contains it, resolved in one pass of the drawn geometry.
+    fn tags_overview_click_target(&self, x: f64, y: f64) -> Option<TagsOverviewClick> {
+        let overview = self.features.system_ui.tags_overview()?;
+        let geometry = tags_grid::grid_geometry(
+            self.system_ui_viewport().rect(),
+            overview.cells.len(),
+            overview.cols,
+        );
+        let (x, y) = (x as f32, y as f32);
+        Some(plan_click(
+            tags_grid::cell_at(&geometry, x, y),
+            tags_grid::panel_contains(&geometry, x, y),
+        ))
     }
 
     /// Rebuild the cells after window changes while the panel is open (the
@@ -580,5 +677,14 @@ mod tests {
         assert_eq!(commit_mask(9, 9), None);
         assert_eq!(commit_mask(2, 0), None);
         assert_eq!(commit_mask(40, 64), None);
+    }
+
+    #[test]
+    fn a_click_commits_a_cell_cancels_the_scrim_and_dies_on_the_panel() {
+        assert_eq!(plan_click(Some(2), true), TagsOverviewClick::Commit(2));
+        // A cell never sits outside the panel, but the arm stays total.
+        assert_eq!(plan_click(Some(2), false), TagsOverviewClick::Commit(2));
+        assert_eq!(plan_click(None, false), TagsOverviewClick::Cancel);
+        assert_eq!(plan_click(None, true), TagsOverviewClick::Keep);
     }
 }

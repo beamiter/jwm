@@ -396,6 +396,22 @@ impl WMController for Jwm {
             }
             return;
         }
+        if self.features.system_ui.is_tags_overview() {
+            // The compositors register no hit map for the grid, so — like the
+            // film strip — the WM hit-tests the shared geometry itself. Only
+            // the left button acts; every other press is swallowed by the
+            // grab, which is what keeps clicks off the desktop below.
+            if detail == 1 {
+                let (x, y) = backend
+                    .input_ops()
+                    .get_pointer_position()
+                    .unwrap_or(self.last_mouse_root);
+                if let Err(error) = self.click_tags_overview(backend, x, y) {
+                    error!("Error handling tags overview click: {error}");
+                }
+            }
+            return;
+        }
         if self.features.system_ui.is_active() {
             let (x, y) = backend
                 .input_ops()
@@ -691,6 +707,10 @@ impl WMController for Jwm {
             // one a click would take.
             if self.features.system_ui.is_layout_picker() {
                 self.hover_layout_picker(backend, root_x, root_y);
+            } else if self.features.system_ui.is_tags_overview() {
+                // Same contract for the grid: the pointer moves the shared
+                // highlight, and a click takes the cell under it.
+                self.hover_tags_overview(backend, root_x, root_y);
             } else {
                 let row = match backend.compositor_system_ui_hit_test(root_x, root_y) {
                     crate::backend::api::SystemUiHitTarget::Item(row) => Some(row),
@@ -1396,7 +1416,7 @@ mod tests {
         OutputOps, PropertyOps, RenderScheduler, SystemUiHitTarget, WindowAttributes,
         WindowChanges, WindowOps, WindowType, WmHints,
     };
-    use crate::backend::common_define::Pixel;
+    use crate::backend::common_define::{EventMaskBits, Pixel};
     use crate::backend::wayland_dummy_ops::{
         DummyColorAllocator, DummyCursorProvider, DummyOutputOps,
     };
@@ -1409,7 +1429,9 @@ mod tests {
     use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{
+        AtomicBool, AtomicI64, AtomicU32, AtomicUsize, Ordering as AtomicOrdering,
+    };
     use xbar_core::shared_structures::SharedMessage;
 
     struct MapRestorePropertyOps {
@@ -1679,6 +1701,8 @@ mod tests {
     struct GrabSpyInputOps {
         pointer_grabs: AtomicUsize,
         pointer_ungrabs: AtomicUsize,
+        /// Event-mask bits of the most recent grab; 0 before the first one.
+        last_pointer_mask: AtomicU32,
     }
 
     impl InputOps for GrabSpyInputOps {
@@ -1691,8 +1715,9 @@ mod tests {
         fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
             Ok((0.0, 0.0))
         }
-        fn grab_pointer(&self, _mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
+        fn grab_pointer(&self, mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
             self.pointer_grabs.fetch_add(1, AtomicOrdering::Relaxed);
+            self.last_pointer_mask.store(mask, AtomicOrdering::Relaxed);
             Ok(true)
         }
         fn ungrab_pointer(&self) -> Result<(), BackendError> {
@@ -3870,10 +3895,32 @@ mod tests {
             "no active tag bit preselects the first cell"
         );
 
+        // The grid follows the pointer, so its grab carries motion on top of
+        // the buttons, and closing hands the pointer back.
+        let mask = backend
+            .input_ops
+            .last_pointer_mask
+            .load(AtomicOrdering::SeqCst);
+        assert_ne!(mask & EventMaskBits::BUTTON_PRESS.bits(), 0);
+        assert_ne!(mask & EventMaskBits::BUTTON_RELEASE.bits(), 0);
+        assert_ne!(
+            mask & EventMaskBits::POINTER_MOTION.bits(),
+            0,
+            "hover needs motion events"
+        );
+
         // The key that opened it takes it back down.
         jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
             .unwrap();
         assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(
+            backend
+                .input_ops
+                .pointer_ungrabs
+                .load(AtomicOrdering::SeqCst),
+            1,
+            "closing must release the pointer grab"
+        );
     }
 
     #[test]
@@ -3925,6 +3972,112 @@ mod tests {
             jwm.state.monitors[mon_key].get_active_tags(),
             0,
             "cancel must not view anything"
+        );
+    }
+
+    #[test]
+    fn tags_overview_hover_moves_the_highlight_but_only_between_cells() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        // jwm_with_monitor leaves the monitor geometry zeroed, so the panel's
+        // viewport falls back to the full virtual screen.
+        let geometry = tags_grid::grid_geometry(
+            [0.0, 0.0, 1920.0, 1080.0],
+            overview.cells.len(),
+            overview.cols,
+        );
+        let target = 3usize;
+        let [x, y] = layout_strip::center(geometry.cells[target].cell);
+
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            x as f64,
+            y as f64,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().selected,
+            target,
+            "hover must move the shared highlight"
+        );
+
+        // Motion over the panel's dead space (the title band) leaves the
+        // selection where the pointer last earned it.
+        let [px, py, _, _] = geometry.panel;
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            (px + 1.0) as f64,
+            (py + 1.0) as f64,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().selected,
+            target,
+            "hover between cells must not move the highlight"
+        );
+    }
+
+    #[test]
+    fn tags_overview_click_commits_the_cell_and_swallows_dead_panel_space() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        let geometry = tags_grid::grid_geometry(
+            [0.0, 0.0, 1920.0, 1080.0],
+            overview.cells.len(),
+            overview.cols,
+        );
+
+        // The title band is inside the panel but on no cell: swallowed.
+        let [px, py, _, _] = geometry.panel;
+        jwm.click_tags_overview(&mut backend, (px + 1.0) as f64, (py + 1.0) as f64)
+            .unwrap();
+        assert!(
+            jwm.features.system_ui.is_tags_overview(),
+            "dead panel space must neither commit nor cancel"
+        );
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
+
+        let target = 4usize;
+        let [x, y] = layout_strip::center(geometry.cells[target].cell);
+        jwm.click_tags_overview(&mut backend, x as f64, y as f64)
+            .unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << target);
+    }
+
+    #[test]
+    fn tags_overview_click_on_the_scrim_cancels() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+
+        // A corner of the output, well outside the centred panel.
+        jwm.click_tags_overview(&mut backend, 2.0, 2.0).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(
+            jwm.state.monitors[mon_key].get_active_tags(),
+            0,
+            "a scrim click must not view anything"
         );
     }
 

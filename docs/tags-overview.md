@@ -34,6 +34,20 @@ sits on a real cell, so `Return` never surprises you. The digit keys work
 with modifiers held too: the panel holds the keyboard grab, so the global
 `Mod1+N` bindings never see the key, and the panel answers it in their place.
 
+## Mouse
+
+The panel grabs the pointer while it is open, so no click can fall through
+to the windows underneath.
+
+- Moving the pointer over a cell highlights it. Mouse and keyboard share the
+  one highlight, so you can mix them freely; the dead space between cells
+  leaves the highlight where it is.
+- Clicking a cell jumps to that tag and closes, exactly like `Return`.
+- Clicking the dimmed desktop around the panel closes without switching,
+  exactly like `Esc`.
+- Clicking the panel's own dead space (the title, caption and hint bands,
+  the gaps between cells) does nothing — the press is swallowed.
+
 ## What the cells show
 
 - Windows parked on another tag are drawn at the position they will return
@@ -55,8 +69,6 @@ nowhere.
 
 ## Limitations
 
-- v1 is keyboard-only: no hover, no click. Mouse interaction is planned for
-  v1.1.
 - Only the current monitor's tags are shown; there is no cross-monitor grid.
 - Cells are wireframes, not live thumbnails — the grid identifies windows by
   position and shape, not by content.

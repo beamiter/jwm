@@ -9,6 +9,7 @@ use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
 use crate::jwm::features::switcher;
 use crate::jwm::features::system_ui::{ListRow, RowData};
+use crate::jwm::features::toggles::SystemUiPointerGrab;
 use crate::jwm::types::WMArgEnum;
 use log::{info, warn};
 
@@ -574,7 +575,7 @@ impl Jwm {
         // Keyboard-only, like the keybinding viewer: the gesture lives on the
         // held modifier, and the pointer stays free so a click can still pick
         // a row (commit) or land on the desktop (cancel).
-        self.prepare_system_ui(backend, "window switcher", false)?;
+        self.prepare_system_ui(backend, "window switcher", SystemUiPointerGrab::None)?;
 
         // Sampled after the grab landed: if the modifier is already back up,
         // its release went to someone else and waiting for it would wedge the

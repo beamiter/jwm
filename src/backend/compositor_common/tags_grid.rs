@@ -178,6 +178,14 @@ pub fn cell_at(geometry: &TagsGridGeometry, x: f32, y: f32) -> Option<usize> {
     })
 }
 
+/// Whether `(x, y)` falls inside the panel card at all. The hit-test splits
+/// the card from the modal scrim around it: a click in the title, caption or
+/// hint bands is inside the panel without being on a cell.
+pub fn panel_contains(geometry: &TagsGridGeometry, x: f32, y: f32) -> bool {
+    let [px, py, pw, ph] = geometry.panel;
+    x >= px && x < px + pw && y >= py && y < py + ph
+}
+
 /// Text origin of a cell's tag label once the cell's presentation scale
 /// (see [`crate::backend::compositor_common::layout_strip::SELECTED_SCALE`])
 /// is applied. The label scales with its cell so the selected cell's lift
@@ -287,6 +295,23 @@ mod tests {
             cell_at(&g, px + 1.0, py + 1.0),
             None,
             "the title band is not a cell"
+        );
+    }
+
+    #[test]
+    fn the_panel_card_is_hit_separately_from_its_cells() {
+        let g = geom(13, 4);
+        let [px, py, pw, ph] = g.panel;
+        // The title band is panel but no cell; so is every cell's interior.
+        assert!(panel_contains(&g, px + 1.0, py + 1.0));
+        let [x, y] = center(g.cells[0].cell);
+        assert!(panel_contains(&g, x, y));
+        // The scrim around the card is not.
+        assert!(!panel_contains(&g, px - 1.0, py - 1.0));
+        assert!(!panel_contains(&g, px + pw + 1.0, py + ph + 1.0));
+        assert!(
+            !panel_contains(&g, px + pw, py + ph),
+            "far edge is exclusive"
         );
     }
 

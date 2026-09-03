@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-09-03：UI/UX 七轮（网格总览鼠标支持 v1.1）
+
+1. **tags 网格总览支持鼠标**：hover 移动选中（cell 间死区不动键盘选中）、
+   左键点 cell 提交（与回车同路径）、点 scrim 取消、panel 死区吞掉不穿透。
+   决策是纯函数 `tags_overview::plan_click`（Commit/Cancel/Keep）；命中走 WM 侧
+   `tags_grid::grid_geometry` + `cell_at`（viewport/cols 与渲染同源：同一
+   `system_ui_viewport()` 推送，有一致性测试钉住），两端渲染器仍不注册命中几何。
+2. **指针抓取参数化**：`prepare_system_ui` 的 bool 升级为
+   `SystemUiPointerGrab::{None, Buttons, ButtonsAndMotion}`（toggles.rs:46-77），
+   12 个既有面板逐一核对为 `Buttons`，tags overview 用 `ButtonsAndMotion`
+   （hover 需要 POINTER_MOTION，expose 同款 mask），keybinding viewer 与
+   window switcher 为 `None`。释放统一在 `close_system_ui`，confirm/cancel/
+   toggle-off/hand-over backstop 全汇一处；编排测试断言抓取 mask 与 ungrab 计数。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2530 passed / 0 failed。
+
+---
+
 ## 2026-09-03：UI/UX 六轮（tags 网格总览）
 
 1. **工作区网格总览 v1**（Mod1+O / `toggle_tags_overview`，IPC 同名，开关
@@ -29,9 +48,10 @@
    包装时 clamp 到 `[1, count]`，否则单 tag 时 WM 行走与绘制形状不一致
    （有一致性测试钉住）。
 
-**v1.1/v2 遗留**：鼠标 hover/click（需抓指针 + 两端注册 `cell_at` 命中几何）、
-跨显示器同框、当前 tag cell 升级 live 纹理（expose 已有 per-window 纹理能力）、
-拖窗口跨 cell 改 tag。文档 `docs/tags-overview.md`。
+**v1.1/v2 遗留**：~~鼠标 hover/click~~（v1.1 已完成，见七轮；命中走 WM 侧共享
+几何，两端仍不注册命中几何）、跨显示器同框、当前 tag cell 升级 live 纹理
+（expose 已有 per-window 纹理能力）、拖窗口跨 cell 改 tag。文档
+`docs/tags-overview.md`。
 
 验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
 lib 2525 passed / 0 failed。真机未实测。

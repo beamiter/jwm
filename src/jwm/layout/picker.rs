@@ -15,6 +15,7 @@ use crate::core::layout::LayoutEnum;
 use crate::jwm::Jwm;
 use crate::jwm::features::SystemUiState;
 use crate::jwm::features::layout_picker::LayoutPickerState;
+use crate::jwm::features::toggles::SystemUiPointerGrab;
 use crate::jwm::types::WMArgEnum;
 use log::info;
 use std::rc::Rc;
@@ -81,7 +82,7 @@ impl Jwm {
         let sel_mon_key = self.state.sel_mon.ok_or("No selected monitor")?;
         let current = self.current_selected_layout(sel_mon_key)?;
 
-        self.prepare_system_ui(backend, "layout picker", true)?;
+        self.prepare_system_ui(backend, "layout picker", SystemUiPointerGrab::Buttons)?;
         let mut picker = LayoutPickerState::new(&current);
         let target = if delta == 0 {
             picker.selected_layout()
