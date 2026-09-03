@@ -147,6 +147,10 @@ pub enum SystemUiState {
     /// so it carries only the picker state; see
     /// [`crate::jwm::features::layout_picker`].
     LayoutPicker(crate::jwm::features::LayoutPickerState),
+    /// The grid of per-tag wireframe cells. Its own panel rather than a list,
+    /// so it carries only the overview state; see
+    /// [`crate::jwm::features::tags_overview`].
+    TagsOverview(crate::jwm::features::TagsOverviewState),
     MonitorLayout {
         entries: Vec<MonitorLayoutEntry>,
         selected: usize,
@@ -592,6 +596,7 @@ impl Clone for SystemUiState {
         match self {
             Self::Inactive => Self::Inactive,
             Self::LayoutPicker(picker) => Self::LayoutPicker(picker.clone()),
+            Self::TagsOverview(overview) => Self::TagsOverview(overview.clone()),
             Self::Launcher {
                 query,
                 entries,
@@ -710,6 +715,24 @@ impl SystemUiState {
     pub fn layout_picker_mut(&mut self) -> Option<&mut crate::jwm::features::LayoutPickerState> {
         match self {
             Self::LayoutPicker(picker) => Some(picker),
+            _ => None,
+        }
+    }
+
+    pub fn is_tags_overview(&self) -> bool {
+        matches!(self, Self::TagsOverview(_))
+    }
+
+    pub fn tags_overview(&self) -> Option<&crate::jwm::features::TagsOverviewState> {
+        match self {
+            Self::TagsOverview(overview) => Some(overview),
+            _ => None,
+        }
+    }
+
+    pub fn tags_overview_mut(&mut self) -> Option<&mut crate::jwm::features::TagsOverviewState> {
+        match self {
+            Self::TagsOverview(overview) => Some(overview),
             _ => None,
         }
     }
@@ -2070,6 +2093,7 @@ impl SystemUiState {
             }
             Self::Inactive
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }
@@ -2099,6 +2123,7 @@ impl SystemUiState {
             }
             Self::Inactive
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }
@@ -2231,6 +2256,7 @@ impl SystemUiState {
             Self::Inactive
             | Self::Info { .. }
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::Locked { .. }
             | Self::Calendar { .. } => None,
@@ -2299,6 +2325,7 @@ impl SystemUiState {
             }
             Self::Inactive
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::Locked { .. }
             | Self::Calendar { .. } => return false,
@@ -2362,6 +2389,7 @@ impl SystemUiState {
             }
             Self::Inactive
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::Locked { .. }
             | Self::Calendar { .. } => return false,
@@ -2481,6 +2509,18 @@ impl SystemUiState {
                     scroll: None,
                 }
             }
+            // The grid draws its own panel. Only the words come from here:
+            // the headline, the highlighted tag's name as the caption (the
+            // single `items` row), and the footer.
+            Self::TagsOverview(overview) => OverlayParts {
+                title: "\u{f00a}  TAGS".into(),
+                query: None,
+                items: vec![format!("Tag {}", overview.selected + 1)],
+                selected: Some(0),
+                hint: "\u{f060}\u{f061}\u{f062}\u{f063}  choose    Enter  jump    1-9  direct    Esc  close"
+                    .into(),
+                scroll: None,
+            },
             Self::Locked { password, message } => {
                 let status = if message.is_empty() {
                     "Enter password to unlock"
@@ -2896,6 +2936,7 @@ impl SystemUiState {
             Self::Inactive
             | Self::Locked { .. }
             | Self::LayoutPicker(_)
+            | Self::TagsOverview(_)
             | Self::MonitorLayout { .. }
             | Self::ControlCenter { .. }
             | Self::ListPanel { .. }

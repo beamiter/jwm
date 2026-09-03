@@ -39,6 +39,7 @@ pub mod switcher;
 mod sysfs;
 pub mod system_controls;
 pub mod system_ui;
+pub mod tags_overview;
 pub mod toggles;
 pub mod wallpaper;
 pub mod wallpaper_colors;
@@ -71,6 +72,7 @@ pub use shell_hub::ShellHubRoute;
 pub use system_ui::{
     ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState,
 };
+pub use tags_overview::{TagClientFrame, TagsOverviewState};
 
 /// Durable diagnostics for runtime compositor hand-offs.
 ///

@@ -233,6 +233,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "toggle_wifi",
         "toggle_peek",
         "toggle_recording",
+        "toggle_tags_overview",
         "toggle_waterlily",
         "togglebar",
         "togglecompositor",
@@ -655,6 +656,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
             Ok((Jwm::toggle_waterlily, parse_int_arg(args, 0)?))
         }
         "toggle_overview" => Ok((Jwm::toggle_overview, parse_int_arg(args, 0)?)),
+        "toggle_tags_overview" => Ok((Jwm::toggle_tags_overview, parse_int_arg(args, 0)?)),
         "cycle_overview" => Ok((Jwm::cycle_overview, parse_int_arg(args, 1)?)),
         "toggle_magnifier" => Ok((Jwm::toggle_magnifier, parse_int_arg(args, 0)?)),
         "toggle_peek" => Ok((Jwm::toggle_peek, parse_int_arg(args, 0)?)),

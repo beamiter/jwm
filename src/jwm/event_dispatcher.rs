@@ -3857,6 +3857,125 @@ mod tests {
     }
 
     #[test]
+    fn tags_overview_opens_on_the_current_tag_and_toggles_back_off() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.cells.len(), CONFIG.load().tags_length());
+        assert_eq!(
+            overview.selected, 0,
+            "no active tag bit preselects the first cell"
+        );
+
+        // The key that opened it takes it back down.
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+    }
+
+    #[test]
+    fn tags_overview_arrow_walk_and_digit_jump_commit_through_view() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.move_tags_overview_selection(
+            &mut backend,
+            crate::backend::api::ExposeNavDirection::Right,
+        );
+        jwm.move_tags_overview_selection(
+            &mut backend,
+            crate::backend::api::ExposeNavDirection::Right,
+        );
+        assert_eq!(jwm.features.system_ui.tags_overview().unwrap().selected, 2);
+
+        jwm.confirm_tags_overview(&mut backend).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << 2);
+
+        // A digit jumps straight to its tag and commits in one press.
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.jump_tags_overview(&mut backend, 4).unwrap();
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << 4);
+    }
+
+    #[test]
+    fn tags_overview_cancel_leaves_the_current_tag_untouched() {
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.move_tags_overview_selection(
+            &mut backend,
+            crate::backend::api::ExposeNavDirection::Down,
+        );
+        jwm.cancel_tags_overview(&mut backend);
+
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(
+            jwm.state.monitors[mon_key].get_active_tags(),
+            0,
+            "cancel must not view anything"
+        );
+    }
+
+    #[test]
+    fn arrange_rebuilds_the_open_overviews_cells() {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        // insert_monitor (unlike a bare SlotMap insert) creates the
+        // per-monitor client vectors the snapshot collects from.
+        let mut monitor = jwm.createmon(true);
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let mon_key = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(mon_key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        assert!(
+            !jwm.features.system_ui.tags_overview().unwrap().cells[0].occupied,
+            "an empty monitor opens an all-empty grid"
+        );
+
+        let mut client = WMClient::new(WindowId::from_raw(0xfeed));
+        client.mon = Some(mon_key);
+        client.state.tags = 1;
+        client.geometry.w = 800;
+        client.geometry.h = 600;
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, mon_key);
+
+        // The arrange tail rebuilds the open panel's cells; the flush then
+        // repushes the overlay. Neither touches the highlight.
+        jwm.system_ui_dirty = false;
+        jwm.arrange(&mut backend, Some(mon_key));
+
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert!(overview.cells[0].occupied);
+        assert_eq!(overview.cells[0].windows.len(), 1);
+        assert!(jwm.system_ui_dirty, "the rebuild must request a repaint");
+
+        jwm.close_system_ui(&mut backend);
+        assert!(!jwm.system_ui_dirty);
+    }
+
+    #[test]
     fn native_layout_picker_leases_and_restores_the_compositor() {
         let mut jwm = jwm_with_monitor();
         let mut backend = RenderSpyBackend::new();

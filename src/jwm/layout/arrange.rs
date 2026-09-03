@@ -64,5 +64,9 @@ impl Jwm {
             let _ = self.restack(backend, Some(mon_key));
         }
         let _ = backend.window_ops().flush();
+
+        // Window moves the arrange just made are the overview's content:
+        // rebuild the open grid's cells so it never shows stale wireframes.
+        self.refresh_tags_overview();
     }
 }

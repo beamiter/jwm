@@ -3,7 +3,7 @@
 use crate::Jwm;
 use crate::backend::api::{
     AllowMode, Backend, ExposeNavDirection, HitTarget, LayoutFilmCell, LayoutFilmstrip,
-    SystemUiOverlay, SystemUiViewport, WindowChanges, WindowType,
+    SystemUiOverlay, SystemUiViewport, TagsGrid, WindowChanges, WindowType,
 };
 use crate::backend::common_define::{ConfigWindowBits, Mods, MouseButton, WindowId, keys};
 use crate::backend::compositor_common::annotation_overlay::{AnnotationLabel, AnnotationQuad};
@@ -244,6 +244,15 @@ impl Jwm {
                         countdown: picker.countdown(now),
                     }
                 }),
+                tags_grid: self
+                    .features
+                    .system_ui
+                    .tags_overview()
+                    .map(|overview| TagsGrid {
+                        cells: overview.cells.clone(),
+                        cols: overview.cols,
+                        selected: overview.selected,
+                    }),
             }
         }));
         backend.compositor_force_full_redraw();
@@ -1346,6 +1355,47 @@ impl Jwm {
                     _ => {}
                 }
                 return Ok(());
+            }
+            // The tags overview is keyboard-only (v1). Unhandled keys fall
+            // through so the panel's own toggle binding can still close it.
+            if self.features.system_ui.is_tags_overview() {
+                let handled = match keysym {
+                    keys::KEY_Escape => {
+                        self.cancel_tags_overview(backend);
+                        true
+                    }
+                    keys::KEY_Return | keys::KEY_KP_Enter => {
+                        self.confirm_tags_overview(backend)?;
+                        true
+                    }
+                    keys::KEY_Left => {
+                        self.move_tags_overview_selection(backend, ExposeNavDirection::Left);
+                        true
+                    }
+                    keys::KEY_Right => {
+                        self.move_tags_overview_selection(backend, ExposeNavDirection::Right);
+                        true
+                    }
+                    keys::KEY_Up => {
+                        self.move_tags_overview_selection(backend, ExposeNavDirection::Up);
+                        true
+                    }
+                    keys::KEY_Down => {
+                        self.move_tags_overview_selection(backend, ExposeNavDirection::Down);
+                        true
+                    }
+                    // A digit jumps straight to its tag and commits, with or
+                    // without modifiers: the panel holds the keyboard grab,
+                    // so the global Mod1+N bindings never see the key.
+                    k if (keys::KEY_1..=keys::KEY_9).contains(&k) => {
+                        self.jump_tags_overview(backend, (k - keys::KEY_1) as usize)?;
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    return Ok(());
+                }
             }
             // Every UI key binding is a toggle. The panel is modal and would
             // otherwise swallow the very key that opened it, so the binding

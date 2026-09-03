@@ -924,6 +924,10 @@ pub struct BehaviorConfig {
     #[serde(default = "default_expose_gap")]
     pub expose_gap: f32,
 
+    // --- Tags overview (all-tags grid) ---
+    #[serde(default = "default_true")]
+    pub tags_overview_enabled: bool,
+
     // --- Smart Snap Preview ---
     #[serde(default = "default_true")]
     pub snap_preview: bool,
@@ -1925,6 +1929,7 @@ impl Default for Config {
                     particle_gravity: default_particle_gravity(),
                     expose_enabled: default_true(),
                     expose_gap: default_expose_gap(),
+                    tags_overview_enabled: default_true(),
                     snap_preview: default_true(),
                     snap_preview_color: default_snap_preview_color(),
                     snap_animation_duration_ms: default_snap_animation_duration_ms(),
@@ -2034,6 +2039,12 @@ impl Config {
                 modifier: vec!["Mod1".to_string()],
                 key: "e".to_string(),
                 function: "toggle_expose".to_string(),
+                argument: ArgumentConfig::Int(0),
+            },
+            KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "o".to_string(),
+                function: "toggle_tags_overview".to_string(),
                 argument: ArgumentConfig::Int(0),
             },
             KeyConfig {
@@ -2999,6 +3010,35 @@ impl Config {
                 }
             }
         }
+        // Same story for the tags overview: configurations snapshotted before
+        // it existed gain its default chord unless they already spend it.
+        if !self
+            .inner
+            .keybindings
+            .keys
+            .iter()
+            .any(|key| key.function == "toggle_tags_overview")
+        {
+            let fallback = KeyConfig {
+                modifier: vec!["Mod1".to_string()],
+                key: "o".to_string(),
+                function: "toggle_tags_overview".to_string(),
+                argument: ArgumentConfig::Int(0),
+            };
+            if let Some(binding) = self.convert_key_config(&fallback) {
+                let occupied = keys
+                    .iter()
+                    .any(|key| key.mask == binding.mask && key.key_sym == binding.key_sym);
+                if occupied {
+                    log::warn!("[config] tags overview has no shortcut: Alt+O is already occupied");
+                } else {
+                    log::info!(
+                        "[config] legacy key list detected; enabling tags overview on Alt+O"
+                    );
+                    keys.push(binding);
+                }
+            }
+        }
         for i in 0..self.tags_length() {
             keys.extend(self.generate_tag_keys(i));
         }
@@ -3179,6 +3219,7 @@ impl Config {
             "save_session" => Some(Jwm::save_session),
             "restore_session" => Some(Jwm::restore_session),
             "toggle_expose" => Some(Jwm::toggle_expose),
+            "toggle_tags_overview" => Some(Jwm::toggle_tags_overview),
             "toggle_recording" => Some(Jwm::toggle_recording),
             "volume_adjust" => Some(Jwm::volume_adjust),
             "volume_mute" => Some(Jwm::volume_mute),
@@ -5055,6 +5096,45 @@ border_px = 3
             .get_keys()
             .into_iter()
             .filter(|key| key.key_sym == key_sym && key.mask == (Mods::ALT | Mods::CONTROL))
+            .count();
+        assert_eq!(matches, 1);
+    }
+
+    #[test]
+    fn legacy_key_list_gets_non_conflicting_tags_overview_fallback() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_tags_overview");
+
+        let key_sym = cfg.parse_keysym("o").unwrap();
+        let keys = cfg.get_keys();
+        assert!(
+            keys.iter()
+                .any(|key| { key.key_sym == key_sym && key.mask == Mods::ALT })
+        );
+    }
+
+    #[test]
+    fn legacy_tags_overview_fallback_does_not_override_occupied_chord() {
+        let mut cfg = Config::default();
+        cfg.inner
+            .keybindings
+            .keys
+            .retain(|key| key.function != "toggle_tags_overview");
+        cfg.inner.keybindings.keys.push(KeyConfig {
+            modifier: vec!["Mod1".into()],
+            key: "o".into(),
+            function: "spawn".into(),
+            argument: ArgumentConfig::StringVec(vec!["true".into()]),
+        });
+
+        let key_sym = cfg.parse_keysym("o").unwrap();
+        let matches = cfg
+            .get_keys()
+            .into_iter()
+            .filter(|key| key.key_sym == key_sym && key.mask == Mods::ALT)
             .count();
         assert_eq!(matches, 1);
     }

@@ -4,6 +4,40 @@
 
 ---
 
+## 2026-09-03：UI/UX 六轮（tags 网格总览）
+
+1. **工作区网格总览 v1**（Mod1+O / `toggle_tags_overview`，IPC 同名，开关
+   `behavior.tags_overview_enabled` 默认 true）。GNOME 式「一次看到所有 tag」：
+   中央网格每格一个 tag 的窗口布局线框（真实几何归一化到工作区、clamp 0..=1），
+   occupied/空、active（accent 内框）、选中（chip 填充+`SELECTED_SCALE` 放大）
+   三层视觉正交。方向键 clamp 移动（复用 expose 的 `move_expose_selection`，
+   与 expose 同手感）、Return 提交（走 `view()` 全链路）、数字键 1-9 直跳、
+   Escape 取消、再按 Mod1+O 关闭。旧配置无 Mod1+O 绑定时回填（占用则 warn
+   不抢键）。
+2. **承载面是 SystemUiOverlay 新 `tags_grid` 字段**（filmstrip 先例）：几何/命中/
+   状态全在共享模块（新建 `compositor_common/tags_grid.rs`，geometry 含
+   cell 不出 panel/互不重叠/负 origin/cell_at 往返回归；WM 侧新建
+   `jwm/features/tags_overview.rs`），两端渲染器只剩 dumb fill/stroke。两端
+   均不注册命中几何（v1 键盘-only）。
+3. **快照坑（后来者勿踩）**：非当前 tag 的窗口被停放到屏幕外，线框必须取
+   `client.geometry.hidden_restore_rect`；sticky 的 tags 会被 `update_sticky_tags`
+   改写，快照按 flag 特判「在所有 tag 上」；minimized/swallowed 不进线框但计
+   `occupied`（对齐 bar 的 `calculate_tag_masks`）。arrange 末尾
+   `refresh_tags_overview` 重建快照，选中按 tag index 天然稳定，commit 时
+   `commit_mask` 对 tags_length 重校验（配置 reload 收缩退化为取消）。
+4. **设计勘误**：`expose_grid_cols` 对 n=1 在 16:9 屏给 2 列，`grid_cols`
+   包装时 clamp 到 `[1, count]`，否则单 tag 时 WM 行走与绘制形状不一致
+   （有一致性测试钉住）。
+
+**v1.1/v2 遗留**：鼠标 hover/click（需抓指针 + 两端注册 `cell_at` 命中几何）、
+跨显示器同框、当前 tag cell 升级 live 纹理（expose 已有 per-window 纹理能力）、
+拖窗口跨 cell 改 tag。文档 `docs/tags-overview.md`。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2525 passed / 0 failed。真机未实测。
+
+---
+
 ## 2026-09-03：UI/UX 五轮（切换器恢复最小化窗口 / VRR 文档纠偏）
 
 1. **Alt+Tab 切换器纳入最小化窗口**。`switcher_eligible` 不再排除 hidden

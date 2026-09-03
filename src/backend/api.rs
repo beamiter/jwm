@@ -868,6 +868,9 @@ pub struct SystemUiOverlay {
     /// Set by the layout picker, which is drawn as a film strip of layout
     /// thumbnails instead of the list card.
     pub filmstrip: Option<LayoutFilmstrip>,
+    /// Set by the tags overview, which is drawn as a grid of per-tag
+    /// wireframe cells instead of the list card.
+    pub tags_grid: Option<TagsGrid>,
 }
 
 /// What is under the pointer on the compositor-drawn system-UI card.
@@ -973,6 +976,33 @@ pub struct LayoutFilmCell {
     /// Whether this layout leaves room for the status bar, drawn as a rule
     /// across the top of the thumbnail.
     pub shows_bar: bool,
+}
+
+/// The tags overview's contents: one grid cell per tag of the selected
+/// monitor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TagsGrid {
+    pub cells: Vec<TagsGridCell>,
+    /// Columns the window manager's keyboard walk uses; the renderer lays the
+    /// same grid out, so the two can never disagree on the shape.
+    pub cols: u32,
+    pub selected: usize,
+}
+
+/// One tag's cell in the overview grid.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TagsGridCell {
+    /// Zero-based tag index. The drawn label is `tag_index + 1`, matching the
+    /// status bar.
+    pub tag_index: usize,
+    /// Window outlines in `0.0..=1.0` of the cell's exposed frame, back to
+    /// front.
+    pub windows: Vec<[f32; 4]>,
+    /// The tag holds windows at all, minimized and swallowed ones included —
+    /// which `windows` cannot say, because those draw no outline.
+    pub occupied: bool,
+    /// The tag is currently visible on the monitor.
+    pub active: bool,
 }
 
 /// What the OSD card depicts. Unlike toasts the OSD is a single

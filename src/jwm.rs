@@ -765,6 +765,7 @@ impl Jwm {
             || eq!(Jwm::audio_output_picker)
             || eq!(Jwm::audio_input_picker)
             || eq!(Jwm::monitor_layout)
+            || eq!(Jwm::toggle_tags_overview)
     }
 
     fn func_name(func: WMFuncType) -> &'static str {
@@ -858,6 +859,8 @@ impl Jwm {
             "restore_session"
         } else if eq!(Jwm::toggle_expose) {
             "toggle_expose"
+        } else if eq!(Jwm::toggle_tags_overview) {
+            "toggle_tags_overview"
         } else if eq!(Jwm::toggle_recording) {
             "toggle_recording"
         } else if eq!(Jwm::adjust_recording_region) {

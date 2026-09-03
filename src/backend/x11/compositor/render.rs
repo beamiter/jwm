@@ -2014,6 +2014,267 @@ impl<C: CompositorConnection> Compositor<C> {
         }
     }
 
+    /// The tags overview: one cell per tag of the selected monitor, each with
+    /// the tag's number and a line-drawn wireframe of its windows, back to
+    /// front. The selected cell lifts out of the grid; tags currently on
+    /// screen carry a persistent accent frame inside the cell, kept distinct
+    /// from the selection gate around it.
+    fn render_tags_grid(
+        &mut self,
+        proj: &[f32; 16],
+        grid: &crate::backend::api::TagsGrid,
+        viewport: [f32; 4],
+    ) {
+        use crate::backend::compositor_common::layout_strip as film;
+        use crate::backend::compositor_common::tags_grid as grid_layout;
+
+        let ui = ui_theme::palette();
+        let [viewport_x, viewport_y, viewport_w, viewport_h] = viewport;
+        let geometry = grid_layout::grid_geometry(viewport, grid.cells.len(), grid.cols);
+        let [panel_x, panel_y, panel_w, panel_h] = geometry.panel;
+        let accent = self.border_gradient_color_a;
+
+        // The panel repaints only when the overview changes, so the cell
+        // labels are rasterized per redraw instead of living in a cache.
+        let config = crate::config::CONFIG.load();
+        let description = config.system_ui_font();
+        let text_size = crate::backend::compositor_font::ui_font_pixel_size(description);
+        let mut labels: Vec<(usize, glow::Texture, u32, u32)> = Vec::new();
+        for (index, content) in grid.cells.iter().enumerate() {
+            if index >= geometry.cells.len() {
+                break;
+            }
+            let color = if content.occupied {
+                ui.item_ink
+            } else {
+                ui.hint_ink
+            };
+            let text = format!("{}", content.tag_index + 1);
+            if let Some((tex, w, h)) =
+                self.rasterize_toast_text(&text, description, text_size, color)
+            {
+                labels.push((index, tex, w, h));
+            }
+        }
+
+        unsafe {
+            self.gl.bind_vertex_array(Some(self.quad_vao));
+
+            // Scrim: dim the desktop the grid is describing.
+            self.gl.use_program(Some(self.hud_program));
+            self.gl
+                .uniform_matrix_4_f32_slice(self.hud_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_4_f32(
+                self.hud_uniforms.bg_color.as_ref(),
+                ui.scrim[0],
+                ui.scrim[1],
+                ui.scrim[2],
+                ui.scrim[3],
+            );
+            self.gl
+                .uniform_2_f32(self.hud_uniforms.size.as_ref(), viewport_w, viewport_h);
+            self.gl.uniform_4_f32(
+                self.hud_uniforms.rect.as_ref(),
+                viewport_x,
+                viewport_y,
+                viewport_w,
+                viewport_h,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+
+        self.capture_glass_backdrop(ui);
+
+        unsafe {
+            // Drop shadow, then the card.
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.shadow_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            let spread = ui.spread(48.0);
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.spread.as_ref(), spread);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.shadow_color.as_ref(),
+                ui.shadow[0],
+                ui.shadow[1],
+                ui.shadow[2],
+                ui.shadow[3],
+            );
+            self.gl
+                .uniform_1_f32(self.shadow_uniforms.radius.as_ref(), film::PANEL_RADIUS);
+            self.gl
+                .uniform_2_f32(self.shadow_uniforms.size.as_ref(), panel_w, panel_h);
+            self.gl.uniform_4_f32(
+                self.shadow_uniforms.rect.as_ref(),
+                panel_x - spread,
+                panel_y - spread + 14.0,
+                panel_w + 2.0 * spread,
+                panel_h + 2.0 * spread,
+            );
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+
+            self.ui_fill_surface(
+                proj,
+                ui,
+                panel_x,
+                panel_y,
+                panel_w,
+                panel_h,
+                film::PANEL_RADIUS,
+                ui.panel,
+                1.0,
+            );
+
+            let line = UiPalette::ink(ui.item_ink, 0.72);
+            let dim_line = UiPalette::ink(ui.hint_ink, 0.55);
+
+            for (index, cell) in geometry.cells.iter().enumerate() {
+                let selected = index == grid.selected;
+                let scale = if selected { film::SELECTED_SCALE } else { 1.0 };
+                let pivot = film::center(cell.cell);
+                let cell_rect = film::scaled_about(cell.cell, pivot, scale);
+                let frame = film::scaled_about(cell.frame, pivot, scale);
+
+                self.sysui_fill_rounded(
+                    cell_rect[0],
+                    cell_rect[1],
+                    cell_rect[2],
+                    cell_rect[3],
+                    film::CELL_RADIUS,
+                    if selected {
+                        UiPalette::faded(ui.chip, 1.0)
+                    } else {
+                        UiPalette::faded(ui.chip, 0.7)
+                    },
+                );
+
+                let Some(content) = grid.cells.get(index) else {
+                    continue;
+                };
+                // Occupied tags (minimized windows included) draw in the
+                // bright ink; empty ones sit back in the dim tone.
+                let ink = if content.occupied { line } else { dim_line };
+                self.sysui_stroke_rounded(
+                    frame[0],
+                    frame[1],
+                    frame[2],
+                    frame[3],
+                    film::WINDOW_RADIUS,
+                    film::LINE_WIDTH * scale,
+                    UiPalette::faded(ink, 0.6),
+                );
+                for window in &content.windows {
+                    let rect = film::window_rect(frame, *window);
+                    self.sysui_stroke_rounded(
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
+                        film::WINDOW_RADIUS,
+                        film::LINE_WIDTH * scale,
+                        ink,
+                    );
+                }
+
+                if content.active {
+                    // The persistent "on screen now" marker, inside the cell
+                    // so the selection gate outside it stays readable when a
+                    // tag is both current and highlighted.
+                    self.sysui_stroke_rounded(
+                        cell_rect[0] + 2.0,
+                        cell_rect[1] + 2.0,
+                        cell_rect[2] - 4.0,
+                        cell_rect[3] - 4.0,
+                        film::CELL_RADIUS,
+                        1.6,
+                        [accent[0], accent[1], accent[2], 0.75],
+                    );
+                }
+                if selected {
+                    // The gate: an accent ring around the cell being shown.
+                    self.sysui_stroke_rounded(
+                        cell_rect[0] - 2.0,
+                        cell_rect[1] - 2.0,
+                        cell_rect[2] + 4.0,
+                        cell_rect[3] + 4.0,
+                        film::CELL_RADIUS + 2.0,
+                        1.8,
+                        [accent[0], accent[1], accent[2], 0.95],
+                    );
+                }
+            }
+
+            // Tag numbers ride their cell's presentation scale, so the
+            // selected cell's lift does not leave its label behind.
+            self.gl.use_program(Some(self.hud_text_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.hud_text_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            self.gl
+                .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), 1.0);
+            self.gl.active_texture(glow::TEXTURE0);
+            for (index, tex, w, h) in &labels {
+                let cell = &geometry.cells[*index];
+                let scale = if *index == grid.selected {
+                    film::SELECTED_SCALE
+                } else {
+                    1.0
+                };
+                let pivot = film::center(cell.cell);
+                let cell_rect = film::scaled_about(cell.cell, pivot, scale);
+                let [tx, ty] = grid_layout::label_origin(cell, cell_rect, scale);
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    tx,
+                    ty,
+                    *w as f32,
+                    *h as f32,
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(*tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Title, the highlighted tag's name centred under the grid, and
+            // the footer hint.
+            let title = geometry.title;
+            let caption = geometry.caption_center;
+            let hint = geometry.hint;
+            for (slot, pos) in [(0usize, Some(title)), (2, None), (3, Some(hint))] {
+                let Some((tex, w, h)) = self.sysui_textures[slot] else {
+                    continue;
+                };
+                let (tx, ty) = match pos {
+                    Some([x, y]) => (x, y),
+                    // The caption is centred on the grid rather than aligned
+                    // to the panel's text column.
+                    None => (caption[0] - w as f32 * 0.5, caption[1] - h as f32 * 0.5),
+                };
+                self.gl.uniform_4_f32(
+                    self.hud_text_uniforms.rect.as_ref(),
+                    tx,
+                    ty,
+                    w as f32,
+                    h as f32,
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            self.gl.bind_vertex_array(None);
+            self.gl.use_program(None);
+
+            for (_, tex, _, _) in labels {
+                self.gl.delete_texture(tex);
+            }
+        }
+    }
+
     /// Modal system UI drawn as a material-style card: dimmed scrim, drop
     /// shadow, rounded panel with a gradient accent ring, a search-field bar,
     /// and a selection pill under the highlighted list row.
@@ -2026,6 +2287,10 @@ impl<C: CompositorConnection> Compositor<C> {
         let viewport = overlay.effective_viewport(self.screen_w as i32, self.screen_h as i32);
         if let Some(strip) = &overlay.filmstrip {
             self.render_layout_filmstrip(proj, strip, viewport);
+            return;
+        }
+        if let Some(grid) = &overlay.tags_grid {
+            self.render_tags_grid(proj, grid, viewport);
             return;
         }
         let dims = |slot: usize| -> (f32, f32) {

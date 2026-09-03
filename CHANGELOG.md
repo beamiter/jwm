@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- A GNOME-style tags overview (`Alt+O`, `toggle_tags_overview`) shows every
+  tag of the current monitor at once as a wireframe grid: each cell carries
+  the tag's number and outlines of its windows, occupied tags (minimized
+  windows included) draw brighter, and the tags currently on screen keep a
+  persistent accent frame. Arrow keys walk the grid with edge clamping,
+  `Return` jumps to the highlighted tag, a digit key jumps straight to its
+  tag, and `Esc` or a second `Alt+O` closes without switching.
+  `behavior.tags_overview_enabled` (default true) gates entry, and
+  configurations snapshotted before the action existed gain the `Alt+O`
+  fallback binding unless they already spend the chord. v1 is keyboard-only
+  and draws wireframes rather than live thumbnails.
 - Native shell cards are now fully pointer-operable on X11 and Wayland:
   hovering an interactive row shows a quiet preview cue, clicking runs the same
   guarded action as `Enter`, the wheel browses lists (and calendar months),

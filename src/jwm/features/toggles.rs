@@ -19,7 +19,7 @@ use std::process::Command;
 const RECORDING_PROBE_ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const RECORDING_CONCAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
+pub(crate) const fn configured_feature_toggle_allowed(active: bool, enabled: bool) -> bool {
     // Config flags gate entry only. An already-active mode must always retain
     // its exit path so it can release input grabs and compositor state.
     active || enabled

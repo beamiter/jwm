@@ -289,7 +289,9 @@ the grabs — and none of them replaces the lock screen.
 The Alt+Ctrl+Tab window switcher and the `cube` tag-switch transition are both
 the Compiz-style lit prism documented in [cube effects](docs/cube-effects.md).
 `Alt+Tab` is a hold-the-modifier MRU [window switcher](docs/window-switcher.md),
-`Alt+E` spreads the visible windows into an [expose](docs/expose.md) grid, and a
+`Alt+E` spreads the visible windows into an [expose](docs/expose.md) grid,
+`Alt+O` shows every tag of the monitor at once in the
+[tags overview](docs/tags-overview.md), and a
 monitor with two or more tiled windows shows a
 [window tab strip](docs/window-tabs.md) across the top of its tiling area.
 Alt+Space cycles layouts over a film strip of live thumbnails; see
