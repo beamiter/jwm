@@ -204,6 +204,10 @@ use std::sync::mpsc;
 use math::ortho;
 use transitions_common::TransitionMode;
 
+use crate::backend::compositor_common::window_animation::{
+    WindowAnimationFrame, WindowAnimationStyle, scale_carrier_progress, window_animation_frame,
+};
+
 // ---------------------------------------------------------------------------
 // Blur quality auto-downgrade (Phase 2.2)
 // ---------------------------------------------------------------------------
@@ -556,6 +560,7 @@ where
     // --- Window scale animation ---
     window_animation: bool,
     window_animation_scale: f32,
+    window_animation_style: WindowAnimationStyle,
 
     // --- Dim inactive ---
     inactive_dim: f32,

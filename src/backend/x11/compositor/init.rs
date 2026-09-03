@@ -1086,6 +1086,9 @@ impl<C: CompositorConnection> Compositor<C> {
             // Window scale animation
             window_animation: behavior.window_animation,
             window_animation_scale: finite_clamp(behavior.window_animation_scale, 0.1, 2.0, 0.92),
+            window_animation_style: WindowAnimationStyle::from_name(
+                &behavior.window_animation_style,
+            ),
             // Dim inactive
             inactive_dim: finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0),
             inactive_desaturate: finite_clamp(behavior.inactive_desaturate, 0.0, 1.0, 0.0),

@@ -80,7 +80,7 @@ impl MouseButton {
 }
 
 bitflags! {
-    #[derive(Debug, Clone, PartialEq, Eq, Copy)]
+    #[derive(Debug, Clone, PartialEq, Eq, Copy, Default)]
     pub struct Mods: u16 {
         const NONE    = 0;
         const SHIFT   = 1 << 0;

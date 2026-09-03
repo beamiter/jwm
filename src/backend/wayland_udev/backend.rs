@@ -2876,6 +2876,22 @@ impl UdevBackend {
                                 if should_cancel {
                                     cancel_key_repeat_timer(&state.loop_handle, &shared);
                                 }
+                                // A system UI grab owns the keyboard the way an
+                                // X11 keyboard grab would, and the Alt+Tab
+                                // switcher commits on the modifier going up:
+                                // mirror releases to the WM while the grab is
+                                // active, even for a key whose press predates
+                                // it — Alt itself is the common one.
+                                if !session_locked && system_ui_grab_active {
+                                    let mods_state = shared.lock_safe().mods_state;
+                                    pending_events.lock_safe().push_back(
+                                        BackendEvent::KeyRelease {
+                                            keycode: keycode_u8,
+                                            state: mods_state,
+                                            time,
+                                        },
+                                    );
+                                }
                             }
                         }
                         InputEvent::PointerAxis { event, .. } => {

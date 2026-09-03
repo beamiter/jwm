@@ -30,6 +30,7 @@ pub mod transitions;
 pub(crate) mod ui_theme;
 pub mod wallpaper;
 pub mod waterlily;
+pub mod window_animation;
 pub(crate) mod window_glow;
 pub mod window_tabs;
 pub mod wobbly;

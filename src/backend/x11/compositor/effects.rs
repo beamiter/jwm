@@ -671,7 +671,8 @@ impl<C: CompositorConnection> Compositor<C> {
                 self.tilt_target_y,
             )
             || self.windows.values().any(|wt| {
-                (self.fading && (wt.fading_out || wt.fade_opacity < 1.0))
+                ((self.fading || self.window_animation_uses_fade())
+                    && (wt.fading_out || wt.fade_opacity < 1.0))
                     || (self.window_animation
                         && (wt.anim_scale - wt.anim_scale_target).abs() > 0.001)
             })
@@ -858,6 +859,7 @@ impl<C: CompositorConnection> Compositor<C> {
     /// Advance fade animations.
     pub(super) fn tick_fades(&mut self, dt: f32) -> FadeTick {
         let frame_scale = sanitize_animation_dt(dt) * 60.0;
+        let animation_fades = self.window_animation_uses_fade();
         let mut tick = FadeTick::default();
         let mut to_remove = Vec::new();
 
@@ -865,7 +867,7 @@ impl<C: CompositorConnection> Compositor<C> {
             let mut window_active = false;
 
             // Fade animation
-            if self.fading {
+            if self.fading || animation_fades {
                 if wt.fading_out {
                     wt.fade_opacity -= self.fade_out_step * frame_scale;
                     if wt.fade_opacity <= 0.0 {

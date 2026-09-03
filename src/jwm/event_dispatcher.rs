@@ -327,7 +327,25 @@ impl WMController for Jwm {
         }
     }
 
-    fn on_key_release(&mut self, _backend: &mut dyn Backend, _keycode: u8, _mods: u16, _time: u32) {
+    fn on_key_release(&mut self, backend: &mut dyn Backend, keycode: u8, _mods: u16, _time: u32) {
+        // Only the window switcher listens to releases: letting go of the
+        // modifier the gesture started with commits the highlighted row.
+        if !self.features.system_ui.is_window_switcher() {
+            return;
+        }
+        let Ok(keysym) = backend.key_ops_mut().keysym_from_keycode(keycode) else {
+            return;
+        };
+        let commits = crate::jwm::features::switcher::modifier_of_keysym(keysym)
+            .is_some_and(|modifier| self.features.window_switcher_mods.contains(modifier));
+        if commits {
+            if let Err(e) = self.commit_window_switcher(backend) {
+                error!(
+                    "Error committing window switcher on modifier release: {:?}",
+                    e
+                );
+            }
+        }
     }
 
     fn on_button_press(
@@ -338,6 +356,29 @@ impl WMController for Jwm {
         detail: u8,
         time: u32,
     ) {
+        // The Alt+Tab switcher holds no pointer grab, so only some clicks
+        // ever reach here — the desktop, the bar, Alt+click on a client.
+        // Whichever it is, the gesture ends: a row picks that window, any
+        // other press cancels.
+        if self.features.system_ui.is_window_switcher() {
+            use crate::backend::api::SystemUiHitTarget;
+            if detail == 1 {
+                let (x, y) = backend
+                    .input_ops()
+                    .get_pointer_position()
+                    .unwrap_or(self.last_mouse_root);
+                if let SystemUiHitTarget::Item(row) = backend.compositor_system_ui_hit_test(x, y) {
+                    if self.features.system_ui.select_visible_row(row).is_some() {
+                        if let Err(e) = self.commit_window_switcher(backend) {
+                            error!("Error committing window switcher from pointer: {:?}", e);
+                        }
+                        return;
+                    }
+                }
+            }
+            self.cancel_window_switcher(backend);
+            return;
+        }
         if self.features.system_ui.is_layout_picker() {
             let (x, y) = backend
                 .input_ops()

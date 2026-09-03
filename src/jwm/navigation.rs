@@ -4,9 +4,11 @@ use std::sync::atomic::Ordering;
 
 use crate::Jwm;
 use crate::backend::api::Backend;
-use crate::backend::common_define::{EventMaskBits, StdCursorKind};
+use crate::backend::common_define::{EventMaskBits, StdCursorKind, WindowId};
 use crate::config::CONFIG;
 use crate::core::models::{ClientKey, MonitorKey};
+use crate::jwm::features::switcher;
+use crate::jwm::features::system_ui::{ListRow, RowData};
 use crate::jwm::types::WMArgEnum;
 use log::{info, warn};
 
@@ -486,7 +488,7 @@ impl Jwm {
             None => return Ok(()),
         };
 
-        // Trigger compositor transition for loopview shortcuts (Alt+Tab/PageUp/PageDown).
+        // Trigger compositor transition for loopview shortcuts (Alt+PageUp/PageDown).
         let mut transitioning = false;
         if backend.has_compositor() {
             let cfg = CONFIG.load();
@@ -526,6 +528,127 @@ impl Jwm {
         self.refresh_compositor_monitors(backend);
 
         Ok(())
+    }
+
+    /// Alt+Tab, the classic hold-and-tap switcher: open the MRU list with the
+    /// previous window pre-selected, walk it with further Tabs, and commit
+    /// when the modifier comes back up. `direction` only decides which end
+    /// the first selection lands on; stepping afterwards is the panel's own
+    /// key path in `input_handler.rs`.
+    pub fn window_switcher(
+        &mut self,
+        backend: &mut dyn Backend,
+        arg: &WMArgEnum,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("[window_switcher]");
+
+        let direction = match arg {
+            WMArgEnum::Int(val) => *val,
+            _ => return Ok(()),
+        };
+        if direction == 0 {
+            return Ok(());
+        }
+
+        // Already open: a re-trigger (key repeat, or an IPC call) steps the
+        // list instead of rebuilding it.
+        if self.features.system_ui.is_window_switcher() {
+            self.features
+                .system_ui
+                .move_selection(direction.signum() as isize);
+            self.sync_system_ui(backend);
+            return Ok(());
+        }
+        // Another modal — a panel, expose, a capture — owns the session. The
+        // switcher consumes every key once it is up, so it must never stack
+        // on top of one of those.
+        if self.features.has_active_feature() {
+            return Ok(());
+        }
+
+        let entries = self.window_switcher_snapshot();
+        let Some(selected) = switcher::initial_selection(entries.len(), direction) else {
+            return Ok(());
+        };
+
+        // Keyboard-only, like the keybinding viewer: the gesture lives on the
+        // held modifier, and the pointer stays free so a click can still pick
+        // a row (commit) or land on the desktop (cancel).
+        self.prepare_system_ui(backend, "window switcher", false)?;
+
+        // Sampled after the grab landed: if the modifier is already back up,
+        // its release went to someone else and waiting for it would wedge the
+        // panel. Only the gesture modifiers count — letting go of Shift first
+        // in Alt+Shift+Tab must not commit.
+        let held = backend
+            .input_ops()
+            .query_pointer_root()
+            .map(|(_, _, mask, _)| backend.key_ops().clean_mods(mask))
+            .unwrap_or_default()
+            & switcher::release_commit_mods();
+        self.features.window_switcher_mods = held;
+
+        let rows = entries
+            .iter()
+            .map(|entry| ListRow {
+                key: entry.window.to_string(),
+                text: switcher::switcher_row(entry),
+                data: RowData::WindowSwitcher {
+                    window: entry.window,
+                },
+            })
+            .collect();
+        self.features.system_ui =
+            crate::jwm::features::SystemUiState::window_switcher(rows, selected);
+        self.sync_system_ui(backend);
+
+        if held.is_empty() {
+            // No commit modifier is down — a tap faster than the grab, or an
+            // IPC call with no key held at all. The gesture is over before it
+            // began: commit the row the direction picked and leave no panel
+            // behind.
+            self.commit_window_switcher(backend)?;
+        }
+        Ok(())
+    }
+
+    /// End the gesture on the highlighted row: close the panel, hand the
+    /// grabs back, and focus the window, the way a tab-bar click does. A row
+    /// whose window died or lost its tag while the modifier was held
+    /// degrades to a cancel.
+    pub(crate) fn commit_window_switcher(
+        &mut self,
+        backend: &mut dyn Backend,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The panel may have been handed over to another modal while the
+        // modifier was held; that panel is not ours to close.
+        if !self.features.system_ui.is_window_switcher() {
+            return Ok(());
+        }
+        let target = switcher::commit_target(
+            self.features.system_ui.selected_switcher_window(),
+            |window| {
+                self.wintoclient(WindowId::from_raw(window))
+                    .is_some_and(|client_key| self.is_client_visible_by_key(client_key))
+            },
+        )
+        .and_then(|window| self.wintoclient(WindowId::from_raw(window)));
+        self.close_system_ui(backend);
+        if let Some(client_key) = target {
+            self.focus(backend, Some(client_key))?;
+            if let Some(mon_key) = self.state.sel_mon {
+                self.last_stacking.remove(mon_key);
+            }
+            let _ = self.restack(backend, self.state.sel_mon);
+        }
+        Ok(())
+    }
+
+    /// End the gesture without touching focus.
+    pub(crate) fn cancel_window_switcher(&mut self, backend: &mut dyn Backend) {
+        if self.features.system_ui.is_window_switcher() {
+            self.close_system_ui(backend);
+        }
     }
 
     pub(crate) fn calculate_next_tag(&self, direction: i32) -> u32 {

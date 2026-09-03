@@ -4572,11 +4572,12 @@ impl<C: CompositorConnection> Compositor<C> {
 
                     // Feature 14: Non-uniform shadow offset (heavier bottom)
                     let sy_offset = oy + bottom_extra;
-                    let anim_s = wt.anim_scale;
+                    let anim = self.window_animation_frame_for(wt);
+                    let anim_s = anim.scale;
                     let win_w = w as f32 * anim_s;
                     let win_h = h as f32 * anim_s;
                     let cx = x as f32 + (w as f32 - win_w) * 0.5;
-                    let cy = y as f32 + (h as f32 - win_h) * 0.5;
+                    let cy = y as f32 + (h as f32 - win_h) * 0.5 + anim.dy;
                     let mut sx = cx + ox - spread;
                     let mut sy = cy + sy_offset - spread;
                     let mut sw = win_w + 2.0 * spread;
@@ -4653,11 +4654,12 @@ impl<C: CompositorConnection> Compositor<C> {
                             self.corner_radius
                         }
                     });
-                    let scale = wt.scale * wt.anim_scale;
+                    let anim = self.window_animation_frame_for(wt);
+                    let scale = wt.scale * anim.scale;
                     let draw_w = w as f32 * scale;
                     let draw_h = h as f32 * scale;
                     let draw_x = x as f32 + (w as f32 - draw_w) * 0.5;
-                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5;
+                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5 + anim.dy;
                     if draw_w <= 0.0 || draw_h <= 0.0 {
                         continue;
                     }
@@ -4873,15 +4875,16 @@ impl<C: CompositorConnection> Compositor<C> {
                     // Focus highlighting must not resample client content:
                     // terminal text and its insertion cursor otherwise appear
                     // to flicker on every focus transition.
-                    let scale = wt.scale * wt.anim_scale;
+                    let anim = self.window_animation_frame_for(wt);
+                    let scale = wt.scale * anim.scale;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
                         let cx = x as f32 + (w as f32 - cw) * 0.5;
-                        let cy = y as f32 + (h as f32 - ch) * 0.5;
+                        let cy = y as f32 + (h as f32 - ch) * 0.5 + anim.dy;
                         (cx, cy, cw, ch)
                     } else {
-                        (x as f32, y as f32, w as f32, h as f32)
+                        (x as f32, y as f32 + anim.dy, w as f32, h as f32)
                     };
 
                     // Feature 13: Draw blurred background behind translucent windows (with frame extents mask)

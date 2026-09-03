@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-09-03：UI/UX 二轮（Alt+Tab 切换器 / 动画样式 / 通知持久化）
+
+1. **按住式 Alt+Tab MRU 窗口切换器**。默认键位变更：Alt+Tab/Alt+Shift+Tab 从
+   loopview（工作区循环）改为 `window_switcher(±1)`；loopview 保留在
+   Alt+Page_Up/Page_Down 与三指滑动手势。列表 = `monitor_stack` 的 MRU 序
+   （sel_mon 在前，同 launcher 窗口序），过滤 swallowed/hidden/非活跃 tag；
+   初始选中 `1 % len`（按一下回前一个窗口）。面板复用 SystemUi 列表
+   （新 `ListKind::WindowSwitcher`，行格式复用 `launcher::window_row`），
+   零新渲染代码。激活期间键盘被抓取且**全部按键被消费**：Tab/Shift+Tab/上下
+   方向键环回移动（wrap，与 expose 的 clamp 语义相反，是有意的），Return
+   提交，Escape 取消；释放 Alt/Super/Ctrl 提交（Shift 刻意不算——
+   Alt+Shift+Tab 先松 Shift 不该提前提交）；点击面板行=提交该行，点击别处=
+   取消。激活瞬间采样修饰键状态（`query_pointer_root`），抓不住的快速点按
+   直接提交首选项不卡面板。纯逻辑在 `jwm/features/switcher.rs`（eligibility/
+   initial_selection/row/commit_target 均有单测）；提交时重校验窗口仍存活可见，
+   失效降级为取消。不含最小化窗口（恢复语义不属于切换手势）。
+2. **窗口开关动画样式**。新配置 `behavior.window_animation_style` =
+   `scale`（默认，现状不变）/ `fade`（纯透明度）/ `slide`（24px 上滑+淡入，
+   `SLIDE_OFFSET_PX`）。纯映射 `compositor_common/window_animation.rs`：
+   `window_animation_frame(style, progress, scale_from) -> (scale, alpha, dy)`，
+   非法值回退 scale（`validate_choice` 集中校验）。fade/slide 复用现有
+   `fade_opacity` 载体（自动贯穿阴影/glow/遮挡判定，不双重叠加），scale 走
+   原 `anim_scale` 载体且有往返一致性单测。两端渲染各自四处绘制点接入同一
+   frame，观感不漂移。
+3. **通知历史跨重启持久化**。`$XDG_DATA_HOME/jwm/notification-history`
+   （JSON，`version: 1`，最新 64 条，原子写 0600，损坏/超限/缺失 = 空历史
+   启动不崩）。加载在 `FeatureStates::new()`，保存在每次历史变更
+   （post/close/clear 三个汇聚点）。`next_id` 入盘防重启后 id 冲突。
+   序列化/解析是纯函数（`serialize_history`/`parse_history`），IO 薄壳镜像
+   launcher UsageStore 范式。docs/notifications.md 已同步。注意：transient
+   hint 目前根本不进 WM（bridge 不转发），持久化内容与内存历史严格一致。
+
+验证：fmt/clippy -D warnings/两组 cargo check 全绿；`cargo test --locked`
+lib 2487 passed / 0 failed，集成套件全过。真机端到端未实测（无显示会话）：
+Alt 释放提交依赖 keyboard grab 后的 KeyRelease 投递（X11 两后端走 grab mask，
+wayland 走键盘焦点），真机验证时优先试这一条链路。
+
+---
+
 ## 2026-09-03：UI/UX 交互闭环一轮（tabs / toast / expose）
 
 1. **Tab 条 hover 高亮（两后端）**。hover 状态不进 `Tab`/`TabGroup`

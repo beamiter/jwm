@@ -328,8 +328,9 @@ impl WaylandCompositor {
     /// Tick fade animations (fade-in on map, fade-out on unmap)
     pub(crate) fn tick_fades(&mut self, dt: f32) {
         let dt = sanitize_animation_dt(dt);
+        let animation_fades = self.window_animation_uses_fade();
         for (_id, win) in self.windows.iter_mut() {
-            if self.fading_enabled {
+            if self.fading_enabled || animation_fades {
                 if win.fading_out {
                     win.fade_opacity -= self.fade_out_step * dt * 60.0;
                     if win.fade_opacity <= 0.0 {

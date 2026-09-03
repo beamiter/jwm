@@ -209,6 +209,10 @@ pub enum ListKind {
     Wallpaper,
     AudioOutput,
     AudioInput,
+    /// The Alt+Tab MRU switcher. Unlike the other lists it is not opened to
+    /// be browsed: it exists for one held-modifier gesture and closes the
+    /// moment the modifier comes up.
+    WindowSwitcher,
 }
 
 impl ListKind {
@@ -221,6 +225,7 @@ impl ListKind {
             Self::Wallpaper => "\u{f03e}  WALLPAPER",
             Self::AudioOutput => "\u{f028}  AUDIO OUTPUT",
             Self::AudioInput => "\u{f130}  AUDIO INPUT",
+            Self::WindowSwitcher => "\u{f0ec}  WINDOWS",
         }
     }
 
@@ -238,6 +243,9 @@ impl ListKind {
             Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
+            }
+            Self::WindowSwitcher => {
+                "Tab/Shift+Tab  move    Enter / release Alt  switch    Esc  cancel"
             }
         }
     }
@@ -278,6 +286,11 @@ pub enum RowData {
     Wallpaper,
     /// The device id lives in the row's key, the way the wallpaper path does.
     AudioDevice,
+    /// The Alt+Tab switcher: the row stands for this raw window id, resolved
+    /// back through `wintoclient` when the gesture commits.
+    WindowSwitcher {
+        window: u64,
+    },
 }
 
 /// One row of a list panel.
@@ -1591,6 +1604,35 @@ impl SystemUiState {
         text: impl Into<String>,
     ) {
         self.set_list_message(Self::audio_kind(direction), text);
+    }
+
+    // --- Window switcher ---
+
+    /// The Alt+Tab MRU switcher. `rows` is the snapshot taken when the
+    /// gesture started and `selected` the row its direction picked; from
+    /// there on the switcher's own key path steps the highlight.
+    pub fn window_switcher(rows: Vec<ListRow>, selected: usize) -> Self {
+        Self::ListPanel {
+            kind: ListKind::WindowSwitcher,
+            rows,
+            selected,
+            message: String::new(),
+            prompt: None,
+            // The opener no-ops on an empty list, so this line never renders.
+            empty: "No windows".to_string(),
+        }
+    }
+
+    pub fn is_window_switcher(&self) -> bool {
+        self.is_list(ListKind::WindowSwitcher)
+    }
+
+    /// The window the gesture would commit: the highlighted row's raw id.
+    pub fn selected_switcher_window(&self) -> Option<u64> {
+        match &self.selected_row(ListKind::WindowSwitcher)?.data {
+            RowData::WindowSwitcher { window } => Some(*window),
+            _ => None,
+        }
     }
 
     /// Build the session menu from what this machine can actually do.

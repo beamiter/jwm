@@ -98,6 +98,9 @@ pub(crate) fn is_auxiliary_window_id(window_id: u64) -> bool {
 }
 
 use crate::backend::compositor_common::transitions::TransitionMode;
+use crate::backend::compositor_common::window_animation::{
+    WindowAnimationFrame, WindowAnimationStyle, scale_carrier_progress, window_animation_frame,
+};
 use crate::backend::compositor_common::wobbly::WobblyState;
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1051,7 @@ pub(crate) struct WaylandCompositor {
     // Animation feature flags (all default false; read from config.toml)
     fading_enabled: bool,
     window_animation_enabled: bool,
+    window_animation_style: WindowAnimationStyle,
     edge_glow_enabled: bool,
     attention_animation_enabled: bool,
     wobbly_enabled: bool,
@@ -2424,6 +2428,7 @@ impl WaylandCompositor {
                 // Animation feature flags — all off until config.toml enables them
                 fading_enabled: false,
                 window_animation_enabled: false,
+                window_animation_style: WindowAnimationStyle::Scale,
                 edge_glow_enabled: false,
                 attention_animation_enabled: false,
                 wobbly_enabled: false,

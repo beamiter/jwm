@@ -8,15 +8,44 @@
 //! the notification-center panel renders — so the freedesktop bridge, the IPC
 //! surface, and the panel all agree on one representation.
 //!
-//! Everything here is pure: no backend, no clock of its own (callers pass the
-//! timestamp), so it is exercised directly by unit tests.
+//! The history survives a restart (see [`HISTORY_FILE`]): loading and saving
+//! are a thin file-IO shell around the pure [`serialize_history`] /
+//! [`parse_history`] pair. Everything else here is pure: no backend, no clock
+//! of its own (callers pass the timestamp), so it is exercised directly by
+//! unit tests.
 
 use std::collections::VecDeque;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 /// Records kept before the oldest is evicted. Deep enough to cover a work
 /// session's backlog, bounded so a chatty application cannot grow the
 /// compositor's heap without limit.
 pub const MAX_HISTORY: usize = 64;
+
+/// Where the history lives across restarts, under the user's data directory.
+pub const HISTORY_FILE: &str = "notification-history";
+
+/// On-disk schema version. A file carrying anything else is not read, so a
+/// future migration starts from a clean, explicit break.
+const HISTORY_FILE_VERSION: u32 = 1;
+
+/// Generous per-record allowance, used only to size the file check on load:
+/// a record holds at most three [`MAX_TEXT_CHARS`]-character texts, six
+/// actions, and small scalar fields, so this mostly bounds sender-controlled
+/// action keys.
+const MAX_HISTORY_RECORD_BYTES: u64 = 4096;
+
+/// Largest history file read back; a larger one is rejected like any other
+/// special or damaged source.
+const MAX_HISTORY_BYTES: u64 = MAX_HISTORY as u64 * MAX_HISTORY_RECORD_BYTES + 1024;
+
+static HISTORY_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Longest summary/body kept; the panel does not wrap.
 const MAX_TEXT_CHARS: usize = 96;
@@ -34,7 +63,7 @@ const MAX_LABEL_CHARS: usize = 20;
 const DEFAULT_KEY: &str = "default";
 
 /// One button a sender offered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationAction {
     /// What goes back out over `ActionInvoked`; meaningful only to the sender.
     pub key: String,
@@ -64,7 +93,7 @@ impl CloseReason {
 }
 
 /// A notification as the shell remembers it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationRecord {
     /// Identifier handed back to the sender; never zero.
     pub id: u32,
@@ -404,6 +433,44 @@ impl NotificationCenter {
     pub fn recent(&self) -> impl Iterator<Item = &NotificationRecord> {
         self.records.iter().rev()
     }
+
+    /// Read the history back from disk. A missing file is an empty history,
+    /// and so is an unreadable or malformed one — with a warning, because
+    /// the notification center must work regardless of what is on disk.
+    #[must_use]
+    pub fn load() -> Self {
+        Self::load_from_path(&history_path())
+    }
+
+    fn load_from_path(path: &Path) -> Self {
+        match read_history(path) {
+            Ok(text) => parse_history(&text).unwrap_or_else(|| {
+                log::warn!(
+                    "notification history at {} is not a v{HISTORY_FILE_VERSION} file; starting empty",
+                    path.display()
+                );
+                Self::default()
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                log::warn!(
+                    "notification history at {} cannot be read: {error}; starting empty",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Write the history back. Failures are logged and dropped — losing a
+    /// snapshot is not worth interrupting a notification over.
+    pub fn save(&self) {
+        let path = history_path();
+        let serialized = serialize_history(&self.records, self.next_id);
+        if let Err(error) = atomic_write_history(&path, serialized.as_bytes()) {
+            log::debug!("notifications: {}: {error}", path.display());
+        }
+    }
 }
 
 /// Compact age label: `now`, `4m`, `2h`, `3d`. Clock jumps backwards (NTP
@@ -478,6 +545,154 @@ pub fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+// -------------------------------------------------------------------------
+// Persistence
+// -------------------------------------------------------------------------
+
+/// The history on disk: oldest record first, matching the in-memory order,
+/// with the identifier counter so records restored from a previous run and
+/// notifications posted after it can never share an identifier.
+#[derive(Serialize, Deserialize)]
+struct HistoryFile {
+    version: u32,
+    next_id: u32,
+    notifications: Vec<NotificationRecord>,
+}
+
+/// Serialize the history as a versioned JSON document, keeping at most the
+/// newest [`MAX_HISTORY`] records.
+#[must_use]
+pub fn serialize_history<'a>(
+    records: impl IntoIterator<Item = &'a NotificationRecord>,
+    next_id: u32,
+) -> String {
+    let mut kept: Vec<&NotificationRecord> = records.into_iter().collect();
+    let overflow = kept.len().saturating_sub(MAX_HISTORY);
+    kept.drain(..overflow);
+    let file = HistoryFile {
+        version: HISTORY_FILE_VERSION,
+        next_id,
+        notifications: kept.into_iter().cloned().collect(),
+    };
+    serde_json::to_string(&file).unwrap_or_else(|_| {
+        // Strings, integers and vectors cannot fail to serialize; should that
+        // ever change, an empty history still beats not writing at all.
+        format!("{{\"version\":{HISTORY_FILE_VERSION},\"next_id\":{next_id},\"notifications\":[]}}")
+    })
+}
+
+/// Parse a history file back into a center. Anything that is not a
+/// well-formed v1 document — corrupt JSON, a missing or mismatched version —
+/// is `None`, which the loader reports as an empty history.
+///
+/// Records are re-checked against the posting-time bounds rather than
+/// trusted: the file is user-writable, so what lands in memory must satisfy
+/// the same invariants as a record that arrived over IPC.
+#[must_use]
+pub fn parse_history(text: &str) -> Option<NotificationCenter> {
+    let file: HistoryFile = serde_json::from_str(text).ok()?;
+    if file.version != HISTORY_FILE_VERSION {
+        return None;
+    }
+    // Oldest first on disk too, so an over-cap file keeps the newest records.
+    let skip = file.notifications.len().saturating_sub(MAX_HISTORY);
+    let mut next_id = file.next_id;
+    let mut records = VecDeque::with_capacity(file.notifications.len() - skip);
+    for mut record in file.notifications.into_iter().skip(skip) {
+        // Zero is the specification's "not a notification"; a record holding
+        // it would answer to lookups no client was ever handed.
+        if record.id == 0 {
+            continue;
+        }
+        // The counter must stay ahead of every restored identifier, whatever
+        // the file claims.
+        next_id = next_id.max(record.id);
+        record.app = sanitize(&record.app);
+        record.summary = sanitize(&record.summary);
+        record.body = sanitize(&record.body);
+        record.urgency = record.urgency.min(2);
+        record.actions = sanitize_actions(&record.actions);
+        records.push_back(record);
+    }
+    Some(NotificationCenter { records, next_id })
+}
+
+fn read_history(path: &Path) -> io::Result<String> {
+    // O_NONBLOCK matters for a path unexpectedly replaced with a FIFO: the
+    // regular-file check can then reject it without waiting for a writer.
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "notification history source is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_HISTORY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification history file exceeds its size limit",
+        ));
+    }
+
+    // Keep the descriptor bounded too: metadata may be stale by the time the
+    // read starts. The sentinel byte distinguishes an exact-limit file.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_HISTORY_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HISTORY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "notification history file exceeds its size limit",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+fn atomic_write_history(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let sequence = HISTORY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(
+        ".{HISTORY_FILE}.tmp-{}-{sequence}",
+        std::process::id()
+    ));
+
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        // `mode` is still filtered through the process umask. Set the final
+        // private mode explicitly before the inode becomes visible at `path`.
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn history_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::data_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    base.join("jwm").join(HISTORY_FILE)
+}
+
 impl crate::jwm::Jwm {
     /// Record a notification and, unless Do-Not-Disturb is on, show it as a
     /// native toast. Returns the identifier the sender should use to replace
@@ -497,6 +712,7 @@ impl crate::jwm::Jwm {
             .features
             .notifications
             .push(request, now_unix_ms(), suppressed);
+        self.features.notifications.save();
 
         if !suppressed {
             let title = if request.summary.trim().is_empty() {
@@ -536,6 +752,7 @@ impl crate::jwm::Jwm {
         if !self.features.notifications.close(id) {
             return false;
         }
+        self.features.notifications.save();
         self.broadcast_ipc_event(
             "notification/closed",
             serde_json::json!({ "id": id, "reason": reason.code() }),
@@ -555,6 +772,7 @@ impl crate::jwm::Jwm {
             .map(|record| record.id)
             .collect();
         let count = self.features.notifications.clear();
+        self.features.notifications.save();
         for id in ids {
             self.broadcast_ipc_event(
                 "notification/closed",
@@ -1075,5 +1293,228 @@ mod tests {
         let id = center.push(&terse, 0, false);
         let row = panel_row(center.get(id).expect("record kept"), 0);
         assert!(!row.contains('\u{2014}'));
+    }
+
+    // ---------------------------------------------------------------------
+    // Persistence
+    // ---------------------------------------------------------------------
+
+    fn history_temp_root(tag: &str) -> std::path::PathBuf {
+        let sequence = HISTORY_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "jwm-notification-history-{tag}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn history_round_trips_through_the_disk_format() {
+        let mut center = NotificationCenter::new();
+        center.push(
+            &NotificationRequest {
+                actions: vec![action("default", "Open")],
+                ..request("first")
+            },
+            1_000,
+            false,
+        );
+        center.push(&request("第 二 条"), 2_000, true);
+
+        let text = serialize_history(&center.records, center.next_id);
+        let document: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(document["version"], HISTORY_FILE_VERSION);
+
+        let mut restored = parse_history(&text).expect("a v1 file parses");
+        assert_eq!(restored.records, center.records);
+        assert_eq!(restored.next_id, center.next_id);
+        // The identifier counter survives too, so a post-restart notification
+        // cannot collide with a restored one.
+        assert_eq!(restored.push(&request("after restart"), 3_000, false), 3);
+        assert!(restored.get(2).is_some());
+    }
+
+    #[test]
+    fn history_parse_rejects_corrupt_json_and_foreign_versions() {
+        assert!(parse_history("not json").is_none());
+        assert!(parse_history("{\"version\":2,\"next_id\":1,\"notifications\":[]}").is_none());
+        // A missing version is not implicitly v1.
+        assert!(parse_history("{\"next_id\":1,\"notifications\":[]}").is_none());
+        // A truncated record is corrupt, not a record with defaults.
+        assert!(
+            parse_history("{\"version\":1,\"next_id\":1,\"notifications\":[{\"id\":1}]}").is_none()
+        );
+    }
+
+    #[test]
+    fn an_empty_history_round_trips() {
+        let text = serialize_history(&Vec::<NotificationRecord>::new(), 7);
+        let mut center = parse_history(&text).expect("an empty v1 file parses");
+        assert!(center.is_empty());
+        assert_eq!(center.push(&request("fresh"), 0, false), 8);
+    }
+
+    #[test]
+    fn history_parse_keeps_only_the_newest_records() {
+        let records: Vec<serde_json::Value> = (1..=(MAX_HISTORY + 5) as u32)
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "app": "app",
+                    "summary": format!("n{id}"),
+                    "body": "",
+                    "urgency": 1,
+                    "posted_unix_ms": u64::from(id),
+                    "suppressed": false,
+                    "actions": [],
+                })
+            })
+            .collect();
+        let text = serde_json::json!({
+            "version": HISTORY_FILE_VERSION,
+            "next_id": 900,
+            "notifications": records,
+        })
+        .to_string();
+
+        let center = parse_history(&text).expect("well-formed file");
+        assert_eq!(center.len(), MAX_HISTORY);
+        assert_eq!(
+            center.recent().next().expect("newest").id,
+            (MAX_HISTORY + 5) as u32
+        );
+        assert_eq!(center.recent().last().expect("oldest kept").id, 6);
+        assert_eq!(center.next_id, 900);
+    }
+
+    #[test]
+    fn history_serialize_keeps_only_the_newest_records() {
+        let many: Vec<NotificationRecord> = (1..=(MAX_HISTORY + 5) as u32)
+            .map(|id| NotificationRecord {
+                id,
+                app: "app".into(),
+                summary: format!("n{id}"),
+                body: String::new(),
+                urgency: 1,
+                posted_unix_ms: u64::from(id),
+                suppressed: false,
+                actions: Vec::new(),
+            })
+            .collect();
+
+        let text = serialize_history(&many, 42);
+        let document: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        let written = document["notifications"].as_array().expect("array");
+        assert_eq!(written.len(), MAX_HISTORY);
+        assert_eq!(written[0]["id"], 6);
+        assert_eq!(document["next_id"], 42);
+    }
+
+    #[test]
+    fn history_parse_rechecks_posting_time_bounds() {
+        let text = serde_json::json!({
+            "version": HISTORY_FILE_VERSION,
+            "next_id": 3,
+            "notifications": [
+                {
+                    "id": 0,
+                    "app": "app",
+                    "summary": "zero",
+                    "body": "",
+                    "urgency": 1,
+                    "posted_unix_ms": 1,
+                    "suppressed": false,
+                    "actions": [],
+                },
+                {
+                    "id": 9,
+                    "app": "app",
+                    "summary": format!("loud\n{}", "x".repeat(MAX_TEXT_CHARS + 20)),
+                    "body": "",
+                    "urgency": 9,
+                    "posted_unix_ms": 2,
+                    "suppressed": false,
+                    "actions": [{"key": "  ", "label": "dropped"}],
+                },
+            ],
+        })
+        .to_string();
+
+        let mut center = parse_history(&text).expect("well-formed file");
+        assert_eq!(center.len(), 1, "the zero identifier is reserved");
+        let record = center.get(9).expect("record kept");
+        assert_eq!(record.urgency, 2);
+        assert_eq!(record.summary.chars().count(), MAX_TEXT_CHARS);
+        assert!(!record.summary.chars().any(char::is_control));
+        assert!(record.actions.is_empty(), "a keyless action is dropped");
+        // The file's counter lagged its own records; allocation must stay
+        // ahead of every restored identifier.
+        assert_eq!(center.push(&request("fresh"), 0, false), 10);
+    }
+
+    #[test]
+    fn history_load_rejects_oversized_files_and_special_sources() {
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = history_temp_root("load");
+
+        let oversized = root.join("oversized");
+        fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_HISTORY_BYTES + 1)
+            .unwrap();
+        assert!(NotificationCenter::load_from_path(&oversized).is_empty());
+
+        let fifo = root.join("fifo");
+        let fifo_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_path.as_ptr(), 0o600) }, 0);
+        // Opening a FIFO for a normal blocking read would hang here until a
+        // writer appeared. The loader must reject it immediately instead.
+        assert!(NotificationCenter::load_from_path(&fifo).is_empty());
+
+        // A missing file is the normal first-run case: just an empty history.
+        assert!(NotificationCenter::load_from_path(&root.join("absent")).is_empty());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_history_file_loads_as_empty() {
+        let root = history_temp_root("damaged");
+        let path = root.join(HISTORY_FILE);
+        fs::write(
+            &path,
+            "{\"version\":1,\"next_id\":1,\"notifications\":[{\"id\":",
+        )
+        .unwrap();
+        assert!(NotificationCenter::load_from_path(&path).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn history_save_replaces_a_symlink_without_touching_its_target() {
+        let root = history_temp_root("write");
+        let victim = root.join("victim");
+        fs::write(&victim, "unchanged").unwrap();
+        let path = root.join(HISTORY_FILE);
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+
+        let mut center = NotificationCenter::new();
+        center.push(&request("kept across restarts"), 1_000, false);
+        atomic_write_history(
+            &path,
+            serialize_history(&center.records, center.next_id).as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "unchanged");
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.is_file());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let restored = NotificationCenter::load_from_path(&path);
+        assert_eq!(restored.records, center.records);
+        assert_eq!(restored.next_id, center.next_id);
+        fs::remove_dir_all(root).unwrap();
     }
 }

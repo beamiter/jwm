@@ -3,7 +3,7 @@
 //! 这个模块包含所有窗口管理器特性的切换函数（toggle* 系列）
 
 use crate::backend::api::Backend;
-use crate::backend::common_define::{EventMaskBits, StdCursorKind};
+use crate::backend::common_define::{EventMaskBits, Mods, StdCursorKind};
 use crate::config::CONFIG;
 use crate::core::animation::AnimationKind;
 use crate::core::models::ClientKey;
@@ -1346,6 +1346,9 @@ impl Jwm {
         // backstop for a panel that closed on purpose.
         self.system_ui_dirty = false;
         self.features.system_ui_return_to_hub = false;
+        // The Alt+Tab switcher's commit modifiers die with its panel, however
+        // the panel went away.
+        self.features.window_switcher_mods = Mods::empty();
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
         let _ = backend.key_ops().ungrab_keyboard();
@@ -1402,6 +1405,8 @@ impl Jwm {
         self.restore_layout_picker_origin(backend);
         // A child page's Escape target goes with the page.
         self.features.system_ui_return_to_hub = false;
+        // So do the Alt+Tab switcher's commit modifiers.
+        self.features.window_switcher_mods = Mods::empty();
         // `cancel` zeroes the lock password and any Wi-Fi passphrase before
         // the string is dropped.
         self.features.system_ui.cancel();

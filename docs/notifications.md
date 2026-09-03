@@ -56,8 +56,14 @@ separate pointer button.
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.
 
-The history holds 64 records; the oldest is evicted beyond that. It is
-in-memory only and does not survive a restart.
+The history holds 64 records; the oldest is evicted beyond that. It survives
+a restart: every change (post, replace, dismiss, clear) is written through to
+`$XDG_DATA_HOME/jwm/notification-history` — `~/.local/share/jwm/` when
+`XDG_DATA_HOME` is unset — and read back on startup. The file is a compact
+JSON document carrying a `version` field (currently `1`) and the identifier
+counter alongside the records, written atomically with `0600` permissions. A
+missing, oversized, or malformed file simply starts an empty history rather
+than failing startup.
 
 ## Action buttons
 

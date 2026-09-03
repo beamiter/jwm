@@ -130,7 +130,7 @@ impl<C: CompositorConnection> Compositor<C> {
             }
         }
         // Also need render if any fade animations are in progress
-        if self.fading {
+        if self.fading || self.window_animation_uses_fade() {
             for wt in self.windows.values() {
                 if wt.fading_out || wt.fade_opacity < 1.0 {
                     return true;
@@ -257,6 +257,31 @@ impl<C: CompositorConnection> Compositor<C> {
         self.overlay_window
     }
 
+    /// Whether the window open/close animation drives window alpha, i.e. the
+    /// fade machinery must run for it even when standalone `fading` is off.
+    pub(super) fn window_animation_uses_fade(&self) -> bool {
+        self.window_animation && self.window_animation_style.uses_fade()
+    }
+
+    /// Resolve a window's current open/close animation transform from its
+    /// carriers. Scale styles progress through `anim_scale`; alpha-driven
+    /// styles progress through `fade_opacity` (which also applies the alpha).
+    pub(super) fn window_animation_frame_for(&self, wt: &WindowTexture) -> WindowAnimationFrame {
+        if !self.window_animation {
+            return WindowAnimationFrame::REST;
+        }
+        let progress = if self.window_animation_style.uses_fade() {
+            wt.fade_opacity
+        } else {
+            scale_carrier_progress(wt.anim_scale, self.window_animation_scale)
+        };
+        window_animation_frame(
+            self.window_animation_style,
+            progress,
+            self.window_animation_scale,
+        )
+    }
+
     /// Mutable access to OML for syncing
     pub(crate) fn oml_mut(&mut self) -> Option<&mut oml_sync_control::OmlSyncControl> {
         self.oml.as_mut()
@@ -374,7 +399,17 @@ impl<C: CompositorConnection> Compositor<C> {
         let cfg = crate::config::CONFIG.load();
         let behavior = cfg.behavior();
         let anim_speed = cfg.animation_speed();
-        let disabling_fading = self.fading && !behavior.fading;
+        let window_animation_style =
+            WindowAnimationStyle::from_name(&behavior.window_animation_style);
+        // The open/close fade machinery is driven by the standalone `fading`
+        // feature and by alpha-driven animation styles. When a reload leaves
+        // no driver behind, in-flight fades would freeze mid-decay (nothing
+        // advances `fade_opacity` any more), so they are settled below.
+        let fade_was_driven =
+            self.fading || (self.window_animation && self.window_animation_style.uses_fade());
+        let fade_now_driven =
+            behavior.fading || (behavior.window_animation && window_animation_style.uses_fade());
+        let settling_fades = fade_was_driven && !fade_now_driven;
         let disabling_window_animation = self.window_animation && !behavior.window_animation;
         let disabling_wobbly = self.wobbly_windows && !behavior.wobbly_windows;
         let disabling_particles = self.particle_effects && !behavior.particle_effects;
@@ -569,6 +604,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // --- Window animation ---
         self.window_animation = behavior.window_animation;
         self.window_animation_scale = finite_clamp(behavior.window_animation_scale, 0.1, 2.0, 0.92);
+        self.window_animation_style = window_animation_style;
 
         // --- Dim inactive ---
         self.inactive_dim = finite_clamp(behavior.inactive_dim, 0.0, 1.0, 1.0);
@@ -754,7 +790,7 @@ impl<C: CompositorConnection> Compositor<C> {
         // Normalize or retire in-flight state so re-enabling an effect cannot
         // resurrect stale meshes/trails and disabled fades cannot retain dead
         // windows indefinitely.
-        if disabling_fading {
+        if settling_fades {
             let fading_out: Vec<u32> = self
                 .windows
                 .iter()

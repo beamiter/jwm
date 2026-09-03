@@ -796,6 +796,9 @@ pub struct BehaviorConfig {
     pub window_animation: bool,
     #[serde(default = "default_window_animation_scale")]
     pub window_animation_scale: f32,
+    /// Open/close animation style: "scale" (default), "fade", "slide".
+    #[serde(default = "default_window_animation_style")]
+    pub window_animation_style: String,
 
     // --- Dim inactive windows ---
     #[serde(default = "default_one")]
@@ -1353,6 +1356,9 @@ fn default_blur_quality_by_monitor() -> String {
 fn default_window_animation_scale() -> f32 {
     0.85
 }
+fn default_window_animation_style() -> String {
+    "scale".to_string()
+}
 fn default_edge_glow_color() -> [f32; 4] {
     [0.3, 0.5, 1.0, 0.6]
 }
@@ -1689,6 +1695,7 @@ fn key_function_is_repeatable(function: &str) -> bool {
         function,
         "focusstack"
             | "loopview"
+            | "window_switcher"
             | "setmfact"
             | "setcfact"
             | "incnmaster"
@@ -1858,6 +1865,7 @@ impl Default for Config {
                     transition_mode: default_transition_mode(),
                     window_animation: false,
                     window_animation_scale: default_window_animation_scale(),
+                    window_animation_style: default_window_animation_style(),
                     inactive_dim: default_one(),
                     inactive_desaturate: default_inactive_desaturate(),
                     edge_glow: false,
@@ -2312,13 +2320,13 @@ impl Config {
             KeyConfig {
                 modifier: vec!["Mod1".to_string()],
                 key: "Tab".to_string(),
-                function: "loopview".to_string(),
+                function: "window_switcher".to_string(),
                 argument: ArgumentConfig::Int(1),
             },
             KeyConfig {
                 modifier: vec!["Mod1".to_string(), "Shift".to_string()],
                 key: "Tab".to_string(),
-                function: "loopview".to_string(),
+                function: "window_switcher".to_string(),
                 argument: ArgumentConfig::Int(-1),
             },
             KeyConfig {
@@ -3133,6 +3141,7 @@ impl Config {
             "toggletag" => Some(Jwm::toggletag),
             "tagmon" => Some(Jwm::tagmon),
             "loopview" => Some(Jwm::loopview),
+            "window_switcher" => Some(Jwm::window_switcher),
 
             "movemouse" => Some(Jwm::movemouse),
             "resizemouse" => Some(Jwm::resizemouse),

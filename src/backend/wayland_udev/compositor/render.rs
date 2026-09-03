@@ -856,11 +856,12 @@ impl WaylandCompositor {
                     layer_opacity
                 };
 
-                let scale = win.anim_scale.max(0.01);
+                let anim = self.window_animation_frame_for(win);
+                let scale = anim.scale.max(0.01);
                 let draw_w = w * scale;
                 let draw_h = h * scale;
                 let draw_x = x + (w - draw_w) * 0.5;
-                let draw_y = y + (h - draw_h) * 0.5;
+                let draw_y = y + (h - draw_h) * 0.5 + anim.dy;
                 let radius = if win.is_shaped || win.is_fullscreen {
                     0.0
                 } else {
@@ -2171,11 +2172,12 @@ impl WaylandCompositor {
                             .or_else(|| self.lookup_corner_radius_rule(&wt.class_name))
                             .unwrap_or(self.corner_radius)
                     };
-                    let scale = wt.anim_scale;
+                    let anim = self.window_animation_frame_for(wt);
+                    let scale = anim.scale;
                     let draw_w = w as f32 * scale;
                     let draw_h = h as f32 * scale;
                     let draw_x = x as f32 + (w as f32 - draw_w) * 0.5;
-                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5;
+                    let draw_y = y as f32 + (h as f32 - draw_h) * 0.5 + anim.dy;
                     if draw_w <= 0.0 || draw_h <= 0.0 {
                         continue;
                     }
@@ -2446,15 +2448,16 @@ impl WaylandCompositor {
                 };
 
                 // --- Compute scale from animation ---
-                let scale = wt.anim_scale;
+                let anim = self.window_animation_frame_for(wt);
+                let scale = anim.scale;
                 let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                     let cw = w as f32 * scale;
                     let ch = h as f32 * scale;
                     let cx = x as f32 + (w as f32 - cw) * 0.5;
-                    let cy = y as f32 + (h as f32 - ch) * 0.5;
+                    let cy = y as f32 + (h as f32 - ch) * 0.5 + anim.dy;
                     (cx, cy, cw, ch)
                 } else {
-                    (x as f32, y as f32, w as f32, h as f32)
+                    (x as f32, y as f32 + anim.dy, w as f32, h as f32)
                 };
 
                 // --- UV rect: use content_uv (accounts for CSD geometry offset) ---
@@ -2860,15 +2863,16 @@ impl WaylandCompositor {
                         wt.corner_radius_override.unwrap_or(self.corner_radius)
                     };
 
-                    let scale = wt.anim_scale;
+                    let anim = self.window_animation_frame_for(wt);
+                    let scale = anim.scale;
                     let (draw_x, draw_y, draw_w, draw_h) = if (scale - 1.0).abs() > f32::EPSILON {
                         let cw = w as f32 * scale;
                         let ch = h as f32 * scale;
                         let cx = x as f32 + (w as f32 - cw) * 0.5;
-                        let cy = y as f32 + (h as f32 - ch) * 0.5;
+                        let cy = y as f32 + (h as f32 - ch) * 0.5 + anim.dy;
                         (cx, cy, cw, ch)
                     } else {
-                        (x as f32, y as f32, w as f32, h as f32)
+                        (x as f32, y as f32 + anim.dy, w as f32, h as f32)
                     };
 
                     // Focus highlight: temporary pulse + thicker border on the

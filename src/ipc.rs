@@ -248,6 +248,7 @@ pub const IPC_REGISTRY: IpcRegistry = IpcRegistry {
         "wallpaper_picker",
         "waterlily_palette",
         "wifi_picker",
+        "window_switcher",
         "zoom",
     ],
     special_commands: &[
@@ -602,6 +603,7 @@ pub fn dispatch_command(name: &str, args: &Value) -> Result<(WMFuncType, WMArgEn
         "toggleview" => Ok((Jwm::toggleview, parse_uint_arg(args)?)),
         "toggletag" => Ok((Jwm::toggletag, parse_uint_arg(args)?)),
         "loopview" => Ok((Jwm::loopview, parse_int_arg(args, 1)?)),
+        "window_switcher" => Ok((Jwm::window_switcher, parse_int_arg(args, 1)?)),
 
         // --- Monitor ---
         "focusmon" => Ok((Jwm::focusmon, parse_int_arg(args, 1)?)),

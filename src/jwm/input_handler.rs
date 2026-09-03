@@ -948,6 +948,42 @@ impl Jwm {
     /// Key handling while the notification center is open: Up/Down select,
     /// Return invokes the sender's default action, `d`/Delete dismisses one
     /// row, `c` clears the history.
+    /// Key handling while the Alt+Tab switcher is up: Tab and the arrows
+    /// walk the list (wrapping), Return commits, Escape cancels, and every
+    /// other key is swallowed — the modifier is still down, so nothing else
+    /// may fire.
+    fn handle_window_switcher_key(
+        &mut self,
+        backend: &mut dyn Backend,
+        keysym: u32,
+        mods: Mods,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // The keyboard owns the selection cue now: a stationary pointer's
+        // hover must not keep a stale row pinned.
+        backend.compositor_set_system_ui_hover(None);
+        match keysym {
+            keys::KEY_Escape => self.cancel_window_switcher(backend),
+            keys::KEY_Return | keys::KEY_KP_Enter => self.commit_window_switcher(backend)?,
+            keys::KEY_Tab | keys::KEY_ISO_Left_Tab => {
+                let backwards = mods.contains(Mods::SHIFT) || keysym == keys::KEY_ISO_Left_Tab;
+                self.features
+                    .system_ui
+                    .move_selection(if backwards { -1 } else { 1 });
+                self.sync_system_ui(backend);
+            }
+            keys::KEY_Up => {
+                self.features.system_ui.move_selection(-1);
+                self.sync_system_ui(backend);
+            }
+            keys::KEY_Down => {
+                self.features.system_ui.move_selection(1);
+                self.sync_system_ui(backend);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn handle_notification_center_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
         use crate::jwm::features::notifications::CloseReason;
 
@@ -1231,6 +1267,16 @@ impl Jwm {
             | Mods::MOD2
             | Mods::MOD3
             | Mods::MOD5;
+
+        // The Alt+Tab switcher is the most modal surface of all: its modifier
+        // is still held, and any binding that shares it (Alt+C would kill the
+        // focused window) must not fire underneath the panel. Every key is
+        // consumed until the gesture commits or cancels — even the screenshot
+        // exception below has to wait.
+        if self.features.system_ui.is_window_switcher() {
+            self.handle_window_switcher_key(backend, keysym, clean_state)?;
+            return Ok(());
+        }
 
         // Screenshot bindings are compositor-global actions, not panel input.
         // Keep them reachable while a shell surface owns the keyboard grab;

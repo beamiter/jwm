@@ -317,7 +317,7 @@ impl<C: CompositorConnection> Compositor<C> {
         };
 
         let ordinary_add = disposition == AddWindowMinimizeDisposition::TrackNormally;
-        let initial_fade = if ordinary_add && self.fading {
+        let initial_fade = if ordinary_add && (self.fading || self.window_animation_uses_fade()) {
             0.0
         } else {
             1.0
@@ -353,7 +353,10 @@ impl<C: CompositorConnection> Compositor<C> {
                 scale: 1.0,
                 frame_extents: [0; 4],
                 is_shaped: false,
-                anim_scale: if ordinary_add && self.window_animation {
+                anim_scale: if ordinary_add
+                    && self.window_animation
+                    && self.window_animation_style.uses_scale()
+                {
                     self.window_animation_scale
                 } else {
                     1.0
@@ -670,11 +673,13 @@ impl<C: CompositorConnection> Compositor<C> {
         }
 
         // If fading is enabled and the window exists, start fade-out instead of immediate remove
-        if self.fading {
+        if self.fading || self.window_animation_uses_fade() {
             if let Some(wt) = self.windows.get_mut(&x11_win) {
                 if !wt.fading_out && wt.fade_opacity > 0.0 {
                     wt.fading_out = true;
-                    wt.anim_scale_target = self.window_animation_scale;
+                    if self.window_animation && self.window_animation_style.uses_scale() {
+                        wt.anim_scale_target = self.window_animation_scale;
+                    }
                     self.effect_tick_clock.reset();
                     self.needs_render = true;
                     return;

@@ -350,13 +350,48 @@ impl WaylandCompositor {
     pub(crate) fn has_system_ui(&self) -> bool {
         self.system_ui.is_some()
     }
+
+    /// Whether the window open/close animation drives window alpha, i.e. the
+    /// fade machinery must run for it even when standalone `fading` is off.
+    pub(crate) fn window_animation_uses_fade(&self) -> bool {
+        self.window_animation_enabled && self.window_animation_style.uses_fade()
+    }
+
+    /// Resolve a window's current open/close animation transform from its
+    /// carriers. Scale styles progress through `anim_scale`; alpha-driven
+    /// styles progress through `fade_opacity` (which also applies the alpha).
+    pub(crate) fn window_animation_frame_for(&self, win: &WindowState) -> WindowAnimationFrame {
+        if !self.window_animation_enabled {
+            return WindowAnimationFrame::REST;
+        }
+        let progress = if self.window_animation_style.uses_fade() {
+            win.fade_opacity
+        } else {
+            scale_carrier_progress(win.anim_scale, self.window_animation_scale)
+        };
+        window_animation_frame(
+            self.window_animation_style,
+            progress,
+            self.window_animation_scale,
+        )
+    }
+
     pub(crate) fn apply_config(&mut self) {
         // Font and theme changes invalidate baked text even when the overlay's
         // strings themselves did not change.
         self.sysui_text_dirty = true;
         let cfg = CONFIG.load();
         let b = cfg.behavior();
-        let disabling_fading = self.fading_enabled && !b.fading;
+        let window_animation_style = WindowAnimationStyle::from_name(&b.window_animation_style);
+        // The open/close fade machinery is driven by the standalone `fading`
+        // feature and by alpha-driven animation styles. When a reload leaves
+        // no driver behind, in-flight fades would freeze mid-decay (nothing
+        // advances `fade_opacity` any more), so they are settled below.
+        let fade_was_driven = self.fading_enabled
+            || (self.window_animation_enabled && self.window_animation_style.uses_fade());
+        let fade_now_driven =
+            b.fading || (b.window_animation && window_animation_style.uses_fade());
+        let settling_fades = fade_was_driven && !fade_now_driven;
         let disabling_window_animation = self.window_animation_enabled && !b.window_animation;
         let disabling_wobbly = self.wobbly_enabled && !b.wobbly_windows;
         let disabling_motion_trail = self.motion_trail_enabled && !b.motion_trail;
@@ -418,6 +453,7 @@ impl WaylandCompositor {
         // --- Animation feature flags ---
         self.fading_enabled = b.fading;
         self.window_animation_enabled = b.window_animation;
+        self.window_animation_style = window_animation_style;
         self.edge_glow_enabled = b.edge_glow;
         self.attention_animation_enabled = b.attention_animation;
         self.wobbly_enabled = b.wobbly_windows;
@@ -545,7 +581,7 @@ impl WaylandCompositor {
             self.set_wallpaper(&b.wallpaper.clone(), &b.wallpaper_mode.clone());
         }
 
-        if disabling_fading {
+        if settling_fades {
             self.windows.retain(|_, win| !win.fading_out);
             self.refresh_any_color_transform_active();
             for win in self.windows.values_mut() {
@@ -1760,6 +1796,7 @@ impl WaylandCompositor {
         let fading_enabled = self.fading_enabled;
         let window_animation_enabled = self.window_animation_enabled;
         let window_animation_scale = self.window_animation_scale;
+        let window_animation_style = self.window_animation_style;
         let ripple_enabled = self.ripple_on_open_enabled;
         let initial_urgency = self.pending_window_urgency.take_for_new_window(window_id);
         let mut inserted = false;
@@ -1804,8 +1841,14 @@ impl WaylandCompositor {
             if let Some(metadata) = self.minimized_window_metadata.get(&window_id) {
                 metadata.apply_to(win);
             }
-            win.fade_opacity = if fading_enabled { 0.0 } else { 1.0 };
-            win.anim_scale = if window_animation_enabled {
+            win.fade_opacity = if fading_enabled
+                || (window_animation_enabled && window_animation_style.uses_fade())
+            {
+                0.0
+            } else {
+                1.0
+            };
+            win.anim_scale = if window_animation_enabled && window_animation_style.uses_scale() {
                 window_animation_scale
             } else {
                 1.0
@@ -1999,7 +2042,7 @@ impl WaylandCompositor {
             if let Some(win) = self.windows.get_mut(&window_id) {
                 win.fading_out = true;
                 win.closing_rect = closing_rect;
-                if self.window_animation_enabled {
+                if self.window_animation_enabled && self.window_animation_style.uses_scale() {
                     win.anim_scale_target = self.window_animation_scale;
                 }
                 if win.texture_owner.is_none() || win.closing_rect.is_none() {
@@ -2052,6 +2095,7 @@ impl WaylandCompositor {
         let fading_enabled = self.fading_enabled;
         let window_animation_enabled = self.window_animation_enabled;
         let window_animation_scale = self.window_animation_scale;
+        let window_animation_style = self.window_animation_style;
         let ripple_enabled = self.ripple_on_open_enabled;
         let initial_urgency = self.pending_window_urgency.take_for_new_window(window_id);
         let restore_requested = self.pending_genie_restores.contains(&window_id)
@@ -2118,14 +2162,16 @@ impl WaylandCompositor {
             }
             win.fade_opacity = if restore_requested {
                 1.0
-            } else if fading_enabled {
+            } else if fading_enabled
+                || (window_animation_enabled && window_animation_style.uses_fade())
+            {
                 0.0
             } else {
                 1.0
             };
             win.anim_scale = if restore_requested {
                 1.0
-            } else if window_animation_enabled {
+            } else if window_animation_enabled && window_animation_style.uses_scale() {
                 window_animation_scale
             } else {
                 1.0

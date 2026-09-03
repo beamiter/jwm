@@ -1050,6 +1050,12 @@ impl Config {
                 "book",
             ],
         );
+        validate_choice(
+            &mut diagnostics,
+            "behavior.window_animation_style",
+            &behavior.window_animation_style,
+            &["scale", "fade", "slide"],
+        );
         validate_choice_ignore_ascii_case(
             &mut diagnostics,
             "behavior.new_client_position",

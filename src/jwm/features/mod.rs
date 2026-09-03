@@ -35,6 +35,7 @@ pub mod resources;
 pub mod screenshot;
 pub mod session;
 pub mod shell_hub;
+pub mod switcher;
 mod sysfs;
 pub mod system_controls;
 pub mod system_ui;
@@ -166,6 +167,7 @@ pub struct FeatureStates {
     pub low_battery: LowBatteryWarner,
     /// Bounded history behind the notification center. Not a mode: it
     /// survives `disable_all` and never counts as an active feature.
+    /// Persisted across restarts; see `notifications::HISTORY_FILE`.
     pub notifications: NotificationCenter,
     /// Built-in lock screen, application launcher, and display layout UI.
     pub system_ui: SystemUiState,
@@ -182,6 +184,11 @@ pub struct FeatureStates {
     /// A page opened from the Shell Hub returns there on Escape. Directly
     /// opened panels still close normally.
     pub system_ui_return_to_hub: bool,
+    /// The modifiers held when the Alt+Tab switcher opened; releasing one of
+    /// them commits the gesture. Meaningful only while the
+    /// `ListKind::WindowSwitcher` panel is up — the shared close and
+    /// hand-over paths clear it.
+    pub window_switcher_mods: crate::backend::common_define::Mods,
     /// The compositor was started only to render the current built-in system
     /// UI. Closing the panel (or unlocking) returns to non-composited mode.
     pub system_ui_temporary_compositor: bool,
@@ -197,7 +204,13 @@ pub struct FeatureStates {
 
 impl FeatureStates {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            // Startup restores the history the last run left on disk; every
+            // later mutation saves it back. A missing or damaged file is an
+            // empty history, never a startup failure.
+            notifications: NotificationCenter::load(),
+            ..Self::default()
+        }
     }
 
     /// 检查是否有任何特殊模式激活
