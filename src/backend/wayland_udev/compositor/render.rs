@@ -4553,6 +4553,14 @@ impl WaylandCompositor {
                 // Occupied tags (minimized windows included) draw in the
                 // bright ink; empty ones sit back in the dim tone.
                 let ink = if content.occupied { line } else { dim_line };
+                let live = grid.live_for_cell(index);
+                if let Some(live) = live {
+                    // The on-screen tag's cell swaps its wireframes for the
+                    // windows' own textures, scaled into the same rectangles.
+                    self.render_tags_grid_live_cell(gl, projection, frame, live, ink, scale);
+                }
+                // The frame's border sits above the cell's content, so a live
+                // thumbnail ends exactly at the frame edge.
                 self.sysui_stroke_rounded(
                     gl,
                     frame[0],
@@ -4563,18 +4571,20 @@ impl WaylandCompositor {
                     film::LINE_WIDTH * scale,
                     UiPalette::faded(ink, 0.6),
                 );
-                for window in &content.windows {
-                    let rect = film::window_rect(frame, *window);
-                    self.sysui_stroke_rounded(
-                        gl,
-                        rect[0],
-                        rect[1],
-                        rect[2],
-                        rect[3],
-                        film::WINDOW_RADIUS,
-                        film::LINE_WIDTH * scale,
-                        ink,
-                    );
+                if live.is_none() {
+                    for window in &content.windows {
+                        let rect = film::window_rect(frame, *window);
+                        self.sysui_stroke_rounded(
+                            gl,
+                            rect[0],
+                            rect[1],
+                            rect[2],
+                            rect[3],
+                            film::WINDOW_RADIUS,
+                            film::LINE_WIDTH * scale,
+                            ink,
+                        );
+                    }
                 }
 
                 if content.active {
@@ -4659,6 +4669,98 @@ impl WaylandCompositor {
 
             for (_, tex, _, _) in labels {
                 gl.DeleteTextures(1, &tex);
+            }
+        }
+    }
+
+    /// The on-screen tag's live cell content: every window's texture scaled
+    /// into the rectangle its wireframe would occupy — the identical
+    /// [`crate::backend::compositor_common::layout_strip::window_rect`]
+    /// mapping, so live and line-drawn cells never disagree about placement.
+    /// Drawn through the ordinary window program, the expose thumbnails'
+    /// shader path — content UV, ripple-off and color transform included;
+    /// a window without a ready texture keeps its outline as a fail-safe.
+    unsafe fn render_tags_grid_live_cell(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        frame: [f32; 4],
+        live: &crate::backend::api::LiveTagsCell,
+        ink: [f32; 4],
+        scale: f32,
+    ) {
+        use crate::backend::compositor_common::layout_strip as film;
+
+        unsafe {
+            gl.UseProgram(self.program);
+            gl.UniformMatrix4fv(
+                self.win_uniforms.projection,
+                1,
+                ffi::FALSE as u8,
+                projection.as_ptr(),
+            );
+
+            let mut outlines = Vec::new();
+            for (window, norm) in &live.windows {
+                let rect = film::window_rect(frame, *norm);
+                let Some(win) = self.windows.get(&window.raw()) else {
+                    outlines.push(rect);
+                    continue;
+                };
+                let Some(tex) = win.gl_texture else {
+                    outlines.push(rect);
+                    continue;
+                };
+
+                gl.Uniform4f(self.win_uniforms.rect, rect[0], rect[1], rect[2], rect[3]);
+                gl.Uniform1f(self.win_uniforms.opacity, 1.0);
+                gl.Uniform1f(self.win_uniforms.radius, 6.0);
+                gl.Uniform2f(self.win_uniforms.size, rect[2], rect[3]);
+                gl.Uniform1f(self.win_uniforms.dim, 1.0);
+
+                // Use content_uv to crop out CSD shadows/decorations.
+                let [cu, cv, cw, ch] = win.content_uv;
+                let (uv_x, uv_y, uv_w, uv_h) = if win.y_inverted {
+                    (cu, cv + ch, cw, -ch)
+                } else {
+                    (cu, cv, cw, ch)
+                };
+                gl.Uniform4f(self.win_uniforms.uv_rect, uv_x, uv_y, uv_w, uv_h);
+                gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
+                gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+
+                let color_transform = win.color_transform.map(|transform| {
+                    if self.scene_linear_color_path_active() {
+                        transform_for_encoded_srgb(transform)
+                    } else {
+                        transform
+                    }
+                });
+                self.upload_window_color_transform(gl, color_transform, false);
+
+                gl.ActiveTexture(ffi::TEXTURE0);
+                self.bind_window_texture(gl, tex);
+                gl.Uniform1i(self.win_uniforms.texture, 0);
+
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                self.reset_window_color_transform(gl);
+            }
+
+            // Back to the border program the cell loop's strokes draw with,
+            // then the fail-safe outlines.
+            gl.UseProgram(self.border_program);
+            self.set_projection_uniform(gl, self.border_uniforms.projection, projection);
+            for rect in outlines {
+                self.sysui_stroke_rounded(
+                    gl,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    film::WINDOW_RADIUS,
+                    film::LINE_WIDTH * scale,
+                    ink,
+                );
             }
         }
     }

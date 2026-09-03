@@ -44,6 +44,7 @@ use smithay::reexports::drm::control::{Device as ControlDevice, ModeTypeFlags, c
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server;
 use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Buffer as BufferCoord, Clock, Monotonic, Size};
 use smithay::utils::{DeviceFd, Physical, Point, Rectangle, Scale, Transform};
@@ -379,7 +380,9 @@ pub(super) struct ColorPipelineDecision {
 /// common linear-sRGB texture. Keeping the classes explicit makes fallback
 /// diagnostics actionable and gives later internalization work one checklist
 /// to update instead of another aggregate boolean.
-#[repr(u8)]
+///
+/// The recognized wire names live in `api::LINEAR_TAIL_BLOCKER_NAMES`; every
+/// variant's `wire_name` must appear in that table (a unit test enforces it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LinearTailBlocker {
     CompositorEncodedTail,
@@ -387,81 +390,385 @@ pub(super) enum LinearTailBlocker {
     SessionLockSurface,
     DragIcon,
     Cursor,
-    TopOrOverlayLayerSurface,
+    TopLayerSurface,
+    OverlayLayerSurface,
 }
 
 impl LinearTailBlocker {
-    const ALL: [Self; 6] = [
+    /// Stable report order. `CompositorEncodedTail` is owned by the
+    /// compositor and prepended by the caller; the plan never sets it.
+    const ALL: [Self; 7] = [
         Self::CompositorEncodedTail,
         Self::CaptureReadback,
         Self::SessionLockSurface,
         Self::DragIcon,
         Self::Cursor,
-        Self::TopOrOverlayLayerSurface,
+        Self::TopLayerSurface,
+        Self::OverlayLayerSurface,
     ];
 
     const fn wire_name(self) -> &'static str {
-        crate::backend::api::LINEAR_TAIL_BLOCKER_NAMES[self as usize]
-    }
-
-    const fn bit(self) -> u8 {
-        1 << self as u8
+        match self {
+            Self::CompositorEncodedTail => "compositor_encoded_tail",
+            Self::CaptureReadback => "capture_readback",
+            Self::SessionLockSurface => "session_lock_surface",
+            Self::DragIcon => "drag_icon",
+            Self::Cursor => "cursor",
+            Self::TopLayerSurface => "top_layer_surface",
+            Self::OverlayLayerSurface => "overlay_layer_surface",
+        }
     }
 }
 
+/// The element classes KMS/Smithay assemble outside the compositor's common
+/// linear-sRGB texture. Each class owns exactly one `LinearTailBlocker`, so
+/// the assembly gate, the route blocker list, and the IPC diagnostics all
+/// read a single enumeration instead of maintaining parallel vocabularies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ExternalElementClass {
+    /// Pointer cursor, whether drawn from the loaded theme bitmap or from the
+    /// procedural software fallback; both sources are equally external.
+    Cursor,
+    /// Drag-and-drop icon surface tree following the pointer.
+    DragIcon,
+    /// Session-lock surface tree bound to one output.
+    SessionLock,
+    /// wlr-layer-shell Top layer surface trees overlapping an output.
+    LayerTop,
+    /// wlr-layer-shell Overlay layer trees overlapping an output.
+    LayerOverlay,
+}
+
+impl ExternalElementClass {
+    const ALL: [Self; 5] = [
+        Self::Cursor,
+        Self::DragIcon,
+        Self::SessionLock,
+        Self::LayerTop,
+        Self::LayerOverlay,
+    ];
+
+    const fn blocker(self) -> LinearTailBlocker {
+        match self {
+            Self::Cursor => LinearTailBlocker::Cursor,
+            Self::DragIcon => LinearTailBlocker::DragIcon,
+            Self::SessionLock => LinearTailBlocker::SessionLockSurface,
+            Self::LayerTop => LinearTailBlocker::TopLayerSurface,
+            Self::LayerOverlay => LinearTailBlocker::OverlayLayerSurface,
+        }
+    }
+
+    const fn wire_name(self) -> &'static str {
+        self.blocker().wire_name()
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+/// What one external element class does on one output for one frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalElementDisposition {
+    /// No pixel of this class reaches the output: nothing is assembled and no
+    /// blocker is contributed. This extends the DPMS-off/soft-disabled
+    /// precedent to absent sources, uncommitted trees, and off-output
+    /// geometry.
+    Hidden,
+    /// Visible and importable, but KMS assembles it outside the common
+    /// linear-sRGB texture because no per-class adapter exists yet. Every
+    /// class takes this branch today; it stays a fail-closed blocker until
+    /// internalization lands.
+    ExternalAssembly,
+    /// Visible, but some content failed the import precheck, so even a
+    /// future common-linear adapter must keep this class a hard blocker.
+    /// Today it assembles externally and blocks exactly like
+    /// `ExternalAssembly`; the split exists so diagnostics and the future
+    /// adapter precheck share one vocabulary.
+    ImportBlocked,
+}
+
+impl ExternalElementDisposition {
+    /// Whether the KMS element assembly draws the class this frame.
+    const fn assembles_externally(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+
+    /// Whether the class forces the exact-sRGB fallback. Until per-class
+    /// internalization exists, every visible external element blocks.
+    const fn contributes_blocker(self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+}
+
+/// Pure per-class, per-output decision. Invisible elements (absent source or
+/// uncommitted tree) never block; every visible element blocks while assembly
+/// is external; an import-precheck failure is recorded as `ImportBlocked` so
+/// a future adapter can never internalize the class silently.
+fn classify_external_element(
+    present: bool,
+    drawable: bool,
+    importable: bool,
+) -> ExternalElementDisposition {
+    if !present || !drawable {
+        ExternalElementDisposition::Hidden
+    } else if importable {
+        ExternalElementDisposition::ExternalAssembly
+    } else {
+        ExternalElementDisposition::ImportBlocked
+    }
+}
+
+/// Half-open rectangle/output intersection in the global layout space,
+/// shared by the color plan and the KMS element assembly so both make the
+/// same visibility call. The strict comparisons mirror smithay's
+/// `Rectangle::overlaps`; i64 math keeps extreme coordinates from
+/// overflowing or saturating differently.
+fn rect_overlaps_output(
+    rect_loc: (i32, i32),
+    rect_size: (i32, i32),
+    origin: (i32, i32),
+    mode_size: (i32, i32),
+) -> bool {
+    let (rx, ry) = (i64::from(rect_loc.0), i64::from(rect_loc.1));
+    let (rw, rh) = (i64::from(rect_size.0), i64::from(rect_size.1));
+    let (ox, oy) = (i64::from(origin.0), i64::from(origin.1));
+    let (ow, oh) = (i64::from(mode_size.0), i64::from(mode_size.1));
+    rx < ox + ow && ox < rx + rw && ry < oy + oh && oy < ry + rh
+}
+
+/// Per-class observation on one output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExternalElementClassPlan {
+    disposition: ExternalElementDisposition,
+    /// Stable snake_case token stating the visibility/importability basis.
+    basis: &'static str,
+}
+
+impl ExternalElementClassPlan {
+    const HIDDEN: Self = Self {
+        disposition: ExternalElementDisposition::Hidden,
+        basis: "not_observed",
+    };
+}
+
+/// One output's slice of the frame's external element plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OutputExternalElementPlan {
+    output_name: String,
+    /// Mirrors the frame loop's participation rule: not DPMS-off and not
+    /// soft-disabled. Non-participating outputs assemble nothing and
+    /// contribute no blocker.
+    participating: bool,
+    /// Resolved pointer position when the cursor class assembles on this
+    /// output; `None` when the pointer is elsewhere or not representable.
+    cursor_position: Option<(i32, i32)>,
+    classes: [ExternalElementClassPlan; ExternalElementClass::ALL.len()],
+}
+
+impl OutputExternalElementPlan {
+    fn new(output_name: String, participating: bool) -> Self {
+        let classes = if participating {
+            [ExternalElementClassPlan::HIDDEN; ExternalElementClass::ALL.len()]
+        } else {
+            [ExternalElementClassPlan {
+                disposition: ExternalElementDisposition::Hidden,
+                basis: "output_not_participating",
+            }; ExternalElementClass::ALL.len()]
+        };
+        Self {
+            output_name,
+            participating,
+            cursor_position: None,
+            classes,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        class: ExternalElementClass,
+        disposition: ExternalElementDisposition,
+        basis: &'static str,
+    ) {
+        self.classes[class.index()] = ExternalElementClassPlan { disposition, basis };
+    }
+
+    fn class(&self, class: ExternalElementClass) -> ExternalElementClassPlan {
+        self.classes[class.index()]
+    }
+
+    /// Whether the KMS element assembly draws this class on this output.
+    fn assembles(&self, class: ExternalElementClass) -> bool {
+        self.participating && self.class(class).disposition.assembles_externally()
+    }
+
+    /// Whether this output contributes the class blocker to the frame.
+    fn contributes(&self, class: ExternalElementClass) -> bool {
+        self.participating && self.class(class).disposition.contributes_blocker()
+    }
+}
+
+/// Per-frame plan for the elements KMS/Smithay assembles outside the
+/// compositor's common linear-sRGB texture. One derivation feeds three
+/// consumers: the KMS element assembly (`render_if_needed`), the color
+/// delivery route (`blockers`), and the IPC diagnostics (`class_statuses`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ExternalElementColorPlan {
-    blocker_bits: u8,
+    /// Capture/readback requests are frame-global rather than per-output.
+    capture_readback: bool,
+    /// The frame's resolved pointer position, shared by cursor placement and
+    /// drag-icon placement. `None` fails closed: affected classes report a
+    /// blocker but cannot be placed, so nothing is drawn for them.
+    cursor_position: Option<(i32, i32)>,
+    /// Aligned with `KmsState.outputs` by index.
+    outputs: Vec<OutputExternalElementPlan>,
 }
 
 impl ExternalElementColorPlan {
-    fn from_frame_flags(capture_readback: bool, session_lock: bool, drag_icon: bool) -> Self {
-        let mut plan = Self::default();
-        plan.set(LinearTailBlocker::CaptureReadback, capture_readback);
-        plan.set(LinearTailBlocker::SessionLockSurface, session_lock);
-        plan.set(LinearTailBlocker::DragIcon, drag_icon);
-        plan
+    fn output(&self, output_idx: usize) -> Option<&OutputExternalElementPlan> {
+        self.outputs.get(output_idx)
     }
 
-    fn set(&mut self, blocker: LinearTailBlocker, present: bool) {
-        if present {
-            self.blocker_bits |= blocker.bit();
-        } else {
-            self.blocker_bits &= !blocker.bit();
-        }
-    }
-
-    fn observe_output(
-        &mut self,
-        cursor: Option<(i32, i32)>,
-        origin: (i32, i32),
-        mode_size: (i32, i32),
-        participating: bool,
-        has_top_or_overlay_layer: bool,
-    ) {
-        if !participating {
-            return;
-        }
-        // An invalid pointer coordinate is not proof that the externally
-        // rendered cursor disappeared, so inventory it conservatively.
-        if cursor.is_none_or(|point| point_in_output(point, origin, mode_size)) {
-            self.set(LinearTailBlocker::Cursor, true);
-        }
-        if has_top_or_overlay_layer {
-            self.set(LinearTailBlocker::TopOrOverlayLayerSurface, true);
-        }
+    fn class_is_visible(&self, class: ExternalElementClass) -> bool {
+        self.outputs.iter().any(|output| output.contributes(class))
     }
 
     pub(super) fn is_safe(&self) -> bool {
-        self.blocker_bits == 0
+        !self.capture_readback
+            && !ExternalElementClass::ALL
+                .into_iter()
+                .any(|class| self.class_is_visible(class))
     }
 
+    /// Frame-level blocker list in stable `LinearTailBlocker::ALL` order.
     pub(super) fn blockers(&self) -> Vec<LinearTailBlocker> {
         LinearTailBlocker::ALL
             .into_iter()
-            .filter(|blocker| self.blocker_bits & blocker.bit() != 0)
+            .filter(|blocker| match blocker {
+                // The compositor reports its own encoded tail separately.
+                LinearTailBlocker::CompositorEncodedTail => false,
+                LinearTailBlocker::CaptureReadback => self.capture_readback,
+                class_blocker => ExternalElementClass::ALL
+                    .into_iter()
+                    .any(|class| class.blocker() == *class_blocker && self.class_is_visible(class)),
+            })
             .collect()
     }
+
+    /// Per-class diagnostic view for the render-decision IPC.
+    pub(super) fn class_statuses(&self) -> Vec<crate::backend::api::ExternalElementClassStatus> {
+        ExternalElementClass::ALL
+            .into_iter()
+            .map(|class| {
+                let visible_outputs: Vec<&OutputExternalElementPlan> = self
+                    .outputs
+                    .iter()
+                    .filter(|output| output.contributes(class))
+                    .collect();
+                let visible = !visible_outputs.is_empty();
+                let importable = visible
+                    && visible_outputs.iter().all(|output| {
+                        output.class(class).disposition
+                            == ExternalElementDisposition::ExternalAssembly
+                    });
+                let basis = visible_outputs
+                    .first()
+                    .map(|output| output.class(class).basis)
+                    .or_else(|| {
+                        self.outputs
+                            .iter()
+                            .find(|output| output.participating)
+                            .map(|output| output.class(class).basis)
+                    })
+                    .unwrap_or("no_participating_output");
+                crate::backend::api::ExternalElementClassStatus {
+                    class: class.wire_name().to_owned(),
+                    visible,
+                    importable,
+                    assembly: if visible { "kms_external" } else { "none" }.to_owned(),
+                    blocker: visible.then(|| class.wire_name().to_owned()),
+                    outputs: visible_outputs
+                        .iter()
+                        .map(|output| output.output_name.clone())
+                        .collect(),
+                    basis: basis.to_owned(),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Committed-content summary of one external surface tree. `drawable` counts
+/// surfaces whose committed buffer produces render content; `unimportable`
+/// counts drawable surfaces whose buffer fails the import precheck.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SurfaceTreeContent {
+    drawable: u32,
+    unimportable: u32,
+}
+
+impl SurfaceTreeContent {
+    fn has_drawable(&self) -> bool {
+        self.drawable > 0
+    }
+
+    fn all_importable(&self) -> bool {
+        self.unimportable == 0
+    }
+}
+
+/// Whether a committed buffer can become a GL texture in this renderer. Shm,
+/// single-pixel, and EGL-reader buffers import through the renderer's
+/// standard paths; dmabuf buffers import when their format is in the EGL
+/// texture-format set; unmanaged buffers fail closed. This is a plan-time
+/// precheck — the assembly's actual GL import remains the final word.
+fn buffer_import_supported(buffer: &WlBuffer, dmabuf_texture_formats: &FormatSet) -> bool {
+    use smithay::backend::allocator::Buffer as _;
+    use smithay::backend::renderer::{BufferType, buffer_type};
+    match buffer_type(buffer) {
+        // `buffer_type` only reports managed buffers, so any other variant is
+        // backed by a smithay import path.
+        Some(BufferType::Shm) | Some(BufferType::SinglePixel) => true,
+        Some(BufferType::Dma) => {
+            get_dmabuf(buffer).is_ok_and(|dmabuf| dmabuf_texture_formats.contains(&dmabuf.format()))
+        }
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// Walk one external surface tree the same way the element assembly does,
+/// counting drawable and import-failing surfaces for the color plan.
+fn summarize_external_surface_tree(
+    surface: &WlSurface,
+    dmabuf_texture_formats: &FormatSet,
+) -> SurfaceTreeContent {
+    let mut content = SurfaceTreeContent::default();
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, _| TraversalAction::DoChildren(()),
+        |_child_surface, child_states, _| {
+            let data = child_states.data_map.get::<RendererSurfaceStateUserData>();
+            let Some(data) = data else {
+                return;
+            };
+            let data = data.lock_safe();
+            if data.view().is_none() {
+                return;
+            }
+            content.drawable += 1;
+            // A view without a buffer should be impossible; fail closed.
+            let importable = data
+                .buffer()
+                .is_some_and(|buffer| buffer_import_supported(buffer, dmabuf_texture_formats));
+            if !importable {
+                content.unimportable += 1;
+            }
+        },
+        |_, _, _| true,
+    );
+    content
 }
 
 fn rounded_pointer_location(x: f64, y: f64) -> Option<(i32, i32)> {
@@ -1434,17 +1741,19 @@ impl KmsState {
         self.outputs.get(output_idx)?.color_pipeline_caps.clone()
     }
 
-    /// Whether every element that will reach scanout is already inside the
-    /// compositor's common linear-sRGB texture. Smithay currently adds the
-    /// cursor, drag icon, lock surface, and top/overlay layer surfaces after
-    /// the compositor has finalized that texture. Until those elements gain
-    /// an explicit color-domain adapter, their presence requires the global
-    /// encoded-sRGB fallback.
+    /// Build the per-frame plan for the elements Smithay assembles outside
+    /// the compositor's common linear-sRGB texture: cursor (theme bitmap or
+    /// software fallback), drag icon, session-lock surface, and top/overlay
+    /// layer surface trees, each with their subsurface trees. The same plan
+    /// gates the KMS element assembly in `render_if_needed`, feeds the
+    /// delivery-route blocker list, and fills the IPC diagnostics, so check
+    /// and draw cannot drift apart. Until those classes gain a common-linear
+    /// adapter, any visible class requires the global encoded-sRGB fallback.
     pub(super) fn external_element_color_plan(
         &self,
         state: &crate::backend::wayland::state::JwmWaylandState,
     ) -> ExternalElementColorPlan {
-        let capture_pending = self.screenshot_requests.has_pending()
+        let capture_readback = self.screenshot_requests.has_pending()
             || self
                 .screencopy_pending
                 .as_ref()
@@ -1453,45 +1762,212 @@ impl KmsState {
                 .image_capture_pending
                 .as_ref()
                 .is_some_and(|queue| !queue.lock_safe().is_empty());
-        let mut plan = ExternalElementColorPlan::from_frame_flags(
-            capture_pending,
-            state.session_locked,
-            state.dnd_icon.is_some(),
-        );
-
-        let cursor = rounded_pointer_location(state.pointer_location.x, state.pointer_location.y);
+        let dmabuf_texture_formats = self.renderer.egl_context().dmabuf_texture_formats();
+        let cursor_position =
+            rounded_pointer_location(state.pointer_location.x, state.pointer_location.y);
+        let mut plan = ExternalElementColorPlan {
+            capture_readback,
+            cursor_position,
+            outputs: Vec::with_capacity(self.outputs.len()),
+        };
         for output in &self.outputs {
             let participating =
                 !output.dpms_off && !state.soft_disabled_outputs.contains(&output.output_name);
-            if !participating {
-                continue;
+            let mut output_plan =
+                OutputExternalElementPlan::new(output.output_name.clone(), participating);
+            if participating {
+                self.observe_output_external_elements(
+                    state,
+                    output,
+                    cursor_position,
+                    dmabuf_texture_formats,
+                    &mut output_plan,
+                );
             }
-            let map = layer_map_for_output(&output.output);
-            let has_top_or_overlay_layer = [WlrLayer::Overlay, WlrLayer::Top]
-                .into_iter()
-                .any(|layer| map.layers_on(layer).next().is_some());
-            plan.observe_output(
-                cursor,
-                output.origin,
-                output.mode_size,
-                participating,
-                has_top_or_overlay_layer,
-            );
+            plan.outputs.push(output_plan);
         }
         plan
+    }
+
+    /// Observe every external element class on one participating output. The
+    /// judgment is per class per output: absent sources, uncommitted trees,
+    /// and off-output geometry all stay `Hidden` and never force the
+    /// exact-sRGB fallback.
+    fn observe_output_external_elements(
+        &self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        output: &KmsOutputState,
+        cursor_position: Option<(i32, i32)>,
+        dmabuf_texture_formats: &FormatSet,
+        output_plan: &mut OutputExternalElementPlan,
+    ) {
+        // Cursor: the theme bitmap and the procedural fallback are both plain
+        // CPU content, so a resolved position is always importable. An
+        // invalid coordinate cannot prove the externally drawn cursor
+        // disappeared, so it fails closed with a blocker but no placement.
+        match cursor_position {
+            Some(point) if point_in_output(point, output.origin, output.mode_size) => {
+                output_plan.cursor_position = Some(point);
+                output_plan.observe(
+                    ExternalElementClass::Cursor,
+                    classify_external_element(true, true, true),
+                    "pointer_on_output",
+                );
+            }
+            Some(_) => output_plan.observe(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::Hidden,
+                "pointer_off_output",
+            ),
+            None => output_plan.observe(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::ExternalAssembly,
+                "pointer_position_unknown",
+            ),
+        }
+
+        match state.dnd_icon.as_ref() {
+            None => output_plan.observe(
+                ExternalElementClass::DragIcon,
+                ExternalElementDisposition::Hidden,
+                "no_drag_icon",
+            ),
+            Some(icon) => {
+                let content =
+                    summarize_external_surface_tree(&icon.surface, dmabuf_texture_formats);
+                if !content.has_drawable() {
+                    // An icon without a committed buffer produces no render
+                    // elements anywhere, so it must not force the fallback.
+                    output_plan.observe(
+                        ExternalElementClass::DragIcon,
+                        ExternalElementDisposition::Hidden,
+                        "drag_icon_tree_uncommitted",
+                    );
+                } else if cursor_position.is_none() {
+                    output_plan.observe(
+                        ExternalElementClass::DragIcon,
+                        ExternalElementDisposition::ExternalAssembly,
+                        "pointer_position_unknown",
+                    );
+                } else {
+                    // The icon follows the pointer and can straddle an output
+                    // boundary, and the assembly places it on every
+                    // participating output (clipped at scanout). Conservatively
+                    // mark every participating output as hosting it.
+                    output_plan.observe(
+                        ExternalElementClass::DragIcon,
+                        classify_external_element(true, true, content.all_importable()),
+                        "drag_icon_follows_pointer",
+                    );
+                }
+            }
+        }
+
+        if !state.session_locked {
+            output_plan.observe(
+                ExternalElementClass::SessionLock,
+                ExternalElementDisposition::Hidden,
+                "session_unlocked",
+            );
+        } else {
+            match state.lock_surfaces.get(&output.output_name) {
+                // Without a lock surface only the domain-invariant black
+                // shield reaches scanout on this output.
+                None => output_plan.observe(
+                    ExternalElementClass::SessionLock,
+                    ExternalElementDisposition::Hidden,
+                    "no_lock_surface_on_output",
+                ),
+                Some(lock_surface) => {
+                    let content = summarize_external_surface_tree(
+                        lock_surface.wl_surface(),
+                        dmabuf_texture_formats,
+                    );
+                    if content.has_drawable() {
+                        output_plan.observe(
+                            ExternalElementClass::SessionLock,
+                            classify_external_element(true, true, content.all_importable()),
+                            "lock_surface_committed",
+                        );
+                    } else {
+                        output_plan.observe(
+                            ExternalElementClass::SessionLock,
+                            ExternalElementDisposition::Hidden,
+                            "lock_surface_uncommitted",
+                        );
+                    }
+                }
+            }
+        }
+
+        let map = layer_map_for_output(&output.output);
+        for (layer, class) in [
+            (WlrLayer::Top, ExternalElementClass::LayerTop),
+            (WlrLayer::Overlay, ExternalElementClass::LayerOverlay),
+        ] {
+            let mut any_drawable = false;
+            let mut any_unimportable = false;
+            let mut basis = "no_layer_mapped";
+            for layer_surface in map.layers_on(layer) {
+                let Some(geometry) = map.layer_geometry(layer_surface) else {
+                    continue;
+                };
+                let overlaps = rect_overlaps_output(
+                    (
+                        output.origin.0 + geometry.loc.x,
+                        output.origin.1 + geometry.loc.y,
+                    ),
+                    (geometry.size.w, geometry.size.h),
+                    output.origin,
+                    output.mode_size,
+                );
+                if !overlaps {
+                    basis = "layer_outside_output";
+                    continue;
+                }
+                let content = summarize_external_surface_tree(
+                    layer_surface.wl_surface(),
+                    dmabuf_texture_formats,
+                );
+                if !content.has_drawable() {
+                    basis = "layer_tree_uncommitted";
+                    continue;
+                }
+                any_drawable = true;
+                if !content.all_importable() {
+                    any_unimportable = true;
+                }
+            }
+            if any_drawable {
+                basis = "layer_overlaps_output";
+            }
+            output_plan.observe(
+                class,
+                classify_external_element(any_drawable, any_drawable, !any_unimportable),
+                basis,
+            );
+        }
     }
 
     /// Record the current frame's color-delivery decision without claiming it
     /// reached the display. `render_if_needed` attaches the prepared plan to a
     /// successfully queued framebuffer; `on_vblank` is the only promotion
-    /// point into the last-success snapshot.
+    /// point into the last-success snapshot. The external-element plan that
+    /// gated the assembly is recorded alongside, so the IPC diagnosis shows
+    /// the same classes the route decision saw.
     pub(super) fn record_color_delivery_attempt(
         &mut self,
         decision: &ColorPipelineDecision,
-        linear_tail_blockers: &[LinearTailBlocker],
+        external_element_plan: &ExternalElementColorPlan,
+        compositor_tail_safe: bool,
         scene_linear_active: bool,
     ) {
-        let linear_tail_safe = linear_tail_blockers.is_empty();
+        let mut linear_tail_blockers = external_element_plan.blockers();
+        if !compositor_tail_safe {
+            linear_tail_blockers.insert(0, LinearTailBlocker::CompositorEncodedTail);
+        }
+        let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
+        debug_assert_eq!(linear_tail_safe, linear_tail_blockers.is_empty());
         let prepared = prepared_color_delivery(decision, linear_tail_safe, scene_linear_active);
         self.color_delivery_policy_sequence = self.color_delivery_policy_sequence.saturating_add(1);
         self.last_color_delivery_policy =
@@ -1508,6 +1984,7 @@ impl KmsState {
                         .map(|blocker| blocker.wire_name().to_owned())
                         .collect(),
                 ),
+                external_elements: Some(external_element_plan.class_statuses()),
             });
         self.prepared_color_delivery = (!decision.delivery_blocked).then_some(prepared);
     }
@@ -1532,6 +2009,9 @@ impl KmsState {
                 scene_linear_active: false,
                 linear_tail_safe: false,
                 linear_tail_blockers: None,
+                // The legacy path has no external-element plan; the field
+                // stays absent rather than claiming an empty inventory.
+                external_elements: None,
             });
         self.prepared_color_delivery = Some(prepared);
     }
@@ -4397,6 +4877,11 @@ impl KmsState {
             self.ensure_legacy_color_delivery_attempt();
         }
 
+        // The same per-frame plan that fed the color-delivery route also
+        // gates the element assembly below: visibility is decided in exactly
+        // one place (`external_element_color_plan`), never re-derived here.
+        let external_plan = self.external_element_color_plan(state);
+
         self.last_direct_scanout_outputs.clear();
         let mut any_skipped = false;
         let mut any_failed = false;
@@ -4420,6 +4905,11 @@ impl KmsState {
             }
             let color_delivery_retry_required = self.outputs[out_idx].color_delivery_retry_required;
             let manual_surface_path = compositor.is_none();
+            // The plan is aligned with `self.outputs` by index; the early
+            // continue above already established this output participates.
+            let Some(external_output) = external_plan.output(out_idx) else {
+                continue;
+            };
 
             let scale: Scale<f64> = self.outputs[out_idx]
                 .output
@@ -4444,13 +4934,13 @@ impl KmsState {
             // So: cursor/top-most surfaces first, solid background last.
             let mut elements: Vec<KmsRenderElement> = Vec::new();
 
-            // Cursor will be pushed FIRST (front-most).
-            let cursor_x = state.pointer_location.x.round() as i32;
-            let cursor_y = state.pointer_location.y.round() as i32;
-            if cursor_x >= ox
-                && cursor_y >= oy
-                && cursor_x < (ox + out_w)
-                && cursor_y < (oy + out_h)
+            // Cursor will be pushed FIRST (front-most), when the frame's
+            // external element plan places it on this output. The plan
+            // resolves the pointer coordinate once for check and draw alike;
+            // an unrepresentable coordinate contributes a blocker but no
+            // placement, so nothing is drawn for it.
+            if external_output.assembles(ExternalElementClass::Cursor)
+                && let Some((cursor_x, cursor_y)) = external_output.cursor_position
             {
                 // Approximate a cursor scale factor from the output scale.
                 let cursor_scale = scale.x.max(1.0).ceil() as u32;
@@ -4514,7 +5004,9 @@ impl KmsState {
             let mut frame_roots: Vec<WlSurface> = Vec::new();
 
             if state.session_locked {
-                if let Some(lock_surface) = state.lock_surfaces.get(&out.output_name) {
+                if external_output.assembles(ExternalElementClass::SessionLock)
+                    && let Some(lock_surface) = state.lock_surfaces.get(&out.output_name)
+                {
                     let surface = lock_surface.wl_surface().clone();
                     frame_roots.push(surface.clone());
 
@@ -4559,8 +5051,12 @@ impl KmsState {
 
             // DnD drag icon: rendered just below the cursor, in front of all windows.
             // Placed before the compositor/element branch split so it overlays both
-            // render paths identically.
-            if let Some(icon) = state.dnd_icon.as_ref() {
+            // render paths identically. The plan's resolved pointer position places
+            // it; without one the class reports a blocker but draws nothing.
+            if external_output.assembles(ExternalElementClass::DragIcon)
+                && let Some(icon) = state.dnd_icon.as_ref()
+                && let Some((cursor_x, cursor_y)) = external_plan.cursor_position
+            {
                 let surface = icon.surface.clone();
                 frame_roots.push(surface.clone());
                 with_surface_tree_downward(
@@ -4596,19 +5092,27 @@ impl KmsState {
                 elements.extend(icon_elements);
             }
 
-            // Layer surfaces above normal windows.
+            // Layer surfaces above normal windows, gated per class by the same
+            // plan that reported them to the color-delivery route.
             {
                 let map = layer_map_for_output(&out.output);
-                for layer in [WlrLayer::Overlay, WlrLayer::Top] {
+                for (layer, class) in [
+                    (WlrLayer::Overlay, ExternalElementClass::LayerOverlay),
+                    (WlrLayer::Top, ExternalElementClass::LayerTop),
+                ] {
+                    if !external_output.assembles(class) {
+                        continue;
+                    }
                     for ls in map.layers_on(layer) {
                         let Some(geo) = map.layer_geometry(ls) else {
                             continue;
                         };
-                        let rect_global = Rectangle::<i32, smithay::utils::Logical>::new(
-                            (ox + geo.loc.x, oy + geo.loc.y).into(),
-                            geo.size,
-                        );
-                        if !rect_global.overlaps(output_rect_global) {
+                        if !rect_overlaps_output(
+                            (ox + geo.loc.x, oy + geo.loc.y),
+                            (geo.size.w, geo.size.h),
+                            (ox, oy),
+                            (out_w, out_h),
+                        ) {
                             continue;
                         }
 
@@ -5601,16 +6105,18 @@ fn spawn_screenshot_png_write(
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
     use super::{
-        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, ExternalElementColorPlan,
-        FrameQueueBoundary, LinearTailBlocker, OutputColorDeliveryTracker,
-        OutputColorRegionCandidate, QueuedFrameData, client_direct_scanout_presented,
-        compositor_output_texture_identity_matches, connector_color_property_neutral_value,
-        crtc_color_property, ctm_offload_allowed, direct_scanout_allowed_for_color_retry,
-        frame_flags_for_color_delivery, frame_watchdog_remaining, frame_watchdog_timeout,
-        gamma_ramp_is_identity, legacy_color_delivery_attempt_needed, output_color_target,
+        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, ExternalElementClass,
+        ExternalElementColorPlan, ExternalElementDisposition, FrameQueueBoundary,
+        LinearTailBlocker, OutputColorDeliveryTracker, OutputColorRegionCandidate,
+        OutputExternalElementPlan, QueuedFrameData, classify_external_element,
+        client_direct_scanout_presented, compositor_output_texture_identity_matches,
+        connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
+        direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
+        frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
+        legacy_color_delivery_attempt_needed, output_color_target,
         plan_output_configuration_rollback, plan_software_color_regions, point_in_output,
-        prepared_color_delivery, rollback_mode_requires_restore, rounded_pointer_location,
-        smithay_transform_to_wl, submitted_color_delivery_observation,
+        prepared_color_delivery, rect_overlaps_output, rollback_mode_requires_restore,
+        rounded_pointer_location, smithay_transform_to_wl, submitted_color_delivery_observation,
         vblank_is_not_older_than_queue, wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
@@ -5794,14 +6300,58 @@ mod compositor_texture_ownership_tests {
         assert_eq!(blocked.fallback_reason, Some("kms_color_state_unresolved"));
     }
 
+    /// Build a plan with one output carrying the given per-class dispositions,
+    /// exercising the same aggregation the frame loop relies on.
+    fn plan_with_output(
+        participating: bool,
+        cursor_position: Option<(i32, i32)>,
+        classes: &[(ExternalElementClass, ExternalElementDisposition)],
+    ) -> ExternalElementColorPlan {
+        let mut output = OutputExternalElementPlan::new("HDMI-A-1".to_owned(), participating);
+        output.cursor_position = cursor_position;
+        for &(class, disposition) in classes {
+            output.observe(class, disposition, "test");
+        }
+        ExternalElementColorPlan {
+            capture_readback: false,
+            cursor_position,
+            outputs: vec![output],
+        }
+    }
+
     #[test]
     fn external_element_plan_reports_every_visible_frame_tail_class() {
         let safe = ExternalElementColorPlan::default();
         assert!(safe.is_safe());
         assert!(safe.blockers().is_empty());
 
-        let mut blocked = ExternalElementColorPlan::from_frame_flags(true, true, true);
-        blocked.observe_output(Some((5, 5)), (0, 0), (10, 10), true, true);
+        let mut blocked = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::DragIcon,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::SessionLock,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::LayerTop,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::LayerOverlay,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+            ],
+        );
+        blocked.capture_readback = true;
         assert!(!blocked.is_safe());
         assert_eq!(
             blocked
@@ -5814,9 +6364,85 @@ mod compositor_texture_ownership_tests {
                 "session_lock_surface",
                 "drag_icon",
                 "cursor",
-                "top_or_overlay_layer_surface",
+                "top_layer_surface",
+                "overlay_layer_surface",
             ]
         );
+    }
+
+    #[test]
+    fn external_element_classification_tracks_visibility_and_importability() {
+        use ExternalElementDisposition::*;
+        // Invisible classes never assemble and never block.
+        assert_eq!(classify_external_element(false, false, false), Hidden);
+        assert_eq!(classify_external_element(false, true, true), Hidden);
+        // An active source without drawable content (e.g. an uncommitted
+        // surface tree) produces no pixels and no blocker.
+        assert_eq!(classify_external_element(true, false, true), Hidden);
+        // Visible and importable: externally assembled today, still blocking
+        // until a common-linear adapter owns the class.
+        assert_eq!(
+            classify_external_element(true, true, true),
+            ExternalAssembly
+        );
+        // Visible but unimportable — including any unimportable subsurface in
+        // the tree — stays a hard, named blocker even for a future adapter.
+        assert_eq!(classify_external_element(true, true, false), ImportBlocked);
+
+        assert!(!Hidden.assembles_externally());
+        assert!(!Hidden.contributes_blocker());
+        assert!(ExternalAssembly.assembles_externally());
+        assert!(ExternalAssembly.contributes_blocker());
+        assert!(ImportBlocked.assembles_externally());
+        assert!(ImportBlocked.contributes_blocker());
+    }
+
+    #[test]
+    fn rect_overlap_matches_smithay_half_open_semantics_without_overflow() {
+        let origin = (-1920, 0);
+        let size = (1920, 1080);
+        assert!(rect_overlaps_output((-1920, 0), (100, 100), origin, size));
+        assert!(rect_overlaps_output((-10, 0), (20, 20), origin, size));
+        // Edge-touching is not overlapping (strict half-open comparison).
+        assert!(!rect_overlaps_output((0, 0), (100, 100), origin, size));
+        assert!(!rect_overlaps_output(
+            (-1920, 1080),
+            (100, 100),
+            origin,
+            size
+        ));
+        // Degenerate rectangles follow smithay's `Rectangle::overlaps`.
+        assert!(rect_overlaps_output((5, 5), (0, 0), (0, 0), (10, 10)));
+        assert!(!rect_overlaps_output((10, 5), (0, 0), (0, 0), (10, 10)));
+        // i64 math keeps extreme layout coordinates exact.
+        assert!(rect_overlaps_output(
+            (i32::MAX - 10, i32::MAX - 10),
+            (20, 20),
+            (i32::MAX - 20, i32::MAX - 20),
+            (30, 30),
+        ));
+        assert!(!rect_overlaps_output(
+            (i32::MIN, i32::MIN),
+            (10, 10),
+            (i32::MAX - 100, i32::MAX - 100),
+            (50, 50),
+        ));
+    }
+
+    #[test]
+    fn every_blocker_wire_name_is_in_the_recognized_name_table() {
+        for blocker in LinearTailBlocker::ALL {
+            assert!(
+                crate::backend::api::is_known_linear_tail_blocker_name(blocker.wire_name()),
+                "{}",
+                blocker.wire_name()
+            );
+        }
+        // Each external element class owns exactly one blocker, and the class
+        // name and blocker name are one vocabulary.
+        for class in ExternalElementClass::ALL {
+            assert_eq!(class.wire_name(), class.blocker().wire_name());
+        }
     }
 
     #[test]
@@ -5862,31 +6488,125 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn inactive_outputs_contribute_no_cursor_or_layer_blocker() {
-        let mut plan = ExternalElementColorPlan::default();
-        plan.observe_output(Some((5, 5)), (0, 0), (10, 10), false, true);
+    fn inactive_outputs_contribute_no_blockers_or_assembly() {
+        // Defense in depth: even a populated entry on a non-participating
+        // output neither assembles nor blocks (the DPMS-off/soft-disabled
+        // precedent).
+        let plan = plan_with_output(
+            false,
+            Some((5, 5)),
+            &[(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::ExternalAssembly,
+            )],
+        );
         assert!(plan.is_safe());
+        assert!(plan.blockers().is_empty());
+        assert!(!plan.outputs[0].assembles(ExternalElementClass::Cursor));
     }
 
     #[test]
-    fn output_inventory_accumulates_instead_of_last_output_winning() {
-        let mut plan = ExternalElementColorPlan::default();
-        plan.observe_output(Some((5, 5)), (0, 0), (10, 10), true, true);
-        plan.observe_output(Some((5, 5)), (100, 100), (10, 10), true, false);
+    fn blockers_accumulate_across_outputs_instead_of_last_output_winning() {
+        let mut plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::LayerTop,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+            ],
+        );
+        let mut second = OutputExternalElementPlan::new("DP-1".to_owned(), true);
+        second.observe(
+            ExternalElementClass::LayerOverlay,
+            ExternalElementDisposition::ExternalAssembly,
+            "test",
+        );
+        plan.outputs.push(second);
         assert_eq!(
             plan.blockers(),
             [
                 LinearTailBlocker::Cursor,
-                LinearTailBlocker::TopOrOverlayLayerSurface,
+                LinearTailBlocker::TopLayerSurface,
+                LinearTailBlocker::OverlayLayerSurface,
             ]
         );
     }
 
     #[test]
     fn invalid_pointer_state_fails_closed_on_a_participating_output() {
-        let mut plan = ExternalElementColorPlan::default();
-        plan.observe_output(None, (0, 0), (1920, 1080), true, false);
+        // `observe_output_external_elements` maps an unresolvable pointer to
+        // a blocking cursor class without a placement; assembly then draws
+        // nothing while the blocker keeps the frame on exact-sRGB.
+        let plan = plan_with_output(
+            true,
+            None,
+            &[(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::ExternalAssembly,
+            )],
+        );
         assert_eq!(plan.blockers(), [LinearTailBlocker::Cursor]);
+        assert!(plan.outputs[0].assembles(ExternalElementClass::Cursor));
+        assert_eq!(plan.outputs[0].cursor_position, None);
+    }
+
+    #[test]
+    fn class_statuses_report_per_class_visibility_importability_and_outputs() {
+        let mut plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::LayerTop,
+                    ExternalElementDisposition::ImportBlocked,
+                ),
+            ],
+        );
+        let mut second = OutputExternalElementPlan::new("DP-1".to_owned(), true);
+        second.observe(
+            ExternalElementClass::LayerTop,
+            ExternalElementDisposition::ExternalAssembly,
+            "test",
+        );
+        plan.outputs.push(second);
+
+        let statuses = plan.class_statuses();
+        assert_eq!(statuses.len(), ExternalElementClass::ALL.len());
+
+        let cursor = &statuses[0];
+        assert_eq!(cursor.class, "cursor");
+        assert!(cursor.visible && cursor.importable);
+        assert_eq!(cursor.assembly, "kms_external");
+        assert_eq!(cursor.blocker.as_deref(), Some("cursor"));
+        assert_eq!(cursor.outputs, ["HDMI-A-1".to_owned()]);
+
+        // One import-blocked output makes the whole class unimportable.
+        let layer_top = statuses
+            .iter()
+            .find(|status| status.class == "top_layer_surface")
+            .unwrap();
+        assert!(layer_top.visible && !layer_top.importable);
+        assert_eq!(layer_top.outputs.len(), 2);
+        assert_eq!(layer_top.blocker.as_deref(), Some("top_layer_surface"));
+
+        let lock = statuses
+            .iter()
+            .find(|status| status.class == "session_lock_surface")
+            .unwrap();
+        assert!(!lock.visible && !lock.importable);
+        assert_eq!(lock.assembly, "none");
+        assert_eq!(lock.blocker, None);
+        assert!(lock.outputs.is_empty());
     }
 
     #[test]
@@ -5899,6 +6619,7 @@ mod compositor_texture_ownership_tests {
             scene_linear_active: true,
             linear_tail_safe: false,
             linear_tail_blockers: Some(vec!["cursor".into(), "drag_icon".into()]),
+            external_elements: None,
         };
         let encoded = serde_json::to_value(&status).unwrap();
         assert!(status.linear_tail_inventory_consistent());

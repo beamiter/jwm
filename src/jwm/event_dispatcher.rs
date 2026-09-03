@@ -400,15 +400,15 @@ impl WMController for Jwm {
             // The compositors register no hit map for the grid, so — like the
             // film strip — the WM hit-tests the shared geometry itself. Only
             // the left button acts; every other press is swallowed by the
-            // grab, which is what keeps clicks off the desktop below.
+            // grab, which is what keeps clicks off the desktop below. A cell
+            // press commits nothing yet: it arms a pending press the release
+            // settles as the click's tag jump or a wireframe drag's move.
             if detail == 1 {
                 let (x, y) = backend
                     .input_ops()
                     .get_pointer_position()
                     .unwrap_or(self.last_mouse_root);
-                if let Err(error) = self.click_tags_overview(backend, x, y) {
-                    error!("Error handling tags overview click: {error}");
-                }
+                self.press_tags_overview(backend, x, y);
             }
             return;
         }
@@ -471,6 +471,19 @@ impl WMController for Jwm {
 
     fn on_button_release(&mut self, backend: &mut dyn Backend, _target: HitTarget, _time: u32) {
         if self.features.capture.take_swallowed_button_release() {
+            return;
+        }
+        if self.features.system_ui.is_tags_overview() {
+            // The press armed a cell; its release settles the gesture — the
+            // click's tag jump, a wireframe drag's window move, or a plain
+            // disarm over the scrim or dead space.
+            let (x, y) = backend
+                .input_ops()
+                .get_pointer_position()
+                .unwrap_or(self.last_mouse_root);
+            if let Err(error) = self.release_tags_overview(backend, x, y) {
+                error!("Error handling tags overview release: {error}");
+            }
             return;
         }
         if self.features.system_ui.is_active() {
@@ -1703,6 +1716,9 @@ mod tests {
         pointer_ungrabs: AtomicUsize,
         /// Event-mask bits of the most recent grab; 0 before the first one.
         last_pointer_mask: AtomicU32,
+        /// The position `get_pointer_position` reports; tests move the
+        /// pointer by storing here.
+        pointer: Mutex<(f64, f64)>,
     }
 
     impl InputOps for GrabSpyInputOps {
@@ -1713,7 +1729,7 @@ mod tests {
             Ok(())
         }
         fn get_pointer_position(&self) -> Result<(f64, f64), BackendError> {
-            Ok((0.0, 0.0))
+            Ok(*self.pointer.lock().expect("pointer position lock"))
         }
         fn grab_pointer(&self, mask: u32, _cursor: Option<u64>) -> Result<bool, BackendError> {
             self.pointer_grabs.fetch_add(1, AtomicOrdering::Relaxed);
@@ -4132,7 +4148,7 @@ mod tests {
     }
 
     #[test]
-    fn tags_overview_click_commits_the_cell_and_swallows_dead_panel_space() {
+    fn tags_overview_cell_click_commits_on_release_and_swallows_dead_panel_space() {
         use crate::backend::compositor_common::{layout_strip, tags_grid};
 
         let mut jwm = jwm_with_monitor();
@@ -4148,26 +4164,48 @@ mod tests {
             overview.cols,
         );
 
-        // The title band is inside the panel but on no cell: swallowed.
+        // The title band is inside the panel but on no cell: swallowed by
+        // the press, and the release finds no pending press to settle.
         let [px, py, _, _] = geometry.panel;
-        jwm.click_tags_overview(&mut backend, (px + 1.0) as f64, (py + 1.0) as f64)
-            .unwrap();
+        jwm.press_tags_overview(&mut backend, (px + 1.0) as f64, (py + 1.0) as f64);
         assert!(
             jwm.features.system_ui.is_tags_overview(),
             "dead panel space must neither commit nor cancel"
         );
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().pending,
+            None,
+            "dead panel space arms no press"
+        );
+        jwm.release_tags_overview(&mut backend, (px + 1.0) as f64, (py + 1.0) as f64)
+            .unwrap();
+        assert!(jwm.features.system_ui.is_tags_overview());
         assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
 
         let target = 4usize;
         let [x, y] = layout_strip::center(geometry.cells[target].cell);
-        jwm.click_tags_overview(&mut backend, x as f64, y as f64)
+        // The press alone commits nothing: it arms the pending press.
+        jwm.press_tags_overview(&mut backend, x as f64, y as f64);
+        assert!(jwm.features.system_ui.is_tags_overview());
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().pending,
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: target,
+                window: None,
+                dragging: false,
+            })
+        );
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
+
+        // The release on the same cell is the click's commit.
+        jwm.release_tags_overview(&mut backend, x as f64, y as f64)
             .unwrap();
         assert!(!jwm.features.system_ui.is_active());
         assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << target);
     }
 
     #[test]
-    fn tags_overview_click_on_the_scrim_cancels() {
+    fn tags_overview_press_on_the_scrim_cancels() {
         let mut jwm = jwm_with_monitor();
         let mut backend = RenderSpyBackend::new();
         let mon_key = jwm.state.sel_mon.unwrap();
@@ -4175,14 +4213,274 @@ mod tests {
         jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
             .unwrap();
 
-        // A corner of the output, well outside the centred panel.
-        jwm.click_tags_overview(&mut backend, 2.0, 2.0).unwrap();
+        // A corner of the output, well outside the centred panel. The scrim
+        // answers on the press itself, so no release is needed.
+        jwm.press_tags_overview(&mut backend, 2.0, 2.0);
         assert!(!jwm.features.system_ui.is_active());
         assert_eq!(
             jwm.state.monitors[mon_key].get_active_tags(),
             0,
             "a scrim click must not view anything"
         );
+    }
+
+    #[test]
+    fn tags_overview_pointer_gesture_flows_through_the_dispatcher() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let mut jwm = jwm_with_monitor();
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        let geometry = tags_grid::grid_geometry(
+            [0.0, 0.0, 1920.0, 1080.0],
+            overview.cells.len(),
+            overview.cols,
+        );
+        let target = 2usize;
+        let [x, y] = layout_strip::center(geometry.cells[target].cell);
+        *backend.input_ops.pointer.lock().unwrap() = (x as f64, y as f64);
+
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert!(
+            jwm.features.system_ui.is_tags_overview(),
+            "the press must not close the panel"
+        );
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 0);
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+        assert!(!jwm.features.system_ui.is_active());
+        assert_eq!(jwm.state.monitors[mon_key].get_active_tags(), 1 << target);
+    }
+
+    /// A monitor carrying one client on its first tag, ready for the grid's
+    /// drag: the window, its key, and the grid geometry over the full screen.
+    fn jwm_with_overview_drag_source(
+        tags: u32,
+        rect: [i32; 4],
+    ) -> (Jwm, crate::core::models::ClientKey, WindowId) {
+        use crate::core::models::WMClient;
+
+        let mut jwm = empty_jwm();
+        let mut monitor = jwm.createmon(true);
+        monitor.geometry.m_w = 1920;
+        monitor.geometry.m_h = 1080;
+        monitor.geometry.w_w = 1920;
+        monitor.geometry.w_h = 1080;
+        let mon_key = jwm.insert_monitor(monitor);
+        jwm.state.sel_mon = Some(mon_key);
+        jwm.s_w = 1920;
+        jwm.s_h = 1080;
+
+        let win = WindowId::from_raw(0xfeed);
+        let mut client = WMClient::new(win);
+        client.mon = Some(mon_key);
+        client.state.tags = tags;
+        client.geometry.x = rect[0];
+        client.geometry.y = rect[1];
+        client.geometry.w = rect[2];
+        client.geometry.h = rect[3];
+        let client_key = jwm.insert_client(client);
+        jwm.attach_to_monitor(client_key, mon_key);
+        (jwm, client_key, win)
+    }
+
+    #[test]
+    fn dragging_a_wireframe_to_another_cell_moves_the_window_and_keeps_the_panel() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let (mut jwm, client_key, win) = jwm_with_overview_drag_source(0b001, [100, 100, 800, 600]);
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(overview.window_ids[0], vec![win.raw()]);
+        let geometry = tags_grid::grid_geometry(
+            [0.0, 0.0, 1920.0, 1080.0],
+            overview.cells.len(),
+            overview.cols,
+        );
+
+        // The press lands on the wireframe itself: the outline's drawn rect
+        // inside cell 0's frame.
+        let outline = jwm.features.system_ui.tags_overview().unwrap().cells[0].windows[0];
+        let wire = layout_strip::window_rect(geometry.cells[0].frame, outline);
+        let [press_x, press_y] = layout_strip::center(wire);
+        *backend.input_ops.pointer.lock().unwrap() = (press_x as f64, press_y as f64);
+        <Jwm as WMController>::on_button_press(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+            1,
+            0,
+        );
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().pending,
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: 0,
+                window: Some(win.raw()),
+                dragging: false,
+            }),
+            "pressing the wireframe arms the press with the window's identity"
+        );
+
+        // Drag across the grid into cell 2 (tag 3): the hover moves the
+        // highlight there and the gesture becomes a drag.
+        let target = 2usize;
+        let [drop_x, drop_y] = layout_strip::center(geometry.cells[target].cell);
+        *backend.input_ops.pointer.lock().unwrap() = (drop_x as f64, drop_y as f64);
+        <Jwm as WMController>::on_motion_notify(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            drop_x as f64,
+            drop_y as f64,
+            0,
+        );
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(
+            overview.selected, target,
+            "the hover highlights the drop target"
+        );
+        assert!(
+            overview.pending.unwrap().dragging,
+            "crossing the boundary with a window in hand is a drag"
+        );
+
+        <Jwm as WMController>::on_button_release(
+            &mut jwm,
+            &mut backend,
+            HitTarget::Background { output: None },
+            0,
+        );
+
+        assert_eq!(
+            jwm.state.clients[client_key].state.tags,
+            1 << target,
+            "the drop moves the window onto the target tag"
+        );
+        let overview = jwm
+            .features
+            .system_ui
+            .tags_overview()
+            .expect("the panel survives the drop");
+        assert_eq!(overview.pending, None);
+        assert_eq!(
+            overview.window_ids[target],
+            vec![win.raw()],
+            "the rebuilt snapshot draws the window in its new cell"
+        );
+        assert!(
+            overview.window_ids[0].is_empty(),
+            "and no longer in the old one"
+        );
+    }
+
+    #[test]
+    fn a_wireframe_press_released_on_the_scrim_only_disarms() {
+        use crate::backend::compositor_common::{layout_strip, tags_grid};
+
+        let (mut jwm, client_key, win) = jwm_with_overview_drag_source(0b001, [100, 100, 800, 600]);
+        let mut backend = RenderSpyBackend::new();
+        let mon_key = jwm.state.sel_mon.unwrap();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        let active_before = jwm.state.monitors[mon_key].get_active_tags();
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        let geometry = tags_grid::grid_geometry(
+            [0.0, 0.0, 1920.0, 1080.0],
+            overview.cells.len(),
+            overview.cols,
+        );
+        let outline = jwm.features.system_ui.tags_overview().unwrap().cells[0].windows[0];
+        let wire = layout_strip::window_rect(geometry.cells[0].frame, outline);
+        let [press_x, press_y] = layout_strip::center(wire);
+
+        jwm.press_tags_overview(&mut backend, press_x as f64, press_y as f64);
+        assert_eq!(
+            jwm.features.system_ui.tags_overview().unwrap().pending,
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: 0,
+                window: Some(win.raw()),
+                dragging: false,
+            }),
+            "pressing the wireframe arms the press with the window's identity"
+        );
+
+        // The release lands on the scrim: the misdrag escape hatch — the
+        // press disarms, the panel stays, the window keeps its tag.
+        jwm.release_tags_overview(&mut backend, 2.0, 2.0).unwrap();
+        let overview = jwm
+            .features
+            .system_ui
+            .tags_overview()
+            .expect("a release on the scrim must not cancel the panel");
+        assert_eq!(overview.pending, None);
+        assert_eq!(jwm.state.clients[client_key].state.tags, 1);
+        assert_eq!(
+            jwm.state.monitors[mon_key].get_active_tags(),
+            active_before,
+            "a disarmed press must not view anything"
+        );
+    }
+
+    #[test]
+    fn an_overview_rebuild_keeps_a_press_in_flight() {
+        use crate::core::models::WMClient;
+
+        let (mut jwm, _, win) = jwm_with_overview_drag_source(0b001, [100, 100, 800, 600]);
+        let mon_key = jwm.state.sel_mon.unwrap();
+        let mut backend = RenderSpyBackend::new();
+
+        jwm.toggle_tags_overview(&mut backend, &WMArgEnum::Int(0))
+            .unwrap();
+        jwm.features.system_ui.tags_overview_mut().unwrap().pending =
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: 0,
+                window: Some(win.raw()),
+                dragging: false,
+            });
+
+        // An unrelated window appearing mid-gesture rebuilds the cells; the
+        // pending press and the highlight survive it.
+        let mut other = WMClient::new(WindowId::from_raw(0xbeef));
+        other.mon = Some(mon_key);
+        other.state.tags = 0b100;
+        other.geometry.w = 400;
+        other.geometry.h = 300;
+        let other_key = jwm.insert_client(other);
+        jwm.attach_to_monitor(other_key, mon_key);
+        jwm.arrange(&mut backend, Some(mon_key));
+
+        let overview = jwm.features.system_ui.tags_overview().unwrap();
+        assert_eq!(
+            overview.pending,
+            Some(crate::jwm::features::tags_overview::PendingCellPress {
+                cell: 0,
+                window: Some(win.raw()),
+                dragging: false,
+            }),
+            "a rebuild must not eat the gesture in flight"
+        );
+        assert_eq!(overview.window_ids[2], vec![0xbeef]);
     }
 
     #[test]

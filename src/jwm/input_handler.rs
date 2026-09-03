@@ -17,6 +17,7 @@ use crate::jwm::features::expose_plan;
 use crate::jwm::features::screenshot::{
     ScreenshotAnnotation, ScreenshotTool, ToolbarCommand, marker_ink,
 };
+use crate::jwm::features::tags_overview::live_cell;
 use crate::jwm::features::{CaptureTarget, MonitorDirection};
 use crate::jwm::rules::RuleMatcher;
 use crate::jwm::types::{WMArgEnum, WMClickType, WMFuncType};
@@ -252,6 +253,10 @@ impl Jwm {
                         cells: overview.cells.clone(),
                         cols: overview.cols,
                         selected: overview.selected,
+                        // The on-screen tag's cell draws live window textures;
+                        // the compositor falls back to the wireframe for any
+                        // window whose texture it cannot find.
+                        live: live_cell(overview),
                     }),
             }
         }));

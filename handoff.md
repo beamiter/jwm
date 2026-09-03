@@ -4,6 +4,40 @@
 
 ---
 
+## 2026-09-03：UI/UX 九轮（网格 v2 拖拽换 tag + live 缩略 / HDR P0-2）
+
+1. **网格总览拖窗口换 tag**：按住 cell 里的窗口线框拖到另一 cell 松开 =
+   把窗口移到目标 tag（替换语义，与 dwm `tag()` 一致，经 `move_client_to_tag`
+   走 EWMH/arrange 全链路），面板保持打开。提交时机从 press 改为 release：
+   纯状态机 `plan_press`/`plan_release`（tags_overview.rs:172/206）——同 cell
+   松开 = view 跳转（原点击语义），跨 cell 且越界激活 = 移动窗口，scrim 松开
+   仅解除手势不取消面板。WM 侧快照保留窗口身份（`window_ids` 与线框平行，
+   不过 API 边界）；线框命中 `tags_grid::frame_window_at`（topmost，含最小线宽）。
+   已知限制：grab 的 release 不带键号，按下 button-1 后任意键 release 都会
+   结算手势（注释写明）。嵌套实测：拖到 tag3 → IPC 确认 tags 位变化且面板
+   仍在；无位移点击仍跳转。
+2. **当前 tag cell live 缩略**：`TagsGrid.live: Option<LiveTagsCell>`（cell 索引 +
+   `(WindowId, 归一化rect)`，rect 与线框同一映射零漂移；id 越界先例 = expose）。
+   两端 `render_tags_grid_live_cell` 复用 expose 缩略图的 shader 路径把窗口纹理
+   逐帧画进 cell（缺纹理回退线框），非当前 tag 保持线框（停放窗口纹理是旧画面，
+   画出来是误导）。X11 端 id 在委托宏翻译（未知句柄丢弃，arrange 重建自愈）。
+   实测 live 证据：xclock 秒针在 cell 内逐秒更新（裁片 AE diff 212/2.5s，
+   线框 cell diff 0）。damage 未动：system UI 打开本就连帧。
+3. **HDR P0 第 2 项（逐类外部元素颜色计划）**：见下方 TODO 节的
+   「进展（2026-09-03）」小节——`external_elements_color_pipeline_safe` 总 bool
+   拆成五类（cursor/DnD/lock/layer-top/layer-overlay）可诊断计划，组装/route/
+   诊断三方同源；修掉「未 commit 的 DnD/lock/layer 树也触发 fallback」的
+   false-positive；IPC 新增 `external_elements` 逐类状态。HDR enable 仍
+   fail-closed。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2561 passed / 0 failed；v2a/v2b 均有嵌套实测截图（/tmp/jwm-uivalidate/shots/
+v2a_*.png、v2b_*.png）。
+
+**网格总览剩余**：跨显示器同框；urgent 标记（v1.1 设计里留的 v2 项）。
+
+---
+
 ## 2026-09-03：UI/UX 八轮（嵌套实测验证 + 三个实测 bug 修复）
 
 前七轮全部经嵌套会话（Xephyr :80 + x11rb + GLX + xdotool 注入）实测，
@@ -88,8 +122,8 @@ lib 2530 passed / 0 failed。
    （有一致性测试钉住）。
 
 **v1.1/v2 遗留**：~~鼠标 hover/click~~（v1.1 已完成，见七轮；命中走 WM 侧共享
-几何，两端仍不注册命中几何）、跨显示器同框、当前 tag cell 升级 live 纹理
-（expose 已有 per-window 纹理能力）、拖窗口跨 cell 改 tag。文档
+几何，两端仍不注册命中几何）、跨显示器同框、~~当前 tag cell 升级 live 纹理~~
+（v2b 已完成）、拖窗口跨 cell 改 tag。文档
 `docs/tags-overview.md`。
 
 验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
@@ -324,6 +358,25 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-03）：P0 外部元素颜色计划已完成
+
+`external_elements_color_pipeline_safe` 的总 bool 已拆成逐类计划
+（`ExternalElementColorPlan`，`src/backend/udev_kms.rs`）：cursor（主题位图与软件
+fallback 同一类）、DnD、session-lock、layer-top、layer-overlay 五类逐输出记录
+`Hidden / ExternalAssembly / ImportBlocked` 判定与 stable basis token。计划以实际
+可见/可导入为准：未 commit 的 DnD/lock/layer surface tree 不再触发 fallback（修正了
+原来的 false-positive）；非参与输出（DPMS-off/soft-disabled）恒 Hidden；导入预检用
+`buffer_type` + `dmabuf_texture_formats`，subsurface tree 任一不可导入则该类
+`ImportBlocked`。同一份计划驱动 `render_if_needed` 的元素组装（cursor 坐标一次解析、
+判定与绘制共用；`rect_overlaps_output` 共享几何）、颜色交付 route 的 blocker 清单与
+IPC 诊断，检查与绘制不再维护两套枚举。`TopOrOverlayLayerSurface` 拆成
+`top_layer_surface`/`overlay_layer_surface` 两个 wire name，`api.rs` 唯一名称表扩到
+8 项并保留 legacy 名 `top_or_overlay_layer_surface` 可识别。render-decision IPC 新增
+`color_pipeline.external_elements`（逐类 visible/importable/assembly/blocker/outputs/
+basis），typed/raw/serde/IPC 一致性测试同步扩展。route 行为仍收敛 exact-sRGB
+fallback；`ImportBlocked` 与 `assembly` 字段是第 3 项 internalize/adapt 的预留接口。
+后续从第 3 项继续。
+
 ### 进展（2026-08-20）：P0 last-success 诊断已完成
 
 `get_wayland_status`、`get_hdr_status` 和 `get_color_management_status` 现在共享
@@ -385,7 +438,7 @@ exact-sRGB fallback。
      transition 则先使旧证据失效，直到替换帧成功。
    - IPC 明确区分 EDID capability、用户 request、attempt 与实际 scanout，不再从配置静态推断
      active HDR；尚无成功快照时返回 null/unknown。
-2. **P0：KMS 外部元素颜色计划** — `src/backend/udev_kms.rs`
+2. **P0：[已完成] KMS 外部元素颜色计划** — `src/backend/udev_kms.rs`
    - 把 `external_elements_color_pipeline_safe` 的总 bool 拆成可诊断的逐类计划，完整覆盖
      cursor（主题与 fallback）、DnD、lock、top/overlay 及各自 subsurface tree；计划必须以
      实际可见/可导入元素为准。

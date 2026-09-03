@@ -565,6 +565,28 @@ macro_rules! delegate_compositor_capabilities {
                 &mut self,
                 overlay: Option<crate::backend::api::SystemUiOverlay>,
             ) {
+                let mut overlay = overlay;
+                // The compositor keys its window textures by XID and never
+                // sees a WindowId — expose crosses this boundary
+                // pre-translated the same way — so the tags grid's live cell
+                // is resolved here. A window the registry has already
+                // forgotten is dropped from the payload; its cell rebuild
+                // arrives with the next arrange.
+                if let Some(live) = overlay
+                    .as_mut()
+                    .and_then(|overlay| overlay.tags_grid.as_mut())
+                    .and_then(|grid| grid.live.as_mut())
+                {
+                    live.windows.retain_mut(|(window, _)| {
+                        match self.ids.x11(*window) {
+                            Ok(x11_window) => {
+                                *window = WindowId::from_raw(u64::from(x11_window));
+                                true
+                            }
+                            Err(_) => false,
+                        }
+                    });
+                }
                 if let Some(compositor) = self.compositor.as_mut() {
                     compositor.set_system_ui(overlay);
                 }

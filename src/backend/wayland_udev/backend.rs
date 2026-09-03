@@ -5412,21 +5412,19 @@ impl Backend for UdevBackend {
                 // CTM/LUT, per-output shader regions, or global-sRGB fallback.
                 let compositor_tail_safe = compositor.compositor_linear_tail_safe();
                 let external_element_plan = kms.borrow().external_element_color_plan(&self.state);
-                let mut linear_tail_blockers = external_element_plan.blockers();
-                if !compositor_tail_safe {
-                    linear_tail_blockers.insert(0, kms::LinearTailBlocker::CompositorEncodedTail);
-                }
                 let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
-                debug_assert_eq!(linear_tail_safe, linear_tail_blockers.is_empty());
                 let scene_linear_color_path = compositor.scene_linear_color_path_active();
                 let decision = kms.borrow_mut().refresh_color_pipeline_offload(
                     &self.state,
                     linear_tail_safe,
                     scene_linear_color_path,
                 );
+                // The blocker list and the per-class IPC diagnostics derive
+                // from the same plan instance that gates the KMS assembly.
                 kms.borrow_mut().record_color_delivery_attempt(
                     &decision,
-                    &linear_tail_blockers,
+                    &external_element_plan,
+                    compositor_tail_safe,
                     scene_linear_color_path,
                 );
                 if decision.delivery_blocked {

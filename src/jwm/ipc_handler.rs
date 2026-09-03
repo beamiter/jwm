@@ -728,6 +728,75 @@ fn output_color_policy_json(
     })
 }
 
+/// Maximum outputs listed per external element class, and maximum bytes in
+/// one output name, when reflecting the recorded per-class plan.
+const MAX_EXTERNAL_ELEMENT_OUTPUTS: usize = 64;
+const MAX_EXTERNAL_ELEMENT_OUTPUT_NAME_BYTES: usize = 256;
+
+/// Reflect the per-class external-element plan recorded with a policy
+/// decision, but only when every entry is structurally valid; a malformed
+/// payload collapses to `None` the same way an invalid blocker inventory
+/// does. Entries are rebuilt from known keys with bounded counts and bounded
+/// name lengths, so a future or hostile payload cannot smuggle arbitrary
+/// fields into the diagnostic mirror.
+fn sanitized_external_element_classes(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let entries = value.as_array()?;
+    if entries.len() > crate::backend::api::MAX_EXTERNAL_ELEMENT_CLASSES {
+        return None;
+    }
+    let mut sanitized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let object = entry.as_object()?;
+        let class = object.get("class")?.as_str()?;
+        if !crate::backend::api::linear_tail_blocker_name_is_valid(class) {
+            return None;
+        }
+        let visible = object.get("visible")?.as_bool()?;
+        let importable = object.get("importable")?.as_bool()?;
+        let assembly = object.get("assembly")?.as_str()?;
+        if !matches!(assembly, "kms_external" | "none") {
+            return None;
+        }
+        let blocker = match object.get("blocker") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => {
+                let name = value.as_str()?;
+                if !crate::backend::api::linear_tail_blocker_name_is_valid(name) {
+                    return None;
+                }
+                Some(name.to_owned())
+            }
+        };
+        let output_values = object.get("outputs")?.as_array()?;
+        if output_values.len() > MAX_EXTERNAL_ELEMENT_OUTPUTS {
+            return None;
+        }
+        let mut outputs = Vec::with_capacity(output_values.len());
+        for output in output_values {
+            let name = output.as_str()?;
+            if name.len() > MAX_EXTERNAL_ELEMENT_OUTPUT_NAME_BYTES {
+                return None;
+            }
+            outputs.push(name.to_owned());
+        }
+        // Basis tokens share the blocker-name grammar (snake_case, bounded).
+        let basis = object.get("basis")?.as_str()?;
+        if !crate::backend::api::linear_tail_blocker_name_is_valid(basis) {
+            return None;
+        }
+        sanitized.push(serde_json::json!({
+            "class": class,
+            "visible": visible,
+            "importable": importable,
+            "assembly": assembly,
+            "blocker": blocker,
+            "outputs": outputs,
+            "basis": basis,
+        }));
+    }
+    Some(serde_json::Value::Array(sanitized))
+}
+
 fn render_decisions_json(
     direct_scanout: Option<&serde_json::Value>,
     blur: Option<&serde_json::Value>,
@@ -899,6 +968,13 @@ fn render_decisions_json(
                 !blockers[..index].iter().any(|previous| previous == blocker)
             })
         });
+    // The per-class external-element plan recorded with the policy decision;
+    // absent (legacy payload or legacy render path) stays null, and a
+    // structurally invalid payload collapses to null rather than reflecting.
+    let external_elements = current_policy_decision
+        .and_then(|decision| decision.get("external_elements"))
+        .filter(|value| !value.is_null())
+        .and_then(sanitized_external_element_classes);
     let delivery_output_count = participating_delivery_outputs.len();
     let successful_deliveries = participating_delivery_outputs
         .iter()
@@ -1023,6 +1099,7 @@ fn render_decisions_json(
         "linear_tail_safe": current_linear_tail_safe,
         "linear_tail_blockers": current_linear_tail_blockers,
         "linear_tail_inventory_consistent": linear_tail_inventory.is_consistent(),
+        "external_elements": external_elements,
         "scene_linear_target_active": scene_linear_target_active,
         "capability": if color_render_path_enabled && scene_linear_target_active {
             "normalized_linear_srgb_per_output_delivery"
@@ -4087,6 +4164,115 @@ mod tests {
             render(&clear)["color_pipeline"]["linear_tail_inventory_state"],
             "observed_clear"
         );
+    }
+
+    #[test]
+    fn render_decisions_reflect_the_per_class_external_element_plan() {
+        let delivery = |decision: serde_json::Value| {
+            serde_json::json!({
+                "schema_version": 1,
+                "last_policy_decision": decision,
+                "outputs": []
+            })
+        };
+        let render = |delivery: &serde_json::Value| {
+            render_decisions_json(
+                None,
+                None,
+                &[],
+                Some(delivery),
+                0,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+            )
+        };
+
+        // Legacy decisions without the field report null, not a fabrication.
+        let legacy = delivery(serde_json::json!({
+            "sequence": 1,
+            "linear_tail_safe": true,
+            "linear_tail_blockers": []
+        }));
+        assert_eq!(
+            render(&legacy)["color_pipeline"]["external_elements"],
+            serde_json::Value::Null
+        );
+
+        let planned = delivery(serde_json::json!({
+            "sequence": 2,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": ["cursor", "overlay_layer_surface"],
+            "external_elements": [
+                {
+                    "class": "cursor",
+                    "visible": true,
+                    "importable": true,
+                    "assembly": "kms_external",
+                    "blocker": "cursor",
+                    "outputs": ["HDMI-A-1"],
+                    "basis": "pointer_on_output"
+                },
+                {
+                    "class": "overlay_layer_surface",
+                    "visible": true,
+                    "importable": false,
+                    "assembly": "kms_external",
+                    "blocker": "overlay_layer_surface",
+                    "outputs": ["HDMI-A-1"],
+                    "basis": "layer_overlaps_output"
+                },
+                {
+                    "class": "session_lock_surface",
+                    "visible": false,
+                    "importable": false,
+                    "assembly": "none",
+                    "blocker": null,
+                    "outputs": [],
+                    "basis": "session_unlocked"
+                }
+            ]
+        }));
+        let elements = render(&planned)["color_pipeline"]["external_elements"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(elements.len(), 3);
+        assert_eq!(elements[0]["class"], "cursor");
+        assert_eq!(elements[0]["blocker"], "cursor");
+        assert_eq!(elements[1]["importable"], false);
+        assert_eq!(elements[1]["basis"], "layer_overlaps_output");
+        assert_eq!(elements[2]["assembly"], "none");
+        assert_eq!(elements[2]["blocker"], serde_json::Value::Null);
+
+        // A structurally invalid payload collapses to null, like an invalid
+        // blocker inventory.
+        for bad in [
+            serde_json::json!({"class": "Cursor", "visible": true, "importable": true,
+                "assembly": "kms_external", "blocker": null, "outputs": [], "basis": "x"}),
+            serde_json::json!({"class": "cursor", "visible": "yes", "importable": true,
+                "assembly": "kms_external", "blocker": null, "outputs": [], "basis": "x"}),
+            serde_json::json!({"class": "cursor", "visible": true, "importable": true,
+                "assembly": "kms_external", "blocker": "Bad Name", "outputs": [], "basis": "x"}),
+            serde_json::json!({"class": "cursor", "visible": true, "importable": true,
+                "assembly": "compositor_internal", "blocker": null, "outputs": [], "basis": "x"}),
+            serde_json::json!({"class": "cursor", "visible": true, "importable": true,
+                "assembly": "kms_external", "blocker": null, "outputs": [1], "basis": "x"}),
+        ] {
+            let delivery = delivery(serde_json::json!({
+                "sequence": 3,
+                "linear_tail_safe": true,
+                "linear_tail_blockers": [],
+                "external_elements": [bad]
+            }));
+            assert_eq!(
+                render(&delivery)["color_pipeline"]["external_elements"],
+                serde_json::Value::Null
+            );
+        }
     }
 
     #[test]

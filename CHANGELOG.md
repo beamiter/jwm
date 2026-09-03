@@ -20,6 +20,13 @@ monorepo use independent Semantic Versions.
   pointer-operable too: hovering a cell moves the highlight, clicking a cell
   jumps to its tag, and clicking the dimmed desktop around the panel cancels.
   Cells draw wireframes rather than live thumbnails.
+- The tags overview grid moves windows with the mouse: dragging a cell's
+  wireframe onto another cell moves that window to the cell's tag while the
+  grid stays open, through the same code path as `Mod1+Shift+N` — a
+  multi-tag window's mask is replaced, not merged. A cell's commit moved
+  from press to release to make room for the gesture, so a plain click still
+  jumps to the tag, while a release landing on the dimmed desktop or the
+  panel's dead space settles nothing.
 - Native shell cards are now fully pointer-operable on X11 and Wayland:
   hovering an interactive row shows a quiet preview cue, clicking runs the same
   guarded action as `Enter`, the wheel browses lists (and calendar months),

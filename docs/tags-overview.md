@@ -37,19 +37,36 @@ with modifiers held too: the panel holds the keyboard grab, so the global
 ## Mouse
 
 The panel grabs the pointer while it is open, so no click can fall through
-to the windows underneath.
+to the windows underneath. A press on a cell commits nothing by itself —
+the release settles what the gesture meant.
 
 - Moving the pointer over a cell highlights it. Mouse and keyboard share the
   one highlight, so you can mix them freely; the dead space between cells
   leaves the highlight where it is.
-- Clicking a cell jumps to that tag and closes, exactly like `Return`.
+- Clicking a cell — press and release on the same cell — jumps to that tag
+  and closes, exactly like `Return`.
+- Dragging a window's wireframe from its cell onto another cell moves the
+  window to that tag and keeps the grid open, so several windows can be
+  dealt out in one visit. The move replaces the window's whole tag mask with
+  the target tag — the dwm `tag()` semantics of `Mod1+Shift+N`, shared with
+  the same code path — so a window that sat on several tags ends up on only
+  the drop target. Dropping on the dimmed desktop or the panel's dead space
+  commits nothing and simply lets the press go.
 - Clicking the dimmed desktop around the panel closes without switching,
-  exactly like `Esc`.
+  exactly like `Esc`. The cancel answers on the press; a release that lands
+  on the scrim after starting on a cell never cancels, so a misdrag stays
+  harmless.
 - Clicking the panel's own dead space (the title, caption and hint bands,
   the gaps between cells) does nothing — the press is swallowed.
 
 ## What the cells show
 
+- The tag currently on screen draws live: its cell swaps the wireframes for
+  the windows' own textures, scaled into the same rectangles (the expose
+  thumbnails' shader path), so a ticking clock or a moving video reads
+  directly in the grid. A window whose texture is unavailable keeps its
+  outline. Every other cell stays a wireframe — a parked window's texture
+  only holds the stale image from before it left the screen.
 - Windows parked on another tag are drawn at the position they will return
   to, not at their off-screen parking spot.
 - Sticky windows (and clients spanning every tag) draw in every cell but,
@@ -70,8 +87,9 @@ nowhere.
 ## Limitations
 
 - Only the current monitor's tags are shown; there is no cross-monitor grid.
-- Cells are wireframes, not live thumbnails — the grid identifies windows by
-  position and shape, not by content.
+- Only the on-screen tag's cell is live; a multi-tag view live-draws its
+  primary (lowest) tag, and every other cell identifies windows by position
+  and shape, not by content.
 
 ## Related surfaces
 
@@ -85,7 +103,10 @@ nowhere.
 
 ## Where it lives
 
-- `src/jwm/features/tags_overview.rs` — the snapshot, cell building,
-  selection walk and commit as pure functions, unit-tested without a display.
-- `src/backend/compositor_common/tags_grid.rs` — the grid geometry shared by
-  both compositors, so a cell is exactly where the WM thinks it is.
+- `src/jwm/features/tags_overview.rs` — the snapshot (with the window id
+  behind every wireframe kept parallel to it), cell building, selection walk,
+  press/release gesture plan and commit as pure functions, unit-tested
+  without a display.
+- `src/backend/compositor_common/tags_grid.rs` — the grid geometry and the
+  wireframe hit-test shared by both compositors, so a cell and its outlines
+  are exactly where the WM thinks they are.

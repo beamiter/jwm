@@ -21,21 +21,34 @@ impl Jwm {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // info!("[tag]");
         if let WMArgEnum::UInt(ui) = *arg {
-            let sel_client_key = self.get_selected_client_key();
-            let target_tag = ui & CONFIG.load().tagmask();
-
-            if let Some(client_key) = sel_client_key {
-                if target_tag > 0 {
-                    if let Some(client) = self.state.clients.get_mut(client_key) {
-                        client.state.tags = target_tag;
-                    }
-                    let _ = self.setclienttagprop(backend, client_key);
-
-                    self.focus(backend, None)?;
-                    self.arrange(backend, self.state.sel_mon);
-                }
+            if let Some(client_key) = self.get_selected_client_key() {
+                self.move_client_to_tag(backend, client_key, ui)?;
             }
         }
+        Ok(())
+    }
+
+    /// 把指定窗口移动到目标标签掩码（dwm `tag()` 语义：tags 是替换而非合并，
+    /// 多标签窗口移动后只属于目标标签）。掩码先与 tagmask 求交，空掩码不动；
+    /// 生效后同步 EWMH 标签属性、重新聚焦并重排。`Mod1+Shift+数字` 与 tags
+    /// 概览面板的拖拽移动共用这一条路径，保证属性、arrange 与 IPC 一致。
+    pub(crate) fn move_client_to_tag(
+        &mut self,
+        backend: &mut dyn Backend,
+        client_key: ClientKey,
+        target_tag: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let target_tag = target_tag & CONFIG.load().tagmask();
+        if target_tag == 0 {
+            return Ok(());
+        }
+        if let Some(client) = self.state.clients.get_mut(client_key) {
+            client.state.tags = target_tag;
+        }
+        let _ = self.setclienttagprop(backend, client_key);
+
+        self.focus(backend, None)?;
+        self.arrange(backend, self.state.sel_mon);
         Ok(())
     }
 

@@ -2157,6 +2157,14 @@ impl<C: CompositorConnection> Compositor<C> {
                 // Occupied tags (minimized windows included) draw in the
                 // bright ink; empty ones sit back in the dim tone.
                 let ink = if content.occupied { line } else { dim_line };
+                let live = grid.live_for_cell(index);
+                if let Some(live) = live {
+                    // The on-screen tag's cell swaps its wireframes for the
+                    // windows' own textures, scaled into the same rectangles.
+                    self.render_tags_grid_live_cell(proj, frame, live, ink, scale);
+                }
+                // The frame's border sits above the cell's content, so a live
+                // thumbnail ends exactly at the frame edge.
                 self.sysui_stroke_rounded(
                     frame[0],
                     frame[1],
@@ -2166,17 +2174,19 @@ impl<C: CompositorConnection> Compositor<C> {
                     film::LINE_WIDTH * scale,
                     UiPalette::faded(ink, 0.6),
                 );
-                for window in &content.windows {
-                    let rect = film::window_rect(frame, *window);
-                    self.sysui_stroke_rounded(
-                        rect[0],
-                        rect[1],
-                        rect[2],
-                        rect[3],
-                        film::WINDOW_RADIUS,
-                        film::LINE_WIDTH * scale,
-                        ink,
-                    );
+                if live.is_none() {
+                    for window in &content.windows {
+                        let rect = film::window_rect(frame, *window);
+                        self.sysui_stroke_rounded(
+                            rect[0],
+                            rect[1],
+                            rect[2],
+                            rect[3],
+                            film::WINDOW_RADIUS,
+                            film::LINE_WIDTH * scale,
+                            ink,
+                        );
+                    }
                 }
 
                 if content.active {
@@ -2271,6 +2281,86 @@ impl<C: CompositorConnection> Compositor<C> {
 
             for (_, tex, _, _) in labels {
                 self.gl.delete_texture(tex);
+            }
+        }
+    }
+
+    /// The on-screen tag's live cell content: every window's texture scaled
+    /// into the rectangle its wireframe would occupy — the identical
+    /// [`crate::backend::compositor_common::layout_strip::window_rect`]
+    /// mapping, so live and line-drawn cells never disagree about placement.
+    /// Drawn through the ordinary window program, the expose thumbnails'
+    /// shader path; a window whose texture is not in the table keeps its
+    /// outline as a fail-safe.
+    unsafe fn render_tags_grid_live_cell(
+        &self,
+        proj: &[f32; 16],
+        frame: [f32; 4],
+        live: &crate::backend::api::LiveTagsCell,
+        ink: [f32; 4],
+        scale: f32,
+    ) {
+        use crate::backend::compositor_common::layout_strip as film;
+
+        unsafe {
+            self.gl.use_program(Some(self.program));
+            self.gl
+                .uniform_matrix_4_f32_slice(self.win_uniforms.projection.as_ref(), false, proj);
+            self.gl.uniform_1_i32(self.win_uniforms.texture.as_ref(), 0);
+            self.gl
+                .uniform_4_f32(self.win_uniforms.uv_rect.as_ref(), 0.0, 0.0, 1.0, 1.0);
+            self.gl.active_texture(glow::TEXTURE0);
+
+            let mut outlines = Vec::new();
+            for (window, norm) in &live.windows {
+                let rect = film::window_rect(frame, *norm);
+                // The delegation layer resolved these ids to XID-backed raws;
+                // a window whose texture never arrived (or is already gone)
+                // keeps its wireframe.
+                let Some(texture) = self
+                    .windows
+                    .get(&(window.raw() as u32))
+                    .map(|wt| wt.gl_texture)
+                else {
+                    outlines.push(rect);
+                    continue;
+                };
+                self.gl
+                    .uniform_1_f32(self.win_uniforms.opacity.as_ref(), 1.0);
+                self.gl
+                    .uniform_1_f32(self.win_uniforms.radius.as_ref(), self.corner_radius);
+                self.gl.uniform_1_f32(self.win_uniforms.dim.as_ref(), 1.0);
+                self.gl
+                    .uniform_2_f32(self.win_uniforms.size.as_ref(), rect[2], rect[3]);
+                self.gl.uniform_4_f32(
+                    self.win_uniforms.rect.as_ref(),
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                );
+                self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+
+            // Back to the border program the cell loop's strokes draw with,
+            // then the fail-safe outlines.
+            self.gl.use_program(Some(self.border_program));
+            self.gl.uniform_matrix_4_f32_slice(
+                self.border_uniforms.projection.as_ref(),
+                false,
+                proj,
+            );
+            for rect in outlines {
+                self.sysui_stroke_rounded(
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    film::WINDOW_RADIUS,
+                    film::LINE_WIDTH * scale,
+                    ink,
+                );
             }
         }
     }

@@ -12,7 +12,7 @@
 //! and the window manager hit-test against it without any of them exchanging
 //! coordinates.
 
-use crate::backend::compositor_common::layout_strip::Rect;
+use crate::backend::compositor_common::layout_strip::{self, Rect};
 
 /// One grid cell.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -186,6 +186,22 @@ pub fn panel_contains(geometry: &TagsGridGeometry, x: f32, y: f32) -> bool {
     x >= px && x < px + pw && y >= py && y < py + ph
 }
 
+/// Which of a cell's window wireframes `(x, y)` lands on, if any.
+///
+/// `windows` are the cell's normalized outlines in back-to-front draw order,
+/// so the last hit wins — the wireframe the eye sees on top is the one the
+/// pointer grabs. Every outline is mapped through the same
+/// [`layout_strip::window_rect`] the renderers draw with, minimum line size
+/// included, so the clickable shape is the drawn shape. `frame` and the
+/// point share one (global) coordinate space; the frame's inset from its
+/// cell is already accounted for by the caller passing `frame`, not `cell`.
+pub fn frame_window_at(frame: Rect, windows: &[[f32; 4]], x: f32, y: f32) -> Option<usize> {
+    windows.iter().rposition(|window| {
+        let [wx, wy, ww, wh] = layout_strip::window_rect(frame, *window);
+        x >= wx && x < wx + ww && y >= wy && y < wy + wh
+    })
+}
+
 /// Text origin of a cell's tag label once the cell's presentation scale
 /// (see [`crate::backend::compositor_common::layout_strip::SELECTED_SCALE`])
 /// is applied. The label scales with its cell so the selected cell's lift
@@ -347,5 +363,91 @@ mod tests {
         let origin = label_origin(&cell, scaled, 1.12);
         assert_eq!(origin[0], scaled[0] + cell.label_offset[0] * 1.12);
         assert_eq!(origin[1], scaled[1] + cell.label_offset[1] * 1.12);
+    }
+
+    #[test]
+    fn a_wireframe_hit_picks_the_topmost_outline() {
+        let g = geom(9, 3);
+        let frame = g.cells[0].frame;
+        // Two overlapping outlines, the second drawn (and stacked) on top,
+        // plus a third off in its own corner.
+        let windows = [
+            [0.1, 0.1, 0.5, 0.5],
+            [0.3, 0.3, 0.5, 0.5],
+            [0.7, 0.7, 0.2, 0.2],
+        ];
+        let point_in = |window: [f32; 4]| {
+            let rect = layout_strip::window_rect(frame, window);
+            center(rect)
+        };
+
+        // The overlap belongs to the topmost wireframe.
+        let [x, y] = point_in([0.35, 0.35, 0.2, 0.2]);
+        assert_eq!(frame_window_at(frame, &windows, x, y), Some(1));
+        // Where only the lower wireframe sits, the lower one answers.
+        let [x, y] = point_in([0.12, 0.12, 0.1, 0.1]);
+        assert_eq!(frame_window_at(frame, &windows, x, y), Some(0));
+        let [x, y] = point_in(windows[2]);
+        assert_eq!(frame_window_at(frame, &windows, x, y), Some(2));
+    }
+
+    #[test]
+    fn a_wireframe_hit_respects_the_frame_and_misses_empty_space() {
+        let g = geom(9, 3);
+        let cell = g.cells[0];
+        let [fx, fy, fw, fh] = cell.frame;
+        let windows = [[0.0, 0.0, 0.5, 0.5]];
+
+        // The frame's padding and label band are not the wireframe: the same
+        // normalized outline starts at the frame origin, not the cell origin.
+        assert_eq!(
+            frame_window_at(cell.frame, &windows, fx + 1.0, fy + 1.0),
+            Some(0)
+        );
+        let [cx, cy, _, _] = cell.cell;
+        assert_eq!(
+            frame_window_at(cell.frame, &windows, cx + 1.0, cy + 1.0),
+            None,
+            "the cell's label band must not hit a wireframe drawn in the frame"
+        );
+        // Inside the frame but past the outline, and outside the grid
+        // entirely: no hit.
+        assert_eq!(
+            frame_window_at(cell.frame, &windows, fx + fw * 0.9, fy + fh * 0.9),
+            None
+        );
+        assert_eq!(frame_window_at(cell.frame, &windows, -50.0, -50.0), None);
+        // An empty cell hits nothing.
+        assert_eq!(frame_window_at(cell.frame, &[], fx + 1.0, fy + 1.0), None);
+    }
+
+    #[test]
+    fn a_tiny_wireframe_is_hit_at_its_drawn_minimum_size() {
+        let g = geom(9, 3);
+        let [fx, fy, _, _] = g.cells[0].frame;
+        // Smaller than the line-width floor the renderer clamps to; the hit
+        // shape follows the drawn shape, not the raw normalized numbers.
+        let windows = [[0.0, 0.0, 0.0001, 0.0001]];
+        let floor = layout_strip::LINE_WIDTH * 2.0;
+        assert_eq!(
+            frame_window_at(
+                g.cells[0].frame,
+                &windows,
+                fx + floor * 0.75,
+                fy + floor * 0.75
+            ),
+            Some(0),
+            "inside the clamped outline"
+        );
+        assert_eq!(
+            frame_window_at(
+                g.cells[0].frame,
+                &windows,
+                fx + floor * 2.0,
+                fy + floor * 2.0
+            ),
+            None,
+            "past the clamped outline"
+        );
     }
 }

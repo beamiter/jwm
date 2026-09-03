@@ -304,6 +304,43 @@ pub struct ColorDeliveryPolicyDecisionStatus {
     /// any one class caused the selected route.
     #[serde(default, deserialize_with = "deserialize_linear_tail_blockers")]
     pub linear_tail_blockers: Option<Vec<String>>,
+    /// Per-class view of the KMS-assembled external elements behind
+    /// `linear_tail_blockers`: cursor, drag icon, session lock, and the top /
+    /// overlay layer classes, each with its visibility and importability
+    /// basis. `None` means the decision predates or skipped the external
+    /// element plan (legacy path or older schema-v1 payload). The list is
+    /// diagnostic; the route is still selected from the aggregate bits above.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_external_element_classes"
+    )]
+    pub external_elements: Option<Vec<ExternalElementClassStatus>>,
+}
+
+/// Diagnostic status of one KMS-assembled external element class for one
+/// policy decision. All names are stable snake_case tokens; `outputs` lists
+/// the participating outputs where the class is assembled.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalElementClassStatus {
+    /// The class and (when blocked) blocker wire name: one of `cursor`,
+    /// `drag_icon`, `session_lock_surface`, `top_layer_surface`,
+    /// `overlay_layer_surface`.
+    pub class: String,
+    /// The class produces pixels on at least one participating output.
+    pub visible: bool,
+    /// Every drawable surface passed the import precheck, so a future
+    /// common-linear adapter could own the class. `false` while hidden.
+    pub importable: bool,
+    /// Who assembles the class this frame: `kms_external` (outside the
+    /// compositor texture) or `none` (hidden). A common-linear pass is the
+    /// documented next step, not a current value.
+    pub assembly: String,
+    /// The contributed linear-tail blocker name when the class blocks.
+    pub blocker: Option<String>,
+    pub outputs: Vec<String>,
+    /// Stable token stating the visibility/importability judgment.
+    pub basis: String,
 }
 
 /// Maximum number of blocker classes accepted from either the typed status
@@ -311,16 +348,25 @@ pub struct ColorDeliveryPolicyDecisionStatus {
 pub const MAX_LINEAR_TAIL_BLOCKERS: usize = 32;
 /// Maximum bytes in one stable or future blocker name.
 pub const MAX_LINEAR_TAIL_BLOCKER_NAME_BYTES: usize = 64;
+/// Maximum number of external element class entries accepted from the typed
+/// status schema. The compositor emits one entry per class (currently five);
+/// the bound only guards against malformed or future payloads.
+pub const MAX_EXTERNAL_ELEMENT_CLASSES: usize = 16;
 
-/// Stable blocker names emitted by the current compositor. Future names that
-/// satisfy the grammar remain valid and are counted as unknown.
-pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 6] = [
+/// Stable blocker names recognized by the current compositor. Future names
+/// that satisfy the grammar remain valid and are counted as unknown.
+/// `top_or_overlay_layer_surface` is the legacy aggregate from before the
+/// per-layer split; it stays recognized so recorded payloads keep classifying
+/// as known, but the compositor now emits only the granular names.
+pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 8] = [
     "compositor_encoded_tail",
     "capture_readback",
     "session_lock_surface",
     "drag_icon",
     "cursor",
     "top_or_overlay_layer_surface",
+    "top_layer_surface",
+    "overlay_layer_surface",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -637,6 +683,73 @@ where
     deserializer.deserialize_option(OptionalInventoryVisitor)
 }
 
+fn deserialize_external_element_classes<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ExternalElementClassStatus>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct OptionalClassesVisitor;
+    struct ClassesVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for OptionalClassesVisitor {
+        type Value = Option<Vec<ExternalElementClassStatus>>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null or a bounded external element class array")
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_seq(ClassesVisitor).map(Some)
+        }
+    }
+
+    impl<'de> serde::de::Visitor<'de> for ClassesVisitor {
+        type Value = Vec<ExternalElementClassStatus>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a bounded external element class array")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut classes = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or(0)
+                    .min(MAX_EXTERNAL_ELEMENT_CLASSES),
+            );
+            while classes.len() < MAX_EXTERNAL_ELEMENT_CLASSES {
+                let Some(class) = sequence.next_element::<ExternalElementClassStatus>()? else {
+                    return Ok(classes);
+                };
+                classes.push(class);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "external element class list exceeds its entry limit",
+                ));
+            }
+            Ok(classes)
+        }
+    }
+
+    deserializer.deserialize_option(OptionalClassesVisitor)
+}
+
 #[cfg(test)]
 mod linear_tail_inventory_tests {
     use super::*;
@@ -651,6 +764,7 @@ mod linear_tail_inventory_tests {
             linear_tail_safe: safe,
             linear_tail_blockers: blockers
                 .map(|blockers| blockers.into_iter().map(ToOwned::to_owned).collect()),
+            external_elements: None,
         }
     }
 
@@ -759,6 +873,91 @@ mod linear_tail_inventory_tests {
             "linear_tail_blockers": ["x".repeat(1024 * 1024)],
         });
         assert!(serde_json::from_value::<ColorDeliveryPolicyDecisionStatus>(huge_name).is_err());
+    }
+
+    #[test]
+    fn blocker_name_table_stays_unique_and_recognizes_split_layer_names() {
+        let mut sorted = LINEAR_TAIL_BLOCKER_NAMES.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), before, "blocker name table must not repeat");
+
+        for name in [
+            "cursor",
+            "drag_icon",
+            "session_lock_surface",
+            "top_layer_surface",
+            "overlay_layer_surface",
+        ] {
+            assert!(is_known_linear_tail_blocker_name(name), "{name}");
+            assert!(linear_tail_blocker_name_is_valid(name), "{name}");
+        }
+        // The pre-split aggregate stays recognized for recorded payloads even
+        // though the compositor no longer emits it.
+        assert!(is_known_linear_tail_blocker_name(
+            "top_or_overlay_layer_surface"
+        ));
+    }
+
+    #[test]
+    fn external_element_classes_serialize_bounded_and_legacy_absent() {
+        let mut decision = status(false, Some(vec!["cursor"]));
+        assert_eq!(decision.external_elements, None);
+        // Legacy schema-v1 payloads never carried the field; absence and an
+        // explicit null both decode as not-applicable.
+        let encoded = serde_json::to_value(&decision).unwrap();
+        assert!(encoded.get("external_elements").is_none());
+        let decoded: ColorDeliveryPolicyDecisionStatus = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.external_elements, None);
+        let with_null = serde_json::json!({
+            "sequence": 1,
+            "composited_route": "global_srgb_fallback",
+            "blocked": false,
+            "reason": null,
+            "scene_linear_active": true,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": ["cursor"],
+            "external_elements": null,
+        });
+        let decoded: ColorDeliveryPolicyDecisionStatus = serde_json::from_value(with_null).unwrap();
+        assert_eq!(decoded.external_elements, None);
+
+        decision.external_elements = Some(vec![ExternalElementClassStatus {
+            class: "cursor".into(),
+            visible: true,
+            importable: true,
+            assembly: "kms_external".into(),
+            blocker: Some("cursor".into()),
+            outputs: vec!["HDMI-A-1".into()],
+            basis: "pointer_on_output".into(),
+        }]);
+        let encoded = serde_json::to_value(&decision).unwrap();
+        assert_eq!(encoded["external_elements"][0]["class"], "cursor");
+        assert_eq!(encoded["external_elements"][0]["assembly"], "kms_external");
+        let decoded: ColorDeliveryPolicyDecisionStatus = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, decision);
+
+        let entry = serde_json::json!({
+            "class": "cursor",
+            "visible": true,
+            "importable": true,
+            "assembly": "kms_external",
+            "blocker": "cursor",
+            "outputs": [],
+            "basis": "pointer_on_output",
+        });
+        let too_many = serde_json::json!({
+            "sequence": 1,
+            "composited_route": "global_srgb_fallback",
+            "blocked": false,
+            "reason": null,
+            "scene_linear_active": true,
+            "linear_tail_safe": false,
+            "linear_tail_blockers": ["cursor"],
+            "external_elements": vec![entry; MAX_EXTERNAL_ELEMENT_CLASSES + 1],
+        });
+        assert!(serde_json::from_value::<ColorDeliveryPolicyDecisionStatus>(too_many).is_err());
     }
 }
 
@@ -987,6 +1186,56 @@ pub struct TagsGrid {
     /// same grid out, so the two can never disagree on the shape.
     pub cols: u32,
     pub selected: usize,
+    /// The currently visible tag's cell upgraded to live content. `None`
+    /// keeps every cell a wireframe.
+    pub live: Option<LiveTagsCell>,
+}
+
+impl TagsGrid {
+    /// The live payload a renderer applies to cell `index`, when the grid
+    /// carries one for it: the on-screen tag's cell draws the windows' own
+    /// textures instead of wireframes, while every other cell keeps its
+    /// outlines — a parked window's texture only holds the stale image from
+    /// before it was moved off-screen.
+    #[must_use]
+    pub fn live_for_cell(&self, index: usize) -> Option<&LiveTagsCell> {
+        self.live.as_ref().filter(|live| live.cell == index)
+    }
+}
+
+/// The currently visible tag's cell upgraded to live content: which cell,
+/// and each window's id + normalized rect (same `0.0..=1.0` cell space as
+/// the wireframes, back to front). Precedent for ids crossing this boundary:
+/// expose mode.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveTagsCell {
+    pub cell: usize,
+    pub windows: Vec<(WindowId, [f32; 4])>,
+}
+
+#[cfg(test)]
+mod tags_grid_tests {
+    use super::{LiveTagsCell, TagsGrid, WindowId};
+
+    #[test]
+    fn live_for_cell_matches_only_the_live_cell() {
+        let grid = TagsGrid {
+            live: Some(LiveTagsCell {
+                cell: 2,
+                windows: vec![(WindowId::from_raw(7), [0.0, 0.0, 1.0, 1.0])],
+            }),
+            ..TagsGrid::default()
+        };
+        assert_eq!(grid.live_for_cell(2), grid.live.as_ref());
+        assert_eq!(grid.live_for_cell(1), None);
+        assert_eq!(grid.live_for_cell(3), None);
+    }
+
+    #[test]
+    fn a_grid_without_live_content_is_wireframe_everywhere() {
+        let grid = TagsGrid::default();
+        assert_eq!(grid.live_for_cell(0), None);
+    }
 }
 
 /// One tag's cell in the overview grid.

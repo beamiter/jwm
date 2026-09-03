@@ -9,8 +9,18 @@
 //! Unlike the layout picker nothing is previewed: the desktop behind the
 //! panel never changes while the grid is up, so cancelling is simply closing
 //! and confirming is an ordinary tag jump (`Jwm::view`).
+//!
+//! The pointer gesture is a press/release pair. A press on a cell only arms
+//! a [`PendingCellPress`]; the release settles it: released on the same cell
+//! it is the click's tag jump, released on another cell with a wireframe in
+//! hand it drops that window onto the new tag (`Jwm::move_client_to_tag`,
+//! the dwm `tag()` semantics — the mask is replaced, not merged), released
+//! anywhere else it simply disarms. The compositor-facing [`TagsGridCell`]
+//! carries no window identity, so the snapshot keeps a parallel id per
+//! outline in [`TagsOverviewState::window_ids`] for the drag to resolve.
 
-use crate::backend::api::{Backend, ExposeNavDirection, TagsGridCell};
+use crate::backend::api::{Backend, ExposeNavDirection, LiveTagsCell, TagsGridCell};
+use crate::backend::common_define::WindowId;
 use crate::backend::compositor_common::expose::{expose_grid_cols, move_expose_selection};
 use crate::backend::compositor_common::tags_grid;
 use crate::config::CONFIG;
@@ -25,6 +35,9 @@ use crate::jwm::types::WMArgEnum;
 /// be tested without a window manager.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TagClientFrame {
+    /// Raw window id. The compositor-facing cell keeps only rectangles, so
+    /// the drag gesture resolves which window a wireframe is through this.
+    pub win: u64,
     /// Raw `ClientState::tags`. Sticky windows have theirs rewritten to the
     /// active mask by `Jwm::update_sticky_tags`, which is why stickiness is
     /// carried separately.
@@ -43,16 +56,39 @@ pub struct TagClientFrame {
     pub rect: [i32; 4],
 }
 
+/// A button press on a cell, held until its release settles what it meant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingCellPress {
+    /// The cell the press landed on.
+    pub cell: usize,
+    /// The wireframe hit under the press, as the window's raw id — resolved
+    /// through [`TagsOverviewState::window_ids`]. `None` on an empty cell or
+    /// the gaps between wireframes: such a press can only ever settle as the
+    /// click's view jump, never as a drag.
+    pub window: Option<u64>,
+    /// The press crossed into another cell with a window in hand: the
+    /// gesture is a drag, and its release drops the window on the cell under
+    /// it.
+    pub dragging: bool,
+}
+
 /// The open panel's state: a snapshot of the monitor's tags plus the
-/// keyboard highlight.
+/// keyboard highlight and an in-flight pointer press.
 #[derive(Debug, Clone)]
 pub struct TagsOverviewState {
     /// One cell per tag, in tag order.
     pub cells: Vec<TagsGridCell>,
+    /// Parallel to `cells[*].windows`: the raw window id behind every
+    /// outline, in the same back-to-front order. The API's [`TagsGridCell`]
+    /// carries no identity, so the drag gesture keeps its map here, on the
+    /// WM side of the snapshot.
+    pub window_ids: Vec<Vec<u64>>,
     /// Columns of the grid the cells are walked (and drawn) in.
     pub cols: u32,
     /// Highlighted cell: a tag index, stable across rebuilds.
     pub selected: usize,
+    /// The pointer press waiting for its release, if one is down.
+    pub pending: Option<PendingCellPress>,
 }
 
 impl TagsOverviewState {
@@ -64,7 +100,7 @@ impl TagsOverviewState {
         work: [i32; 4],
         tags_length: usize,
     ) -> Self {
-        let cells = build_cells(clients, active_tags, work, tags_length);
+        let (cells, window_ids) = build_cells_with_ids(clients, active_tags, work, tags_length);
         let cols = grid_cols(cells.len(), work);
         let selected = if active_tags == 0 || active_tags == u32::MAX {
             0
@@ -73,8 +109,10 @@ impl TagsOverviewState {
         };
         Self {
             cells,
+            window_ids,
             cols,
             selected,
+            pending: None,
         }
     }
 
@@ -114,26 +152,66 @@ pub fn commit_mask(selected: usize, tags_length: usize) -> Option<u32> {
     1u32.checked_shl(selected as u32)
 }
 
-/// What a resolved pointer hit means for the open overview.
+/// What a resolved pointer hit means for a press on the open overview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TagsOverviewClick {
-    /// On a cell: select it and commit — the mouse's Return.
-    Commit(usize),
-    /// On the dimmed desktop around the panel: the mouse's Escape.
+pub enum TagsOverviewPress {
+    /// On a cell: arm it. What the gesture settles into — the click's view
+    /// jump or a wireframe drag's window move — is the release's call.
+    Cell(usize),
+    /// On the dimmed desktop around the panel: the mouse's Escape, answered
+    /// on the press itself so the panel is gone before the button comes up.
     Cancel,
     /// Inside the panel but on no cell: swallow the press.
     Keep,
 }
 
-/// Decide a click from its hit-test. A cell always commits; the modal scrim
-/// cancels; the panel's dead space — the title, caption and hint bands and
-/// the gaps between cells — swallows the press, so a click can never fall
-/// through to the desktop the panel is modal over.
-pub fn plan_click(hit: Option<usize>, in_panel: bool) -> TagsOverviewClick {
+/// Decide a press from its hit-test. A cell arms a pending press; the modal
+/// scrim cancels immediately; the panel's dead space — the title, caption
+/// and hint bands and the gaps between cells — swallows the press, so a
+/// click can never fall through to the desktop the panel is modal over.
+pub fn plan_press(hit: Option<usize>, in_panel: bool) -> TagsOverviewPress {
     match (hit, in_panel) {
-        (Some(index), _) => TagsOverviewClick::Commit(index),
-        (None, true) => TagsOverviewClick::Keep,
-        (None, false) => TagsOverviewClick::Cancel,
+        (Some(index), _) => TagsOverviewPress::Cell(index),
+        (None, true) => TagsOverviewPress::Keep,
+        (None, false) => TagsOverviewPress::Cancel,
+    }
+}
+
+/// What a release settles the pending press into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagsOverviewRelease {
+    /// Press and release on one cell: the click — jump to that tag and
+    /// close, exactly what the cell committed on press before the grid
+    /// learned to drag.
+    View(usize),
+    /// A wireframe dragged onto another cell: move its window to that tag.
+    MoveToTag {
+        /// Raw window id, as [`PendingCellPress::window`] recorded it.
+        window: u64,
+        /// Target cell, i.e. target tag index.
+        target: usize,
+    },
+    /// Landing nowhere meaningful — the scrim, the panel's dead space, or a
+    /// cell crossed without a drag in flight: just disarm the press. In
+    /// particular a release on the scrim never cancels the panel; cancelling
+    /// is the scrim *press*'s job, so a misdrag that started on a cell stays
+    /// harmless.
+    Disarm,
+}
+
+/// Settle a release from the press it answers and the cell it lands on.
+/// Same cell is always the click, whatever the press held; another cell is
+/// a window drop only once the gesture actually became a drag (a window in
+/// hand that crossed the cell boundary).
+pub fn plan_release(pending: PendingCellPress, release_cell: Option<usize>) -> TagsOverviewRelease {
+    match release_cell {
+        Some(cell) if cell == pending.cell => TagsOverviewRelease::View(cell),
+        Some(target) if pending.dragging => match pending.window {
+            Some(window) => TagsOverviewRelease::MoveToTag { window, target },
+            // A drag by definition holds a window; the arm stays total.
+            None => TagsOverviewRelease::Disarm,
+        },
+        _ => TagsOverviewRelease::Disarm,
     }
 }
 
@@ -151,6 +229,18 @@ pub fn build_cells(
     work: [i32; 4],
     tags_length: usize,
 ) -> Vec<TagsGridCell> {
+    build_cells_with_ids(clients, active_tags, work, tags_length).0
+}
+
+/// [`build_cells`] plus, parallel to each cell's `windows`, the raw window
+/// id behind every outline. The two vectors are pushed together, so
+/// `window_ids[i][j]` is always the window `cells[i].windows[j]` draws.
+fn build_cells_with_ids(
+    clients: &[TagClientFrame],
+    active_tags: u32,
+    work: [i32; 4],
+    tags_length: usize,
+) -> (Vec<TagsGridCell>, Vec<Vec<u64>>) {
     let tags_length = tags_length.clamp(1, 31);
     let [wx, wy, ww, wh] = work;
     let full_mask = (1u32 << tags_length) - 1;
@@ -163,6 +253,7 @@ pub fn build_cells(
             active: (active_tags >> tag_index) & 1 != 0,
         })
         .collect();
+    let mut window_ids: Vec<Vec<u64>> = (0..tags_length).map(|_| Vec::new()).collect();
 
     for client in clients {
         let effective_tags = client.tags & full_mask;
@@ -181,10 +272,31 @@ pub fn build_cells(
             }
             if let Some(outline) = normalize_rect(client.rect, wx, wy, ww, wh) {
                 cell.windows.push(outline);
+                window_ids[index].push(client.win);
             }
         }
     }
-    cells
+    (cells, window_ids)
+}
+
+/// The payload that upgrades the on-screen tag's cell to live window
+/// content: the first active cell — a multi-tag view's primary tag, matching
+/// the selection's pre-select — with each outline's window id paired back to
+/// the normalized rect its wireframe carries, so a live thumbnail and its
+/// wireframe can never disagree about placement. `None` when no tag is on
+/// screen; every other cell keeps its wireframes, because a parked window's
+/// texture only holds the stale image from before it left the screen.
+pub fn live_cell(overview: &TagsOverviewState) -> Option<LiveTagsCell> {
+    let cell = overview.cells.iter().position(|cell| cell.active)?;
+    let outlines = &overview.cells[cell].windows;
+    let ids = overview.window_ids.get(cell)?;
+    let windows = ids
+        .iter()
+        .copied()
+        .zip(outlines.iter().copied())
+        .map(|(id, rect)| (WindowId::from_raw(id), rect))
+        .collect();
+    Some(LiveTagsCell { cell, windows })
 }
 
 /// Map a global window rectangle into a cell's `0.0..=1.0` frame, clipping
@@ -303,37 +415,105 @@ impl Jwm {
 
     /// Highlight the cell under the pointer. Mouse and keyboard share the one
     /// `selected`, so a hover after an arrow walk continues from where the
-    /// keys left off; a miss between cells leaves the selection alone.
+    /// keys left off; a miss between cells leaves the selection alone. A
+    /// press holding a window that crosses into another cell becomes a drag:
+    /// the hover keeps highlighting the drop target, and the release drops
+    /// the window on it.
     pub(crate) fn hover_tags_overview(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
         let Some(index) = self.tags_overview_cell_at(x, y) else {
             return;
         };
-        let Some(overview) = self.features.system_ui.tags_overview_mut() else {
-            return;
-        };
-        if overview.selected == index {
-            return;
+        let mut moved = false;
+        {
+            let Some(overview) = self.features.system_ui.tags_overview_mut() else {
+                return;
+            };
+            if let Some(pending) = &mut overview.pending {
+                if pending.window.is_some() && index != pending.cell {
+                    pending.dragging = true;
+                }
+            }
+            if overview.selected != index {
+                overview.selected = index;
+                moved = true;
+            }
         }
-        overview.selected = index;
-        self.sync_system_ui(backend);
+        if moved {
+            self.sync_system_ui(backend);
+        }
     }
 
-    /// A click commits like Return, cancels like Escape, or dies on the
-    /// panel's dead space — but never reaches the desktop underneath.
-    pub(crate) fn click_tags_overview(
+    /// A press on the grid: on a cell it arms a [`PendingCellPress`] whose
+    /// release decides between the click's view jump and a wireframe drag's
+    /// window move; on the scrim it cancels outright; the panel's dead space
+    /// swallows it — a press never reaches the desktop underneath.
+    pub(crate) fn press_tags_overview(&mut self, backend: &mut dyn Backend, x: f64, y: f64) {
+        match self.tags_overview_press_target(x, y) {
+            Some(TagsOverviewPress::Cell(index)) => {
+                let window = self.tags_overview_window_at(index, x, y);
+                if let Some(overview) = self.features.system_ui.tags_overview_mut() {
+                    overview.pending = Some(PendingCellPress {
+                        cell: index,
+                        window,
+                        dragging: false,
+                    });
+                }
+            }
+            Some(TagsOverviewPress::Cancel) => self.cancel_tags_overview(backend),
+            Some(TagsOverviewPress::Keep) | None => {}
+        }
+    }
+
+    /// The release answering a pending press: on the press's own cell it is
+    /// the click (select that tag, commit, close); on another cell with a
+    /// drag in flight it drops the window on that tag through
+    /// [`Jwm::move_client_to_tag`] — the same path `Mod1+Shift+数字` takes —
+    /// and keeps the panel open with refreshed cells; anywhere else it just
+    /// disarms. The pointer grab delivers releases without the button
+    /// number, so the first release after the button-1 press settles the
+    /// gesture.
+    pub(crate) fn release_tags_overview(
         &mut self,
         backend: &mut dyn Backend,
         x: f64,
         y: f64,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        match self.tags_overview_click_target(x, y) {
-            // A click on a cell is the digit key with the mouse: select that
-            // tag, then the ordinary commit.
-            Some(TagsOverviewClick::Commit(index)) => {
+        let Some(pending) = self
+            .features
+            .system_ui
+            .tags_overview()
+            .and_then(|overview| overview.pending)
+        else {
+            return Ok(());
+        };
+        let release_cell = self.tags_overview_cell_at(x, y);
+        match plan_release(pending, release_cell) {
+            TagsOverviewRelease::View(index) => {
+                // The click, settled: the digit jump's path — select, view,
+                // close. Closing drops the state, pending press included.
                 self.jump_tags_overview(backend, index)?;
             }
-            Some(TagsOverviewClick::Cancel) => self.cancel_tags_overview(backend),
-            Some(TagsOverviewClick::Keep) | None => {}
+            TagsOverviewRelease::MoveToTag { window, target } => {
+                if let Some(overview) = self.features.system_ui.tags_overview_mut() {
+                    overview.pending = None;
+                }
+                let mask = commit_mask(target, CONFIG.load().tags_length());
+                let client_key = self.wintoclient(WindowId::from_raw(window));
+                if let (Some(mask), Some(client_key)) = (mask, client_key) {
+                    log::info!(
+                        "[tags_overview] dragging window {window} to tag {}",
+                        target + 1
+                    );
+                    // The arrange inside rebuilds the open panel's cells, so
+                    // the drop is visible without the panel closing.
+                    self.move_client_to_tag(backend, client_key, mask)?;
+                }
+            }
+            TagsOverviewRelease::Disarm => {
+                if let Some(overview) = self.features.system_ui.tags_overview_mut() {
+                    overview.pending = None;
+                }
+            }
         }
         Ok(())
     }
@@ -352,9 +532,25 @@ impl Jwm {
         tags_grid::cell_at(&geometry, x as f32, y as f32)
     }
 
-    /// A click's full hit-test: the cell under the point and whether the
+    /// The window whose wireframe a point inside `cell_index` lands on, if
+    /// any: the drawn topmost outline under the point, resolved to its raw
+    /// id through the snapshot's parallel [`TagsOverviewState::window_ids`].
+    fn tags_overview_window_at(&self, cell_index: usize, x: f64, y: f64) -> Option<u64> {
+        let overview = self.features.system_ui.tags_overview()?;
+        let geometry = tags_grid::grid_geometry(
+            self.system_ui_viewport().rect(),
+            overview.cells.len(),
+            overview.cols,
+        );
+        let grid_cell = geometry.cells.get(cell_index)?;
+        let outlines = &overview.cells.get(cell_index)?.windows;
+        let hit = tags_grid::frame_window_at(grid_cell.frame, outlines, x as f32, y as f32)?;
+        overview.window_ids.get(cell_index)?.get(hit).copied()
+    }
+
+    /// A press's full hit-test: the cell under the point and whether the
     /// panel card contains it, resolved in one pass of the drawn geometry.
-    fn tags_overview_click_target(&self, x: f64, y: f64) -> Option<TagsOverviewClick> {
+    fn tags_overview_press_target(&self, x: f64, y: f64) -> Option<TagsOverviewPress> {
         let overview = self.features.system_ui.tags_overview()?;
         let geometry = tags_grid::grid_geometry(
             self.system_ui_viewport().rect(),
@@ -362,7 +558,7 @@ impl Jwm {
             overview.cols,
         );
         let (x, y) = (x as f32, y as f32);
-        Some(plan_click(
+        Some(plan_press(
             tags_grid::cell_at(&geometry, x, y),
             tags_grid::panel_contains(&geometry, x, y),
         ))
@@ -371,7 +567,9 @@ impl Jwm {
     /// Rebuild the cells after window changes while the panel is open (the
     /// `arrange` tail calls here). The selection is a tag index, so a rebuild
     /// cannot shift what it means; a tag list shrunk by a config reload
-    /// clamps it instead.
+    /// clamps it instead. A held pointer press survives the rebuild — an
+    /// unrelated arrange must not eat a gesture in flight — clamped like the
+    /// selection in case its cell went away.
     pub(crate) fn refresh_tags_overview(&mut self) {
         if !self.features.system_ui.is_tags_overview() {
             return;
@@ -382,8 +580,12 @@ impl Jwm {
         let rebuilt = self.tags_overview_state(sel_mon_key);
         if let Some(overview) = self.features.system_ui.tags_overview_mut() {
             let selected = overview.selected;
+            let pending = overview
+                .pending
+                .filter(|pending| pending.cell < rebuilt.cells.len());
             *overview = rebuilt;
             overview.selected = selected.min(overview.cells.len().saturating_sub(1));
+            overview.pending = pending;
         }
         self.mark_system_ui_dirty();
     }
@@ -434,6 +636,7 @@ impl Jwm {
                     .hidden_restore_rect
                     .unwrap_or(Rect::new(geometry.x, geometry.y, geometry.w, geometry.h));
                 Some(TagClientFrame {
+                    win: client.win.raw(),
                     tags: client.state.tags,
                     sticky: client.state.is_sticky,
                     minimized: client.state.is_hidden,
@@ -453,11 +656,19 @@ mod tests {
 
     fn frame(tags: u32, rect: [i32; 4]) -> TagClientFrame {
         TagClientFrame {
+            win: 0x1000,
             tags,
             sticky: false,
             minimized: false,
             swallowed: false,
             rect,
+        }
+    }
+
+    fn win_frame(win: u64, tags: u32, rect: [i32; 4]) -> TagClientFrame {
+        TagClientFrame {
+            win,
+            ..frame(tags, rect)
         }
     }
 
@@ -680,11 +891,185 @@ mod tests {
     }
 
     #[test]
-    fn a_click_commits_a_cell_cancels_the_scrim_and_dies_on_the_panel() {
-        assert_eq!(plan_click(Some(2), true), TagsOverviewClick::Commit(2));
+    fn a_press_arms_a_cell_cancels_the_scrim_and_dies_on_the_panel() {
+        assert_eq!(plan_press(Some(2), true), TagsOverviewPress::Cell(2));
         // A cell never sits outside the panel, but the arm stays total.
-        assert_eq!(plan_click(Some(2), false), TagsOverviewClick::Commit(2));
-        assert_eq!(plan_click(None, false), TagsOverviewClick::Cancel);
-        assert_eq!(plan_click(None, true), TagsOverviewClick::Keep);
+        assert_eq!(plan_press(Some(2), false), TagsOverviewPress::Cell(2));
+        assert_eq!(plan_press(None, false), TagsOverviewPress::Cancel);
+        assert_eq!(plan_press(None, true), TagsOverviewPress::Keep);
+    }
+
+    #[test]
+    fn every_outline_has_its_window_id_in_the_same_back_to_front_order() {
+        let (cells, window_ids) = build_cells_with_ids(
+            &[
+                win_frame(11, 0b001, [100, 100, 400, 300]),
+                win_frame(22, 0b001, [200, 200, 400, 300]),
+                // Minimized: occupies, but draws and identifies nothing.
+                TagClientFrame {
+                    minimized: true,
+                    ..win_frame(33, 0b001, [300, 300, 400, 300])
+                },
+                win_frame(44, 0b101, [400, 400, 400, 300]),
+            ],
+            0b001,
+            WORK,
+            9,
+        );
+        for (index, cell) in cells.iter().enumerate() {
+            assert_eq!(
+                cell.windows.len(),
+                window_ids[index].len(),
+                "cell {index}: ids must stay parallel to outlines"
+            );
+        }
+        assert_eq!(window_ids[0], vec![11, 22, 44]);
+        assert_eq!(window_ids[2], vec![44]);
+    }
+
+    #[test]
+    fn the_snapshot_starts_without_a_pending_press() {
+        let state =
+            TagsOverviewState::new(&[win_frame(7, 0b001, [0, 0, 400, 300])], 0b001, WORK, 9);
+        assert_eq!(state.window_ids[0], vec![7]);
+        assert_eq!(state.pending, None);
+    }
+
+    #[test]
+    fn a_release_on_the_presss_own_cell_is_the_click() {
+        // Same cell is the view jump whether or not the press held a
+        // wireframe, and even if the gesture dragged away and came back.
+        for pending in [
+            PendingCellPress {
+                cell: 2,
+                window: None,
+                dragging: false,
+            },
+            PendingCellPress {
+                cell: 2,
+                window: Some(9),
+                dragging: false,
+            },
+            PendingCellPress {
+                cell: 2,
+                window: Some(9),
+                dragging: true,
+            },
+        ] {
+            assert_eq!(
+                plan_release(pending, Some(2)),
+                TagsOverviewRelease::View(2),
+                "{pending:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drag_released_on_another_cell_moves_the_window() {
+        let pending = PendingCellPress {
+            cell: 0,
+            window: Some(9),
+            dragging: true,
+        };
+        assert_eq!(
+            plan_release(pending, Some(4)),
+            TagsOverviewRelease::MoveToTag {
+                window: 9,
+                target: 4
+            }
+        );
+    }
+
+    #[test]
+    fn a_release_off_every_cell_only_disarms() {
+        let drag = PendingCellPress {
+            cell: 0,
+            window: Some(9),
+            dragging: true,
+        };
+        // The scrim — and the panel's dead space — commit nothing.
+        assert_eq!(plan_release(drag, None), TagsOverviewRelease::Disarm);
+        // A press that never became a drag settles nothing off its own cell:
+        // without a wireframe in hand there is nothing to drop, and a bare
+        // press-release straddling two cells is not a gesture the grid sells.
+        let plain = PendingCellPress {
+            cell: 0,
+            window: None,
+            dragging: false,
+        };
+        assert_eq!(plan_release(plain, Some(4)), TagsOverviewRelease::Disarm);
+        let held_window_never_moved = PendingCellPress {
+            cell: 0,
+            window: Some(9),
+            dragging: false,
+        };
+        assert_eq!(
+            plan_release(held_window_never_moved, Some(4)),
+            TagsOverviewRelease::Disarm,
+            "a window drop requires the boundary-crossing motion"
+        );
+    }
+
+    #[test]
+    fn the_live_cell_pairs_each_outline_with_its_window_id() {
+        let state = TagsOverviewState::new(
+            &[
+                win_frame(0x100, 0b001, [960, 540, 960, 540]),
+                win_frame(0x200, 0b001, [0, 0, 480, 270]),
+                win_frame(0x300, 0b010, [100, 100, 400, 300]),
+            ],
+            0b001,
+            WORK,
+            9,
+        );
+        let live = live_cell(&state).expect("the on-screen tag goes live");
+        assert_eq!(live.cell, 0);
+        // The payload reuses the wireframe's own rects, in the same order.
+        let rects: Vec<[f32; 4]> = live.windows.iter().map(|(_, rect)| *rect).collect();
+        assert_eq!(rects, state.cells[0].windows);
+        let ids: Vec<u64> = live.windows.iter().map(|(id, _)| id.raw()).collect();
+        assert_eq!(ids, state.window_ids[0]);
+    }
+
+    #[test]
+    fn the_live_cell_is_the_lowest_active_tag_not_the_highlight() {
+        // A multi-tag view live-draws its primary tag; the keyboard
+        // highlight — which the user can move anywhere — never decides it.
+        let mut state =
+            TagsOverviewState::new(&[win_frame(0x100, 0b110, [0, 0, 960, 540])], 0b110, WORK, 9);
+        state.selected = 2;
+        let live = live_cell(&state).expect("a visible tag is live");
+        assert_eq!(live.cell, 1);
+        assert_eq!(live.windows.len(), 1);
+    }
+
+    #[test]
+    fn nothing_visible_means_no_live_cell() {
+        let state =
+            TagsOverviewState::new(&[win_frame(0x100, 0b001, [0, 0, 960, 540])], 0, WORK, 9);
+        assert_eq!(live_cell(&state), None);
+    }
+
+    #[test]
+    fn the_live_cell_skips_outlineless_windows_like_the_wireframe_does() {
+        let state = TagsOverviewState::new(
+            &[
+                TagClientFrame {
+                    minimized: true,
+                    ..win_frame(0x100, 0b001, [0, 0, 960, 540])
+                },
+                win_frame(0x200, 0b001, [100, 100, 400, 300]),
+            ],
+            0b001,
+            WORK,
+            9,
+        );
+        let live = live_cell(&state).expect("the on-screen tag goes live");
+        assert_eq!(live.windows.len(), 1);
+        assert_eq!(live.windows[0].0, WindowId::from_raw(0x200));
+        assert!(
+            state.cells[0].occupied,
+            "the minimized window still occupies"
+        );
     }
 }
