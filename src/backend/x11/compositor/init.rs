@@ -1040,6 +1040,7 @@ impl<C: CompositorConnection> Compositor<C> {
             toast_textures: HashMap::new(),
             toast_rects: Vec::new(),
             toast_hover: None,
+            toast_button_hover: None,
             osd_slot: Default::default(),
             osd_texture: None,
             hud_text_cache: String::new(),

@@ -2128,13 +2128,25 @@ impl Jwm {
             return self.apply_expose_action(backend, expose_plan::plan_click(hit));
         }
 
-        // A left-click on a toast card dismisses it. The click is swallowed
-        // here — before any window dispatch — so it is never replayed to the
-        // client underneath the card.
+        // A left-click on a toast card dismisses it; on an action button it
+        // additionally invokes the action against the notification record.
+        // The click is swallowed here — before any window dispatch — so it is
+        // never replayed to the client underneath the card.
         if MouseButton::from_u8(detail_btn) == MouseButton::Left {
             let (rx, ry) = self.last_mouse_root;
-            if backend.compositor_click_toast(rx as f32, ry as f32) {
-                return Ok(());
+            match backend.compositor_click_toast(rx as f32, ry as f32) {
+                crate::backend::api::ToastClick::Miss => {}
+                crate::backend::api::ToastClick::Dismissed => return Ok(()),
+                crate::backend::api::ToastClick::Action {
+                    notification_id,
+                    action_key,
+                } => {
+                    // Invoking closes the record (freedesktop order:
+                    // ActionInvoked, then NotificationClosed); the compositor
+                    // already dismissed the card itself.
+                    self.invoke_notification_action(notification_id, &action_key);
+                    return Ok(());
+                }
             }
         }
 

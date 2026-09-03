@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-03：UI/UX 三轮（标签字体统一 / toast 动作按钮 / 动画默认开）
+
+1. **Expose/overview 标签迁移到统一字体栈，位图字体退役**。两端
+   `overview.rs` 的 `render_title_to_pixels`（6x10 ASCII 字模，中文显示 `?`/空格）
+   已删除，`x11/compositor/font.rs` 整文件移除；标签改走
+   `compositor_font::render_ui_text_to_rgba`（ab_glyph + fc-match + CJK/emoji 回退），
+   样式与 tab 条同源：`ui.card` 药丸 chip 底 + `ui.title_ink`，字号约 17.6px。
+   纹理缓存粒度不变（进入 overview 时一批创建，静止零上传）。
+   **expose 网格本来就不画窗口标题**，无迁移面。至此用户可见文字全部走真字体栈，
+   window_tabs 剩余项 #2（非 ASCII 标题）关闭——仅剩 compositor_font 里给
+   无 fontconfig 环境留的兜底位图表。
+2. **Toast 动作按钮**。`ToastNotification` 增加 `actions`（`NotificationAction`
+   挪入 api.rs，历史文件格式不变）与 `notification_id`；有动作的卡片底部画
+   至多 3 个 chip 按钮（accent 描边、hover 换 accent wash、加高 34px），
+   按钮矩形逐帧进 `toast_rects`（升级为 `ToastRects { id, card, buttons }`，
+   纯函数 `hit_test`/`action_row_layout` 有单测）。`compositor_click_toast`
+   返回 `ToastClick::{Miss, Dismissed, Action { notification_id, action_key }}`；
+   WM 命中 Action 走 `invoke_notification_action` 既有链路（IPC 广播 +
+   Dismissed 关闭 record，与通知中心一致）。淡出中的卡再点按钮只吞不重复
+   触发（防双击）。toast sanitize 对 actions 有上限/清洗。
+3. **`window_animation` 默认开启**（`config.rs:795` serde default_true +
+   Default impl 同步），样式默认 `scale`，配合上一轮的三样式；修掉
+   `transition_mode` 文档注释里过时的「none 默认」（实际默认 coverflow）。
+   用户配置里的显式 false 不受影响。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2492 passed / 0 failed。真机未实测。
+
+---
+
 ## 2026-09-03：UI/UX 二轮（Alt+Tab 切换器 / 动画样式 / 通知持久化）
 
 1. **按住式 Alt+Tab MRU 窗口切换器**。默认键位变更：Alt+Tab/Alt+Shift+Tab 从
@@ -351,8 +381,9 @@ bug 整个消掉了 —— 现在没有任何窗口 id 跨过这条边界。
    ui_theme 卡片+chip 风格；`overview.rs` 的 `render_title_to_pixels` 只服务
    expose/overview 标签，不再画 tab 标题。真正残留的是 expose/overview 标签在
    两端的样式差异（X11 深色药丸底+2x / wayland 1x 白字无底）。
-2. **非 ASCII 标题显示为 `?` 或空格。** 两边都是 6x10 ASCII 位图字体，中文标题会整排问号
-   （X11）或空格（wayland）。要修就得引入真正的字体栈，是另一个量级的事。
+2. ~~非 ASCII 标题显示为 `?` 或空格。~~ **已关闭**：tab 标题本就走
+   `compositor_font` 真字体栈，overview 标签在 2026-09-03 三轮迁入后，
+   用户可见文字全部支持 CJK/emoji 回退；仅剩无 fontconfig 环境的兜底位图表。
 3. ~~没有 hover 高亮、没有中键关闭、不能拖拽换序。~~ **已完成**，见 2026-09-03
    「UI/UX 交互闭环一轮」第 1–3 条。
 4. **`compositor_zoom_to_fit(Option<u32>)`**（`compositor_delegation.rs`）仍是原来那种

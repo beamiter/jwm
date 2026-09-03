@@ -6,6 +6,8 @@ use crate::backend::compositor_common::prism::{
     MAX_PRISM_SIDES, MIN_PRISM_SIDES, PrismCamera, PrismKind, PrismPiece, build_prism_pieces,
     mirror_matrix,
 };
+use crate::backend::compositor_common::ui_theme::{self, UiPalette};
+use crate::backend::compositor_font;
 use crate::backend::wayland_udev::color_pipeline::ColorTransform;
 use smithay::backend::renderer::gles::ffi;
 
@@ -14,8 +16,12 @@ use smithay::backend::renderer::gles::ffi;
 const PRISM_FACE_FILL: f32 = 0.56;
 /// Screen-space baseline of the front face, leaving room for its title.
 const PRISM_BASE_LINE: f32 = 0.84;
-const TITLE_SCALE: f32 = 2.0;
 const TITLE_MARGIN: f32 = 8.0;
+/// Horizontal breathing room between a title's text and the edge of the
+/// card-toned pill drawn behind it.
+const TITLE_PAD_X: f32 = 10.0;
+/// Vertical equivalent of [`TITLE_PAD_X`].
+const TITLE_PAD_Y: f32 = 5.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrismEntryAvailability {
@@ -81,10 +87,13 @@ fn prism_face_plan(sides: usize, availability: &[PrismEntryAvailability]) -> Vec
         .collect()
 }
 
+/// Pixel budget for a title label drawn at 1:1 scale: a third of the monitor,
+/// but never so wide that the label could overrun the reserved margins.
 fn max_title_texture_width(monitor_width: u32) -> u32 {
-    let available = (monitor_width.saturating_sub((TITLE_MARGIN * 2.0) as u32) as f32 / TITLE_SCALE)
-        .floor() as u32;
-    (monitor_width / 3).max(120).min(available.max(1))
+    let available = monitor_width
+        .saturating_sub((TITLE_MARGIN * 2.0) as u32)
+        .max(1);
+    (monitor_width / 3).max(120).min(available)
 }
 
 /// Rotation that brings the selected prism face squarely toward the camera.
@@ -116,206 +125,6 @@ pub(super) fn prism_entry_range(
         .min(entry_count - MAX_PRISM_SIDES);
     start..start + MAX_PRISM_SIDES
 }
-
-// ---------------------------------------------------------------------------
-// Minimal 6x10 bitmap font (ASCII 32-126, 95 chars x 10 bytes = 950 bytes)
-// Each byte: lower 6 bits represent pixel columns left-to-right for one row.
-// ---------------------------------------------------------------------------
-
-#[allow(dead_code)]
-#[rustfmt::skip]
-const FONT_6X10: &[u8; 950] = &[
-    // 32: space
-    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 33: !
-    0x04,0x04,0x04,0x04,0x04,0x04,0x00,0x04,0x00,0x00,
-    // 34: "
-    0x0A,0x0A,0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 35: #
-    0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A,0x00,0x00,0x00,
-    // 36: $
-    0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04,0x00,0x00,0x00,
-    // 37: %
-    0x18,0x19,0x02,0x04,0x08,0x13,0x03,0x00,0x00,0x00,
-    // 38: &
-    0x08,0x14,0x14,0x08,0x15,0x12,0x0D,0x00,0x00,0x00,
-    // 39: '
-    0x04,0x04,0x08,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 40: (
-    0x02,0x04,0x08,0x08,0x08,0x04,0x02,0x00,0x00,0x00,
-    // 41: )
-    0x08,0x04,0x02,0x02,0x02,0x04,0x08,0x00,0x00,0x00,
-    // 42: *
-    0x00,0x04,0x15,0x0E,0x15,0x04,0x00,0x00,0x00,0x00,
-    // 43: +
-    0x00,0x04,0x04,0x1F,0x04,0x04,0x00,0x00,0x00,0x00,
-    // 44: ,
-    0x00,0x00,0x00,0x00,0x00,0x04,0x04,0x08,0x00,0x00,
-    // 45: -
-    0x00,0x00,0x00,0x1F,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 46: .
-    0x00,0x00,0x00,0x00,0x00,0x00,0x04,0x00,0x00,0x00,
-    // 47: /
-    0x01,0x01,0x02,0x04,0x08,0x10,0x10,0x00,0x00,0x00,
-    // 48: 0
-    0x0E,0x11,0x13,0x15,0x19,0x11,0x0E,0x00,0x00,0x00,
-    // 49: 1
-    0x04,0x0C,0x04,0x04,0x04,0x04,0x0E,0x00,0x00,0x00,
-    // 50: 2
-    0x0E,0x11,0x01,0x06,0x08,0x10,0x1F,0x00,0x00,0x00,
-    // 51: 3
-    0x0E,0x11,0x01,0x06,0x01,0x11,0x0E,0x00,0x00,0x00,
-    // 52: 4
-    0x02,0x06,0x0A,0x12,0x1F,0x02,0x02,0x00,0x00,0x00,
-    // 53: 5
-    0x1F,0x10,0x1E,0x01,0x01,0x11,0x0E,0x00,0x00,0x00,
-    // 54: 6
-    0x06,0x08,0x10,0x1E,0x11,0x11,0x0E,0x00,0x00,0x00,
-    // 55: 7
-    0x1F,0x01,0x02,0x04,0x08,0x08,0x08,0x00,0x00,0x00,
-    // 56: 8
-    0x0E,0x11,0x11,0x0E,0x11,0x11,0x0E,0x00,0x00,0x00,
-    // 57: 9
-    0x0E,0x11,0x11,0x0F,0x01,0x02,0x0C,0x00,0x00,0x00,
-    // 58: :
-    0x00,0x00,0x04,0x00,0x00,0x04,0x00,0x00,0x00,0x00,
-    // 59: ;
-    0x00,0x00,0x04,0x00,0x00,0x04,0x04,0x08,0x00,0x00,
-    // 60: <
-    0x02,0x04,0x08,0x10,0x08,0x04,0x02,0x00,0x00,0x00,
-    // 61: =
-    0x00,0x00,0x1F,0x00,0x1F,0x00,0x00,0x00,0x00,0x00,
-    // 62: >
-    0x08,0x04,0x02,0x01,0x02,0x04,0x08,0x00,0x00,0x00,
-    // 63: ?
-    0x0E,0x11,0x01,0x02,0x04,0x00,0x04,0x00,0x00,0x00,
-    // 64: @
-    0x0E,0x11,0x17,0x15,0x17,0x10,0x0E,0x00,0x00,0x00,
-    // 65: A
-    0x0E,0x11,0x11,0x1F,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 66: B
-    0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E,0x00,0x00,0x00,
-    // 67: C
-    0x0E,0x11,0x10,0x10,0x10,0x11,0x0E,0x00,0x00,0x00,
-    // 68: D
-    0x1E,0x11,0x11,0x11,0x11,0x11,0x1E,0x00,0x00,0x00,
-    // 69: E
-    0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F,0x00,0x00,0x00,
-    // 70: F
-    0x1F,0x10,0x10,0x1E,0x10,0x10,0x10,0x00,0x00,0x00,
-    // 71: G
-    0x0E,0x11,0x10,0x17,0x11,0x11,0x0F,0x00,0x00,0x00,
-    // 72: H
-    0x11,0x11,0x11,0x1F,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 73: I
-    0x0E,0x04,0x04,0x04,0x04,0x04,0x0E,0x00,0x00,0x00,
-    // 74: J
-    0x07,0x02,0x02,0x02,0x02,0x12,0x0C,0x00,0x00,0x00,
-    // 75: K
-    0x11,0x12,0x14,0x18,0x14,0x12,0x11,0x00,0x00,0x00,
-    // 76: L
-    0x10,0x10,0x10,0x10,0x10,0x10,0x1F,0x00,0x00,0x00,
-    // 77: M
-    0x11,0x1B,0x15,0x15,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 78: N
-    0x11,0x19,0x15,0x13,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 79: O
-    0x0E,0x11,0x11,0x11,0x11,0x11,0x0E,0x00,0x00,0x00,
-    // 80: P
-    0x1E,0x11,0x11,0x1E,0x10,0x10,0x10,0x00,0x00,0x00,
-    // 81: Q
-    0x0E,0x11,0x11,0x11,0x15,0x12,0x0D,0x00,0x00,0x00,
-    // 82: R
-    0x1E,0x11,0x11,0x1E,0x14,0x12,0x11,0x00,0x00,0x00,
-    // 83: S
-    0x0E,0x11,0x10,0x0E,0x01,0x11,0x0E,0x00,0x00,0x00,
-    // 84: T
-    0x1F,0x04,0x04,0x04,0x04,0x04,0x04,0x00,0x00,0x00,
-    // 85: U
-    0x11,0x11,0x11,0x11,0x11,0x11,0x0E,0x00,0x00,0x00,
-    // 86: V
-    0x11,0x11,0x11,0x11,0x0A,0x0A,0x04,0x00,0x00,0x00,
-    // 87: W
-    0x11,0x11,0x11,0x15,0x15,0x1B,0x11,0x00,0x00,0x00,
-    // 88: X
-    0x11,0x11,0x0A,0x04,0x0A,0x11,0x11,0x00,0x00,0x00,
-    // 89: Y
-    0x11,0x11,0x0A,0x04,0x04,0x04,0x04,0x00,0x00,0x00,
-    // 90: Z
-    0x1F,0x01,0x02,0x04,0x08,0x10,0x1F,0x00,0x00,0x00,
-    // 91: [
-    0x0E,0x08,0x08,0x08,0x08,0x08,0x0E,0x00,0x00,0x00,
-    // 92: backslash
-    0x10,0x10,0x08,0x04,0x02,0x01,0x01,0x00,0x00,0x00,
-    // 93: ]
-    0x0E,0x02,0x02,0x02,0x02,0x02,0x0E,0x00,0x00,0x00,
-    // 94: ^
-    0x04,0x0A,0x11,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 95: _
-    0x00,0x00,0x00,0x00,0x00,0x00,0x1F,0x00,0x00,0x00,
-    // 96: `
-    0x08,0x04,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    // 97: a
-    0x00,0x00,0x0E,0x01,0x0F,0x11,0x0F,0x00,0x00,0x00,
-    // 98: b
-    0x10,0x10,0x1E,0x11,0x11,0x11,0x1E,0x00,0x00,0x00,
-    // 99: c
-    0x00,0x00,0x0E,0x11,0x10,0x11,0x0E,0x00,0x00,0x00,
-    // 100: d
-    0x01,0x01,0x0F,0x11,0x11,0x11,0x0F,0x00,0x00,0x00,
-    // 101: e
-    0x00,0x00,0x0E,0x11,0x1F,0x10,0x0E,0x00,0x00,0x00,
-    // 102: f
-    0x06,0x08,0x1E,0x08,0x08,0x08,0x08,0x00,0x00,0x00,
-    // 103: g
-    0x00,0x00,0x0F,0x11,0x11,0x0F,0x01,0x0E,0x00,0x00,
-    // 104: h
-    0x10,0x10,0x1E,0x11,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 105: i
-    0x04,0x00,0x0C,0x04,0x04,0x04,0x0E,0x00,0x00,0x00,
-    // 106: j
-    0x02,0x00,0x06,0x02,0x02,0x02,0x12,0x0C,0x00,0x00,
-    // 107: k
-    0x10,0x10,0x12,0x14,0x18,0x14,0x12,0x00,0x00,0x00,
-    // 108: l
-    0x0C,0x04,0x04,0x04,0x04,0x04,0x0E,0x00,0x00,0x00,
-    // 109: m
-    0x00,0x00,0x1A,0x15,0x15,0x15,0x15,0x00,0x00,0x00,
-    // 110: n
-    0x00,0x00,0x1E,0x11,0x11,0x11,0x11,0x00,0x00,0x00,
-    // 111: o
-    0x00,0x00,0x0E,0x11,0x11,0x11,0x0E,0x00,0x00,0x00,
-    // 112: p
-    0x00,0x00,0x1E,0x11,0x11,0x1E,0x10,0x10,0x00,0x00,
-    // 113: q
-    0x00,0x00,0x0F,0x11,0x11,0x0F,0x01,0x01,0x00,0x00,
-    // 114: r
-    0x00,0x00,0x16,0x19,0x10,0x10,0x10,0x00,0x00,0x00,
-    // 115: s
-    0x00,0x00,0x0F,0x10,0x0E,0x01,0x1E,0x00,0x00,0x00,
-    // 116: t
-    0x08,0x08,0x1E,0x08,0x08,0x09,0x06,0x00,0x00,0x00,
-    // 117: u
-    0x00,0x00,0x11,0x11,0x11,0x11,0x0F,0x00,0x00,0x00,
-    // 118: v
-    0x00,0x00,0x11,0x11,0x11,0x0A,0x04,0x00,0x00,0x00,
-    // 119: w
-    0x00,0x00,0x11,0x11,0x15,0x15,0x0A,0x00,0x00,0x00,
-    // 120: x
-    0x00,0x00,0x11,0x0A,0x04,0x0A,0x11,0x00,0x00,0x00,
-    // 121: y
-    0x00,0x00,0x11,0x11,0x11,0x0F,0x01,0x0E,0x00,0x00,
-    // 122: z
-    0x00,0x00,0x1F,0x02,0x04,0x08,0x1F,0x00,0x00,0x00,
-    // 123: {
-    0x02,0x04,0x04,0x08,0x04,0x04,0x02,0x00,0x00,0x00,
-    // 124: |
-    0x04,0x04,0x04,0x04,0x04,0x04,0x04,0x00,0x00,0x00,
-    // 125: }
-    0x08,0x04,0x04,0x02,0x04,0x04,0x08,0x00,0x00,0x00,
-    // 126: ~
-    0x00,0x00,0x08,0x15,0x02,0x00,0x00,0x00,0x00,0x00,
-];
 
 #[derive(Debug, Clone, PartialEq)]
 struct OverviewStripWindowSegment {
@@ -403,106 +212,69 @@ impl WaylandCompositor {
         Some((sx, sy))
     }
 
-    /// Rasterize a title string into RGBA pixels using the built-in bitmap font.
-    /// Returns (pixels, width, height) or None if title is empty.
-    #[allow(dead_code)]
-    pub(crate) fn render_title_to_pixels(
-        title: &str,
-        max_width: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        if title.is_empty() {
-            return None;
-        }
-
-        const CHAR_W: u32 = 6;
-        const CHAR_H: u32 = 10;
-        const PADDING: u32 = 2;
-
-        let chars: Vec<u8> = title.bytes().collect();
-        let text_width = (chars.len() as u32) * CHAR_W;
-        let img_w = text_width.min(max_width);
-        let img_h = CHAR_H + PADDING * 2;
-        let max_chars = (img_w / CHAR_W) as usize;
-        let render_chars = chars.len().min(max_chars);
-
-        let mut pixels = vec![0u8; (img_w * img_h * 4) as usize];
-
-        for (ci, &ch) in chars[..render_chars].iter().enumerate() {
-            let glyph_idx = if ch >= 32 && ch <= 126 {
-                (ch - 32) as usize
-            } else {
-                0 // render space for non-ASCII
-            };
-            let glyph = &FONT_6X10[glyph_idx * 10..(glyph_idx + 1) * 10];
-
-            for row in 0..CHAR_H {
-                let bits = glyph[row as usize];
-                for col in 0..CHAR_W {
-                    let px = (ci as u32) * CHAR_W + col;
-                    let py = row + PADDING;
-                    if px >= img_w {
-                        break;
-                    }
-                    // Bit 5 is leftmost pixel, bit 0 is rightmost
-                    let bit = (bits >> (CHAR_W - 1 - col)) & 1;
-                    if bit != 0 {
-                        let offset = ((py * img_w + px) * 4) as usize;
-                        pixels[offset] = 255; // R
-                        pixels[offset + 1] = 255; // G
-                        pixels[offset + 2] = 255; // B
-                        pixels[offset + 3] = 255; // A
-                    }
-                }
-            }
-        }
-
-        Some((pixels, img_w, img_h))
-    }
-
     /// Create GL textures for overview entry titles.
-    /// Stores texture IDs in `self.overview_title_textures`.
+    /// Stores (texture, width, height) triples in `self.overview_title_textures`.
+    ///
+    /// Titles use the same face, size and ink as the tab strip's titles, so an
+    /// overview label reads as part of the same UI rather than a separate
+    /// overlay with its own typography.
     pub(crate) fn create_overview_title_textures(&mut self, gl: &ffi::Gles2) {
         self.clear_overview_textures(gl);
 
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
         let max_label_width = max_title_texture_width(self.overview_monitor.2.max(1));
         let mut textures = Vec::with_capacity(self.overview_entries.len());
 
         for entry in &self.overview_entries {
-            if let Some((pixels, w, h)) =
-                Self::render_title_to_pixels(&entry.title, max_label_width)
-            {
-                let mut tex = 0u32;
-                unsafe {
-                    gl.GenTextures(1, &mut tex);
-                    gl.BindTexture(ffi::TEXTURE_2D, tex);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
-                    gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_WRAP_S,
-                        ffi::CLAMP_TO_EDGE as i32,
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_WRAP_T,
-                        ffi::CLAMP_TO_EDGE as i32,
-                    );
-                    gl.TexImage2D(
-                        ffi::TEXTURE_2D,
-                        0,
-                        ffi::RGBA as i32,
-                        w as i32,
-                        h as i32,
-                        0,
-                        ffi::RGBA,
-                        ffi::UNSIGNED_BYTE,
-                        pixels.as_ptr() as *const _,
-                    );
+            let text = compositor_font::fit_ui_text(&entry.title, font, size, max_label_width);
+            let mut uploaded = (0u32, 0u32, 0u32);
+            if !text.is_empty() {
+                let (pixels, w, h) =
+                    compositor_font::render_ui_text_to_rgba(&text, font, size, ui.title_ink);
+                if w != 0 && h != 0 {
+                    let mut tex = 0u32;
+                    unsafe {
+                        gl.GenTextures(1, &mut tex);
+                        gl.BindTexture(ffi::TEXTURE_2D, tex);
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_MIN_FILTER,
+                            ffi::LINEAR as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_MAG_FILTER,
+                            ffi::LINEAR as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_WRAP_S,
+                            ffi::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.TexParameteri(
+                            ffi::TEXTURE_2D,
+                            ffi::TEXTURE_WRAP_T,
+                            ffi::CLAMP_TO_EDGE as i32,
+                        );
+                        gl.TexImage2D(
+                            ffi::TEXTURE_2D,
+                            0,
+                            ffi::RGBA as i32,
+                            w as i32,
+                            h as i32,
+                            0,
+                            ffi::RGBA,
+                            ffi::UNSIGNED_BYTE,
+                            pixels.as_ptr() as *const _,
+                        );
+                    }
+                    uploaded = (tex, w, h);
                 }
-                textures.push(tex);
-            } else {
-                textures.push(0);
             }
+            textures.push(uploaded);
         }
 
         self.overview_title_textures = textures;
@@ -1105,33 +877,48 @@ impl WaylandCompositor {
             // ------------------------------------------------------------------
             // 5. Title label below selected window
             // ------------------------------------------------------------------
-            if !self.overview_title_textures.is_empty()
-                && selected_idx < self.overview_title_textures.len()
-            {
-                let title_tex = self.overview_title_textures[selected_idx];
+            if selected_idx < self.overview_title_textures.len() {
+                let (title_tex, tex_w, tex_h) = self.overview_title_textures[selected_idx];
                 if title_tex != 0 {
-                    // Render title centered below the prism using the window program
-                    let title = &self.overview_entries[selected_idx].title;
-                    let char_w = 6u32;
-                    let char_h = 10u32;
-                    let padding = 2u32;
-                    let max_label_width = max_title_texture_width(mon_w);
-                    let text_w = ((title.len() as u32) * char_w).min(max_label_width);
-                    let text_h = char_h + padding * 2;
-
-                    // Scale up for readability. The atlas width helper already
-                    // reserves both monitor margins at this display scale.
-                    let scale = TITLE_SCALE;
-                    let label_w = text_w as f32 * scale;
-                    let label_h = text_h as f32 * scale;
+                    let label_w = tex_w as f32;
+                    let label_h = tex_h as f32;
+                    // The card-toned pill the tab strip carries its cells on,
+                    // drawn at 1:1 scale behind the rasterized title.
+                    let chip_w = label_w + TITLE_PAD_X * 2.0;
+                    let chip_h = label_h + TITLE_PAD_Y * 2.0;
                     let (anchor_x, anchor_y) = selected_title_anchor
                         .unwrap_or((mon_x as f32 + mw * 0.5, mon_y as f32 + mh * PRISM_BASE_LINE));
                     let min_x = mon_x as f32 + TITLE_MARGIN;
-                    let max_x = (mon_x as f32 + mw - label_w - TITLE_MARGIN).max(min_x);
+                    let max_x = (mon_x as f32 + mw - chip_w - TITLE_MARGIN).max(min_x);
                     let min_y = mon_y as f32 + TITLE_MARGIN;
-                    let max_y = (mon_y as f32 + mh - label_h - TITLE_MARGIN).max(min_y);
-                    let label_x = (anchor_x - label_w * 0.5).clamp(min_x, max_x);
-                    let label_y = anchor_y.clamp(min_y, max_y);
+                    let max_y = (mon_y as f32 + mh - chip_h - TITLE_MARGIN).max(min_y);
+                    let chip_x = (anchor_x - chip_w * 0.5).clamp(min_x, max_x);
+                    let chip_y = anchor_y.clamp(min_y, max_y);
+                    let label_x = chip_x + TITLE_PAD_X;
+                    let label_y = chip_y + TITLE_PAD_Y;
+
+                    let ui = ui_theme::palette();
+                    gl.BindVertexArray(self.quad_vao);
+                    gl.UseProgram(self.border_program);
+                    gl.Uniform1i(
+                        self.border_uniforms.scene_linear,
+                        i32::from(scene_linear_output),
+                    );
+                    gl.UniformMatrix4fv(
+                        self.border_uniforms.projection,
+                        1,
+                        ffi::FALSE as u8,
+                        projection.as_ptr(),
+                    );
+                    self.draw_overview_strip_rect(
+                        gl,
+                        chip_x,
+                        chip_y,
+                        chip_w,
+                        chip_h,
+                        chip_h * 0.5,
+                        UiPalette::faded(ui.card, self.overview_opacity.clamp(0.0, 1.0)),
+                    );
 
                     gl.UseProgram(self.program);
                     gl.Uniform1i(self.win_uniforms.color_managed, 0);
@@ -1151,7 +938,9 @@ impl WaylandCompositor {
                     // alpha; a positive value intentionally forces RGB clients
                     // opaque and would turn the entire label quad black.
                     gl.Uniform1f(self.win_uniforms.opacity, -self.overview_opacity * 0.95);
-                    gl.Uniform1f(self.win_uniforms.radius, 4.0);
+                    // The pill behind the label owns the corner rounding; the
+                    // text quad stays rectangular so no glyph edge is masked.
+                    gl.Uniform1f(self.win_uniforms.radius, 0.0);
                     gl.Uniform2f(self.win_uniforms.size, label_w, label_h);
                     gl.Uniform1f(self.win_uniforms.dim, 1.0);
                     gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
@@ -1160,16 +949,6 @@ impl WaylandCompositor {
 
                     gl.ActiveTexture(ffi::TEXTURE0);
                     gl.BindTexture(ffi::TEXTURE_2D, title_tex);
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_MIN_FILTER,
-                        ffi::NEAREST as i32,
-                    );
-                    gl.TexParameteri(
-                        ffi::TEXTURE_2D,
-                        ffi::TEXTURE_MAG_FILTER,
-                        ffi::NEAREST as i32,
-                    );
                     gl.Uniform1i(self.win_uniforms.texture, 0);
 
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
@@ -1239,7 +1018,7 @@ impl WaylandCompositor {
             return;
         }
         unsafe {
-            for &tex in &self.overview_title_textures {
+            for &(tex, _, _) in &self.overview_title_textures {
                 if tex != 0 {
                     gl.DeleteTextures(1, &tex);
                 }
@@ -1382,11 +1161,11 @@ mod tests {
     }
 
     #[test]
-    fn title_atlas_cap_reserves_scaled_monitor_margins() {
+    fn title_atlas_cap_reserves_monitor_margins() {
         for width in [200, 256, 1920, 7680] {
             let atlas_width = max_title_texture_width(width);
             assert!(
-                atlas_width as f32 * TITLE_SCALE + TITLE_MARGIN * 2.0 <= width as f32,
+                atlas_width as f32 + TITLE_MARGIN * 2.0 <= width as f32,
                 "{width}px monitor produced a {atlas_width}px atlas"
             );
         }

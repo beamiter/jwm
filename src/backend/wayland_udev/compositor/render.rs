@@ -30,6 +30,43 @@ fn premultiplied_blend_factors() -> (u32, u32) {
     (ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA)
 }
 
+/// Upload one line of toast text as a texture; `None` for empty text.
+unsafe fn rasterize_toast_text(
+    gl: &ffi::Gles2,
+    text: &str,
+    description: &str,
+    size: f32,
+    color: [u8; 4],
+) -> Option<(u32, u32, u32)> {
+    if text.is_empty() {
+        return None;
+    }
+    let (pixels, w, h) =
+        crate::backend::compositor_font::render_ui_text_to_rgba(text, description, size, color);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    unsafe {
+        let mut tex = 0;
+        gl.GenTextures(1, &mut tex);
+        gl.BindTexture(ffi::TEXTURE_2D, tex);
+        gl.TexImage2D(
+            ffi::TEXTURE_2D,
+            0,
+            ffi::RGBA as i32,
+            w as i32,
+            h as i32,
+            0,
+            ffi::RGBA,
+            ffi::UNSIGNED_BYTE,
+            pixels.as_ptr().cast(),
+        );
+        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
+        gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
+        Some((tex, w, h))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverviewRenderRoute {
     LegacyEncoded,
@@ -4759,8 +4796,13 @@ impl WaylandCompositor {
         }
     }
 
-    /// Rasterize (and cache) one toast's title/body textures.
-    unsafe fn update_toast_textures(&mut self, gl: &ffi::Gles2, id: u64, title: &str, body: &str) {
+    /// Rasterize (and cache) one toast's title/body and action-label textures.
+    unsafe fn update_toast_textures(
+        &mut self,
+        gl: &ffi::Gles2,
+        id: u64,
+        toast: &crate::backend::api::ToastNotification,
+    ) {
         if self.toast_textures.contains_key(&id) {
             return;
         }
@@ -4770,54 +4812,38 @@ impl WaylandCompositor {
         let ui = ui_theme::palette();
         // Title in the brightest ink, body one step down.
         let colors: [[u8; 4]; 2] = [ui.value_ink, ui.label_ink];
-        let mut slots = [None, None];
-        for (slot, text) in [title, body].into_iter().enumerate() {
+        let mut set = ToastTextureSet {
+            text: [None, None],
+            buttons: Vec::with_capacity(toast.actions.len()),
+        };
+        let texts = [&toast.title, &toast.body];
+        for (slot, (text, color)) in texts.into_iter().zip(colors).enumerate() {
             let text = crate::backend::compositor_font::fit_ui_text_lines(
                 text,
                 description,
                 size,
                 crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX,
             );
-            if text.is_empty() {
-                continue;
-            }
-            let (pixels, w, h) = crate::backend::compositor_font::render_ui_text_to_rgba(
-                &text,
+            set.text[slot] = unsafe { rasterize_toast_text(gl, &text, description, size, color) };
+        }
+        for action in &toast.actions {
+            let text = crate::backend::compositor_font::fit_ui_text_lines(
+                &action.label,
                 description,
                 size,
-                colors[slot],
+                crate::backend::compositor_common::toast::MAX_ACTION_LABEL_WIDTH_PX,
             );
-            if w == 0 || h == 0 {
-                continue;
-            }
-            unsafe {
-                let mut tex = 0;
-                gl.GenTextures(1, &mut tex);
-                gl.BindTexture(ffi::TEXTURE_2D, tex);
-                gl.TexImage2D(
-                    ffi::TEXTURE_2D,
-                    0,
-                    ffi::RGBA as i32,
-                    w as i32,
-                    h as i32,
-                    0,
-                    ffi::RGBA,
-                    ffi::UNSIGNED_BYTE,
-                    pixels.as_ptr().cast(),
-                );
-                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MIN_FILTER, ffi::LINEAR as i32);
-                gl.TexParameteri(ffi::TEXTURE_2D, ffi::TEXTURE_MAG_FILTER, ffi::LINEAR as i32);
-                slots[slot] = Some((tex, w, h));
-            }
+            set.buttons
+                .push(unsafe { rasterize_toast_text(gl, &text, description, size, ui.chip_ink) });
         }
-        self.toast_textures.insert(id, slots);
+        self.toast_textures.insert(id, set);
     }
 
     /// Delete cached textures for the given retired toast ids.
     unsafe fn free_toast_textures(&mut self, gl: &ffi::Gles2, ids: &[u64]) {
         for id in ids {
-            if let Some(slots) = self.toast_textures.remove(id) {
-                for slot in slots.into_iter().flatten() {
+            if let Some(set) = self.toast_textures.remove(id) {
+                for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     unsafe { gl.DeleteTextures(1, &slot.0) };
                 }
             }
@@ -4825,8 +4851,9 @@ impl WaylandCompositor {
     }
 
     /// Transient notification cards stacked in the top-right corner: rounded
-    /// card, drop shadow, urgency accent stripe, title over dimmer body, and
-    /// a fade in/out envelope shared with the X11 backend.
+    /// card, drop shadow, urgency accent stripe, title over dimmer body, an
+    /// optional row of action chips, and a fade in/out envelope shared with
+    /// the X11 backend.
     unsafe fn render_toasts(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let now = std::time::Instant::now();
         let mut removed = std::mem::take(&mut self.toast_retired);
@@ -4840,26 +4867,19 @@ impl WaylandCompositor {
         // hover/click hit-testing never sees stale geometry.
         self.toast_rects.clear();
 
-        let toasts: Vec<(u64, String, String, u8, f32)> = self
+        let toasts: Vec<(u64, crate::backend::api::ToastNotification, f32)> = self
             .toast_stack
             .iter()
-            .map(|toast| {
-                (
-                    toast.id,
-                    toast.notification.title.clone(),
-                    toast.notification.body.clone(),
-                    toast.notification.urgency,
-                    toast.alpha(now),
-                )
-            })
+            .map(|toast| (toast.id, toast.notification.clone(), toast.alpha(now)))
             .collect();
-        for (id, title, body, _, _) in &toasts {
-            unsafe { self.update_toast_textures(gl, *id, title, body) };
+        for (id, notification, _) in &toasts {
+            unsafe { self.update_toast_textures(gl, *id, notification) };
         }
 
         let ui = ui_theme::palette();
         self.ensure_glass_backdrop(gl, ui, projection);
         let motion_enabled = crate::config::CONFIG.load().motion_enabled();
+        let button_hover = self.toast_button_hover;
         let pad = 18.0;
         let pad_left = 30.0;
         let gap = 12.0;
@@ -4875,6 +4895,7 @@ impl WaylandCompositor {
             0.0
         };
 
+        use crate::backend::compositor_common::toast;
         unsafe {
             gl.BindVertexArray(self.quad_vao);
             let text_rect = super::get_uniform_loc(gl, self.sysui_text_program, "u_rect");
@@ -4882,22 +4903,41 @@ impl WaylandCompositor {
             let text_tex = super::get_uniform_loc(gl, self.sysui_text_program, "u_texture");
             let text_opacity = super::get_uniform_loc(gl, self.sysui_text_program, "u_opacity");
 
-            for (id, _, _, urgency, alpha) in &toasts {
-                let slots = self.toast_textures.get(id).copied().unwrap_or([None, None]);
+            for (id, notification, alpha) in &toasts {
+                let slots = self
+                    .toast_textures
+                    .get(id)
+                    .map(|set| set.text)
+                    .unwrap_or([None, None]);
+                let button_slots: Vec<Option<(u32, u32, u32)>> = self
+                    .toast_textures
+                    .get(id)
+                    .map(|set| set.buttons.clone())
+                    .unwrap_or_default();
                 let (title_w, title_h) = slots[0]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
                 let (body_w, body_h) = slots[1]
                     .map(|(_, w, h)| (w as f32, h as f32))
                     .unwrap_or((0.0, 0.0));
-                let content_w = title_w.max(body_w).clamp(
-                    220.0,
-                    crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
-                );
+                let button_widths: Vec<f32> = button_slots
+                    .iter()
+                    .map(|slot| slot.map(|(_, w, _)| w as f32).unwrap_or(0.0))
+                    .collect();
+                let content_w = title_w
+                    .max(body_w)
+                    .max(toast::action_row_width(&button_widths))
+                    .clamp(
+                        220.0,
+                        crate::backend::compositor_common::toast::MAX_TEXT_WIDTH_PX as f32,
+                    );
                 let target_w = content_w + pad_left + pad;
                 let mut target_h = 2.0 * pad + title_h;
                 if body_h > 0.0 {
                     target_h += 6.0 + body_h;
+                }
+                if !button_slots.is_empty() {
+                    target_h += toast::ACTIONS_ROW_EXTRA_H;
                 }
 
                 let (card_w, card_h) = self
@@ -4907,14 +4947,25 @@ impl WaylandCompositor {
                         motion.advance_with_motion(now, target_w, target_h, motion_enabled)
                     });
                 let [x, y, ..] = dock.rect(card_w, card_h, top);
-                self.toast_rects.push((*id, [x, y, card_w, card_h]));
+                // The chip row hangs under the text block, aligned with it.
+                let text_bottom = pad + title_h + if body_h > 0.0 { 6.0 + body_h } else { 0.0 };
+                let button_rects = toast::action_row_layout(
+                    &button_widths,
+                    x + pad_left,
+                    y + text_bottom + toast::ACTION_ROW_TOP_GAP,
+                );
+                self.toast_rects.push(toast::ToastRects {
+                    id: *id,
+                    card: [x, y, card_w, card_h],
+                    buttons: button_rects.clone(),
+                });
                 // Only the card actually touching the bar squares off; the
                 // dock also refuses to square anything when there is no bar.
                 let (radius_top, radius) = dock.radii(card_h, ui.toast_radius, top);
                 let a = *alpha;
                 let opened = (card_w / target_w.max(1.0)).clamp(0.0, 1.0);
                 let content_a = a * opened * opened;
-                let accent = match urgency {
+                let accent = match notification.urgency {
                     2 => [0.95, 0.30, 0.30, 1.0],
                     0 => [0.45, 0.50, 0.62, 1.0],
                     _ => self.border_gradient_color_a,
@@ -4934,6 +4985,35 @@ impl WaylandCompositor {
                     1.5,
                     [accent[0], accent[1], accent[2], 0.9 * content_a],
                 );
+                // Action chips: raised chip fill with an accent hairline; the
+                // hovered chip trades its fill for an accent wash.
+                for (index, rect) in button_rects.iter().enumerate() {
+                    let hovered = button_hover == Some((*id, index));
+                    let fill = if hovered {
+                        [accent[0], accent[1], accent[2], 0.45 * content_a]
+                    } else {
+                        UiPalette::faded(ui.chip, content_a)
+                    };
+                    self.sysui_fill_rounded(
+                        gl,
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
+                        ui.chip_radius,
+                        fill,
+                    );
+                    self.sysui_stroke_rounded(
+                        gl,
+                        rect[0],
+                        rect[1],
+                        rect[2],
+                        rect[3],
+                        ui.chip_radius,
+                        1.0,
+                        [accent[0], accent[1], accent[2], 0.8 * content_a],
+                    );
+                }
 
                 gl.UseProgram(self.sysui_text_program);
                 gl.UniformMatrix4fv(text_proj, 1, ffi::FALSE as u8, projection.as_ptr());
@@ -4955,6 +5035,20 @@ impl WaylandCompositor {
                     );
                     gl.BindTexture(ffi::TEXTURE_2D, tex);
                     gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                }
+                for (index, rect) in button_rects.iter().enumerate() {
+                    if let Some((tex, w, h)) = button_slots.get(index).copied().flatten() {
+                        // Centered in the chip.
+                        gl.Uniform4f(
+                            text_rect,
+                            rect[0] + (rect[2] - w as f32) / 2.0,
+                            rect[1] + (rect[3] - h as f32) / 2.0,
+                            w as f32,
+                            h as f32,
+                        );
+                        gl.BindTexture(ffi::TEXTURE_2D, tex);
+                        gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+                    }
                 }
 
                 top += target_h + gap;

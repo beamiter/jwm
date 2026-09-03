@@ -7,12 +7,19 @@ use super::prism::{
     build_prism_pieces, mirror_matrix,
 };
 use super::{SnapshotDrawCoordinates, SnapshotTextureStorage, snapshot_texture_uv_rect};
+use crate::backend::compositor_common::ui_theme::{self, UiPalette};
+use crate::backend::compositor_font;
 use glow::HasContext;
 
 /// Share of the monitor height the front face covers.
 const FACE_FILL: f32 = 0.56;
 /// Where the prism's front bottom edge lands, leaving room for the reflection.
 const BASE_LINE: f32 = 0.84;
+/// Horizontal breathing room between a title's text and the edge of the
+/// card-toned pill drawn behind it.
+const TITLE_PAD_X: f32 = 10.0;
+/// Vertical equivalent of [`TITLE_PAD_X`].
+const TITLE_PAD_Y: f32 = 5.0;
 
 impl<C: CompositorConnection> Compositor<C> {
     pub(super) fn clear_overview_snapshots(&mut self) {
@@ -57,112 +64,6 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
-    /// Render a title string into an RGBA pixel buffer using a simple embedded bitmap font.
-    /// Returns (pixels, width, height) or None if the title is empty.
-    pub(super) fn render_title_to_pixels(
-        title: &str,
-        max_width: u32,
-    ) -> Option<(Vec<u8>, u32, u32)> {
-        if title.is_empty() {
-            return None;
-        }
-
-        use super::font::{FONT_6X10, GLYPH_H, GLYPH_W};
-        const SCALE: u32 = 2; // render at 2x for readability
-        const CHAR_W: u32 = GLYPH_W * SCALE;
-        const CHAR_H: u32 = GLYPH_H * SCALE;
-        const PAD_X: u32 = 8; // horizontal padding
-        const PAD_Y: u32 = 4; // vertical padding
-
-        // Truncate to fit max_width
-        let max_chars = ((max_width.saturating_sub(PAD_X * 2)) / CHAR_W) as usize;
-        if max_chars == 0 {
-            return None;
-        }
-
-        let display_title: String = title
-            .chars()
-            .take(max_chars)
-            .map(|c| {
-                if c.is_ascii_graphic() || c == ' ' {
-                    c
-                } else {
-                    '?'
-                }
-            })
-            .collect();
-
-        let text_w = display_title.len() as u32 * CHAR_W;
-        let img_w = text_w + PAD_X * 2;
-        let img_h = CHAR_H + PAD_Y * 2;
-        let mut pixels = vec![0u8; (img_w * img_h * 4) as usize];
-
-        // Draw semi-transparent dark background (rounded pill shape)
-        for py in 0..img_h {
-            for px in 0..img_w {
-                let idx = ((py * img_w + px) * 4) as usize;
-                // Simple rounded rect: check if inside pill shape
-                let radius = (img_h / 2) as f32;
-                let cx = px as f32;
-                let cy = py as f32;
-                let inside = if cx < radius {
-                    let dx = radius - cx;
-                    let dy = cy - radius;
-                    dx * dx + dy * dy <= radius * radius
-                } else if cx > (img_w as f32 - radius) {
-                    let dx = cx - (img_w as f32 - radius);
-                    let dy = cy - radius;
-                    dx * dx + dy * dy <= radius * radius
-                } else {
-                    true
-                };
-                if inside {
-                    pixels[idx] = 15; // R
-                    pixels[idx + 1] = 15; // G
-                    pixels[idx + 2] = 20; // B
-                    pixels[idx + 3] = 200; // A (semi-transparent dark)
-                }
-            }
-        }
-
-        // Draw text glyphs
-        for (ci, ch) in display_title.chars().enumerate() {
-            let glyph_idx = if (32..=126).contains(&(ch as u32)) {
-                (ch as u32 - 32) as usize
-            } else {
-                ('?' as u32 - 32) as usize
-            };
-            let glyph = &FONT_6X10[glyph_idx * 10..(glyph_idx + 1) * 10];
-
-            let base_x = PAD_X + ci as u32 * CHAR_W;
-            let base_y = PAD_Y;
-
-            for row in 0..GLYPH_H {
-                let bits = glyph[row as usize];
-                for col in 0..GLYPH_W {
-                    if bits & (0x80 >> col) != 0 {
-                        // Draw scaled pixel
-                        for sy in 0..SCALE {
-                            for sx in 0..SCALE {
-                                let px = base_x + col * SCALE + sx;
-                                let py = base_y + row * SCALE + sy;
-                                if px < img_w && py < img_h {
-                                    let idx = ((py * img_w + px) * 4) as usize;
-                                    pixels[idx] = 240; // R
-                                    pixels[idx + 1] = 240; // G
-                                    pixels[idx + 2] = 245; // B
-                                    pixels[idx + 3] = 255; // A
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Some((pixels, img_w, img_h))
-    }
-
     pub(super) fn create_overview_title_textures(&mut self) {
         let entries: Vec<(String, f32)> = self
             .overview_windows
@@ -170,11 +71,27 @@ impl<C: CompositorConnection> Compositor<C> {
             .map(|e| (e.title.clone(), e.target_w))
             .collect();
 
+        // The same face, size and ink the tab strip paints its titles with, so
+        // an overview label reads as part of the same UI rather than a
+        // separate overlay with its own typography.
+        let ui = ui_theme::palette();
+        let config = crate::config::CONFIG.load();
+        let font = config.system_ui_font();
+        let size = compositor_font::ui_font_pixel_size(font);
+
         let textures: Vec<Option<(glow::Texture, u32, u32)>> = entries
             .iter()
             .map(|(title, target_w)| {
                 let max_w = (*target_w as u32).max(120);
-                let (pixels, w, h) = Self::render_title_to_pixels(title, max_w)?;
+                let text = compositor_font::fit_ui_text(title, font, size, max_w);
+                if text.is_empty() {
+                    return None;
+                }
+                let (pixels, w, h) =
+                    compositor_font::render_ui_text_to_rgba(&text, font, size, ui.title_ink);
+                if w == 0 || h == 0 {
+                    return None;
+                }
                 unsafe {
                     let tex = self.gl.create_texture().ok()?;
                     self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
@@ -556,6 +473,11 @@ impl<C: CompositorConnection> Compositor<C> {
             // flat overlay only carries text.
             let vp_x = mon_x as f32;
             let vp_y = mon_y as f32;
+
+            // Resolve the visible labels once, so the pill pass and the text
+            // pass each bind their program a single time instead of switching
+            // per label.
+            let mut labels: Vec<(glow::Texture, f32, f32, f32, f32, f32)> = Vec::new();
             for piece in solid.iter().rev() {
                 let PrismKind::Face { slot } = piece.kind else {
                     continue;
@@ -575,8 +497,33 @@ impl<C: CompositorConnection> Compositor<C> {
 
                 let (bcx, bcy) =
                     Self::project_to_screen(&piece.mvp, [0.0, -1.0, 0.0], mw, mh, vp_x, vp_y);
-                let title_x = bcx - tw as f32 * 0.5;
-                let title_y = bcy + 10.0;
+                labels.push((tex, tw as f32, th as f32, bcx, bcy, title_alpha));
+            }
+
+            if !labels.is_empty() {
+                let ui = ui_theme::palette();
+
+                // The card-toned pill the tab strip carries its cells on.
+                self.gl.use_program(Some(self.border_program));
+                self.gl.uniform_matrix_4_f32_slice(
+                    self.border_uniforms.projection.as_ref(),
+                    false,
+                    proj,
+                );
+                for &(_, tw, th, bcx, bcy, alpha) in &labels {
+                    let chip_w = tw + TITLE_PAD_X * 2.0;
+                    let chip_h = th + TITLE_PAD_Y * 2.0;
+                    let chip_x = bcx - chip_w * 0.5;
+                    let chip_y = bcy + 10.0 - TITLE_PAD_Y;
+                    self.sysui_fill_rounded(
+                        chip_x,
+                        chip_y,
+                        chip_w,
+                        chip_h,
+                        chip_h * 0.5,
+                        UiPalette::faded(ui.card, alpha),
+                    );
+                }
 
                 self.gl.use_program(Some(self.hud_text_program));
                 self.gl.uniform_matrix_4_f32_slice(
@@ -584,19 +531,23 @@ impl<C: CompositorConnection> Compositor<C> {
                     false,
                     proj,
                 );
-                self.gl.uniform_4_f32(
-                    self.hud_text_uniforms.rect.as_ref(),
-                    title_x,
-                    title_y,
-                    tw as f32,
-                    th as f32,
-                );
                 self.gl
                     .uniform_1_i32(self.hud_text_uniforms.texture.as_ref(), 0);
-                self.gl
-                    .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), title_alpha);
-                self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                for &(tex, tw, th, bcx, bcy, alpha) in &labels {
+                    let title_x = bcx - tw * 0.5;
+                    let title_y = bcy + 10.0;
+                    self.gl.uniform_4_f32(
+                        self.hud_text_uniforms.rect.as_ref(),
+                        title_x,
+                        title_y,
+                        tw,
+                        th,
+                    );
+                    self.gl
+                        .uniform_1_f32(self.hud_text_uniforms.opacity.as_ref(), alpha);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
             }
 
             self.gl.bind_texture(glow::TEXTURE_2D, None);

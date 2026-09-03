@@ -1,7 +1,6 @@
 mod annotations;
 mod effects;
 mod expose;
-mod font;
 mod overview;
 mod pipeline;
 mod platform;
@@ -305,6 +304,15 @@ impl<T> CompositorConnection for T where
 {
 }
 
+/// Cached textures for one toast card: title/body in fixed slots, plus one
+/// label texture per action button.
+pub(crate) struct ToastTextureSet {
+    /// Title and body, in that order.
+    pub(crate) text: [Option<(glow::Texture, u32, u32)>; 2],
+    /// Button labels in action order.
+    pub(crate) buttons: Vec<Option<(glow::Texture, u32, u32)>>,
+}
+
 pub(crate) struct Compositor<C>
 where
     C: CompositorConnection,
@@ -477,12 +485,14 @@ where
 
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
-    toast_textures: HashMap<u64, [Option<(glow::Texture, u32, u32)>; 2]>,
-    /// Last frame's drawn card rects `(id, [x, y, w, h])`, for hover-pause
-    /// and click-to-dismiss hit-testing.
-    toast_rects: Vec<(u64, [f32; 4])>,
+    toast_textures: HashMap<u64, ToastTextureSet>,
+    /// Last frame's drawn card geometry (body + action buttons), for
+    /// hover-pause, click-to-dismiss, and action-button hit-testing.
+    toast_rects: Vec<crate::backend::compositor_common::toast::ToastRects>,
     /// The hovered card (its timeout is paused); compared before repainting.
     toast_hover: Option<u64>,
+    /// The hovered action button `(toast id, button index)`, drawn brighter.
+    toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, glow::Texture, u32, u32)>,
@@ -1055,8 +1065,8 @@ impl<C: CompositorConnection> Drop for Compositor<C> {
                     self.gl.delete_texture(tex);
                 }
             }
-            for (_, slots) in self.toast_textures.drain() {
-                for slot in slots.into_iter().flatten() {
+            for (_, set) in self.toast_textures.drain() {
+                for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     self.gl.delete_texture(slot.0);
                 }
             }

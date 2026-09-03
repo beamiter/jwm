@@ -62,14 +62,12 @@ const MAX_LABEL_CHARS: usize = 20;
 /// activated", rather than one of its buttons.
 const DEFAULT_KEY: &str = "default";
 
-/// One button a sender offered.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NotificationAction {
-    /// What goes back out over `ActionInvoked`; meaningful only to the sender.
-    pub key: String,
-    /// What the panel draws.
-    pub label: String,
-}
+/// One button a sender offered. Defined next to [`ToastNotification`] because
+/// the toast card draws it too; re-exported so the existing module paths keep
+/// working.
+///
+/// [`ToastNotification`]: crate::backend::api::ToastNotification
+pub use crate::backend::api::NotificationAction;
 
 /// Reason a notification left the history, matching the `NotificationClosed`
 /// reason codes in the freedesktop notification specification.
@@ -720,11 +718,21 @@ impl crate::jwm::Jwm {
             } else {
                 request.summary.clone()
             };
+            // The toast carries the record's sanitized actions, so its
+            // buttons invoke the exact keys the history offers.
+            let actions = self
+                .features
+                .notifications
+                .get(id)
+                .map(|record| record.actions.clone())
+                .unwrap_or_default();
             backend.compositor_push_toast(crate::backend::api::ToastNotification {
                 title,
                 body: request.body.clone(),
                 urgency: request.urgency.min(2),
                 timeout_ms,
+                actions,
+                notification_id: id,
             });
         }
 

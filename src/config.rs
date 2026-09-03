@@ -787,12 +787,14 @@ pub struct BehaviorConfig {
     pub shadow_bottom_extra: f32,
 
     // --- Tag-switch transition mode ---
-    /// Workspace switch transition mode: "none" (default), "slide", "cube", "fade", "flip", "zoom", "stack", "blinds".
+    /// Workspace switch transition mode: "slide", "cube", "fade", "flip", "zoom", "stack", "blinds", "coverflow" (default), "helix", "portal", "book", "none".
     #[serde(default = "default_transition_mode")]
     pub transition_mode: String,
 
-    // --- Window open/close scale animation ---
-    #[serde(default)]
+    // --- Window open/close animation ---
+    /// Animate window open/close (default true). The style is picked by
+    /// `window_animation_style`.
+    #[serde(default = "default_true")]
     pub window_animation: bool,
     #[serde(default = "default_window_animation_scale")]
     pub window_animation_scale: f32,
@@ -1863,7 +1865,7 @@ impl Default for Config {
                     blur_use_frame_extents: false,
                     shadow_bottom_extra: default_shadow_bottom_extra(),
                     transition_mode: default_transition_mode(),
-                    window_animation: false,
+                    window_animation: default_true(),
                     window_animation_scale: default_window_animation_scale(),
                     window_animation_style: default_window_animation_style(),
                     inactive_dim: default_one(),

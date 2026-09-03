@@ -906,6 +906,15 @@ pub(crate) enum CompositorOutputTextureOwnership {
 // Main compositor struct
 // ---------------------------------------------------------------------------
 
+/// Cached textures for one toast card: title/body in fixed slots, plus one
+/// label texture per action button.
+pub(crate) struct ToastTextureSet {
+    /// Title and body, in that order.
+    pub(crate) text: [Option<(u32, u32, u32)>; 2],
+    /// Button labels in action order.
+    pub(crate) buttons: Vec<Option<(u32, u32, u32)>>,
+}
+
 #[allow(dead_code)]
 pub(crate) struct WaylandCompositor {
     // Shader programs
@@ -1081,7 +1090,7 @@ pub(crate) struct WaylandCompositor {
     overview_monitor: (i32, i32, u32, u32),
     overview_rotation: f32,
     overview_target_rotation: f32,
-    overview_title_textures: Vec<u32>,
+    overview_title_textures: Vec<(u32, u32, u32)>,
     /// Entry/title changes are recorded without touching GL; the next render
     /// rebuilds the textures while the compositor context is current.
     overview_titles_dirty: bool,
@@ -1357,12 +1366,14 @@ pub(crate) struct WaylandCompositor {
 
     // --- Toast notifications (top-right stacked cards) ---
     toast_stack: crate::backend::compositor_common::toast::ToastStack,
-    toast_textures: HashMap<u64, [Option<(u32, u32, u32)>; 2]>,
-    /// Last frame's drawn card rects `(id, [x, y, w, h])`, for hover-pause
-    /// and click-to-dismiss hit-testing.
-    toast_rects: Vec<(u64, [f32; 4])>,
+    toast_textures: HashMap<u64, ToastTextureSet>,
+    /// Last frame's drawn card geometry (body + action buttons), for
+    /// hover-pause, click-to-dismiss, and action-button hit-testing.
+    toast_rects: Vec<crate::backend::compositor_common::toast::ToastRects>,
     /// The hovered card (its timeout is paused); compared before repainting.
     toast_hover: Option<u64>,
+    /// The hovered action button `(toast id, button index)`, drawn brighter.
+    toast_button_hover: Option<(u64, usize)>,
     osd_slot: crate::backend::compositor_common::osd::OsdSlot,
     /// Cached OSD label texture keyed by its text ("icon  label").
     osd_texture: Option<(String, u32, u32, u32)>,
@@ -2695,6 +2706,7 @@ impl WaylandCompositor {
                 toast_textures: HashMap::new(),
                 toast_rects: Vec::new(),
                 toast_hover: None,
+                toast_button_hover: None,
                 toast_retired: Vec::new(),
                 osd_slot: Default::default(),
                 osd_texture: None,
@@ -2869,8 +2881,8 @@ impl WaylandCompositor {
                     gl.DeleteTextures(1, &texture);
                 }
             }
-            for (_, slots) in self.toast_textures.drain() {
-                for (texture, _, _) in slots.into_iter().flatten() {
+            for (_, set) in self.toast_textures.drain() {
+                for (texture, _, _) in set.text.into_iter().chain(set.buttons).flatten() {
                     if texture != 0 {
                         gl.DeleteTextures(1, &texture);
                     }

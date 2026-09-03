@@ -5,7 +5,7 @@
 //! fade-in/fade-out opacity envelope, and content sanitation — lives here so
 //! the two backends cannot drift.
 
-use crate::backend::api::ToastNotification;
+use crate::backend::api::{NotificationAction, ToastClick, ToastNotification};
 use crate::backend::compositor_common::dynamic_island::IslandMotion;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,24 @@ const MAX_BODY_LINES: usize = 3;
 /// fitting before upload avoids allocating a giant texture only to draw it
 /// outside a 440 px card.
 pub(crate) const MAX_TEXT_WIDTH_PX: u32 = 440;
+
+/// Action buttons a card shows at most: one row of chips must stay readable.
+pub(crate) const MAX_TOAST_ACTIONS: usize = 3;
+/// Longest button label kept after sanitation.
+const MAX_ACTION_LABEL_CHARS: usize = 20;
+/// Widest rasterized button label. Three chips at this width plus their
+/// padding and gaps still fit the card's [`MAX_TEXT_WIDTH_PX`] ceiling.
+pub(crate) const MAX_ACTION_LABEL_WIDTH_PX: u32 = 120;
+/// Chip height in the action row.
+pub(crate) const ACTION_BUTTON_H: f32 = 24.0;
+/// Horizontal padding inside a chip, per side.
+pub(crate) const ACTION_BUTTON_PAD_X: f32 = 10.0;
+/// Space between two chips.
+pub(crate) const ACTION_BUTTON_GAP: f32 = 8.0;
+/// Gap between the text block and the action row.
+pub(crate) const ACTION_ROW_TOP_GAP: f32 = 10.0;
+/// Extra card height when an action row is present.
+pub(crate) const ACTIONS_ROW_EXTRA_H: f32 = ACTION_ROW_TOP_GAP + ACTION_BUTTON_H;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(4000);
 const MIN_TIMEOUT: Duration = Duration::from_millis(800);
@@ -81,17 +99,53 @@ impl ActiveToast {
 }
 
 fn sanitize_line(line: &str) -> String {
-    let cleaned: String = line
+    sanitize_segment(line, MAX_LINE_CHARS)
+}
+
+/// Clamp one text segment: control characters become spaces, trailing
+/// whitespace is dropped, and an over-long run ends in an ellipsis.
+fn sanitize_segment(text: &str, max_chars: usize) -> String {
+    let cleaned: String = text
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect();
     let trimmed = cleaned.trim_end();
-    if trimmed.chars().count() <= MAX_LINE_CHARS {
+    if trimmed.chars().count() <= max_chars {
         return trimmed.to_string();
     }
-    let mut out: String = trimmed.chars().take(MAX_LINE_CHARS - 1).collect();
+    let mut out: String = trimmed.chars().take(max_chars - 1).collect();
     out.push('\u{2026}');
     out
+}
+
+/// Trim a toast's action list to the chip row: a button with no key cannot be
+/// invoked and is dropped before the cap is counted, a blank label falls back
+/// to the key, and labels are cleaned to one short line. The key itself is
+/// kept exact — it goes back out over `ActionInvoked` unchanged.
+fn sanitize_actions(actions: &[NotificationAction]) -> Vec<NotificationAction> {
+    actions
+        .iter()
+        .filter_map(|action| {
+            let key = action.key.trim();
+            (!key.is_empty()).then_some((key, action))
+        })
+        .take(MAX_TOAST_ACTIONS)
+        .map(|(key, action)| {
+            let label = sanitize_segment(
+                action.label.lines().next().unwrap_or(""),
+                MAX_ACTION_LABEL_CHARS,
+            );
+            let label = if label.is_empty() {
+                sanitize_segment(key, MAX_ACTION_LABEL_CHARS)
+            } else {
+                label
+            };
+            NotificationAction {
+                key: key.to_string(),
+                label,
+            }
+        })
+        .collect()
 }
 
 /// Clamp text to renderer-safe shape: control characters stripped, lines
@@ -106,6 +160,69 @@ fn sanitize_notification(notification: &mut ToastNotification) {
         .collect::<Vec<_>>()
         .join("\n");
     notification.urgency = notification.urgency.min(2);
+    notification.actions = sanitize_actions(&notification.actions);
+}
+
+/// One toast card's hit geometry from the last drawn frame.
+///
+/// Rebuilt every frame by the renderers so hover and click testing never see
+/// stale geometry; shared here so the two backends cannot drift.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ToastRects {
+    pub(crate) id: u64,
+    /// Card body `[x, y, w, h]`.
+    pub(crate) card: [f32; 4],
+    /// Action buttons in action order, absolute coordinates like the card.
+    pub(crate) buttons: Vec<[f32; 4]>,
+}
+
+/// Which part of a card a point lands on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToastHit {
+    Card,
+    Button(usize),
+}
+
+fn point_in(rect: &[f32; 4], x: f32, y: f32) -> bool {
+    x >= rect[0] && x <= rect[0] + rect[2] && y >= rect[1] && y <= rect[1] + rect[3]
+}
+
+/// Hit-test one card's recorded geometry. Buttons sit inside the card and
+/// are checked first, so a click on a chip never falls through to the body.
+pub(crate) fn hit_test(rects: &ToastRects, x: f32, y: f32) -> Option<ToastHit> {
+    for (index, button) in rects.buttons.iter().enumerate() {
+        if point_in(button, x, y) {
+            return Some(ToastHit::Button(index));
+        }
+    }
+    point_in(&rects.card, x, y).then_some(ToastHit::Card)
+}
+
+/// Total width of the action row for `label_widths` measured chip texts.
+/// Used to widen the card when the buttons are its widest content.
+pub(crate) fn action_row_width(label_widths: &[f32]) -> f32 {
+    if label_widths.is_empty() {
+        return 0.0;
+    }
+    label_widths
+        .iter()
+        .map(|w| w + 2.0 * ACTION_BUTTON_PAD_X)
+        .sum::<f32>()
+        + ACTION_BUTTON_GAP * (label_widths.len() - 1) as f32
+}
+
+/// Chip rects for the action row: one chip per measured label width,
+/// left-aligned at `x` on the row at `y`. Index order matches the toast's
+/// action order, which is what click dispatch reports back.
+pub(crate) fn action_row_layout(label_widths: &[f32], x: f32, y: f32) -> Vec<[f32; 4]> {
+    let mut rects = Vec::with_capacity(label_widths.len());
+    let mut chip_x = x;
+    for width in label_widths {
+        let chip_w = width + 2.0 * ACTION_BUTTON_PAD_X;
+        rects.push([chip_x, y, chip_w, ACTION_BUTTON_H]);
+        chip_x += chip_w + ACTION_BUTTON_GAP;
+    }
+    rects
 }
 
 #[derive(Debug, Default)]
@@ -199,6 +316,55 @@ impl ToastStack {
         self.toasts.is_empty()
     }
 
+    pub(crate) fn get(&self, id: u64) -> Option<&ActiveToast> {
+        self.toasts.iter().find(|toast| toast.id == id)
+    }
+
+    /// Resolve a left-click at `(x, y)` against the geometry recorded for the
+    /// last drawn frame. Any hit dismisses the card (it fades out on the
+    /// dismiss clock); a button hit additionally reports the action's key and
+    /// the notification record it belongs to, so the WM can invoke it. A
+    /// button on a standalone toast — no record — degrades to a plain
+    /// dismissal, and so does any click on a card already fading out: the
+    /// click is swallowed but the action is never invoked twice.
+    pub(crate) fn click(
+        &mut self,
+        rects: &[ToastRects],
+        x: f32,
+        y: f32,
+        now: Instant,
+    ) -> ToastClick {
+        let Some((id, hit)) = rects
+            .iter()
+            .find_map(|rects| hit_test(rects, x, y).map(|hit| (rects.id, hit)))
+        else {
+            return ToastClick::Miss;
+        };
+        if !self.dismiss(id, now) {
+            return ToastClick::Dismissed;
+        }
+        let action = match hit {
+            ToastHit::Card => None,
+            ToastHit::Button(index) => self.get(id).and_then(|toast| {
+                let notification = &toast.notification;
+                if notification.notification_id == 0 {
+                    return None;
+                }
+                notification
+                    .actions
+                    .get(index)
+                    .map(|action| (notification.notification_id, action.key.clone()))
+            }),
+        };
+        match action {
+            Some((notification_id, action_key)) => ToastClick::Action {
+                notification_id,
+                action_key,
+            },
+            None => ToastClick::Dismissed,
+        }
+    }
+
     pub(crate) fn iter(&self) -> impl Iterator<Item = &ActiveToast> {
         self.toasts.iter()
     }
@@ -223,6 +389,7 @@ mod tests {
             body: String::new(),
             urgency: 1,
             timeout_ms,
+            ..Default::default()
         }
     }
 
@@ -266,6 +433,7 @@ mod tests {
                     .join("\n"),
                 urgency: 9,
                 timeout_ms: 100,
+                ..Default::default()
             },
             now,
         );
@@ -370,5 +538,184 @@ mod tests {
         let removed = stack.prune(now + Duration::from_millis(5000));
         assert_eq!(removed, vec![0]);
         assert_eq!(stack.iter().next().unwrap().id, 1);
+    }
+
+    #[test]
+    fn sanitation_bounds_actions() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        let action = |key: &str, label: &str| NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        };
+        stack.push(
+            ToastNotification {
+                title: "actions".into(),
+                actions: vec![
+                    // Dropped: an empty key cannot be invoked.
+                    action("  ", "no key"),
+                    action("reply", "Re\tply\non two lines"),
+                    // Blank label falls back to the key.
+                    action("open", "  "),
+                    action("later", &"x".repeat(40)),
+                    // Beyond the row cap.
+                    action("extra", "Extra"),
+                ],
+                ..Default::default()
+            },
+            now,
+        );
+        let actions = &stack.iter().next().unwrap().notification.actions;
+        assert_eq!(actions.len(), MAX_TOAST_ACTIONS);
+        assert_eq!(actions[0].key, "reply");
+        assert_eq!(actions[0].label, "Re ply");
+        assert_eq!(actions[1].key, "open");
+        assert_eq!(actions[1].label, "open");
+        assert_eq!(actions[2].key, "later");
+        assert_eq!(actions[2].label.chars().count(), MAX_ACTION_LABEL_CHARS);
+        assert!(actions[2].label.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn hit_test_prefers_buttons_then_card_then_miss() {
+        let rects = ToastRects {
+            id: 7,
+            card: [100.0, 50.0, 300.0, 120.0],
+            buttons: vec![[130.0, 130.0, 80.0, 24.0], [218.0, 130.0, 80.0, 24.0]],
+        };
+        assert_eq!(hit_test(&rects, 150.0, 140.0), Some(ToastHit::Button(0)));
+        assert_eq!(hit_test(&rects, 230.0, 140.0), Some(ToastHit::Button(1)));
+        // Card body outside the chips, still inside the card.
+        assert_eq!(hit_test(&rects, 150.0, 60.0), Some(ToastHit::Card));
+        // The gap between two chips is card body.
+        assert_eq!(hit_test(&rects, 214.0, 140.0), Some(ToastHit::Card));
+        assert_eq!(hit_test(&rects, 50.0, 60.0), None);
+        assert_eq!(hit_test(&rects, 150.0, 200.0), None);
+    }
+
+    #[test]
+    fn action_row_layout_sizes_and_spacing() {
+        let widths = [40.0, 60.0, 30.0];
+        let rects = action_row_layout(&widths, 30.0, 100.0);
+        assert_eq!(rects.len(), 3);
+        let chip_w = |i: usize| widths[i] + 2.0 * ACTION_BUTTON_PAD_X;
+        assert_eq!(rects[0], [30.0, 100.0, chip_w(0), ACTION_BUTTON_H]);
+        assert_eq!(
+            rects[1],
+            [
+                30.0 + chip_w(0) + ACTION_BUTTON_GAP,
+                100.0,
+                chip_w(1),
+                ACTION_BUTTON_H
+            ]
+        );
+        // The row's total width matches the helper the card sizing uses.
+        let right = rects[2][0] + rects[2][2];
+        assert_eq!(right - 30.0, action_row_width(&widths));
+        assert_eq!(action_row_width(&[]), 0.0);
+    }
+
+    #[test]
+    fn click_dispatches_action_dismiss_and_miss() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        let action = |key: &str, label: &str| NotificationAction {
+            key: key.into(),
+            label: label.into(),
+        };
+        stack.push(
+            ToastNotification {
+                title: "with actions".into(),
+                timeout_ms: 4000,
+                notification_id: 42,
+                actions: vec![action("reply", "Reply"), action("open", "Open")],
+                ..Default::default()
+            },
+            now,
+        );
+        stack.push(
+            ToastNotification {
+                title: "standalone".into(),
+                timeout_ms: 4000,
+                // No record: buttons on a standalone toast only dismiss.
+                actions: vec![action("noop", "No-op")],
+                ..Default::default()
+            },
+            now,
+        );
+        let rects = vec![
+            ToastRects {
+                id: 0,
+                card: [100.0, 0.0, 300.0, 100.0],
+                buttons: vec![[130.0, 66.0, 80.0, 24.0], [218.0, 66.0, 80.0, 24.0]],
+            },
+            ToastRects {
+                id: 1,
+                card: [100.0, 112.0, 300.0, 100.0],
+                buttons: vec![[130.0, 178.0, 80.0, 24.0]],
+            },
+        ];
+
+        // A miss touches nothing.
+        assert_eq!(stack.click(&rects, 10.0, 10.0, now), ToastClick::Miss);
+        assert_eq!(stack.iter().count(), 2);
+
+        // A button hit dismisses the card and reports the record and key.
+        let click = now + Duration::from_millis(500);
+        assert_eq!(
+            stack.click(&rects, 230.0, 70.0, click),
+            ToastClick::Action {
+                notification_id: 42,
+                action_key: "open".into(),
+            }
+        );
+        // While the card fades out its rects are still on screen: a second
+        // click on the same chip is swallowed but never invokes twice.
+        assert_eq!(
+            stack.click(&rects, 230.0, 70.0, click + Duration::from_millis(60)),
+            ToastClick::Dismissed
+        );
+        assert_eq!(stack.prune(click + Duration::from_millis(120)), vec![0]);
+
+        // A button on a standalone toast has no record to invoke.
+        let click = click + Duration::from_millis(200);
+        assert_eq!(
+            stack.click(&rects, 150.0, 180.0, click),
+            ToastClick::Dismissed
+        );
+        assert_eq!(stack.prune(click + Duration::from_millis(120)), vec![1]);
+        assert!(stack.is_empty());
+    }
+
+    #[test]
+    fn click_on_card_body_dismisses_without_action() {
+        let now = Instant::now();
+        let mut stack = ToastStack::default();
+        stack.push(
+            ToastNotification {
+                title: "body click".into(),
+                timeout_ms: 4000,
+                notification_id: 9,
+                actions: vec![NotificationAction {
+                    key: "reply".into(),
+                    label: "Reply".into(),
+                }],
+                ..Default::default()
+            },
+            now,
+        );
+        let rects = vec![ToastRects {
+            id: 0,
+            card: [100.0, 0.0, 300.0, 100.0],
+            buttons: vec![[130.0, 66.0, 80.0, 24.0]],
+        }];
+        assert_eq!(stack.click(&rects, 150.0, 20.0, now), ToastClick::Dismissed);
+        // A repeat hit while the card fades out is still swallowed and
+        // reports no action.
+        assert_eq!(
+            stack.click(&rects, 150.0, 20.0, now + Duration::from_millis(60)),
+            ToastClick::Dismissed
+        );
+        assert_eq!(stack.prune(now + Duration::from_millis(120)), vec![0]);
     }
 }

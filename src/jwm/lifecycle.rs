@@ -1254,6 +1254,7 @@ impl Jwm {
                     body: String::new(),
                     urgency: 1,
                     timeout_ms: 2500,
+                    ..Default::default()
                 });
                 self.broadcast_ipc_event(
                     "config/reload",
@@ -1273,6 +1274,7 @@ impl Jwm {
                     body: e.to_string(),
                     urgency: 2,
                     timeout_ms: 8000,
+                    ..Default::default()
                 });
                 self.broadcast_ipc_event(
                     "config/reload",

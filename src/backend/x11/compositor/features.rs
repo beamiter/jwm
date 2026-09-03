@@ -236,20 +236,18 @@ impl<C: CompositorConnection> Compositor<C> {
         self.needs_render = true;
     }
 
-    /// Hit-test last frame's toast card rects; a hit dismisses the card.
-    /// Returns true whenever the point lands on a card so the WM swallows
-    /// the click instead of replaying it to the window below.
-    pub(crate) fn click_toast(&mut self, x: f32, y: f32) -> bool {
-        let hit = self.toast_rects.iter().find_map(|(id, rect)| {
-            let [rx, ry, w, h] = *rect;
-            (x >= rx && x <= rx + w && y >= ry && y <= ry + h).then_some(*id)
-        });
-        let Some(id) = hit else {
-            return false;
-        };
-        self.toast_stack.dismiss(id, std::time::Instant::now());
-        self.needs_render = true;
-        true
+    /// Hit-test last frame's toast geometry through the shared stack: a card
+    /// hit dismisses it, a button hit also reports the action for the WM to
+    /// invoke. Anything but `Miss` is swallowed by the WM rather than
+    /// replayed to the window below.
+    pub(crate) fn click_toast(&mut self, x: f32, y: f32) -> crate::backend::api::ToastClick {
+        let result = self
+            .toast_stack
+            .click(&self.toast_rects, x, y, std::time::Instant::now());
+        if result != crate::backend::api::ToastClick::Miss {
+            self.needs_render = true;
+        }
+        result
     }
 
     pub(crate) fn show_osd(&mut self, kind: crate::backend::api::OsdKind, percent: u8) {
@@ -264,8 +262,8 @@ impl<C: CompositorConnection> Compositor<C> {
 
     pub(crate) fn free_toast_textures(&mut self, ids: &[u64]) {
         for id in ids {
-            if let Some(slots) = self.toast_textures.remove(id) {
-                for slot in slots.into_iter().flatten() {
+            if let Some(set) = self.toast_textures.remove(id) {
+                for slot in set.text.into_iter().chain(set.buttons).flatten() {
                     unsafe { self.gl.delete_texture(slot.0) };
                 }
             }
@@ -308,15 +306,27 @@ impl<C: CompositorConnection> Compositor<C> {
             self.needs_render = true;
         }
         // Hovering a toast card pauses its timeout; same compare-then-repaint
-        // pattern as the tab bar above.
-        let toast_hover = self.toast_rects.iter().find_map(|(id, rect)| {
-            let [rx, ry, w, h] = *rect;
-            (x >= rx && x <= rx + w && y >= ry && y <= ry + h).then_some(*id)
+        // pattern as the tab bar above. A hovered action button additionally
+        // brightens, so the exact chip under the pointer is tracked too.
+        let toast_hover = self.toast_rects.iter().find_map(|rects| {
+            crate::backend::compositor_common::toast::hit_test(rects, x, y).map(|_| rects.id)
         });
         if toast_hover != self.toast_hover {
             self.toast_hover = toast_hover;
             self.toast_stack
                 .set_hovered(toast_hover, std::time::Instant::now());
+            self.needs_render = true;
+        }
+        let button_hover = self.toast_rects.iter().find_map(|rects| {
+            match crate::backend::compositor_common::toast::hit_test(rects, x, y) {
+                Some(crate::backend::compositor_common::toast::ToastHit::Button(index)) => {
+                    Some((rects.id, index))
+                }
+                _ => None,
+            }
+        });
+        if button_hover != self.toast_button_hover {
+            self.toast_button_hover = button_hover;
             self.needs_render = true;
         }
     }

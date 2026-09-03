@@ -2072,6 +2072,7 @@ impl Jwm {
                     body: error.clone(),
                     urgency: 2,
                     timeout_ms: 8000,
+                    ..Default::default()
                 });
                 return Err(error.into());
             }
@@ -2468,6 +2469,7 @@ impl Jwm {
             body: output_path.clone(),
             urgency: 1,
             timeout_ms: 5000,
+            ..Default::default()
         });
         Self::finalize_recording(segments, output_path);
         Ok(())

@@ -997,6 +997,17 @@ pub enum ExposeNavDirection {
     Down,
 }
 
+/// One action button a notification sender offered. The type lives here
+/// because both the toast card and the notification center draw it; the
+/// center re-exports it from `jwm::features::notifications`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationAction {
+    /// What goes back out over `ActionInvoked`; meaningful only to the sender.
+    pub key: String,
+    /// What the button draws.
+    pub label: String,
+}
+
 /// One transient notification card the compositor stacks in the top-right
 /// corner. Pushed fire-and-forget; the compositor owns display and expiry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1008,6 +1019,31 @@ pub struct ToastNotification {
     pub urgency: u8,
     /// Display time in milliseconds; 0 selects the default.
     pub timeout_ms: u32,
+    /// Action buttons drawn as a chip row at the bottom of the card. The
+    /// toast stack caps and cleans the list before anyone sees it.
+    pub actions: Vec<NotificationAction>,
+    /// Notification-center record this toast mirrors; a button click reports
+    /// it so the WM can invoke the action against the record. Zero marks a
+    /// standalone toast with no record — its buttons only dismiss the card.
+    pub notification_id: u32,
+}
+
+/// Outcome of a left-click hit-test against the toast stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastClick {
+    /// No card under the point; the click belongs to whatever is below.
+    Miss,
+    /// A card was hit and dismissed; the WM swallows the click.
+    Dismissed,
+    /// An action button was hit. The card is dismissed either way; the WM
+    /// additionally invokes the action against the notification-center
+    /// record and swallows the click.
+    Action {
+        /// Record the action belongs to (`ToastNotification::notification_id`).
+        notification_id: u32,
+        /// The action's sender-defined key, ready for `ActionInvoked`.
+        action_key: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2341,10 +2377,11 @@ pub trait CompositorWorkspaceEffects: Send {
     fn compositor_show_osd(&mut self, _kind: OsdKind, _percent: u8) {}
     /// Show the media OSD card with a track label instead of a value bar.
     fn compositor_show_media_osd(&mut self, _label: &str) {}
-    /// Left-click hit-test against the toast cards drawn last frame. A hit
-    /// dismisses the card and returns true so the WM swallows the click.
-    fn compositor_click_toast(&mut self, _x: f32, _y: f32) -> bool {
-        false
+    /// Left-click hit-test against the toast cards drawn last frame. A card
+    /// hit dismisses the card; a button hit additionally reports the action
+    /// so the WM can invoke it. Anything but `ToastClick::Miss` is swallowed.
+    fn compositor_click_toast(&mut self, _x: f32, _y: f32) -> ToastClick {
+        ToastClick::Miss
     }
     fn compositor_notify_tag_switch(
         &mut self,

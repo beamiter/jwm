@@ -3857,14 +3857,15 @@ impl CompositorWorkspaceEffects for UdevBackend {
         }
         self.request_render();
     }
-    fn compositor_click_toast(&mut self, x: f32, y: f32) -> bool {
+    fn compositor_click_toast(&mut self, x: f32, y: f32) -> crate::backend::api::ToastClick {
         if let Some(compositor) = self.compositor.as_mut() {
-            if compositor.click_toast(x, y) {
+            let result = compositor.click_toast(x, y);
+            if result != crate::backend::api::ToastClick::Miss {
                 self.request_render();
-                return true;
             }
+            return result;
         }
-        false
+        crate::backend::api::ToastClick::Miss
     }
     fn compositor_notify_tag_switch(
         &mut self,

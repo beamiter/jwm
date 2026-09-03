@@ -3287,15 +3287,19 @@ fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
             texture
         };
         let cached_textures = (0..12).map(|_| allocate_texture()).collect::<Vec<_>>();
-        compositor.overview_title_textures = vec![cached_textures[0]];
+        compositor.overview_title_textures = vec![(cached_textures[0], 1, 1)];
         compositor.tab_title_textures = vec![vec![Some((cached_textures[1], 1, 1))]];
         compositor.annotation_label_textures = vec![Some((cached_textures[2], 1, 1))];
         compositor.screenshot_toolbar_icons = vec![Some((cached_textures[3], 1, 1))];
         compositor.hud_textures[0] = Some((cached_textures[4], 1, 1));
         compositor.sysui_textures[0] = Some((cached_textures[5], 1, 1));
-        compositor
-            .toast_textures
-            .insert(1, [Some((cached_textures[6], 1, 1)), None]);
+        compositor.toast_textures.insert(
+            1,
+            super::ToastTextureSet {
+                text: [Some((cached_textures[6], 1, 1)), None],
+                buttons: Vec::new(),
+            },
+        );
         compositor.osd_texture = Some(("test".into(), cached_textures[7], 1, 1));
         compositor.wallpaper_texture = Some(cached_textures[8]);
         compositor.old_wallpaper_texture = Some(cached_textures[9]);

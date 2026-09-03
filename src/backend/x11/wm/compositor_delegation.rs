@@ -605,10 +605,12 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
-            fn compositor_click_toast(&mut self, x: f32, y: f32) -> bool {
+            fn compositor_click_toast(&mut self, x: f32, y: f32) -> crate::backend::api::ToastClick {
                 self.compositor
                     .as_mut()
-                    .is_some_and(|compositor| compositor.click_toast(x, y))
+                    .map_or(crate::backend::api::ToastClick::Miss, |compositor| {
+                        compositor.click_toast(x, y)
+                    })
             }
 
             fn compositor_notify_tag_switch(
