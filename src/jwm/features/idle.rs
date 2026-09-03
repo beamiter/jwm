@@ -32,8 +32,10 @@ pub const DEFAULT_DIM_LEVEL: f32 = 0.35;
 /// The shortest lock timeout that leaves a session usable. Anything smaller
 /// and non-zero is raised to this: a one-second lock re-locks between
 /// keystrokes of the password, which is not a stricter policy but a session
-/// nobody can get back into. Zero still switches the stage off outright.
-pub const MIN_LOCK_SECS: u64 = 30;
+/// nobody can get back into. A minute matches [`UNLOCK_GRACE`], so the
+/// shortest timeout anyone can configure is also the shortest interval an
+/// unlock buys back. Zero still switches the stage off outright.
+pub const MIN_LOCK_SECS: u64 = 60;
 
 /// How long after an unlock the lock stage stays disarmed. Typing the
 /// password is a statement that somebody is here; taking the screen back a
@@ -815,16 +817,16 @@ mod tests {
 
     #[test]
     fn an_unlock_buys_a_grace_period_before_the_next_lock() {
-        // The grace only bites when the lock timeout is shorter than it, so
-        // this is the clamped `idle_lock_secs = 1` case: locking 30s after
-        // every unlock would still be a session nobody can work in.
+        // The grace only bites when the lock timeout is no longer than it, so
+        // this is the clamped `idle_lock_secs = 1` case: re-locking a minute
+        // after every unlock would still be a session nobody can work in.
         let settings = IdleSettings::from_secs(5, 0.3, 1, 0, false);
         assert_eq!(settings.lock_after, Some(secs(MIN_LOCK_SECS)));
         let mut tracker = IdleTracker::default();
         let start = origin();
 
         assert_eq!(
-            tracker.poll(&settings, secs(30), false, false, start),
+            tracker.poll(&settings, secs(MIN_LOCK_SECS), false, false, start),
             [IdleAction::Dim(0.3), IdleAction::Lock]
         );
         // The lock screen is up, and then the password dismisses it.
@@ -837,7 +839,13 @@ mod tests {
         // Idle for the full timeout again, half a minute after the password
         // was typed: taking the screen back now would only stop the person
         // who just proved they are here.
-        let during_grace = tracker.poll(&settings, secs(30), false, false, start + secs(50));
+        let during_grace = tracker.poll(
+            &settings,
+            secs(MIN_LOCK_SECS),
+            false,
+            false,
+            start + secs(50),
+        );
         assert!(!during_grace.contains(&IdleAction::Lock));
         // Dimming is not the lock screen and is not held back by the grace.
         assert_eq!(during_grace, [IdleAction::Dim(0.3)]);
@@ -847,7 +855,7 @@ mod tests {
             tracker
                 .poll(
                     &settings,
-                    secs(45),
+                    secs(MIN_LOCK_SECS),
                     false,
                     false,
                     start + secs(20) + UNLOCK_GRACE

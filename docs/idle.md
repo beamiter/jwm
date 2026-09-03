@@ -43,8 +43,8 @@ A lock timeout is the one stage that can take the session away from the person
 using it, so two rules keep a misconfiguration from locking you out of your own
 desktop:
 
-- **A floor of 30 seconds.** A non-zero `idle_lock_secs` below 30 is raised to
-  30, with one warning in the log. `idle_lock_secs = 1` otherwise re-locks
+- **A floor of 60 seconds.** A non-zero `idle_lock_secs` below 60 is raised to
+  60, with one warning in the log. `idle_lock_secs = 1` otherwise re-locks
   between the keystrokes of the password, and the only way back in is editing
   the config from behind the lock screen. `0` still switches the stage off
   outright.
