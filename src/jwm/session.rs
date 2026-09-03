@@ -6,6 +6,11 @@
 //! 由于重启后窗口是全新的 `WindowId`，恢复通过 class + instance 匹配实现：
 //! `save_session` 写出快照，`restore_session` 读取快照并把保存的状态套用到
 //! 当前已打开、且 class/instance 匹配的客户端上。
+//!
+//! v3 起，每个显示器额外按 `monitor_clients` 的顺序记录窗口身份列表；
+//! `restore_session` 在套用完全部标签 / 浮动状态后，按保存顺序重排每个
+//! 显示器的客户端列表再统一 `arrange`，从而保留用户手工调整过的平铺顺序
+//! （master/stack 排列与拖拽换序的结果）。
 
 use crate::backend::api::Backend;
 use crate::config::CONFIG;
@@ -22,10 +27,11 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const SESSION_VERSION: u32 = 2;
+const SESSION_VERSION: u32 = 3;
 const MIN_SUPPORTED_SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_CLIENTS: usize = 16_384;
+const MAX_SESSION_MONITORS: usize = 64;
 static SESSION_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// 单个客户端的会话条目（按 class/instance 匹配，不持久化 WindowId）。
@@ -41,11 +47,43 @@ pub struct SessionEntry {
     pub floating: Option<(i32, i32, i32, i32)>,
 }
 
+/// 恢复匹配用的窗口身份（class + instance；重启后 `WindowId` 失效，不持久化）。
+///
+/// 同时是 `clients` 条目与每显示器顺序列表共用的匹配键。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionWindowIdentity {
+    pub class: String,
+    pub instance: String,
+}
+
+impl SessionWindowIdentity {
+    /// 顺序恢复的身份匹配：class 与 instance 都忽略大小写相等。
+    ///
+    /// 刻意比 `plan_restore` 的标签匹配更严格（不使用空 instance 回退）：
+    /// 身份不确定时把窗口当作新窗口追加，而不是把它猜进一个可能错误的
+    /// 位置。
+    fn matches(&self, other: &Self) -> bool {
+        self.class.eq_ignore_ascii_case(&other.class)
+            && self.instance.eq_ignore_ascii_case(&other.instance)
+    }
+}
+
+/// 单个显示器的平铺顺序快照（v3 新增）：`monitor_clients` 顺序导出的
+/// 窗口身份列表，组内（平铺 / 浮动）相对序即用户看到的排列。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMonitorOrder {
+    pub monitor_num: u32,
+    pub clients: Vec<SessionWindowIdentity>,
+}
+
 /// 整个会话快照。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub version: u32,
     pub clients: Vec<SessionEntry>,
+    /// v3 新增：每个显示器按平铺顺序记录的窗口身份。v1/v2 迁移而来时为空，
+    /// 恢复行为与旧版本一致（不重排）。
+    pub monitor_orders: Vec<SessionMonitorOrder>,
 }
 
 /// 版本探测：只读取 `version` 字段，用来选择迁移入口。
@@ -82,6 +120,17 @@ struct SessionSnapshotV1 {
     clients: Vec<SessionEntryV1>,
 }
 
+/// 版本 2 快照：与当前版本共用条目表示，但还没有每显示器顺序列表。
+///
+/// 保持严格（字段无缺省）：v2 是当前版本直系前身，缺字段说明写入方出了
+/// 问题，迁移不做静默补全。
+#[derive(Deserialize)]
+struct SessionSnapshotV2 {
+    #[allow(dead_code)]
+    version: u32,
+    clients: Vec<SessionEntry>,
+}
+
 /// 把任一受支持版本的会话 JSON 迁移为当前版本的快照。
 ///
 /// 崩溃安全约定：迁移是纯内存操作，绝不改写磁盘上的旧快照；升级后的
@@ -98,7 +147,12 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
         1 => {
             let v1: SessionSnapshotV1 = serde_json::from_str(json)
                 .map_err(|error| format!("cannot parse version 1 session snapshot: {error}"))?;
-            migrate_snapshot_v1(v1)
+            migrate_snapshot_v2(migrate_snapshot_v1(v1))
+        }
+        2 => {
+            let v2: SessionSnapshotV2 = serde_json::from_str(json)
+                .map_err(|error| format!("cannot parse version 2 session snapshot: {error}"))?;
+            migrate_snapshot_v2(v2)
         }
         SESSION_VERSION => SessionSnapshot::from_json(json)
             .map_err(|error| format!("cannot parse session snapshot: {error}"))?,
@@ -115,7 +169,7 @@ pub fn migrate_session_json(json: &str) -> Result<SessionSnapshot, String> {
 
 /// v1 -> v2：磁盘字段相同，但 v1 从未校验浮动几何。归一化不合法的
 /// 浮动状态（非浮动窗口或非正尺寸），而不是拒绝整个快照。
-fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshot {
+fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshotV2 {
     let clients = v1
         .clients
         .into_iter()
@@ -134,9 +188,19 @@ fn migrate_snapshot_v1(v1: SessionSnapshotV1) -> SessionSnapshot {
             }
         })
         .collect();
+    SessionSnapshotV2 {
+        version: 2,
+        clients,
+    }
+}
+
+/// v2 -> v3：v2 没有每显示器顺序列表，补空列表即可；恢复时空列表意味着
+/// 不重排，行为与 v2 完全一致。
+fn migrate_snapshot_v2(v2: SessionSnapshotV2) -> SessionSnapshot {
     SessionSnapshot {
         version: SESSION_VERSION,
-        clients,
+        clients: v2.clients,
+        monitor_orders: Vec::new(),
     }
 }
 
@@ -197,6 +261,32 @@ impl SessionSnapshot {
             if !entry.is_floating && entry.floating.is_some() {
                 return Err(format!(
                     "session client {index} has floating geometry but is not floating"
+                ));
+            }
+        }
+        if self.monitor_orders.len() > MAX_SESSION_MONITORS {
+            return Err(format!(
+                "session contains {} monitor order lists, exceeding the limit of \
+                 {MAX_SESSION_MONITORS}",
+                self.monitor_orders.len()
+            ));
+        }
+        let mut ordered_identities = 0usize;
+        for (index, order) in self.monitor_orders.iter().enumerate() {
+            ordered_identities = ordered_identities.saturating_add(order.clients.len());
+            if ordered_identities > MAX_SESSION_CLIENTS {
+                return Err(format!(
+                    "session monitor order lists contain more than {MAX_SESSION_CLIENTS} \
+                     window identities"
+                ));
+            }
+            if order
+                .clients
+                .iter()
+                .any(|identity| identity.class.len() > 65_536 || identity.instance.len() > 65_536)
+            {
+                return Err(format!(
+                    "session monitor order {index} contains oversized text fields"
                 ));
             }
         }
@@ -431,9 +521,40 @@ pub fn capture_snapshot(state: &WMState, status_bar_name: &str) -> SessionSnapsh
             floating,
         });
     }
+    let monitor_orders = state
+        .monitor_order
+        .iter()
+        .filter_map(|&monitor_key| {
+            let monitor = state.monitors.get(monitor_key)?;
+            let monitor_num = u32::try_from(monitor.num).ok()?;
+            let clients = state
+                .monitor_clients
+                .get(monitor_key)
+                .map(|keys| {
+                    keys.iter()
+                        .filter_map(|&client_key| {
+                            let c = state.clients.get(client_key)?;
+                            if c.state.is_dock || c.is_status_bar(status_bar_name) {
+                                return None;
+                            }
+                            Some(SessionWindowIdentity {
+                                class: c.class.clone(),
+                                instance: c.instance.clone(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(SessionMonitorOrder {
+                monitor_num,
+                clients,
+            })
+        })
+        .collect();
     SessionSnapshot {
         version: SESSION_VERSION,
         clients,
+        monitor_orders,
     }
 }
 
@@ -502,6 +623,40 @@ where
     }
 
     out
+}
+
+/// 按保存顺序重排当前客户端（纯函数，便于单元测试）。
+///
+/// 返回包含 `current` 全部 key 的新顺序：
+/// - 保存列表中仍存在的身份按保存序排在前；匹配是出现次数感知的——保存
+///   列表里第 k 个相同身份消费当前列表中第 k 个尚未使用的匹配，同一应用
+///   的多个实例因此保持各自的相对位置；
+/// - 保存列表之外的新窗口保持当前相对顺序追加在后；
+/// - 保存列表中已消失的身份被忽略；空保存列表原样返回当前顺序。
+pub fn plan_order_restore<K: Clone>(
+    saved: &[SessionWindowIdentity],
+    current: &[(K, SessionWindowIdentity)],
+) -> Vec<K> {
+    let mut used = vec![false; current.len()];
+    let mut ordered = Vec::with_capacity(current.len());
+    for saved_identity in saved {
+        if let Some(index) = current
+            .iter()
+            .enumerate()
+            .find_map(|(index, (_, identity))| {
+                (!used[index] && identity.matches(saved_identity)).then_some(index)
+            })
+        {
+            used[index] = true;
+            ordered.push(current[index].0.clone());
+        }
+    }
+    for (index, (key, _)) in current.iter().enumerate() {
+        if !used[index] {
+            ordered.push(key.clone());
+        }
+    }
+    ordered
 }
 
 impl Jwm {
@@ -626,6 +781,11 @@ impl Jwm {
             self.resize_client(backend, key, x, y, w, h, false);
         }
 
+        // 全部窗口状态（tag / 浮动 / 所在显示器）恢复完成后，最后按快照
+        // 重排每个显示器的平铺顺序，再统一 arrange。v1/v2 快照的
+        // monitor_orders 为空，这里自然成为无操作。
+        self.restore_monitor_client_order(&snapshot);
+
         let monitor_keys: Vec<_> = self.state.monitor_order.clone();
         for mk in monitor_keys {
             self.arrange(backend, Some(mk));
@@ -633,6 +793,70 @@ impl Jwm {
 
         log::info!("session restored: {} clients matched", plans.len());
         Ok(())
+    }
+
+    /// 按快照中保存的顺序重排每个显示器的 `monitor_clients`。
+    ///
+    /// 保存列表中的窗口按保存序在前（保持相对序），列表外的新窗口按现有
+    /// 相对顺序追加；`monitor_clients` 的「平铺组在前、浮动组在后」不变量
+    /// 优先于保存顺序——保存后浮动状态发生变化的窗口回到它当前所属的组。
+    fn restore_monitor_client_order(&mut self, snapshot: &SessionSnapshot) {
+        for saved in &snapshot.monitor_orders {
+            let Some(monitor_key) = self
+                .state
+                .monitor_order
+                .iter()
+                .copied()
+                .find(|monitor_key| {
+                    self.state
+                        .monitors
+                        .get(*monitor_key)
+                        .is_some_and(|monitor| u32::try_from(monitor.num) == Ok(saved.monitor_num))
+                })
+            else {
+                continue;
+            };
+            let Some(current_keys) = self.state.monitor_clients.get(monitor_key) else {
+                continue;
+            };
+            let current: Vec<(ClientKey, SessionWindowIdentity)> = current_keys
+                .iter()
+                .filter_map(|&key| {
+                    self.state.clients.get(key).map(|client| {
+                        (
+                            key,
+                            SessionWindowIdentity {
+                                class: client.class.clone(),
+                                instance: client.instance.clone(),
+                            },
+                        )
+                    })
+                })
+                .collect();
+            if current.len() != current_keys.len() {
+                // 列表与客户端表不一致时不重排，避免覆盖丢失 key。
+                continue;
+            }
+            let planned = plan_order_restore(&saved.clients, &current);
+            let mut tiled: Vec<ClientKey> = Vec::with_capacity(planned.len());
+            let mut floating: Vec<ClientKey> = Vec::new();
+            for key in planned {
+                let is_floating = self
+                    .state
+                    .clients
+                    .get(key)
+                    .is_some_and(|client| client.state.is_floating);
+                if is_floating {
+                    floating.push(key);
+                } else {
+                    tiled.push(key);
+                }
+            }
+            tiled.extend(floating);
+            if let Some(client_list) = self.state.monitor_clients.get_mut(monitor_key) {
+                *client_list = tiled;
+            }
+        }
     }
 }
 
@@ -694,6 +918,21 @@ mod tests {
         }
     }
 
+    fn identity(class: &str, instance: &str) -> SessionWindowIdentity {
+        SessionWindowIdentity {
+            class: class.to_string(),
+            instance: instance.to_string(),
+        }
+    }
+
+    fn snapshot_with_clients(clients: Vec<SessionEntry>) -> SessionSnapshot {
+        SessionSnapshot {
+            version: SESSION_VERSION,
+            clients,
+            monitor_orders: Vec::new(),
+        }
+    }
+
     fn keys(n: usize) -> Vec<ClientKey> {
         let mut sm: SlotMap<ClientKey, ()> = SlotMap::new();
         (0..n).map(|_| sm.insert(())).collect()
@@ -715,6 +954,16 @@ mod tests {
                 },
                 entry("Alacritty", "alacritty", 0b1),
             ],
+            monitor_orders: vec![
+                SessionMonitorOrder {
+                    monitor_num: 0,
+                    clients: vec![identity("Alacritty", "alacritty")],
+                },
+                SessionMonitorOrder {
+                    monitor_num: 1,
+                    clients: vec![identity("Firefox", "Navigator")],
+                },
+            ],
         };
         let json = snap.to_json().unwrap();
         let back = SessionSnapshot::from_json(&json).unwrap();
@@ -726,6 +975,7 @@ mod tests {
         let mut snapshot = SessionSnapshot {
             version: 1,
             clients: vec![entry("Term", "kitty", 1)],
+            monitor_orders: Vec::new(),
         };
         assert!(snapshot.validate().is_ok());
 
@@ -735,6 +985,51 @@ mod tests {
         snapshot.version = SESSION_VERSION;
         snapshot.clients[0].floating = Some((0, 0, -1, 100));
         assert!(snapshot.validate().unwrap_err().contains("floating size"));
+    }
+
+    #[test]
+    fn validation_bounds_monitor_order_lists() {
+        let mut snapshot = snapshot_with_clients(Vec::new());
+        snapshot.monitor_orders = vec![
+            SessionMonitorOrder {
+                monitor_num: 0,
+                clients: Vec::new(),
+            };
+            MAX_SESSION_MONITORS + 1
+        ];
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("monitor order lists")
+        );
+
+        let mut snapshot = snapshot_with_clients(Vec::new());
+        snapshot.monitor_orders = vec![SessionMonitorOrder {
+            monitor_num: 0,
+            clients: vec![SessionWindowIdentity {
+                class: "x".repeat(65_537),
+                instance: String::new(),
+            }],
+        }];
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("oversized text fields")
+        );
+
+        let mut snapshot = snapshot_with_clients(Vec::new());
+        snapshot.monitor_orders = vec![SessionMonitorOrder {
+            monitor_num: 0,
+            clients: vec![identity("Term", "kitty"); MAX_SESSION_CLIENTS + 1],
+        }];
+        assert!(
+            snapshot
+                .validate()
+                .unwrap_err()
+                .contains("window identities")
+        );
     }
 
     #[test]
@@ -842,10 +1137,7 @@ mod tests {
 
     #[test]
     fn plan_restore_matches_by_class_and_instance() {
-        let snap = SessionSnapshot {
-            version: SESSION_VERSION,
-            clients: vec![entry("Firefox", "Navigator", 0b100)],
-        };
+        let snap = snapshot_with_clients(vec![entry("Firefox", "Navigator", 0b100)]);
         let k = keys(1);
         let plans = plan_restore(&snap, vec![(k[0], "firefox", "navigator")]);
         assert_eq!(plans.len(), 1);
@@ -861,10 +1153,7 @@ mod tests {
 
     #[test]
     fn plan_restore_no_match_returns_empty() {
-        let snap = SessionSnapshot {
-            version: SESSION_VERSION,
-            clients: vec![entry("Firefox", "Navigator", 0b100)],
-        };
+        let snap = snapshot_with_clients(vec![entry("Firefox", "Navigator", 0b100)]);
         let k = keys(1);
         let plans = plan_restore(&snap, vec![(k[0], "Alacritty", "alacritty")]);
         assert!(plans.is_empty());
@@ -874,10 +1163,7 @@ mod tests {
     fn plan_restore_each_entry_used_at_most_once() {
         // Two terminals saved on different tags; two open terminals should map
         // to distinct entries rather than both matching the first.
-        let snap = SessionSnapshot {
-            version: SESSION_VERSION,
-            clients: vec![entry("Term", "", 0b1), entry("Term", "", 0b10)],
-        };
+        let snap = snapshot_with_clients(vec![entry("Term", "", 0b1), entry("Term", "", 0b10)]);
         let k = keys(2);
         let plans = plan_restore(&snap, vec![(k[0], "Term", ""), (k[1], "Term", "")]);
         assert_eq!(plans.len(), 2);
@@ -888,10 +1174,8 @@ mod tests {
     #[test]
     fn plan_restore_prefers_exact_instance_over_fallback() {
         // Entry 0: class matches, no instance (fallback). Entry 1: exact instance.
-        let snap = SessionSnapshot {
-            version: SESSION_VERSION,
-            clients: vec![entry("Term", "", 0b1), entry("Term", "kitty", 0b1000)],
-        };
+        let snap =
+            snapshot_with_clients(vec![entry("Term", "", 0b1), entry("Term", "kitty", 0b1000)]);
         let k = keys(1);
         let plans = plan_restore(&snap, vec![(k[0], "Term", "kitty")]);
         assert_eq!(plans.len(), 1);
@@ -900,6 +1184,7 @@ mod tests {
 
     const SESSION_V1_FIXTURE: &str = include_str!("../../tests/fixtures/session_v1.json");
     const SESSION_V2_FIXTURE: &str = include_str!("../../tests/fixtures/session_v2.json");
+    const SESSION_V3_FIXTURE: &str = include_str!("../../tests/fixtures/session_v3.json");
 
     #[test]
     fn recorded_v1_snapshot_migrates_tolerantly_and_normalizes_floating_state() {
@@ -921,6 +1206,9 @@ mod tests {
         // 浮动但尺寸非法的条目保留浮动标志、丢弃几何。
         assert!(snapshot.clients[2].is_floating);
         assert_eq!(snapshot.clients[2].floating, None);
+
+        // v1 没有每显示器顺序列表，迁移结果为空列表（恢复时不重排）。
+        assert!(snapshot.monitor_orders.is_empty());
     }
 
     #[test]
@@ -930,20 +1218,45 @@ mod tests {
         assert_eq!(snapshot.clients.len(), 2);
         assert_eq!(snapshot.clients[0].floating, Some((40, 60, 1024, 768)));
         assert_eq!(snapshot.clients[1].floating, None);
+        // v2 同样没有顺序数据。
+        assert!(snapshot.monitor_orders.is_empty());
+    }
+
+    #[test]
+    fn recorded_v3_snapshot_loads_with_monitor_order() {
+        let snapshot = migrate_session_json(SESSION_V3_FIXTURE).unwrap();
+        assert_eq!(snapshot.version, SESSION_VERSION);
+        assert_eq!(snapshot.clients.len(), 2);
+        assert_eq!(snapshot.monitor_orders.len(), 2);
+        assert_eq!(snapshot.monitor_orders[0].monitor_num, 0);
+        assert_eq!(
+            snapshot.monitor_orders[0].clients,
+            vec![
+                identity("Alacritty", "alacritty"),
+                identity("Firefox", "Navigator"),
+            ]
+        );
+        assert_eq!(snapshot.monitor_orders[1].monitor_num, 1);
+        assert!(snapshot.monitor_orders[1].clients.is_empty());
     }
 
     #[test]
     fn migration_refuses_future_versions_and_unreadable_documents() {
-        let error = migrate_session_json(r#"{"version":3,"clients":[]}"#).unwrap_err();
-        assert!(error.contains("unsupported session version 3"));
+        let error =
+            migrate_session_json(r#"{"version":4,"clients":[],"monitor_orders":[]}"#).unwrap_err();
+        assert!(error.contains("unsupported session version 4"));
 
         let error = migrate_session_json("not JSON").unwrap_err();
         assert!(error.contains("no readable version"));
 
-        // v2 保持严格：当前版本缺字段说明写入方出了问题，不做静默补全。
+        // v2 保持严格：缺字段说明写入方出了问题，迁移不做静默补全。
         let error =
             migrate_session_json(r#"{"version":2,"clients":[{"class":"A","instance":"a"}]}"#)
                 .unwrap_err();
+        assert!(error.contains("cannot parse version 2 session snapshot"));
+
+        // v3（当前版本）同样严格：缺 monitor_orders 字段直接拒绝。
+        let error = migrate_session_json(r#"{"version":3,"clients":[]}"#).unwrap_err();
         assert!(error.contains("cannot parse session snapshot"));
     }
 
@@ -964,13 +1277,117 @@ mod tests {
 
     #[test]
     fn plan_restore_class_match_but_instance_differs_is_skipped_when_both_present() {
-        let snap = SessionSnapshot {
-            version: SESSION_VERSION,
-            clients: vec![entry("Term", "kitty", 0b1)],
-        };
+        let snap = snapshot_with_clients(vec![entry("Term", "kitty", 0b1)]);
         let k = keys(1);
         // Both have instance, but they differ -> no match.
         let plans = plan_restore(&snap, vec![(k[0], "Term", "alacritty")]);
         assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn capture_exports_monitor_clients_order_and_skips_bars_and_docks() {
+        let mut state = WMState::new();
+        let mut monitor = WMMonitor::new();
+        monitor.num = 0;
+        let monitor_key = state.monitors.insert(monitor);
+        state.monitor_order.push(monitor_key);
+
+        let mut ordered_keys = Vec::new();
+        for (raw, class, instance) in [
+            (1, "Firefox", "Navigator"),
+            (2, "Term", "kitty"),
+            (3, "xbar", "xbar"),
+            (4, "Gimp", "gimp"),
+        ] {
+            let mut client = WMClient::new(WindowId::from_raw(raw));
+            client.class = class.into();
+            client.instance = instance.into();
+            client.state.tags = 1;
+            client.mon = Some(monitor_key);
+            if class == "xbar" {
+                client.state.is_dock = true;
+            }
+            let key = state.clients.insert(client);
+            state.client_order.push(key);
+            ordered_keys.push(key);
+        }
+        state.monitor_clients.insert(monitor_key, ordered_keys);
+
+        let snapshot = capture_snapshot(&state, "status-bar");
+        assert_eq!(snapshot.monitor_orders.len(), 1);
+        assert_eq!(snapshot.monitor_orders[0].monitor_num, 0);
+        // 顺序即 monitor_clients 顺序；dock 窗口与 clients 列表一样被跳过。
+        assert_eq!(
+            snapshot.monitor_orders[0].clients,
+            vec![
+                identity("Firefox", "Navigator"),
+                identity("Term", "kitty"),
+                identity("Gimp", "gimp"),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_order_restore_full_match_uses_saved_order() {
+        let saved = vec![identity("B", "b"), identity("A", "a")];
+        let current = vec![(0, identity("A", "a")), (1, identity("B", "b"))];
+        assert_eq!(plan_order_restore(&saved, &current), vec![1, 0]);
+    }
+
+    #[test]
+    fn plan_order_restore_ignores_saved_identities_that_disappeared() {
+        let saved = vec![identity("B", "b"), identity("X", "x"), identity("A", "a")];
+        let current = vec![(0, identity("A", "a")), (1, identity("B", "b"))];
+        assert_eq!(plan_order_restore(&saved, &current), vec![1, 0]);
+    }
+
+    #[test]
+    fn plan_order_restore_appends_new_windows_in_current_order() {
+        let saved = vec![identity("B", "b")];
+        let current = vec![
+            (0, identity("N1", "n1")),
+            (1, identity("B", "b")),
+            (2, identity("N2", "n2")),
+        ];
+        assert_eq!(plan_order_restore(&saved, &current), vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn plan_order_restore_empty_saved_list_keeps_current_order() {
+        let current = vec![(0, identity("A", "a")), (1, identity("B", "b"))];
+        assert_eq!(plan_order_restore(&[], &current), vec![0, 1]);
+    }
+
+    #[test]
+    fn plan_order_restore_duplicate_identities_match_by_occurrence() {
+        // Two terminals with the same identity: the k-th saved occurrence
+        // consumes the k-th still-unused current match, so each instance
+        // keeps its own relative slot.
+        let saved = vec![
+            identity("Term", "kitty"),
+            identity("Firefox", "Navigator"),
+            identity("Term", "kitty"),
+        ];
+        let current = vec![
+            (0, identity("Term", "kitty")),
+            (1, identity("Term", "kitty")),
+            (2, identity("Firefox", "Navigator")),
+        ];
+        assert_eq!(plan_order_restore(&saved, &current), vec![0, 2, 1]);
+
+        // More saved occurrences than current windows: the excess is dropped.
+        let saved = vec![identity("Term", "kitty"), identity("Term", "kitty")];
+        let current = vec![(0, identity("Term", "kitty"))];
+        assert_eq!(plan_order_restore(&saved, &current), vec![0]);
+    }
+
+    #[test]
+    fn plan_order_restore_matches_case_insensitively() {
+        let saved = vec![identity("firefox", "navigator")];
+        let current = vec![
+            (0, identity("Term", "kitty")),
+            (1, identity("Firefox", "Navigator")),
+        ];
+        assert_eq!(plan_order_restore(&saved, &current), vec![1, 0]);
     }
 }

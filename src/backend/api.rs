@@ -2508,7 +2508,10 @@ pub trait CompositorWindowEffects: Send {
         _groups: Vec<crate::backend::compositor_common::window_tabs::TabGroup>,
     ) {
     }
-    fn compositor_zoom_to_fit(&mut self, _window: Option<u32>) {}
+    /// Zoom one window so it fits the screen, or reset with `None`. The
+    /// window crosses this boundary as a [`WindowId`]; each backend
+    /// translates it to its native id before touching the compositor.
+    fn compositor_zoom_to_fit(&mut self, _window: Option<WindowId>) {}
 }
 
 /// Accessibility color correction and interactive screen annotations.

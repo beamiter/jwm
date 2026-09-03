@@ -26,6 +26,12 @@ While any toast is visible the scene keeps compositing (direct scanout and
 KMS color offload resume once the last card fades out). The modal system UI
 draws above toasts, and the lock screen hides them entirely.
 
+Cards answer the pointer. Hovering one freezes its countdown — the timer
+resumes from the frozen point when the pointer leaves, so reading a long
+body never races the fade. A left-click on the card body dismisses it with
+a quick 120 ms fade-out; the click is swallowed before window dispatch, so
+it never falls through to the client underneath the card.
+
 ## Notification center
 
 `Alt+F11` (`notification_center`) opens the history as a material card, newest
@@ -78,6 +84,16 @@ beneath it, with a mark on the one `Enter` would invoke:
 
 Invoking one sends the sender `ActionInvoked` and then closes the notification,
 in that order, which is what the specification expects.
+
+A toast card for a notification with actions shows up to three of them as
+chips along its bottom edge, accent-outlined, with an accent wash on the
+chip under the pointer. Clicking a chip invokes the action through the same
+pipeline as the notification center — `ActionInvoked`, then the record
+closes as dismissed — while clicking the card body still just dismisses the
+toast. A click on a card that is already fading out is swallowed without
+invoking anything twice. Chips follow their own sanitation: an action with
+no key is dropped before the cap is counted, and a blank label falls back
+to its key.
 
 Rules worth knowing, all unit tested:
 

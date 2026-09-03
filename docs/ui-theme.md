@@ -1,9 +1,12 @@
 # UI theme
 
-JWM draws four surfaces itself: the [debug HUD](debug-hud.md), the modal
+JWM draws these surfaces itself: the [debug HUD](debug-hud.md), the modal
 system-UI card (launcher, keybinding viewer, lock screen), the
-[notification toasts](notifications.md) and the volume/brightness OSD. They
-share one palette, chosen by `appearance.ui_theme`:
+[notification toasts](notifications.md), the volume/brightness OSD, and the
+[window tab strip](window-tabs.md); the overview's window labels take the
+same palette as a pill chip under the title. They share one palette, chosen
+by `appearance.ui_theme`, and their text all goes through one font stack
+with CJK and emoji fallback:
 
 ```toml
 [appearance]

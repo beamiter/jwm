@@ -100,8 +100,9 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 - Versioned runtime health and capability snapshots expose the actual selected
   backend and supported control surface without changing legacy IPC envelopes.
 - Session snapshots use an atomic private state store, validate schema and
-  payload limits, and restore monitor/tag placement with on-screen floating
-  geometry while continuing to read the legacy cache location.
+  payload limits, and restore monitor/tag placement, per-monitor tiled client
+  order, and on-screen floating geometry while continuing to read the legacy
+  cache location.
 - `EventHandler` explicitly delegates immediate compositor rendering to JWM's
   render pump. X11 Damage events no longer fall through the trait's no-op
   default and wait for the periodic update tick.
@@ -255,10 +256,12 @@ tools/jwm_remote.rs         separate trusted-LAN X11 helper
 - Session snapshots load through an explicit version-probed migration
   (`session::migrate_session_json`): version 1 parses through a tolerant
   representation whose invalid floating state is normalized rather than
-  rejected, unknown versions fail without partial state, and loading never
-  rewrites the on-disk snapshot, so a crash mid-restore or a downgrade always
-  finds the previous file intact. Recorded v1/v2 fixtures freeze both
-  generations before any future schema change.
+  rejected, version 2 gains an empty per-monitor order list, and the current
+  version 3 records each monitor's tiled client order as ordered
+  class/instance identities. Unknown versions fail without partial state, and
+  loading never rewrites the on-disk snapshot, so a crash mid-restore or a
+  downgrade always finds the previous file intact. Recorded v1/v2/v3 fixtures
+  freeze every generation before any future schema change.
 
 Each step should be behavior-preserving and land independently. Avoid moving a
 module and changing its behavior in the same change unless tests cover it.

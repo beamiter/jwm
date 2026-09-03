@@ -1127,9 +1127,14 @@ macro_rules! delegate_compositor_capabilities {
                 }
             }
 
-            fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+            fn compositor_zoom_to_fit(&mut self, window: Option<crate::backend::common_define::WindowId>) {
                 if let Some(compositor) = self.compositor.as_mut() {
-                    compositor.zoom_to_fit(window);
+                    // The compositor's window table is keyed by XID, so the
+                    // window manager's handle must be translated here; an
+                    // unknown handle zooms nothing instead of matching a
+                    // window that happens to share the raw value.
+                    let x11_window = window.and_then(|win| self.ids.x11(win).ok());
+                    compositor.zoom_to_fit(x11_window);
                 }
             }
         }

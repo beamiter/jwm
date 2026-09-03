@@ -1773,7 +1773,7 @@ impl WaylandCompositor {
         self.annotation_line_width = width.max(1.0);
     }
 
-    pub(crate) fn zoom_to_fit(&mut self, window: Option<u32>) {
+    pub(crate) fn zoom_to_fit(&mut self, window: Option<u64>) {
         self.zoom_to_fit_window = window;
         self.needs_render = true;
     }

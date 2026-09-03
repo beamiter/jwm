@@ -1205,7 +1205,7 @@ pub(crate) struct WaylandCompositor {
     monitors: Vec<(u32, i32, i32, u32, u32, u32)>,
 
     // Zoom to fit
-    zoom_to_fit_window: Option<u32>,
+    zoom_to_fit_window: Option<u64>,
 
     // Annotations
     annotation_active: bool,

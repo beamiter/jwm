@@ -83,7 +83,8 @@ minimised, and raises it. Nothing is spawned and the launch ranking is not
 touched — focusing Firefox must not promote the Firefox application row.
 
 `/` on its own lists open windows and no applications at all, which is the
-window switcher when you want one:
+window switcher when you want one — for a hold-the-modifier gesture, see
+the [Alt+Tab window switcher](window-switcher.md):
 
 ```
 /            every window

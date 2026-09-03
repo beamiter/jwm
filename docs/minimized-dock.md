@@ -227,8 +227,11 @@ queue.
   valid snapshot as an interrupted restore and finishes it at the semantic
   target. Floating placement therefore survives seamless restarts exactly when
   the output still exists, and is clamped when topology changed. Exact tiled
-  client order remains a separate limitation because it depends on preserving
-  the monitor's logical client sequence, not just a rectangle.
+  client order is preserved through the session snapshot: a v3 snapshot records
+  each monitor's logical client sequence as an ordered list of class/instance
+  identities, and `restore_session` replays it onto the monitor's client list
+  before arranging — saved windows keep their saved relative order, while
+  windows unknown to the snapshot append under the usual insertion rules.
 - Named scratchpads also carry a bounded, versioned identity handoff across a
   seamless exec. Established X11 entries use the server-owned XID rather than
   the fresh backend's discovery-order `WindowId`, are resolved only against an

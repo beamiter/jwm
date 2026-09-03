@@ -4151,9 +4151,9 @@ impl CompositorWindowEffects for UdevBackend {
             c.set_window_groups(groups);
         }
     }
-    fn compositor_zoom_to_fit(&mut self, window: Option<u32>) {
+    fn compositor_zoom_to_fit(&mut self, window: Option<WindowId>) {
         if let Some(c) = self.compositor.as_mut() {
-            c.zoom_to_fit(window);
+            c.zoom_to_fit(window.map(|win| win.raw()));
         }
     }
 }

@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-09-03：UI/UX 四轮（会话 v3 平铺顺序 / 文档补齐 / zoom_to_fit 修正）
+
+1. **会话格式 v3：精确平铺顺序跨重启保留**。`SessionSnapshot` 新增
+   `monitor_orders`（每显示器按序的 `{class, instance}` 身份列表，沿用现有匹配键，
+   不持久化 WindowId/title）；保存时从 `monitor_clients` 导出，恢复时在统一 arrange
+   前经纯函数 `plan_order_restore` 重排（忽略大小写、出现次数感知、缺失身份跳过、
+   新窗口保持相对序追加、浮动分组不变量优先于保存序）。v1→v2→v3 迁移链，
+   `tests/fixtures/session_v3.json` 冻结。限制：只覆盖 save/restore 显式工作流
+   （裸 seamless exec 仍靠 V1 属性，不含平铺顺序）；class+instance 全同的窗口按
+   出现次序配对。dock 顺序不动（已由 `_JWM_MINIMIZED_RESTORE_V1` 属性持久化）。
+2. **文档补齐**：新建 `docs/window-tabs.md`、`docs/expose.md`、
+   `docs/window-switcher.md`（含 Alt+Tab 默认键位变更的醒目标注与恢复旧行为的
+   配置示例）；更新 notifications.md（toast 交互+动作按钮）、ui-theme.md
+   （字体栈与自绘 surface 清单）、launcher.md（交叉引用）、minimized-dock.md
+   （顺序限制已解）、architecture.md 与 README.md（迁移链与新页面登记）。
+   所有配置键名/默认值均对照 src/config.rs 核实。
+3. **`compositor_zoom_to_fit` 修正 id 翻译**（window_tabs 剩余项 #4 关闭）：
+   API 签名从裸 `Option<u32>` 改为 `Option<WindowId>`（api.rs:2511），X11 委托处
+   经 `self.ids.x11()` 翻译（未知句柄 = 不缩放而非错配裸值），wayland 侧字段
+   从 `Option<u32>` 更正为本机 `Option<u64>`。仍无调用者，但下一次接线不会再
+   踩到 id 错配。注意：wayland 渲染端只存不使用（render.rs 无引用），实际缩放
+   只有 X11 实现——接线时若需要 wayland 缩放要补 render 路径。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2501 passed / 0 failed。
+
+---
+
 ## 2026-09-03：UI/UX 三轮（标签字体统一 / toast 动作按钮 / 动画默认开）
 
 1. **Expose/overview 标签迁移到统一字体栈，位图字体退役**。两端
@@ -375,17 +403,15 @@ bug 整个消掉了 —— 现在没有任何窗口 id 跨过这条边界。
 点左/中/右格分别切到对应窗口；点已激活的格子不动栈序；关到只剩 1 个窗口时预留自动
 收回。`cargo test --lib` 1238 passed。
 
-**剩余项**（2026-09-03 核对）
+**剩余项**（2026-09-03 四轮后核对：全部关闭）
 
-1. ~~两个后端的标题样式不一致~~ **已过时**：两端 `render_tab_bar` 现已统一为
-   ui_theme 卡片+chip 风格；`overview.rs` 的 `render_title_to_pixels` 只服务
-   expose/overview 标签，不再画 tab 标题。真正残留的是 expose/overview 标签在
-   两端的样式差异（X11 深色药丸底+2x / wayland 1x 白字无底）。
+1. ~~两个后端的标题样式不一致~~ **已关闭**：overview 标签在三轮统一迁入
+   `compositor_font` + ui_theme 药丸 chip，两端同源同样式，位图字体文件已删。
 2. ~~非 ASCII 标题显示为 `?` 或空格。~~ **已关闭**：tab 标题本就走
    `compositor_font` 真字体栈，overview 标签在 2026-09-03 三轮迁入后，
    用户可见文字全部支持 CJK/emoji 回退；仅剩无 fontconfig 环境的兜底位图表。
 3. ~~没有 hover 高亮、没有中键关闭、不能拖拽换序。~~ **已完成**，见 2026-09-03
    「UI/UX 交互闭环一轮」第 1–3 条。
-4. **`compositor_zoom_to_fit(Option<u32>)`**（`compositor_delegation.rs`）仍是原来那种
-   未翻译的裸 u32 形状，`zoom_to_fit` 用 `self.windows.get(&win)` 按 xid 查表。
-   目前全仓库没有调用者所以没暴露；接线之前记得先翻译，否则就是刚修掉的那个 bug。
+4. ~~`compositor_zoom_to_fit(Option<u32>)` 未翻译裸 id~~ **已关闭**：四轮改为
+   `Option<WindowId>` 并在两端委托处翻译。注意 wayland render 端只存不用，
+   将来接线若需 wayland 实际缩放要补渲染路径。
