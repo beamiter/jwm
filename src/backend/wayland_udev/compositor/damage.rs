@@ -146,6 +146,12 @@ impl WaylandCompositor {
         if self.scene_linear_color_path_active() {
             return Some("scene-linear output conversion requires composition");
         }
+        // The compositor texture currently carries internalized KMS external
+        // elements (cursor, drag icon, layer trees). A direct scanout would
+        // drop them from the visible frame entirely.
+        if self.external_elements_drawn {
+            return Some("internalized KMS external elements require composition");
+        }
         if self.postprocess_active {
             return Some("post-processing requires composition");
         }

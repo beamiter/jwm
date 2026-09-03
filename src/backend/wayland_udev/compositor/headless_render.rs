@@ -3245,6 +3245,629 @@ fn wayland_scene_linear_delivery_blocks_scanout_and_annotation_only_tail() {
     }
 }
 
+/// Premultiplied passthrough standing in for Smithay's KMS element draw:
+/// the scanout assembly samples the element texture unchanged and blends it
+/// (GL_ONE, GL_ONE_MINUS_SRC_ALPHA) over the compositor texture in the
+/// encoded domain.
+const KMS_PASSTHROUGH_FRAGMENT: &str = r#"#version 300 es
+precision mediump float;
+uniform sampler2D u_texture;
+in vec2 v_uv;
+out vec4 frag_color;
+void main() { frag_color = texture(u_texture, v_uv); }
+"#;
+
+/// Read back a whole compositor-owned FBO in GL's bottom-left row order.
+unsafe fn read_fbo_frame(
+    gl: &smithay::backend::renderer::gles::ffi::Gles2,
+    fbo: u32,
+    w: i32,
+    h: i32,
+) -> Vec<u8> {
+    use smithay::backend::renderer::gles::ffi;
+    unsafe {
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+        let mut frame = vec![0u8; (w * h * 4) as usize];
+        gl.ReadPixels(
+            0,
+            0,
+            w,
+            h,
+            ffi::RGBA,
+            ffi::UNSIGNED_BYTE,
+            frame.as_mut_ptr().cast(),
+        );
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
+        frame
+    }
+}
+
+/// Sample `frame` (bottom-left row order) at top-left-origin coordinates.
+fn frame_pixel(frame: &[u8], w: usize, h: usize, x: usize, y_top_left: usize) -> [u8; 4] {
+    let row = h - 1 - y_top_left;
+    let idx = (row * w + x) * 4;
+    [frame[idx], frame[idx + 1], frame[idx + 2], frame[idx + 3]]
+}
+
+/// Upload `pixels` (top-to-bottom RGBA rows) as a GL texture the compositor
+/// may stage as an external element.
+unsafe fn create_element_texture(
+    gl: &smithay::backend::renderer::gles::ffi::Gles2,
+    w: i32,
+    h: i32,
+    pixels: &[u8],
+) -> u32 {
+    use smithay::backend::renderer::gles::ffi;
+    unsafe {
+        let mut tex = 0;
+        gl.GenTextures(1, &mut tex);
+        gl.BindTexture(ffi::TEXTURE_2D, tex);
+        gl.TexImage2D(
+            ffi::TEXTURE_2D,
+            0,
+            ffi::RGBA as i32,
+            w,
+            h,
+            0,
+            ffi::RGBA,
+            ffi::UNSIGNED_BYTE,
+            pixels.as_ptr().cast(),
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_MIN_FILTER,
+            ffi::NEAREST as i32,
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_MAG_FILTER,
+            ffi::NEAREST as i32,
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_WRAP_S,
+            ffi::CLAMP_TO_EDGE as i32,
+        );
+        gl.TexParameteri(
+            ffi::TEXTURE_2D,
+            ffi::TEXTURE_WRAP_T,
+            ffi::CLAMP_TO_EDGE as i32,
+        );
+        gl.BindTexture(ffi::TEXTURE_2D, 0);
+        tex
+    }
+}
+
+/// CPU model of the internalized pipeline for one pixel: premultiplied
+/// encoded source → unpremultiply → sRGB ingress decode → premultiply →
+/// linear over-blend over the decoded background → output OETF.
+fn internalized_pixel_oracle(
+    src: [u8; 4],
+    dst_encoded: [u8; 4],
+    transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+) -> [u8; 4] {
+    use crate::backend::wayland_udev::color_pipeline::TransferKind;
+    let src_a = f32::from(src[3]) / 255.0;
+    let mut blended = [0.0f32; 3];
+    for (channel, blended) in blended.iter_mut().enumerate() {
+        let premult = f32::from(src[channel]) / 255.0;
+        let straight = if src_a > 1e-6 { premult / src_a } else { 0.0 };
+        let src_linear = TransferKind::Srgb.inverse(straight.clamp(0.0, 1.0)) * src_a;
+        let dst_linear = TransferKind::Srgb.inverse(f32::from(dst_encoded[channel]) / 255.0);
+        *blended = src_linear + (1.0 - src_a) * dst_linear;
+    }
+    let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        quantize(transfer.forward(blended[0])),
+        quantize(transfer.forward(blended[1])),
+        quantize(transfer.forward(blended[2])),
+        quantize(src_a + (1.0 - src_a) * f32::from(dst_encoded[3]) / 255.0),
+    ]
+}
+
+/// CPU model of the legacy KMS assembly for one pixel: premultiplied
+/// texels blended in the encoded domain, no color transform at all.
+fn legacy_kms_pixel_oracle(src: [u8; 4], dst_encoded: [u8; 4]) -> [u8; 4] {
+    let src_a = f32::from(src[3]) / 255.0;
+    let mut out = [0u8; 4];
+    for channel in 0..4 {
+        let src = f32::from(src[channel]) / 255.0;
+        let dst = f32::from(dst_encoded[channel]) / 255.0;
+        out[channel] = ((src + (1.0 - src_a) * dst).clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    out
+}
+
+/// The encoded-domain background texel the compositor clear produces through
+/// one decode/encode roundtrip (RGBA8 quantization of the f32 clear color).
+fn background_texel() -> [u8; 4] {
+    [
+        (0.1f32 * 255.0).round() as u8,
+        (0.15f32 * 255.0).round() as u8,
+        (0.25f32 * 255.0).round() as u8,
+        255,
+    ]
+}
+
+/// The deferred common-linear route must place positioned content at exactly
+/// the scene coordinates the legacy encoded route produces. The scene-linear
+/// decode/encode passes flip the storage convention between the two FBOs
+/// unless they sample V-flipped; this regression test pins the contract for
+/// the window pass that KMS external element staging also relies on.
+#[test]
+fn wayland_scene_linear_route_preserves_window_scene_position() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping scene-linear positioning test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        // Keep the probe free of intentional linear-domain effects: the dim
+        // scalar commutes with premultiplied alpha but not with the sRGB
+        // transfer, so an unfocused window would legitimately differ.
+        compositor.inactive_dim = 1.0;
+        compositor.inactive_desaturate = 0.0;
+        let pixels = [40u8, 40, 200, 255].repeat(8 * 6);
+        let win_tex = create_element_texture(&gl, 8, 6, &pixels);
+        compositor.windows.insert(
+            7,
+            super::WindowState {
+                gl_texture: Some(win_tex),
+                texture_owner: None,
+                width: 8,
+                height: 6,
+                has_alpha: false,
+                y_inverted: false,
+                fade_opacity: 1.0,
+                fading_out: false,
+                anim_scale: 1.0,
+                anim_scale_target: 1.0,
+                wobbly: None,
+                motion_trail: Default::default(),
+                opacity_override: None,
+                corner_radius_override: Some(0.0),
+                frame_extents: [0; 4],
+                is_shaped: false,
+                is_fullscreen: false,
+                is_urgent: false,
+                is_pip: false,
+                is_moving: false,
+                is_frosted: false,
+                frosted_strength: 0.0,
+                class_name: String::new(),
+                scale: 1.0,
+                audio_sync_target: None,
+                ripple_progress: 0.0,
+                ripple_active: false,
+                content_uv: [0.0, 0.0, 1.0, 1.0],
+                closing_rect: None,
+                is_genie_minimizing: false,
+                is_genie_restoring: false,
+                color_transform: None,
+            },
+        );
+        let scene = [(7u64, 10i32, 20i32, 8u32, 6u32)];
+        let blue_bbox = |frame: &[u8]| {
+            let mut bbox = [usize::MAX, usize::MAX, 0usize, 0usize];
+            for y in 0..H as usize {
+                for x in 0..W as usize {
+                    let p = frame_pixel(frame, W as usize, H as usize, x, y);
+                    if p[2] > 150 && p[0] < 100 {
+                        bbox[0] = bbox[0].min(x);
+                        bbox[1] = bbox[1].min(y);
+                        bbox[2] = bbox[2].max(x);
+                        bbox[3] = bbox[3].max(y);
+                    }
+                }
+            }
+            bbox
+        };
+
+        // Legacy route: no linear target, windows draw straight into output_fbo.
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &scene, None, false, false, false, None));
+        let legacy = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let legacy_bbox = blue_bbox(&legacy);
+        assert_eq!(
+            legacy_bbox,
+            [10, 20, 17, 25],
+            "legacy route window bbox changed: {legacy_bbox:?}"
+        );
+
+        // Deferred-regions route through the common-linear target.
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+        };
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &scene,
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&region)),
+        ));
+        let linear = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let linear_bbox = blue_bbox(&linear);
+        assert_eq!(
+            linear_bbox, legacy_bbox,
+            "deferred common-linear route must preserve the window's scene position"
+        );
+        // The whole frame must round-trip, not just the window bbox. The
+        // probe window is opaque with sharp corners, so no intentional
+        // linear-domain blend differences are in play.
+        let mut worst = 0i32;
+        for y in 0..H as usize {
+            for x in 0..W as usize {
+                let a = frame_pixel(&legacy, W as usize, H as usize, x, y);
+                let b = frame_pixel(&linear, W as usize, H as usize, x, y);
+                for channel in 0..4 {
+                    worst = worst.max((a[channel] as i32 - b[channel] as i32).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= 2,
+            "scene-linear round trip diverged from the legacy frame by {worst} LSB"
+        );
+
+        gl.DeleteTextures(1, &win_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
+fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping external element pipeline test");
+        return;
+    };
+    use smithay::backend::renderer::gles::ffi;
+    let gl = ffi::Gles2::load_with(|symbol| egl::get_proc_address(symbol) as *const c_void);
+
+    const W: i32 = 64;
+    const H: i32 = 48;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(
+            compositor.linear_fbo, 0,
+            "headless GLES3 must provide the requested FP16 scene target"
+        );
+
+        // Element A, 4x4 premultiplied: left two columns opaque red, right
+        // two columns 50%-alpha green — exercises both the exact roundtrip
+        // and the semi-transparent blend edge. Element B, 4x4 opaque blue,
+        // staged later (nearer the front) and overlapping A's bottom-right,
+        // probes the back-to-front draw order.
+        let mut pixels = [0u8; 16 * 4];
+        for texel in 0..16usize {
+            let column = texel % 4;
+            let rgba: [u8; 4] = if column < 2 {
+                [200, 40, 40, 255]
+            } else {
+                [0, 128, 0, 128]
+            };
+            pixels[texel * 4..texel * 4 + 4].copy_from_slice(&rgba);
+        }
+        let element_a_tex = create_element_texture(&gl, 4, 4, &pixels);
+        let rect_a = [10, 20, 4, 4];
+        let element_b_tex = create_element_texture(&gl, 4, 4, &[40u8, 40, 200, 255].repeat(16));
+        let rect_b = [12, 22, 4, 4];
+
+        // Frame A — legacy reference: no staged elements, tail-unsafe frame,
+        // then the KMS stand-in draws both elements over the encoded output
+        // in painter's order.
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(&gl, &[], None, false, false, false, None));
+        let reference_program =
+            super::create_program(&gl, super::shaders::VERTEX_SHADER, KMS_PASSTHROUGH_FRAGMENT)
+                .expect("passthrough reference program must link");
+        gl.BindFramebuffer(ffi::FRAMEBUFFER, compositor.output_fbo);
+        gl.Viewport(0, 0, W, H);
+        gl.Enable(ffi::BLEND);
+        gl.BlendFunc(ffi::ONE, ffi::ONE_MINUS_SRC_ALPHA);
+        gl.UseProgram(reference_program);
+        let projection = super::ortho(0.0, W as f32, H as f32, 0.0);
+        let projection_loc =
+            gl.GetUniformLocation(reference_program, b"u_projection\0".as_ptr() as *const _);
+        let rect_loc = gl.GetUniformLocation(reference_program, b"u_rect\0".as_ptr() as *const _);
+        let texture_loc =
+            gl.GetUniformLocation(reference_program, b"u_texture\0".as_ptr() as *const _);
+        gl.UniformMatrix4fv(projection_loc, 1, ffi::FALSE as u8, projection.as_ptr());
+        gl.Uniform1i(texture_loc, 0);
+        gl.ActiveTexture(ffi::TEXTURE0);
+        gl.BindVertexArray(compositor.quad_vao);
+        for (tex, rect) in [(element_a_tex, rect_a), (element_b_tex, rect_b)] {
+            gl.Uniform4f(
+                rect_loc,
+                rect[0] as f32,
+                rect[1] as f32,
+                rect[2] as f32,
+                rect[3] as f32,
+            );
+            gl.BindTexture(ffi::TEXTURE_2D, tex);
+            gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+        }
+        gl.BindVertexArray(0);
+        gl.UseProgram(0);
+        gl.DeleteProgram(reference_program);
+        let legacy_frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+
+        // Frame B — internalized: the elements ride the common-linear target
+        // and the per-output sRGB region encode.
+        compositor.set_external_elements(vec![
+            super::ExternalElementVisual {
+                texture: element_a_tex,
+                owner: None,
+                rect: rect_a,
+            },
+            super::ExternalElementVisual {
+                texture: element_b_tex,
+                owner: None,
+                rect: rect_b,
+            },
+        ]);
+        let srgb_region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+        };
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &[],
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&srgb_region)),
+        ));
+        let internalized_frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+
+        let background = background_texel();
+        // Opaque content and the untouched background must match the legacy
+        // KMS assembly within FP16 + double-quantization tolerance. The
+        // half-alpha green texels are exempt here: the linear pipeline blends
+        // them in linear light by design (same domain change the compositor's
+        // own windows take); their per-domain oracles are pinned below.
+        let green_visible = |x: usize, y: usize| (12..=13).contains(&x) && (20..=21).contains(&y);
+        let mut worst = 0i32;
+        for y in 0..H as usize {
+            for x in 0..W as usize {
+                if green_visible(x, y) {
+                    continue;
+                }
+                let legacy = frame_pixel(&legacy_frame, W as usize, H as usize, x, y);
+                let internalized = frame_pixel(&internalized_frame, W as usize, H as usize, x, y);
+                for channel in 0..4 {
+                    worst =
+                        worst.max((legacy[channel] as i32 - internalized[channel] as i32).abs());
+                }
+            }
+        }
+        assert!(
+            worst <= 2,
+            "internalized sRGB output diverged from legacy KMS pixels by {worst} LSB"
+        );
+
+        // The overlap region proves painter order: B's opaque blue must win
+        // over A in both assembly paths.
+        let overlap = frame_pixel(&internalized_frame, W as usize, H as usize, 12, 22);
+        assert_pixel(
+            overlap,
+            [40, 40, 200, 255],
+            2,
+            "front element must win the overlap",
+        );
+        assert_pixel(
+            frame_pixel(&legacy_frame, W as usize, H as usize, 12, 22),
+            overlap,
+            1,
+            "legacy overlap must match internalized overlap",
+        );
+
+        // Point oracles against both CPU models.
+        use crate::backend::wayland_udev::color_pipeline::TransferKind;
+        let opaque = frame_pixel(&internalized_frame, W as usize, H as usize, 10, 20);
+        assert_pixel(
+            opaque,
+            internalized_pixel_oracle([200, 40, 40, 255], background, TransferKind::Srgb),
+            2,
+            "internalized opaque texel",
+        );
+        assert_pixel(
+            opaque,
+            legacy_kms_pixel_oracle([200, 40, 40, 255], background),
+            1,
+            "opaque texel must match the legacy encoded blend exactly",
+        );
+        let half_alpha = frame_pixel(&internalized_frame, W as usize, H as usize, 12, 20);
+        assert_pixel(
+            half_alpha,
+            internalized_pixel_oracle([0, 128, 0, 128], background, TransferKind::Srgb),
+            2,
+            "internalized half-alpha texel blends in linear light",
+        );
+        assert_pixel(
+            frame_pixel(&legacy_frame, W as usize, H as usize, 12, 20),
+            legacy_kms_pixel_oracle([0, 128, 0, 128], background),
+            2,
+            "legacy half-alpha texel blends in the encoded domain",
+        );
+        assert_pixel(
+            frame_pixel(&internalized_frame, W as usize, H as usize, 40, 10),
+            background,
+            1,
+            "background outside the element",
+        );
+        // Placement: the pixel just outside each element edge stays background.
+        assert_pixel(
+            frame_pixel(&internalized_frame, W as usize, H as usize, 9, 20),
+            background,
+            1,
+            "element left edge must not bleed",
+        );
+        assert_pixel(
+            frame_pixel(&internalized_frame, W as usize, H as usize, 10, 19),
+            background,
+            1,
+            "element top edge must not bleed",
+        );
+
+        // Frame C — same staged elements through a PQ output region: exactly
+        // one OETF application over the linear blend.
+        let pq_region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            output_tf: TransferKind::St2084Pq,
+            ..srgb_region.clone()
+        };
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &[],
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&pq_region)),
+        ));
+        let pq_frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        assert_pixel(
+            frame_pixel(&pq_frame, W as usize, H as usize, 10, 20),
+            internalized_pixel_oracle([200, 40, 40, 255], background, TransferKind::St2084Pq),
+            3,
+            "PQ opaque texel encodes the linear blend exactly once",
+        );
+        assert_pixel(
+            frame_pixel(&pq_frame, W as usize, H as usize, 12, 20),
+            internalized_pixel_oracle([0, 128, 0, 128], background, TransferKind::St2084Pq),
+            3,
+            "PQ half-alpha texel encodes the linear blend exactly once",
+        );
+        assert_pixel(
+            frame_pixel(&pq_frame, W as usize, H as usize, 12, 22),
+            internalized_pixel_oracle([40, 40, 200, 255], background, TransferKind::St2084Pq),
+            3,
+            "PQ overlap texel keeps the front element",
+        );
+
+        gl.DeleteTextures(1, &element_a_tex);
+        gl.DeleteTextures(1, &element_b_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
+#[test]
+fn wayland_internalized_external_element_moves_without_ghosting_under_partial_damage() {
+    let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping external element damage test");
+        return;
+    };
+    let gl = smithay::backend::renderer::gles::ffi::Gles2::load_with(|symbol| {
+        egl::get_proc_address(symbol) as *const c_void
+    });
+
+    const W: i32 = 96;
+    const H: i32 = 64;
+    unsafe {
+        let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)
+            .expect("headless Wayland compositor must initialize");
+        compositor.scene_linear_requested = true;
+        compositor.sync_scene_linear_target(&gl);
+        assert_ne!(compositor.linear_fbo, 0);
+        compositor.set_partial_damage(true);
+
+        let pixels = [200u8, 40, 40, 255].repeat(16);
+        let element_tex = create_element_texture(&gl, 4, 4, &pixels);
+        let region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
+            rect: [0, 0, W, H],
+            output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
+            working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+        };
+
+        // Frame 1 places the element (this is the full-damage transition
+        // frame after enabling partial repair).
+        compositor.set_external_elements(vec![super::ExternalElementVisual {
+            texture: element_tex,
+            owner: None,
+            rect: [8, 8, 4, 4],
+        }]);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &[],
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&region)),
+        ));
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let placed = frame_pixel(&frame, W as usize, H as usize, 10, 10);
+        assert!(
+            (placed[0] as i32 - 200).abs() <= 2 && (placed[1] as i32 - 40).abs() <= 2,
+            "element not drawn at its staged position: {placed:?}"
+        );
+
+        // Frame 2 moves only the element. The compositor must repair both
+        // footprints: the previous position baked into output_fbo last frame
+        // and the new one in the linear target.
+        compositor.set_external_elements(vec![super::ExternalElementVisual {
+            texture: element_tex,
+            owner: None,
+            rect: [40, 24, 4, 4],
+        }]);
+        compositor.force_full_redraw();
+        assert!(compositor.render_frame(
+            &gl,
+            &[],
+            None,
+            true,
+            false,
+            false,
+            Some(std::slice::from_ref(&region)),
+        ));
+        let frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
+        let background = background_texel();
+        assert_pixel(
+            frame_pixel(&frame, W as usize, H as usize, 10, 10),
+            background,
+            1,
+            "previous element footprint must be repaired, not ghosted",
+        );
+        let moved = frame_pixel(&frame, W as usize, H as usize, 42, 26);
+        assert!(
+            (moved[0] as i32 - 200).abs() <= 2 && (moved[1] as i32 - 40).abs() <= 2,
+            "element missing at its moved position: {moved:?}"
+        );
+
+        gl.DeleteTextures(1, &element_tex);
+        assert!(compositor.release_gpu_resources(
+            &gl,
+            super::CompositorOutputTextureOwnership::RawCompositor,
+        ));
+    }
+}
+
 #[test]
 fn wayland_runtime_gpu_release_is_complete_idempotent_and_recreatable() {
     let Some(_headless) = HeadlessGl::new(GlApi::Gles3) else {

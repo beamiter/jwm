@@ -213,6 +213,22 @@ pub fn label_origin(cell: &GridCell, scaled_cell: Rect, scale: f32) -> [f32; 2] 
     ]
 }
 
+/// Diameter of a cell's urgency badge.
+const BADGE_D: f32 = 8.0;
+
+/// Where a cell's urgency badge goes: a dot at the label band's right end,
+/// vertically centred in the band, so it reads as part of the tag's title row
+/// and never covers a wireframe. Like the label it is placed from the scaled
+/// cell, so the selected cell's presentation lift carries it along.
+pub fn urgent_badge_rect(scaled_cell: Rect, scale: f32) -> Rect {
+    [
+        scaled_cell[0] + scaled_cell[2] - (FRAME_PAD + BADGE_D) * scale,
+        scaled_cell[1] + (LABEL_H - BADGE_D) * 0.5 * scale,
+        BADGE_D * scale,
+        BADGE_D * scale,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +379,43 @@ mod tests {
         let origin = label_origin(&cell, scaled, 1.12);
         assert_eq!(origin[0], scaled[0] + cell.label_offset[0] * 1.12);
         assert_eq!(origin[1], scaled[1] + cell.label_offset[1] * 1.12);
+    }
+
+    #[test]
+    fn the_urgent_badge_sits_in_the_label_bands_right_end() {
+        let g = geom(9, 3);
+        for cell in &g.cells {
+            let badge = urgent_badge_rect(cell.cell, 1.0);
+            let [x, y, w, _] = cell.cell;
+            assert_eq!(badge[2], badge[3], "the badge is a circle");
+            assert!(badge[0] > x && badge[0] + badge[2] < x + w);
+            assert!(
+                badge[1] >= y && badge[1] + badge[3] <= y + LABEL_H + 0.01,
+                "the badge must stay inside the label band, clear of the frame"
+            );
+            // Right-aligned against the same inset the frame uses.
+            assert!((badge[0] + badge[2] - (x + w - FRAME_PAD)).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn the_urgent_badge_rides_the_selected_cells_scale() {
+        let g = geom(9, 3);
+        let cell = g.cells[4];
+        let pivot = center(cell.cell);
+        let scaled =
+            crate::backend::compositor_common::layout_strip::scaled_about(cell.cell, pivot, 1.12);
+        let badge = urgent_badge_rect(scaled, 1.12);
+        assert!((badge[2] - BADGE_D * 1.12).abs() < 0.001);
+        // Scaled about the pivot, the badge's own centre lands where the
+        // unscaled badge's centre was carried by the same transform.
+        let unscaled = urgent_badge_rect(cell.cell, 1.0);
+        let [ux, uy] = center(unscaled);
+        let expect_x = pivot[0] + (ux - pivot[0]) * 1.12;
+        let expect_y = pivot[1] + (uy - pivot[1]) * 1.12;
+        let [bx, by] = center(badge);
+        assert!((bx - expect_x).abs() < 0.01, "{bx} vs {expect_x}");
+        assert!((by - expect_y).abs() < 0.01, "{by} vs {expect_y}");
     }
 
     #[test]

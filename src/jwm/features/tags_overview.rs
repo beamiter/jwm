@@ -50,6 +50,9 @@ pub struct TagClientFrame {
     /// Swallowed by a terminal child (`ClientState::is_swallowed`): same
     /// treatment as minimized — it owns no screen real estate.
     pub swallowed: bool,
+    /// Demanding attention (`ClientState::is_urgent`): the tag gets the
+    /// attention dot, following the status bar's urgent mask.
+    pub urgent: bool,
     /// The window's *visible* rectangle in global coordinates. Callers must
     /// resolve parked windows through `ClientGeometry::hidden_restore_rect`
     /// before filling this in; the builder takes the rect verbatim.
@@ -220,9 +223,11 @@ pub fn plan_release(pending: PendingCellPress, release_cell: Option<usize>) -> T
 /// Occupied follows the status bar's `calculate_tag_masks`: any window on
 /// the tag counts, minimized and swallowed ones included, while windows
 /// floating above the tag axis — sticky ones, or clients spanning every tag
-/// — draw everywhere but mark nothing occupied. Outlines are normalized to
-/// the work area and clipped to `0.0..=1.0`: a floating window may hang off
-/// the area, but its wireframe may not poke through the cell.
+/// — draw everywhere but mark nothing occupied. Urgent follows the exact
+/// same rule, so a tag's attention dot can never appear on a cell that does
+/// not also read occupied. Outlines are normalized to the work area and
+/// clipped to `0.0..=1.0`: a floating window may hang off the area, but its
+/// wireframe may not poke through the cell.
 pub fn build_cells(
     clients: &[TagClientFrame],
     active_tags: u32,
@@ -250,6 +255,7 @@ fn build_cells_with_ids(
             tag_index,
             windows: Vec::new(),
             occupied: false,
+            urgent: false,
             active: (active_tags >> tag_index) & 1 != 0,
         })
         .collect();
@@ -266,6 +272,10 @@ fn build_cells_with_ids(
             }
             if !floats_everywhere {
                 cell.occupied = true;
+                // Like the status bar's urgent mask: the window's hidden or
+                // swallowed state is irrelevant — a minimized window still
+                // demands attention.
+                cell.urgent |= client.urgent;
             }
             if !draws_outline {
                 continue;
@@ -641,6 +651,7 @@ impl Jwm {
                     sticky: client.state.is_sticky,
                     minimized: client.state.is_hidden,
                     swallowed: client.state.is_swallowed,
+                    urgent: client.state.is_urgent,
                     rect: [visible.x, visible.y, visible.w, visible.h],
                 })
             })
@@ -661,6 +672,7 @@ mod tests {
             sticky: false,
             minimized: false,
             swallowed: false,
+            urgent: false,
             rect,
         }
     }
@@ -734,6 +746,105 @@ mod tests {
             );
             assert!(!cell.occupied);
         }
+    }
+
+    #[test]
+    fn an_urgent_window_marks_every_tag_it_sits_on() {
+        // The status bar's urgent mask ORs the window's whole effective mask;
+        // the grid does the same per cell.
+        let urgent = TagClientFrame {
+            urgent: true,
+            ..frame(0b101, [100, 100, 400, 300])
+        };
+        let cells = build_cells(&[urgent], 0b001, WORK, 9);
+        assert!(cells[0].urgent);
+        assert!(!cells[1].urgent);
+        assert!(cells[2].urgent);
+        // The dot never appears on a tag the window only shares with a
+        // calmer sibling.
+        let calm = frame(0b010, [200, 200, 400, 300]);
+        let cells = build_cells(&[urgent, calm], 0b001, WORK, 9);
+        assert!(cells[1].occupied);
+        assert!(!cells[1].urgent);
+    }
+
+    #[test]
+    fn urgent_never_appears_without_occupied() {
+        // Sticky and all-tags urgent windows float above the tag axis: like
+        // the status bar's full-mask skip, they mark no tag.
+        let sticky = TagClientFrame {
+            tags: 0b001,
+            sticky: true,
+            urgent: true,
+            ..frame(0, [100, 100, 400, 300])
+        };
+        let all_tags = TagClientFrame {
+            urgent: true,
+            ..frame(0x1ff, [200, 200, 400, 300])
+        };
+        let cells = build_cells(&[sticky, all_tags], 0b001, WORK, 9);
+        for (index, cell) in cells.iter().enumerate() {
+            assert!(!cell.urgent, "floating urgent window marked tag {index}");
+            assert!(!cell.occupied);
+        }
+        // The invariant holds in general: urgent is a subset of occupied.
+        let mixed = build_cells(
+            &[
+                TagClientFrame {
+                    urgent: true,
+                    ..frame(0b110, [100, 100, 400, 300])
+                },
+                frame(0b011, [200, 200, 400, 300]),
+            ],
+            0b001,
+            WORK,
+            9,
+        );
+        for cell in &mixed {
+            assert!(!cell.urgent || cell.occupied);
+        }
+    }
+
+    #[test]
+    fn a_minimized_urgent_window_still_marks_its_tag() {
+        // The status bar's urgent mask never looks at the hidden state, so
+        // minimizing must not silence the signal — the dot is exactly how a
+        // parked-away window stays visible.
+        let minimized = TagClientFrame {
+            minimized: true,
+            urgent: true,
+            ..frame(0b010, [100, 100, 400, 300])
+        };
+        let swallowed = TagClientFrame {
+            swallowed: true,
+            urgent: true,
+            ..frame(0b100, [200, 200, 400, 300])
+        };
+        let cells = build_cells(&[minimized, swallowed], 0b001, WORK, 9);
+        assert!(cells[1].urgent);
+        assert!(cells[1].windows.is_empty());
+        assert!(cells[2].urgent);
+        assert!(cells[2].windows.is_empty());
+        assert!(!cells[0].urgent);
+    }
+
+    #[test]
+    fn urgency_clears_with_the_window_state() {
+        // Once no window on the tag demands attention the dot goes away;
+        // nothing latches.
+        let urgent = TagClientFrame {
+            urgent: true,
+            ..frame(0b001, [100, 100, 400, 300])
+        };
+        let calmed = TagClientFrame {
+            urgent: false,
+            ..urgent
+        };
+        let cells = build_cells(&[urgent], 0b001, WORK, 9);
+        assert!(cells[0].urgent);
+        let cells = build_cells(&[calmed], 0b001, WORK, 9);
+        assert!(cells[0].occupied);
+        assert!(!cells[0].urgent);
     }
 
     #[test]

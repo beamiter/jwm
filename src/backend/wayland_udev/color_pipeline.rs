@@ -329,6 +329,17 @@ fn hlg_forward(l: f32) -> f32 {
     }
 }
 
+/// Whether a source carrying this description can use the legacy sRGB ingress
+/// unchanged: sRGB transfer plus sRGB/D65 primaries. Undescribed content is
+/// sRGB by convention; anything else (PQ/HLG, wide gamut, custom primaries)
+/// needs a described transform, which paths without per-element color plans —
+/// currently the KMS external-element adapter — must refuse by staying on the
+/// encoded fallback instead of guessing.
+pub fn description_is_srgb_default(p: &ParametricParams) -> bool {
+    TransferKind::from_params(p) == TransferKind::Srgb
+        && ColorSpacePrimaries::from_params(p) == ColorSpacePrimaries::SRGB_D65
+}
+
 /// A surface color transform: inverse source EOTF, linear-light 3×3 gamut map,
 /// and optional target EOTF. The target may be the common linear-sRGB working
 /// space (`forward_eotf = Linear`) or a legacy encoded output. Stored
@@ -759,6 +770,31 @@ mod tests {
             ..Default::default()
         };
         assert!(ColorTransform::build(&p, &p).is_none());
+    }
+
+    #[test]
+    fn srgb_default_gate_accepts_only_srgb_transfer_and_primaries() {
+        assert!(description_is_srgb_default(&ParametricParams::default()));
+        assert!(description_is_srgb_default(
+            &crate::backend::color_policy::srgb_params()
+        ));
+        // Gamma22/BT.1886 are legacy SDR curves but not the sRGB piecewise
+        // transfer — an adapter without per-element plans must not guess.
+        for tf in [2 /* Gamma22 */, 11 /* PQ */, 13 /* HLG */] {
+            assert!(!description_is_srgb_default(&ParametricParams {
+                tf_named: Some(tf),
+                ..Default::default()
+            }));
+        }
+        assert!(!description_is_srgb_default(&ParametricParams {
+            primaries_named: Some(6 /* BT.2020 */),
+            ..Default::default()
+        }));
+        // tf_power likewise steps off the exact sRGB curve.
+        assert!(!description_is_srgb_default(&ParametricParams {
+            tf_power: Some(22_000),
+            ..Default::default()
+        }));
     }
 
     #[test]

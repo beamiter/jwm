@@ -2189,6 +2189,20 @@ impl<C: CompositorConnection> Compositor<C> {
                     }
                 }
 
+                if content.urgent {
+                    // The attention dot at the label band's right end, in the
+                    // same `attention_color` the urgent window's own border
+                    // breathes in, so grid and frame agree about the signal.
+                    let badge = grid_layout::urgent_badge_rect(cell_rect, scale);
+                    self.sysui_fill_rounded(
+                        badge[0],
+                        badge[1],
+                        badge[2],
+                        badge[3],
+                        badge[2] * 0.5,
+                        self.attention_color,
+                    );
+                }
                 if content.active {
                     // The persistent "on screen now" marker, inside the cell
                     // so the selection gate outside it stays readable when a

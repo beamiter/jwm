@@ -27,6 +27,12 @@ monorepo use independent Semantic Versions.
   from press to release to make room for the gesture, so a plain click still
   jumps to the tag, while a release landing on the dimmed desktop or the
   panel's dead space settles nothing.
+- The tags overview marks tags holding an urgent window with a small dot in
+  `behavior.attention_color` at the right end of the cell's label band — the
+  same token the urgent window's own border breathes in. The marker follows
+  the status bar's urgent mask: an urgent window marks every tag it sits on,
+  minimized and swallowed urgent windows still count, and sticky or all-tags
+  windows mark nothing.
 - Native shell cards are now fully pointer-operable on X11 and Wayland:
   hovering an interactive row shows a quiet preview cue, clicking runs the same
   guarded action as `Enter`, the wheel browses lists (and calendar months),

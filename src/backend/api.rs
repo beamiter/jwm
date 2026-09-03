@@ -320,7 +320,7 @@ pub struct ColorDeliveryPolicyDecisionStatus {
 
 /// Diagnostic status of one KMS-assembled external element class for one
 /// policy decision. All names are stable snake_case tokens; `outputs` lists
-/// the participating outputs where the class is assembled.
+/// the participating outputs where the class produces pixels.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExternalElementClassStatus {
     /// The class and (when blocked) blocker wire name: one of `cursor`,
@@ -329,12 +329,13 @@ pub struct ExternalElementClassStatus {
     pub class: String,
     /// The class produces pixels on at least one participating output.
     pub visible: bool,
-    /// Every drawable surface passed the import precheck, so a future
-    /// common-linear adapter could own the class. `false` while hidden.
+    /// Every drawable surface passed the import precheck, so the
+    /// common-linear adapter may own the class. `false` while hidden.
     pub importable: bool,
     /// Who assembles the class this frame: `kms_external` (outside the
-    /// compositor texture) or `none` (hidden). A common-linear pass is the
-    /// documented next step, not a current value.
+    /// compositor texture), `common_linear` (internalized into the
+    /// compositor's shared linear-sRGB target ahead of the per-output
+    /// transform), or `none` (hidden).
     pub assembly: String,
     /// The contributed linear-tail blocker name when the class blocks.
     pub blocker: Option<String>,
@@ -1250,6 +1251,10 @@ pub struct TagsGridCell {
     /// The tag holds windows at all, minimized and swallowed ones included —
     /// which `windows` cannot say, because those draw no outline.
     pub occupied: bool,
+    /// The tag holds at least one window demanding attention. Follows
+    /// `occupied`: minimized windows count, sticky and all-tags windows mark
+    /// nothing. Drawn as a dot in the cell's label band.
+    pub urgent: bool,
     /// The tag is currently visible on the monitor.
     pub active: bool,
 }

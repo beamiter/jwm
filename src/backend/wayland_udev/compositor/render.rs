@@ -932,6 +932,65 @@ impl WaylandCompositor {
         }
     }
 
+    /// Draw the KMS external elements staged this frame into the common
+    /// linear-sRGB target, back-to-front, above every compositor pass that ran
+    /// before — the same relative z position the KMS element assembly gives
+    /// them above the compositor texture (cursor top-most; layer top below
+    /// overlay, drag icon, and cursor). The textures are premultiplied
+    /// encoded sRGB produced by Smithay's normal import/composite paths;
+    /// undescribed content enters linear light through the shared window
+    /// shader's legacy sRGB ingress (`u_color_managed = 0` +
+    /// `u_scene_linear = 1`), so no second transfer-function copy exists and
+    /// the frame's per-output matrix + OETF applies to them exactly once.
+    /// Blending stays the canonical premultiplied state.
+    fn render_external_elements_into_linear(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        if self.external_elements.is_empty() || self.linear_fbo == 0 {
+            return;
+        }
+        unsafe {
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.linear_fbo);
+            gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
+            self.enable_premultiplied_blend(gl);
+            gl.UseProgram(self.program);
+            self.set_projection_uniform(gl, self.win_uniforms.projection, projection);
+            gl.Uniform1i(self.win_uniforms.texture, 0);
+            gl.Uniform1i(self.win_uniforms.color_managed, 0);
+            gl.Uniform1i(self.win_uniforms.scene_linear, 1);
+            gl.Uniform1f(self.win_uniforms.dim, 1.0);
+            gl.Uniform1f(self.win_uniforms.desat, 0.0);
+            gl.Uniform1f(self.win_uniforms.radius, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_progress, 0.0);
+            gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
+            gl.BindVertexArray(self.quad_vao);
+            gl.ActiveTexture(ffi::TEXTURE0);
+
+            for element in &self.external_elements {
+                let [x, y, w, h] = element.rect;
+                if w <= 0 || h <= 0 {
+                    continue;
+                }
+                self.set_rect_uniform(
+                    gl,
+                    self.win_uniforms.rect,
+                    x as f32,
+                    y as f32,
+                    w as f32,
+                    h as f32,
+                );
+                gl.Uniform2f(self.win_uniforms.size, w as f32, h as f32);
+                // Negative opacity: the shared shader treats the texture as
+                // premultiplied RGBA and honors its alpha (window convention).
+                gl.Uniform1f(self.win_uniforms.opacity, -1.0);
+                gl.Uniform4f(self.win_uniforms.uv_rect, 0.0, 0.0, 1.0, 1.0);
+                self.bind_window_texture(gl, element.texture);
+                gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
+            }
+
+            gl.BindVertexArray(0);
+            gl.UseProgram(0);
+        }
+    }
+
     fn render_minimized_dock_items(
         &mut self,
         gl: &ffi::Gles2,
@@ -1746,6 +1805,40 @@ impl WaylandCompositor {
 
             self.prev_scene.clear();
             self.prev_scene.extend_from_slice(scene);
+        }
+
+        // =================================================================
+        // 1c. Internalized KMS external elements: damage both footprints
+        // =================================================================
+        // External elements move independently of the window scene (pointer
+        // motion does not dirty any window). Their previous rectangles are
+        // baked into the persistent output FBO, and the new ones land in the
+        // linear FBO this frame, so a partial-damage box computed without
+        // them would either strand the old element or skip the new one.
+        {
+            let rects_changed = self.external_elements.len()
+                != self.external_elements_prev_rects.len()
+                || self
+                    .external_elements
+                    .iter()
+                    .zip(self.external_elements_prev_rects.iter())
+                    .any(|(element, previous)| element.rect != *previous);
+            if rects_changed {
+                let tracker = &mut self.dirty_region_tracker;
+                for rect in self
+                    .external_elements_prev_rects
+                    .iter()
+                    .copied()
+                    .chain(self.external_elements.iter().map(|element| element.rect))
+                {
+                    tracker.mark_dirty(dirty_region::DirtyRect::new(
+                        rect[0] as f32,
+                        rect[1] as f32,
+                        rect[2] as f32,
+                        rect[3] as f32,
+                    ));
+                }
+            }
         }
 
         // Feed dirty regions to per-monitor renderer
@@ -2756,6 +2849,14 @@ impl WaylandCompositor {
             hw_ctm_active,
             software_output_regions.is_some(),
         );
+        // The staged external elements only land in the persistent FBO chain
+        // when this frame's route still flows through the linear target.
+        // `LegacyEncoded` never touches it; the other three routes each call
+        // `render_external_elements_into_linear` just before their conversion
+        // point.
+        let drew_external_elements = !self.external_elements.is_empty()
+            && scene_linear_active
+            && !matches!(output_route, FrameOutputRoute::LegacyEncoded);
         // Retained-window and border passes are color-domain aware, so keep
         // them in the common FP16 target even when a later encoded-only effect
         // will force the global-sRGB fallback. Encoding at the old main-window
@@ -3062,6 +3163,12 @@ impl WaylandCompositor {
 
         if output_route == FrameOutputRoute::EarlySrgbFallback {
             use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+            // Internalized external elements still belong above every
+            // linear-aware pass; drawing them before this encode keeps them
+            // on the same single linear→sRGB conversion as the rest of the
+            // scene. (This route only coexists with staged elements on
+            // topologies where neither hardware nor region delivery exists.)
+            self.render_external_elements_into_linear(gl, &projection);
             // The passes above are linear-aware. Convert only at the first
             // encoded-only layer so their existing z-order remains intact and
             // all following effects see the historical global-sRGB domain.
@@ -3303,6 +3410,16 @@ impl WaylandCompositor {
         // =================================================================
         // 18b. Output delivery
         // =================================================================
+        // Internalized KMS external elements are the top-most content of the
+        // common-linear scene (cursor above drag icon above overlay above
+        // top-layer). Draw them at the end of the linear passes so the final
+        // per-output matrix + OETF below applies to them exactly once.
+        if matches!(
+            output_route,
+            FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions
+        ) {
+            self.render_external_elements_into_linear(gl, &projection);
+        }
         // Linear-tail-safe frames remain in the common FP16 target through
         // every compatible late overlay. Convert only now, immediately before
         // screenshots/recording and KMS consume output_texture.
@@ -3490,6 +3607,21 @@ impl WaylandCompositor {
         self.dirty_region_tracker.clear();
         self.content_dirty_ids.clear();
         self.prev_focused = focused;
+        // Publish what this frame actually drew into the persistent FBO chain:
+        // the KMS assembly skips re-drawing exactly these classes, and direct
+        // scanout stays blocked while the output texture carries them. A frame
+        // that rendered without drawing the staged set leaves no element
+        // pixels behind: with full damage the output FBO was rebuilt from the
+        // clear, and with partial repair section 1c put the previous
+        // rectangles inside the damage box, so they were cleared there. The
+        // previous-rect set therefore always mirrors the positions actually
+        // present in output_fbo — never stale, never perpetually dirty.
+        self.external_elements_drawn = drew_external_elements;
+        self.external_elements_prev_rects.clear();
+        if drew_external_elements {
+            self.external_elements_prev_rects
+                .extend(self.external_elements.iter().map(|element| element.rect));
+        }
         unsafe {
             self.reset_external_gl_state(gl);
         }
@@ -4587,6 +4719,21 @@ impl WaylandCompositor {
                     }
                 }
 
+                if content.urgent {
+                    // The attention dot at the label band's right end, in the
+                    // same `attention_color` the urgent window's own border
+                    // breathes in, so grid and frame agree about the signal.
+                    let badge = grid_layout::urgent_badge_rect(cell_rect, scale);
+                    self.sysui_fill_rounded(
+                        gl,
+                        badge[0],
+                        badge[1],
+                        badge[2],
+                        badge[3],
+                        badge[2] * 0.5,
+                        self.attention_color,
+                    );
+                }
                 if content.active {
                     // The persistent "on screen now" marker, inside the cell
                     // so the selection gate outside it stays readable when a

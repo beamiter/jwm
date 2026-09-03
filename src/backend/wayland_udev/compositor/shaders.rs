@@ -681,7 +681,13 @@ vec3 hlg_forward(vec3 l) {
 }
 
 void main() {
-    vec4 texel = texture(u_texture, v_uv);
+    // Both scene targets share one storage convention with the output FBO
+    // (storage row r = scene row H-1-r, i.e. the window pass's projection).
+    // The fullscreen quad's v_uv runs bottom-up, so flip V to keep the copy
+    // row-preserving: direct draws into the linear target (windows, staged
+    // KMS external elements) must land at the same scene position they would
+    // have in the encoded output FBO.
+    vec4 texel = texture(u_texture, vec2(v_uv.x, 1.0 - v_uv.y));
     // The FP16 scene is stored in common linear-sRGB. Gamut-map each output
     // region while values are still linear, then apply that output's OETF.
     // Matrix math is valid directly on premultiplied RGB because it is linear
@@ -764,7 +770,10 @@ vec3 decode_eotf(vec3 c) {
 }
 
 void main() {
-    vec4 texel = texture(u_texture, v_uv);
+    // See the encode pass for the shared storage convention: flip V so the
+    // copy into the working target is row-preserving and positioned content
+    // (windows, staged KMS external elements) keeps its scene coordinates.
+    vec4 texel = texture(u_texture, vec2(v_uv.x, 1.0 - v_uv.y));
     frag_color = vec4(decode_eotf(texel.rgb), texel.a);
 }
 "#;

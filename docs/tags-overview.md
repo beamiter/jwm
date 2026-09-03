@@ -75,6 +75,12 @@ the release settles what the gesture meant.
   wireframes in the bright ink; empty cells sit back in the dim tone.
 - Minimized and swallowed windows draw no outline: they own no screen real
   estate. They still count toward the cell's occupied marker.
+- A tag holding an urgent window draws a small dot in
+  `behavior.attention_color` at the right end of the cell's label band — the
+  same token the urgent window's own border breathes in. The marker follows
+  the status bar's urgent mask: an urgent window marks every tag it sits on,
+  minimized and swallowed urgent windows still count, and sticky or all-tags
+  windows float above the tag axis and mark nothing.
 - Floating windows may hang off the work area; their wireframes are clipped
   at the cell edge rather than poking through the card.
 
@@ -87,6 +93,19 @@ nowhere.
 ## Limitations
 
 - Only the current monitor's tags are shown; there is no cross-monitor grid.
+  This was re-evaluated and stays a deliberate boundary. Keeping one panel on
+  the selected monitor's `SystemUiViewport` is fine, but everything past the
+  viewport is structural: the flat `TagsGrid` schema (one `cols`, a single
+  `live` cell, one selection), the uniform `grid_geometry`, the rectangular
+  clamping keyboard walk, and a commit that targets `sel_mon` — a
+  cross-screen commit would need `focusmon`+`view`, the digit keys become
+  ambiguous across groups, and a wireframe drag is only defined within the
+  window's own monitor. A minimal design, if it ever lands: `TagsGrid` gains
+  per-monitor sections (label, cell range, per-section `cols`) plus one live
+  cell per monitor; a sectioned geometry variant stacks each monitor's
+  sub-grid with a header band inside the same panel; the selection walk
+  learns section boundaries; commit resolves a cell to (monitor, tag) and
+  runs `focusmon` then `view` when they differ; drags stay same-monitor.
 - Only the on-screen tag's cell is live; a multi-tag view live-draws its
   primary (lowest) tag, and every other cell identifies windows by position
   and shape, not by content.
@@ -107,6 +126,7 @@ nowhere.
   behind every wireframe kept parallel to it), cell building, selection walk,
   press/release gesture plan and commit as pure functions, unit-tested
   without a display.
-- `src/backend/compositor_common/tags_grid.rs` — the grid geometry and the
-  wireframe hit-test shared by both compositors, so a cell and its outlines
-  are exactly where the WM thinks they are.
+- `src/backend/compositor_common/tags_grid.rs` — the grid geometry, the
+  wireframe hit-test and the urgency badge anchor shared by both
+  compositors, so a cell, its outlines and its marker are exactly where the
+  WM thinks they are.

@@ -5411,9 +5411,41 @@ impl Backend for UdevBackend {
                 // geometry-independent; this decision only selects paired CRTC
                 // CTM/LUT, per-output shader regions, or global-sRGB fallback.
                 let compositor_tail_safe = compositor.compositor_linear_tail_safe();
-                let external_element_plan = kms.borrow().external_element_color_plan(&self.state);
-                let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
                 let scene_linear_color_path = compositor.scene_linear_color_path_active();
+                let mut external_element_plan =
+                    kms.borrow().external_element_color_plan(&self.state);
+
+                // P0 internalize/adapt: when the frame can take a linear
+                // route and the only linear-tail blockers are migratable
+                // classes, import those elements now (cursor, drag icon,
+                // top/overlay layer trees) and hand them to the compositor's
+                // common-linear pass. Staging runs before the route decision
+                // so the verdict feeds `linear_tail_safe`; any class that
+                // fails to import keeps its blocker and the untouched plan
+                // fails the frame closed to exact-sRGB with the KMS assembly
+                // drawing every class as before.
+                let mut staged_external_draws = Vec::new();
+                let mut internalized_classes = [false; 5];
+                if compositor_tail_safe
+                    && scene_linear_color_path
+                    && external_element_plan.internalization_could_make_safe()
+                {
+                    let cursor_kind = self.shared.lock_safe().cursor_kind;
+                    let staged = kms.borrow_mut().stage_external_elements_for_linear(
+                        &self.state,
+                        &external_element_plan,
+                        cursor_kind,
+                    );
+                    let (committed_plan, committed) =
+                        kms::commit_staged_internalization(&external_element_plan, &staged.classes);
+                    external_element_plan = committed_plan;
+                    if committed {
+                        staged_external_draws = staged.draws;
+                        internalized_classes = staged.classes;
+                    }
+                }
+
+                let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
                 let decision = kms.borrow_mut().refresh_color_pipeline_offload(
                     &self.state,
                     linear_tail_safe,
@@ -5559,6 +5591,11 @@ impl Backend for UdevBackend {
                 if let Some(presented_at) = kms.borrow_mut().take_presentation_time() {
                     compositor.on_vblank_presented(presented_at);
                 }
+                // Hand this frame's staged external elements over. Empty when
+                // the frame could not (or did not need to) internalize, which
+                // also clears a set staged by a previous frame before this
+                // render pass runs.
+                compositor.set_external_elements(staged_external_draws);
                 let rendered = kms
                     .borrow_mut()
                     .with_renderer(|gl| {
@@ -5577,7 +5614,29 @@ impl Backend for UdevBackend {
                     log::debug!("[crf] render_frame returned {rendered}");
                 }
                 if rendered {
-                    kms.borrow_mut().request_render();
+                    // The compositor texture now carries exactly the staged
+                    // classes (its draw predicate matches the staging gate:
+                    // scene-linear target live and the frame linear-tail
+                    // safe). Publish the verdict pinned to this texture
+                    // identity; a frame that internalized nothing clears the
+                    // previous verdict so the KMS assembly draws every visible
+                    // class again. A frame that produced nothing keeps the old
+                    // texture and therefore the old verdict.
+                    let verdict = if internalized_classes
+                        .iter()
+                        .any(|internalized| *internalized)
+                    {
+                        Some(kms::InternalizedExternalFrame::new(
+                            compositor.output_texture_id(),
+                            compositor.output_texture_generation(),
+                            internalized_classes,
+                        ))
+                    } else {
+                        None
+                    };
+                    let mut kms_ref = kms.borrow_mut();
+                    kms_ref.set_internalized_external_frame(verdict);
+                    kms_ref.request_render();
                 }
                 rendered
             } else {

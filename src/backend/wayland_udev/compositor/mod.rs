@@ -811,6 +811,28 @@ pub(crate) struct RetainedOutputColorContext {
     pub working_to_output_row_major: [f32; 9],
 }
 
+/// One KMS external element (cursor, drag icon, top/overlay layer surface
+/// tree) staged for the common-linear target. The backend composites the
+/// element through Smithay's GL paths into a premultiplied encoded-sRGB
+/// texture; the compositor draws it into the FP16 linear FBO through the
+/// shared window shader's sRGB ingress (`u_color_managed = 0` +
+/// `u_scene_linear = 1`), so the per-output matrix + OETF still owns the
+/// final encode. Staged textures are stored top-to-bottom (Smithay
+/// `render_output` flips Y), sampled with a plain 0..1 UV.
+pub(crate) struct ExternalElementVisual {
+    /// Raw GLES texture name sampled by the shared window shader.
+    pub texture: u32,
+    /// Strong Smithay owner keeping `texture` alive for as long as the
+    /// compositor may sample it; pure RAII — never read, only dropped.
+    /// `None` only in headless tests, where the harness owns the GL name
+    /// itself.
+    #[allow(dead_code)]
+    pub owner: Option<GlesTexture>,
+    /// Global physical-pixel destination `[x, y, w, h]`, top-left origin —
+    /// the same coordinate space as the compositor's screen FBO.
+    pub rect: [i32; 4],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct RetainedColorPlanContext {
     render_path_enabled: bool,
@@ -1163,6 +1185,17 @@ pub(crate) struct WaylandCompositor {
 
     // Previous frame scene for dirty tracking
     prev_scene: Vec<(u64, i32, i32, u32, u32)>,
+
+    // KMS external elements (cursor, drag icon, top/overlay layer trees)
+    // staged by the backend for the common-linear target this frame, in
+    // back-to-front draw order. `external_elements_prev_rects` tracks the
+    // rectangles of the set actually drawn into the persistent FBO chain, so a
+    // moved/removed element damages both its old and new footprint even under
+    // partial-damage repair. `external_elements_drawn` records whether the
+    // current output texture carries them, which also blocks direct scanout.
+    external_elements: Vec<ExternalElementVisual>,
+    external_elements_prev_rects: Vec<[i32; 4]>,
+    external_elements_drawn: bool,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame to avoid
     // per-frame heap allocation in the render hot path).
@@ -2532,6 +2565,9 @@ impl WaylandCompositor {
                 frame_count: 0,
                 fps: 0.0,
                 prev_scene: Vec::new(),
+                external_elements: Vec::new(),
+                external_elements_prev_rects: Vec::new(),
+                external_elements_drawn: false,
                 scratch_curr_ids: HashSet::new(),
                 scratch_prev_geom: HashMap::new(),
                 scratch_scanout: Vec::new(),
@@ -2851,6 +2887,12 @@ impl WaylandCompositor {
             // `glass_backdrop` aliases blur_fbos[0].texture; it is never an
             // independent owner.
             self.glass_backdrop = None;
+
+            // Dropping the staged external element set releases its Smithay
+            // texture owners through the renderer's normal teardown channel.
+            self.external_elements.clear();
+            self.external_elements_prev_rects.clear();
+            self.external_elements_drawn = false;
 
             self.clear_overview_textures(gl);
             for row in self.tab_title_textures.drain(..) {
@@ -3646,6 +3688,17 @@ impl WaylandCompositor {
 
     pub(crate) fn output_texture_generation(&self) -> u64 {
         self.output_texture_generation
+    }
+
+    /// Replace the KMS external elements staged for this frame's common-linear
+    /// pass. The backend calls this before every `render_frame` with either
+    /// the freshly staged set (back-to-front) or an empty list; the frame
+    /// draws them into the linear FBO only when the frame's route still goes
+    /// through that target, and the draw fact is published through the
+    /// `external_elements_drawn` flag for the KMS assembly/direct-scanout
+    /// gates.
+    pub(crate) fn set_external_elements(&mut self, elements: Vec<ExternalElementVisual>) {
+        self.external_elements = elements;
     }
 
     /// Current screen dimensions.

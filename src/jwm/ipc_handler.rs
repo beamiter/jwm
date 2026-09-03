@@ -754,7 +754,7 @@ fn sanitized_external_element_classes(value: &serde_json::Value) -> Option<serde
         let visible = object.get("visible")?.as_bool()?;
         let importable = object.get("importable")?.as_bool()?;
         let assembly = object.get("assembly")?.as_str()?;
-        if !matches!(assembly, "kms_external" | "none") {
+        if !matches!(assembly, "kms_external" | "common_linear" | "none") {
             return None;
         }
         let blocker = match object.get("blocker") {
@@ -4233,6 +4233,15 @@ mod tests {
                     "blocker": null,
                     "outputs": [],
                     "basis": "session_unlocked"
+                },
+                {
+                    "class": "top_layer_surface",
+                    "visible": true,
+                    "importable": true,
+                    "assembly": "common_linear",
+                    "blocker": null,
+                    "outputs": ["HDMI-A-1"],
+                    "basis": "layer_overlaps_output"
                 }
             ]
         }));
@@ -4240,13 +4249,15 @@ mod tests {
             .as_array()
             .unwrap()
             .clone();
-        assert_eq!(elements.len(), 3);
+        assert_eq!(elements.len(), 4);
         assert_eq!(elements[0]["class"], "cursor");
         assert_eq!(elements[0]["blocker"], "cursor");
         assert_eq!(elements[1]["importable"], false);
         assert_eq!(elements[1]["basis"], "layer_overlaps_output");
         assert_eq!(elements[2]["assembly"], "none");
         assert_eq!(elements[2]["blocker"], serde_json::Value::Null);
+        assert_eq!(elements[3]["assembly"], "common_linear");
+        assert_eq!(elements[3]["blocker"], serde_json::Value::Null);
 
         // A structurally invalid payload collapses to null, like an invalid
         // blocker inventory.

@@ -30,7 +30,7 @@ use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderbuffer;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+use smithay::backend::renderer::utils::{RendererSurfaceStateUserData, import_surface_tree};
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen, Renderer};
 use smithay::backend::session::Session;
 use smithay::backend::session::libseat::LibSeatSession;
@@ -465,6 +465,15 @@ impl ExternalElementClass {
     const fn index(self) -> usize {
         self as usize
     }
+
+    /// Classes the common-linear adapter can stage into the compositor target.
+    /// SessionLock stays external on purpose: a locked session is rare, its
+    /// exact-sRGB fallback is visually inconsequential, and the KMS-side
+    /// shield + lock-surface assembly remains the single audited occlusion
+    /// boundary (lock pixels must provably cover the client scene).
+    const fn supports_internalization(self) -> bool {
+        !matches!(self, Self::SessionLock)
+    }
 }
 
 /// What one external element class does on one output for one frame.
@@ -476,35 +485,50 @@ enum ExternalElementDisposition {
     /// geometry.
     Hidden,
     /// Visible and importable, but KMS assembles it outside the common
-    /// linear-sRGB texture because no per-class adapter exists yet. Every
-    /// class takes this branch today; it stays a fail-closed blocker until
-    /// internalization lands.
+    /// linear-sRGB texture because the class was not staged into the
+    /// compositor this frame (or cannot be staged at all). It stays a
+    /// fail-closed blocker while externally assembled.
     ExternalAssembly,
-    /// Visible, but some content failed the import precheck, so even a
-    /// future common-linear adapter must keep this class a hard blocker.
-    /// Today it assembles externally and blocks exactly like
-    /// `ExternalAssembly`; the split exists so diagnostics and the future
-    /// adapter precheck share one vocabulary.
+    /// Visible and staged into the compositor's common linear-sRGB target this
+    /// frame: the compositor draws the class through the shared sRGB ingress
+    /// before the per-output matrix + OETF, so KMS must not assemble it again
+    /// and the class no longer forces the exact-sRGB fallback. The verdict is
+    /// only ever applied from a successful staging pass
+    /// (`apply_internalized`); it is never a classification outcome.
+    Internalized,
+    /// Visible, but some content failed the import precheck, so the
+    /// common-linear adapter must never internalize this class. It assembles
+    /// externally and blocks exactly like `ExternalAssembly`; the split exists
+    /// so diagnostics and the adapter precheck share one vocabulary.
     ImportBlocked,
 }
 
 impl ExternalElementDisposition {
     /// Whether the KMS element assembly draws the class this frame.
     const fn assembles_externally(self) -> bool {
+        matches!(self, Self::ExternalAssembly | Self::ImportBlocked)
+    }
+
+    /// Whether the class reaches scanout on this output through either
+    /// assembly path — used for surface enter/frame-callback bookkeeping,
+    /// which internalized trees still need.
+    const fn produces_pixels(self) -> bool {
         !matches!(self, Self::Hidden)
     }
 
-    /// Whether the class forces the exact-sRGB fallback. Until per-class
-    /// internalization exists, every visible external element blocks.
+    /// Whether the class forces the exact-sRGB fallback. Internalized classes
+    /// go through the common-linear pipeline and therefore do not block it.
     const fn contributes_blocker(self) -> bool {
-        !matches!(self, Self::Hidden)
+        matches!(self, Self::ExternalAssembly | Self::ImportBlocked)
     }
 }
 
 /// Pure per-class, per-output decision. Invisible elements (absent source or
 /// uncommitted tree) never block; every visible element blocks while assembly
 /// is external; an import-precheck failure is recorded as `ImportBlocked` so
-/// a future adapter can never internalize the class silently.
+/// the adapter can never internalize the class silently. `Internalized` is
+/// assigned only by `ExternalElementColorPlan::apply_internalized` after a
+/// successful staging pass, never here.
 fn classify_external_element(
     present: bool,
     drawable: bool,
@@ -602,6 +626,13 @@ impl OutputExternalElementPlan {
         self.participating && self.class(class).disposition.assembles_externally()
     }
 
+    /// Whether this class produces pixels on this output through either
+    /// assembly path. Internalized trees still need output enter/leave and
+    /// frame-callback bookkeeping even though KMS no longer draws them.
+    fn shows(&self, class: ExternalElementClass) -> bool {
+        self.participating && self.class(class).disposition.produces_pixels()
+    }
+
     /// Whether this output contributes the class blocker to the frame.
     fn contributes(&self, class: ExternalElementClass) -> bool {
         self.participating && self.class(class).disposition.contributes_blocker()
@@ -629,15 +660,65 @@ impl ExternalElementColorPlan {
         self.outputs.get(output_idx)
     }
 
-    fn class_is_visible(&self, class: ExternalElementClass) -> bool {
+    /// Whether the class forces the exact-sRGB fallback on any output. A
+    /// visible class no longer blocks once every visible slice of it has been
+    /// internalized into the common-linear target.
+    fn class_contributes_blocker(&self, class: ExternalElementClass) -> bool {
         self.outputs.iter().any(|output| output.contributes(class))
+    }
+
+    /// Whether any output shows the class through either assembly path.
+    fn class_produces_pixels(&self, class: ExternalElementClass) -> bool {
+        self.outputs.iter().any(|output| output.shows(class))
     }
 
     pub(super) fn is_safe(&self) -> bool {
         !self.capture_readback
             && !ExternalElementClass::ALL
                 .into_iter()
-                .any(|class| self.class_is_visible(class))
+                .any(|class| self.class_contributes_blocker(class))
+    }
+
+    /// Whether internalizing every migratable visible class would leave the
+    /// frame linear-tail safe: no capture/readback request, no visible
+    /// non-migratable class (session lock), and no import-blocked tree.
+    /// Staging costs real GL work, so the frame loop asks this pure question
+    /// before paying it.
+    pub(super) fn internalization_could_make_safe(&self) -> bool {
+        !self.capture_readback
+            && ExternalElementClass::ALL.into_iter().all(|class| {
+                if !self.class_produces_pixels(class) {
+                    return true;
+                }
+                if !class.supports_internalization() {
+                    return false;
+                }
+                self.outputs.iter().all(|output| {
+                    !output.participating
+                        || output.class(class).disposition
+                            != ExternalElementDisposition::ImportBlocked
+                })
+            })
+    }
+
+    /// Flip every `ExternalAssembly` output of the flagged classes to
+    /// `Internalized`. The verdict comes from the staging pass that actually
+    /// imported the class content and handed it to the compositor; `Hidden`
+    /// and `ImportBlocked` entries are never rewritten, so a class whose
+    /// staging failed (bit left clear) keeps its blocker and pulls the frame
+    /// back to the exact-sRGB path.
+    fn apply_internalized(&mut self, classes: &[bool; ExternalElementClass::ALL.len()]) {
+        for class in ExternalElementClass::ALL {
+            if !classes[class.index()] {
+                continue;
+            }
+            for output in &mut self.outputs {
+                if output.class(class).disposition == ExternalElementDisposition::ExternalAssembly {
+                    let basis = output.class(class).basis;
+                    output.observe(class, ExternalElementDisposition::Internalized, basis);
+                }
+            }
+        }
     }
 
     /// Frame-level blocker list in stable `LinearTailBlocker::ALL` order.
@@ -648,9 +729,9 @@ impl ExternalElementColorPlan {
                 // The compositor reports its own encoded tail separately.
                 LinearTailBlocker::CompositorEncodedTail => false,
                 LinearTailBlocker::CaptureReadback => self.capture_readback,
-                class_blocker => ExternalElementClass::ALL
-                    .into_iter()
-                    .any(|class| class.blocker() == *class_blocker && self.class_is_visible(class)),
+                class_blocker => ExternalElementClass::ALL.into_iter().any(|class| {
+                    class.blocker() == *class_blocker && self.class_contributes_blocker(class)
+                }),
             })
             .collect()
     }
@@ -660,18 +741,24 @@ impl ExternalElementColorPlan {
         ExternalElementClass::ALL
             .into_iter()
             .map(|class| {
-                let visible_outputs: Vec<&OutputExternalElementPlan> = self
+                let shown_outputs: Vec<&OutputExternalElementPlan> = self
                     .outputs
                     .iter()
-                    .filter(|output| output.contributes(class))
+                    .filter(|output| output.shows(class))
                     .collect();
-                let visible = !visible_outputs.is_empty();
+                let visible = !shown_outputs.is_empty();
                 let importable = visible
-                    && visible_outputs.iter().all(|output| {
-                        output.class(class).disposition
-                            == ExternalElementDisposition::ExternalAssembly
+                    && shown_outputs.iter().all(|output| {
+                        output.class(class).disposition != ExternalElementDisposition::ImportBlocked
                     });
-                let basis = visible_outputs
+                // Staging is all-or-nothing per class per frame, so a visible
+                // class is either fully internalized or fully external.
+                let internalized = visible
+                    && shown_outputs.iter().all(|output| {
+                        output.class(class).disposition == ExternalElementDisposition::Internalized
+                    });
+                let blocked = self.class_contributes_blocker(class);
+                let basis = shown_outputs
                     .first()
                     .map(|output| output.class(class).basis)
                     .or_else(|| {
@@ -685,9 +772,16 @@ impl ExternalElementColorPlan {
                     class: class.wire_name().to_owned(),
                     visible,
                     importable,
-                    assembly: if visible { "kms_external" } else { "none" }.to_owned(),
-                    blocker: visible.then(|| class.wire_name().to_owned()),
-                    outputs: visible_outputs
+                    assembly: if !visible {
+                        "none"
+                    } else if internalized {
+                        "common_linear"
+                    } else {
+                        "kms_external"
+                    }
+                    .to_owned(),
+                    blocker: blocked.then(|| class.wire_name().to_owned()),
+                    outputs: shown_outputs
                         .iter()
                         .map(|output| output.output_name.clone())
                         .collect(),
@@ -696,6 +790,103 @@ impl ExternalElementColorPlan {
             })
             .collect()
     }
+}
+
+/// Whether a class is worth staging into the common-linear target this frame:
+/// at least one participating output assembles it externally, and no output
+/// reports it import-blocked (an import-blocked tree anywhere keeps the whole
+/// class external, matching the precheck's hard-blocker contract).
+fn class_is_staging_candidate(
+    plan: &ExternalElementColorPlan,
+    class: ExternalElementClass,
+) -> bool {
+    let mut any_assembly = false;
+    for output in &plan.outputs {
+        if !output.participating {
+            continue;
+        }
+        match output.class(class).disposition {
+            ExternalElementDisposition::ExternalAssembly => any_assembly = true,
+            ExternalElementDisposition::ImportBlocked => return false,
+            _ => {}
+        }
+    }
+    any_assembly
+}
+
+/// Commit or discard a staging outcome. The internalized dispositions are
+/// applied only when the resulting plan is linear-tail safe; otherwise the
+/// untouched plan keeps every blocker, the frame takes the exact-sRGB
+/// fallback, and KMS assembles every class as before (fail-closed: no element
+/// is dropped and no frame mixes color domains).
+pub(super) fn commit_staged_internalization(
+    plan: &ExternalElementColorPlan,
+    staged_classes: &[bool; ExternalElementClass::ALL.len()],
+) -> (ExternalElementColorPlan, bool) {
+    let mut trial = plan.clone();
+    trial.apply_internalized(staged_classes);
+    if trial.is_safe() {
+        (trial, true)
+    } else {
+        (plan.clone(), false)
+    }
+}
+
+/// Which external element classes the compositor's current output texture
+/// already carries, written after every successful composited frame. The KMS
+/// assembly consults it so an internalized class is never drawn twice; the
+/// texture identity check pins the verdict to exactly the framebuffer it
+/// describes, so a recreated/resized compositor silently reverts to external
+/// assembly until its first staged frame lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct InternalizedExternalFrame {
+    texture_id: u32,
+    generation: u64,
+    classes: [bool; ExternalElementClass::ALL.len()],
+}
+
+impl InternalizedExternalFrame {
+    pub(super) fn new(
+        texture_id: u32,
+        generation: u64,
+        classes: [bool; ExternalElementClass::ALL.len()],
+    ) -> Self {
+        Self {
+            texture_id,
+            generation,
+            classes,
+        }
+    }
+
+    /// Apply this verdict to a freshly derived plan when — and only when —
+    /// the compositor texture about to be wrapped is the one the verdict
+    /// describes.
+    fn apply_to_plan(&self, plan: &mut ExternalElementColorPlan, texture_id: u32, generation: u64) {
+        if compositor_output_texture_identity_matches(
+            texture_id,
+            generation,
+            self.texture_id,
+            self.generation,
+        ) {
+            plan.apply_internalized(&self.classes);
+        }
+    }
+}
+
+/// Per-surface wp-color-management descriptions, snapshotted once per staging
+/// pass so a mid-frame commit cannot make the frame disagree with itself.
+type SurfaceColorDescriptions = std::collections::HashMap<
+    wayland_server::backend::ObjectId,
+    crate::backend::color_policy::ParametricParams,
+>;
+
+/// Result of `KmsState::stage_external_elements_for_linear`: the compositor
+/// draw list (back-to-front) plus the per-class verdict of which classes were
+/// fully staged. A class bit is set only when every visible instance of the
+/// class was imported and composited successfully.
+pub(super) struct StagedExternalElements {
+    pub draws: Vec<super::super::compositor::ExternalElementVisual>,
+    pub classes: [bool; ExternalElementClass::ALL.len()],
 }
 
 /// Committed-content summary of one external surface tree. `drawable` counts
@@ -1151,6 +1342,10 @@ pub(super) struct KmsState {
     color_delivery_policy_sequence: u64,
     color_delivery_generation: u64,
     last_color_delivery_policy: Option<crate::backend::api::ColorDeliveryPolicyDecisionStatus>,
+    /// External element classes baked into the compositor texture the KMS
+    /// assembly is about to wrap; written after every successful composited
+    /// frame, `None` when that frame internalized nothing.
+    internalized_external_frame: Option<InternalizedExternalFrame>,
     /// Set only after the constructor's final all-CRTC neutral-color commit.
     /// A failed/incomplete reinit must not run the Drop reset: the previous
     /// `KmsState` still owns and tracks those live properties.
@@ -1160,6 +1355,10 @@ pub(super) struct KmsState {
 #[derive(Clone)]
 struct CursorBitmap {
     buffer: MemoryRenderBuffer,
+    /// Buffer dimensions in physical pixels (the KMS element derives them
+    /// from the buffer; the staging path needs them for the offscreen size).
+    width: i32,
+    height: i32,
     xhot: i32,
     yhot: i32,
 }
@@ -1350,6 +1549,8 @@ impl KmsState {
             );
             let bitmap = CursorBitmap {
                 buffer,
+                width: img.width as i32,
+                height: img.height as i32,
                 xhot: img.xhot as i32,
                 yhot: img.yhot as i32,
             };
@@ -1490,6 +1691,17 @@ impl KmsState {
         queue: crate::backend::wayland_udev::image_copy_capture::PendingImageCaptureQueue,
     ) {
         self.image_capture_pending = Some(queue);
+    }
+
+    /// Record which external element classes the frame just rendered into the
+    /// compositor texture. Called after every successful composited frame;
+    /// `None` (or an all-clear set) when nothing was internalized, so the KMS
+    /// assembly returns to drawing every visible class on the next frame.
+    pub(super) fn set_internalized_external_frame(
+        &mut self,
+        frame: Option<InternalizedExternalFrame>,
+    ) {
+        self.internalized_external_frame = frame;
     }
 
     pub(super) fn set_capture_counters(
@@ -1747,8 +1959,11 @@ impl KmsState {
     /// layer surface trees, each with their subsurface trees. The same plan
     /// gates the KMS element assembly in `render_if_needed`, feeds the
     /// delivery-route blocker list, and fills the IPC diagnostics, so check
-    /// and draw cannot drift apart. Until those classes gain a common-linear
-    /// adapter, any visible class requires the global encoded-sRGB fallback.
+    /// and draw cannot drift apart. Classes the staging pass internalized
+    /// carry the `Internalized` disposition (applied afterwards via
+    /// `apply_internalized`): they leave the KMS assembly and stop blocking
+    /// the linear route; every other visible class still requires the global
+    /// encoded-sRGB fallback.
     pub(super) fn external_element_color_plan(
         &self,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -1947,6 +2162,431 @@ impl KmsState {
                 basis,
             );
         }
+    }
+
+    /// Composite one set of KMS render elements into a single offscreen
+    /// texture through the same Smithay GL paths the scanout assembly uses,
+    /// preserving premultiplied-alpha, encoded-sRGB content 1:1. `None` means
+    /// the import/draw failed and the owning class must stay external this
+    /// frame (fail-closed into the exact-sRGB fallback).
+    fn composite_elements_to_texture(
+        renderer: &mut GlesRenderer,
+        elements: &[KmsRenderElement],
+        size: (i32, i32),
+    ) -> Option<GlesTexture> {
+        if size.0 <= 0 || size.1 <= 0 {
+            return None;
+        }
+        let mut texture =
+            Offscreen::<GlesTexture>::create_buffer(renderer, Fourcc::Abgr8888, size.into())
+                .map_err(|error| {
+                    log::debug!("[kms-cm] external element offscreen alloc failed: {error:?}");
+                    error
+                })
+                .ok()?;
+        let mut target = renderer
+            .bind(&mut texture)
+            .map_err(|error| {
+                log::debug!("[kms-cm] external element offscreen bind failed: {error:?}");
+                error
+            })
+            .ok()?;
+        let phys: Size<i32, Physical> = size.into();
+        let mut tracker = OutputDamageTracker::new(phys, Scale::from(1.0f64), Transform::Normal);
+        // age=0 forces a full redraw; the transparent clear keeps uncovered
+        // texels see-through so the compositor blends exactly the element.
+        tracker
+            .render_output(
+                renderer,
+                &mut target,
+                0,
+                elements,
+                smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.0),
+            )
+            .map_err(|error| {
+                log::debug!("[kms-cm] external element offscreen render failed: {error:?}");
+                error
+            })
+            .ok()?;
+        drop(target);
+        // `render_output` flips Y in its projection, so the texture is stored
+        // top-to-bottom and the compositor samples it with a plain 0..1 UV.
+        Some(texture)
+    }
+
+    /// The common-linear adapter carries no per-element color transform, so
+    /// every drawable surface in an external tree must be undescribed or
+    /// exactly sRGB-default. A described PQ/HLG/wide-gamut tree fails this
+    /// check and its class stays on the external assembly path — fail-closed
+    /// rather than guessing at the source domain.
+    fn tree_descriptions_stay_srgb_default(
+        surface: &WlSurface,
+        surface_params: Option<&SurfaceColorDescriptions>,
+    ) -> bool {
+        let Some(params) = surface_params else {
+            return true;
+        };
+        let mut supported = true;
+        with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |child_surface, _, _| {
+                if let Some(params) = params.get(&child_surface.id()) {
+                    supported &=
+                        crate::backend::wayland_udev::color_pipeline::description_is_srgb_default(
+                            params,
+                        );
+                }
+            },
+            |_, _, _| true,
+        );
+        supported
+    }
+
+    /// Stage one external surface tree: import through the renderer and
+    /// composite it into an offscreen texture at `scale`, mirroring the KMS
+    /// assembly's `render_elements` placement (root at `root_global` in global
+    /// physical pixels, subsurface offsets scaled). The returned rectangle is
+    /// the tree's visible bounding box in global physical pixels.
+    fn stage_surface_tree(
+        renderer: &mut GlesRenderer,
+        surface: &WlSurface,
+        root_global: (i32, i32),
+        scale: f64,
+        surface_params: Option<&SurfaceColorDescriptions>,
+        draws: &mut Vec<super::super::compositor::ExternalElementVisual>,
+    ) -> bool {
+        if !Self::tree_descriptions_stay_srgb_default(surface, surface_params) {
+            return false;
+        }
+        let bbox = smithay::desktop::utils::bbox_from_surface_tree(
+            surface,
+            Point::<i32, smithay::utils::Logical>::from((0, 0)),
+        );
+        if bbox.size.w <= 0 || bbox.size.h <= 0 {
+            return false;
+        }
+        if import_surface_tree(renderer, surface).is_err() {
+            return false;
+        }
+        let offset: Point<i32, Physical> = (
+            (-f64::from(bbox.loc.x) * scale).round() as i32,
+            (-f64::from(bbox.loc.y) * scale).round() as i32,
+        )
+            .into();
+        let elements: Vec<KmsRenderElement> = render_elements_from_surface_tree(
+            renderer,
+            surface,
+            offset,
+            Scale::from(scale),
+            1.0,
+            Kind::Unspecified,
+        );
+        if elements.is_empty() {
+            return false;
+        }
+        let size = (
+            (f64::from(bbox.size.w) * scale).ceil() as i32,
+            (f64::from(bbox.size.h) * scale).ceil() as i32,
+        );
+        let Some(texture) = Self::composite_elements_to_texture(renderer, &elements, size) else {
+            return false;
+        };
+        let rect = [
+            root_global.0 + (f64::from(bbox.loc.x) * scale).round() as i32,
+            root_global.1 + (f64::from(bbox.loc.y) * scale).round() as i32,
+            size.0,
+            size.1,
+        ];
+        let tex_id = texture.tex_id();
+        draws.push(super::super::compositor::ExternalElementVisual {
+            texture: tex_id,
+            owner: Some(texture),
+            rect,
+        });
+        true
+    }
+
+    /// Stage the pointer cursor (theme bitmap or procedural fallback) at its
+    /// hotspot-adjusted global physical position, mirroring the KMS assembly's
+    /// per-output scale selection through the pointer's host output.
+    fn stage_cursor(
+        &mut self,
+        plan: &ExternalElementColorPlan,
+        cursor_kind: StdCursorKind,
+        draws: &mut Vec<super::super::compositor::ExternalElementVisual>,
+    ) -> bool {
+        if !class_is_staging_candidate(plan, ExternalElementClass::Cursor) {
+            return false;
+        }
+        // The plan resolves the pointer's host output once for check and draw
+        // alike; an unplaceable pointer cannot be staged and keeps its blocker.
+        let Some(host_idx) = plan
+            .outputs
+            .iter()
+            .position(|output| output.participating && output.cursor_position.is_some())
+        else {
+            return false;
+        };
+        let Some((cursor_x, cursor_y)) = plan.outputs[host_idx].cursor_position else {
+            return false;
+        };
+        let scale: Scale<f64> = self.outputs[host_idx]
+            .output
+            .current_scale()
+            .fractional_scale()
+            .into();
+        let cursor_scale = scale.x.max(1.0).ceil() as u32;
+
+        match self.cursor_bitmap(cursor_kind, cursor_scale) {
+            Some(bitmap) => {
+                let size = (bitmap.width, bitmap.height);
+                if size.0 <= 0 || size.1 <= 0 {
+                    return false;
+                }
+                let element = match MemoryRenderBufferRenderElement::from_buffer(
+                    &mut self.renderer,
+                    Point::<f64, Physical>::from((0.0, 0.0)),
+                    &bitmap.buffer,
+                    None,
+                    None,
+                    None,
+                    Kind::Cursor,
+                ) {
+                    Ok(element) => element,
+                    Err(_) => return false,
+                };
+                let Some(texture) = Self::composite_elements_to_texture(
+                    &mut self.renderer,
+                    &[KmsRenderElement::Memory(element)],
+                    size,
+                ) else {
+                    return false;
+                };
+                let tex_id = texture.tex_id();
+                draws.push(super::super::compositor::ExternalElementVisual {
+                    texture: tex_id,
+                    owner: Some(texture),
+                    rect: [
+                        cursor_x - bitmap.xhot,
+                        cursor_y - bitmap.yhot,
+                        size.0,
+                        size.1,
+                    ],
+                });
+                true
+            }
+            None => {
+                // The procedural software fallback: body rects first, then the
+                // +1px shadow rects, exactly the KMS front-to-back order.
+                let mut min_x = i32::MAX;
+                let mut min_y = i32::MAX;
+                let mut max_x = i32::MIN;
+                let mut max_y = i32::MIN;
+                for &(rx, ry, rw, rh) in CURSOR_RECTS {
+                    for (x, y) in [(rx, ry), (rx + 1, ry + 1)] {
+                        min_x = min_x.min(x);
+                        min_y = min_y.min(y);
+                        max_x = max_x.max(x + rw);
+                        max_y = max_y.max(y + rh);
+                    }
+                }
+                let mut elements: Vec<KmsRenderElement> = Vec::new();
+                for &(rx, ry, rw, rh) in CURSOR_RECTS {
+                    let geo: Rectangle<i32, Physical> =
+                        Rectangle::new((rx - min_x, ry - min_y).into(), (rw, rh).into());
+                    elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
+                        Id::new(),
+                        geo,
+                        0usize,
+                        smithay::backend::renderer::Color32F::new(0.98, 0.98, 0.98, 1.0),
+                        Kind::Cursor,
+                    )));
+                }
+                for &(rx, ry, rw, rh) in CURSOR_RECTS {
+                    let geo: Rectangle<i32, Physical> =
+                        Rectangle::new((rx + 1 - min_x, ry + 1 - min_y).into(), (rw, rh).into());
+                    elements.push(KmsRenderElement::Solid(SolidColorRenderElement::new(
+                        Id::new(),
+                        geo,
+                        0usize,
+                        smithay::backend::renderer::Color32F::new(0.0, 0.0, 0.0, 0.55),
+                        Kind::Cursor,
+                    )));
+                }
+                let Some(texture) = Self::composite_elements_to_texture(
+                    &mut self.renderer,
+                    &elements,
+                    (max_x - min_x, max_y - min_y),
+                ) else {
+                    return false;
+                };
+                let tex_id = texture.tex_id();
+                draws.push(super::super::compositor::ExternalElementVisual {
+                    texture: tex_id,
+                    owner: Some(texture),
+                    rect: [
+                        cursor_x + min_x,
+                        cursor_y + min_y,
+                        max_x - min_x,
+                        max_y - min_y,
+                    ],
+                });
+                true
+            }
+        }
+    }
+
+    /// Stage the drag-and-drop icon following the pointer, mirroring the KMS
+    /// placement (`cursor + icon.offset` in global physical pixels) and the
+    /// pointer host output's scale.
+    fn stage_drag_icon(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        plan: &ExternalElementColorPlan,
+        surface_params: Option<&SurfaceColorDescriptions>,
+        draws: &mut Vec<super::super::compositor::ExternalElementVisual>,
+    ) -> bool {
+        if !class_is_staging_candidate(plan, ExternalElementClass::DragIcon) {
+            return false;
+        }
+        let Some(icon) = state.dnd_icon.as_ref() else {
+            return false;
+        };
+        // Without a resolved pointer the assembly draws nothing but blocks;
+        // keep that fail-closed shape here.
+        let Some((cursor_x, cursor_y)) = plan.cursor_position else {
+            return false;
+        };
+        let host_scale = plan
+            .outputs
+            .iter()
+            .position(|output| output.participating && output.cursor_position.is_some())
+            .map(|idx| self.outputs[idx].output.current_scale().fractional_scale())
+            .unwrap_or(1.0);
+        Self::stage_surface_tree(
+            &mut self.renderer,
+            &icon.surface,
+            (cursor_x + icon.offset.x, cursor_y + icon.offset.y),
+            host_scale,
+            surface_params,
+            draws,
+        )
+    }
+
+    /// Stage every overlapping surface of one layer-shell class across the
+    /// participating outputs. All-or-nothing per class: any instance that
+    /// fails to import or composite rolls back the class's staged draws so
+    /// the frame can fall back as a whole.
+    fn stage_layer_class(
+        &mut self,
+        plan: &ExternalElementColorPlan,
+        layer: WlrLayer,
+        class: ExternalElementClass,
+        surface_params: Option<&SurfaceColorDescriptions>,
+        draws: &mut Vec<super::super::compositor::ExternalElementVisual>,
+    ) -> bool {
+        if !class_is_staging_candidate(plan, class) {
+            return false;
+        }
+        let staged_before = draws.len();
+        let mut staged_any = false;
+        for idx in 0..self.outputs.len() {
+            let Some(output_plan) = plan.output(idx) else {
+                continue;
+            };
+            if output_plan.class(class).disposition != ExternalElementDisposition::ExternalAssembly
+            {
+                continue;
+            }
+            let output = &self.outputs[idx];
+            let (ox, oy) = output.origin;
+            let (out_w, out_h) = output.mode_size;
+            let scale = output.output.current_scale().fractional_scale();
+            // Collect first: the layer map borrows the output while the
+            // composite below needs the renderer.
+            let map = layer_map_for_output(&output.output);
+            let mut instances: Vec<(WlSurface, Point<i32, smithay::utils::Logical>)> = Vec::new();
+            for layer_surface in map.layers_on(layer) {
+                let Some(geometry) = map.layer_geometry(layer_surface) else {
+                    continue;
+                };
+                if !rect_overlaps_output(
+                    (ox + geometry.loc.x, oy + geometry.loc.y),
+                    (geometry.size.w, geometry.size.h),
+                    (ox, oy),
+                    (out_w, out_h),
+                ) {
+                    continue;
+                }
+                instances.push((layer_surface.wl_surface().clone(), geometry.loc));
+            }
+            drop(map);
+            for (surface, loc) in instances {
+                if !Self::stage_surface_tree(
+                    &mut self.renderer,
+                    &surface,
+                    (ox + loc.x, oy + loc.y),
+                    scale,
+                    surface_params,
+                    draws,
+                ) {
+                    draws.truncate(staged_before);
+                    return false;
+                }
+                staged_any = true;
+            }
+        }
+        staged_any
+    }
+
+    /// Stage every internalizable external element class visible this frame
+    /// into textures the compositor can draw into its common linear-sRGB
+    /// target. The draw list is accumulated front-to-back in exactly the KMS
+    /// element order (cursor, drag icon, overlay, top) and reversed at the end
+    /// for the compositor's back-to-front painter order. Classes that fail
+    /// staging keep their `ExternalAssembly`/`ImportBlocked` disposition, so
+    /// the untouched plan still forces the exact-sRGB fallback and the KMS
+    /// assembly keeps drawing them — never dropped, never mixed-domain.
+    pub(super) fn stage_external_elements_for_linear(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        plan: &ExternalElementColorPlan,
+        cursor_kind: StdCursorKind,
+    ) -> StagedExternalElements {
+        let surface_params = state
+            .color_manager
+            .as_ref()
+            .map(|manager| manager.snapshot_surface_params());
+        let mut draws = Vec::new();
+        let mut classes = [false; ExternalElementClass::ALL.len()];
+        if self.stage_cursor(plan, cursor_kind, &mut draws) {
+            classes[ExternalElementClass::Cursor.index()] = true;
+        }
+        if self.stage_drag_icon(state, plan, surface_params.as_ref(), &mut draws) {
+            classes[ExternalElementClass::DragIcon.index()] = true;
+        }
+        if self.stage_layer_class(
+            plan,
+            WlrLayer::Overlay,
+            ExternalElementClass::LayerOverlay,
+            surface_params.as_ref(),
+            &mut draws,
+        ) {
+            classes[ExternalElementClass::LayerOverlay.index()] = true;
+        }
+        if self.stage_layer_class(
+            plan,
+            WlrLayer::Top,
+            ExternalElementClass::LayerTop,
+            surface_params.as_ref(),
+            &mut draws,
+        ) {
+            classes[ExternalElementClass::LayerTop.index()] = true;
+        }
+        draws.reverse();
+        StagedExternalElements { draws, classes }
     }
 
     /// Record the current frame's color-delivery decision without claiming it
@@ -4792,6 +5432,7 @@ impl KmsState {
             color_delivery_policy_sequence: 0,
             color_delivery_generation: 0,
             last_color_delivery_policy: None,
+            internalized_external_frame: None,
             owns_scanout_color_state: false,
         }));
 
@@ -4880,7 +5521,20 @@ impl KmsState {
         // The same per-frame plan that fed the color-delivery route also
         // gates the element assembly below: visibility is decided in exactly
         // one place (`external_element_color_plan`), never re-derived here.
-        let external_plan = self.external_element_color_plan(state);
+        // The plan is then overlaid with the verdict of what the compositor
+        // actually internalized into its output texture (pinned to that exact
+        // texture by id+generation), so a staged class is never drawn twice
+        // and a texture without the staged content is never skipped.
+        let mut external_plan = self.external_element_color_plan(state);
+        if let Some(compositor) = compositor
+            && let Some(frame) = self.internalized_external_frame
+        {
+            frame.apply_to_plan(
+                &mut external_plan,
+                compositor.output_texture_id(),
+                compositor.output_texture_generation(),
+            );
+        }
 
         self.last_direct_scanout_outputs.clear();
         let mut any_skipped = false;
@@ -5053,9 +5707,10 @@ impl KmsState {
             // Placed before the compositor/element branch split so it overlays both
             // render paths identically. The plan's resolved pointer position places
             // it; without one the class reports a blocker but draws nothing.
-            if external_output.assembles(ExternalElementClass::DragIcon)
+            // An internalized icon is drawn by the compositor instead, but its
+            // tree still needs the output-enter and frame-callback bookkeeping.
+            if external_output.shows(ExternalElementClass::DragIcon)
                 && let Some(icon) = state.dnd_icon.as_ref()
-                && let Some((cursor_x, cursor_y)) = external_plan.cursor_position
             {
                 let surface = icon.surface.clone();
                 frame_roots.push(surface.clone());
@@ -5075,21 +5730,25 @@ impl KmsState {
                     },
                     |_, _, _| true,
                 );
-                let loc: Point<i32, Physical> = (
-                    (cursor_x - ox) + icon.offset.x,
-                    (cursor_y - oy) + icon.offset.y,
-                )
-                    .into();
-                let tree = SurfaceTree::from_surface(&surface);
-                let icon_elements: Vec<KmsRenderElement> =
-                    AsRenderElements::<GlesRenderer>::render_elements(
-                        &tree,
-                        &mut self.renderer,
-                        loc,
-                        scale,
-                        1.0,
-                    );
-                elements.extend(icon_elements);
+                if external_output.assembles(ExternalElementClass::DragIcon)
+                    && let Some((cursor_x, cursor_y)) = external_plan.cursor_position
+                {
+                    let loc: Point<i32, Physical> = (
+                        (cursor_x - ox) + icon.offset.x,
+                        (cursor_y - oy) + icon.offset.y,
+                    )
+                        .into();
+                    let tree = SurfaceTree::from_surface(&surface);
+                    let icon_elements: Vec<KmsRenderElement> =
+                        AsRenderElements::<GlesRenderer>::render_elements(
+                            &tree,
+                            &mut self.renderer,
+                            loc,
+                            scale,
+                            1.0,
+                        );
+                    elements.extend(icon_elements);
+                }
             }
 
             // Layer surfaces above normal windows, gated per class by the same
@@ -5100,7 +5759,7 @@ impl KmsState {
                     (WlrLayer::Overlay, ExternalElementClass::LayerOverlay),
                     (WlrLayer::Top, ExternalElementClass::LayerTop),
                 ] {
-                    if !external_output.assembles(class) {
+                    if !external_output.shows(class) {
                         continue;
                     }
                     for ls in map.layers_on(layer) {
@@ -5137,17 +5796,22 @@ impl KmsState {
                             |_, _, _| true,
                         );
 
-                        let location: Point<i32, Physical> = (geo.loc.x, geo.loc.y).into();
-                        let tree = SurfaceTree::from_surface(&surface);
-                        let layer_elements: Vec<KmsRenderElement> =
-                            AsRenderElements::<GlesRenderer>::render_elements(
-                                &tree,
-                                &mut self.renderer,
-                                location,
-                                scale,
-                                1.0,
-                            );
-                        elements.extend(layer_elements);
+                        // Internalized layers are inside the compositor
+                        // texture already; only the external assembly pushes
+                        // elements.
+                        if external_output.assembles(class) {
+                            let location: Point<i32, Physical> = (geo.loc.x, geo.loc.y).into();
+                            let tree = SurfaceTree::from_surface(&surface);
+                            let layer_elements: Vec<KmsRenderElement> =
+                                AsRenderElements::<GlesRenderer>::render_elements(
+                                    &tree,
+                                    &mut self.renderer,
+                                    location,
+                                    scale,
+                                    1.0,
+                                );
+                            elements.extend(layer_elements);
+                        }
                     }
                 }
             }
@@ -6107,9 +6771,10 @@ mod compositor_texture_ownership_tests {
     use super::{
         ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, ExternalElementClass,
         ExternalElementColorPlan, ExternalElementDisposition, FrameQueueBoundary,
-        LinearTailBlocker, OutputColorDeliveryTracker, OutputColorRegionCandidate,
-        OutputExternalElementPlan, QueuedFrameData, classify_external_element,
-        client_direct_scanout_presented, compositor_output_texture_identity_matches,
+        InternalizedExternalFrame, LinearTailBlocker, OutputColorDeliveryTracker,
+        OutputColorRegionCandidate, OutputExternalElementPlan, QueuedFrameData,
+        class_is_staging_candidate, classify_external_element, client_direct_scanout_presented,
+        commit_staged_internalization, compositor_output_texture_identity_matches,
         connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
         direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
         frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
@@ -6607,6 +7272,316 @@ mod compositor_texture_ownership_tests {
         assert_eq!(lock.assembly, "none");
         assert_eq!(lock.blocker, None);
         assert!(lock.outputs.is_empty());
+    }
+
+    #[test]
+    fn internalized_disposition_leaves_kms_assembly_and_stops_blocking() {
+        use ExternalElementDisposition::*;
+        // The internalized class is drawn by the compositor into the common
+        // linear target: KMS must not assemble it again, it still produces
+        // pixels (enter/leave and frame callbacks continue), and it no longer
+        // forces the exact-sRGB fallback.
+        assert!(!Internalized.assembles_externally());
+        assert!(Internalized.produces_pixels());
+        assert!(!Internalized.contributes_blocker());
+        assert!(!Hidden.produces_pixels());
+        assert!(ExternalAssembly.produces_pixels());
+        assert!(ImportBlocked.produces_pixels());
+    }
+
+    #[test]
+    fn apply_internalized_flips_only_external_assembly_entries() {
+        let mut plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::DragIcon,
+                    ExternalElementDisposition::ImportBlocked,
+                ),
+            ],
+        );
+        let mut second = OutputExternalElementPlan::new("DP-1".to_owned(), false);
+        second.observe(
+            ExternalElementClass::Cursor,
+            ExternalElementDisposition::Hidden,
+            "output_not_participating",
+        );
+        plan.outputs.push(second);
+
+        let mut classes = [false; ExternalElementClass::ALL.len()];
+        classes[ExternalElementClass::Cursor.index()] = true;
+        classes[ExternalElementClass::DragIcon.index()] = true;
+        plan.apply_internalized(&classes);
+
+        assert_eq!(
+            plan.outputs[0]
+                .class(ExternalElementClass::Cursor)
+                .disposition,
+            ExternalElementDisposition::Internalized
+        );
+        // ImportBlocked is a hard blocker the adapter must never dissolve.
+        assert_eq!(
+            plan.outputs[0]
+                .class(ExternalElementClass::DragIcon)
+                .disposition,
+            ExternalElementDisposition::ImportBlocked
+        );
+        // Hidden entries (here: non-participating output) never flip.
+        assert_eq!(
+            plan.outputs[1]
+                .class(ExternalElementClass::Cursor)
+                .disposition,
+            ExternalElementDisposition::Hidden
+        );
+        assert!(!plan.outputs[1].shows(ExternalElementClass::Cursor));
+        assert!(plan.outputs[0].shows(ExternalElementClass::Cursor));
+        assert!(!plan.outputs[0].assembles(ExternalElementClass::Cursor));
+    }
+
+    #[test]
+    fn internalized_class_unblocks_plan_and_reports_common_linear() {
+        let mut plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::LayerTop,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+            ],
+        );
+        assert!(!plan.is_safe());
+        assert_eq!(
+            plan.blockers(),
+            [
+                LinearTailBlocker::Cursor,
+                LinearTailBlocker::TopLayerSurface
+            ]
+        );
+
+        let mut classes = [false; ExternalElementClass::ALL.len()];
+        classes[ExternalElementClass::Cursor.index()] = true;
+        classes[ExternalElementClass::LayerTop.index()] = true;
+        plan.apply_internalized(&classes);
+
+        assert!(plan.is_safe());
+        assert!(plan.blockers().is_empty());
+        let statuses = plan.class_statuses();
+        let cursor = &statuses[0];
+        assert!(cursor.visible && cursor.importable);
+        assert_eq!(cursor.assembly, "common_linear");
+        assert_eq!(cursor.blocker, None);
+        assert_eq!(cursor.outputs, ["HDMI-A-1".to_owned()]);
+        let layer_top = statuses
+            .iter()
+            .find(|status| status.class == "top_layer_surface")
+            .unwrap();
+        assert_eq!(layer_top.assembly, "common_linear");
+        assert_eq!(layer_top.blocker, None);
+    }
+
+    #[test]
+    fn staging_candidate_matrix_follows_dispositions() {
+        let plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (
+                    ExternalElementClass::Cursor,
+                    ExternalElementDisposition::ExternalAssembly,
+                ),
+                (
+                    ExternalElementClass::DragIcon,
+                    ExternalElementDisposition::Hidden,
+                ),
+            ],
+        );
+        assert!(class_is_staging_candidate(
+            &plan,
+            ExternalElementClass::Cursor
+        ));
+        assert!(!class_is_staging_candidate(
+            &plan,
+            ExternalElementClass::DragIcon
+        ));
+        assert!(!class_is_staging_candidate(
+            &plan,
+            ExternalElementClass::SessionLock
+        ));
+
+        // An import-blocked output anywhere disqualifies the whole class.
+        let mut blocked = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(
+                ExternalElementClass::LayerTop,
+                ExternalElementDisposition::ExternalAssembly,
+            )],
+        );
+        let mut second = OutputExternalElementPlan::new("DP-1".to_owned(), true);
+        second.observe(
+            ExternalElementClass::LayerTop,
+            ExternalElementDisposition::ImportBlocked,
+            "test",
+        );
+        blocked.outputs.push(second);
+        assert!(!class_is_staging_candidate(
+            &blocked,
+            ExternalElementClass::LayerTop
+        ));
+
+        // A class already internalized is not a staging candidate anymore.
+        let mut internalized = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::Internalized,
+            )],
+        );
+        assert!(!class_is_staging_candidate(
+            &internalized,
+            ExternalElementClass::Cursor
+        ));
+        internalized.outputs[0].observe(
+            ExternalElementClass::Cursor,
+            ExternalElementDisposition::ExternalAssembly,
+            "test",
+        );
+        assert!(class_is_staging_candidate(
+            &internalized,
+            ExternalElementClass::Cursor
+        ));
+    }
+
+    #[test]
+    fn internalization_gate_rejects_lock_capture_and_import_blocked() {
+        use ExternalElementDisposition::*;
+        // Only a visible cursor: internalizing it would make the frame safe.
+        let cursor_only = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(ExternalElementClass::Cursor, ExternalAssembly)],
+        );
+        assert!(cursor_only.internalization_could_make_safe());
+
+        // Session lock is deliberately not migratable: the KMS shield path
+        // stays the audited occlusion boundary.
+        let locked = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (ExternalElementClass::Cursor, ExternalAssembly),
+                (ExternalElementClass::SessionLock, ExternalAssembly),
+            ],
+        );
+        assert!(!locked.internalization_could_make_safe());
+        assert!(!ExternalElementClass::SessionLock.supports_internalization());
+        for class in [
+            ExternalElementClass::Cursor,
+            ExternalElementClass::DragIcon,
+            ExternalElementClass::LayerTop,
+            ExternalElementClass::LayerOverlay,
+        ] {
+            assert!(class.supports_internalization());
+        }
+
+        // Capture/readback requests are frame-global blockers.
+        let mut capturing = cursor_only.clone();
+        capturing.capture_readback = true;
+        assert!(!capturing.internalization_could_make_safe());
+
+        // An import-blocked tree must stay external even though it is
+        // otherwise migratable.
+        let import_blocked = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(ExternalElementClass::DragIcon, ImportBlocked)],
+        );
+        assert!(!import_blocked.internalization_could_make_safe());
+    }
+
+    #[test]
+    fn commit_staged_internalization_is_all_or_nothing_per_frame() {
+        use ExternalElementDisposition::*;
+        let plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[
+                (ExternalElementClass::Cursor, ExternalAssembly),
+                (ExternalElementClass::LayerOverlay, ExternalAssembly),
+            ],
+        );
+
+        // Every visible class staged: the committed plan internalizes both
+        // and the frame leaves the exact-sRGB fallback.
+        let mut all = [false; ExternalElementClass::ALL.len()];
+        all[ExternalElementClass::Cursor.index()] = true;
+        all[ExternalElementClass::LayerOverlay.index()] = true;
+        let (committed, ok) = commit_staged_internalization(&plan, &all);
+        assert!(ok);
+        assert!(committed.is_safe());
+        assert!(committed.blockers().is_empty());
+
+        // One class failed staging: its blocker survives, so the frame
+        // reverts wholesale — the compositor must not draw the other class
+        // either, and KMS keeps assembling both.
+        let mut partial = [false; ExternalElementClass::ALL.len()];
+        partial[ExternalElementClass::Cursor.index()] = true;
+        let (committed, ok) = commit_staged_internalization(&plan, &partial);
+        assert!(!ok);
+        assert_eq!(committed, plan);
+        assert!(!committed.is_safe());
+
+        // Nothing to migrate on an already-safe plan: commit is a no-op.
+        let safe = ExternalElementColorPlan::default();
+        let (committed, ok) =
+            commit_staged_internalization(&safe, &[false; ExternalElementClass::ALL.len()]);
+        assert!(ok);
+        assert_eq!(committed, safe);
+    }
+
+    #[test]
+    fn internalized_frame_verdict_is_pinned_to_texture_identity() {
+        let plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::ExternalAssembly,
+            )],
+        );
+        let mut classes = [false; ExternalElementClass::ALL.len()];
+        classes[ExternalElementClass::Cursor.index()] = true;
+        let verdict = InternalizedExternalFrame::new(42, 7, classes);
+
+        // Matching texture identity: the class flips to internalized.
+        let mut matching = plan.clone();
+        verdict.apply_to_plan(&mut matching, 42, 7);
+        assert_eq!(
+            matching.outputs[0]
+                .class(ExternalElementClass::Cursor)
+                .disposition,
+            ExternalElementDisposition::Internalized
+        );
+
+        // A recreated or resized compositor produces a new texture identity;
+        // the stale verdict must not dissolve the external assembly then.
+        for (tex, generation) in [(43, 7), (42, 8)] {
+            let mut stale = plan.clone();
+            verdict.apply_to_plan(&mut stale, tex, generation);
+            assert_eq!(stale, plan);
+            assert!(stale.outputs[0].assembles(ExternalElementClass::Cursor));
+        }
     }
 
     #[test]

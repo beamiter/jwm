@@ -4,6 +4,62 @@
 
 ---
 
+## 2026-09-04：十轮收口（HDR P0-3 internalize / urgent 标记 / 蓝牙配对设计）
+
+1. **HDR P0 第 3 项完成**：cursor/DnD/layer-top/layer-overlay 四类外部元素现在
+   internalize 进 FP16 common-linear target（lock 有意保持外部，锁定时整帧本就
+   收敛 exact-sRGB）。staging 复用 Smithay 同一导入/采样路径合成 encoded-sRGB
+   offscreen，compositor 用共享 window shader 的 legacy sRGB ingress 画入
+   linear_fbo，帧尾逐输出 matrix+OETF 只施加一次；任意类失败 = 整帧回退
+   exact-sRGB + KMS 照常组装（不丢元素不混域）。**顺带修了一个潜伏 bug**：
+   scene-linear decode/encode 两个 fullscreen pass 的 V 采样方向相反导致
+   deferred/early 路由上定位内容垂直翻转——此前 cursor 恒触发 fallback 使该
+   路由从未真正驱动 scanout，所以从未暴露；已修并有窗口级回归。细节见下方
+   TODO 节「进展（2026-09-04）」。像素 oracle（严格 surfaceless EGL，本机 Mesa
+   真实执行）覆盖 SDR 与旧路径 ±1-2 LSB 一致、PQ 单次 OETF、partial damage
+   移动无残影。
+2. **网格 urgent 标记与跨屏评估**、**WM_HINTS 直改不触发 urgency 的疑似缺口**：
+   见下方「2026-09-03：网格 v2c」节（该节日期实为 09-04 凌晨，保持原样）。
+   WM_HINTS 缺口留作待查。
+3. **蓝牙配对设计完成**（只读调查，未实施）：推荐路线 = bridge 一次性配对会话
+   进程（`jwm-bridge pair <addr>`，D-Bus Agent1，KeyboardDisplay capability，
+   仅响应自己发起的配对），jwm 侧纯状态机 + prompt UI 泛化（wifi 密码 prompt
+   先例）。v1 含发现扫描/PIN 输入/六位确认/仅展示；不做入站授权。完整计划
+   在本会话记录中，实施时按「jwm 侧 pairing.rs + connectivity.rs +
+   system_ui.rs prompt 泛化 + IPC 三个新命令 + bridge/src/bluez.rs」落地，
+   CI 兜底 = 私有 dbus-daemon 挂假 org.bluez 跑完整握手。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2578 passed / 0 failed。
+
+---
+
+## 2026-09-03：网格 v2c — urgent 标记 + 跨屏评估
+
+1. **urgent 标记**：`TagsGridCell.urgent`（api.rs:1256）+ `TagClientFrame.urgent`
+   （tags_overview.rs:53）。聚合语义对齐状态栏 `calculate_tag_masks`：窗口在每个
+   所属 tag 上计入（minimized/swallowed 同样计入），sticky / 全 tag 窗口浮在 tag
+   轴之上、不标任何 cell；urgent ⊆ occupied 恒成立。绘制两端同位置同样式：
+   `tags_grid::urgent_badge_rect`（标签带右端、随选中 cell 缩放）+
+   `sysui_fill_rounded` 圆点，颜色用 `behavior.attention_color`（与 urgent 边框
+   同 token，x11 render.rs:2206 / wayland_udev render.rs:4605 附近）。
+2. **跨屏同框：评估后不做**。viewport 语义可以不动（单 panel 仍在 sel_mon），
+   但其余全是结构改动：扁平 `TagsGrid` schema（单一 cols / 单一 live cell）、
+   均匀 `grid_geometry`、矩形键盘行走、commit 只面向 sel_mon（跨屏需
+   focusmon+view）、数字键跨组歧义、拖拽仅定义在窗口本显示器内。阻塞点与最小
+   设计草案写进 docs/tags-overview.md 的 Limitations。
+
+嵌套实测（v2c，/tmp/jwm-uivalidate/shots/v2c_*.png）：tag1 停放的 xclock 设
+urgent → 开网格 cell 1 右上出现 attention 色圆点（裁片 AE diff 60），清除后
+消失（diff 0）。**注意**：实测发现 `xdotool set_window --urgency`（EWMH
+`_NET_WM_STATE_DEMANDS_ATTENTION` client message）能置位，而
+`xprop -f WM_HINTS 32i -set WM_HINTS ...` 直接改写 WM_HINTS 在嵌套 x11rb
+会话里不触发 jwm 的 urgency 更新（xev 能看到 PropertyNotify，jwm 无反应；
+RUST_LOG=debug 下日志也静默，jwm 日志级别疑似被压在 info）。WM_HINTS
+PropertyNotify 链路疑似有缺口，待查；EWMH 路径正常。
+
+---
+
 ## 2026-09-03：UI/UX 九轮（网格 v2 拖拽换 tag + live 缩略 / HDR P0-2）
 
 1. **网格总览拖窗口换 tag**：按住 cell 里的窗口线框拖到另一 cell 松开 =
@@ -34,7 +90,10 @@
 lib 2561 passed / 0 failed；v2a/v2b 均有嵌套实测截图（/tmp/jwm-uivalidate/shots/
 v2a_*.png、v2b_*.png）。
 
-**网格总览剩余**：跨显示器同框；urgent 标记（v1.1 设计里留的 v2 项）。
+**网格总览剩余**：urgent 标记已由 v2c 完成（见上方 2026-09-03 v2c 节）；
+跨显示器同框评估为结构性改动、不做，阻塞点与最小设计草案见
+docs/tags-overview.md 的 Limitations。另有一条待查：WM_HINTS 直改在嵌套
+x11rb 会话不触发 urgency 更新（v2c 节）。
 
 ---
 
@@ -358,6 +417,46 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-04）：P0 internalize/adapt 已完成
+
+cursor（主题位图与软件 fallback）、DnD drag icon、layer-top、layer-overlay 四类外部
+元素现在 internalize 进 FP16 common-linear target；session-lock 保持 KMS 外部组装
+（遮挡安全语义：锁定帧稀少、exact-sRGB 无视觉损失，shield/lock 路径维持单一受审计
+边界；锁定时帧尾本就因 lock blocker 收敛 fallback，游标也随之留在外部，不混域）。
+
+- **z-order**：staging 按 KMS 元素 vec 的 front-to-back 顺序（cursor、dnd、overlay、
+  top）收集，reverse 后交给 compositor 以 back-to-front 画入 linear_fbo——与 KMS
+  组装相对 z 完全一致（cursor 最顶）。internalized 元素的 enter/leave 与 frame
+  callback 簿记改由 `shows()` 门控保留在 `render_if_needed`，仅元素推送由
+  `assembles()` 门控。
+- **适配器复用**：staging 用 Smithay 既有 import + `render_output` 把每棵树/位图
+  合成到 offscreen premultiplied encoded-sRGB texture；compositor 以共享 window
+  shader 的 legacy sRGB ingress（`color_managed=0 + scene_linear=1`）绘入
+  linear_fbo，无第二套传递函数；既有逐输出 matrix + OETF 在帧尾统一施加一次。
+  无颜色描述按 sRGB ingress；带非 sRGB 默认描述的树（PQ/HLG/广色域）staging
+  拒绝并留在 KMS 路径（`description_is_srgb_default`）。
+- **每帧 fail-closed**：`commit_staged_internalization` 只在 staging 成功且 trial
+  plan 安全时才把 disposition 从 `ExternalAssembly` 迁到 `Internalized`；任一失败
+  整帧退回 exact-sRGB 且该类回到 KMS 组装（`ImportBlocked` 永不迁移）。verdict 经
+  `KmsState.internalized_external_frame` 以 (texture id, generation) 钉住当前
+  compositor 纹理，assembly 与 route 决策共用同一计划语义。
+- **顺带修复的潜伏缺陷**：scene-linear decode/encode pass 的 V 采样方向曾使
+  linear_fbo 与 output_fbo 行存储约定相反，所有定位内容（含窗口）在
+  deferred/Early 路由上垂直翻转——该路由此前从未真正驱动 scanout（cursor 恒阻塞
+  触发 fallback），故未暴露；两 shader 现统一 V 翻转使两 FBO 同一约定。
+  `wayland_scene_linear_route_preserves_window_scene_position` 钉住契约。
+- **damage/scanout**：internalized 元素的 prev∪curr 矩形注入 dirty tracker
+  （section 1c），partial-damage 修复下移动无残影；`external_elements_drawn`
+  期间 direct scanout 保持阻断。
+- **像素 oracle**（严格 surfaceless EGL）：SDR 全帧 opaque/背景与旧路径 ±1 LSB
+  一致；半透明列按域分别钉住 CPU oracle（internalized=线性混合、legacy=编码
+  混合，线性混合是管线既定语义）；PQ region 验证单次 OETF；重叠区验证
+  back-to-front；partial-damage 下跨位置移动验证无残影。策略侧覆盖 disposition
+  迁移矩阵、staging 候选/门控、commit 全有或全无、verdict identity 钉住。
+- **P0-4 接口预留**：`produces_pixels`/`assembles_externally`/`contributes_blocker`
+  的三分语义、`assembly` 的 `common_linear` 取值与 verdict 通道即帧尾 domain
+  table 的接入点；encoded-tail overlay 仍各自保留具名 blocker。
+
 ### 进展（2026-09-03）：P0 外部元素颜色计划已完成
 
 `external_elements_color_pipeline_safe` 的总 bool 已拆成逐类计划
@@ -444,7 +543,7 @@ exact-sRGB fallback。
      实际可见/可导入元素为准。
    - 让同一份计划驱动 element assembly、颜色交付 route 与 blocker reason，避免检查与绘制
      两套枚举再次漂移。
-3. **P0：internalize/adapt** — `src/backend/wayland_udev/backend.rs` 与
+3. **P0：[已完成] internalize/adapt** — `src/backend/wayland_udev/backend.rs` 与
    `compositor/{render,mod}.rs`
    - 优先把上述元素按正确 z-order 绘入 FP16 common-linear target，再执行现有逐输出
      matrix + OETF；保留 exact-sRGB fallback 作为每帧 fail-closed 路径。
