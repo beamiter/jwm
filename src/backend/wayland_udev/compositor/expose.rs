@@ -17,7 +17,25 @@ impl WaylandCompositor {
     /// Render the expose (mission control) mode overlay.
     /// Shows all windows arranged in a grid layout with animation.
     /// Includes dark backdrop, shadows, hover highlight with scale, and content_uv handling.
-    pub(crate) fn render_expose(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+    ///
+    /// `tail_scene_linear` is the frame-tail domain table's draw-domain bit:
+    /// true when this overlay draws into the common linear-sRGB target
+    /// (deferred routes), false when it draws into the encoded output target
+    /// (legacy and early-fallback routes — the historical SDR draw).
+    pub(crate) fn render_expose(
+        &self,
+        gl: &ffi::Gles2,
+        projection: &[f32; 16],
+        tail_scene_linear: bool,
+    ) {
+        // The draw domain below is only correct while the domain table keeps
+        // this class common-linear-aware; flipping it back to encoded-only
+        // must revisit this draw path (the gate then keeps it off deferred
+        // routes anyway).
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::Expose.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
         if self.expose_entries.is_empty() || self.expose_opacity <= 0.0 {
             return;
         }
@@ -35,6 +53,10 @@ impl WaylandCompositor {
                 self.overview_bg_program,
                 b"u_opacity\0".as_ptr() as *const _,
             );
+            let scene_linear_loc = gl.GetUniformLocation(
+                self.overview_bg_program,
+                b"u_scene_linear\0".as_ptr() as *const _,
+            );
 
             if rect_loc >= 0 {
                 gl.Uniform4f(
@@ -50,6 +72,9 @@ impl WaylandCompositor {
             }
             if opacity_loc >= 0 {
                 gl.Uniform1f(opacity_loc, self.expose_opacity * 0.85);
+            }
+            if scene_linear_loc >= 0 {
+                gl.Uniform1i(scene_linear_loc, i32::from(tail_scene_linear));
             }
 
             gl.BindVertexArray(self.quad_vao);
@@ -91,7 +116,10 @@ impl WaylandCompositor {
                     )
                 };
 
-                // Draw shadow behind each window
+                // Draw shadow behind each window. The shadow color is fixed
+                // black, whose RGB is identical in the encoded and linear
+                // domains; only the blend follows the bound target's domain,
+                // which is the pipeline's defined linear-blend semantic.
                 gl.UseProgram(self.shadow_program);
                 gl.UniformMatrix4fv(
                     self.shadow_uniforms.projection,
@@ -150,14 +178,18 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
+                // The transform's forward stage is ignored by the shader when
+                // drawing into the linear target, so only the encoded draw
+                // (legacy/early-fallback routes on an active scene-linear
+                // pipeline) needs the sRGB re-encode override.
                 let color_transform = win.color_transform.map(|transform| {
-                    if self.scene_linear_color_path_active() {
-                        transform_for_encoded_srgb(transform)
-                    } else {
+                    if tail_scene_linear || !self.scene_linear_color_path_active() {
                         transform
+                    } else {
+                        transform_for_encoded_srgb(transform)
                     }
                 });
-                self.upload_window_color_transform(gl, color_transform, false);
+                self.upload_window_color_transform(gl, color_transform, tail_scene_linear);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, tex);
@@ -198,7 +230,15 @@ impl WaylandCompositor {
 
     /// Render the snap preview highlight rectangle.
     /// Shows a translucent blue rounded rect where a window will snap to.
+    ///
+    /// The border program's `u_scene_linear` tracks the bound target via
+    /// `sync_overlay_color_domain`, so this draw needs no per-route branch;
+    /// the domain table pins the class as common-linear-aware.
     pub(crate) fn render_snap_preview(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::SnapPreview.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
         let (x, y, w, h) = match self.snap_preview {
             Some(rect) => rect,
             None => return,
@@ -308,13 +348,21 @@ impl WaylandCompositor {
     /// Render peek mode ("boss key") overlay.
     /// Draws a dark overlay over everything, then redraws only the focused window
     /// at full opacity on top, creating a spotlight effect.
+    ///
+    /// `tail_scene_linear` follows the frame-tail domain table: true when this
+    /// overlay draws into the common linear-sRGB target (deferred routes).
     pub(crate) fn render_peek_mode(
         &self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
         focused: Option<u64>,
         scene: &[(u64, i32, i32, u32, u32)],
+        tail_scene_linear: bool,
     ) {
+        debug_assert_eq!(
+            tail_domain::TailOverlayClass::Peek.domain(),
+            tail_domain::TailOverlayDomain::CommonLinearAware
+        );
         if self.peek_opacity <= 0.0 {
             return;
         }
@@ -334,6 +382,10 @@ impl WaylandCompositor {
                 self.overview_bg_program,
                 b"u_opacity\0".as_ptr() as *const _,
             );
+            let scene_linear_loc = gl.GetUniformLocation(
+                self.overview_bg_program,
+                b"u_scene_linear\0".as_ptr() as *const _,
+            );
 
             if rect_loc >= 0 {
                 gl.Uniform4f(
@@ -349,6 +401,9 @@ impl WaylandCompositor {
             }
             if opacity_loc >= 0 {
                 gl.Uniform1f(opacity_loc, 0.7 * self.peek_opacity.clamp(0.0, 1.0));
+            }
+            if scene_linear_loc >= 0 {
+                gl.Uniform1i(scene_linear_loc, i32::from(tail_scene_linear));
             }
             gl.DrawArrays(ffi::TRIANGLE_STRIP, 0, 4);
 
@@ -398,14 +453,18 @@ impl WaylandCompositor {
                 gl.Uniform1f(self.win_uniforms.ripple_progress, -1.0);
                 gl.Uniform1f(self.win_uniforms.ripple_amplitude, 0.0);
 
+                // The transform's forward stage is ignored by the shader when
+                // drawing into the linear target, so only the encoded draw
+                // (legacy/early-fallback routes on an active scene-linear
+                // pipeline) needs the sRGB re-encode override.
                 let color_transform = win.color_transform.map(|transform| {
-                    if self.scene_linear_color_path_active() {
-                        transform_for_encoded_srgb(transform)
-                    } else {
+                    if tail_scene_linear || !self.scene_linear_color_path_active() {
                         transform
+                    } else {
+                        transform_for_encoded_srgb(transform)
                     }
                 });
-                self.upload_window_color_transform(gl, color_transform, false);
+                self.upload_window_color_transform(gl, color_transform, tail_scene_linear);
 
                 gl.ActiveTexture(ffi::TEXTURE0);
                 self.bind_window_texture(gl, tex);

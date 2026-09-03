@@ -57,6 +57,7 @@ mod shader_hot_reload;
 pub mod shaders;
 #[allow(dead_code, unreachable_pub)]
 mod subpixel_render;
+pub(crate) mod tail_domain;
 #[allow(dead_code, unreachable_pub)]
 mod texture_pool;
 mod transitions;
@@ -924,6 +925,29 @@ pub(crate) enum CompositorOutputTextureOwnership {
     SmithayRenderer,
 }
 
+/// Where capture consumers read the frame's pixels from. The physical scanout
+/// route never depends on this choice: the compositor derives an explicitly
+/// encoded view so screenshots/recording/screencopy always read canonical
+/// sRGB pixels without forcing the exact-sRGB fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CompositorCaptureView {
+    /// `output_fbo` already holds the canonical encoded sRGB frame (legacy and
+    /// early-fallback routes), so capture reads the scanout texture as before.
+    EncodedOutput,
+    /// A dedicated encoded view derived from the common linear-sRGB target by
+    /// one identity-matrix sRGB OETF pass (deferred routes leave the scanout
+    /// texture in output-referred space, which is not screenshot semantics).
+    Dedicated {
+        texture: u32,
+        internal_format: u32,
+        generation: u64,
+    },
+    /// The frame is on a deferred route but no fresh encoded view exists
+    /// (allocation failure or a stale linear target). Capture must skip this
+    /// frame rather than read pixels in the wrong color domain.
+    Unavailable,
+}
+
 // ---------------------------------------------------------------------------
 // Main compositor struct
 // ---------------------------------------------------------------------------
@@ -1041,6 +1065,25 @@ pub(crate) struct WaylandCompositor {
     #[allow(dead_code)]
     transition_fbo: u32,
     transition_texture: u32,
+    /// Dedicated RGBA8 target holding the explicitly encoded sRGB capture view
+    /// of the common-linear frame (render.rs section 18c). Lazily allocated on
+    /// the first deferred-route frame that a capture consumer observes; the
+    /// physical scanout route never depends on it.
+    capture_view_fbo: u32,
+    capture_view_texture: u32,
+    /// Changes whenever the capture texture is recreated, even if GL recycles
+    /// the numeric texture id.
+    capture_view_texture_generation: u64,
+    /// The size the lazily allocated capture target was created at; a resize
+    /// recreates it on the next capture frame.
+    capture_view_size: (u32, u32),
+    /// The capture FBO currently holds an encode of the current linear target
+    /// contents. Cleared whenever a render pass may have touched the linear
+    /// target and whenever the frame leaves the deferred routes.
+    capture_view_fresh: bool,
+    /// What capture consumers (KMS offscreen screenshot/screencopy and the
+    /// compositor's own readbacks) may read this frame.
+    capture_view: CompositorCaptureView,
     particle_vao: u32,
     particle_vbo: u32,
     /// Guards the explicit context-current teardown used by runtime toggles.
@@ -1196,6 +1239,11 @@ pub(crate) struct WaylandCompositor {
     external_elements: Vec<ExternalElementVisual>,
     external_elements_prev_rects: Vec<[i32; 4]>,
     external_elements_drawn: bool,
+    /// The staged set includes the pointer cursor class, so a frame that draws
+    /// it (`external_elements_drawn`) already carries the real cursor image in
+    /// the compositor texture/capture view — recording must not add its
+    /// synthesised arrow on top.
+    external_elements_include_cursor: bool,
 
     // Reusable per-frame scratch buffers (cleared+refilled each frame to avoid
     // per-frame heap allocation in the render hot path).
@@ -2438,6 +2486,14 @@ impl WaylandCompositor {
                 postprocess_texture,
                 transition_fbo,
                 transition_texture,
+                // The capture view is allocated lazily on the first
+                // deferred-route frame a capture consumer observes.
+                capture_view_fbo: 0,
+                capture_view_texture: 0,
+                capture_view_texture_generation: 0,
+                capture_view_size: (0, 0),
+                capture_view_fresh: false,
+                capture_view: CompositorCaptureView::EncodedOutput,
                 particle_vao,
                 particle_vbo,
                 gpu_resources_released: false,
@@ -2568,6 +2624,7 @@ impl WaylandCompositor {
                 external_elements: Vec::new(),
                 external_elements_prev_rects: Vec::new(),
                 external_elements_drawn: false,
+                external_elements_include_cursor: false,
                 scratch_curr_ids: HashSet::new(),
                 scratch_prev_geom: HashMap::new(),
                 scratch_scanout: Vec::new(),
@@ -2893,6 +2950,7 @@ impl WaylandCompositor {
             self.external_elements.clear();
             self.external_elements_prev_rects.clear();
             self.external_elements_drawn = false;
+            self.external_elements_include_cursor = false;
 
             self.clear_overview_textures(gl);
             for row in self.tab_title_textures.drain(..) {
@@ -2979,6 +3037,7 @@ impl WaylandCompositor {
             delete_framebuffer_name(gl, &mut self.scene_fbo);
             delete_framebuffer_name(gl, &mut self.postprocess_fbo);
             delete_framebuffer_name(gl, &mut self.transition_fbo);
+            delete_framebuffer_name(gl, &mut self.capture_view_fbo);
 
             match output_texture_ownership {
                 CompositorOutputTextureOwnership::RawCompositor => {
@@ -2995,6 +3054,7 @@ impl WaylandCompositor {
             delete_texture_name(gl, &mut self.scene_texture);
             delete_texture_name(gl, &mut self.postprocess_texture);
             delete_texture_name(gl, &mut self.transition_texture);
+            delete_texture_name(gl, &mut self.capture_view_texture);
 
             delete_buffer_name(gl, &mut self.particle_vbo);
             delete_buffer_name(gl, &mut self.quad_vbo);
@@ -3100,6 +3160,8 @@ mod gpu_release_contract_tests {
         "postprocess_texture",
         "transition_fbo",
         "transition_texture",
+        "capture_view_fbo",
+        "capture_view_texture",
         "prev_blur_fbo",
         "temporal_mix_fbo",
         "blur_blit_src_fbo",
@@ -3690,14 +3752,29 @@ impl WaylandCompositor {
         self.output_texture_generation
     }
 
+    /// What capture consumers (KMS offscreen screenshot/screencopy and the
+    /// compositor's own readbacks) may read for the last rendered frame. The
+    /// state is recomputed at every `render_frame` (section 18c) and never
+    /// feeds back into the physical scanout route.
+    pub(crate) fn capture_view(&self) -> CompositorCaptureView {
+        self.capture_view
+    }
+
     /// Replace the KMS external elements staged for this frame's common-linear
     /// pass. The backend calls this before every `render_frame` with either
     /// the freshly staged set (back-to-front) or an empty list; the frame
     /// draws them into the linear FBO only when the frame's route still goes
     /// through that target, and the draw fact is published through the
     /// `external_elements_drawn` flag for the KMS assembly/direct-scanout
-    /// gates.
-    pub(crate) fn set_external_elements(&mut self, elements: Vec<ExternalElementVisual>) {
+    /// gates. `include_cursor` records whether the cursor class is part of the
+    /// staged set, so capture consumers can tell whether the frame already
+    /// carries the real pointer image.
+    pub(crate) fn set_external_elements(
+        &mut self,
+        elements: Vec<ExternalElementVisual>,
+        include_cursor: bool,
+    ) {
+        self.external_elements_include_cursor = include_cursor;
         self.external_elements = elements;
     }
 

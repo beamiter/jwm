@@ -5410,10 +5410,16 @@ impl Backend for UdevBackend {
                 // output delivery. Surface plans below remain source-owned and
                 // geometry-independent; this decision only selects paired CRTC
                 // CTM/LUT, per-output shader regions, or global-sRGB fallback.
-                let compositor_tail_safe = compositor.compositor_linear_tail_safe();
+                let compositor_tail_status = compositor.linear_tail_status();
+                let compositor_tail_safe = compositor_tail_status.linear_tail_safe();
                 let scene_linear_color_path = compositor.scene_linear_color_path_active();
                 let mut external_element_plan =
                     kms.borrow().external_element_color_plan(&self.state);
+                // Capture consumers (screenshot/screencopy/image-capture)
+                // derive their pixels from the compositor's explicitly encoded
+                // capture view; the physical route decision does not depend on
+                // them. This bit only tells the compositor to produce the view.
+                let capture_view_required = kms.borrow().capture_readback_pending();
 
                 // P0 internalize/adapt: when the frame can take a linear
                 // route and the only linear-tail blockers are migratable
@@ -5452,11 +5458,12 @@ impl Backend for UdevBackend {
                     scene_linear_color_path,
                 );
                 // The blocker list and the per-class IPC diagnostics derive
-                // from the same plan instance that gates the KMS assembly.
+                // from the same plan instance that gates the KMS assembly; the
+                // compositor tail contributes its table-driven typed status.
                 kms.borrow_mut().record_color_delivery_attempt(
                     &decision,
                     &external_element_plan,
-                    compositor_tail_safe,
+                    &compositor_tail_status,
                     scene_linear_color_path,
                 );
                 if decision.delivery_blocked {
@@ -5594,8 +5601,13 @@ impl Backend for UdevBackend {
                 // Hand this frame's staged external elements over. Empty when
                 // the frame could not (or did not need to) internalize, which
                 // also clears a set staged by a previous frame before this
-                // render pass runs.
-                compositor.set_external_elements(staged_external_draws);
+                // render pass runs. The cursor bit tells capture consumers
+                // (recording) whether the frame already carries the real
+                // pointer image.
+                compositor.set_external_elements(
+                    staged_external_draws,
+                    internalized_classes[kms::ExternalElementClass::Cursor.index()],
+                );
                 let rendered = kms
                     .borrow_mut()
                     .with_renderer(|gl| {
@@ -5607,6 +5619,7 @@ impl Backend for UdevBackend {
                             decision.hw_encode_active,
                             decision.hw_ctm_active,
                             decision.software_regions.as_deref(),
+                            capture_view_required,
                         )
                     })
                     .unwrap_or(false);

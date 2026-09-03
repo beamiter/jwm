@@ -383,6 +383,16 @@ pub(super) struct ColorPipelineDecision {
 ///
 /// The recognized wire names live in `api::LINEAR_TAIL_BLOCKER_NAMES`; every
 /// variant's `wire_name` must appear in that table (a unit test enforces it).
+/// The compositor-owned frame-tail overlays are not listed here: they are
+/// typed by `TailOverlayClass` (compositor `tail_domain` module) and merged
+/// into the reported inventory by `record_color_delivery_attempt`.
+///
+/// `CaptureReadback` is retained for name-table compatibility with recorded
+/// payloads but is no longer emitted: capture derives from the compositor's
+/// explicitly encoded capture view and never constrains the route.
+/// `CompositorEncodedTail` is now emitted only when the common-linear target
+/// itself is unavailable; visible encoded-only overlays are reported under
+/// their own per-class names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum LinearTailBlocker {
     CompositorEncodedTail,
@@ -462,7 +472,7 @@ impl ExternalElementClass {
         self.blocker().wire_name()
     }
 
-    const fn index(self) -> usize {
+    pub(super) const fn index(self) -> usize {
         self as usize
     }
 
@@ -643,10 +653,14 @@ impl OutputExternalElementPlan {
 /// compositor's common linear-sRGB texture. One derivation feeds three
 /// consumers: the KMS element assembly (`render_if_needed`), the color
 /// delivery route (`blockers`), and the IPC diagnostics (`class_statuses`).
+///
+/// Capture/readback is intentionally not part of this plan: screenshots,
+/// screencopy and recording read the compositor's explicitly encoded capture
+/// view (render.rs section 18c), so their presence never constrains the
+/// physical route. `KmsState::capture_readback_pending` still reports pending
+/// capture work so the compositor knows when to derive that view.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct ExternalElementColorPlan {
-    /// Capture/readback requests are frame-global rather than per-output.
-    capture_readback: bool,
     /// The frame's resolved pointer position, shared by cursor placement and
     /// drag-icon placement. `None` fails closed: affected classes report a
     /// blocker but cannot be placed, so nothing is drawn for them.
@@ -673,32 +687,28 @@ impl ExternalElementColorPlan {
     }
 
     pub(super) fn is_safe(&self) -> bool {
-        !self.capture_readback
-            && !ExternalElementClass::ALL
-                .into_iter()
-                .any(|class| self.class_contributes_blocker(class))
+        !ExternalElementClass::ALL
+            .into_iter()
+            .any(|class| self.class_contributes_blocker(class))
     }
 
     /// Whether internalizing every migratable visible class would leave the
-    /// frame linear-tail safe: no capture/readback request, no visible
-    /// non-migratable class (session lock), and no import-blocked tree.
-    /// Staging costs real GL work, so the frame loop asks this pure question
-    /// before paying it.
+    /// frame linear-tail safe: no visible non-migratable class (session lock)
+    /// and no import-blocked tree. Staging costs real GL work, so the frame
+    /// loop asks this pure question before paying it.
     pub(super) fn internalization_could_make_safe(&self) -> bool {
-        !self.capture_readback
-            && ExternalElementClass::ALL.into_iter().all(|class| {
-                if !self.class_produces_pixels(class) {
-                    return true;
-                }
-                if !class.supports_internalization() {
-                    return false;
-                }
-                self.outputs.iter().all(|output| {
-                    !output.participating
-                        || output.class(class).disposition
-                            != ExternalElementDisposition::ImportBlocked
-                })
+        ExternalElementClass::ALL.into_iter().all(|class| {
+            if !self.class_produces_pixels(class) {
+                return true;
+            }
+            if !class.supports_internalization() {
+                return false;
+            }
+            self.outputs.iter().all(|output| {
+                !output.participating
+                    || output.class(class).disposition != ExternalElementDisposition::ImportBlocked
             })
+        })
     }
 
     /// Flip every `ExternalAssembly` output of the flagged classes to
@@ -721,14 +731,19 @@ impl ExternalElementColorPlan {
         }
     }
 
-    /// Frame-level blocker list in stable `LinearTailBlocker::ALL` order.
+    /// Frame-level blocker list in stable `LinearTailBlocker::ALL` order. Only
+    /// the KMS-assembled element classes appear here; the compositor-owned
+    /// frame tail is merged in by `record_color_delivery_attempt`, and capture
+    /// no longer blocks (it reads the independent encoded capture view).
     pub(super) fn blockers(&self) -> Vec<LinearTailBlocker> {
         LinearTailBlocker::ALL
             .into_iter()
             .filter(|blocker| match blocker {
                 // The compositor reports its own encoded tail separately.
                 LinearTailBlocker::CompositorEncodedTail => false,
-                LinearTailBlocker::CaptureReadback => self.capture_readback,
+                // Legacy name, retained for recorded payloads: capture derives
+                // from the independent encoded view and never blocks.
+                LinearTailBlocker::CaptureReadback => false,
                 class_blocker => ExternalElementClass::ALL.into_iter().any(|class| {
                     class.blocker() == *class_blocker && self.class_contributes_blocker(class)
                 }),
@@ -1277,6 +1292,9 @@ pub(super) struct KmsState {
 
     pub(super) needs_render: bool,
     compositor_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
+    /// Same wrapper cache for the compositor's dedicated capture-view texture,
+    /// used only while an offscreen capture render runs.
+    capture_texture_cache: Option<(u32, u32, u32, u32, u64, GlesTexture)>,
     // Strong refs to every compositor output-FBO texture generation we've wrapped.
     // Older generations were explicitly deleted by the compositor's resize path,
     // so their wrappers must remain alive until context teardown to avoid a delayed
@@ -1415,6 +1433,39 @@ impl std::fmt::Display for KmsInitError {
 }
 
 impl std::error::Error for KmsInitError {}
+
+/// Merge the compositor's typed frame-tail status with the KMS
+/// external-element plan into the reported blocker inventory. When the
+/// common-linear target is unavailable the aggregate `compositor_encoded_tail`
+/// name stands in for the whole tail; otherwise every visible encoded-only
+/// overlay class reports under its own name in `TailOverlayClass::ALL` draw
+/// order. The KMS-assembled classes follow in `LinearTailBlocker::ALL` order.
+fn linear_tail_blocker_names(
+    compositor_tail: &super::super::compositor::tail_domain::LinearTailStatus,
+    external_element_plan: &ExternalElementColorPlan,
+) -> Vec<String> {
+    let mut names: Vec<String> = if compositor_tail.linear_target_ready {
+        compositor_tail
+            .overlay_blockers
+            .iter()
+            .filter_map(|class| class.blocker_wire_name())
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![
+            LinearTailBlocker::CompositorEncodedTail
+                .wire_name()
+                .to_owned(),
+        ]
+    };
+    names.extend(
+        external_element_plan
+            .blockers()
+            .into_iter()
+            .map(|blocker| blocker.wire_name().to_owned()),
+    );
+    names
+}
 
 impl KmsState {
     fn deliver_frame_callbacks(
@@ -1953,6 +2004,23 @@ impl KmsState {
         self.outputs.get(output_idx)?.color_pipeline_caps.clone()
     }
 
+    /// Whether any capture consumer (IPC screenshot, wlr-screencopy,
+    /// ext-image-copy-capture) waits on this frame. The frame loop passes this
+    /// to the compositor so it derives the explicitly encoded capture view;
+    /// per the frame-tail domain table, pending capture never enters the
+    /// color-delivery route decision.
+    pub(super) fn capture_readback_pending(&self) -> bool {
+        self.screenshot_requests.has_pending()
+            || self
+                .screencopy_pending
+                .as_ref()
+                .is_some_and(|queue| !queue.lock_safe().is_empty())
+            || self
+                .image_capture_pending
+                .as_ref()
+                .is_some_and(|queue| !queue.lock_safe().is_empty())
+    }
+
     /// Build the per-frame plan for the elements Smithay assembles outside
     /// the compositor's common linear-sRGB texture: cursor (theme bitmap or
     /// software fallback), drag icon, session-lock surface, and top/overlay
@@ -1968,20 +2036,10 @@ impl KmsState {
         &self,
         state: &crate::backend::wayland::state::JwmWaylandState,
     ) -> ExternalElementColorPlan {
-        let capture_readback = self.screenshot_requests.has_pending()
-            || self
-                .screencopy_pending
-                .as_ref()
-                .is_some_and(|queue| !queue.lock_safe().is_empty())
-            || self
-                .image_capture_pending
-                .as_ref()
-                .is_some_and(|queue| !queue.lock_safe().is_empty());
         let dmabuf_texture_formats = self.renderer.egl_context().dmabuf_texture_formats();
         let cursor_position =
             rounded_pointer_location(state.pointer_location.x, state.pointer_location.y);
         let mut plan = ExternalElementColorPlan {
-            capture_readback,
             cursor_position,
             outputs: Vec::with_capacity(self.outputs.len()),
         };
@@ -2595,17 +2653,22 @@ impl KmsState {
     /// point into the last-success snapshot. The external-element plan that
     /// gated the assembly is recorded alongside, so the IPC diagnosis shows
     /// the same classes the route decision saw.
+    ///
+    /// The compositor's frame tail arrives as the typed `LinearTailStatus`
+    /// from the domain table: when the common-linear target is unavailable the
+    /// aggregate `compositor_encoded_tail` name is emitted; otherwise every
+    /// visible encoded-only overlay class is reported under its own name, in
+    /// `TailOverlayClass::ALL` draw order, ahead of the KMS-side classes.
     pub(super) fn record_color_delivery_attempt(
         &mut self,
         decision: &ColorPipelineDecision,
         external_element_plan: &ExternalElementColorPlan,
-        compositor_tail_safe: bool,
+        compositor_tail: &super::super::compositor::tail_domain::LinearTailStatus,
         scene_linear_active: bool,
     ) {
-        let mut linear_tail_blockers = external_element_plan.blockers();
-        if !compositor_tail_safe {
-            linear_tail_blockers.insert(0, LinearTailBlocker::CompositorEncodedTail);
-        }
+        let compositor_tail_safe = compositor_tail.linear_tail_safe();
+        let linear_tail_blockers =
+            linear_tail_blocker_names(compositor_tail, external_element_plan);
         let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
         debug_assert_eq!(linear_tail_safe, linear_tail_blockers.is_empty());
         let prepared = prepared_color_delivery(decision, linear_tail_safe, scene_linear_active);
@@ -2618,12 +2681,7 @@ impl KmsState {
                 reason: prepared.fallback_reason.map(str::to_owned),
                 scene_linear_active,
                 linear_tail_safe,
-                linear_tail_blockers: Some(
-                    linear_tail_blockers
-                        .iter()
-                        .map(|blocker| blocker.wire_name().to_owned())
-                        .collect(),
-                ),
+                linear_tail_blockers: Some(linear_tail_blockers),
                 external_elements: Some(external_element_plan.class_statuses()),
             });
         self.prepared_color_delivery = (!decision.delivery_blocked).then_some(prepared);
@@ -4085,6 +4143,72 @@ impl KmsState {
         Ok(())
     }
 
+    /// Wrap one compositor-owned raw texture in a Smithay `GlesTexture`,
+    /// caching the wrapper per texture identity. Every wrapper generation is
+    /// retained in `keepalive`: the compositor owns and may explicitly
+    /// recreate/delete the raw GL name, so a stale wrapper must never delete
+    /// a recycled id belonging to a newer texture.
+    fn wrap_compositor_texture(
+        renderer: &GlesRenderer,
+        cache: &mut Option<(u32, u32, u32, u32, u64, GlesTexture)>,
+        keepalive: &mut Vec<(u64, GlesTexture)>,
+        tex_id: u32,
+        width: u32,
+        height: u32,
+        internal_format: u32,
+        generation: u64,
+    ) -> GlesTexture {
+        if let Some((cached_id, cached_w, cached_h, cached_format, cached_generation, cached_tex)) =
+            cache.as_ref()
+            && *cached_id == tex_id
+            && *cached_w == width
+            && *cached_h == height
+            && *cached_format == internal_format
+            && *cached_generation == generation
+        {
+            return cached_tex.clone();
+        }
+        let size: Size<i32, BufferCoord> = (width as i32, height as i32).into();
+        let tex =
+            unsafe { GlesTexture::from_raw(renderer, Some(internal_format), false, tex_id, size) };
+        keepalive.push((generation, tex.clone()));
+        *cache = Some((
+            tex_id,
+            width,
+            height,
+            internal_format,
+            generation,
+            tex.clone(),
+        ));
+        tex
+    }
+
+    /// The full-screen compositor-frame element for one output. `origin` is
+    /// the output's global layout origin: subtracting it slices the output's
+    /// rectangle out of the single global framebuffer. Used for both the
+    /// scanout texture and, during offscreen capture renders, the explicitly
+    /// encoded capture view.
+    fn compositor_frame_element(
+        renderer: &GlesRenderer,
+        texture: GlesTexture,
+        origin: (i32, i32),
+    ) -> KmsRenderElement {
+        let context_id = renderer.context_id();
+        KmsRenderElement::Texture(TextureRenderElement::from_static_texture(
+            Id::new(),
+            context_id,
+            ((-origin.0) as f64, (-origin.1) as f64),
+            texture,
+            1,
+            Transform::Flipped180,
+            None,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        ))
+    }
+
     /// Render all elements to an offscreen buffer and save as PNG.
     /// Split out as a free-standing function so it can borrow `self.renderer`
     /// without conflicting with the mutable borrow on `self.outputs`.
@@ -5402,6 +5526,7 @@ impl KmsState {
             renderer,
             needs_render: true,
             compositor_texture_cache: None,
+            capture_texture_cache: None,
             compositor_texture_keepalive: Vec::new(),
             background_id: Id::new(),
 
@@ -5587,6 +5712,10 @@ impl KmsState {
             // DrmOutput::render_frame expects elements in front-to-back order.
             // So: cursor/top-most surfaces first, solid background last.
             let mut elements: Vec<KmsRenderElement> = Vec::new();
+            // Position of the full-screen compositor-texture element, so the
+            // capture path below can temporarily point it at the compositor's
+            // explicitly encoded capture view.
+            let mut compositor_element_index: Option<usize> = None;
 
             // Cursor will be pushed FIRST (front-most), when the frame's
             // external element plan places it on this output. The plan
@@ -5975,64 +6104,24 @@ impl KmsState {
                 }
                 // Wrap the compositor's output FBO texture as a full-screen render element.
                 let (sw, sh) = comp.screen_size();
-                let tex_id = comp.output_texture_id();
-                let tex_format = comp.output_texture_internal_format();
-                let tex_generation = comp.output_texture_generation();
-                let output_tex = match &self.compositor_texture_cache {
-                    Some((
-                        cached_id,
-                        cached_w,
-                        cached_h,
-                        cached_format,
-                        cached_generation,
-                        cached_tex,
-                    )) if *cached_id == tex_id
-                        && *cached_w == sw
-                        && *cached_h == sh
-                        && *cached_format == tex_format
-                        && *cached_generation == tex_generation =>
-                    {
-                        cached_tex.clone()
-                    }
-                    _ => {
-                        let size: Size<i32, BufferCoord> = (sw as i32, sh as i32).into();
-                        let tex = unsafe {
-                            GlesTexture::from_raw(
-                                &self.renderer,
-                                Some(tex_format),
-                                false,
-                                tex_id,
-                                size,
-                            )
-                        };
-                        // Retain every wrapper generation. The compositor owns
-                        // and may explicitly recreate/delete the raw GL name;
-                        // letting Smithay later drop an older wrapper could
-                        // delete a recycled id belonging to a newer texture.
-                        self.compositor_texture_keepalive
-                            .push((tex_generation, tex.clone()));
-                        self.compositor_texture_cache =
-                            Some((tex_id, sw, sh, tex_format, tex_generation, tex.clone()));
-                        tex
-                    }
-                };
-                let context_id = self.renderer.context_id();
+                let output_tex = Self::wrap_compositor_texture(
+                    &self.renderer,
+                    &mut self.compositor_texture_cache,
+                    &mut self.compositor_texture_keepalive,
+                    comp.output_texture_id(),
+                    sw,
+                    sh,
+                    comp.output_texture_internal_format(),
+                    comp.output_texture_generation(),
+                );
                 // Position is output-relative: subtract the output's global origin so each
                 // output sees the correct slice of the single full-screen FBO.
-                let elem = TextureRenderElement::from_static_texture(
-                    Id::new(),
-                    context_id,
-                    ((-ox) as f64, (-oy) as f64),
+                compositor_element_index = Some(elements.len());
+                elements.push(Self::compositor_frame_element(
+                    &self.renderer,
                     output_tex,
-                    1,
-                    Transform::Flipped180,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Kind::Unspecified,
-                );
-                elements.push(KmsRenderElement::Texture(elem));
+                    (ox, oy),
+                ));
             } else {
                 // smithay's try_assign_overlay_plane only considers Kind::ScanoutCandidate
                 // elements; the kernel atomic test still has final say.
@@ -6345,8 +6434,73 @@ impl KmsState {
             // Drop the `out` borrow so we can access other `self` fields below.
             let _ = out;
 
+            // ── Capture view selection ─────────────────────────────────────
+            // Capture consumers re-render this element list offscreen. On
+            // deferred color-delivery routes the scanout compositor texture is
+            // output-referred (linear for CRTC delivery, per-output encoded
+            // for region delivery), which is not capture semantics, so the
+            // compositor element temporarily points at the explicitly encoded
+            // capture view (compositor render.rs section 18c). The scanout
+            // list is restored before render_frame below: capture never
+            // changes the physical route.
+            // The capture view only matters when this output's element list
+            // actually carries the compositor texture; a direct-scanout list
+            // of client surface elements is route-independent already.
+            let capture_view =
+                if self.capture_readback_pending() && compositor_element_index.is_some() {
+                    compositor.map(|comp| comp.capture_view())
+                } else {
+                    None
+                };
+            let capture_unavailable = matches!(
+                capture_view,
+                Some(super::super::compositor::CompositorCaptureView::Unavailable)
+            );
+            let mut swapped_compositor_element = None;
+            if let (
+                Some(comp),
+                Some(element_index),
+                Some(super::super::compositor::CompositorCaptureView::Dedicated {
+                    texture,
+                    internal_format,
+                    generation,
+                }),
+            ) = (compositor, compositor_element_index, capture_view)
+            {
+                // The capture view spans the same global framebuffer as the
+                // scanout texture, so the wrapper size is the compositor's
+                // screen size, not this output's mode size.
+                let (sw, sh) = comp.screen_size();
+                let capture_tex = Self::wrap_compositor_texture(
+                    &self.renderer,
+                    &mut self.capture_texture_cache,
+                    &mut self.compositor_texture_keepalive,
+                    texture,
+                    sw,
+                    sh,
+                    internal_format,
+                    generation,
+                );
+                let capture_element =
+                    Self::compositor_frame_element(&self.renderer, capture_tex, (ox, oy));
+                swapped_compositor_element = Some(std::mem::replace(
+                    &mut elements[element_index],
+                    capture_element,
+                ));
+            }
+            if capture_unavailable {
+                // A deferred route without a fresh capture view (its
+                // allocation failed): skip this frame's captures instead of
+                // reading pixels in the wrong color domain. The pending
+                // queues stay armed, so the next frame retries.
+                any_failed = true;
+                log::warn!(
+                    "[kms] capture skipped: compositor has no encoded capture view this frame"
+                );
+            }
+
             // ── Screenshot capture (offscreen render) ───────────────────────
-            if out_idx == 0 {
+            if out_idx == 0 && !capture_unavailable {
                 for request in self.screenshot_requests.take_all() {
                     match request {
                         crate::backend::compositor_common::screenshot::ScreenshotRequest::Full(
@@ -6380,7 +6534,7 @@ impl KmsState {
             }
 
             // ── wlr-screencopy fulfillment ──────────────────────────────────
-            if let Some(ref pending_queue) = self.screencopy_pending {
+            if !capture_unavailable && let Some(ref pending_queue) = self.screencopy_pending {
                 let output_ref = &self.outputs[out_idx].output;
                 Self::fulfill_screencopy_frames(
                     &mut self.renderer,
@@ -6395,7 +6549,7 @@ impl KmsState {
             }
 
             // ── ext-image-copy-capture fulfillment ──────────────────────────
-            if let Some(ref pending_queue) = self.image_capture_pending {
+            if !capture_unavailable && let Some(ref pending_queue) = self.image_capture_pending {
                 let output_ref = &self.outputs[out_idx].output;
                 Self::fulfill_image_capture_frames(
                     &mut self.renderer,
@@ -6407,6 +6561,15 @@ impl KmsState {
                     pending_queue,
                     self.capture_counters.as_ref(),
                 );
+            }
+
+            // Restore the scanout compositor texture before the DRM render:
+            // the physical route must be exactly what it would have been
+            // without any capture consumer.
+            if let (Some(element_index), Some(original)) =
+                (compositor_element_index, swapped_compositor_element)
+            {
+                elements[element_index] = original;
             }
 
             // Re-borrow for render_frame + queue_frame.
@@ -6778,7 +6941,7 @@ mod compositor_texture_ownership_tests {
         connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
         direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
         frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
-        legacy_color_delivery_attempt_needed, output_color_target,
+        legacy_color_delivery_attempt_needed, linear_tail_blocker_names, output_color_target,
         plan_output_configuration_rollback, plan_software_color_regions, point_in_output,
         prepared_color_delivery, rect_overlaps_output, rollback_mode_requires_restore,
         rounded_pointer_location, smithay_transform_to_wl, submitted_color_delivery_observation,
@@ -6786,6 +6949,9 @@ mod compositor_texture_ownership_tests {
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+    use crate::backend::wayland_udev::compositor::tail_domain::{
+        LinearTailStatus, TailOverlayVisibility, tail_overlay_blockers,
+    };
     use smithay::backend::drm::compositor::FrameFlags;
     use smithay::utils::Transform;
 
@@ -6978,7 +7144,6 @@ mod compositor_texture_ownership_tests {
             output.observe(class, disposition, "test");
         }
         ExternalElementColorPlan {
-            capture_readback: false,
             cursor_position,
             outputs: vec![output],
         }
@@ -6990,7 +7155,7 @@ mod compositor_texture_ownership_tests {
         assert!(safe.is_safe());
         assert!(safe.blockers().is_empty());
 
-        let mut blocked = plan_with_output(
+        let blocked = plan_with_output(
             true,
             Some((5, 5)),
             &[
@@ -7016,8 +7181,10 @@ mod compositor_texture_ownership_tests {
                 ),
             ],
         );
-        blocked.capture_readback = true;
         assert!(!blocked.is_safe());
+        // Capture/readback deliberately contributes nothing: it reads the
+        // compositor's independent encoded capture view, so the KMS class
+        // list is exactly the five external element classes.
         assert_eq!(
             blocked
                 .blockers()
@@ -7025,7 +7192,6 @@ mod compositor_texture_ownership_tests {
                 .map(LinearTailBlocker::wire_name)
                 .collect::<Vec<_>>(),
             [
-                "capture_readback",
                 "session_lock_surface",
                 "drag_icon",
                 "cursor",
@@ -7107,6 +7273,90 @@ mod compositor_texture_ownership_tests {
         // name and blocker name are one vocabulary.
         for class in ExternalElementClass::ALL {
             assert_eq!(class.wire_name(), class.blocker().wire_name());
+        }
+        // The compositor-owned frame tail is one vocabulary too: every
+        // encoded-only overlay class's blocker name is recognized. (The
+        // per-class domain matrix itself is tested in the compositor's
+        // tail_domain module.)
+        for class in crate::backend::wayland_udev::compositor::tail_domain::TailOverlayClass::ALL {
+            if let Some(name) = class.blocker_wire_name() {
+                assert!(
+                    crate::backend::api::is_known_linear_tail_blocker_name(name),
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tail_blocker_inventory_merges_typed_compositor_status_and_plan() {
+        let tail_status = |ready: bool, visibility: &TailOverlayVisibility| LinearTailStatus {
+            linear_target_ready: ready,
+            overlay_blockers: tail_overlay_blockers(visibility),
+        };
+        let clear = TailOverlayVisibility::default();
+
+        // Clear tail, clear plan: an empty inventory, which is also the safe
+        // state (the record path debug-asserts the two agree).
+        let safe_plan = ExternalElementColorPlan::default();
+        assert!(linear_tail_blocker_names(&tail_status(true, &clear), &safe_plan).is_empty());
+
+        // Common-linear-aware overlays (expose/peek/snap preview/overview)
+        // are visible but contribute no blocker after their migration.
+        let mut migrated = TailOverlayVisibility::default();
+        migrated.expose = true;
+        migrated.peek = true;
+        migrated.snap_preview = true;
+        migrated.overview = true;
+        assert!(
+            linear_tail_blocker_names(&tail_status(true, &migrated), &safe_plan).is_empty(),
+            "migrated common-linear-aware overlays must not appear in the inventory"
+        );
+
+        // Encoded-only overlays report their own names in draw order.
+        let mut encoded = TailOverlayVisibility::default();
+        encoded.recording_region_overlay = true;
+        encoded.workspace_transition = true;
+        encoded.toast = true;
+        assert_eq!(
+            linear_tail_blocker_names(&tail_status(true, &encoded), &safe_plan),
+            [
+                "workspace_transition_overlay",
+                "toast_overlay",
+                "recording_region_overlay"
+            ]
+        );
+
+        // Without a live linear target the tail reports the aggregate name,
+        // not the per-class list.
+        assert_eq!(
+            linear_tail_blocker_names(&tail_status(false, &encoded), &safe_plan),
+            ["compositor_encoded_tail"]
+        );
+
+        // The KMS-assembled classes follow the compositor-owned tail.
+        let blocked_plan = plan_with_output(
+            true,
+            Some((5, 5)),
+            &[(
+                ExternalElementClass::Cursor,
+                ExternalElementDisposition::ExternalAssembly,
+            )],
+        );
+        assert_eq!(
+            linear_tail_blocker_names(&tail_status(true, &encoded), &blocked_plan),
+            [
+                "workspace_transition_overlay",
+                "toast_overlay",
+                "recording_region_overlay",
+                "cursor"
+            ]
+        );
+        // Capture/readback appears nowhere: it reads the independent encoded
+        // capture view and never constrains the route (P0-4 decoupling).
+        for visibility in [&clear, &migrated, &encoded] {
+            let names = linear_tail_blocker_names(&tail_status(true, visibility), &blocked_plan);
+            assert!(!names.iter().any(|name| name == "capture_readback"));
         }
     }
 
@@ -7464,7 +7714,7 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn internalization_gate_rejects_lock_capture_and_import_blocked() {
+    fn internalization_gate_rejects_lock_and_import_blocked() {
         use ExternalElementDisposition::*;
         // Only a visible cursor: internalizing it would make the frame safe.
         let cursor_only = plan_with_output(
@@ -7495,10 +7745,10 @@ mod compositor_texture_ownership_tests {
             assert!(class.supports_internalization());
         }
 
-        // Capture/readback requests are frame-global blockers.
-        let mut capturing = cursor_only.clone();
-        capturing.capture_readback = true;
-        assert!(!capturing.internalization_could_make_safe());
+        // Capture/readback requests are no longer frame blockers at all: they
+        // read the compositor's independent encoded capture view, so the plan
+        // has no capture input to gate (see the domain table in
+        // compositor/tail_domain.rs).
 
         // An import-blocked tree must stay external even though it is
         // otherwise migratable.

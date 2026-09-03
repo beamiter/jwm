@@ -359,7 +359,13 @@ pub const MAX_EXTERNAL_ELEMENT_CLASSES: usize = 16;
 /// `top_or_overlay_layer_surface` is the legacy aggregate from before the
 /// per-layer split; it stays recognized so recorded payloads keep classifying
 /// as known, but the compositor now emits only the granular names.
-pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 8] = [
+/// `capture_readback` is likewise retained for recorded payloads but no longer
+/// emitted: capture derives from the compositor's explicitly encoded
+/// independent view and never constrains the route. `compositor_encoded_tail`
+/// remains, now emitted only when the common-linear target itself is
+/// unavailable; visible encoded-only frame-tail overlays report under their
+/// own per-class names (the compositor's tail-domain table).
+pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 20] = [
     "compositor_encoded_tail",
     "capture_readback",
     "session_lock_surface",
@@ -368,6 +374,18 @@ pub(crate) const LINEAR_TAIL_BLOCKER_NAMES: [&str; 8] = [
     "top_or_overlay_layer_surface",
     "top_layer_surface",
     "overlay_layer_surface",
+    "workspace_transition_overlay",
+    "tab_bar_overlay",
+    "particle_overlay",
+    "edge_glow_overlay",
+    "postprocess_filter",
+    "debug_hud_overlay",
+    "annotation_overlay",
+    "screenshot_toolbar_overlay",
+    "toast_overlay",
+    "osd_overlay",
+    "system_ui_overlay",
+    "recording_region_overlay",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

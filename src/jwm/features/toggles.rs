@@ -554,6 +554,9 @@ impl Jwm {
     /// Rebuild the shell home page after leaving a child page. This path does
     /// not reacquire grabs or toggle the compositor.
     pub(crate) fn return_to_shell_hub(&mut self, backend: &mut dyn Backend) {
+        // Leaving the Bluetooth picker for the hub abandons any live pairing,
+        // the same as closing the panel would.
+        self.cancel_bluetooth_pairing();
         self.ensure_control_snapshot_refresh(std::time::Instant::now());
         self.ensure_connectivity_refresh();
         self.features.system_ui_return_to_hub = false;
@@ -961,6 +964,42 @@ impl Jwm {
         }
         let mut changed = false;
 
+        // Pairing deadlines, enforced from the frame tick. The helper runs its
+        // own clocks too; these keep the panel honest when the helper is slow
+        // or gone. (`maintenance_next_wakeup_at` wakes the loop for them.)
+        let now = std::time::Instant::now();
+        if let Some(session) = &self.features.bluetooth_pairing {
+            if session.session_timed_out(now) {
+                // The helper vanished without a `done`: end the session.
+                log::warn!("Bluetooth: pairing helper never reported back");
+                self.cancel_bluetooth_pairing();
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("Pairing timed out");
+                changed = true;
+            } else if session.prompt_timed_out(now) {
+                // An unanswered prompt: withdraw it and cancel the helper's
+                // outstanding request. The session stays until the helper's
+                // `done` lands (its request failure unwinds Pair promptly).
+                let cookie = session.cookie().to_string();
+                if let Some(session) = &mut self.features.bluetooth_pairing {
+                    session.clear_prompt();
+                }
+                self.features.system_ui.cancel_pairing_prompt();
+                self.broadcast_ipc_event(
+                    crate::jwm::features::pairing::RESPONSE_EVENT,
+                    crate::jwm::features::pairing::response_payload(
+                        &cookie,
+                        crate::jwm::features::pairing::PairingAnswer::Cancelled,
+                    ),
+                );
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("Pairing timed out");
+                changed = true;
+            }
+        }
+
         if let Some(devices) = self
             .features
             .bluetooth_scan
@@ -1001,17 +1040,174 @@ impl Jwm {
         }
     }
 
-    /// Connect or disconnect the selected device.
+    /// Connect, disconnect, or pair the selected device.
     pub(crate) fn activate_selected_bluetooth(&mut self, backend: &mut dyn Backend) {
-        let Some((address, action)) = self.features.system_ui.selected_bluetooth() else {
+        let Some((address, name, action)) = self.features.system_ui.selected_bluetooth() else {
             return;
         };
+        if action == "pair" {
+            self.start_bluetooth_pairing(backend, &address, &name);
+            return;
+        }
         self.features
             .system_ui
             .set_bluetooth_message(format!("{action}ing\u{2026}"));
         let job = crate::jwm::features::connectivity::start_device_action(&address, action);
         self.features.bluetooth_action = Some(self.track_background_job(job));
         self.sync_system_ui(backend);
+    }
+
+    /// Start a pairing session: mint the cookie, spawn the one-shot
+    /// `jwm-bridge pair` helper, and park the session record so the helper's
+    /// prompt/done commands can be matched to it. The helper speaks to bluez;
+    /// this side only renders its questions and returns the user's answers.
+    fn start_bluetooth_pairing(&mut self, backend: &mut dyn Backend, address: &str, name: &str) {
+        use crate::jwm::features::pairing;
+
+        if self.features.bluetooth_pairing.is_some() {
+            self.features
+                .system_ui
+                .set_bluetooth_message("A pairing is already running");
+            self.sync_system_ui(backend);
+            return;
+        }
+        let cookie = pairing::new_cookie();
+        let Some(session) =
+            pairing::PairingSession::new(address, name, cookie.clone(), std::time::Instant::now())
+        else {
+            self.features
+                .system_ui
+                .set_bluetooth_message("Not a Bluetooth address");
+            self.sync_system_ui(backend);
+            return;
+        };
+        // The cookie authorizes prompt answers; hand it over through the
+        // environment, not argv, which `ps` exposes on machines without
+        // hidepid.
+        let spawn = crate::jwm::features::external_command::spawn_detached(
+            "jwm-bridge",
+            &["pair", address],
+            &[("JWM_PAIRING_COOKIE", cookie.as_str())],
+        );
+        match spawn {
+            Ok(child) => {
+                self.supervise_transient_child(child);
+                log::info!("Bluetooth: pairing with {address} started");
+                self.features.bluetooth_pairing = Some(session);
+                self.features
+                    .system_ui
+                    .set_bluetooth_message(format!("Pairing with {name}\u{2026}"));
+            }
+            Err(error) => {
+                log::warn!("Bluetooth: could not start jwm-bridge: {error}");
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("jwm-bridge is not installed");
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
+    /// Hand the user's typed PIN to the helper and drop our copy.
+    pub(crate) fn submit_bluetooth_pin(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::pairing;
+
+        let Some(valid) = self
+            .features
+            .system_ui
+            .pairing_pin()
+            .map(pairing::valid_pin)
+        else {
+            return;
+        };
+        if !valid {
+            self.features
+                .system_ui
+                .set_bluetooth_message("A PIN is 1-16 characters");
+            self.sync_system_ui(backend);
+            return;
+        }
+        let Some(session) = &mut self.features.bluetooth_pairing else {
+            return;
+        };
+        if !matches!(session.phase(), pairing::PairingPhase::AwaitingPin) {
+            return;
+        }
+        let cookie = session.cookie().to_string();
+        // The take hands the only copy over; wipe it once the broadcast is
+        // out so the PIN does not linger in a freed allocation.
+        let Some(mut pin) = self.features.system_ui.take_pairing_pin() else {
+            return;
+        };
+        if let Some(session) = &mut self.features.bluetooth_pairing {
+            session.clear_prompt();
+        }
+        self.broadcast_ipc_event(
+            pairing::RESPONSE_EVENT,
+            pairing::response_payload(&cookie, pairing::PairingAnswer::Pin(&pin)),
+        );
+        unsafe { pin.as_bytes_mut().fill(0) };
+        self.features
+            .system_ui
+            .set_bluetooth_message("Pairing\u{2026}");
+        self.sync_system_ui(backend);
+    }
+
+    /// Answer a numeric-comparison prompt: `y`/Enter confirms, `n` rejects.
+    pub(crate) fn answer_bluetooth_confirm(&mut self, backend: &mut dyn Backend, accepted: bool) {
+        use crate::jwm::features::pairing;
+
+        let Some(session) = &mut self.features.bluetooth_pairing else {
+            return;
+        };
+        if !matches!(
+            session.phase(),
+            pairing::PairingPhase::AwaitingConfirm { .. }
+        ) {
+            return;
+        }
+        let cookie = session.cookie().to_string();
+        session.clear_prompt();
+        self.features.system_ui.cancel_pairing_prompt();
+        self.broadcast_ipc_event(
+            pairing::RESPONSE_EVENT,
+            pairing::response_payload(
+                &cookie,
+                if accepted {
+                    pairing::PairingAnswer::Confirmed
+                } else {
+                    pairing::PairingAnswer::Rejected
+                },
+            ),
+        );
+        self.features.system_ui.set_bluetooth_message(if accepted {
+            "Pairing\u{2026}"
+        } else {
+            "Passkey rejected"
+        });
+        self.sync_system_ui(backend);
+    }
+
+    /// Cancel any live pairing session: tell the helper (its one outstanding
+    /// bluez request fails, or Pair is cancelled outright), wipe any prompt,
+    /// and drop the session record. Closing, handing over, or timing out the
+    /// picker all funnel here — a session must never outlive its panel.
+    pub(crate) fn cancel_bluetooth_pairing(&mut self) {
+        use crate::jwm::features::pairing;
+
+        let Some(session) = self.features.bluetooth_pairing.take() else {
+            self.features.system_ui.cancel_pairing_prompt();
+            return;
+        };
+        log::info!("Bluetooth: pairing with {} cancelled", session.address());
+        self.broadcast_ipc_event(
+            pairing::RESPONSE_EVENT,
+            pairing::response_payload(session.cookie(), pairing::PairingAnswer::Cancelled),
+        );
+        self.features.system_ui.cancel_pairing_prompt();
+        self.features
+            .system_ui
+            .set_bluetooth_message("Pairing cancelled");
     }
 
     /// Adopt a finished scan or connection attempt. Called from the frame
@@ -1391,6 +1587,9 @@ impl Jwm {
         // The Alt+Tab switcher's commit modifiers die with its panel, however
         // the panel went away.
         self.features.window_switcher_mods = Mods::empty();
+        // A Bluetooth pairing session belongs to the Bluetooth picker; the
+        // picker going away cancels the pairing before the panel drops.
+        self.cancel_bluetooth_pairing();
         self.features.system_ui.cancel();
         backend.compositor_set_system_ui(None);
         let _ = backend.key_ops().ungrab_keyboard();
@@ -1449,6 +1648,9 @@ impl Jwm {
         self.features.system_ui_return_to_hub = false;
         // So do the Alt+Tab switcher's commit modifiers.
         self.features.window_switcher_mods = Mods::empty();
+        // A Bluetooth pairing session belongs to the outgoing Bluetooth
+        // picker; it is cancelled before the panel state drops.
+        self.cancel_bluetooth_pairing();
         // `cancel` zeroes the lock password and any Wi-Fi passphrase before
         // the string is dropped.
         self.features.system_ui.cancel();

@@ -112,6 +112,29 @@ pub(crate) fn status_with_timeout(
     }
 }
 
+/// Spawn a long-lived helper without waiting for it: detached stdio, no
+/// output capture, no deadline. The caller owns reaping the returned child —
+/// in practice it is handed to the transient-child supervisor. This is the
+/// one unbounded path here; everything above waits with a hard limit because
+/// those helpers are synchronous, while this one (e.g. the Bluetooth pairing
+/// agent) must stay alive until *its* conversation ends.
+pub(crate) fn spawn_detached(
+    cmd: &str,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> io::Result<std::process::Child> {
+    let mut command = Command::new(cmd);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.spawn()
+}
+
 fn command_output_bounded(
     command: &mut Command,
     timeout: Duration,
@@ -507,6 +530,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn detached_spawn_returns_a_live_unsupervised_child() {
+        let mut child = spawn_detached(
+            "sh",
+            &["-c", "test \"$JWM_TEST_DETACHED\" = seen; exit $?"],
+            &[("JWM_TEST_DETACHED", "seen")],
+        )
+        .expect("detached spawn");
+        let status = child.wait().expect("reap the child we spawned");
+        assert!(status.success(), "extra env did not reach the child");
     }
 
     fn process_can_run(pid: u32) -> bool {

@@ -89,6 +89,12 @@ impl JwmIpc {
         }
     }
 
+    /// Test hook: talk to a jwm stand-in on a private socket.
+    #[cfg(test)]
+    pub(crate) fn with_socket(socket: PathBuf) -> Self {
+        Self { socket }
+    }
+
     #[must_use]
     pub fn socket(&self) -> &std::path::Path {
         &self.socket

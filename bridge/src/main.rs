@@ -11,6 +11,7 @@
 //!   One OS thread owns the blocking jwm event subscription.
 //!   Commands run on `spawn_blocking` with bounded socket timeouts.
 
+mod bluez;
 mod jwm_ipc;
 mod mpris;
 mod notifications;
@@ -26,6 +27,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_secs()
         .init();
+
+    // One-shot subcommand: drive a single Bluetooth pairing against the
+    // system bus and exit. It never touches the session bus or the
+    // org.freedesktop.Notifications name, so it cannot disturb a long-lived
+    // bridge running in the same session.
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("pair") {
+        let Some(address) = argv.next() else {
+            eprintln!("usage: jwm-bridge pair <AA:BB:CC:DD:EE:FF>");
+            std::process::exit(bluez::EXIT_USAGE);
+        };
+        // The session cookie arrives over the environment, not argv: `ps`
+        // output is world-readable on machines without hidepid, and the
+        // cookie is what authorizes answers to the pairing prompt.
+        let cookie = std::env::var("JWM_PAIRING_COOKIE").unwrap_or_default();
+        if cookie.is_empty() {
+            eprintln!("jwm-bridge pair: JWM_PAIRING_COOKIE is not set");
+            std::process::exit(bluez::EXIT_USAGE);
+        }
+        std::process::exit(bluez::run(&address, &cookie).await);
+    }
 
     log::info!("jwm-bridge {} starting", env!("CARGO_PKG_VERSION"));
 

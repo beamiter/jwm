@@ -28,6 +28,7 @@ pub mod media;
 pub mod notifications;
 pub mod overview;
 pub mod overview_plan;
+pub mod pairing;
 pub mod power;
 pub mod recording;
 pub mod recording_plan;
@@ -62,6 +63,7 @@ pub use media::{MediaCommand, MediaState, MediaStatus, PlaybackStatus};
 pub use notifications::{NotificationCenter, NotificationRecord, NotificationRequest};
 pub use overview::OverviewState;
 pub use overview_plan::CyclePlan;
+pub use pairing::{PairingPhase, PairingSession};
 pub use power::{BatteryState, ChargeStatus, LowBatteryWarner};
 pub use recording::RecordingState;
 pub use recording_plan::FinalizationPlan;
@@ -70,7 +72,8 @@ pub use screenshot::ScreenshotState;
 pub use session::SessionAction;
 pub use shell_hub::ShellHubRoute;
 pub use system_ui::{
-    ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, SystemUiState,
+    ControlCenterInputs, ControlKind, MonitorDirection, MonitorLayoutEntry, PromptKind,
+    SystemUiState,
 };
 pub use tags_overview::{TagClientFrame, TagsOverviewState};
 
@@ -155,6 +158,10 @@ pub struct FeatureStates {
     pub bluetooth_scan: Option<connectivity::BackgroundJob<Vec<BluetoothDevice>>>,
     /// Connect/disconnect running for an open Bluetooth picker, if any.
     pub bluetooth_action: Option<connectivity::BackgroundJob<Result<String, String>>>,
+    /// Live pairing session driven by the one-shot `jwm-bridge pair` helper,
+    /// if any. Dropping it (panel closed, timed out) is how pairing cancels;
+    /// the helper notices through the cancel broadcast or its own deadlines.
+    pub bluetooth_pairing: Option<pairing::PairingSession>,
     /// Colour extraction running for a wallpaper, if any.
     pub wallpaper_theme: Option<connectivity::BackgroundJob<Option<wallpaper_colors::Palette>>>,
     /// The wallpaper the last extraction was started for, so a config apply
@@ -239,6 +246,9 @@ impl FeatureStates {
         self.recording.cancel();
         let _ = self.audio_recording.stop();
         self.magnifier.disable();
+        // No IPC access from here: the helper outlives this state by at most
+        // its own prompt/wall-clock deadlines, then exits on its own.
+        self.bluetooth_pairing = None;
         self.peek_active = false;
         self.expose_active = false;
         self.annotation_active = false;

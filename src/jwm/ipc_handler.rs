@@ -1485,6 +1485,84 @@ impl Jwm {
             return IpcResponse::ok(Some(serde_json::json!({ "active": active })));
         }
 
+        // Special command: bluetooth_pairing_prompt — the pairing helper
+        // (`jwm-bridge pair`) relays a bluez agent callback. This only updates
+        // session state and the picker's prompt; the answer travels back over
+        // the `bluetooth/pairing_response` broadcast. The passkey/code the
+        // command may carry is rendered but never logged.
+        if name == "bluetooth_pairing_prompt" {
+            use crate::jwm::features::pairing;
+
+            let command = match pairing::parse_prompt_command(args) {
+                Ok(command) => command,
+                Err(error) => {
+                    return IpcResponse::err(format!("bluetooth_pairing_prompt: {error}"));
+                }
+            };
+            let Some(session) = &mut self.features.bluetooth_pairing else {
+                return IpcResponse::err(
+                    "bluetooth_pairing_prompt: no pairing session is active".to_string(),
+                );
+            };
+            if !session.matches(&command.address, &command.cookie) {
+                return IpcResponse::err(
+                    "bluetooth_pairing_prompt: not the active pairing session".to_string(),
+                );
+            }
+            session.apply_prompt(command.prompt.clone(), std::time::Instant::now());
+            self.features
+                .system_ui
+                .prompt_bluetooth_pairing(&command.prompt, session.device_name());
+            self.sync_system_ui(backend);
+            return IpcResponse::ok(None);
+        }
+
+        // Special command: bluetooth_pairing_done — the helper's terminal
+        // report. A successful pairing re-reads the device list so the row
+        // shows the new bonded state; a failure stays on the status line so
+        // the user can retry.
+        if name == "bluetooth_pairing_done" {
+            use crate::jwm::features::pairing;
+
+            let done = match pairing::parse_done_command(args) {
+                Ok(done) => done,
+                Err(error) => return IpcResponse::err(format!("bluetooth_pairing_done: {error}")),
+            };
+            let Some(session) = &self.features.bluetooth_pairing else {
+                return IpcResponse::err(
+                    "bluetooth_pairing_done: no pairing session is active".to_string(),
+                );
+            };
+            if !session.matches(&done.address, &done.cookie) {
+                return IpcResponse::err(
+                    "bluetooth_pairing_done: not the active pairing session".to_string(),
+                );
+            }
+            let device_name = session.device_name().to_string();
+            self.features.bluetooth_pairing = None;
+            // A prompt left on screen (bluez cancelled its request before the
+            // user answered) is withdrawn without touching the list.
+            self.features.system_ui.cancel_pairing_prompt();
+            if self.features.system_ui.is_bluetooth_picker() {
+                if done.ok {
+                    log::info!("Bluetooth: paired with {device_name}");
+                    self.features
+                        .system_ui
+                        .set_bluetooth_message(format!("Paired {device_name}"));
+                    if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
+                        self.features.bluetooth_scan = Some(self.track_background_job(scan));
+                    }
+                    self.refresh_connectivity();
+                } else {
+                    let reason = done.error.unwrap_or_else(|| "pairing failed".to_string());
+                    log::warn!("Bluetooth: pairing with {device_name} failed: {reason}");
+                    self.features.system_ui.set_bluetooth_message(reason);
+                }
+            }
+            self.sync_system_ui(backend);
+            return IpcResponse::ok(None);
+        }
+
         // Special command: clipboard_record — how a backend helper or a
         // script feeds the history. Offers marked secret must be dropped
         // before calling this, not here.
@@ -1896,6 +1974,11 @@ impl Jwm {
             "get_media_status" => IpcResponse::ok(Some(self.media_status_json())),
             "get_power_status" => IpcResponse::ok(Some(self.power_status_json())),
             "get_connectivity" => IpcResponse::ok(Some(self.connectivity_json())),
+            "get_bluetooth_pairing" => {
+                IpcResponse::ok(Some(crate::jwm::features::pairing::session_json(
+                    self.features.bluetooth_pairing.as_ref(),
+                )))
+            }
             "get_audio_devices" => IpcResponse::ok(Some(self.audio_devices_json())),
             "get_wallpaper_colors" => IpcResponse::ok(Some(self.wallpaper_theme_json())),
             "get_idle_status" => IpcResponse::ok(Some(self.idle_status_json())),

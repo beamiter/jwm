@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- The Bluetooth picker can now pair new devices: `s` runs a bounded discovery
+  scan, and `Enter` on a device that was never bonded spawns the one-shot
+  `jwm-bridge pair` helper, which registers a `KeyboardDisplay` BlueZ agent
+  and drives `Device1.Pair`. The picker renders PIN entry (masked),
+  numeric-comparison confirm (`y`/`Enter` vs `n`/`Esc`), and display-only
+  prompts; `Esc` or closing the panel cancels the session, prompts time out
+  after 25 s, and sessions are bound by a per-session cookie passed through
+  the helper's environment. IPC grows the `bluetooth_pairing_prompt` /
+  `bluetooth_pairing_done` commands, the `get_bluetooth_pairing` query, and
+  the `bluetooth` event topic carrying `bluetooth/pairing_response`.
+
 - A GNOME-style tags overview (`Alt+O`, `toggle_tags_overview`) shows every
   tag of the current monitor at once as a wireframe grid: each cell carries
   the tag's number and outlines of its windows, occupied tags (minimized

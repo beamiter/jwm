@@ -1269,21 +1269,24 @@ impl WaylandCompositor {
         }
     }
 
-    // Finalize common linear-sRGB into output_fbo with the supplied gamut
-    // matrix and forward transfer. This serves a physical output region or the
-    // whole-frame sRGB fallback. encode_tf < 0 means "sRGB default";
-    // encode_gamma is consulted only for TF_POWER. Blending is disabled.
+    // Finalize common linear-sRGB into `target_fbo` with the supplied gamut
+    // matrix and forward transfer. This serves a physical output region, the
+    // whole-frame sRGB fallback, or the dedicated capture view (an explicitly
+    // encoded sRGB view for screenshots/recording). encode_tf < 0 means "sRGB
+    // default"; encode_gamma is consulted only for TF_POWER. Blending is
+    // disabled.
     fn dispatch_scene_linear_encode_pass(
         &self,
         gl: &ffi::Gles2,
         projection: &[f32; 16],
+        target_fbo: u32,
         encode_tf: i32,
         encode_gamma: f32,
         color_matrix_row_major: [f32; 9],
         scissor: Option<[i32; 4]>,
     ) {
         unsafe {
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
+            gl.BindFramebuffer(ffi::FRAMEBUFFER, target_fbo);
             gl.Viewport(0, 0, self.screen_w as i32, self.screen_h as i32);
             if let Some([x, y, width, height]) = scissor {
                 gl.Enable(ffi::SCISSOR_TEST);
@@ -1386,6 +1389,7 @@ impl WaylandCompositor {
             self.dispatch_scene_linear_encode_pass(
                 gl,
                 projection,
+                self.output_fbo,
                 transfer.shader_id(),
                 transfer.gamma_for_shader(),
                 matrix,
@@ -1599,6 +1603,10 @@ impl WaylandCompositor {
     /// `hw_encode_active` / `hw_ctm_active` identify output stages owned by KMS.
     /// `software_output_regions` supplies the physical framebuffer partitions
     /// and remaining gamut/transfer work for shader delivery.
+    /// `capture_view_required` reports KMS-side capture consumers (screenshot,
+    /// screencopy, image-capture) waiting on this frame. On deferred routes the
+    /// compositor then derives an explicitly encoded sRGB capture view (section
+    /// 18c); capture never feeds back into the route decision.
     /// Returns true if a frame was rendered (false if skipped due to no changes).
     pub(crate) fn render_frame(
         &mut self,
@@ -1611,6 +1619,7 @@ impl WaylandCompositor {
         software_output_regions: Option<
             &[crate::backend::wayland_udev::color_pipeline::OutputColorRegion],
         >,
+        capture_view_required: bool,
     ) -> bool {
         let previous_frame_was_deferred = previous_frame_requires_srgb_transition_snapshot(
             self.last_output_color_frame_state.as_ref(),
@@ -1675,6 +1684,10 @@ impl WaylandCompositor {
         }
 
         self.sync_scene_linear_target(gl);
+        // A rendering pass may touch the linear target, so any capture view
+        // derived earlier no longer describes its contents. Section 18c
+        // re-derives the view when this frame needs one.
+        self.capture_view_fresh = false;
 
         // output_fbo still contains the previous workspace at this point. Take
         // the transition snapshot before any clear or scene pass overwrites it;
@@ -1693,6 +1706,7 @@ impl WaylandCompositor {
                 self.dispatch_scene_linear_encode_pass(
                     gl,
                     &projection,
+                    self.output_fbo,
                     fallback.shader_id(),
                     fallback.gamma_for_shader(),
                     IDENTITY_CTM,
@@ -2849,6 +2863,17 @@ impl WaylandCompositor {
             hw_ctm_active,
             software_output_regions.is_some(),
         );
+        // Frame-tail domain table: sections 12-18 draw into whichever target
+        // the route leaves bound. On the two deferred routes no encode pass
+        // runs before them, so the common-linear-aware tail overlays (snap
+        // preview, overview, expose, peek) draw into the linear target and the
+        // per-output matrix + OETF at section 18b applies to them exactly
+        // once. On legacy and early-fallback routes the bound target is
+        // already encoded and those same draws keep their historical domain.
+        let tail_draws_linear = matches!(
+            output_route,
+            FrameOutputRoute::DeferredHardware | FrameOutputRoute::DeferredRegions
+        );
         // The staged external elements only land in the persistent FBO chain
         // when this frame's route still flows through the linear target.
         // `LegacyEncoded` never touches it; the other three routes each call
@@ -3176,6 +3201,7 @@ impl WaylandCompositor {
             self.dispatch_scene_linear_encode_pass(
                 gl,
                 &projection,
+                self.output_fbo,
                 fallback.shader_id(),
                 fallback.gamma_for_shader(),
                 IDENTITY_CTM,
@@ -3196,6 +3222,9 @@ impl WaylandCompositor {
         // =================================================================
         // 13. Snap preview overlay
         // =================================================================
+        // Common-linear-aware (frame-tail domain table): the border program's
+        // u_scene_linear already tracks the bound target via
+        // `sync_overlay_color_domain`, so this draw needs no per-route branch.
         self.render_snap_preview(gl, &projection);
 
         // =================================================================
@@ -3237,6 +3266,7 @@ impl WaylandCompositor {
                         self.dispatch_scene_linear_encode_pass(
                             gl,
                             &projection,
+                            self.output_fbo,
                             fallback.shader_id(),
                             fallback.gamma_for_shader(),
                             IDENTITY_CTM,
@@ -3257,15 +3287,19 @@ impl WaylandCompositor {
         // =================================================================
         // 15. Expose overlay
         // =================================================================
+        // Common-linear-aware (frame-tail domain table): on deferred routes
+        // this draws into the still-bound linear target.
         if !self.expose_entries.is_empty() && self.expose_opacity > 0.0 {
-            self.render_expose(gl, &projection);
+            self.render_expose(gl, &projection, tail_draws_linear);
         }
 
         // =================================================================
         // 15b. Peek mode (fade out non-focused windows)
         // =================================================================
+        // Common-linear-aware (frame-tail domain table), same target rule as
+        // the expose overlay above.
         if self.peek_opacity > 0.0 {
-            self.render_peek_mode(gl, &projection, focused, scene);
+            self.render_peek_mode(gl, &projection, focused, scene, tail_draws_linear);
         }
 
         // =================================================================
@@ -3456,6 +3490,36 @@ impl WaylandCompositor {
             FrameOutputRoute::LegacyEncoded | FrameOutputRoute::EarlySrgbFallback => {}
         }
 
+        // =================================================================
+        // 18c. Capture view derivation
+        // =================================================================
+        // Screenshots, screencopy and recording read an explicitly encoded
+        // sRGB view of the frame. On the legacy/early-fallback routes
+        // output_fbo already is that view. On the deferred routes the scanout
+        // texture stays output-referred (linear for CRTC CTM/LUT delivery,
+        // per-output encoded for region delivery), which is not screenshot
+        // semantics, so derive the canonical view with one identity-matrix
+        // sRGB OETF pass into the dedicated capture target. The derivation is
+        // downstream of the route decision and never feeds back into it.
+        let capture_view_needed = capture_view_required
+            || self.screenshot_requests.has_pending()
+            || self.recording.is_active()
+            || self.pending_recording_start.is_some();
+        if tail_draws_linear && capture_view_needed {
+            self.encode_capture_view(gl, &projection);
+        }
+        self.capture_view = if !tail_draws_linear {
+            CompositorCaptureView::EncodedOutput
+        } else if self.capture_view_fresh && self.capture_view_fbo != 0 {
+            CompositorCaptureView::Dedicated {
+                texture: self.capture_view_texture,
+                internal_format: ffi::RGBA8,
+                generation: self.capture_view_texture_generation,
+            }
+        } else {
+            CompositorCaptureView::Unavailable
+        };
+
         // A locked compositor must never expose the client scene through an
         // IPC or protocol screenshot. Draw the opaque shield before readback.
         if self
@@ -3463,8 +3527,8 @@ impl WaylandCompositor {
             .as_ref()
             .is_some_and(|overlay| overlay.locked)
         {
+            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::SystemUi);
             unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_system_ui(gl, &projection);
             }
         }
@@ -3473,9 +3537,18 @@ impl WaylandCompositor {
         // 19. Screenshot capture (region or full)
         // =================================================================
         if self.screenshot_requests.has_pending() {
-            unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
-                self.capture_pending_screenshots(gl);
+            match self.capture_readback_fbo() {
+                Some(fbo) => unsafe {
+                    gl.BindFramebuffer(ffi::FRAMEBUFFER, fbo);
+                    self.capture_pending_screenshots(gl);
+                },
+                // A deferred route without a fresh capture view (allocation
+                // failure) must not read output-referred pixels; keep the
+                // requests queued and retry on the next frame.
+                None => {
+                    log::warn!("[compositor] screenshot delayed: encoded capture view unavailable");
+                    self.needs_render = true;
+                }
             }
         }
         unsafe {
@@ -3487,8 +3560,8 @@ impl WaylandCompositor {
         // card, so the basic HUD must draw on its own like it does on X11.
         // =================================================================
         if self.debug_hud_enabled {
+            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::DebugHud);
             unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_debug_hud(gl, &projection);
             }
         }
@@ -3500,9 +3573,7 @@ impl WaylandCompositor {
         // on top of the arrow that points at it. The screenshot toolbar comes
         // last of all, since it floats above everything it edits.
         if self.annotation_active {
-            unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
-            }
+            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Annotation);
             self.refresh_annotation_labels(gl);
             self.render_annotation_shapes(gl, &projection);
             if !self.annotation_strokes.is_empty() {
@@ -3512,24 +3583,29 @@ impl WaylandCompositor {
             }
         }
         if self.screenshot_toolbar.is_some() {
-            unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
-            }
+            self.bind_post_delivery_overlay_target(
+                gl,
+                tail_domain::TailOverlayClass::ScreenshotToolbar,
+            );
             self.refresh_screenshot_toolbar(gl);
             self.render_screenshot_toolbar(gl, &projection);
         }
 
         // Toast cards sit above clients but under the modal system UI (its
-        // scrim dims them; the lock screen hides them).
+        // scrim dims them; the lock screen hides them). `render_toasts` also
+        // prunes expired cards every frame, so it runs unconditionally.
+        self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Toast);
         unsafe {
-            gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
             self.render_toasts(gl, &projection);
+        }
+        self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::Osd);
+        unsafe {
             self.render_osd(gl, &projection);
         }
 
         if self.system_ui.is_some() {
+            self.bind_post_delivery_overlay_target(gl, tail_domain::TailOverlayClass::SystemUi);
             unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_system_ui(gl, &projection);
             }
         }
@@ -3564,9 +3640,28 @@ impl WaylandCompositor {
             }
         }
         if self.recording.is_active() {
-            unsafe {
-                self.recording
-                    .capture_frame(gl, self.output_fbo, (self.mouse_x, self.mouse_y));
+            // When the cursor class was internalized this frame, the capture
+            // source already carries the real pointer image; the recorder's
+            // synthesised arrow would draw a second cursor on top of it.
+            let cursor_already_present =
+                drew_external_elements && self.external_elements_include_cursor;
+            match self.capture_readback_fbo() {
+                Some(fbo) => unsafe {
+                    self.recording.capture_frame(
+                        gl,
+                        fbo,
+                        (self.mouse_x, self.mouse_y),
+                        cursor_already_present,
+                    );
+                },
+                // Deferring delivery left the scanout texture output-referred
+                // and the capture view allocation failed: drop this recording
+                // frame rather than encode pixels in the wrong color domain.
+                None => {
+                    log::warn!(
+                        "[compositor] recording frame skipped: encoded capture view unavailable"
+                    )
+                }
             }
         }
         if self.pending_recording_stop {
@@ -3579,8 +3674,11 @@ impl WaylandCompositor {
         // The crop outline is deliberately rendered after recording readback:
         // it is visible on the local output but never encoded into the video.
         if self.recording_region_overlay.is_some() {
+            self.bind_post_delivery_overlay_target(
+                gl,
+                tail_domain::TailOverlayClass::RecordingRegionOverlay,
+            );
             unsafe {
-                gl.BindFramebuffer(ffi::FRAMEBUFFER, self.output_fbo);
                 self.render_recording_region_overlay(gl, &projection);
                 gl.BindFramebuffer(ffi::FRAMEBUFFER, 0);
             }
@@ -3644,6 +3742,75 @@ impl WaylandCompositor {
 
     fn render_genie_animations(&self, gl: &ffi::Gles2, projection: &[f32; 16]) {
         let _ = (gl, projection);
+    }
+
+    /// Derive the explicitly encoded sRGB capture view from the common
+    /// linear-sRGB target: one fullscreen identity-matrix sRGB OETF pass into
+    /// the dedicated RGBA8 capture target. Runs at section 18c, after the
+    /// delivery point, so the linear target holds the complete frame
+    /// (internalized external elements included). KMS still applies its own
+    /// CTM/LUT or per-output region encode to the scanout texture
+    /// independently — the capture view never constrains the physical route.
+    fn encode_capture_view(&mut self, gl: &ffi::Gles2, projection: &[f32; 16]) {
+        if !self.ensure_capture_view_target(gl) {
+            return;
+        }
+        use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
+        let capture_tf = TransferKind::Srgb;
+        self.dispatch_scene_linear_encode_pass(
+            gl,
+            projection,
+            self.capture_view_fbo,
+            capture_tf.shader_id(),
+            capture_tf.gamma_for_shader(),
+            IDENTITY_CTM,
+            None,
+        );
+        self.capture_view_fresh = true;
+    }
+
+    /// Lazily (re)allocate the RGBA8 capture target at the current screen
+    /// size. Returns false — leaving the capture view unavailable for this
+    /// frame — when the driver rejects the allocation; capture consumers then
+    /// skip this frame instead of reading pixels in the wrong color domain.
+    fn ensure_capture_view_target(&mut self, gl: &ffi::Gles2) -> bool {
+        if self.capture_view_fbo != 0 && self.capture_view_size == (self.screen_w, self.screen_h) {
+            return true;
+        }
+        unsafe {
+            delete_framebuffer_name(gl, &mut self.capture_view_fbo);
+            delete_texture_name(gl, &mut self.capture_view_texture);
+        }
+        self.capture_view_size = (0, 0);
+        match unsafe {
+            create_fbo_texture_fmt(gl, self.screen_w.max(1), self.screen_h.max(1), ffi::RGBA8)
+        } {
+            Ok((fbo, texture)) => {
+                self.capture_view_fbo = fbo;
+                self.capture_view_texture = texture;
+                self.capture_view_texture_generation = next_output_texture_generation();
+                self.capture_view_size = (self.screen_w, self.screen_h);
+                true
+            }
+            Err(status) => {
+                log::warn!(
+                    "[udev/compositor] capture view allocation failed (RGBA8 FBO status=0x{status:x}); capture consumers skip this frame"
+                );
+                false
+            }
+        }
+    }
+
+    /// The framebuffer capture readbacks sample this frame. Mirrors
+    /// `self.capture_view` as recomputed at section 18c: legacy/fallback
+    /// frames read output_fbo (already canonical encoded sRGB), deferred
+    /// frames read the dedicated encoded view.
+    fn capture_readback_fbo(&self) -> Option<u32> {
+        match self.capture_view {
+            CompositorCaptureView::EncodedOutput => Some(self.output_fbo),
+            CompositorCaptureView::Dedicated { .. } => Some(self.capture_view_fbo),
+            CompositorCaptureView::Unavailable => None,
+        }
     }
 
     unsafe fn capture_pending_screenshots(&mut self, gl: &ffi::Gles2) {

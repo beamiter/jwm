@@ -1099,8 +1099,40 @@ impl Jwm {
     }
 
     /// Key handling while the Bluetooth picker is open: Up/Down select,
-    /// Return connects or disconnects, `r` re-reads the list.
-    fn handle_bluetooth_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32) {
+    /// Return connects/disconnects (or starts pairing on a device never
+    /// bonded), `s` runs a bounded discovery scan, `r` re-reads the list.
+    /// While a pairing prompt is up, the prompt owns the keys.
+    fn handle_bluetooth_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32, mods: Mods) {
+        use crate::jwm::features::system_ui::PromptKind;
+
+        let prompt = self.features.system_ui.pairing_prompt();
+        if matches!(prompt, Some(PromptKind::Pin { .. })) {
+            if keysym == keys::KEY_Return {
+                self.submit_bluetooth_pin(backend);
+                return;
+            }
+            if keysym == keys::KEY_BackSpace || keysym == keys::KEY_Delete {
+                self.features.system_ui.backspace();
+            } else if let Some(ch) = Self::system_ui_char(keysym, mods) {
+                self.features.system_ui.push_char(ch);
+            }
+            self.sync_system_ui(backend);
+            return;
+        }
+        if matches!(prompt, Some(PromptKind::Confirm { .. })) {
+            if keysym == keys::KEY_y || keysym == keys::KEY_Return {
+                self.answer_bluetooth_confirm(backend, true);
+            } else if keysym == keys::KEY_n {
+                self.answer_bluetooth_confirm(backend, false);
+            }
+            return;
+        }
+        if matches!(prompt, Some(PromptKind::Display { .. })) {
+            // Nothing to type here: Esc (handled with the global prompt
+            // cancels above) is the way out.
+            return;
+        }
+
         if keysym == keys::KEY_Return || keysym == keys::KEY_space {
             self.activate_selected_bluetooth(backend);
             return;
@@ -1109,6 +1141,19 @@ impl Jwm {
             self.features.system_ui.move_selection(-1);
         } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
             self.features.system_ui.move_selection(1);
+        } else if keysym == keys::KEY_s {
+            match crate::jwm::features::connectivity::start_discovery_scan() {
+                Some(scan) => {
+                    self.features.bluetooth_scan = Some(self.track_background_job(scan));
+                    self.features
+                        .system_ui
+                        .set_bluetooth_message("Scanning\u{2026}");
+                }
+                None => self
+                    .features
+                    .system_ui
+                    .set_bluetooth_message("bluetoothctl is not available"),
+            }
         } else if keysym == keys::KEY_r {
             match crate::jwm::features::connectivity::start_device_scan() {
                 Some(scan) => {
@@ -1207,7 +1252,7 @@ impl Jwm {
         } else if self.features.system_ui.is_wifi_picker() {
             self.handle_wifi_picker_key(backend, keys::KEY_Return, Mods::empty());
         } else if self.features.system_ui.is_bluetooth_picker() {
-            self.handle_bluetooth_picker_key(backend, keys::KEY_Return);
+            self.handle_bluetooth_picker_key(backend, keys::KEY_Return, Mods::empty());
         } else if self.features.system_ui.audio_picker_direction().is_some() {
             self.use_selected_audio_device(backend);
         } else if self.features.system_ui.is_clipboard_picker() {
@@ -1254,6 +1299,10 @@ impl Jwm {
         }
         backend.compositor_set_system_ui_hover(None);
         if self.features.system_ui.cancel_wifi_passphrase() {
+            self.sync_system_ui(backend);
+        } else if self.features.system_ui.pairing_prompt().is_some() {
+            // Clicking the scrim out of a pairing prompt cancels the pairing.
+            self.cancel_bluetooth_pairing();
             self.sync_system_ui(backend);
         } else if self.features.system_ui_return_to_hub {
             self.return_to_shell_hub(backend);
@@ -1330,6 +1379,13 @@ impl Jwm {
             // Escape backs out of the passphrase prompt before it closes the
             // picker, so a typo does not cost the whole scan.
             if keysym == keys::KEY_Escape && self.features.system_ui.cancel_wifi_passphrase() {
+                self.sync_system_ui(backend);
+                return Ok(());
+            }
+            // Escape also abandons a Bluetooth pairing prompt — and with it
+            // the pairing session, which must never outlive its panel.
+            if keysym == keys::KEY_Escape && self.features.system_ui.pairing_prompt().is_some() {
+                self.cancel_bluetooth_pairing();
                 self.sync_system_ui(backend);
                 return Ok(());
             }
@@ -1528,7 +1584,7 @@ impl Jwm {
             // Hub, notification history and every picker. Handle it once
             // before their action-specific keys so long lists remain fast to
             // traverse and Shift+Tab never accidentally moves forward.
-            if !self.features.system_ui.is_prompting_wifi_passphrase() {
+            if !self.features.system_ui.is_prompting() {
                 let navigated = match keysym {
                     keys::KEY_Home => self.features.system_ui.jump_selection(false),
                     keys::KEY_End => self.features.system_ui.jump_selection(true),
@@ -1566,7 +1622,7 @@ impl Jwm {
                 return Ok(());
             }
             if self.features.system_ui.is_bluetooth_picker() {
-                self.handle_bluetooth_picker_key(backend, keysym);
+                self.handle_bluetooth_picker_key(backend, keysym, clean_state);
                 return Ok(());
             }
             if self.features.system_ui.audio_picker_direction().is_some() {

@@ -668,7 +668,7 @@ const MAX_BLUETOOTH_DEVICES: usize = 64;
 const MAX_BLUETOOTH_DEVICE_LINES: usize = 1024;
 const MAX_BLUETOOTH_DEVICE_NAME_CHARS: usize = 248;
 
-fn is_bluetooth_address(address: &str) -> bool {
+pub(crate) fn is_bluetooth_address(address: &str) -> bool {
     let mut count = 0;
     for octet in address.split(':') {
         if octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -705,6 +705,67 @@ pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
             continue;
         }
         let name = parts.next().unwrap_or(address).trim();
+        devices.push(BluetoothDevice {
+            address: address.to_string(),
+            name: if name.is_empty() {
+                address.to_string()
+            } else {
+                name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect()
+            },
+            connected: false,
+            paired: false,
+        });
+    }
+    devices
+}
+
+/// Parse `bluetoothctl --timeout N scan on` output into newly heard devices.
+///
+/// Discovery prints `[NEW] Device <address> <name>` on first sighting and
+/// `[CHG] Device <address> <property>: <value>` as advertisements update. Only
+/// `Name:` changes carry something worth listing; RSSI/TxPower churn is
+/// ignored. A device heard about only through property lines still gets a row
+/// under its address.
+#[must_use]
+pub fn parse_scan_output(output: &str) -> Vec<BluetoothDevice> {
+    let mut devices: Vec<BluetoothDevice> = Vec::new();
+    for line in output.lines().take(MAX_BLUETOOTH_DEVICE_LINES) {
+        let line = line.trim();
+        let (changed, rest) = if let Some(rest) = line.strip_prefix("[NEW] Device ") {
+            (false, rest)
+        } else if let Some(rest) = line.strip_prefix("[CHG] Device ") {
+            (true, rest)
+        } else {
+            continue;
+        };
+        let mut parts = rest.splitn(2, ' ');
+        let Some(address) = parts.next().filter(|address| is_bluetooth_address(address)) else {
+            continue;
+        };
+        let remainder = parts.next().unwrap_or("").trim();
+        // [CHG] lines are property updates; a plain remainder only names a
+        // device on the [NEW] line. `Alias:` mirrors `Name:` and is skipped.
+        let name = if changed {
+            match remainder.strip_prefix("Name:") {
+                Some(name) => name.trim(),
+                None => continue,
+            }
+        } else {
+            remainder
+        };
+        if let Some(existing) = devices
+            .iter_mut()
+            .find(|device| device.address.eq_ignore_ascii_case(address))
+        {
+            // A later Name: change can fill in a device first heard unnamed.
+            if !name.is_empty() && existing.name == existing.address {
+                existing.name = name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect();
+            }
+            continue;
+        }
+        if devices.len() >= MAX_BLUETOOTH_DEVICES {
+            break;
+        }
         devices.push(BluetoothDevice {
             address: address.to_string(),
             name: if name.is_empty() {
@@ -766,20 +827,52 @@ pub fn device_row(device: &BluetoothDevice) -> String {
     )
 }
 
-/// Whether activating a device should connect or disconnect it.
+/// Whether activating a device pairs, connects, or disconnects it. A device
+/// the controller has never bonded must be paired before connecting is even
+/// meaningful, and pairing goes through the `jwm-bridge pair` helper because
+/// bluez wants an interactive agent.
 #[must_use]
 pub fn device_action(device: &BluetoothDevice) -> &'static str {
     if device.connected {
         "disconnect"
-    } else {
+    } else if device.paired {
         "connect"
+    } else {
+        "pair"
+    }
+}
+
+/// Read the live `Connected:`/`Paired:` flags into every listed device.
+/// `bluetoothctl info` is one process per device, which is why callers run on
+/// a worker thread: a handful of devices would otherwise stall a frame.
+fn read_device_states(devices: &mut [BluetoothDevice]) {
+    for device in devices {
+        if let Some(info) = run("bluetoothctl", &["info", &device.address]) {
+            let (connected, paired) = parse_device_info(&info);
+            device.connected = connected;
+            device.paired = paired;
+        }
+    }
+}
+
+/// Fold freshly discovered devices into the remembered list, keeping the
+/// remembered entry's live flags. Bounded like the remembered list itself.
+fn merge_discovered(devices: &mut Vec<BluetoothDevice>, discovered: Vec<BluetoothDevice>) {
+    for device in discovered {
+        if devices.len() >= MAX_BLUETOOTH_DEVICES {
+            break;
+        }
+        if devices
+            .iter()
+            .any(|known| known.address.eq_ignore_ascii_case(&device.address))
+        {
+            continue;
+        }
+        devices.push(device);
     }
 }
 
 /// List known devices with their live state, on a worker thread.
-///
-/// `bluetoothctl info` is one process per device, which is why this does not
-/// run inline: a handful of remembered devices would otherwise stall a frame.
 #[must_use]
 pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
     if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
@@ -789,13 +882,36 @@ pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
         let mut devices = run("bluetoothctl", &["devices"])
             .map(|output| parse_devices(&output))
             .unwrap_or_default();
-        for device in &mut devices {
-            if let Some(info) = run("bluetoothctl", &["info", &device.address]) {
-                let (connected, paired) = parse_device_info(&info);
-                device.connected = connected;
-                device.paired = paired;
-            }
-        }
+        read_device_states(&mut devices);
+        sort_devices(&mut devices);
+        devices
+    }))
+}
+
+/// Run a bounded discovery (`bluetoothctl --timeout 15 scan on`) and merge
+/// what it hears into the remembered list, on a worker thread.
+///
+/// The scan window is fixed; the worker deadline leaves headroom for process
+/// startup and the follow-up `info` sweep over the merged list.
+#[must_use]
+pub fn start_discovery_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+        return None;
+    }
+    Some(BackgroundJob::spawn(|| {
+        let discovered = connectivity_output(
+            "bluetoothctl",
+            &["--timeout", "15", "scan", "on"],
+            Duration::from_secs(25),
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        )
+        .map(|output| parse_scan_output(&String::from_utf8_lossy(&output.stdout)))
+        .unwrap_or_default();
+        let mut devices = run("bluetoothctl", &["devices"])
+            .map(|output| parse_devices(&output))
+            .unwrap_or_default();
+        merge_discovered(&mut devices, discovered);
+        read_device_states(&mut devices);
         sort_devices(&mut devices);
         devices
     }))
@@ -1490,6 +1606,71 @@ mod tests {
     fn activating_a_device_toggles_its_connection() {
         assert_eq!(device_action(&device("Speaker", false, true)), "connect");
         assert_eq!(device_action(&device("Speaker", true, true)), "disconnect");
+        // Never bonded: pairing must come before connecting is meaningful.
+        assert_eq!(device_action(&device("Keyboard", false, false)), "pair");
+    }
+
+    #[test]
+    fn scan_output_collects_new_devices_and_name_changes() {
+        // Real `bluetoothctl --timeout 15 scan on` output: [NEW] on first
+        // sighting, then property churn as advertisements arrive.
+        let output = "[NEW] Device 5C:FB:7C:1A:2B:3C WH-1000XM4\n\
+                      [CHG] Device 5C:FB:7C:1A:2B:3C RSSI: -61\n\
+                      [CHG] Device 5C:FB:7C:1A:2B:3C TxPower: 4\n\
+                      [NEW] Device 7C:10:C9:AA:BB:CC\n\
+                      [CHG] Device 7C:10:C9:AA:BB:CC Name: MX Master 3S\n\
+                      [CHG] Device 7C:10:C9:AA:BB:CC Alias: MX Master 3S\n\
+                      [NEW] Device not-an-address junk\n\
+                      [DEL] Device 5C:FB:7C:1A:2B:3C WH-1000XM4\n";
+        let devices = parse_scan_output(output);
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].name, "WH-1000XM4");
+        assert!(!devices[0].paired);
+        assert!(!devices[0].connected);
+        // Heard unnamed, named by a later Name: change.
+        assert_eq!(devices[1].name, "MX Master 3S");
+    }
+
+    #[test]
+    fn scan_output_deduplicates_and_bounds_the_catch() {
+        let repeated = "[NEW] Device 5C:FB:7C:1A:2B:3C Speaker\n\
+                        [CHG] Device 5C:fb:7c:1a:2b:3c Name: Speaker\n";
+        assert_eq!(parse_scan_output(repeated).len(), 1);
+        assert!(parse_scan_output("").is_empty());
+        assert!(parse_scan_output("[bluetooth]# scan on\n").is_empty());
+
+        let crowd = (0..MAX_BLUETOOTH_DEVICES + 20)
+            .map(|index| {
+                format!(
+                    "[NEW] Device 00:00:00:{:02X}:{:02X}:{:02X} D{index}\n",
+                    index / 65536,
+                    (index / 256) % 256,
+                    index % 256
+                )
+            })
+            .collect::<String>();
+        assert_eq!(parse_scan_output(&crowd).len(), MAX_BLUETOOTH_DEVICES);
+    }
+
+    #[test]
+    fn discovered_devices_merge_under_the_remembered_list() {
+        let mut remembered = vec![BluetoothDevice {
+            address: "5C:FB:7C:1A:2B:3C".to_string(),
+            name: "Speaker".to_string(),
+            connected: false,
+            paired: true,
+        }];
+        let discovered = parse_scan_output(
+            "[NEW] Device 5c:fb:7c:1a:2b:3c Speaker\n[NEW] Device 7C:10:C9:AA:BB:CC Keyboard\n",
+        );
+        merge_discovered(&mut remembered, discovered);
+
+        assert_eq!(remembered.len(), 2);
+        // The remembered entry wins: its live flags survive the merge.
+        assert!(remembered[0].paired);
+        assert_eq!(remembered[1].name, "Keyboard");
+        assert!(!remembered[1].paired);
     }
 
     #[test]

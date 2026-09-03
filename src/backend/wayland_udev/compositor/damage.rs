@@ -14,16 +14,6 @@ fn attention_requires_composition(enabled: bool, has_urgent_window: bool) -> boo
     attention_signal_active(enabled, has_urgent_window)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OverlayColorDomain {
-    SceneLinearAware,
-    EncodedOnly,
-}
-
-fn visible_overlay_blocks_color_pipeline(visible: bool, domain: OverlayColorDomain) -> bool {
-    visible && domain == OverlayColorDomain::EncodedOnly
-}
-
 fn rect_animation_pending(current: [f32; 4], target: [f32; 4]) -> bool {
     current.into_iter().zip(target).any(|(current, target)| {
         !current.is_finite() || !target.is_finite() || (target - current).abs() > f32::EPSILON
@@ -64,63 +54,6 @@ fn peek_animation_pending(active: bool, opacity: f32) -> bool {
 /// Simple damage tracking for the Wayland compositor.
 /// Tracks whether a redraw is needed based on scene changes.
 impl WaylandCompositor {
-    /// Deferred output delivery is safe only while every compositor pass
-    /// written after the linear window scene is itself linear-aware.
-    /// Encoded-space overlays would otherwise be transformed twice by either
-    /// the final software regions or the CRTC LUT/CTM pair.
-    pub(crate) fn compositor_linear_tail_safe(&self) -> bool {
-        if !self.scene_linear_requested || self.linear_fbo == 0 {
-            return false;
-        }
-
-        // Genie and both minimized-Dock passes are intentionally absent here:
-        // they use the shared window fragment shader with `u_scene_linear`
-        // wired to the hardware-OETF state. The preview shadow is fixed black,
-        // whose RGB value is identical in encoded and linear domains.
-        let encoded_overlay_active = self.transition_active
-            || self.snap_preview.is_some()
-            || self.snap_preview_opacity > 0.0
-            // Overview is intentionally absent: skydome, solid/reflection,
-            // title and strip all bind their output color domain explicitly.
-            || visible_overlay_blocks_color_pipeline(
-                self.overview_active || self.overview_opacity > 0.0,
-                OverlayColorDomain::SceneLinearAware,
-            )
-            || visible_overlay_blocks_color_pipeline(
-                self.expose_active || !self.expose_entries.is_empty(),
-                OverlayColorDomain::EncodedOnly,
-            )
-            || visible_overlay_blocks_color_pipeline(
-                self.peek_active || self.peek_opacity > 0.0,
-                OverlayColorDomain::EncodedOnly,
-            )
-            || (self.window_tabs_enabled && !self.window_groups.is_empty())
-            || !self.particle_systems.is_empty()
-            || (self.edge_glow_enabled
-                && self.edge_glow_width > 0.0
-                && self.edge_glow_active
-                && !self.edge_glow_suppressed)
-            || self.postprocess_active
-            || self.debug_hud_enabled
-            || self.debug_hud_extended
-            // Every annotation primitive is currently encoded-only. Quads
-            // and labels are independent of freehand strokes, so checking the
-            // stroke list alone can let a text/shape-only frame leak past the
-            // linear-tail gate.
-            || self.annotation_active
-            || self.screenshot_toolbar.is_some()
-            || self.system_ui.is_some()
-            || !self.toast_stack.is_empty()
-            || !self.osd_slot.is_empty()
-            || self.recording_region_overlay.is_some()
-            // Hardware delivery leaves output_fbo in linear light for KMS;
-            // readback consumers require a shader-encoded framebuffer.
-            || self.screenshot_requests.has_pending()
-            || self.recording_requires_composition();
-
-        !encoded_overlay_active
-    }
-
     /// Return the compositor-owned visual that currently prevents KMS direct
     /// scanout.
     ///
@@ -466,11 +399,10 @@ fn minimized_dock_requires_composition(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompositorRect, OverlayColorDomain, attention_requires_composition,
-        border_requires_composition, expose_animation_pending,
-        inactive_window_styling_requires_composition, minimized_dock_requires_composition,
-        overview_animation_pending, peek_animation_pending, rect_animation_pending,
-        visible_overlay_blocks_color_pipeline,
+        CompositorRect, attention_requires_composition, border_requires_composition,
+        expose_animation_pending, inactive_window_styling_requires_composition,
+        minimized_dock_requires_composition, overview_animation_pending, peek_animation_pending,
+        rect_animation_pending,
     };
 
     #[test]
@@ -584,22 +516,6 @@ mod tests {
         assert!(overview_animation_pending(true, 0.9, 0.0, 0.0));
         assert!(overview_animation_pending(true, 1.0, 0.0, 0.2));
         assert!(overview_animation_pending(false, 0.2, 0.0, 0.0));
-    }
-
-    #[test]
-    fn scene_linear_overview_does_not_block_hardware_color_pipeline() {
-        assert!(!visible_overlay_blocks_color_pipeline(
-            true,
-            OverlayColorDomain::SceneLinearAware,
-        ));
-        assert!(visible_overlay_blocks_color_pipeline(
-            true,
-            OverlayColorDomain::EncodedOnly,
-        ));
-        assert!(!visible_overlay_blocks_color_pipeline(
-            false,
-            OverlayColorDomain::EncodedOnly,
-        ));
     }
 
     #[test]

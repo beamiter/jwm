@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-09-04：十一轮补充（蓝牙配对 v1 落地 / WM_HINTS 结案）
+
+1. **蓝牙配对 v1 已实施**（上一轮的设计落地）。控制中心蓝牙 picker：`s` 发现
+   扫描（有界 `bluetoothctl --timeout 15 scan on`，`[NEW]/[CHG]` 行解析），
+   未配对设备 Enter 发起配对 → spawn 一次性 `jwm-bridge pair <addr>` 会话进程
+   （zbus system bus，Agent1 @ KeyboardDisplay，只应答目标地址，入站授权一律
+   Rejected，用完注销）。prompt UI 泛化为 `PromptKind::{Passphrase, Pin,
+   Confirm, Display}`（masked/点名设备/y-n/仅展示），25s prompt 截止 + 95s
+   会话硬墙钟；Esc/关面板/hand-over/返回 hub/点 scrim 全部汇入取消路径。
+   IPC：commands `bluetooth_pairing_prompt`/`bluetooth_pairing_done`、query
+   `get_bluetooth_pairing`、topic `bluetooth`（cookie 一次性防串台）。
+   测试：jwm 侧 ~30 个纯逻辑单测；bridge 侧 41 个，含 `dbus-daemon --session`
+   私有总线 + 假 org.bluez 的完整握手集成测试（confirm/拒绝实名错误/cancel/
+   会话已死）。**未实测真机**（本机无蓝牙控制器），docs/control-center.md
+   已换「out of scope」段。v2 候选：入站请求、配对后自动连接、D-Bus
+   StartDiscovery。
+2. **WM_HINTS 疑点结案**：见 v2c 节的复查记录——xprop 把属性类型写成
+   INTEGER 导致 jwm 类型严格读取返回空，是测试工具假象；python-xlib 正确
+   类型写入后 ICCCM urgency 置位/清除均正常。另注意：嵌套会话 debug! 日志
+   不落盘，别再把「日志静默」当事件未到达的证据。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；root `cargo test
+--locked` lib 2612 passed / 0 failed；bridge 41 passed / 0 failed。
+
+---
+
+## 2026-09-04：十一轮收口（HDR P0-4 帧尾 domain table + capture 独立 view）
+
+**HDR P0 第 4 项完成**：帧尾 overlay 逐类 domain 归属集中到
+`compositor/tail_domain.rs`（一张表驱动门禁/绘制位置/blocker 名）；snap preview、
+expose、peek 迁移为 common-linear-aware（overview 本就已适配），其余 12 类保留具名
+blocker 并接进 `api::LINEAR_TAIL_BLOCKER_NAMES`。capture/readback 改为从明确编码的
+独立 view 派生（deferred 路由上 section 18c 派生专用 RGBA8 target，KMS 离屏 capture
+换用该 view 纹理），`capture_readback` 不再出现在 route 决策里——capture 存在与否
+scanout 逐位一致（headless oracle 钉住），PQ scanout 下 capture 仍得 canonical sRGB。
+细节见下方 TODO 节「进展（2026-09-04 末）」。
+
+验证：fmt / clippy -D warnings / 两组 cargo check 全绿；`cargo test --locked`
+lib 2612 passed / 0 failed。
+
+---
+
 ## 2026-09-04：十轮收口（HDR P0-3 internalize / urgent 标记 / 蓝牙配对设计）
 
 1. **HDR P0 第 3 项完成**：cursor/DnD/layer-top/layer-overlay 四类外部元素现在
@@ -18,9 +60,10 @@
    TODO 节「进展（2026-09-04）」。像素 oracle（严格 surfaceless EGL，本机 Mesa
    真实执行）覆盖 SDR 与旧路径 ±1-2 LSB 一致、PQ 单次 OETF、partial damage
    移动无残影。
-2. **网格 urgent 标记与跨屏评估**、**WM_HINTS 直改不触发 urgency 的疑似缺口**：
-   见下方「2026-09-03：网格 v2c」节（该节日期实为 09-04 凌晨，保持原样）。
-   WM_HINTS 缺口留作待查。
+2. **网格 urgent 标记与跨屏评估**：见下方「2026-09-03：网格 v2c」节
+   （该节日期实为 09-04 凌晨，保持原样）。其中 WM_HINTS 疑点已于 09-04
+   复查结案：xprop 写错属性类型的测试假象，WM 链路无 bug（v2c 节有完整
+   复查记录）。
 3. **蓝牙配对设计完成**（只读调查，未实施）：推荐路线 = bridge 一次性配对会话
    进程（`jwm-bridge pair <addr>`，D-Bus Agent1，KeyboardDisplay capability，
    仅响应自己发起的配对），jwm 侧纯状态机 + prompt UI 泛化（wifi 密码 prompt
@@ -51,12 +94,14 @@ lib 2578 passed / 0 failed。
 
 嵌套实测（v2c，/tmp/jwm-uivalidate/shots/v2c_*.png）：tag1 停放的 xclock 设
 urgent → 开网格 cell 1 右上出现 attention 色圆点（裁片 AE diff 60），清除后
-消失（diff 0）。**注意**：实测发现 `xdotool set_window --urgency`（EWMH
-`_NET_WM_STATE_DEMANDS_ATTENTION` client message）能置位，而
-`xprop -f WM_HINTS 32i -set WM_HINTS ...` 直接改写 WM_HINTS 在嵌套 x11rb
-会话里不触发 jwm 的 urgency 更新（xev 能看到 PropertyNotify，jwm 无反应；
-RUST_LOG=debug 下日志也静默，jwm 日志级别疑似被压在 info）。WM_HINTS
-PropertyNotify 链路疑似有缺口，待查；EWMH 路径正常。
+消失（diff 0）。**WM_HINTS 疑点已结案（09-04 复查）**：当时的「xprop 直改
+不触发」是测试工具假象——`xprop -f WM_HINTS 32i -set` 会把属性类型写成
+INTEGER（回显 `WM_HINTS(INTEGER)` 可辨），jwm 的 `get_property` 按
+WM_HINTS 类型严格读取，类型不符返回空、静默 no-op，这是正确行为。
+python-xlib 以正确类型（XA_WM_HINTS=35）写入后，urgency 置位/清除即时生效
+（含聚焦自动抑制 + 清除源位的策略分支）。EWMH 与 ICCCM 两条路径都正常，
+无代码改动。附带教训：嵌套会话里 debug! 级日志不落盘（RUST_LOG=debug 也
+只有 info 行），「日志静默」不能作为事件未到达的证据。
 
 ---
 
@@ -92,8 +137,8 @@ v2a_*.png、v2b_*.png）。
 
 **网格总览剩余**：urgent 标记已由 v2c 完成（见上方 2026-09-03 v2c 节）；
 跨显示器同框评估为结构性改动、不做，阻塞点与最小设计草案见
-docs/tags-overview.md 的 Limitations。另有一条待查：WM_HINTS 直改在嵌套
-x11rb 会话不触发 urgency 更新（v2c 节）。
+docs/tags-overview.md 的 Limitations。WM_HINTS 疑点已结案（xprop 类型假象，
+v2c 节有复查记录）。
 
 ---
 
@@ -417,6 +462,32 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-04 末）：P0-4 帧尾 domain table + capture 独立 view 已完成
+
+帧尾 overlay 的颜色域归属集中到新模块 `compositor/tail_domain.rs`
+（`TailOverlayClass` 16 类，逐类记录 domain / 具名 blocker / 绘制位置 stage），同一张
+表驱动门禁（`linear_tail_status`）、绘制域（post-delivery 绑定走
+`bind_post_delivery_overlay_target`）与 KMS 侧 blocker 清单
+（`linear_tail_blocker_names`），不再有第二套枚举。迁移进 common-linear-aware 的四类：
+snap preview、overview（本就已适配）、expose、peek——它们在 deferred 路由上直接画进
+linear_fbo（border/overview_bg/window 三个共享 shader 的 `u_scene_linear` 入域），统一走
+帧尾单次 matrix+OETF。保留具名 blocker 的 12 类（全部接进
+`api::LINEAR_TAIL_BLOCKER_NAMES`）：workspace_transition_overlay、tab_bar_overlay、
+particle_overlay、edge_glow_overlay、postprocess_filter、debug_hud_overlay、
+annotation_overlay、screenshot_toolbar_overlay、toast_overlay、osd_overlay、
+system_ui_overlay、recording_region_overlay。`compositor_encoded_tail` 现在只在
+common-linear target 本身不可用时发出。
+
+capture/readback 与 route 解耦：截图/录屏/screencopy 一律读「独立编码 view」——
+legacy/early-fallback 路由上 output_fbo 本身就是 canonical sRGB view；deferred 路由上由
+render.rs section 18c 用一次 identity-matrix sRGB OETF 从 linear_fbo 派生专用 RGBA8
+capture target（懒分配）。KMS 离屏 capture 渲染元素列表时把 compositor 元素临时换到该
+view（随后复原），compositor 侧截图/录屏 readback 也改读该 view；`capture_readback`
+blocker 从 route 决策中删除（名称保留在已知表中兼容历史 payload）。像素 oracle 证明：
+capture 请求存在与否 scanout 像素逐位一致；PQ scanout 下 capture view 仍是 canonical
+sRGB。顺带修掉一个本改动会引入的回归：cursor internalized 的帧里录屏不再叠加合成箭头
+（`capture_frame` 新增 `cursor_already_present`）。
+
 ### 进展（2026-09-04）：P0 internalize/adapt 已完成
 
 cursor（主题位图与软件 fallback）、DnD drag icon、layer-top、layer-overlay 四类外部
@@ -516,7 +587,7 @@ exact-sRGB fallback。
 3. **几何与 alpha 契约尚未锁定。** internalize/adapt 时必须保留 cursor hotspot、输出
    transform/scale、layer z-order、damage 和 premultiplied alpha；无颜色描述的元素按 sRGB
    ingress，导入失败或描述不受支持时必须退回 exact-sRGB，不能混域继续提交。
-4. **帧尾仍有第二套颜色域。** Expose/Peek、tabs、particles、edge glow、HUD、annotation、
+4. **[已完成] 帧尾仍有第二套颜色域。** Expose/Peek、tabs、particles、edge glow、HUD、annotation、
    toolbar、toast/OSD、recording overlay 等必须逐类标注为 common-linear-aware，或保留具名
    blocker；capture/readback 要从明确编码的独立 view 派生，不能通过改变物理 scanout route
    来获得截图。
@@ -549,7 +620,7 @@ exact-sRGB fallback。
      matrix + OETF；保留 exact-sRGB fallback 作为每帧 fail-closed 路径。
    - 复用 `color_management.rs` / `color_pipeline.rs` 的 sRGB ingress、矩阵布局和 transfer
      规则，不为 cursor/layer 复制另一套 GLSL 传递函数。
-4. **P0：清理其余 linear-tail blocker** — `compositor/{damage,render,expose}.rs`
+4. **P0：[已完成] 清理其余 linear-tail blocker** — `compositor/{tail_domain,damage,render,expose}.rs`
    - 建立帧尾 domain table，让每一类 overlay 要么在 final delivery 前绘制，要么有显式颜色
      adapter；capture/recording 使用独立、目标明确的 view，不再反向约束物理输出 route。
 5. **P1：补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径

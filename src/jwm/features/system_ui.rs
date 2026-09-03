@@ -175,7 +175,7 @@ pub enum SystemUiState {
     },
     /// Notifications, Wi-Fi networks, Bluetooth devices, and wallpapers are
     /// all the same panel: a scrolling list with a status line and an
-    /// optional masked prompt. Only what a row *means* differs, which is
+    /// optional prompt. Only what a row *means* differs, which is
     /// what [`ListKind`] and [`RowData`] carry.
     ListPanel {
         kind: ListKind,
@@ -183,8 +183,8 @@ pub enum SystemUiState {
         selected: usize,
         /// Status line: scanning, connecting, or why something failed.
         message: String,
-        /// Masked secret entry, while the panel is asking for one.
-        prompt: Option<String>,
+        /// What the panel is currently asking for, if anything.
+        prompt: Option<PromptKind>,
         /// Shown when the list is empty and there is no message.
         empty: String,
     },
@@ -200,6 +200,68 @@ pub enum SystemUiState {
         /// the selection disarms it.
         armed: bool,
     },
+}
+
+/// What a [`SystemUiState::ListPanel`] prompt is asking for. Wi-Fi asks for a
+/// passphrase; Bluetooth pairing adds the three agent-driven shapes. The
+/// secret-carrying variants are wiped before their buffers are dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Wi-Fi passphrase; masked while typing.
+    Passphrase(String),
+    /// Pairing PIN (or numeric passkey); masked while typing. `device` names
+    /// the target so the line still says what is being paired.
+    Pin { typed: String, device: String },
+    /// Numeric comparison: the user confirms both sides show this passkey.
+    Confirm { passkey: u32, device: String },
+    /// Code the user types on the device itself; no input on this panel.
+    Display { code: String, device: String },
+}
+
+impl PromptKind {
+    /// Whether this prompt is part of a Bluetooth pairing session (as opposed
+    /// to the Wi-Fi passphrase).
+    #[must_use]
+    pub fn is_pairing(&self) -> bool {
+        !matches!(self, Self::Passphrase(_))
+    }
+
+    /// The editable secret buffer, for the prompts that have one.
+    fn secret(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Passphrase(typed) | Self::Pin { typed, .. } => Some(typed),
+            Self::Confirm { .. } | Self::Display { .. } => None,
+        }
+    }
+
+    /// Overwrite any secret buffer before it is dropped, so a cancelled
+    /// prompt does not leave the secret sitting in a freed allocation.
+    fn wipe(&mut self) {
+        if let Some(typed) = self.secret() {
+            // Keep the optimizer from eliding the overwrite before dropping.
+            unsafe { typed.as_bytes_mut().fill(0) };
+        }
+    }
+
+    /// A copy safe to keep in a second allocation: secrets are blanked, the
+    /// passkey/code a prompt *displays* are not secret and stay.
+    fn redacted_clone(&self) -> Self {
+        match self {
+            Self::Passphrase(_) => Self::Passphrase(String::new()),
+            Self::Pin { device, .. } => Self::Pin {
+                typed: String::new(),
+                device: device.clone(),
+            },
+            Self::Confirm { passkey, device } => Self::Confirm {
+                passkey: *passkey,
+                device: device.clone(),
+            },
+            Self::Display { code, device } => Self::Display {
+                code: code.clone(),
+                device: device.clone(),
+            },
+        }
+    }
 }
 
 /// What a [`SystemUiState::ListPanel`] is listing. Decides the title, the
@@ -233,9 +295,14 @@ impl ListKind {
         }
     }
 
-    fn hint(self, prompting: bool) -> &'static str {
-        if prompting {
-            return "Enter  join    Esc  cancel";
+    fn hint(self, prompt: Option<&PromptKind>) -> &'static str {
+        if let Some(prompt) = prompt {
+            return match prompt {
+                PromptKind::Passphrase(_) => "Enter  join    Esc  cancel",
+                PromptKind::Pin { .. } => "Enter  submit    Esc  cancel pairing",
+                PromptKind::Confirm { .. } => "y/Enter  confirm    n/Esc  reject",
+                PromptKind::Display { .. } => "Esc  cancel pairing",
+            };
         }
         match self {
             Self::Notifications => {
@@ -243,7 +310,9 @@ impl ListKind {
             }
             Self::Clipboard => "Click/Enter  copy    d  forget    c  clear all    Esc  close",
             Self::Wifi => "Click/Enter  join    \u{f062}/\u{f063}  select    Esc  close",
-            Self::Bluetooth => "Click/Enter  connect/disconnect    r  refresh    Esc  close",
+            Self::Bluetooth => {
+                "Click/Enter  connect/disconnect/pair    s  scan    r  refresh    Esc  close"
+            }
             Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput => {
                 "Click/Enter  use    \u{f062}/\u{f063}  select    Esc  close"
@@ -283,9 +352,12 @@ pub enum RowData {
     Wifi {
         secured: bool,
     },
-    /// `connect` or `disconnect`, decided when the list was built.
+    /// `connect`, `disconnect`, or `pair`, decided when the list was built.
+    /// `name` is the display name, which pairing prompts use to name the
+    /// device even after a refresh shuffled the rows.
     Bluetooth {
         action: &'static str,
+        name: String,
     },
     Wallpaper,
     /// The device id lives in the row's key, the way the wallpaper path does.
@@ -668,8 +740,8 @@ impl Clone for SystemUiState {
                 rows: rows.clone(),
                 selected: *selected,
                 message: message.clone(),
-                // Never duplicate a passphrase into another allocation.
-                prompt: prompt.as_ref().map(|_| String::new()),
+                // Never duplicate a passphrase or PIN into another allocation.
+                prompt: prompt.as_ref().map(PromptKind::redacted_clone),
                 empty: empty.clone(),
             },
             Self::Calendar { view, clock } => Self::Calendar {
@@ -738,13 +810,12 @@ impl SystemUiState {
     }
 
     pub fn cancel(&mut self) {
-        // Keep the optimizer from eliding the overwrites before dropping.
         match self {
             Self::Locked { password, .. } => unsafe { password.as_bytes_mut().fill(0) },
             Self::ListPanel {
-                prompt: Some(typed),
+                prompt: Some(prompt),
                 ..
-            } => unsafe { typed.as_bytes_mut().fill(0) },
+            } => prompt.wipe(),
             _ => {}
         }
         *self = Self::Inactive;
@@ -1422,13 +1493,25 @@ impl SystemUiState {
         } = self
             && *kind == ListKind::Wifi
         {
-            *prompt = Some(String::new());
+            *prompt = Some(PromptKind::Passphrase(String::new()));
             message.clear();
         }
     }
 
     /// Whether the picker is currently asking for a passphrase.
     pub fn is_prompting_wifi_passphrase(&self) -> bool {
+        matches!(
+            self,
+            Self::ListPanel {
+                prompt: Some(PromptKind::Passphrase(_)),
+                ..
+            }
+        )
+    }
+
+    /// Whether any prompt is up — while one is, list navigation stays put so
+    /// Home/End/Page keys cannot slide the rows out from under the question.
+    pub fn is_prompting(&self) -> bool {
         matches!(
             self,
             Self::ListPanel {
@@ -1444,7 +1527,14 @@ impl SystemUiState {
         let Self::ListPanel { prompt, .. } = self else {
             return None;
         };
-        prompt.take()
+        match prompt.take() {
+            Some(PromptKind::Passphrase(passphrase)) => Some(passphrase),
+            // Not ours (a pairing prompt): put it back untouched.
+            other => {
+                *prompt = other;
+                None
+            }
+        }
     }
 
     /// Abandon the passphrase prompt, wiping what was typed.
@@ -1452,11 +1542,13 @@ impl SystemUiState {
         let Self::ListPanel { prompt, .. } = self else {
             return false;
         };
-        let Some(mut typed) = prompt.take() else {
+        if !matches!(prompt, Some(PromptKind::Passphrase(_))) {
+            return false;
+        }
+        let Some(mut taken) = prompt.take() else {
             return false;
         };
-        // Keep the optimizer from eliding the overwrite before dropping.
-        unsafe { typed.as_bytes_mut().fill(0) };
+        taken.wipe();
         true
     }
 
@@ -1486,17 +1578,19 @@ impl SystemUiState {
                 text: crate::jwm::features::connectivity::device_row(device),
                 data: RowData::Bluetooth {
                     action: crate::jwm::features::connectivity::device_action(device),
+                    name: device.name.clone(),
                 },
             })
             .collect();
         self.set_rows(ListKind::Bluetooth, rows);
     }
 
-    /// The selected device: its address and what activating it would do.
-    pub fn selected_bluetooth(&self) -> Option<(String, &'static str)> {
+    /// The selected device: its address, display name, and what activating it
+    /// would do (`connect`, `disconnect`, or `pair`).
+    pub fn selected_bluetooth(&self) -> Option<(String, String, &'static str)> {
         let row = self.selected_row(ListKind::Bluetooth)?;
-        match row.data {
-            RowData::Bluetooth { action } => Some((row.key.clone(), action)),
+        match &row.data {
+            RowData::Bluetooth { action, name } => Some((row.key.clone(), name.clone(), action)),
             _ => None,
         }
     }
@@ -1504,6 +1598,99 @@ impl SystemUiState {
     /// Replace the Bluetooth picker's status line.
     pub fn set_bluetooth_message(&mut self, text: impl Into<String>) {
         self.set_list_message(ListKind::Bluetooth, text);
+    }
+
+    /// Show a Bluetooth pairing prompt. The pairing session in `features`
+    /// decides *when*; the panel only renders what it is told, and only while
+    /// the Bluetooth picker is on screen.
+    pub fn prompt_bluetooth_pairing(
+        &mut self,
+        prompt: &crate::jwm::features::pairing::PairingPrompt,
+        device: &str,
+    ) {
+        let Self::ListPanel {
+            kind,
+            prompt: slot,
+            message,
+            ..
+        } = self
+        else {
+            return;
+        };
+        if *kind != ListKind::Bluetooth {
+            return;
+        }
+        let device = device.to_string();
+        *slot = Some(match prompt {
+            crate::jwm::features::pairing::PairingPrompt::Pin => PromptKind::Pin {
+                typed: String::new(),
+                device,
+            },
+            crate::jwm::features::pairing::PairingPrompt::Confirm { passkey } => {
+                PromptKind::Confirm {
+                    passkey: *passkey,
+                    device,
+                }
+            }
+            crate::jwm::features::pairing::PairingPrompt::Display { code } => PromptKind::Display {
+                code: code.clone(),
+                device,
+            },
+        });
+        message.clear();
+    }
+
+    /// The active pairing prompt, if the panel is showing one.
+    pub fn pairing_prompt(&self) -> Option<&PromptKind> {
+        match self {
+            Self::ListPanel {
+                kind: ListKind::Bluetooth,
+                prompt: Some(prompt),
+                ..
+            } if prompt.is_pairing() => Some(prompt),
+            _ => None,
+        }
+    }
+
+    /// The PIN buffer, for validation before it is submitted.
+    pub fn pairing_pin(&self) -> Option<&str> {
+        match self.pairing_prompt() {
+            Some(PromptKind::Pin { typed, .. }) => Some(typed.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Take the typed PIN, clearing the prompt. The caller owns the only copy
+    /// afterwards and is responsible for wiping it.
+    pub fn take_pairing_pin(&mut self) -> Option<String> {
+        let Self::ListPanel { prompt, .. } = self else {
+            return None;
+        };
+        if !matches!(prompt, Some(PromptKind::Pin { .. })) {
+            return None;
+        }
+        match prompt.take() {
+            Some(PromptKind::Pin { typed, .. }) => Some(typed),
+            other => {
+                *prompt = other;
+                None
+            }
+        }
+    }
+
+    /// Abandon a pairing prompt, wiping a half-typed PIN.
+    pub fn cancel_pairing_prompt(&mut self) -> bool {
+        let Self::ListPanel { prompt, .. } = self else {
+            return false;
+        };
+        if !matches!(prompt, Some(prompt) if prompt.is_pairing()) {
+            return false;
+        }
+        let Some(mut taken) = prompt.take() else {
+            return false;
+        };
+        taken.wipe();
+        true
     }
 
     // --- Wallpaper picker ---
@@ -2079,12 +2266,14 @@ impl SystemUiState {
         match self {
             Self::Launcher { query, .. } | Self::Info { query, .. } => query.push(ch),
             Self::ListPanel {
-                prompt: Some(typed),
+                prompt: Some(prompt),
                 message,
                 ..
             } => {
-                typed.push(ch);
-                message.clear();
+                if let Some(typed) = prompt.secret() {
+                    typed.push(ch);
+                    message.clear();
+                }
                 return;
             }
             Self::Locked { password, message } => {
@@ -2109,12 +2298,14 @@ impl SystemUiState {
                 query.pop();
             }
             Self::ListPanel {
-                prompt: Some(typed),
+                prompt: Some(prompt),
                 message,
                 ..
             } => {
-                typed.pop();
-                message.clear();
+                if let Some(typed) = prompt.secret() {
+                    typed.pop();
+                    message.clear();
+                }
                 return;
             }
             Self::Locked { password, message } => {
@@ -2730,18 +2921,37 @@ impl SystemUiState {
                         .map(|row| row.text.clone())
                         .collect()
                 };
-                if let Some(typed) = prompt {
+                if let Some(prompt) = prompt {
                     items.push(String::new());
-                    // Name the network: the selection highlight is dropped
-                    // while prompting, so the row alone would not say which
-                    // passphrase is being asked for.
-                    let subject = rows
-                        .get(*selected)
-                        .map_or("network", |row| row.key.as_str());
-                    items.push(format!(
-                        "\u{f084}  Passphrase for {subject}  {}",
-                        "*".repeat(typed.chars().count())
-                    ));
+                    match prompt {
+                        PromptKind::Passphrase(typed) => {
+                            // Name the network: the selection highlight is
+                            // dropped while prompting, so the row alone would
+                            // not say which passphrase is being asked for.
+                            let subject = rows
+                                .get(*selected)
+                                .map_or("network", |row| row.key.as_str());
+                            items.push(format!(
+                                "\u{f084}  Passphrase for {subject}  {}",
+                                "*".repeat(typed.chars().count())
+                            ));
+                        }
+                        PromptKind::Pin { typed, device } => {
+                            items.push(format!(
+                                "\u{f084}  PIN for {device}  {}",
+                                "*".repeat(typed.chars().count())
+                            ));
+                        }
+                        PromptKind::Confirm { passkey, device } => {
+                            items.push(format!(
+                                "\u{f293}  Confirm passkey {} on '{device}'?",
+                                crate::jwm::features::pairing::format_passkey(*passkey),
+                            ));
+                        }
+                        PromptKind::Display { code, device } => {
+                            items.push(format!("\u{f293}  Enter {code} on '{device}'"));
+                        }
+                    }
                 } else if !message.is_empty() && !rows.is_empty() {
                     items.push(String::new());
                     items.push(format!("  {message}"));
@@ -2762,7 +2972,7 @@ impl SystemUiState {
                     query: None,
                     selected: (!rows.is_empty() && prompt.is_none()).then(|| selected - start),
                     items,
-                    hint: kind.hint(prompt.is_some()).to_string(),
+                    hint: kind.hint(prompt.as_ref()).to_string(),
                     scroll,
                 }
             }
@@ -3718,6 +3928,157 @@ mod tests {
         assert!(panel.is_wifi_picker(), "the picker stays open");
         // Nothing to cancel the second time.
         assert!(!panel.cancel_wifi_passphrase());
+    }
+
+    fn bluetooth_panel() -> SystemUiState {
+        let mut panel = SystemUiState::bluetooth_picker("");
+        panel.set_bluetooth_devices(&[crate::jwm::features::BluetoothDevice {
+            address: "5C:FB:7C:1A:2B:3C".to_string(),
+            name: "WH-1000XM4".to_string(),
+            connected: false,
+            paired: false,
+        }]);
+        panel
+    }
+
+    #[test]
+    fn the_bluetooth_row_data_carries_action_and_name() {
+        let panel = bluetooth_panel();
+        assert_eq!(
+            panel.selected_bluetooth(),
+            Some((
+                "5C:FB:7C:1A:2B:3C".to_string(),
+                "WH-1000XM4".to_string(),
+                "pair"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_pairing_pin_prompt_masks_input_and_names_the_device() {
+        let mut panel = bluetooth_panel();
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Pin,
+            "WH-1000XM4",
+        );
+        panel.push_char('4');
+        panel.push_char('2');
+        let parts = panel.overlay_parts();
+
+        assert!(parts.selected.is_none());
+        let prompt = parts.items.last().expect("prompt row");
+        assert!(prompt.contains("PIN for WH-1000XM4"));
+        assert!(prompt.contains("**"));
+        assert!(!prompt.contains("42"), "the PIN itself is never drawn");
+        assert!(parts.hint.contains("submit"));
+
+        assert_eq!(panel.pairing_pin(), Some("42"));
+        assert_eq!(panel.take_pairing_pin().as_deref(), Some("42"));
+        assert!(panel.pairing_prompt().is_none());
+    }
+
+    #[test]
+    fn a_confirm_prompt_shows_the_passkey_and_its_keys() {
+        let mut panel = bluetooth_panel();
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Confirm { passkey: 42 },
+            "WH-1000XM4",
+        );
+        let parts = panel.overlay_parts();
+
+        let prompt = parts.items.last().expect("prompt row");
+        assert_eq!(
+            prompt.trim(),
+            "\u{f293}  Confirm passkey 000042 on 'WH-1000XM4'?"
+        );
+        assert!(parts.hint.contains("confirm"));
+        assert!(parts.hint.contains("reject"));
+        // A confirm prompt has no editable buffer: typing must not panic or
+        // grow one.
+        panel.push_char('y');
+        assert!(matches!(
+            panel.pairing_prompt(),
+            Some(PromptKind::Confirm { passkey: 42, .. })
+        ));
+    }
+
+    #[test]
+    fn a_display_prompt_shows_the_code_without_taking_input() {
+        let mut panel = bluetooth_panel();
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Display {
+                code: "1234".to_string(),
+            },
+            "WH-1000XM4",
+        );
+        let parts = panel.overlay_parts();
+
+        assert_eq!(
+            parts.items.last().expect("prompt row").trim(),
+            "\u{f293}  Enter 1234 on 'WH-1000XM4'"
+        );
+        assert!(parts.hint.contains("cancel pairing"));
+    }
+
+    #[test]
+    fn cancelling_a_pairing_prompt_keeps_the_picker() {
+        let mut panel = bluetooth_panel();
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Pin,
+            "WH-1000XM4",
+        );
+        panel.push_char('1');
+
+        assert!(panel.cancel_pairing_prompt());
+        assert!(panel.pairing_prompt().is_none());
+        assert!(panel.is_bluetooth_picker());
+        assert!(!panel.cancel_pairing_prompt(), "nothing left to cancel");
+        // The Wi-Fi prompt API must not eat a pairing prompt.
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Confirm { passkey: 1 },
+            "WH-1000XM4",
+        );
+        assert!(!panel.cancel_wifi_passphrase());
+        assert!(panel.pairing_prompt().is_some());
+    }
+
+    #[test]
+    fn pairing_prompts_only_open_on_the_bluetooth_picker() {
+        let mut panel = SystemUiState::wifi_picker("");
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Pin,
+            "WH-1000XM4",
+        );
+        assert!(panel.pairing_prompt().is_none());
+        assert!(!panel.is_prompting());
+    }
+
+    #[test]
+    fn every_glyph_stays_in_the_widely_available_range_with_pairing_prompts() {
+        let mut panel = bluetooth_panel();
+        for prompt in [
+            crate::jwm::features::pairing::PairingPrompt::Pin,
+            crate::jwm::features::pairing::PairingPrompt::Confirm { passkey: 123_456 },
+            crate::jwm::features::pairing::PairingPrompt::Display {
+                code: "1234".to_string(),
+            },
+        ] {
+            panel.prompt_bluetooth_pairing(&prompt, "WH-1000XM4");
+            let parts = panel.overlay_parts();
+            for ch in parts
+                .items
+                .iter()
+                .chain(std::iter::once(&parts.hint))
+                .flat_map(|row| row.chars())
+                .filter(|ch| ('\u{f000}'..'\u{f900}').contains(ch))
+            {
+                assert!(
+                    (ch as u32) < 0xf600,
+                    "{ch:?} (U+{:04X}) is outside the FontAwesome-4 range",
+                    ch as u32
+                );
+            }
+        }
     }
 
     #[test]

@@ -205,7 +205,10 @@ mistyped passphrase can be retried without rescanning.
 `Alt+Ctrl+F12` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
 the devices the controller remembers: connected first, then paired, then by
 name. `Enter` connects the selected device, or disconnects it if it is already
-connected; `r` re-reads the list; `Esc` — or `Alt+Ctrl+F12` again — closes.
+connected; on a device that was never bonded, `Enter` starts pairing (below).
+`s` runs a bounded fifteen-second discovery scan and merges what it hears into
+the list; `r` re-reads the remembered list; `Esc` — or `Alt+Ctrl+F12` again —
+closes.
 
 Reading the list is one `bluetoothctl info` per device, so it runs on a worker
 thread like the Wi-Fi scan and the panel shows `Reading devices…` until it
@@ -213,9 +216,38 @@ lands. After a connect or disconnect the list is re-read, so the row shows
 what actually took rather than what was asked — `bluetoothctl` exits 0 even
 when the attempt failed, so the outcome is read out of what it printed.
 
-Pairing a *new* device is out of scope: it needs interactive agent
-confirmation. Pair once with `bluetoothctl`, and the device shows up here
-afterwards.
+### Pairing
+
+Pairing is driven by a one-shot helper: `jwm-bridge pair <address>` registers
+an `org.bluez.Agent1` with capability `KeyboardDisplay` on the system bus,
+calls `Device1.Pair`, and relays BlueZ's callbacks to the picker. JWM keeps
+the session state and draws the prompts; the helper never outlives the session
+and exits as soon as pairing completes, fails, or is cancelled.
+
+Three prompt shapes exist, all naming the device:
+
+- **PIN entry** — the device shows a code, you type it. Masked like the Wi-Fi
+  passphrase, 1-16 characters, `Enter` submits.
+- **Numeric comparison** — `Confirm passkey 123456 on '<name>'?`. `y` or
+  `Enter` confirms, `n` or `Esc` rejects.
+- **Display** — `Enter 1234 on '<name>'`: type the code on the device itself;
+  the panel takes no input.
+
+`Esc` (or closing/replacing the panel in any way) cancels the pairing: JWM
+broadcasts the cancel, the helper fails its outstanding BlueZ request or calls
+`CancelPairing`, and the picker stays open with a one-line status. An
+unanswered prompt times out after 25 seconds; a helper that never reports back
+is given up on after 95 seconds. A successful pairing re-reads the device
+list; a failure leaves the reason on the status line and can be retried.
+
+The helper answers only callbacks naming the device it was started for and
+refuses inbound `RequestAuthorization`/`AuthorizeService` outright. Prompts
+and outcomes travel over two IPC commands (`bluetooth_pairing_prompt`,
+`bluetooth_pairing_done`) matched to the session by a cookie JWM mints and
+passes through the helper's environment; answers go back as
+`bluetooth/pairing_response` events on the `bluetooth` topic, which JWM
+broadcasts only while a session is active. PINs and passkeys are never logged
+by either side, and JWM wipes the typed buffer once the answer is sent.
 
 ## Audio device pickers
 

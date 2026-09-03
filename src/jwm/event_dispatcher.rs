@@ -4780,6 +4780,17 @@ impl Jwm {
         next = min_optional_duration(next, self.secondary_bar_next_wakeup(now));
         next = min_optional_duration(next, self.ping_next_wakeup(now));
         next = min_optional_duration(next, self.idle_next_wakeup(now));
+        // A live Bluetooth pairing session owns two deadlines (prompt and
+        // whole-session); wake exactly when `poll_bluetooth_jobs` must
+        // enforce them.
+        if let Some(pairing) = self
+            .features
+            .bluetooth_pairing
+            .as_ref()
+            .and_then(|session| session.next_timeout_in(now))
+        {
+            next = min_optional_duration(next, Some(pairing));
+        }
         next = min_optional_duration(next, self.resources_next_wakeup(now));
         next = min_optional_duration(next, Some(self.battery_next_wakeup(now)));
         next.expect("config reload always supplies a maintenance deadline")

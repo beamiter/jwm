@@ -21,12 +21,14 @@ void main() {
 
 /// Draws the pointer into the capture target.
 ///
-/// The Wayland session has no cursor image to sample: KMS scans the real cursor
-/// out on its own plane, so the compositor only ever knows where the pointer is.
-/// The recorder therefore synthesises the same arrow it always has — the shape
-/// below is `SOFTWARE_CURSOR_RECTS` expressed for the GPU, drawn as a black
-/// shadow offset by one cursor unit and then an opaque white fill, exactly as
-/// the CPU compositing pass did it.
+/// When KMS assembles the real cursor outside the compositor texture (its own
+/// plane, or an exact-sRGB fallback frame), the capture source has no cursor
+/// image to sample, so the recorder synthesises the same arrow it always has —
+/// the shape below is `SOFTWARE_CURSOR_RECTS` expressed for the GPU, drawn as
+/// a black shadow offset by one cursor unit and then an opaque white fill,
+/// exactly as the CPU compositing pass did it. Frames where the cursor class
+/// was internalized into the common-linear target already carry the themed
+/// cursor in the capture view and skip this draw (`cursor_already_present`).
 ///
 /// `u_origin` is where the pointer sits in the recorded frame and `u_scale` how
 /// many output pixels one cursor unit spans, so the arrow follows a scaled
@@ -467,6 +469,7 @@ impl RecordingState {
         gl: &ffi::Gles2,
         source_fbo: u32,
         pointer_position: (f32, f32),
+        cursor_already_present: bool,
     ) {
         if !self.active {
             return;
@@ -499,7 +502,13 @@ impl RecordingState {
             // The pointer is drawn into the capture target before packing. The
             // CPU pass this replaces wrote it into the readback buffer
             // afterwards, which a subsampled pixel format cannot accommodate.
-            self.draw_cursor(gl, pointer_position);
+            // Skipped when the source already carries the real cursor: on
+            // frames where the cursor class was internalized into the
+            // compositor's common-linear target, the capture view contains the
+            // themed cursor and the synthesised arrow would double it.
+            if !cursor_already_present {
+                self.draw_cursor(gl, pointer_position);
+            }
 
             // Convert to NV12 on the GPU so the readback, the copy out of
             // mapped memory, the pipe and ffmpeg's read all carry 1.5 bytes per
