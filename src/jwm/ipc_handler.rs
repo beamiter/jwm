@@ -562,6 +562,7 @@ fn color_session_policy_json(
     // reports HDR metadata on its last successful presentation — derived,
     // never inferred from configuration.
     hdr_refusals: &[(String, Option<String>)],
+    hdr_enable_available: bool,
     hdr_observed_active: bool,
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
@@ -631,8 +632,14 @@ fn color_session_policy_json(
     if hdr_postprocess_requested {
         blockers.extend(hdr_refusal_blockers.iter().copied());
     }
-    let hdr_signalling_enable_available =
-        !hdr_refusals.is_empty() && hdr_refusals.iter().any(|(_, refusal)| refusal.is_none());
+    // "Available" means the enable *command* would be accepted, which is what
+    // a toggle needs to know. It is not "nothing is blocking right now":
+    // a momentary refusal — a toast on screen, this frame's delivery route —
+    // is exactly what the request latch carries across, so reading one as
+    // unavailable would hide the feature on hardware that supports it. The
+    // backend answers with the command's own rule rather than this object
+    // re-deriving it from wire names.
+    let hdr_signalling_enable_available = hdr_enable_available;
 
     // This object remains the static policy/capability view. The sibling
     // `color_delivery` object carries the separately versioned, vblank-backed
@@ -2585,6 +2592,7 @@ impl Jwm {
             color_advanced_enabled,
             color_delivery.is_some(),
             &hdr_enable_refusals,
+            backend.compositor_hdr_enable_available(),
             hdr_observed_active,
         );
         let color_surface_samples = color_surfaces
@@ -4015,6 +4023,7 @@ mod tests {
             true,
             &REFUSED,
             false,
+            false,
         );
         assert_eq!(full["mixed_hdr_outputs"], true);
         assert_eq!(full["heterogeneous_output_profiles"], true);
@@ -4089,6 +4098,7 @@ mod tests {
             false,
             &REFUSED,
             false,
+            false,
         );
         assert_eq!(
             unavailable["fallback_policy"]["route_observation"],
@@ -4108,6 +4118,7 @@ mod tests {
             false,
             true,
             &REFUSED,
+            false,
             false,
         );
         assert_eq!(
@@ -4132,6 +4143,7 @@ mod tests {
             false,
             true,
             &REFUSED,
+            false,
             false,
         );
         assert_eq!(
@@ -4164,8 +4176,17 @@ mod tests {
         hlg.id = OutputId(3);
         hlg.name = "HDMI-A-2".into();
         hlg.identity = OutputIdentity::connector_only("HDMI-A-2");
-        let pq_hlg =
-            color_session_policy_json(&[pq, hlg], true, true, false, true, true, &REFUSED, false);
+        let pq_hlg = color_session_policy_json(
+            &[pq, hlg],
+            true,
+            true,
+            false,
+            true,
+            true,
+            &REFUSED,
+            false,
+            false,
+        );
         assert_eq!(pq_hlg["mixed_hdr_outputs"], false);
         assert_eq!(pq_hlg["heterogeneous_output_profiles"], true);
         assert_eq!(

@@ -191,6 +191,14 @@ struct KmsOutputState {
     legacy_gamma_override: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
+    /// The HDR_OUTPUT_METADATA blob currently committed on this connector.
+    ///
+    /// Tracked so it can be destroyed when it is replaced or cleared. Each
+    /// assert creates a new kernel blob; dropping the id on the floor leaks
+    /// one per assert for the life of the DRM fd, and the reconcile loop
+    /// asserts again every time a toast clears. `installed_gamma_lut` and
+    /// `installed_ctm` are tracked for exactly the same reason.
+    installed_hdr_metadata_blob: Option<u64>,
     /// `VrrSupport::Supported` on this connector, probed once at init.
     /// `vrr_supported` costs two ioctls and rebuilds the connector info for
     /// an answer that only changes on hotplug, so it must not be in the
@@ -759,6 +767,17 @@ pub(super) enum HdrEnableRefusal {
     /// No software delivery region covers this output, so nothing applies the
     /// output transfer function to it.
     NoSoftwareDeliveryRegion,
+    /// This output's physical rectangle overlaps another participating
+    /// output — a mirrored or cloned layout.
+    ///
+    /// Asserting HDR here gives this output a transfer function its twin does
+    /// not have, and `plan_software_color_regions` rejects a plan whose
+    /// overlapping regions carry different profiles. The assertion would undo
+    /// itself the next frame and re-assert the frame after, forever —
+    /// mode-switching the display in and out of HDR, and signalling PQ over
+    /// an sRGB fallback frame each time round. A stable refusal is the only
+    /// correct answer; stability is what a fail-closed gate is for.
+    OverlappingOutputProfileConflict,
 }
 
 impl HdrEnableRefusal {
@@ -776,6 +795,7 @@ impl HdrEnableRefusal {
             Self::DeliveryBlocked => "color_delivery_blocked",
             Self::HardwareLutRouteClipsHdrHeadroom => "hardware_lut_route_clips_hdr_headroom",
             Self::NoSoftwareDeliveryRegion => "no_software_delivery_region",
+            Self::OverlappingOutputProfileConflict => "overlapping_output_profile_conflict",
         }
     }
 }
@@ -811,6 +831,8 @@ pub(super) struct HdrEnableEvidence {
     pub hardware_pair_active: bool,
     /// KMS color state is unresolved and presentation is held.
     pub delivery_blocked: bool,
+    /// This output's physical rectangle overlaps another participating one.
+    pub overlaps_participating_output: bool,
 }
 
 /// What one output's HDR signalling should do this frame.
@@ -880,11 +902,17 @@ pub(super) const fn hdr_enable_refusal(e: &HdrEnableEvidence) -> Option<HdrEnabl
     if !e.advanced_color_management {
         return Some(HdrEnableRefusal::AdvancedColorManagementDisabled);
     }
-    if !e.scene_linear_active {
-        return Some(HdrEnableRefusal::SceneLinearTargetInactive);
-    }
+    // Configuration before frame content, as the doc above says. These two
+    // were the other way round, and it mattered: with the render path or
+    // scene-linear compositing switched off, `scene_linear_active` is false
+    // *because* `offload_gate_on` is, so the momentary refusal masked the
+    // permanent one and `set_hdr_metadata` answered Ok to a request that
+    // configuration can never honour.
     if !e.offload_gate_on {
         return Some(HdrEnableRefusal::ColorPipelineOffloadDisabled);
+    }
+    if !e.scene_linear_active {
+        return Some(HdrEnableRefusal::SceneLinearTargetInactive);
     }
     if !e.linear_tail_safe {
         return Some(HdrEnableRefusal::LinearTailUnsafe);
@@ -894,6 +922,11 @@ pub(super) const fn hdr_enable_refusal(e: &HdrEnableEvidence) -> Option<HdrEnabl
     }
     if e.delivery_blocked {
         return Some(HdrEnableRefusal::DeliveryBlocked);
+    }
+    // Before the route refusals: they are downstream consequences of the same
+    // overlap, and reporting one of those would hide the actual reason.
+    if e.overlaps_participating_output {
+        return Some(HdrEnableRefusal::OverlappingOutputProfileConflict);
     }
     if e.hardware_pair_active {
         return Some(HdrEnableRefusal::HardwareLutRouteClipsHdrHeadroom);
@@ -3855,6 +3888,15 @@ impl KmsState {
             }
             return Err(error);
         }
+        // The blob the connector was holding is no longer referenced by
+        // anything. Freeing it here is what stops one kernel blob leaking per
+        // assert — and the reconcile loop asserts again every time a toast
+        // clears. `apply_scanout_color_goals` frees its replaced CRTC blobs
+        // the same way.
+        if let Some(previous) = self.outputs[output_idx].installed_hdr_metadata_blob {
+            let _ = dev.destroy_property_blob(previous);
+        }
+        self.outputs[output_idx].installed_hdr_metadata_blob = (blob_id != 0).then_some(blob_id);
         drop(mgr);
 
         crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
@@ -4253,6 +4295,24 @@ impl KmsState {
                 linear_tail_safe,
                 scene_linear_active,
             );
+            // A permanent refusal drops the request. Keeping it would leave
+            // `hdr_route_requested` true forever — suppressing the CRTC
+            // CTM+LUT route for the whole delivery group and paying the
+            // software shader route with no HDR to show for it — after, say,
+            // the HDR panel was swapped for an SDR one on the same connector,
+            // with no log line and no way back but a disable the user has no
+            // reason to think of.
+            if let Some(refusal) = refusal
+                && self.outputs[index].hdr_requested
+                && hdr_enable_refusal_is_permanent(refusal)
+            {
+                log::info!(
+                    "[kms-cm] dropping the HDR request on {}: {}",
+                    self.outputs[index].output_name,
+                    refusal.wire_name()
+                );
+                self.outputs[index].hdr_requested = false;
+            }
             let action =
                 hdr_signalling_action(self.outputs[index].hdr_requested, refusal.is_some(), active);
             let want = match action {
@@ -4356,6 +4416,19 @@ impl KmsState {
             software_region_planned: output.last_software_region_planned,
             hardware_pair_active: output.last_hardware_pair_active,
             delivery_blocked: self.color_pipeline_delivery_blocked,
+            overlaps_participating_output: self.outputs.iter().enumerate().any(
+                |(other_index, other)| {
+                    other_index != index
+                        && !other.dpms_off
+                        && !state.soft_disabled_outputs.contains(&other.output_name)
+                        && rect_overlaps_output(
+                            other.origin,
+                            other.mode_size,
+                            output.origin,
+                            output.mode_size,
+                        )
+                },
+            ),
         })
     }
 
@@ -6613,6 +6686,7 @@ impl KmsState {
                 output_tf,
                 output_ctm,
                 legacy_gamma_override: false,
+                installed_hdr_metadata_blob: None,
                 vrr_supported_without_modeset,
                 vrr_last_attempt: None,
                 vrr_override: None,
@@ -8015,7 +8089,8 @@ impl Drop for KmsState {
                 o.installed_gamma_lut
                     .map(|(id, _)| id)
                     .into_iter()
-                    .chain(o.installed_ctm.into_iter())
+                    .chain(o.installed_ctm)
+                    .chain(o.installed_hdr_metadata_blob)
             })
             .collect();
         let mgr = self.drm_output_manager.lock();
@@ -8222,6 +8297,7 @@ mod compositor_texture_ownership_tests {
             software_region_planned: true,
             hardware_pair_active: false,
             delivery_blocked: false,
+            overlaps_participating_output: false,
         }
     }
 
@@ -8289,6 +8365,23 @@ mod compositor_texture_ownership_tests {
             spoil(|e| e.software_region_planned = false),
             Some(R::NoSoftwareDeliveryRegion)
         );
+        assert_eq!(
+            spoil(|e| e.overlaps_participating_output = true),
+            Some(R::OverlappingOutputProfileConflict)
+        );
+
+        // Configuration is tested before frame content. These two were the
+        // other way round, and with the render path switched off
+        // `scene_linear_active` is false *because* `offload_gate_on` is — so
+        // the momentary refusal masked the permanent one and the enable
+        // command answered Ok to a request configuration can never honour.
+        let mut unconfigured = hdr_ready();
+        unconfigured.offload_gate_on = false;
+        unconfigured.scene_linear_active = false;
+        assert_eq!(
+            hdr_enable_refusal(&unconfigured),
+            Some(R::ColorPipelineOffloadDisabled)
+        );
     }
 
     #[test]
@@ -8324,11 +8417,11 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn the_headroom_refusal_is_a_backstop_not_the_normal_answer() {
+    fn a_request_steers_the_route_so_the_headroom_refusal_stays_a_backstop() {
         use super::HdrEnableRefusal as R;
 
-        // The refusal exists and fires when the hardware pair is somehow
-        // active under a request...
+        // The refusal fires when the hardware pair is active under a
+        // request...
         let mut paired = hdr_ready();
         paired.hardware_pair_active = true;
         assert_eq!(
@@ -8336,48 +8429,68 @@ mod compositor_texture_ownership_tests {
             Some(R::HardwareLutRouteClipsHdrHeadroom)
         );
 
-        // ...but it must not be where a request normally lands. The route
-        // planner suppresses the CRTC pair while any participating output has
-        // a request, precisely because the pair is preferred wherever the
-        // hardware has the stages — without that, an enable would be refused
-        // forever on exactly the hardware capable of HDR, and the feature
-        // would look implemented while never once firing.
-        assert!(!hdr_ready().hardware_pair_active);
-        assert_eq!(hdr_enable_refusal(&hdr_ready()), None);
+        // ...but it must not be where a request normally lands, because the
+        // pair is *preferred* wherever the CRTC has GAMMA_LUT+CTM. Without
+        // the route steering an enable would be refused forever on exactly
+        // the hardware capable of HDR: implemented-looking, never firing.
+        // `refresh_color_pipeline_offload` needs a device, so the clause is
+        // pinned by reading the source of the function it lives in — the
+        // haystack is narrowed to that function, and the needle assembled at
+        // runtime, so this cannot match its own literal the way a
+        // whole-file scan of a written-out needle would.
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        let body = SOURCE
+            .split_once("pub(super) fn refresh_color_pipeline_offload(")
+            .expect("refresh_color_pipeline_offload exists")
+            .1
+            .split_once("fn finish_color_pipeline_decision(")
+            .expect("finish_color_pipeline_decision follows it")
+            .0;
+        let needle = format!("&& !{}", "hdr_route_requested");
         assert!(
-            SOURCE_STEERS_THE_ROUTE_ON_REQUEST,
+            body.contains(&needle),
             "hw_pair_target must be filtered by hdr_route_requested"
+        );
+        assert!(
+            !SOURCE
+                .split_once("pub(super) fn refresh_color_pipeline_offload(")
+                .expect("split")
+                .0
+                .contains(&needle),
+            "the needle must not appear before the function, or this proves nothing"
         );
     }
 
-    /// The route-steering clause is one line inside a long function; a source
-    /// assertion is what keeps it from being refactored away silently, in the
-    /// same spirit as `render_hot_path_reuses_cached_output_names`.
-    const SOURCE_STEERS_THE_ROUTE_ON_REQUEST: bool = {
-        const SOURCE: &str = include_str!("udev_kms.rs");
-        // `str::contains` is not const; a byte scan is.
-        const NEEDLE: &[u8] = b"&& !hdr_route_requested";
-        const HAYSTACK: &[u8] = SOURCE.as_bytes();
-        let mut i = 0;
-        let mut found = false;
-        while i + NEEDLE.len() <= HAYSTACK.len() {
-            let mut j = 0;
-            let mut matched = true;
-            while j < NEEDLE.len() {
-                if HAYSTACK[i + j] != NEEDLE[j] {
-                    matched = false;
-                    break;
-                }
-                j += 1;
-            }
-            if matched {
-                found = true;
-                break;
-            }
-            i += 1;
-        }
-        found
-    };
+    #[test]
+    fn a_mirrored_output_is_refused_rather_than_flipped_every_frame() {
+        use super::HdrEnableRefusal as R;
+
+        // Asserting HDR on one of two cloned outputs gives it a transfer
+        // function its twin does not have, and the region planner rejects a
+        // plan whose overlapping regions carry different profiles. The next
+        // frame would then refuse for want of a region, withdraw, restore the
+        // plan, and re-assert — mode-switching the display in and out of HDR
+        // forever, and signalling PQ over an sRGB fallback frame each time
+        // round. A stable refusal is the only correct answer.
+        let mut mirrored = hdr_ready();
+        mirrored.overlaps_participating_output = true;
+        assert_eq!(
+            hdr_enable_refusal(&mirrored),
+            Some(R::OverlappingOutputProfileConflict)
+        );
+        // It is momentary — unplug the clone and HDR comes back — so it must
+        // not fail the enable command.
+        assert!(!super::hdr_enable_refusal_is_permanent(
+            R::OverlappingOutputProfileConflict
+        ));
+        // And it is tested before the route refusals, which are downstream
+        // consequences of the same overlap.
+        mirrored.software_region_planned = false;
+        assert_eq!(
+            hdr_enable_refusal(&mirrored),
+            Some(R::OverlappingOutputProfileConflict)
+        );
+    }
 
     #[test]
     fn the_signalling_loop_withdraws_on_a_toast_and_re_asserts_when_it_clears() {
@@ -8479,6 +8592,7 @@ mod compositor_texture_ownership_tests {
             R::DeliveryBlocked,
             R::HardwareLutRouteClipsHdrHeadroom,
             R::NoSoftwareDeliveryRegion,
+            R::OverlappingOutputProfileConflict,
         ];
         let mut names: Vec<&str> = all.iter().map(|refusal| refusal.wire_name()).collect();
         names.sort_unstable();

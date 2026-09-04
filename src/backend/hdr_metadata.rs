@@ -41,8 +41,18 @@ pub fn pick_eotf(caps: &EdidHdrCapabilities) -> Eotf {
     }
 }
 
+/// The mastering display primaries the descriptor claims.
+///
+/// This has to use the same predicate `color_policy::params_from_edid` uses
+/// to pick the *container* primaries, or the three halves of one signal
+/// disagree: the connector's `Colorspace` is programmed to BT2020_RGB
+/// whenever HDR is asserted, and the software region encodes BT.2020 for any
+/// PQ/HLG panel — so a panel whose CTA colorimetry block sets no BT.2020 bit
+/// would be sent BT.2020-encoded pixels under a BT.2020 colorimetry signal
+/// while being told they were mastered on a BT.709 display, which is a
+/// gamut-mapping error the sink acts on.
 pub fn pick_primaries(caps: &EdidHdrCapabilities) -> Chromaticity {
-    if caps.supports_bt2020 {
+    if caps.supports_bt2020 || caps.supports_pq || caps.supports_hlg {
         PRIMARIES_BT2020
     } else {
         PRIMARIES_BT709
@@ -181,6 +191,37 @@ mod tests {
     }
 
     #[test]
+    fn the_descriptor_primaries_match_the_container_the_pixels_use() {
+        // A PQ panel whose CTA colorimetry block sets no BT.2020 bit still
+        // gets BT.2020 container primaries from `params_from_edid`, and the
+        // connector is programmed to Colorspace = BT2020_RGB whenever HDR is
+        // asserted. The descriptor has to agree, or the sink is told the
+        // content was mastered on a BT.709 display while receiving BT.2020
+        // pixels under a BT.2020 signal.
+        let pq_only = EdidHdrCapabilities {
+            max_luminance_nits: 600.0,
+            min_luminance_nits: 0.01,
+            supports_bt2020: false,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        assert_eq!(pick_primaries(&pq_only).r, PRIMARIES_BT2020.r);
+        let params = crate::backend::color_policy::params_from_edid(&pq_only);
+        assert_eq!(params.primaries_named, Some(6), "BT.2020 container");
+
+        // An SDR panel is described in BT.709, and never reaches the blob
+        // path anyway — the gate refuses it for lacking an HDR profile.
+        let sdr = EdidHdrCapabilities {
+            max_luminance_nits: 0.0,
+            min_luminance_nits: 0.0,
+            supports_bt2020: false,
+            supports_pq: false,
+            supports_hlg: false,
+        };
+        assert_eq!(pick_primaries(&sdr).r, PRIMARIES_BT709.r);
+    }
+
+    #[test]
     fn build_from_edid_falls_back_to_config_peak() {
         let caps = EdidHdrCapabilities {
             max_luminance_nits: 0.0,
@@ -196,6 +237,9 @@ mod tests {
             600,
             "config peak used"
         );
-        assert_eq!(u16::from_ne_bytes([blob[6], blob[7]]), 32000, "BT709 R.x");
+        // BT.2020, not BT.709: an HLG panel gets a BT.2020 container from
+        // `params_from_edid` and a BT2020_RGB Colorspace on the connector, so
+        // the descriptor has to say the same thing about its pixels.
+        assert_eq!(u16::from_ne_bytes([blob[6], blob[7]]), 35400, "BT2020 R.x");
     }
 }

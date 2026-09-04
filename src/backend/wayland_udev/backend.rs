@@ -1400,6 +1400,34 @@ struct UdevDragState {
 }
 
 impl UdevBackend {
+    /// The two frame-shaped facts the HDR gate reads, built exactly as the
+    /// render loop builds them.
+    ///
+    /// `linear_tail_safe` is the compositor's tail verdict **and** the
+    /// external-element plan. Omitting the second half made the report
+    /// disagree with the frame loop in the ordinary case: a normal desktop
+    /// cursor is KMS-external and cannot be internalized, so the frame loop
+    /// refuses with `linear_tail_unsafe` every frame while the gate reported
+    /// "signalling permitted" and the session policy advertised the enable as
+    /// available. The point of one policy function is that the gate and the
+    /// frame loop cannot drift apart; they can still drift if they are handed
+    /// different evidence.
+    fn hdr_gate_frame_evidence(&self) -> (bool, bool) {
+        let Some(compositor) = self.compositor.as_ref() else {
+            return (false, false);
+        };
+        let scene_linear_active = compositor.scene_linear_color_path_active();
+        let external_safe = self.kms.as_ref().is_some_and(|kms| {
+            kms.borrow()
+                .external_element_color_plan(&self.state)
+                .is_safe()
+        });
+        (
+            compositor.linear_tail_status().linear_tail_safe() && external_safe,
+            scene_linear_active,
+        )
+    }
+
     fn request_flush(&self) {
         if !self.flush_pending.swap(true, Ordering::SeqCst) {
             let _ = self.flush_tx.send(());
@@ -3631,14 +3659,7 @@ impl BackendDiagnostics for UdevBackend {
         let Some(kms) = self.kms.as_ref() else {
             return Vec::new();
         };
-        let linear_tail_safe = self
-            .compositor
-            .as_ref()
-            .is_some_and(|compositor| compositor.linear_tail_status().linear_tail_safe());
-        let scene_linear_active = self
-            .compositor
-            .as_ref()
-            .is_some_and(|compositor| compositor.scene_linear_color_path_active());
+        let (linear_tail_safe, scene_linear_active) = self.hdr_gate_frame_evidence();
         let kms = kms.borrow();
         kms.output_names()
             .into_iter()
@@ -3655,6 +3676,23 @@ impl BackendDiagnostics for UdevBackend {
                 (name, refusal)
             })
             .collect()
+    }
+
+    fn compositor_hdr_enable_available(&self) -> bool {
+        let Some(kms) = self.kms.as_ref() else {
+            return false;
+        };
+        let (linear_tail_safe, scene_linear_active) = self.hdr_gate_frame_evidence();
+        let kms = kms.borrow();
+        (0..kms.output_names().len()).any(|index| {
+            kms.hdr_enable_refusal_for_output(
+                index,
+                &self.state,
+                linear_tail_safe,
+                scene_linear_active,
+            )
+            .is_none_or(|refusal| !kms::hdr_enable_refusal_is_permanent(refusal))
+        })
     }
 
     fn compositor_tearing_hint_count(&self) -> usize {
@@ -4365,14 +4403,7 @@ impl DisplayControl for UdevBackend {
         drop(shared);
 
         if enabled {
-            let linear_tail_safe = self
-                .compositor
-                .as_ref()
-                .is_some_and(|compositor| compositor.linear_tail_status().linear_tail_safe());
-            let scene_linear_active = self
-                .compositor
-                .as_ref()
-                .is_some_and(|compositor| compositor.scene_linear_color_path_active());
+            let (linear_tail_safe, scene_linear_active) = self.hdr_gate_frame_evidence();
             if let Some(refusal) = kms.borrow().hdr_enable_refusal_for_output(
                 index,
                 &self.state,

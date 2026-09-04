@@ -41,7 +41,7 @@ then configuration, then this frame's content:
 | Reason | Meaning |
 | --- | --- |
 | `output_not_participating` | DPMS off, or soft-disabled through wlr-output-management. |
-| `scanout_chain_*` | The 10-bit format / plane / CRTC-stage / connector-property chain is incomplete. Six distinct variants name which link. |
+| `scanout_chain_*` | The 10-bit format / plane / CRTC-stage / connector-property chain is incomplete. Five variants name which link; a sixth, `scanout_chain_cross_device`, exists for a multi-GPU delivery path that does not exist yet and is never reported today. |
 | `edid_lacks_hdr_profile` | The panel's EDID advertises neither PQ nor HLG, so there is no CTA-861.3 blob that would describe it. |
 | `advanced_color_management_disabled` | Clients are being told this output is exact sRGB. |
 | `scene_linear_target_inactive` | No FP16 common-linear target; the frame is composed in encoded sRGB. |
@@ -51,6 +51,7 @@ then configuration, then this frame's content:
 | `color_delivery_blocked` | KMS colour state is unresolved and presentation is being held. |
 | `hardware_lut_route_clips_hdr_headroom` | See below. |
 | `no_software_delivery_region` | No software delivery region covers this output, so nothing applies its transfer function. |
+| `overlapping_output_profile_conflict` | This output is mirrored onto another. Giving one of two cloned outputs a different transfer function makes the region plan fail, which would withdraw the signal the next frame and re-assert it the frame after — forever. |
 
 ```sh
 jwm-tool wayland-status --json | jq '.color_management.session_policy.hdr_enable_refusals'
@@ -89,7 +90,14 @@ with no latch the first toast would drop HDR permanently.
 
 A withdrawal clears `Colorspace` to Default and the metadata blob to zero in
 the same controlled atomic request that set them, so the sink is never left
-told BT.2020 with no metadata behind it.
+told BT.2020 with no metadata behind it. The kernel blob a previous assert
+installed is destroyed when it is replaced or cleared.
+
+A refusal the user cannot wait out — an SDR panel appearing on the connector,
+the advanced switch going off — also *drops* the request rather than parking
+it, because a request that can never be honoured would still steer the
+delivery route away from the CRTC pair for every output, paying the software
+shader path for nothing.
 
 The one exception is an output that has gone dark — DPMS off, or
 soft-disabled through wlr-output-management. There the claim is dropped
@@ -114,10 +122,13 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 
 - `color_management.session_policy.hdr_active` — whether any output presented
   with HDR metadata.
-- `…delivery_capabilities.hdr_signalling_enable_available` — whether at least
-  one output currently has no refusal. An empty `hdr_enable_refusals` array
-  means the backend has no gate of its own (X11, headless), which is **not**
-  an availability claim.
+- `…delivery_capabilities.hdr_signalling_enable_available` — whether the
+  enable *command* would be accepted on at least one output. Not "nothing is
+  refusing right now": a refusal the request latch carries across (a toast, a
+  route change) does not fail the command, and reading one as unavailable
+  would hide the feature on the hardware that supports it. An empty
+  `hdr_enable_refusals` array means the backend has no gate of its own (X11,
+  headless), which is **not** an availability claim.
 - Per-output `color_policy.selected_transfer_function` / `selected_primaries`
   — the profile the display is being told *now*. Signalled outputs report
   their EDID-derived profile; everything else reports sRGB.

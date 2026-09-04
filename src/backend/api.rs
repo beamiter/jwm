@@ -2480,6 +2480,18 @@ pub trait BackendDiagnostics: Send {
         Vec::new()
     }
 
+    /// Whether an HDR enable command would be accepted on at least one
+    /// output right now.
+    ///
+    /// Not the same as "no output is refusing": a refusal the request latch
+    /// carries across — a toast on screen, this frame's delivery route — does
+    /// not make the command fail, and reporting it as unavailable would hide
+    /// the feature on exactly the hardware that supports it. Answered by the
+    /// backend so the command and the report apply one rule.
+    fn compositor_hdr_enable_available(&self) -> bool {
+        false
+    }
+
     fn compositor_session_lock_surface_count(&self) -> usize {
         0
     }
