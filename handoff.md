@@ -4,6 +4,65 @@
 
 ---
 
+## 2026-09-04：十二轮补充（蓝牙 v2 之三：入站授权，用户手动开窗）
+
+v1 记录里 v2 候选的最后一项。**结论先说：做成「用户显式开一个 60s 窗口」，
+不做常驻默认 agent。**
+
+**为什么不常驻。** 常驻 agent 要么塞进长期 `jwm-bridge`（它是 session bus 上被
+D-Bus 激活的 `org.freedesktop.Notifications`，从不开 system bus，且全仓库唯一
+的 spawn 点是 `toggles.rs` 的配对路径——安全相关的 prompt 却要等到本 session
+第一条通知才存在，可用性不确定），要么单独常驻进程；两者都把「一台指定设备、
+≤90s」变成「任何设备、永远」，且 cookie 从「一次会话」退化成长期进程秘密或者
+反向由 helper 铸造——正好推翻 `pairing.rs:236` 与 `main.rs:41` 写死的信任方向。
+另外 `RequestDefaultAgent` 是后写者赢：常驻会在整个 session 里把 default 从
+blueman/gnome-bluetooth 手里抢走，而对方稍后启动又抢回去，我们的 prompt 从此
+静默且无信号。
+
+1. **落点（helper）**：新 `jwm-bridge accept`，cookie 仍走环境变量。自愈查询用
+   新的 `inbound_session_matches`——**除 cookie 外还校验 `kind == "inbound"`**，
+   否则一个 inbound agent 可能被挂到 jwm 为「配对一台指定设备」开的会话上，那
+   正是把窄窗口变成常开门的路径。agent 服务在
+   `/org/jwm/inbound_agent`（与 `AGENT_PATH` 分开只为日志可读），
+   RegisterAgent + RequestDefaultAgent（入站请求只发给 default agent，不抢就等
+   于注册了永远收不到），然后**不调用 `Pair`**，只等回调。
+2. **必须开 Pairable/Discoverable**：本机实测两者默认都是 false
+   （`busctl get-property … Adapter1 Discoverable Pairable` → `b false` / `b
+   false`），不开的话整条功能是「已武装、逻辑正确、完全无法触达」。
+   `AdapterExposure` 记下开窗前的原值，收摊时**恢复**而不是清零。
+3. **目标晚绑定，不是不绑**：`Shared.target` 变成 `Mutex<Option<String>>`，
+   `bind_target` 第一次回调钉住、之后与旧逻辑逐字相同；jwm 侧对称地
+   `PairingSession::inbound` + `pin_address`，`matches()` 在未钉住时只接受
+   *合法地址*，钉住后恢复严格相等。配对 helper 仍恒拒入站
+   （`Shared.accepts_inbound = false`），有专门集成测试钉住。
+4. **prompt 泛化**：`PairingPrompt::Authorize { service: Option<String> }`
+   （None=RequestAuthorization，Some=AuthorizeService）、
+   `PairingPhase::AwaitingAuthorization`、`PromptKind::Authorize`。
+   UUID 经 `service_label` 查表转成人能判断的 profile 名（认不出就原样显示——
+   编一个名字比显示 UUID 更糟）；service 与 device_name 都按既有规矩定界并拒
+   控制字符（远端可控字符串要落到模态面板上）。y/n 走
+   `PromptKind::is_yes_no` 与 Confirm 合并成一条分支，`answer_bluetooth_confirm`
+   的 phase 守卫同时认两种，其余一律 return。
+5. **窗口寿命 60s**（`INBOUND_WINDOW`），比配对的 95s 短：它是投机开的，且整个
+   生命期里控制器都是可发现的。`session_timed_out`/`next_timeout_in` 改走
+   `lifetime()`；关面板/hand-over/Esc/scrim 全部沿用既有 `cancel_bluetooth_pairing`
+   汇合点，窗口不会活过面板。同一时刻仍只允许一个会话（任一方向）。
+
+已知限制与非目标：**未实测真机入站**（本机有 hci0 但没有会主动来配对的外设），
+覆盖来自私有 dbus-daemon + 假 org.bluez 的 3 个新集成测试（允许→bluez 收到成功、
+拒绝→bluez 收到错误、第二台设备被拒、配对 agent 恒拒入站）。锁屏下的入站没有单
+独处理：`prompt_bluetooth_pairing` 本就只在蓝牙 picker 在屏时渲染，而开窗必须是
+用户在 picker 里按 `a`，所以「锁屏时收到入站请求」根本不可达。
+「记住这次授权」（Trusted 之外的按服务持久化）不做，留 v2.1。
+
+验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
+`--no-default-features` 及 7 组 backend feature profile 全绿；
+`cargo test --locked` lib 2665 passed / 0 failed（上一条目 2659 + 新增 6：
+pairing 5、system_ui 1）；bridge 55 passed / 0 failed（上一条目 49 + 新增 6：
+纯逻辑 3、集成 3）。
+
+---
+
 ## 2026-09-04：十二轮（蓝牙 v2 之二：配对后自动连接 / D-Bus 发现）
 
 v1 记录里列的 v2 候选三项，本轮做掉后两项（入站授权见下一条目）。

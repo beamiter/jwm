@@ -1509,6 +1509,28 @@ impl Jwm {
                     "bluetooth_pairing_prompt: not the active pairing session".to_string(),
                 );
             }
+            // An armed inbound window learns its device here and only here:
+            // the first callback binds it, and `matches` above enforces it
+            // from then on, so the foreign-device rule is late-bound rather
+            // than dropped. An outbound session was already bound at spawn
+            // and this is a no-op for it.
+            if !session.pin_address(&command.address, &command.device_name) {
+                return IpcResponse::err(
+                    "bluetooth_pairing_prompt: not the device this session is bound to".to_string(),
+                );
+            }
+            // Only a request the user armed may draw a modal prompt. An
+            // authorization arriving on an outbound pairing session is a
+            // device answering something nobody asked, and is refused rather
+            // than rendered.
+            if matches!(command.prompt, pairing::PairingPrompt::Authorize { .. })
+                && session.kind() != pairing::PairingKind::Inbound
+            {
+                return IpcResponse::err(
+                    "bluetooth_pairing_prompt: authorization is only offered while an inbound window is armed"
+                        .to_string(),
+                );
+            }
             session.apply_prompt(command.prompt.clone(), std::time::Instant::now());
             self.features
                 .system_ui
@@ -1539,20 +1561,32 @@ impl Jwm {
                 );
             }
             let device_name = session.device_name().to_string();
+            let inbound = session.kind() == pairing::PairingKind::Inbound;
             self.features.bluetooth_pairing = None;
             // A prompt left on screen (bluez cancelled its request before the
             // user answered) is withdrawn without touching the list.
             self.features.system_ui.cancel_pairing_prompt();
             if self.features.system_ui.is_bluetooth_picker() {
                 if done.ok {
-                    log::info!("Bluetooth: paired with {device_name}");
-                    self.features.system_ui.set_bluetooth_message(
-                        crate::jwm::features::pairing::paired_message(&device_name, done.connected),
-                    );
+                    log::info!("Bluetooth: {device_name} allowed/paired");
+                    // An inbound window's own answer already went on the
+                    // status line ("Allowed"/"Refused"); the window closing
+                    // afterwards must not overwrite it with pairing words
+                    // that describe a different gesture.
+                    if !inbound {
+                        self.features.system_ui.set_bluetooth_message(
+                            crate::jwm::features::pairing::paired_message(
+                                &device_name,
+                                done.connected,
+                            ),
+                        );
+                    }
                     if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
                         self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     }
                     self.refresh_connectivity();
+                } else if inbound {
+                    log::info!("Bluetooth: request from {device_name} refused");
                 } else {
                     let reason = done.error.unwrap_or_else(|| "pairing failed".to_string());
                     log::warn!("Bluetooth: pairing with {device_name} failed: {reason}");

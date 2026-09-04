@@ -216,6 +216,13 @@ pub enum PromptKind {
     Confirm { passkey: u32, device: String },
     /// Code the user types on the device itself; no input on this panel.
     Display { code: String, device: String },
+    /// Something out there asked for something. `service` is `None` for a
+    /// device wanting to bond and `Some(name)` for a bonded device wanting a
+    /// profile. Only reachable while an inbound window is armed.
+    Authorize {
+        device: String,
+        service: Option<String>,
+    },
 }
 
 impl PromptKind {
@@ -230,7 +237,7 @@ impl PromptKind {
     fn secret(&mut self) -> Option<&mut String> {
         match self {
             Self::Passphrase(typed) | Self::Pin { typed, .. } => Some(typed),
-            Self::Confirm { .. } | Self::Display { .. } => None,
+            Self::Confirm { .. } | Self::Display { .. } | Self::Authorize { .. } => None,
         }
     }
 
@@ -260,7 +267,19 @@ impl PromptKind {
                 code: code.clone(),
                 device: device.clone(),
             },
+            Self::Authorize { device, service } => Self::Authorize {
+                device: device.clone(),
+                service: service.clone(),
+            },
         }
+    }
+
+    /// Whether this prompt is a plain yes/no. Both the numeric comparison and
+    /// an inbound authorization are answered by the same keys, so the input
+    /// layer asks this rather than matching two variants.
+    #[must_use]
+    pub fn is_yes_no(&self) -> bool {
+        matches!(self, Self::Confirm { .. } | Self::Authorize { .. })
     }
 }
 
@@ -302,6 +321,7 @@ impl ListKind {
                 PromptKind::Pin { .. } => "Enter  submit    Esc  cancel pairing",
                 PromptKind::Confirm { .. } => "y/Enter  confirm    n/Esc  reject",
                 PromptKind::Display { .. } => "Esc  cancel pairing",
+                PromptKind::Authorize { .. } => "y/Enter  allow    n/Esc  refuse",
             };
         }
         match self {
@@ -311,7 +331,7 @@ impl ListKind {
             Self::Clipboard => "Click/Enter  copy    d  forget    c  clear all    Esc  close",
             Self::Wifi => "Click/Enter  join    \u{f062}/\u{f063}  select    Esc  close",
             Self::Bluetooth => {
-                "Click/Enter  connect/disconnect/pair    s  scan    r  refresh    Esc  close"
+                "Enter  connect/pair    s  scan    a  accept incoming    r  refresh    Esc"
             }
             Self::Wallpaper => "Click/Enter  apply    \u{f062}/\u{f063}  select    Esc  close",
             Self::AudioOutput | Self::AudioInput => {
@@ -1636,6 +1656,12 @@ impl SystemUiState {
                 code: code.clone(),
                 device,
             },
+            crate::jwm::features::pairing::PairingPrompt::Authorize { service } => {
+                PromptKind::Authorize {
+                    device,
+                    service: service.clone(),
+                }
+            }
         });
         message.clear();
     }
@@ -2951,6 +2977,17 @@ impl SystemUiState {
                         PromptKind::Display { code, device } => {
                             items.push(format!("\u{f293}  Enter {code} on '{device}'"));
                         }
+                        PromptKind::Authorize { device, service } => {
+                            // Two different questions, and the difference
+                            // matters: one grants a bond, the other grants a
+                            // profile to a device that already has one.
+                            items.push(match service {
+                                Some(service) => format!(
+                                    "\u{f293}  Allow '{device}' to use {service}?"
+                                ),
+                                None => format!("\u{f293}  Allow '{device}' to pair?"),
+                            });
+                        }
                     }
                 } else if !message.is_empty() && !rows.is_empty() {
                     items.push(String::new());
@@ -3884,7 +3921,15 @@ mod tests {
             SystemUiState::bluetooth_picker("")
                 .overlay_parts()
                 .hint
-                .contains("connect/disconnect")
+                .contains("connect/pair")
+        );
+        // The inbound window is only reachable if the key that arms it is
+        // named somewhere the user will look.
+        assert!(
+            SystemUiState::bluetooth_picker("")
+                .overlay_parts()
+                .hint
+                .contains("a  accept incoming")
         );
         assert!(
             SystemUiState::wallpaper_picker(&[], "", "/walls")
@@ -4063,6 +4108,10 @@ mod tests {
             crate::jwm::features::pairing::PairingPrompt::Display {
                 code: "1234".to_string(),
             },
+            crate::jwm::features::pairing::PairingPrompt::Authorize { service: None },
+            crate::jwm::features::pairing::PairingPrompt::Authorize {
+                service: Some("Audio sink".to_string()),
+            },
         ] {
             panel.prompt_bluetooth_pairing(&prompt, "WH-1000XM4");
             let parts = panel.overlay_parts();
@@ -4080,6 +4129,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_authorization_prompt_says_which_grant_it_is_asking_for() {
+        let mut panel = bluetooth_panel();
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Authorize { service: None },
+            "MX Master 3S",
+        );
+        let parts = panel.overlay_parts();
+        assert!(
+            parts
+                .items
+                .iter()
+                .any(|row| row.contains("Allow 'MX Master 3S' to pair?")),
+            "{:?}",
+            parts.items
+        );
+        // Same keys as the numeric comparison, different words: this one is
+        // not confirming a code, it is granting access.
+        assert_eq!(parts.hint, "y/Enter  allow    n/Esc  refuse");
+
+        panel.prompt_bluetooth_pairing(
+            &crate::jwm::features::pairing::PairingPrompt::Authorize {
+                service: Some("Audio sink".to_string()),
+            },
+            "MX Master 3S",
+        );
+        assert!(
+            panel
+                .overlay_parts()
+                .items
+                .iter()
+                .any(|row| row.contains("Allow 'MX Master 3S' to use Audio sink?"))
+        );
+
+        // It is a pairing prompt for every purpose the panel cares about —
+        // it carries no secret, and Esc cancels it like any other.
+        assert!(
+            panel
+                .pairing_prompt()
+                .is_some_and(crate::jwm::features::system_ui::PromptKind::is_yes_no)
+        );
+        assert!(panel.cancel_pairing_prompt());
+        assert!(panel.pairing_prompt().is_none());
+        assert!(panel.is_bluetooth_picker());
     }
 
     #[test]

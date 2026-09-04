@@ -1100,8 +1100,9 @@ impl Jwm {
 
     /// Key handling while the Bluetooth picker is open: Up/Down select,
     /// Return connects/disconnects (or starts pairing on a device never
-    /// bonded), `s` runs a bounded discovery scan, `r` re-reads the list.
-    /// While a pairing prompt is up, the prompt owns the keys.
+    /// bonded), `s` runs a bounded discovery scan, `r` re-reads the list,
+    /// `a` arms a bounded window in which an incoming request may be
+    /// accepted. While a pairing prompt is up, the prompt owns the keys.
     fn handle_bluetooth_picker_key(&mut self, backend: &mut dyn Backend, keysym: u32, mods: Mods) {
         use crate::jwm::features::system_ui::PromptKind;
 
@@ -1119,7 +1120,10 @@ impl Jwm {
             self.sync_system_ui(backend);
             return;
         }
-        if matches!(prompt, Some(PromptKind::Confirm { .. })) {
+        // The numeric comparison and an inbound authorization are the same
+        // gesture — y/Enter accepts, n rejects, Esc cancels through the
+        // global prompt path — so they share one branch.
+        if prompt.is_some_and(PromptKind::is_yes_no) {
             if keysym == keys::KEY_y || keysym == keys::KEY_Return {
                 self.answer_bluetooth_confirm(backend, true);
             } else if keysym == keys::KEY_n {
@@ -1165,6 +1169,9 @@ impl Jwm {
                     .system_ui
                     .set_bluetooth_message("bluetoothctl is not available"),
             }
+        } else if keysym == keys::KEY_a {
+            self.arm_bluetooth_inbound_authorization(backend);
+            return;
         } else if keysym == keys::KEY_r {
             if self.features.bluetooth_scan.is_some() {
                 self.sync_system_ui(backend);

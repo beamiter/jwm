@@ -1108,6 +1108,57 @@ impl Jwm {
         self.sync_system_ui(backend);
     }
 
+    /// Arm a bounded window in which an incoming Bluetooth request may be
+    /// accepted, by spawning the one-shot `jwm-bridge accept` helper.
+    ///
+    /// This is deliberately an explicit gesture with no persistent form.
+    /// Without it there is no agent of ours registered, BlueZ answers an
+    /// inbound `RequestAuthorization`/`AuthorizeService` by refusing it, and
+    /// the controller is neither pairable nor discoverable — which is the
+    /// safe resting state and stays the default. The helper holds the window
+    /// open for as long as jwm's session record lives and puts everything
+    /// back on the way out.
+    pub(crate) fn arm_bluetooth_inbound_authorization(&mut self, backend: &mut dyn Backend) {
+        use crate::jwm::features::pairing;
+
+        if self.features.bluetooth_pairing.is_some() {
+            // One session at a time, in either direction: an inbound window
+            // must never displace or race a pairing the user started.
+            self.features
+                .system_ui
+                .set_bluetooth_message("A Bluetooth session is already running");
+            self.sync_system_ui(backend);
+            return;
+        }
+        let cookie = pairing::new_cookie();
+        let spawn = crate::jwm::features::external_command::spawn_detached(
+            "jwm-bridge",
+            &["accept"],
+            &[("JWM_PAIRING_COOKIE", cookie.as_str())],
+        );
+        match spawn {
+            Ok(child) => {
+                self.supervise_transient_child(child);
+                log::info!("Bluetooth: accepting incoming requests for one window");
+                self.features.bluetooth_pairing = Some(pairing::PairingSession::inbound(
+                    cookie,
+                    std::time::Instant::now(),
+                ));
+                let seconds = pairing::INBOUND_WINDOW.as_secs();
+                self.features
+                    .system_ui
+                    .set_bluetooth_message(format!("Accepting incoming requests ({seconds}s)"));
+            }
+            Err(error) => {
+                log::warn!("Bluetooth: could not start jwm-bridge: {error}");
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("jwm-bridge is not installed");
+            }
+        }
+        self.sync_system_ui(backend);
+    }
+
     /// Hand the user's typed PIN to the helper and drop our copy.
     pub(crate) fn submit_bluetooth_pin(&mut self, backend: &mut dyn Backend) {
         use crate::jwm::features::pairing;
@@ -1160,12 +1211,13 @@ impl Jwm {
         let Some(session) = &mut self.features.bluetooth_pairing else {
             return;
         };
-        if !matches!(
-            session.phase(),
-            pairing::PairingPhase::AwaitingConfirm { .. }
-        ) {
-            return;
-        }
+        // The user must be answering the question that was actually asked:
+        // both yes/no phases route here, and nothing else may.
+        let authorizing = match session.phase() {
+            pairing::PairingPhase::AwaitingConfirm { .. } => false,
+            pairing::PairingPhase::AwaitingAuthorization { .. } => true,
+            _ => return,
+        };
         let cookie = session.cookie().to_string();
         session.clear_prompt();
         self.features.system_ui.cancel_pairing_prompt();
@@ -1180,18 +1232,24 @@ impl Jwm {
                 },
             ),
         );
-        self.features.system_ui.set_bluetooth_message(if accepted {
-            "Pairing\u{2026}"
-        } else {
-            "Passkey rejected"
-        });
+        self.features
+            .system_ui
+            .set_bluetooth_message(match (authorizing, accepted) {
+                (true, true) => "Allowed",
+                (true, false) => "Refused",
+                (false, true) => "Pairing\u{2026}",
+                (false, false) => "Passkey rejected",
+            });
         self.sync_system_ui(backend);
     }
 
-    /// Cancel any live pairing session: tell the helper (its one outstanding
-    /// bluez request fails, or Pair is cancelled outright), wipe any prompt,
-    /// and drop the session record. Closing, handing over, or timing out the
-    /// picker all funnel here — a session must never outlive its panel.
+    /// Cancel any live pairing session — outbound or an armed inbound window
+    /// — by telling the helper (its one outstanding bluez request fails, or
+    /// Pair is cancelled outright), wiping any prompt, and dropping the
+    /// session record. Closing, handing over, or timing out the picker all
+    /// funnel here: a session must never outlive its panel, and an inbound
+    /// window in particular must not keep the controller discoverable after
+    /// the user has moved on.
     pub(crate) fn cancel_bluetooth_pairing(&mut self) {
         use crate::jwm::features::pairing;
 
@@ -1199,15 +1257,22 @@ impl Jwm {
             self.features.system_ui.cancel_pairing_prompt();
             return;
         };
-        log::info!("Bluetooth: pairing with {} cancelled", session.address());
+        let inbound = session.kind() == pairing::PairingKind::Inbound;
+        log::info!(
+            "Bluetooth: {} session with {} cancelled",
+            session.kind().as_str(),
+            session.address().unwrap_or("no device yet"),
+        );
         self.broadcast_ipc_event(
             pairing::RESPONSE_EVENT,
             pairing::response_payload(session.cookie(), pairing::PairingAnswer::Cancelled),
         );
         self.features.system_ui.cancel_pairing_prompt();
-        self.features
-            .system_ui
-            .set_bluetooth_message("Pairing cancelled");
+        self.features.system_ui.set_bluetooth_message(if inbound {
+            "Not accepting incoming requests"
+        } else {
+            "Pairing cancelled"
+        });
     }
 
     /// Adopt a finished scan or connection attempt. Called from the frame

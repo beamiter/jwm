@@ -281,13 +281,53 @@ between bonding and connecting is reported as `Paired <name> — not connected`
 and the bond, which is already on disk, stands.
 
 The helper answers only callbacks naming the device it was started for and
-refuses inbound `RequestAuthorization`/`AuthorizeService` outright. Prompts
-and outcomes travel over two IPC commands (`bluetooth_pairing_prompt`,
+refuses inbound `RequestAuthorization`/`AuthorizeService` outright — it holds
+the default agent registration for its whole session precisely so nothing else
+answers its callbacks, and letting it also bless whatever rings during that
+window would turn one chosen device into an open door. Accepting an incoming
+request is a separate, explicitly armed thing (below). Prompts and outcomes
+travel over two IPC commands (`bluetooth_pairing_prompt`,
 `bluetooth_pairing_done`) matched to the session by a cookie JWM mints and
 passes through the helper's environment; answers go back as
 `bluetooth/pairing_response` events on the `bluetooth` topic, which JWM
 broadcasts only while a session is active. PINs and passkeys are never logged
 by either side, and JWM wipes the typed buffer once the answer is sent.
+
+### Accepting an incoming request
+
+Pairing above is JWM asking a device. The other direction — a device asking
+this machine — is off by default and has no persistent form: with no agent of
+ours registered BlueZ refuses such requests, and on a default session the
+controller is neither pairable nor discoverable, so nothing can ask in the
+first place.
+
+`a` in the Bluetooth picker arms a sixty-second window. JWM spawns
+`jwm-bridge accept`, which registers an `org.bluez.Agent1` at
+`/org/jwm/inbound_agent`, becomes the default agent (inbound requests go to
+the default agent, so without this the window would be registered and never
+called), and turns on `Adapter1.Pairable` and `Discoverable` — restoring
+whatever they were on the way out. Two questions can arrive:
+
+- **Bond request** (`RequestAuthorization`) — `Allow '<name>' to pair?`
+- **Service request** (`AuthorizeService`) — `Allow '<name>' to use <profile>?`,
+  for a device that is already bonded. Well-known profile UUIDs are shown by
+  name (`Audio sink`, `Input device`, …); anything else is shown verbatim,
+  because an unrecognized UUID is a worse answer than a name and an invented
+  name is worse than both.
+
+`y` or `Enter` allows, `n` or `Esc` refuses, and refusing fails the request on
+the BlueZ side rather than letting it quietly succeed. An incoming pairing can
+also raise the ordinary PIN and passkey prompts, which behave exactly as they
+do outbound.
+
+The window binds to the first device that rings it and refuses every other
+one from then on, so the late-bound target is as narrow as an outbound
+session's — it just cannot be known before the fact. Only one Bluetooth
+session exists at a time in either direction: a window cannot be armed while a
+pairing is running, and vice versa. Closing the panel, handing it over, `Esc`,
+or the window simply expiring all cancel it through the same path, so an armed
+window never outlives the panel that armed it and never leaves the controller
+discoverable behind you.
 
 ## Audio device pickers
 

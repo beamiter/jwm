@@ -49,6 +49,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             std::process::exit(bluez::run(&address, &cookie).await);
         }
+        // `accept` holds one armed inbound window open: register an agent,
+        // make the controller reachable, relay whatever rings to jwm's
+        // picker, and put both back on the way out. Same cookie discipline
+        // as `pair` — without a cookie jwm minted there is no window to
+        // serve, so there is nothing this can be talked into.
+        Some("accept") => {
+            let cookie = std::env::var("JWM_PAIRING_COOKIE").unwrap_or_default();
+            if cookie.is_empty() {
+                eprintln!("jwm-bridge accept: JWM_PAIRING_COOKIE is not set");
+                std::process::exit(bluez::EXIT_USAGE);
+            }
+            std::process::exit(bluez::run_accept(&cookie).await);
+        }
         // `discover [seconds]` prints a JSON array of what bluez knows;
         // `discover 0` lists without touching the radio. No cookie: it
         // reads nothing secret, answers on stdout rather than over the IPC

@@ -7,6 +7,21 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- The Bluetooth picker can accept an *incoming* request: `a` arms a
+  sixty-second window in which `jwm-bridge accept` registers a BlueZ agent,
+  becomes the default agent, and makes the controller pairable and
+  discoverable, so a device asking to bond (`RequestAuthorization`) or a
+  bonded device asking for a profile (`AuthorizeService`) raises
+  `Allow '<name>' to pair?` / `Allow '<name>' to use <profile>?` on the
+  panel. `y`/`Enter` allows, `n`/`Esc` refuses, and refusing fails the request
+  on the BlueZ side. Well-known profile UUIDs are named. This is off by
+  default and has no persistent form: with no window armed, BlueZ refuses
+  such requests and the controller is neither pairable nor discoverable. The
+  window binds to the first device that rings it and refuses every other one,
+  cannot coexist with a pairing session, and restores the adapter flags it
+  changed when it closes. `get_bluetooth_pairing` grows a `kind` field
+  (`outbound`/`inbound`) and reports a null address until a window binds.
+
 - Pairing a Bluetooth device now finishes the job: once the bond lands, the
   `jwm-bridge pair` helper marks the device trusted and connects its
   profiles, so a headset plays and a keyboard types without a second trip

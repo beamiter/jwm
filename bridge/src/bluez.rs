@@ -59,9 +59,24 @@ const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 /// concurrent or successive helpers never fight over it.
 pub const AGENT_PATH: &str = "/org/jwm/pairing_agent";
 
+/// Where the inbound window serves its agent. A distinct path from
+/// [`AGENT_PATH`] so a log line says which direction is running; bluez keys
+/// agents by (sender, path), so two processes could share one path safely,
+/// but nothing is gained by making the logs ambiguous.
+pub const INBOUND_AGENT_PATH: &str = "/org/jwm/inbound_agent";
+
 /// The strongest capability jwm's picker can honor: it can show a passkey and
 /// read a typed PIN back.
 pub const CAPABILITY: &str = "KeyboardDisplay";
+
+/// The longest service identifier jwm's prompt will render
+/// (`pairing::MAX_SERVICE_CHARS`). Anything longer is a malformed callback.
+const MAX_SERVICE_CHARS: usize = 64;
+
+/// How long an armed inbound window waits for something to ring. Shorter than
+/// the pairing wall clock: it holds the controller pairable and discoverable
+/// for its whole life, and jwm drops its own record at 60s.
+const INBOUND_WINDOW: Duration = Duration::from_secs(60);
 
 /// jwm withdraws an unanswered prompt after 25s; answer no callback later
 /// than this so jwm's own cancel reliably lands first.
@@ -137,6 +152,9 @@ enum PromptRequest {
     Confirm { passkey: u32 },
     /// `DisplayPinCode`/`DisplayPasskey`: shown, typed on the device.
     Display { code: String },
+    /// `RequestAuthorization` (`None`) or `AuthorizeService` (the UUID):
+    /// something out there is asking, and only the user can answer.
+    Authorize { service: Option<String> },
 }
 
 /// The user's answer, as parsed from a `bluetooth/pairing_response` event.
@@ -160,8 +178,18 @@ impl UserReply {
 struct Shared {
     /// Target device address, uppercase; callbacks for anything else are
     /// rejected before they can touch the session.
-    target: String,
+    ///
+    /// An outbound session knows it before the process starts. An inbound
+    /// window cannot — nobody can say in advance which device will ring — so
+    /// it starts empty and the first callback pins it. From that moment the
+    /// rule is identical: one session, one device.
+    target: Mutex<Option<String>>,
     cookie: String,
+    /// Whether this process answers inbound authorization at all. False for
+    /// `pair`, whose agent exists to bond one chosen device and must not be
+    /// talked into blessing whatever else asks while it holds the default
+    /// agent registration.
+    accepts_inbound: bool,
     /// The one request bluez has outstanding. BlueZ serializes agent
     /// requests per `Pair` call; a replacement means the first was withdrawn.
     pending: Mutex<Option<oneshot::Sender<UserReply>>>,
@@ -177,23 +205,79 @@ impl Shared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn lock_target(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The device this session has bound to, if it has bound to one.
+    fn target(&self) -> Option<String> {
+        self.lock_target().clone()
+    }
+
+    /// Accept a callback's device: equal to the bound one, or — for an
+    /// inbound window that nothing has called into yet — the one that binds
+    /// it. Late-bound, never absent.
+    fn bind_target(&self, address: &str) -> bool {
+        let mut target = self.lock_target();
+        match target.as_deref() {
+            Some(bound) => bound == address,
+            None => {
+                *target = Some(address.to_string());
+                true
+            }
+        }
+    }
 }
 
 struct PairingAgent {
     shared: Arc<Shared>,
+    /// Only an inbound window needs this: it has to ask bluez what the
+    /// device that just rang is called, because nothing told it in advance.
+    /// `None` for an outbound session, whose name came off the picker row.
+    name_lookup: Option<Connection>,
 }
 
 impl PairingAgent {
+    /// Whether a callback's object path names this session's device, binding
+    /// it on the first inbound callback. A path that is not a device address
+    /// at all never matches.
     fn device_matches(&self, device: &OwnedObjectPath) -> bool {
         address_from_device_path(device.as_str())
-            .is_some_and(|address| address == self.shared.target)
+            .is_some_and(|address| self.shared.bind_target(&address))
+    }
+
+    /// What to call the device on jwm's prompt. Empty unless this is an
+    /// inbound window, where the panel would otherwise have to ask the user
+    /// to make a security decision about a bare MAC address.
+    async fn device_label(&self, address: &str) -> String {
+        let Some(connection) = self.name_lookup.as_ref() else {
+            return String::new();
+        };
+        let Some(objects) = managed_objects(connection).await else {
+            return String::new();
+        };
+        devices_from_managed_objects(&objects)
+            .into_iter()
+            .find(|device| device.address.eq_ignore_ascii_case(address))
+            // `devices_from_managed_objects` already falls back to the
+            // address, which is not a name worth sending.
+            .filter(|device| !device.name.eq_ignore_ascii_case(address))
+            .map(|device| device.name)
+            .unwrap_or_default()
     }
 
     /// Relay a display-only callback to jwm's picker. Nothing comes back; a
     /// cancel while this is showing arrives as a response event with no
     /// pending request and turns into `CancelPairing` in the pump.
     async fn tell_jwm(&self, prompt: PromptRequest) {
-        let args = prompt_args(&self.shared.target, &self.shared.cookie, &prompt);
+        let Some(target) = self.shared.target() else {
+            return;
+        };
+        let label = self.device_label(&target).await;
+        let args = prompt_args(&target, &self.shared.cookie, &label, &prompt);
         let ipc = self.shared.ipc.clone();
         let sent =
             tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_prompt", args))
@@ -202,6 +286,55 @@ impl PairingAgent {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => log::warn!("jwm rejected the display prompt: {error}"),
             Err(error) => log::warn!("could not forward the display prompt: {error}"),
+        }
+    }
+
+    /// Answer an inbound request — a device wanting to bond
+    /// (`RequestAuthorization`) or a bonded device wanting a profile
+    /// (`AuthorizeService`).
+    ///
+    /// Refused outright unless this process was started as an inbound window
+    /// the user armed. A `pair` session holds the default agent registration
+    /// for up to 90 seconds precisely so nothing else answers its callbacks;
+    /// letting it also bless whatever rings during that window would turn one
+    /// chosen device into an open door.
+    async fn authorize(
+        &self,
+        device: OwnedObjectPath,
+        uuid: Option<String>,
+    ) -> Result<(), AgentError> {
+        if !self.shared.accepts_inbound {
+            log::warn!(
+                "rejecting inbound authorization for {} (this session pairs one chosen device)",
+                device.as_str()
+            );
+            return Err(AgentError::Rejected(
+                "this agent only pairs the device it was started for".to_string(),
+            ));
+        }
+        // A UUID longer than jwm will render is a malformed callback, not a
+        // string to truncate into something that reads like a real profile.
+        if uuid
+            .as_ref()
+            .is_some_and(|uuid| uuid.is_empty() || uuid.chars().count() > MAX_SERVICE_CHARS)
+        {
+            log::warn!("rejecting a service authorization with an unusable UUID");
+            return Err(AgentError::Rejected(
+                "unusable service identifier".to_string(),
+            ));
+        }
+        match self
+            .ask(&device, PromptRequest::Authorize { service: uuid })
+            .await?
+        {
+            UserReply::Confirmed => Ok(()),
+            UserReply::Pin(_) => Err(AgentError::Rejected(
+                "jwm answered an authorization with a PIN; refusing".to_string(),
+            )),
+            UserReply::Rejected => Err(AgentError::Rejected("refused by the user".to_string())),
+            UserReply::Cancelled => Err(AgentError::Canceled(
+                "authorization prompt cancelled".to_string(),
+            )),
         }
     }
 
@@ -218,10 +351,12 @@ impl PairingAgent {
                 "not the device this session pairs".to_string(),
             ));
         }
+        let target = self.shared.target().unwrap_or_default();
+        let label = self.device_label(&target).await;
         let (tx, rx) = oneshot::channel();
         *self.shared.lock_pending() = Some(tx);
 
-        let args = prompt_args(&self.shared.target, &self.shared.cookie, &prompt);
+        let args = prompt_args(&target, &self.shared.cookie, &label, &prompt);
         let ipc = self.shared.ipc.clone();
         let sent =
             tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_prompt", args))
@@ -334,24 +469,15 @@ impl PairingAgent {
     }
 
     async fn request_authorization(&self, device: OwnedObjectPath) -> Result<(), AgentError> {
-        log::warn!(
-            "rejecting inbound authorization request for {}",
-            device.as_str()
-        );
-        Err(AgentError::Rejected(
-            "this agent only pairs the device it was started for".to_string(),
-        ))
+        self.authorize(device, None).await
     }
 
     async fn authorize_service(
         &self,
         device: OwnedObjectPath,
-        _uuid: String,
+        uuid: String,
     ) -> Result<(), AgentError> {
-        log::warn!("rejecting service authorization for {}", device.as_str());
-        Err(AgentError::Rejected(
-            "this agent does not authorize services".to_string(),
-        ))
+        self.authorize(device, Some(uuid)).await
     }
 
     fn cancel(&self, device: OwnedObjectPath) {
@@ -412,26 +538,31 @@ fn device_path_from_managed_objects(
 /// Build the `bluetooth_pairing_prompt` command arguments. The passkey/code
 /// a prompt carries is display material, never a secret to keep off the wire
 /// — but it is never logged either.
-fn prompt_args(address: &str, cookie: &str, prompt: &PromptRequest) -> Value {
-    match prompt {
-        PromptRequest::Pin => serde_json::json!({
-            "address": address,
-            "cookie": cookie,
-            "kind": "pin",
-        }),
+fn prompt_args(address: &str, cookie: &str, device_name: &str, prompt: &PromptRequest) -> Value {
+    let mut args = match prompt {
+        PromptRequest::Pin => serde_json::json!({ "kind": "pin" }),
         PromptRequest::Confirm { passkey } => serde_json::json!({
-            "address": address,
-            "cookie": cookie,
             "kind": "confirm",
             "passkey": passkey,
         }),
         PromptRequest::Display { code } => serde_json::json!({
-            "address": address,
-            "cookie": cookie,
             "kind": "display",
             "code": code,
         }),
+        PromptRequest::Authorize { service } => serde_json::json!({
+            "kind": "authorize",
+            // Absent rather than null for a bond request: jwm reads the
+            // field's presence, not its value.
+            "service": service,
+        }),
+    };
+    let object = args.as_object_mut().expect("prompt args are an object");
+    object.insert("address".to_string(), Value::from(address));
+    object.insert("cookie".to_string(), Value::from(cookie));
+    if !device_name.is_empty() {
+        object.insert("device_name".to_string(), Value::from(device_name));
     }
+    args
 }
 
 /// Build the `bluetooth_pairing_done` command arguments.
@@ -513,6 +644,18 @@ fn session_matches(value: &Value, address: &str, cookie: &str) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|other| other.eq_ignore_ascii_case(address))
         && value.get("cookie").and_then(Value::as_str) == Some(cookie)
+}
+
+/// The same self-heal for an inbound window, which has no address yet.
+///
+/// The direction is checked as well as the cookie: a helper must never serve
+/// an inbound agent against a session jwm opened to pair one chosen device,
+/// which is exactly the confusion that would turn the narrow window into a
+/// standing one.
+fn inbound_session_matches(value: &Value, cookie: &str) -> bool {
+    value.get("active").and_then(Value::as_bool) == Some(true)
+        && value.get("cookie").and_then(Value::as_str) == Some(cookie)
+        && value.get("kind").and_then(Value::as_str) == Some("inbound")
 }
 
 // ---------------------------------------------------------------------------
@@ -769,8 +912,12 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
     };
 
     let shared = Arc::new(Shared {
-        target: target.clone(),
+        target: Mutex::new(Some(target.clone())),
         cookie: cookie.to_string(),
+        // This agent exists to bond one chosen device; it holds the default
+        // registration for the session's lifetime and must not answer for
+        // anything else that rings while it does.
+        accepts_inbound: false,
         pending: Mutex::new(None),
         ended_by_user: AtomicBool::new(false),
         ipc: ipc.clone(),
@@ -781,6 +928,9 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
             AGENT_PATH,
             PairingAgent {
                 shared: shared.clone(),
+                // jwm already knows this device's name: it came off the
+                // picker row the user pressed Enter on.
+                name_lookup: None,
             },
         )
         .await
@@ -1104,6 +1254,255 @@ pub async fn discover(seconds: u64) -> i32 {
     EXIT_OK
 }
 
+// ---------------------------------------------------------------------------
+// Inbound window (`jwm-bridge accept`)
+// ---------------------------------------------------------------------------
+
+/// Read a boolean `Adapter1` property, so the window can put back exactly
+/// what it found rather than a guess.
+async fn adapter_flag(connection: &Connection, adapter: &OwnedObjectPath, name: &str) -> bool {
+    let body = (ADAPTER_IFACE, name);
+    let call = connection.call_method(
+        Some(bluez_name()),
+        adapter,
+        Some(PROPERTIES_IFACE),
+        "Get",
+        &body,
+    );
+    match tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
+        Ok(Ok(reply)) => reply
+            .body()
+            .deserialize::<zbus::zvariant::Value<'_>>()
+            .ok()
+            .and_then(|value| bool::try_from(value).ok())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+async fn set_adapter_flag(
+    connection: &Connection,
+    adapter: &OwnedObjectPath,
+    name: &str,
+    value: bool,
+) {
+    let body = (ADAPTER_IFACE, name, zbus::zvariant::Value::Bool(value));
+    let call = connection.call_method(
+        Some(bluez_name()),
+        adapter,
+        Some(PROPERTIES_IFACE),
+        "Set",
+        &body,
+    );
+    if let Ok(Err(error)) = tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
+        log::warn!("accept: could not set {name}: {error}");
+    }
+}
+
+/// The adapter flags an inbound window has to turn on, and what they were
+/// before, so teardown restores rather than clears.
+///
+/// Without `Pairable` and `Discoverable` nothing can ask to bond in the first
+/// place — on a default session both are false — so the window would be
+/// armed, correct, and completely unreachable.
+struct AdapterExposure {
+    adapter: OwnedObjectPath,
+    pairable: bool,
+    discoverable: bool,
+}
+
+impl AdapterExposure {
+    async fn open(connection: &Connection, adapter: OwnedObjectPath) -> AdapterExposure {
+        let exposure = AdapterExposure {
+            pairable: adapter_flag(connection, &adapter, "Pairable").await,
+            discoverable: adapter_flag(connection, &adapter, "Discoverable").await,
+            adapter,
+        };
+        set_adapter_flag(connection, &exposure.adapter, "Pairable", true).await;
+        set_adapter_flag(connection, &exposure.adapter, "Discoverable", true).await;
+        exposure
+    }
+
+    async fn close(&self, connection: &Connection) {
+        set_adapter_flag(connection, &self.adapter, "Pairable", self.pairable).await;
+        set_adapter_flag(connection, &self.adapter, "Discoverable", self.discoverable).await;
+    }
+}
+
+/// Hold one inbound window open: register an agent, make the controller
+/// reachable, and answer whatever rings until jwm cancels or the window
+/// closes. Unlike [`pair_session`] this never calls `Pair` — the remote side
+/// drives, and this process only relays the question and the answer.
+pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -> i32 {
+    // Self-heal before touching bluez, exactly as the pairing helper does:
+    // jwm may have closed the window between spawning this and now.
+    let liveness = {
+        let ipc = ipc.clone();
+        tokio::task::spawn_blocking(move || ipc.query("get_bluetooth_pairing")).await
+    };
+    match liveness {
+        Ok(Ok(value)) if inbound_session_matches(&value, cookie) => {}
+        Ok(Ok(_)) => {
+            log::info!("accept: jwm no longer holds this window; exiting");
+            return EXIT_CANCELLED;
+        }
+        Ok(Err(error)) => {
+            log::warn!("accept: jwm refused the session query: {error}");
+            return EXIT_ERROR;
+        }
+        Err(error) => {
+            log::warn!("accept: could not query jwm: {error}");
+            return EXIT_ERROR;
+        }
+    }
+
+    let (tx, responses) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+    crate::jwm_ipc::subscribe(ipc.clone(), &["bluetooth"], tx);
+
+    let shared = Arc::new(Shared {
+        // Nobody can say which device will ring; the first callback binds it.
+        target: Mutex::new(None),
+        cookie: cookie.to_string(),
+        accepts_inbound: true,
+        pending: Mutex::new(None),
+        ended_by_user: AtomicBool::new(false),
+        ipc: ipc.clone(),
+    });
+    if let Err(error) = connection
+        .object_server()
+        .at(
+            INBOUND_AGENT_PATH,
+            PairingAgent {
+                shared: shared.clone(),
+                name_lookup: Some(connection.clone()),
+            },
+        )
+        .await
+    {
+        log::warn!("accept: could not serve the agent: {error}");
+        return EXIT_ERROR;
+    }
+
+    let agent_path = ObjectPath::from_static_str(INBOUND_AGENT_PATH)
+        .expect("INBOUND_AGENT_PATH is a valid object path");
+    if let Err(error) = agent_manager_call(
+        &connection,
+        "RegisterAgent",
+        &(agent_path.clone(), CAPABILITY),
+    )
+    .await
+    {
+        log::warn!("accept: RegisterAgent failed: {error}");
+        return EXIT_FAILED;
+    }
+    // Inbound requests go to the *default* agent, so without this the window
+    // is registered and never called.
+    let _ = agent_manager_call_path(&connection, "RequestDefaultAgent", agent_path.clone()).await;
+
+    let exposure = match managed_objects(&connection)
+        .await
+        .as_ref()
+        .and_then(adapter_from_managed_objects)
+    {
+        Some(adapter) => Some(AdapterExposure::open(&connection, adapter).await),
+        None => {
+            log::warn!("accept: no bluez adapter to make discoverable");
+            None
+        }
+    };
+
+    // Nothing to drive: wait for a callback to arrive and be answered, or for
+    // jwm to cancel, or for the window to close on its own. `pump_responses`
+    // needs a device path for `CancelPairing`; an inbound window has none
+    // until something rings, so cancellation is handled inline here.
+    let window = tokio::time::timeout(
+        INBOUND_WINDOW,
+        pump_inbound_responses(shared.clone(), responses),
+    )
+    .await;
+    let cancelled = window.is_ok();
+
+    if let Some(exposure) = exposure.as_ref() {
+        exposure.close(&connection).await;
+    }
+    let _ = agent_manager_call_path(&connection, "UnregisterAgent", agent_path).await;
+    connection
+        .object_server()
+        .remove::<PairingAgent, _>(INBOUND_AGENT_PATH)
+        .await
+        .ok();
+
+    // The window is not a pairing attempt, so there is no pairing outcome to
+    // report unless something actually rang and bound a device.
+    if let Some(address) = shared.target() {
+        let ok = !shared.ended_by_user.load(Ordering::Relaxed);
+        report_done(&ipc, &address, cookie, ok, (!ok).then_some("refused"), None).await;
+    }
+    if cancelled { EXIT_CANCELLED } else { EXIT_OK }
+}
+
+/// Turn jwm's answers into agent replies for an inbound window. Returns when
+/// the user cancels with nothing outstanding — the window is closed, so there
+/// is nothing left to wait for.
+async fn pump_inbound_responses(shared: Arc<Shared>, mut responses: mpsc::Receiver<Value>) {
+    while let Some(event) = responses.recv().await {
+        let Some(response) = parse_response_event(&event) else {
+            continue;
+        };
+        if response.cookie != shared.cookie {
+            log::warn!("ignoring a pairing response for a foreign cookie");
+            continue;
+        }
+        if response.reply.is_user_termination() {
+            shared.ended_by_user.store(true, Ordering::Relaxed);
+        }
+        match shared.lock_pending().take() {
+            Some(reply) => {
+                let _ = reply.send(response.reply);
+            }
+            None => {
+                if response.reply.is_user_termination() {
+                    log::info!("accept: window closed by jwm");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Entry point for `jwm-bridge accept`: connect the system bus and hold one
+/// inbound window open.
+pub async fn run_accept(cookie: &str) -> i32 {
+    let ipc = JwmIpc::new();
+    let connection = match zbus::connection::Builder::system() {
+        Ok(builder) => match builder.build().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                log::warn!("accept: cannot reach the system bus: {error}");
+                return EXIT_ERROR;
+            }
+        },
+        Err(error) => {
+            log::warn!("accept: no system bus address: {error}");
+            return EXIT_ERROR;
+        }
+    };
+    // One window's hard bound, a little past jwm's own so jwm's cancel is
+    // what normally ends it — the same ordering the pairing clocks use.
+    match tokio::time::timeout(
+        INBOUND_WINDOW + PROMPT_WAIT,
+        accept_session(ipc, connection, cookie),
+    )
+    .await
+    {
+        Ok(code) => code,
+        Err(_) => {
+            log::warn!("accept: exceeded the inbound window wall clock");
+            EXIT_ERROR
+        }
+    }
+}
+
 /// Entry point for `jwm-bridge pair`: connect the system bus and run one
 /// session under the hard wall clock.
 pub async fn run(address: &str, cookie: &str) -> i32 {
@@ -1160,6 +1559,7 @@ mod tests {
     const ADDR: &str = "5C:FB:7C:1A:2B:3C";
     const COOKIE: &str = "0123456789abcdef";
     const DEVICE_PATH: &str = "/org/bluez/hci0/dev_5C_FB_7C_1A_2B_3C";
+    const ADAPTER_PATH: &str = "/org/bluez/hci0";
 
     // --- Pure mapping tests ---
 
@@ -1432,26 +1832,118 @@ mod tests {
 
     #[test]
     fn prompt_args_carry_each_kind() {
-        let pin = prompt_args(ADDR, COOKIE, &PromptRequest::Pin);
+        let pin = prompt_args(ADDR, COOKIE, "", &PromptRequest::Pin);
         assert_eq!(pin["kind"], "pin");
         assert_eq!(pin["address"], ADDR);
         assert_eq!(pin["cookie"], COOKIE);
         assert!(pin.get("passkey").is_none());
         assert!(pin.get("code").is_none());
+        // An outbound session's name came off the picker row, so the field
+        // is absent rather than an empty string jwm would have to ignore.
+        assert!(pin.get("device_name").is_none());
 
-        let confirm = prompt_args(ADDR, COOKIE, &PromptRequest::Confirm { passkey: 42 });
+        let confirm = prompt_args(ADDR, COOKIE, "", &PromptRequest::Confirm { passkey: 42 });
         assert_eq!(confirm["kind"], "confirm");
         assert_eq!(confirm["passkey"], 42);
 
         let display = prompt_args(
             ADDR,
             COOKIE,
+            "",
             &PromptRequest::Display {
                 code: "1234".to_string(),
             },
         );
         assert_eq!(display["kind"], "display");
         assert_eq!(display["code"], "1234");
+    }
+
+    #[test]
+    fn authorization_args_distinguish_a_bond_request_from_a_service_request() {
+        // RequestAuthorization: something wants to bond. No service field at
+        // all, so jwm reads its presence rather than its value.
+        let bond = prompt_args(
+            ADDR,
+            COOKIE,
+            "MX Master 3S",
+            &PromptRequest::Authorize { service: None },
+        );
+        assert_eq!(bond["kind"], "authorize");
+        assert_eq!(bond["address"], ADDR);
+        assert!(bond["service"].is_null());
+        // An inbound window has no name until it asks bluez for one, so the
+        // name travels with the prompt instead of coming off a picker row.
+        assert_eq!(bond["device_name"], "MX Master 3S");
+
+        // AuthorizeService: a bonded device wants one profile.
+        let service = prompt_args(
+            ADDR,
+            COOKIE,
+            "",
+            &PromptRequest::Authorize {
+                service: Some("0000110B-0000-1000-8000-00805F9B34FB".to_string()),
+            },
+        );
+        assert_eq!(service["kind"], "authorize");
+        assert_eq!(service["service"], "0000110B-0000-1000-8000-00805F9B34FB");
+    }
+
+    #[test]
+    fn an_inbound_window_only_serves_the_session_jwm_opened_for_it() {
+        let window = serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        });
+        assert!(inbound_session_matches(&window, COOKIE));
+        assert!(!inbound_session_matches(&window, "other-cookie"));
+
+        // An outbound pairing session must never be served by an inbound
+        // agent: that is exactly how a 90s one-device window would become a
+        // standing invitation.
+        let pairing = serde_json::json!({
+            "active": true, "address": ADDR, "cookie": COOKIE,
+            "state": "working", "kind": "outbound",
+        });
+        assert!(!inbound_session_matches(&pairing, COOKIE));
+
+        // Nothing live, and a helper too old to say which direction it is.
+        assert!(!inbound_session_matches(
+            &serde_json::json!({"active": false, "cookie": COOKIE, "kind": "inbound"}),
+            COOKIE
+        ));
+        assert!(!inbound_session_matches(
+            &serde_json::json!({"active": true, "cookie": COOKIE}),
+            COOKIE
+        ));
+    }
+
+    #[test]
+    fn a_late_bound_target_still_admits_exactly_one_device() {
+        let shared = |target: Option<&str>, accepts_inbound: bool| Shared {
+            target: Mutex::new(target.map(str::to_string)),
+            cookie: COOKIE.to_string(),
+            accepts_inbound,
+            pending: Mutex::new(None),
+            ended_by_user: AtomicBool::new(false),
+            ipc: JwmIpc::with_socket(PathBuf::from("/nonexistent/jwm-ipc.sock")),
+        };
+
+        // An outbound session is bound before it starts and never moves.
+        let outbound = shared(Some(ADDR), false);
+        assert!(outbound.bind_target(ADDR));
+        assert!(!outbound.bind_target("11:22:33:44:55:66"));
+        assert_eq!(outbound.target().as_deref(), Some(ADDR));
+
+        // An inbound window binds on the first caller — and from then on
+        // behaves exactly like an outbound one.
+        let inbound = shared(None, true);
+        assert_eq!(inbound.target(), None);
+        assert!(inbound.bind_target("11:22:33:44:55:66"));
+        assert_eq!(inbound.target().as_deref(), Some("11:22:33:44:55:66"));
+        assert!(
+            !inbound.bind_target(ADDR),
+            "a second device must not be able to take over an armed window"
+        );
     }
 
     #[test]
@@ -1599,6 +2091,11 @@ mod tests {
         /// When set, `Connect` refuses, standing in for a device that bonded
         /// and then walked out of range.
         connect_fails: Mutex<bool>,
+        /// The adapter flags an inbound window has to turn on. Seeded to
+        /// what a default session really has (both false, verified against
+        /// the live controller) so the restore path is exercised.
+        pairable: Mutex<bool>,
+        discoverable: Mutex<bool>,
     }
 
     impl FakeBluezState {
@@ -1638,6 +2135,38 @@ mod tests {
         async fn request_default_agent(&mut self, path: OwnedObjectPath) -> zbus::fdo::Result<()> {
             *FakeBluezState::lock(&self.state.default_agent) = Some(path.to_string());
             Ok(())
+        }
+    }
+
+    struct FakeAdapter {
+        state: Arc<FakeBluezState>,
+    }
+
+    #[interface(name = "org.bluez.Adapter1")]
+    impl FakeAdapter {
+        #[zbus(property)]
+        fn powered(&self) -> bool {
+            true
+        }
+
+        #[zbus(property)]
+        fn pairable(&self) -> bool {
+            *FakeBluezState::lock(&self.state.pairable)
+        }
+
+        #[zbus(property)]
+        fn set_pairable(&self, value: bool) {
+            *FakeBluezState::lock(&self.state.pairable) = value;
+        }
+
+        #[zbus(property)]
+        fn discoverable(&self) -> bool {
+            *FakeBluezState::lock(&self.state.discoverable)
+        }
+
+        #[zbus(property)]
+        fn set_discoverable(&self, value: bool) {
+            *FakeBluezState::lock(&self.state.discoverable) = value;
         }
     }
 
@@ -1893,6 +2422,15 @@ mod tests {
             .expect("serve AgentManager1");
         server
             .at(
+                ADAPTER_PATH,
+                FakeAdapter {
+                    state: state.clone(),
+                },
+            )
+            .await
+            .expect("serve Adapter1");
+        server
+            .at(
                 DEVICE_PATH,
                 FakeDevice {
                     state: state.clone(),
@@ -1930,6 +2468,217 @@ mod tests {
             .build()
             .await
             .expect("helper connection")
+    }
+
+    /// Wait for the helper to register its agent, then return where it
+    /// lives so the fake bluez can call into it the way bluetoothd would.
+    async fn await_registered_agent(state: &Arc<FakeBluezState>) -> (String, String) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(agent) = FakeBluezState::lock(&state.agent).clone() {
+                return agent;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the helper never registered an agent"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Wait until the window has made the controller reachable. Without
+    /// both flags nothing can ask to bond in the first place, so this is
+    /// part of the feature working at all, not a nicety.
+    async fn await_adapter_exposed(state: &Arc<FakeBluezState>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if *FakeBluezState::lock(&state.pairable) && *FakeBluezState::lock(&state.discoverable)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the window never made the controller pairable and discoverable"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Call an agent callback the way bluetoothd would for an unsolicited
+    /// request: no `Pair`, no prior conversation, just a device ringing.
+    async fn call_agent(
+        connection: &Connection,
+        agent: &(String, String),
+        method: &str,
+        body: &(impl zbus::export::serde::Serialize + zbus::zvariant::DynamicType),
+    ) -> zbus::Result<zbus::message::Message> {
+        let (destination, path) = agent;
+        connection
+            .call_method(
+                Some(destination.as_str()),
+                path.as_str(),
+                Some(<PairingAgent as zbus::object_server::Interface>::name()),
+                method,
+                body,
+            )
+            .await
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_armed_window_lets_the_user_allow_an_incoming_request() {
+        let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+        // The window advertises itself, or nothing could ever ring it.
+        assert_eq!(
+            FakeBluezState::lock(&setup.state.default_agent).as_deref(),
+            Some(INBOUND_AGENT_PATH)
+        );
+        await_adapter_exposed(&setup.state).await;
+
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        let call = tokio::spawn({
+            let bluez = bluez.clone();
+            let device = device.clone();
+            async move { call_agent(&bluez, &agent, "RequestAuthorization", &(device,)).await }
+        });
+
+        // jwm is asked, and told which device and what kind of request.
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+        assert_eq!(prompt["args"]["kind"], "authorize");
+        assert_eq!(prompt["args"]["address"], ADDR);
+        assert_eq!(prompt["args"]["cookie"], COOKIE);
+        assert!(prompt["args"]["service"].is_null(), "a bond request");
+
+        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+        assert!(
+            call.await.expect("agent call task").is_ok(),
+            "an allowed request returns success to bluez"
+        );
+
+        // Closing the window ends the session and reports the outcome.
+        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": false}));
+        let code = session.await.expect("session task");
+        assert_eq!(code, EXIT_CANCELLED);
+        assert_eq!(
+            FakeBluezState::lock(&setup.state.unregistered).as_deref(),
+            Some(INBOUND_AGENT_PATH)
+        );
+        // And the controller goes back to what it was, rather than being
+        // left discoverable behind the user.
+        assert!(!*FakeBluezState::lock(&setup.state.pairable));
+        assert!(!*FakeBluezState::lock(&setup.state.discoverable));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_armed_window_refuses_a_second_device_and_an_unanswered_service() {
+        let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+
+        // First caller binds the window, and is refused by the user.
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        let first = tokio::spawn({
+            let bluez = bluez.clone();
+            let agent = agent.clone();
+            let device = device.clone();
+            async move {
+                call_agent(
+                    &bluez,
+                    &agent,
+                    "AuthorizeService",
+                    &(device, "0000110B-0000-1000-8000-00805F9B34FB".to_string()),
+                )
+                .await
+            }
+        });
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+        assert_eq!(prompt["args"]["kind"], "authorize");
+        assert_eq!(
+            prompt["args"]["service"],
+            "0000110B-0000-1000-8000-00805F9B34FB"
+        );
+        jwm.send_response(
+            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "rejected"}),
+        );
+        assert!(
+            first.await.expect("agent call task").is_err(),
+            "a refused request must fail for bluez, not silently succeed"
+        );
+
+        // A different device may not take over the window the first one bound.
+        let other = OwnedObjectPath::try_from("/org/bluez/hci0/dev_11_22_33_44_55_66")
+            .expect("device path");
+        assert!(
+            call_agent(&bluez, &agent, "RequestAuthorization", &(other,))
+                .await
+                .is_err(),
+            "one window answers for one device"
+        );
+
+        session.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pairing_agent_still_refuses_everything_inbound() {
+        let Some(setup) = fake_setup(PairScript::UntilCancelled).await else {
+            eprintln!("dbus-daemon unavailable; skipping the pairing integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": ADDR, "cookie": COOKIE, "state": "working",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(pair_session(ipc, connection, ADDR, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+
+        // The pairing agent holds the default registration for its whole
+        // session. Anything that rings during that window — even the very
+        // device being paired — is refused without asking the user, because
+        // the user armed a pairing, not an open door.
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        assert!(
+            call_agent(&bluez, &agent, "RequestAuthorization", &(device.clone(),))
+                .await
+                .is_err()
+        );
+        assert!(
+            call_agent(
+                &bluez,
+                &agent,
+                "AuthorizeService",
+                &(device, "0000110B-0000-1000-8000-00805F9B34FB".to_string())
+            )
+            .await
+            .is_err()
+        );
+
+        session.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
