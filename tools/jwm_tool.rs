@@ -2074,7 +2074,7 @@ fn smoke_manual_kms_checklist_json() -> serde_json::Value {
             "id": "hdr-color",
             "area": "color",
             "command": "jwm-tool wayland-status --json",
-            "evidence": "outputs[].hdr_metadata, color_management.session_policy, render_decisions.color_pipeline",
+            "evidence": "outputs[].hdr_metadata, color_management.session_policy (hdr_active, hdr_enable_refusals), get_hdr_status enable_refusals, render_decisions.color_pipeline",
         },
         {
             "id": "capture-dmabuf",
@@ -4968,6 +4968,25 @@ fn run_wayland_status(json_output: bool) -> io::Result<i32> {
             "hdr: config_enabled={} capable_outputs={}",
             enabled, hdr_outputs
         );
+        // Why each output is or is not signalling. `config_enabled` is a
+        // post-process policy flag, not the signal, so without this the
+        // report says nothing about whether HDR is actually reaching a
+        // display or what is stopping it.
+        if let Some(refusals) = hdr.get("enable_refusals").and_then(|v| v.as_array()) {
+            for entry in refusals {
+                println!(
+                    "  {}: {}",
+                    entry
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                    entry
+                        .get("refusal")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("signalling permitted"),
+                );
+            }
+        }
     }
 
     if let Some(tearing) = response_data(queries, "get_tearing_hints") {

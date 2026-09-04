@@ -2470,6 +2470,16 @@ pub trait BackendDiagnostics: Send {
         Vec::new()
     }
 
+    /// Per output: the name of the first reason HDR signalling may not be
+    /// asserted right now, or `None` where an assertion is currently legal.
+    ///
+    /// Empty on backends with no HDR signalling gate of their own — which is
+    /// not the same as "no refusals", and callers must not read it as an
+    /// availability claim.
+    fn compositor_hdr_enable_refusals(&self) -> Vec<(String, Option<String>)> {
+        Vec::new()
+    }
+
     fn compositor_session_lock_surface_count(&self) -> usize {
         0
     }

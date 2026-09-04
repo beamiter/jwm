@@ -7,6 +7,22 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- HDR signalling can now be enabled per output on the Wayland/KMS backend,
+  behind a fail-closed gate that is re-evaluated every frame:
+  `set_hdr_metadata` latches the request and the compositor asserts BT.2020 +
+  `HDR_OUTPUT_METADATA` only while the whole chain holds — a capable EDID, the
+  10-bit scanout chain, advanced colour management, the scene-linear target,
+  a clean frame tail, no gamma-control client, and the software per-output
+  delivery route. It is withdrawn the instant any of those stops holding (a
+  toast, a session lock, a route change) and re-asserted when it comes back,
+  so a single overlay no longer means re-issuing the command. Eleven named
+  refusal reasons are reported per output. The CRTC LUT route is refused on
+  purpose: it writes working-linear into a unorm framebuffer, clipping exactly
+  the above-reference-white content HDR exists for. See the new
+  [docs/hdr.md](docs/hdr.md). **Not verified against a real HDR display** —
+  the compositor is proven never to signal HDR over sRGB pixels, but no panel
+  has confirmed the metadata blob is interpreted as intended.
+
 - The Wayland/KMS backend gained a per-output presentation policy, reported
   per output through `get_tearing_hints` and `render_decisions`. VRR is
   asserted while one mapped fullscreen client owns an output and cleared
@@ -151,6 +167,23 @@ monorepo use independent Semantic Versions.
 - Compatibility, upgrade, and release-process documentation.
 
 ### Changed
+
+- **Breaking (diagnostics):** the colour-session policy object stopped
+  hardcoding its HDR answers. `hdr_active` is now the last successful
+  presentation's own report rather than a constant `false`,
+  `hdr_active_semantics` says so, `hdr_signalling_enable_available` is derived
+  from the per-output gate (and stays false where no gate reports in, which is
+  not an availability claim), the fixed
+  `hdr_signalling_enable_unavailable_until_external_elements_adapted` blocker
+  is replaced by the gate's own per-output reasons in a new
+  `hdr_enable_refusals` array, and the `limitations` list dropped three
+  entries it had been contradicting since absolute luminance, the
+  surface-description commit latch and atomic KMS colour delivery landed. Per
+  output, `color_policy.selected_transfer_function` / `selected_primaries`
+  now report the profile the display is actually being told instead of a
+  literal sRGB, and `colorspace_signal` reports `bt2020_rgb` rather than
+  `hdr_metadata_unspecified_colorspace` — the request always carried
+  BT2020_RGB.
 
 - **Breaking (diagnostics):** `render_decisions` is schema version 2.
   `tearing.active` now reports whether a frame was actually flipped

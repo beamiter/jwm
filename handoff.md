@@ -4,6 +4,71 @@
 
 ---
 
+## 2026-09-04：十二轮收口之二（HDR P2：条件式 enable，逐帧和解）
+
+**enable 不再是硬拒，但也不是一次性开关——它是一个控制回路。**
+
+1. **唯一判据 `hdr_enable_refusal`**（纯函数，风格照抄
+   `hdr_scanout_chain_gap`）：`HdrEnableEvidence` 全是 plain data，11 个具名
+   refusal，优先级固定为「硬件 → 配置 → 本帧内容」，所以一台永远不行的输出
+   报的理由与屏幕上放什么无关。**IPC 请求与逐帧和解调用同一个函数**——这正是
+   tail-domain 表当初给 overlay 立下的规矩：门禁与帧循环不能各写一份。
+   `set_hdr_metadata_for_output` 内部仍自己重跑 chain 校验，本策略是**追加**
+   门禁而非替代。
+2. **意图与状态分开**。`output_hdr_metadata_active` 是 commit 之后的事实，不是
+   意图；没有锁存的话，第一个 toast 让帧尾不安全、HDR 一撤就永远回不来（除非
+   用户再发一次命令）。新增 `KmsOutputState.hdr_requested` 锁存意图，
+   `hdr_signalling_action(requested, refused, active)` 每帧给出
+   Hold/Assert/Withdraw。IPC 命令只在**等不来的**拒绝上直接失败
+   （`hdr_enable_refusal_is_permanent`：SDR 面板、scanout 链缺口、开关没开），
+   一时性的（toast 正在屏上）不失败——锁存就是用来跨过它的。
+3. **撤回面从 1 条扩到 11 条**。原来只有 `!scene_linear_active` 会撤，于是
+   toast / session lock / 导入失败的 cursor / gamma-control 接管 /
+   unsupported topology 全都会让 PQ+BT.2020 的信号盖在 encoded sRGB 的画面上
+   ——那是整屏级色度错误，不是细微偏差。
+4. **首切片只走 software 路由**，而且**请求会反过来选路**。硬件 CRTC pair 把
+   working-linear 写进 unorm 输出 FBO、之后才在 GAMMA_LUT 里过 OETF，>1.0 在
+   写入时就被裁掉；software 路由在 encode shader 里**先**过 OETF，PQ 编码后的
+   值落在 [0,1] 内、headroom 完整。所以 `hw_pair_target` 在任一参与输出带
+   `hdr_requested` 时被抑制（pair 本就是全组同进退，代价是整组转 software）。
+   **这一步是必需的，不是优化**：hw pair 只要 CRTC 有 GAMMA_LUT+CTM 就优先选
+   中，不抑制的话 enable 会在恰恰能做 HDR 的硬件上被永远拒绝——功能看起来实现
+   了、实际一次都不会触发。`HardwareLutRouteClipsHdrHeadroom` 因此退居兜底，
+   选路子句本身由 const 源码断言钉住（同
+   `render_hot_path_reuses_cached_output_names` 的做法）。
+5. **顺带修一个潜伏 bug**：`attach_edid_caps_to_outputs` 用
+   `insert_if_missing_threadsafe`，写一次就不再更新；查表按 output **名字**，
+   而 `Output` 对象在同一 connector 上热插拔会复用。以前这只影响宣告给客户端的
+   image description 大小，现在这份 caps 要去铸 32 字节 CTA-861.3 blob——把旧
+   面板的峰值亮度和基色告诉新面板，正是本队列存在的意义所要防的那类错误。改成
+   `Mutex<Option<..>>` 槽位并**替换**，读取统一走
+   `output_edid_hdr_capabilities`。
+6. **IPC 停止硬编码**：`hdr_active` 改为 last-success 观测（不再恒 false），
+   `hdr_signalling_enable_available` 由逐输出门禁推导（**没有门禁上报 ≠ 可用**，
+   X11/headless 恒 false，有专门断言钉住），固定 blocker 字符串换成
+   `hdr_enable_refusals` 逐输出真实理由，`limitations` 删掉三条早已被代码推翻
+   的（absolute luminance / commit latch / atomic KMS）。逐输出
+   `selected_transfer_function`/`selected_primaries` 原来是字面
+   `srgb_params()`，切换成功的输出也照报 sRGB——那让整个逐输出策略无法用来
+   验证 enable；现在与 `params_for_output` 同源。`colorspace_signal` 从
+   `hdr_metadata_unspecified_colorspace` 改为 `bt2020_rgb`：请求里一直带的就是
+   BT2020_RGB，报「unspecified」让「显示器被告知了什么」这唯一的证据失去意义。
+7. **新增 docs/hdr.md** 并接进 README 索引（本仓库此前没有任何 color/HDR/
+   tearing/VRR 的用户文档）。
+
+已知限制（写进 docs/hdr.md 的 Limitations，不冒充完成）：**无真 HDR 显示器
+实测**——内核会接受一个语法合法但语义未经校验的 blob，所以「合成器绝不在 sRGB
+像素上打 HDR 信号」是被证明了的，「面板把这份 metadata 解读成预期的样子」没有。
+硬件 LUT 路由的 FP16 scanout FB 与扩展 LUT 键、FB 与颜色属性的单 ioctl 配对、
+`linear_tail_safe` 的逐输出化，均为显式非目标。
+
+验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
+`--no-default-features` 及 7 组 backend feature profile 全绿；
+`cargo test --locked` lib 2683 passed / 0 failed（上一条目 2675 + 新增 8：
+udev_kms HDR 门禁/控制回路/atomic plan/选路 7、ipc_handler 逐输出 profile 1）。
+
+---
+
 ## 2026-09-04：十二轮收口之一（tearing hint 消费 / VRR clobber 修复）
 
 **先说结论：真正的 async page flip 这一轮不做，而且不是「没做完」——是做不了，
@@ -968,6 +1033,12 @@ fallback reason。下面第 1 项已落地，后续从第 2 项继续。
 属性与匹配 framebuffer 的原子提交都是硬前置。以下里程碑应独立落地，任何未满足条件都保持
 exact-sRGB fallback。
 
+**[2026-09-04 更新] 队列已走完 P0–P2。** enable 现在是条件式的：逐输出
+`hdr_enable_refusal` 门禁 + `hdr_requested` 意图锁存 + 每帧 assert/withdraw
+和解，首个切片限定在 software per-output region 路由。剩余非目标（硬件路由的
+FP16 scanout FB 与扩展 LUT 键、FB 与颜色属性的单 ioctl、`linear_tail_safe`
+逐输出化）见「十二轮收口之二」条目与 docs/hdr.md。
+
 **缺口**
 
 1. **[已完成] last-success 交付快照。** IPC 已能区分能力/配置、最近 policy decision 和
@@ -1042,10 +1113,21 @@ exact-sRGB fallback。
      request（TEST_ONLY + commit）编程；跨 DRM device 或 10-bit 链路不完整时
      继续软件 SDR，不宣称 hardware HDR active。FB 与颜色属性的同一请求受
      Smithay DrmCompositor 结构限制，配对语义见进展条目。
-7. **P2：开放真实 HDR enable** — `src/backend/udev_kms.rs` 与 `src/jwm/ipc_handler.rs`
-   - 只有工作域、全部可见 tail element、capture、atomic KMS 和位深门槛同时满足时，才提交
-     `Colorspace` + HDR metadata + 匹配 FB；使 enable/disable、DPMS、gamma-control、
-     hotplug/reinit 和 compositor runtime toggle 都保持可回滚的一致状态。
+7. **P2：[已完成] 开放真实 HDR enable** — `src/backend/udev_kms.rs` 与
+   `src/jwm/ipc_handler.rs`
+   - `hdr_enable_refusal`（纯函数，11 个具名 refusal，硬件→配置→本帧内容的
+     固定优先级）是唯一判据，IPC 请求与逐帧和解共用它；`hdr_requested` 锁存
+     意图，`hdr_signalling_action` 每帧比对「意图 × 拒绝 × 现状」→
+     Hold/Assert/Withdraw。DPMS、gamma-control、tail 不安全、路由变化、
+     participation 变化全部自动撤回并在恢复后自动重新断言。
+   - 首个切片**只允许 software per-output region 路由**：硬件 CRTC pair 路由
+     把 working-linear 写进 RGB10_A2/RGBA8 unorm FBO，参考白以上全部在
+     GAMMA_LUT 之前被裁掉——那恰好就是 HDR 存在的意义；且
+     `installed_gamma_lut` 以 `TransferKind` 为键，烘不进峰值相关策略。
+     解除需要 FP16 scanout FB + 扩展 LUT 键，见 docs/hdr.md 与下方非目标。
+   - FB 与颜色属性仍非同一 ioctl（Smithay 结构限制），配对语义仍是
+     「颜色请求严格先行 + last-success 失效钟」，这一条在 docs/hdr.md 的
+     Limitations 里写明，不再冒充完成。
 8. **贯穿测试** — `src/backend/wayland_udev/compositor/headless_render.rs` 及 KMS 纯策略测试
    - 增加外部元素 source-sRGB -> common-linear -> PQ/HLG/sRGB output 的像素 oracle，覆盖
      半透明边缘、cursor hotspot、跨输出移动、DnD、lock、top/overlay 和导入失败。

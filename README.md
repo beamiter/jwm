@@ -322,6 +322,9 @@ reaches vblank. This keeps configured HDR intent, EDID capability, blocked
 decisions, and JWM's KMS-tracked presentation state distinct without claiming
 to measure the downstream link or panel; `get_hdr_status` and
 `get_color_management_status` include the same snapshot.
+HDR signalling itself — what asks for it, the eleven named reasons an output
+can refuse it, and why it is withdrawn and re-asserted per frame — is
+documented in [HDR and colour delivery](docs/hdr.md).
 Additional operational tools are documented in [tools/README.md](tools/README.md).
 The external Julia simulation worker and frame protocol are documented in
 [docs/waterlily.md](docs/waterlily.md).

@@ -527,6 +527,14 @@ fn color_session_policy_json(
     scene_linear_enabled: bool,
     advanced_enabled: bool,
     delivery_observation_available: bool,
+    // `hdr_refusals`: per-output refusal names from the compositor's own
+    // gate, empty on backends without one. Reported instead of a hardcoded
+    // blocker so this object cannot claim HDR is unavailable for a reason the
+    // code no longer applies. `hdr_observed_active`: whether any output
+    // reports HDR metadata on its last successful presentation — derived,
+    // never inferred from configuration.
+    hdr_refusals: &[(String, Option<String>)],
+    hdr_observed_active: bool,
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
 
@@ -582,9 +590,21 @@ fn color_session_policy_json(
     if heterogeneous_output_profiles && !scene_linear_enabled {
         blockers.push("scene_linear_compositing_inactive");
     }
+    // The compositor's own per-output gate is the authority on why HDR
+    // signalling is not asserted. Before it existed this pushed one fixed
+    // string, which stayed in the payload long after the condition it named
+    // was addressed.
+    let hdr_refusal_blockers: Vec<&str> = hdr_refusals
+        .iter()
+        .filter_map(|(_, refusal)| refusal.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
     if hdr_postprocess_requested {
-        blockers.push("hdr_signalling_enable_unavailable_until_external_elements_adapted");
+        blockers.extend(hdr_refusal_blockers.iter().copied());
     }
+    let hdr_signalling_enable_available =
+        !hdr_refusals.is_empty() && hdr_refusals.iter().any(|(_, refusal)| refusal.is_none());
 
     // This object remains the static policy/capability view. The sibling
     // `color_delivery` object carries the separately versioned, vblank-backed
@@ -596,10 +616,20 @@ fn color_session_policy_json(
         "sdr_output_count": sdr_output_count,
         "mixed_hdr_outputs": mixed_hdr_outputs,
         "heterogeneous_output_profiles": heterogeneous_output_profiles,
-        // Compatibility field now reflects the physical signal instead of a
-        // configuration request. HDR enable is fail-closed in this slice.
-        "hdr_active": false,
-        "hdr_active_semantics": "physical_output_signal_fail_closed_sdr",
+        // Compatibility field reflects the physical signal, never a
+        // configuration request: it is the last successful presentation's
+        // own report, not something derived from what was asked for.
+        "hdr_active": hdr_observed_active,
+        "hdr_active_semantics": "physical_output_signal_last_successful_presentation",
+        // Per-output: the name of the first refusal the compositor's gate
+        // reported, or null where an assertion is currently legal.
+        "hdr_enable_refusals": hdr_refusals
+            .iter()
+            .map(|(output, refusal)| serde_json::json!({
+                "output": output,
+                "refusal": refusal,
+            }))
+            .collect::<Vec<_>>(),
         "hdr_postprocess_requested_on_capable_output": hdr_postprocess_requested,
         "sdr_on_hdr_policy": sdr_on_hdr_policy,
         "mixed_hdr_policy": mixed_hdr_policy,
@@ -626,8 +656,8 @@ fn color_session_policy_json(
                 "nonconflicting_overlap"
             ],
             "hardware_delivery_policy": "paired_all_output_crtc_lut_ctm_or_none",
-            "runtime_output_signal_policy": "sdr_srgb_fail_closed",
-            "hdr_signalling_enable_available": false,
+            "runtime_output_signal_policy": "per_output_fail_closed_reconciled_each_frame",
+            "hdr_signalling_enable_available": hdr_signalling_enable_available,
         },
         "fallback_policy": {
             "route": "global_srgb",
@@ -649,13 +679,17 @@ fn color_session_policy_json(
             ],
             "normal_desktop_cursor_effect": "usually_selects_global_srgb_fallback"
         },
+        // What is still true. Absolute luminance, the surface-description
+        // commit latch, KMS atomic colour delivery and external-element
+        // internalization all landed; leaving them listed made this array
+        // contradict the code and, worse, made it useless for deciding
+        // whether an enable is safe.
         "limitations": [
-            "absolute_luminance_normalization_unavailable",
             "non_d65_chromatic_adaptation_unavailable",
-            "surface_color_description_commit_latching_unavailable",
-            "hdr_signalling_enable_unavailable_until_external_elements_adapted",
-            "kms_external_elements_not_color_adapted",
-            "kms_color_properties_and_framebuffer_not_atomic"
+            "hardware_lut_route_clips_hdr_headroom",
+            "hdr_signalling_requires_software_per_output_delivery_route",
+            "framebuffer_and_color_properties_paired_by_ordering_not_one_ioctl",
+            "direct_scanout_blocked_while_scene_linear_active"
         ],
     })
 }
@@ -666,6 +700,10 @@ fn output_color_policy_json(
     render_path_enabled: bool,
     advanced_enabled: bool,
     delivery_observation_available: bool,
+    // Whether this output's last successful presentation carried HDR
+    // metadata. The runtime profile is what the display is actually being
+    // told, so it follows the observation and never the configuration.
+    hdr_signalled: bool,
 ) -> serde_json::Value {
     use crate::backend::color_policy::{params_from_edid, srgb_params};
 
@@ -685,7 +723,24 @@ fn output_color_policy_json(
     } else {
         srgb_params()
     };
-    let runtime_params = srgb_params();
+    // Was a literal `srgb_params()`, which kept reporting sRGB even on an
+    // output that had successfully switched — making the per-output profile
+    // useless for verifying an enable. It now mirrors `params_for_output`:
+    // the EDID-derived profile exactly while HDR is signalled, sRGB
+    // otherwise.
+    // Signalling HDR requires the advanced gate (the enable policy refuses
+    // otherwise), so this combination is unreachable in practice — but the
+    // two halves of the report must agree even then.
+    let runtime_hdr_profile = advanced_enabled && hdr_signalled;
+    let runtime_params = if runtime_hdr_profile {
+        output
+            .hdr_metadata
+            .as_ref()
+            .map(params_from_edid)
+            .unwrap_or_else(srgb_params)
+    } else {
+        srgb_params()
+    };
     let kms_ctm = kms_color
         .and_then(|c| c.get("ctm_supported"))
         .and_then(|v| v.as_bool())
@@ -701,7 +756,11 @@ fn output_color_policy_json(
     serde_json::json!({
         "advanced_enabled": advanced_enabled,
         "render_path_enabled": render_path_enabled,
-        "policy_source": "runtime_srgb_fail_closed",
+        "policy_source": if runtime_hdr_profile {
+            "runtime_edid_hdr_profile_signalled"
+        } else {
+            "runtime_srgb_fail_closed"
+        },
         "capability_source": capability_source,
         "selected_transfer_function": color_transfer_name(runtime_params.tf_named),
         "selected_transfer_function_raw": runtime_params.tf_named,
@@ -719,7 +778,7 @@ fn output_color_policy_json(
         // claim that the last frame actually took a shader route.
         "shader_fallback_required": shader_fallback_required,
         "shader_fallback_semantics": "static_non_srgb_profile_hint_not_active_route",
-        "selected_profile_semantics": "active_fail_closed_output_target",
+        "selected_profile_semantics": "last_successful_presentation_output_target",
         "delivery_route_observation": if delivery_observation_available {
             "see_color_delivery_last_success"
         } else {
@@ -2180,10 +2239,22 @@ impl Jwm {
                 let color_delivery = backend
                     .compositor_color_delivery_status()
                     .and_then(|status| serde_json::to_value(status).ok());
+                // Why each output is (or is not) signalling right now. This
+                // is the query `jwm-tool` shells out to, so the reasons live
+                // here as well as in the session policy — the per-output
+                // gate is the only thing that can answer "why not".
+                let refusals = backend
+                    .compositor_hdr_enable_refusals()
+                    .into_iter()
+                    .map(|(output, refusal)| {
+                        serde_json::json!({ "output": output, "refusal": refusal })
+                    })
+                    .collect::<Vec<_>>();
                 IpcResponse::ok(Some(serde_json::json!({
                     "config_enabled": cfg.behavior().hdr_enabled,
                     "config_peak_nits": cfg.behavior().hdr_peak_nits,
                     "outputs": outputs,
+                    "enable_refusals": refusals,
                     "color_delivery": color_delivery,
                 })))
             }
@@ -2379,12 +2450,27 @@ impl Jwm {
                         "ctm_supported": c.ctm_supported,
                     })
                 });
+                let hdr_signalled = color_delivery
+                    .as_ref()
+                    .and_then(|delivery| delivery.get("outputs"))
+                    .and_then(|outputs| outputs.as_array())
+                    .is_some_and(|outputs| {
+                        outputs.iter().any(|entry| {
+                            entry.get("name").and_then(serde_json::Value::as_str) == Some(&o.name)
+                                && entry
+                                    .get("last_success")
+                                    .and_then(|success| success.get("hdr_metadata_active"))
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                        })
+                    });
                 let color_policy = output_color_policy_json(
                     o,
                     kms_color.as_ref(),
                     color_render_path_enabled,
                     color_advanced_enabled,
                     color_delivery.is_some(),
+                    hdr_signalled,
                 );
                 let hdr_metadata = o.hdr_metadata.as_ref().map(|m| {
                     serde_json::json!({
@@ -2468,6 +2554,22 @@ impl Jwm {
         let color_surfaces = backend.compositor_color_managed_surfaces();
         let color_surface_summary = color_surface_summary_json(&color_surfaces);
         let scene_linear_enabled = backend.compositor_scene_linear_active();
+        let hdr_enable_refusals = backend.compositor_hdr_enable_refusals();
+        // Observed, not configured: the only proof of what a display is being
+        // told is the last frame that actually reached it.
+        let hdr_observed_active = color_delivery
+            .as_ref()
+            .and_then(|delivery| delivery.get("outputs"))
+            .and_then(|outputs| outputs.as_array())
+            .is_some_and(|outputs| {
+                outputs.iter().any(|output| {
+                    output
+                        .get("last_success")
+                        .and_then(|success| success.get("hdr_metadata_active"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+            });
         let color_session_policy = color_session_policy_json(
             &outputs,
             cfg.behavior().hdr_enabled,
@@ -2475,6 +2577,8 @@ impl Jwm {
             scene_linear_enabled,
             color_advanced_enabled,
             color_delivery.is_some(),
+            &hdr_enable_refusals,
+            hdr_observed_active,
         );
         let color_surface_samples = color_surfaces
             .iter()
@@ -3338,6 +3442,11 @@ mod tests {
         render_decisions_json, resolved_client_monitor_num, runtime_health, tagged_client_count,
         workspace_layout_state,
     };
+
+    /// A backend with no HDR signalling gate of its own reports no per-output
+    /// refusals at all — which is *not* the same as "no refusals", and the
+    /// policy object must not read it as one.
+    const REFUSED: [(String, Option<String>); 0] = [];
     use crate::application::BenchmarkRequest;
     use crate::backend::api::{ColorManagedSurfaceInfo, OutputIdentity, OutputInfo};
     use crate::backend::common_define::{OutputId, WindowId};
@@ -3657,6 +3766,7 @@ mod tests {
             true,
             false,
             true,
+            false,
         );
 
         assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
@@ -3679,8 +3789,11 @@ mod tests {
             true,
             true,
             true,
+            false,
         );
 
+        // Capable but not signalled: the runtime profile is what the display
+        // is being told right now, which is still sRGB.
         assert_eq!(value["policy_source"], "runtime_srgb_fail_closed");
         assert_eq!(value["capability_source"], "edid_hdr_capability");
         assert_eq!(value["selected_transfer_function"], "srgb");
@@ -3700,6 +3813,39 @@ mod tests {
             value["delivery_route_observation"],
             "see_color_delivery_last_success"
         );
+    }
+
+    #[test]
+    fn a_signalled_output_reports_the_profile_the_display_is_actually_told() {
+        let hdr = EdidHdrCapabilities {
+            max_luminance_nits: 1000.0,
+            min_luminance_nits: 0.05,
+            supports_bt2020: true,
+            supports_pq: true,
+            supports_hlg: false,
+        };
+        // The runtime profile used to be a literal sRGB, so an output that
+        // had successfully switched still reported sRGB — which made the
+        // per-output policy useless for verifying an enable.
+        let signalled =
+            output_color_policy_json(&output(Some(hdr.clone())), None, true, true, true, true);
+        assert_eq!(
+            signalled["policy_source"],
+            "runtime_edid_hdr_profile_signalled"
+        );
+        assert_eq!(signalled["selected_transfer_function"], "st2084_pq");
+        assert_eq!(signalled["selected_primaries"], "bt2020");
+        assert_eq!(
+            signalled["selected_profile_semantics"],
+            "last_successful_presentation_output_target"
+        );
+
+        // With advanced colour management off the output is advertised as
+        // exact sRGB to clients, so it must report sRGB whatever the last
+        // frame did — the two must not disagree.
+        let gated = output_color_policy_json(&output(Some(hdr)), None, true, false, true, true);
+        assert_eq!(gated["policy_source"], "runtime_srgb_fail_closed");
+        assert_eq!(gated["selected_transfer_function"], "srgb");
     }
 
     #[test]
@@ -3771,8 +3917,16 @@ mod tests {
         sdr.name = "DP-1".into();
         sdr.identity = OutputIdentity::connector_only("DP-1");
 
-        let full =
-            color_session_policy_json(&[hdr.clone(), sdr.clone()], true, true, true, true, true);
+        let full = color_session_policy_json(
+            &[hdr.clone(), sdr.clone()],
+            true,
+            true,
+            true,
+            true,
+            true,
+            &REFUSED,
+            false,
+        );
         assert_eq!(full["mixed_hdr_outputs"], true);
         assert_eq!(full["heterogeneous_output_profiles"], true);
         assert_eq!(
@@ -3781,18 +3935,21 @@ mod tests {
         );
         assert_eq!(
             full["hdr_active_semantics"],
-            "physical_output_signal_fail_closed_sdr"
+            "physical_output_signal_last_successful_presentation"
         );
+        // Nothing has been presented with HDR metadata, so nothing claims it.
         assert_eq!(full["hdr_active"], false);
         assert_eq!(
             full["mixed_hdr_policy"],
             "per_output_delivery_infrastructure_sdr_signalling_fail_closed"
         );
+        // A backend with no per-output gate contributes no refusal names, and
+        // the object does not invent one.
+        assert_eq!(full["blockers"], serde_json::json!([]));
+        assert_eq!(full["hdr_enable_refusals"], serde_json::json!([]));
         assert_eq!(
-            full["blockers"],
-            serde_json::json!([
-                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
-            ])
+            full["delivery_capabilities"]["hdr_signalling_enable_available"], false,
+            "no gate reporting in is not an availability claim"
         );
         assert_eq!(
             full["delivery_capabilities"]["working_space"],
@@ -3819,31 +3976,51 @@ mod tests {
             full["fallback_policy"]["normal_desktop_cursor_effect"],
             "usually_selects_global_srgb_fallback"
         );
+        // Absolute luminance, the commit latch, KMS atomic colour delivery
+        // and external-element internalization all landed; a limitations
+        // list that still named them contradicted the code and was useless
+        // for deciding whether an enable is safe.
         assert_eq!(
             full["limitations"],
             serde_json::json!([
-                "absolute_luminance_normalization_unavailable",
                 "non_d65_chromatic_adaptation_unavailable",
-                "surface_color_description_commit_latching_unavailable",
-                "hdr_signalling_enable_unavailable_until_external_elements_adapted",
-                "kms_external_elements_not_color_adapted",
-                "kms_color_properties_and_framebuffer_not_atomic"
+                "hardware_lut_route_clips_hdr_headroom",
+                "hdr_signalling_requires_software_per_output_delivery_route",
+                "framebuffer_and_color_properties_paired_by_ordering_not_one_ioctl",
+                "direct_scanout_blocked_while_scene_linear_active"
             ])
         );
 
-        let unavailable =
-            color_session_policy_json(std::slice::from_ref(&hdr), true, true, true, true, false);
+        let unavailable = color_session_policy_json(
+            std::slice::from_ref(&hdr),
+            true,
+            true,
+            true,
+            true,
+            false,
+            &REFUSED,
+            false,
+        );
         assert_eq!(
             unavailable["fallback_policy"]["route_observation"],
             "unavailable_on_backend"
         );
-        let output_unavailable = output_color_policy_json(&hdr, None, true, true, false);
+        let output_unavailable = output_color_policy_json(&hdr, None, true, true, false, false);
         assert_eq!(
             output_unavailable["delivery_route_observation"],
             "unavailable_on_backend"
         );
 
-        let legacy = color_session_policy_json(&[hdr, sdr], true, false, false, false, true);
+        let legacy = color_session_policy_json(
+            &[hdr, sdr],
+            true,
+            false,
+            false,
+            false,
+            true,
+            &REFUSED,
+            false,
+        );
         assert_eq!(
             legacy["sdr_on_hdr_policy"],
             "legacy_sdr_passthrough_on_hdr_output"
@@ -3854,8 +4031,7 @@ mod tests {
             serde_json::json!([
                 "advanced_color_management_disabled",
                 "color_management_render_path_disabled",
-                "scene_linear_compositing_inactive",
-                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
+                "scene_linear_compositing_inactive"
             ])
         );
 
@@ -3866,6 +4042,8 @@ mod tests {
             crate::config::scene_linear_render_path_requested(false, true),
             false,
             true,
+            &REFUSED,
+            false,
         );
         assert_eq!(
             configured_without_render_path["scene_linear_enabled"],
@@ -3897,7 +4075,8 @@ mod tests {
         hlg.id = OutputId(3);
         hlg.name = "HDMI-A-2".into();
         hlg.identity = OutputIdentity::connector_only("HDMI-A-2");
-        let pq_hlg = color_session_policy_json(&[pq, hlg], true, true, false, true, true);
+        let pq_hlg =
+            color_session_policy_json(&[pq, hlg], true, true, false, true, true, &REFUSED, false);
         assert_eq!(pq_hlg["mixed_hdr_outputs"], false);
         assert_eq!(pq_hlg["heterogeneous_output_profiles"], true);
         assert_eq!(
@@ -3906,10 +4085,7 @@ mod tests {
         );
         assert_eq!(
             pq_hlg["blockers"],
-            serde_json::json!([
-                "scene_linear_compositing_inactive",
-                "hdr_signalling_enable_unavailable_until_external_elements_adapted"
-            ])
+            serde_json::json!(["scene_linear_compositing_inactive"])
         );
     }
 

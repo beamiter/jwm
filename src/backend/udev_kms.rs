@@ -191,6 +191,22 @@ struct KmsOutputState {
     legacy_gamma_override: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
+    /// The user asked for HDR signalling on this output and has not asked for
+    /// it back.
+    ///
+    /// This is intent, not state: `output_hdr_metadata_active` is a
+    /// post-commit fact, so without a latch the first toast that demotes the
+    /// frame would drop HDR permanently. Every frame reconciles the two —
+    /// assert while the evidence allows it, withdraw the moment it does not,
+    /// re-assert when it comes back — which is what makes a conditional
+    /// enable a control loop rather than a one-shot.
+    hdr_requested: bool,
+    /// The last completed delivery decision put this output on the software
+    /// per-output region route, and whether the CRTC pair was active. Read by
+    /// the next frame's HDR reconciliation, which runs before this frame's
+    /// route is known.
+    last_software_region_planned: bool,
+    last_hardware_pair_active: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -617,7 +633,7 @@ fn scanout_format_channel_bits(fourcc: Fourcc) -> Option<u32> {
 /// Why HDR scanout signalling must stay fail-closed. Each gap is a distinct,
 /// diagnosable reason; the first gap in a stable precedence order is reported.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum HdrScanoutChainGap {
+pub(super) enum HdrScanoutChainGap {
     /// The color stages live on a different DRM device than the scanout
     /// framebuffer; programming them cannot change the scanned-out domain.
     CrossDevice,
@@ -632,6 +648,21 @@ enum HdrScanoutChainGap {
     ConnectorColorspaceMissing,
     /// The connector lacks the HDR_OUTPUT_METADATA property.
     ConnectorHdrMetadataMissing,
+}
+
+impl HdrScanoutChainGap {
+    /// Stable snake_case name for IPC, reported through
+    /// [`HdrEnableRefusal::wire_name`].
+    pub(super) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::CrossDevice => "scanout_chain_cross_device",
+            Self::FramebufferBitDepth => "scanout_chain_framebuffer_bit_depth",
+            Self::PlaneFormatUnsupported => "scanout_chain_plane_format_unsupported",
+            Self::CrtcColorStagesMissing => "scanout_chain_crtc_color_stages_missing",
+            Self::ConnectorColorspaceMissing => "scanout_chain_connector_colorspace_missing",
+            Self::ConnectorHdrMetadataMissing => "scanout_chain_connector_hdr_metadata_missing",
+        }
+    }
 }
 
 /// Validate the complete 10-bit format/plane/connector chain for HDR scanout.
@@ -664,6 +695,196 @@ fn hdr_scanout_chain_gap(
     }
     if handles.hdr_output_metadata.is_none() {
         return Some(HdrScanoutChainGap::ConnectorHdrMetadataMissing);
+    }
+    None
+}
+
+/// Why HDR signalling may not be asserted on one output this frame.
+///
+/// Mirrors [`HdrScanoutChainGap`]: each variant is a distinct, diagnosable
+/// reason, and the first in a stable precedence order is reported. `None`
+/// from [`hdr_enable_refusal`] means the assertion is legal — for this frame.
+/// It is re-evaluated every frame, because every one of these can change
+/// without a modeset, and signalling PQ/BT.2020 over a frame the compositor
+/// encoded as sRGB is a whole-screen colorimetric error rather than a subtle
+/// one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HdrEnableRefusal {
+    /// DPMS off, or soft-disabled by wlr-output-management.
+    OutputNotParticipating,
+    /// The 10-bit format/plane/connector chain is incomplete.
+    ScanoutChain(HdrScanoutChainGap),
+    /// The sink's EDID advertises no HDR static metadata, so there is nothing
+    /// to build a CTA-861.3 blob from that would describe this panel.
+    EdidLacksHdrProfile,
+    /// The advanced (ICC/HDR) color-management surface is not enabled, so
+    /// clients are told the output is exact sRGB. Signalling HDR while
+    /// advertising sRGB is the same lie in the other direction.
+    AdvancedColorManagementDisabled,
+    /// No FP16 common-linear target: the frame is composed in encoded sRGB.
+    SceneLinearTargetInactive,
+    /// `kms_color_pipeline_offload` / the scene-linear render path is off.
+    ColorPipelineOffloadDisabled,
+    /// Something in the frame tail — a toast, a session lock, an unimportable
+    /// cursor tree — is assembled outside the common-linear pass, so the
+    /// frame falls back to exact sRGB.
+    LinearTailUnsafe,
+    /// A zwlr-gamma-control client owns this CRTC's ramp.
+    LegacyGammaOverrideActive,
+    /// KMS color state is unresolved and presentation is being held.
+    DeliveryBlocked,
+    /// The CRTC pair route writes working-linear into an RGB10_A2/RGBA8
+    /// output FBO, clipping everything above reference white before the
+    /// GAMMA_LUT ever sees it, and `installed_gamma_lut` is keyed by
+    /// `TransferKind` alone so no peak-dependent tone-map can be baked. HDR
+    /// content is exactly the content that lives above reference white, so
+    /// this route would silently destroy the point of enabling it. Lifting
+    /// this needs an FP16 scanout FBO and a wider LUT key.
+    HardwareLutRouteClipsHdrHeadroom,
+    /// No software delivery region covers this output, so nothing applies the
+    /// output transfer function to it.
+    NoSoftwareDeliveryRegion,
+}
+
+impl HdrEnableRefusal {
+    /// Stable snake_case name for IPC.
+    pub(super) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::OutputNotParticipating => "output_not_participating",
+            Self::ScanoutChain(gap) => gap.wire_name(),
+            Self::EdidLacksHdrProfile => "edid_lacks_hdr_profile",
+            Self::AdvancedColorManagementDisabled => "advanced_color_management_disabled",
+            Self::SceneLinearTargetInactive => "scene_linear_target_inactive",
+            Self::ColorPipelineOffloadDisabled => "color_pipeline_offload_disabled",
+            Self::LinearTailUnsafe => "linear_tail_unsafe",
+            Self::LegacyGammaOverrideActive => "legacy_gamma_override_active",
+            Self::DeliveryBlocked => "color_delivery_blocked",
+            Self::HardwareLutRouteClipsHdrHeadroom => "hardware_lut_route_clips_hdr_headroom",
+            Self::NoSoftwareDeliveryRegion => "no_software_delivery_region",
+        }
+    }
+}
+
+/// Per-output, per-frame evidence for the HDR signalling decision. Plain data
+/// so the whole policy is unit-testable without a DRM device or a GL context;
+/// every field names its one producer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HdrEnableEvidence {
+    /// `hdr_scanout_chain_gap(..)` for this output.
+    pub chain_gap: Option<HdrScanoutChainGap>,
+    /// `EdidHdrCapabilities` present on the Smithay output and advertising a
+    /// PQ or HLG EOTF.
+    pub edid_supports_hdr: bool,
+    /// `color_policy::advanced_color_management_enabled()`.
+    pub advanced_color_management: bool,
+    /// `WaylandCompositor::scene_linear_color_path_active()`.
+    pub scene_linear_active: bool,
+    /// The frame-global linear-tail verdict (compositor tail table plus the
+    /// external-element plan). Frame-global on purpose: a cursor on one
+    /// output demotes the frame, and HDR must not outlive that.
+    pub linear_tail_safe: bool,
+    /// `kms_color_pipeline_offload && scene_linear_render_path_requested(..)`.
+    pub offload_gate_on: bool,
+    /// A zwlr-gamma-control ramp is installed on this CRTC.
+    pub legacy_gamma_override: bool,
+    /// `!dpms_off && !soft_disabled`.
+    pub participating: bool,
+    /// The last completed delivery decision put this output on the software
+    /// per-output region route.
+    pub software_region_planned: bool,
+    /// The last completed delivery decision had the CRTC CTM+LUT pair active.
+    pub hardware_pair_active: bool,
+    /// KMS color state is unresolved and presentation is held.
+    pub delivery_blocked: bool,
+}
+
+/// What one output's HDR signalling should do this frame.
+///
+/// A conditional enable is a control loop, not a one-shot: request, evidence,
+/// assert or withdraw, re-assert. Keeping the comparison pure is what makes
+/// the loop's whole matrix — a toast appearing and clearing, a lock, a
+/// gamma-control takeover, a chain gap coming back — testable without a
+/// display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HdrSignallingAction {
+    /// Already where it should be.
+    Hold,
+    Assert,
+    Withdraw,
+}
+
+pub(super) const fn hdr_signalling_action(
+    requested: bool,
+    refused: bool,
+    currently_active: bool,
+) -> HdrSignallingAction {
+    let want = requested && !refused;
+    if want == currently_active {
+        HdrSignallingAction::Hold
+    } else if want {
+        HdrSignallingAction::Assert
+    } else {
+        HdrSignallingAction::Withdraw
+    }
+}
+
+/// Whether a refusal describes something the user cannot change by waiting.
+///
+/// A momentary refusal — a toast on screen, a colour retry in flight — must
+/// not fail an enable request: the latch is exactly what carries the intent
+/// across it. A permanent one (no HDR panel, an incomplete scanout chain, a
+/// switch that is off) is worth answering with, because latching an intent
+/// that will never be honored is a silent no.
+pub(super) const fn hdr_enable_refusal_is_permanent(refusal: HdrEnableRefusal) -> bool {
+    matches!(
+        refusal,
+        HdrEnableRefusal::ScanoutChain(_)
+            | HdrEnableRefusal::EdidLacksHdrProfile
+            | HdrEnableRefusal::AdvancedColorManagementDisabled
+            | HdrEnableRefusal::ColorPipelineOffloadDisabled
+    )
+}
+
+/// Fail-closed policy for asserting HDR signalling on one output.
+///
+/// Hardware capability is tested before configuration, and configuration
+/// before frame content, so a permanently incapable output reports the same
+/// reason regardless of what is on screen. This is an *additional* gate:
+/// `set_hdr_metadata_for_output` re-runs the scanout chain validation itself,
+/// precisely so a wrong answer here cannot produce a bad commit.
+pub(super) const fn hdr_enable_refusal(e: &HdrEnableEvidence) -> Option<HdrEnableRefusal> {
+    if !e.participating {
+        return Some(HdrEnableRefusal::OutputNotParticipating);
+    }
+    if let Some(gap) = e.chain_gap {
+        return Some(HdrEnableRefusal::ScanoutChain(gap));
+    }
+    if !e.edid_supports_hdr {
+        return Some(HdrEnableRefusal::EdidLacksHdrProfile);
+    }
+    if !e.advanced_color_management {
+        return Some(HdrEnableRefusal::AdvancedColorManagementDisabled);
+    }
+    if !e.scene_linear_active {
+        return Some(HdrEnableRefusal::SceneLinearTargetInactive);
+    }
+    if !e.offload_gate_on {
+        return Some(HdrEnableRefusal::ColorPipelineOffloadDisabled);
+    }
+    if !e.linear_tail_safe {
+        return Some(HdrEnableRefusal::LinearTailUnsafe);
+    }
+    if e.legacy_gamma_override {
+        return Some(HdrEnableRefusal::LegacyGammaOverrideActive);
+    }
+    if e.delivery_blocked {
+        return Some(HdrEnableRefusal::DeliveryBlocked);
+    }
+    if e.hardware_pair_active {
+        return Some(HdrEnableRefusal::HardwareLutRouteClipsHdrHeadroom);
+    }
+    if !e.software_region_planned {
+        return Some(HdrEnableRefusal::NoSoftwareDeliveryRegion);
     }
     None
 }
@@ -3239,8 +3460,14 @@ impl KmsState {
                 target_transfer_function: "source_buffer_unknown".into(),
                 target_primaries: "source_buffer_unknown".into(),
                 hdr_metadata_active,
+                // `set_hdr_metadata_for_output` commits Colorspace and
+                // HDR_OUTPUT_METADATA in one request, and the chain gate
+                // guarantees the BT2020_RGB enum exists before it can
+                // enable — so an active signal is BT.2020, not unspecified.
+                // Saying "unspecified" made the only proof of what the
+                // display is being told useless for verifying an enable.
                 colorspace_signal: if hdr_metadata_active {
-                    "hdr_metadata_unspecified_colorspace".into()
+                    "bt2020_rgb".into()
                 } else {
                     "default_sdr".into()
                 },
@@ -3265,7 +3492,7 @@ impl KmsState {
             target_primaries,
             hdr_metadata_active,
             colorspace_signal: if hdr_metadata_active {
-                "hdr_metadata_unspecified_colorspace".into()
+                "bt2020_rgb".into()
             } else {
                 "default_sdr".into()
             },
@@ -3960,6 +4187,139 @@ impl KmsState {
     /// feeds each software region's delivery tone-map plan. Outputs missing
     /// from the map default to the SDR reference (1.0), which selects the
     /// pass-through policy — the exact pre-tone-map behavior.
+    /// Per-output assert/withdraw for HDR signalling. Returns whether every
+    /// transition landed; a failure keeps presentation blocked so a frame is
+    /// never scanned out under a signal the compositor could not change.
+    ///
+    /// Both the IPC enable request and this loop go through the same
+    /// [`hdr_enable_refusal`] policy, so the gate and the frame loop cannot
+    /// drift apart — the discipline the tail-domain table established for
+    /// overlays.
+    fn reconcile_hdr_signalling(
+        &mut self,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
+    ) -> bool {
+        let mut ready = true;
+        for index in 0..self.outputs.len() {
+            let active = crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
+                &self.outputs[index].output,
+            );
+            let refusal = self.hdr_enable_refusal_for_output(
+                index,
+                state,
+                linear_tail_safe,
+                scene_linear_active,
+            );
+            let action =
+                hdr_signalling_action(self.outputs[index].hdr_requested, refusal.is_some(), active);
+            let want = match action {
+                HdrSignallingAction::Hold => continue,
+                HdrSignallingAction::Assert => true,
+                HdrSignallingAction::Withdraw => false,
+            };
+            let blob = if want {
+                match self.hdr_metadata_blob_for_output(index) {
+                    Some(blob) => Some(blob),
+                    None => {
+                        // The EDID stopped describing an HDR panel between
+                        // the request and now (a hotplug onto the same
+                        // output name). Nothing to assert; the latch stays so
+                        // a capable panel coming back re-asserts.
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Err(error) = self.set_hdr_metadata_for_output(index, blob.as_ref()) {
+                log::warn!(
+                    "[kms-cm] failed to {} HDR signalling on {}: {error}",
+                    if want { "assert" } else { "withdraw" },
+                    self.outputs[index].output_name
+                );
+                ready = false;
+            } else {
+                log::info!(
+                    "[kms-cm] HDR signalling {} on {}",
+                    if want { "asserted" } else { "withdrawn" },
+                    self.outputs[index].output_name
+                );
+            }
+        }
+        ready
+    }
+
+    /// Assemble one output's evidence and run the policy. `None` means the
+    /// assertion is legal for this frame.
+    pub(super) fn hdr_enable_refusal_for_output(
+        &self,
+        index: usize,
+        state: &crate::backend::wayland::state::JwmWaylandState,
+        linear_tail_safe: bool,
+        scene_linear_active: bool,
+    ) -> Option<HdrEnableRefusal> {
+        let Some(output) = self.outputs.get(index) else {
+            return Some(HdrEnableRefusal::OutputNotParticipating);
+        };
+        let behavior = crate::config::CONFIG.load();
+        let offload_gate_on = behavior.behavior().kms_color_pipeline_offload
+            && crate::config::scene_linear_render_path_requested(
+                behavior.behavior().color_management_render_path,
+                behavior.behavior().scene_linear_compositing,
+            );
+        drop(behavior);
+        hdr_enable_refusal(&HdrEnableEvidence {
+            chain_gap: hdr_scanout_chain_gap(
+                true,
+                output.swapchain_fourcc,
+                &output.primary_plane_formats,
+                &output.color_property_handles,
+            ),
+            edid_supports_hdr:
+                crate::backend::wayland_udev::color_management::output_edid_hdr_capabilities(
+                    &output.output,
+                )
+                // PQ or HLG: the two EOTFs a CTA-861.3 blob can name. A panel
+                // with neither has no HDR profile to describe.
+                .is_some_and(|caps| caps.supports_pq || caps.supports_hlg),
+            advanced_color_management:
+                crate::backend::color_policy::advanced_color_management_enabled(),
+            scene_linear_active,
+            linear_tail_safe,
+            offload_gate_on,
+            legacy_gamma_override: output.legacy_gamma_override,
+            participating: !output.dpms_off
+                && !state.soft_disabled_outputs.contains(&output.output_name),
+            software_region_planned: output.last_software_region_planned,
+            hardware_pair_active: output.last_hardware_pair_active,
+            delivery_blocked: self.color_pipeline_delivery_blocked,
+        })
+    }
+
+    /// Latch (or drop) the user's HDR request for one output. The commit
+    /// itself belongs to the next frame's reconciliation.
+    pub(super) fn set_hdr_requested(&mut self, index: usize, requested: bool) {
+        if let Some(output) = self.outputs.get_mut(index) {
+            output.hdr_requested = requested;
+            self.needs_render = true;
+        }
+    }
+
+    /// The CTA-861.3 static metadata blob describing this output's panel.
+    /// `None` when its EDID carries no HDR profile to describe.
+    fn hdr_metadata_blob_for_output(&self, index: usize) -> Option<[u8; 32]> {
+        let caps = crate::backend::wayland_udev::color_management::output_edid_hdr_capabilities(
+            &self.outputs.get(index)?.output,
+        )?;
+        let peak = crate::config::CONFIG.load().behavior().hdr_peak_nits;
+        // The blob's peak field is a u16 in cd/m²; clamp rather than let a
+        // misconfigured float wrap into a plausible-looking small number.
+        let peak = peak.clamp(0.0, f32::from(u16::MAX)).round() as u16;
+        Some(crate::backend::hdr_metadata::build_from_edid(&caps, peak))
+    }
+
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
@@ -3969,21 +4329,18 @@ impl KmsState {
     ) -> ColorPipelineDecision {
         use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
-        let mut hdr_metadata_ready = true;
-        if !scene_linear_active {
-            for index in 0..self.outputs.len() {
-                if crate::backend::wayland_udev::color_management::output_hdr_metadata_active(
-                    &self.outputs[index].output,
-                ) && let Err(error) = self.set_hdr_metadata_for_output(index, None)
-                {
-                    log::warn!(
-                        "[kms-cm] failed to return {} to SDR signalling: {error}",
-                        self.outputs[index].output_name
-                    );
-                    hdr_metadata_ready = false;
-                }
-            }
-        }
+        // Reconcile HDR signalling against this frame's evidence, before
+        // anything else reads the per-output color targets: flipping the
+        // signal changes `params_for_output`, and therefore each output's
+        // transfer function and CTM.
+        //
+        // This used to withdraw only when the scene-linear target was gone,
+        // which left HDR asserted across a toast, a session lock, an
+        // unimportable cursor tree, a gamma-control takeover, and an
+        // unsupported output topology — every one of which puts encoded sRGB
+        // on the wire under a PQ/BT.2020 signal.
+        let hdr_metadata_ready =
+            self.reconcile_hdr_signalling(state, linear_tail_safe, scene_linear_active);
 
         // EDID/user-data can change independently of a modeset, and a failed
         // property teardown must be retried before any differently encoded
@@ -4098,7 +4455,22 @@ impl KmsState {
                 ctm_capable = false;
             }
         }
-        let hw_pair_target = target.filter(|_| any_participating && lut_capable && ctm_capable);
+        // An HDR request steers the delivery route, and has to.
+        //
+        // The CRTC pair route writes working-linear into the compositor's
+        // RGB10_A2/RGBA8 output FBO and applies the OETF afterwards in the
+        // GAMMA_LUT, so everything above 1.0 is clipped by the unorm write
+        // before the LUT sees it. The software route applies the OETF in the
+        // encode shader *before* that write, so PQ-encoded values land inside
+        // [0,1] with their headroom intact. Since the pair is all-or-nothing
+        // across the delivery group, one output asking for HDR moves the
+        // whole group to the software route — which is the visible cost, and
+        // cheaper than the alternative: the hardware pair is preferred
+        // wherever the CRTC has the stages, so without this an enable would
+        // be refused forever on exactly the hardware that can do HDR.
+        let hdr_route_requested = (0..n).any(|i| participating[i] && self.outputs[i].hdr_requested);
+        let hw_pair_target = target
+            .filter(|_| any_participating && lut_capable && ctm_capable && !hdr_route_requested);
 
         // When `hw_pair_target` is set, the per-surface ColorTransform pass in
         // backend.rs targets sRGB primaries so the FBO is uniform-sRGB and
@@ -4149,6 +4521,36 @@ impl KmsState {
             // The CRTC pair consumes the common linear-sRGB texture directly;
             // no software output conversion remains.
             decision.software_regions = None;
+        }
+
+        // Record which route each output ended on, for the *next* frame's HDR
+        // reconciliation: that runs before this frame's route exists, and
+        // asserting HDR on a route that has not been chosen yet would be a
+        // prediction rather than evidence.
+        let hardware_pair_active = decision.hw_encode_active && decision.hw_ctm_active;
+        let covered: Vec<bool> = decision
+            .software_regions
+            .as_ref()
+            .map(|regions| {
+                (0..n)
+                    .map(|i| {
+                        participating[i]
+                            && regions.iter().any(|region| {
+                                region.rect
+                                    == [
+                                        self.outputs[i].origin.0,
+                                        self.outputs[i].origin.1,
+                                        self.outputs[i].mode_size.0,
+                                        self.outputs[i].mode_size.1,
+                                    ]
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![false; n]);
+        for i in 0..n {
+            self.outputs[i].last_hardware_pair_active = hardware_pair_active && participating[i];
+            self.outputs[i].last_software_region_planned = covered[i];
         }
 
         self.finish_color_pipeline_decision(decision, &participating)
@@ -5652,6 +6054,15 @@ impl KmsState {
         self.last_presentation_outputs.clone()
     }
 
+    /// Output names in index order, so a caller can pair an index-addressed
+    /// per-output answer with the name that identifies it on the wire.
+    pub(super) fn output_names(&self) -> Vec<String> {
+        self.outputs
+            .iter()
+            .map(|output| output.output_name.clone())
+            .collect()
+    }
+
     pub(super) fn presentation_timing_status(
         &self,
     ) -> crate::backend::api::PresentationTimingStatus {
@@ -6054,6 +6465,9 @@ impl KmsState {
                 output_tf,
                 output_ctm,
                 legacy_gamma_override: false,
+                hdr_requested: false,
+                last_software_region_planned: false,
+                last_hardware_pair_active: false,
                 dpms_off: false,
             });
         }
@@ -7555,7 +7969,7 @@ mod compositor_texture_ownership_tests {
     use super::{
         AtomicColorAssignment, AtomicColorOutputPlan, ColorDeliveryPlan, ColorPipelineDecision,
         CrtcColorProperty, ExternalElementClass, ExternalElementColorPlan,
-        ExternalElementDisposition, FrameQueueBoundary, HdrScanoutChainGap,
+        ExternalElementDisposition, FrameQueueBoundary, HdrEnableEvidence, HdrScanoutChainGap,
         InternalizedExternalFrame, LinearTailBlocker, OutputColorDeliveryTracker,
         OutputColorRegionCandidate, OutputExternalElementPlan, OutputScanoutColorGoal,
         PresentationEvidence, QueuedFrameData, SUBMISSION_SUPPORTS_ASYNC_FLIP,
@@ -7565,12 +7979,13 @@ mod compositor_texture_ownership_tests {
         connector_color_property_neutral_value, crtc_color_property,
         direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
         frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
-        hdr_scanout_chain_gap, legacy_color_delivery_attempt_needed, linear_tail_blocker_names,
-        output_color_target, plan_output_configuration_rollback, plan_software_color_regions,
-        point_in_output, prepared_color_delivery, presentation_plan, rect_overlaps_output,
-        rollback_mode_requires_restore, rounded_pointer_location, scanout_color_goal_matches,
-        scanout_format_channel_bits, smithay_transform_to_wl, submitted_color_delivery_observation,
-        vblank_is_not_older_than_queue, wl_transform_to_smithay,
+        hdr_enable_refusal, hdr_scanout_chain_gap, legacy_color_delivery_attempt_needed,
+        linear_tail_blocker_names, output_color_target, plan_output_configuration_rollback,
+        plan_software_color_regions, point_in_output, prepared_color_delivery, presentation_plan,
+        rect_overlaps_output, rollback_mode_requires_restore, rounded_pointer_location,
+        scanout_color_goal_matches, scanout_format_channel_bits, smithay_transform_to_wl,
+        submitted_color_delivery_observation, vblank_is_not_older_than_queue,
+        wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
@@ -7620,6 +8035,327 @@ mod compositor_texture_ownership_tests {
         );
         assert!(render.contains("contains(&self.outputs[out_idx].output_name)"));
         assert!(render.contains("state.lock_surfaces.get(&out.output_name)"));
+    }
+
+    /// A capable HDR panel on a live output, on the software delivery route,
+    /// with a clean frame tail — the one shape where every clause is
+    /// satisfied. Each test below spoils exactly one field.
+    fn hdr_ready() -> HdrEnableEvidence {
+        HdrEnableEvidence {
+            chain_gap: None,
+            edid_supports_hdr: true,
+            advanced_color_management: true,
+            scene_linear_active: true,
+            linear_tail_safe: true,
+            offload_gate_on: true,
+            legacy_gamma_override: false,
+            participating: true,
+            software_region_planned: true,
+            hardware_pair_active: false,
+            delivery_blocked: false,
+        }
+    }
+
+    #[test]
+    fn hdr_signalling_is_legal_only_when_every_precondition_holds() {
+        use super::HdrEnableRefusal as R;
+
+        assert_eq!(hdr_enable_refusal(&hdr_ready()), None);
+
+        let spoil = |mutate: fn(&mut HdrEnableEvidence)| {
+            let mut evidence = hdr_ready();
+            mutate(&mut evidence);
+            hdr_enable_refusal(&evidence)
+        };
+
+        // Hardware first, so a permanently incapable output reports the same
+        // reason regardless of what is on screen.
+        assert_eq!(
+            spoil(|e| e.participating = false),
+            Some(R::OutputNotParticipating)
+        );
+        assert_eq!(
+            spoil(|e| e.chain_gap = Some(HdrScanoutChainGap::FramebufferBitDepth)),
+            Some(R::ScanoutChain(HdrScanoutChainGap::FramebufferBitDepth))
+        );
+        assert_eq!(
+            spoil(|e| e.edid_supports_hdr = false),
+            Some(R::EdidLacksHdrProfile)
+        );
+        // Then configuration.
+        assert_eq!(
+            spoil(|e| e.advanced_color_management = false),
+            Some(R::AdvancedColorManagementDisabled)
+        );
+        assert_eq!(
+            spoil(|e| e.scene_linear_active = false),
+            Some(R::SceneLinearTargetInactive)
+        );
+        assert_eq!(
+            spoil(|e| e.offload_gate_on = false),
+            Some(R::ColorPipelineOffloadDisabled)
+        );
+        // Then this frame. A toast, a session lock, or an unimportable
+        // cursor tree puts encoded sRGB on the wire; signalling PQ over it is
+        // a whole-screen error, not a subtle one.
+        assert_eq!(
+            spoil(|e| e.linear_tail_safe = false),
+            Some(R::LinearTailUnsafe)
+        );
+        assert_eq!(
+            spoil(|e| e.legacy_gamma_override = true),
+            Some(R::LegacyGammaOverrideActive)
+        );
+        assert_eq!(
+            spoil(|e| e.delivery_blocked = true),
+            Some(R::DeliveryBlocked)
+        );
+        // The CRTC pair route writes working-linear into a unorm FBO, which
+        // clips exactly the above-reference-white content HDR exists for.
+        assert_eq!(
+            spoil(|e| e.hardware_pair_active = true),
+            Some(R::HardwareLutRouteClipsHdrHeadroom)
+        );
+        assert_eq!(
+            spoil(|e| e.software_region_planned = false),
+            Some(R::NoSoftwareDeliveryRegion)
+        );
+    }
+
+    #[test]
+    fn the_headroom_refusal_is_a_backstop_not_the_normal_answer() {
+        use super::HdrEnableRefusal as R;
+
+        // The refusal exists and fires when the hardware pair is somehow
+        // active under a request...
+        let mut paired = hdr_ready();
+        paired.hardware_pair_active = true;
+        assert_eq!(
+            hdr_enable_refusal(&paired),
+            Some(R::HardwareLutRouteClipsHdrHeadroom)
+        );
+
+        // ...but it must not be where a request normally lands. The route
+        // planner suppresses the CRTC pair while any participating output has
+        // a request, precisely because the pair is preferred wherever the
+        // hardware has the stages — without that, an enable would be refused
+        // forever on exactly the hardware capable of HDR, and the feature
+        // would look implemented while never once firing.
+        assert!(!hdr_ready().hardware_pair_active);
+        assert_eq!(hdr_enable_refusal(&hdr_ready()), None);
+        assert!(
+            SOURCE_STEERS_THE_ROUTE_ON_REQUEST,
+            "hw_pair_target must be filtered by hdr_route_requested"
+        );
+    }
+
+    /// The route-steering clause is one line inside a long function; a source
+    /// assertion is what keeps it from being refactored away silently, in the
+    /// same spirit as `render_hot_path_reuses_cached_output_names`.
+    const SOURCE_STEERS_THE_ROUTE_ON_REQUEST: bool = {
+        const SOURCE: &str = include_str!("udev_kms.rs");
+        // `str::contains` is not const; a byte scan is.
+        const NEEDLE: &[u8] = b"&& !hdr_route_requested";
+        const HAYSTACK: &[u8] = SOURCE.as_bytes();
+        let mut i = 0;
+        let mut found = false;
+        while i + NEEDLE.len() <= HAYSTACK.len() {
+            let mut j = 0;
+            let mut matched = true;
+            while j < NEEDLE.len() {
+                if HAYSTACK[i + j] != NEEDLE[j] {
+                    matched = false;
+                    break;
+                }
+                j += 1;
+            }
+            if matched {
+                found = true;
+                break;
+            }
+            i += 1;
+        }
+        found
+    };
+
+    #[test]
+    fn the_signalling_loop_withdraws_on_a_toast_and_re_asserts_when_it_clears() {
+        use super::HdrSignallingAction as A;
+        use super::hdr_signalling_action as act;
+
+        // Nobody asked: nothing to do, and nothing to withdraw.
+        assert_eq!(act(false, false, false), A::Hold);
+        assert_eq!(act(false, true, false), A::Hold);
+
+        // Asked, allowed, not yet on: assert. Then hold.
+        assert_eq!(act(true, false, false), A::Assert);
+        assert_eq!(act(true, false, true), A::Hold);
+
+        // A toast appears — the frame tail is no longer safe, so the signal
+        // comes off even though the request stands. That is the whole reason
+        // the request is latched separately from the state.
+        assert_eq!(act(true, true, true), A::Withdraw);
+        // It stays off while the toast is up...
+        assert_eq!(act(true, true, false), A::Hold);
+        // ...and comes back on its own when the toast clears. Without the
+        // latch the first toast would drop HDR until the user re-issued the
+        // command.
+        assert_eq!(act(true, false, false), A::Assert);
+
+        // The user turns it off while it is on: withdraw, then hold.
+        assert_eq!(act(false, false, true), A::Withdraw);
+        assert_eq!(act(false, false, false), A::Hold);
+
+        // Turning it off while a refusal is already keeping it off is a
+        // no-op, not a redundant commit every frame.
+        assert_eq!(act(false, true, false), A::Hold);
+    }
+
+    #[test]
+    fn hdr_refusal_precedence_names_the_condition_that_explains_the_rest() {
+        use super::HdrEnableRefusal as R;
+
+        // A dark output reports being dark, not the five other things that
+        // are also true of a dark output.
+        let mut off = hdr_ready();
+        off.participating = false;
+        off.edid_supports_hdr = false;
+        off.linear_tail_safe = false;
+        assert_eq!(hdr_enable_refusal(&off), Some(R::OutputNotParticipating));
+
+        // An SDR panel reports having no HDR profile, not a route problem it
+        // could never reach anyway.
+        let mut sdr = hdr_ready();
+        sdr.edid_supports_hdr = false;
+        sdr.software_region_planned = false;
+        assert_eq!(hdr_enable_refusal(&sdr), Some(R::EdidLacksHdrProfile));
+    }
+
+    #[test]
+    fn only_refusals_the_user_cannot_wait_out_fail_the_enable_request() {
+        use super::HdrEnableRefusal as R;
+        use super::hdr_enable_refusal_is_permanent as permanent;
+
+        // Answering the command with these is useful: waiting will not fix
+        // an SDR panel, an incomplete scanout chain, or a switch that is off.
+        assert!(permanent(R::EdidLacksHdrProfile));
+        assert!(permanent(R::AdvancedColorManagementDisabled));
+        assert!(permanent(R::ColorPipelineOffloadDisabled));
+        assert!(permanent(R::ScanoutChain(
+            HdrScanoutChainGap::ConnectorHdrMetadataMissing
+        )));
+
+        // These are momentary, and the latch is exactly what carries the
+        // request across them — failing the command would make enabling HDR
+        // depend on whether a toast happened to be on screen.
+        assert!(!permanent(R::LinearTailUnsafe));
+        assert!(!permanent(R::SceneLinearTargetInactive));
+        assert!(!permanent(R::DeliveryBlocked));
+        assert!(!permanent(R::LegacyGammaOverrideActive));
+        assert!(!permanent(R::HardwareLutRouteClipsHdrHeadroom));
+        assert!(!permanent(R::NoSoftwareDeliveryRegion));
+        assert!(!permanent(R::OutputNotParticipating));
+    }
+
+    #[test]
+    fn every_hdr_refusal_has_a_distinct_stable_wire_name() {
+        use super::HdrEnableRefusal as R;
+
+        let all = [
+            R::OutputNotParticipating,
+            R::ScanoutChain(HdrScanoutChainGap::CrossDevice),
+            R::ScanoutChain(HdrScanoutChainGap::FramebufferBitDepth),
+            R::ScanoutChain(HdrScanoutChainGap::PlaneFormatUnsupported),
+            R::ScanoutChain(HdrScanoutChainGap::CrtcColorStagesMissing),
+            R::ScanoutChain(HdrScanoutChainGap::ConnectorColorspaceMissing),
+            R::ScanoutChain(HdrScanoutChainGap::ConnectorHdrMetadataMissing),
+            R::EdidLacksHdrProfile,
+            R::AdvancedColorManagementDisabled,
+            R::SceneLinearTargetInactive,
+            R::ColorPipelineOffloadDisabled,
+            R::LinearTailUnsafe,
+            R::LegacyGammaOverrideActive,
+            R::DeliveryBlocked,
+            R::HardwareLutRouteClipsHdrHeadroom,
+            R::NoSoftwareDeliveryRegion,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|refusal| refusal.wire_name()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "two refusals share a wire name");
+        assert!(
+            names.iter().all(|name| {
+                !name.is_empty()
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                    })
+            }),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn the_enable_plan_signals_bt2020_and_leaves_the_crtc_stages_alone() {
+        // The signalling request carries Colorspace and HDR_OUTPUT_METADATA
+        // together and nothing else: the CRTC colour stages belong to
+        // `apply_scanout_color_goals`, and putting them in the same request
+        // would make an enable able to disturb the delivery route.
+        let handles = ScanoutColorPropertyHandles {
+            degamma_lut: Some(11),
+            gamma_lut: Some(12),
+            ctm: Some(13),
+            colorspace: Some(14),
+            colorspace_bt2020_rgb: Some(9),
+            hdr_output_metadata: Some(15),
+        };
+        let plan = [AtomicColorOutputPlan {
+            crtc: 40,
+            connector: 41,
+            handles,
+            target: ScanoutColorTarget {
+                degamma_lut: None,
+                ctm: None,
+                gamma_lut: None,
+                colorspace: Some(9),
+                hdr_output_metadata: Some(77),
+            },
+        }];
+        let assignments = build_atomic_color_request(&plan).expect("enable plan");
+        assert_eq!(
+            assignments,
+            vec![
+                AtomicColorAssignment {
+                    object: 41,
+                    property: 14,
+                    value: 9,
+                },
+                AtomicColorAssignment {
+                    object: 41,
+                    property: 15,
+                    value: 77,
+                },
+            ]
+        );
+
+        // Clearing targets the neutral Default colorspace and a zero blob, on
+        // the same two properties, so a withdrawal cannot leave the sink
+        // told BT.2020 with no metadata behind it.
+        let clear = [AtomicColorOutputPlan {
+            crtc: 40,
+            connector: 41,
+            handles,
+            target: ScanoutColorTarget {
+                degamma_lut: None,
+                ctm: None,
+                gamma_lut: None,
+                colorspace: Some(0),
+                hdr_output_metadata: Some(0),
+            },
+        }];
+        let assignments = build_atomic_color_request(&clear).expect("clear plan");
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments.iter().all(|a| a.value == 0));
     }
 
     /// A fullscreen tearing client on a live, capable output — the one shape
@@ -8755,7 +9491,7 @@ mod compositor_texture_ownership_tests {
             target_transfer_function: "st2084_pq".into(),
             target_primaries: "bt2020".into(),
             hdr_metadata_active: true,
-            colorspace_signal: "hdr_metadata_unspecified_colorspace".into(),
+            colorspace_signal: "bt2020_rgb".into(),
             fallback_reason: None,
         };
         let mut tracker = OutputColorDeliveryTracker::default();

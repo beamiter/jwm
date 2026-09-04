@@ -3627,6 +3627,36 @@ impl BackendDiagnostics for UdevBackend {
             .unwrap_or_default()
     }
 
+    fn compositor_hdr_enable_refusals(&self) -> Vec<(String, Option<String>)> {
+        let Some(kms) = self.kms.as_ref() else {
+            return Vec::new();
+        };
+        let linear_tail_safe = self
+            .compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.linear_tail_status().linear_tail_safe());
+        let scene_linear_active = self
+            .compositor
+            .as_ref()
+            .is_some_and(|compositor| compositor.scene_linear_color_path_active());
+        let kms = kms.borrow();
+        kms.output_names()
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let refusal = kms
+                    .hdr_enable_refusal_for_output(
+                        index,
+                        &self.state,
+                        linear_tail_safe,
+                        scene_linear_active,
+                    )
+                    .map(|refusal| refusal.wire_name().to_string());
+                (name, refusal)
+            })
+            .collect()
+    }
+
     fn compositor_tearing_hint_count(&self) -> usize {
         // Surfaces asking to tear, not surfaces that have ever held a
         // control object: the map keeps an entry for every live object, and
@@ -4306,20 +4336,26 @@ impl DisplayControl for UdevBackend {
             .set_vrr_for_output(index, enabled)
             .map_err(BackendError::Message)
     }
+    /// Ask for (or drop) HDR signalling on one output.
+    ///
+    /// This latches *intent*. The actual `Colorspace`/`HDR_OUTPUT_METADATA`
+    /// commit is made — and unmade — by the per-frame reconciliation in
+    /// `refresh_color_pipeline_offload`, because every precondition can change
+    /// without a modeset: a toast, a session lock, a gamma-control client, a
+    /// route change, an unimportable cursor tree. Signalling PQ/BT.2020 over a
+    /// frame the compositor encoded as sRGB is a whole-screen colorimetric
+    /// error, so it is a control loop rather than a one-shot.
+    ///
+    /// An enable is refused up front when the refusal is one the user can do
+    /// something about — an incapable panel, an off switch — so the command
+    /// answers with the reason instead of silently latching an intent that
+    /// will never be honored. Refusals that are merely *momentary* (a toast on
+    /// screen right now) do not fail the request: the latch outlives them.
     fn set_hdr_metadata(&mut self, output: OutputId, enabled: bool) -> Result<(), BackendError> {
         let kms = self
             .kms
             .clone()
             .ok_or(BackendError::Unsupported("no KMS"))?;
-        if enabled {
-            // HDR signalling cannot safely remain active on frames which fall
-            // back to encoded sRGB because cursor/lock/layer elements still
-            // bypass the common-linear compositor. Fail closed until those
-            // KMS-external elements participate in output color delivery.
-            return Err(BackendError::Unsupported(
-                "HDR metadata enable is unavailable until KMS-external elements participate in the color pipeline",
-            ));
-        }
         let shared = self.shared.lock_safe();
         let index = shared
             .outputs
@@ -4327,9 +4363,30 @@ impl DisplayControl for UdevBackend {
             .position(|candidate| candidate.id == output)
             .ok_or(BackendError::NotFound("output not found"))?;
         drop(shared);
-        kms.borrow_mut()
-            .set_hdr_metadata_for_output(index, None)
-            .map_err(BackendError::Message)?;
+
+        if enabled {
+            let linear_tail_safe = self
+                .compositor
+                .as_ref()
+                .is_some_and(|compositor| compositor.linear_tail_status().linear_tail_safe());
+            let scene_linear_active = self
+                .compositor
+                .as_ref()
+                .is_some_and(|compositor| compositor.scene_linear_color_path_active());
+            if let Some(refusal) = kms.borrow().hdr_enable_refusal_for_output(
+                index,
+                &self.state,
+                linear_tail_safe,
+                scene_linear_active,
+            ) && kms::hdr_enable_refusal_is_permanent(refusal)
+            {
+                return Err(BackendError::Message(format!(
+                    "HDR signalling is unavailable on this output: {}",
+                    refusal.wire_name()
+                )));
+            }
+        }
+        kms.borrow_mut().set_hdr_requested(index, enabled);
 
         if let Some(compositor) = self.compositor.as_mut() {
             compositor.force_full_redraw();
@@ -7469,19 +7526,24 @@ fn scan_drm_outputs(dev_id: u64, path: &Path) -> Result<Vec<(u64, OutputInfo)>, 
 /// Dispatch reads it back via `Output::from_resource(&wl_output)`. Lookup is by
 /// output name, which both the KMS and the shared OutputInfo path build via
 /// `format!("{:?}-{}", interface, interface_id)`.
+///
+/// The caps are *replaced*, not inserted-if-missing: see
+/// [`store_edid_hdr_capabilities`] for why a write-once slot is wrong here.
+///
+/// [`store_edid_hdr_capabilities`]:
+///     crate::backend::wayland_udev::color_management::store_edid_hdr_capabilities
 fn attach_edid_caps_to_outputs(
     smithay_outputs: &[smithay::output::Output],
     shared_outputs: &[OutputInfo],
 ) {
-    use crate::backend::edid::EdidHdrCapabilities;
     for info in shared_outputs {
-        let Some(caps) = info.hdr_metadata.clone() else {
+        let Some(out) = smithay_outputs.iter().find(|o| o.name() == info.name) else {
             continue;
         };
-        if let Some(out) = smithay_outputs.iter().find(|o| o.name() == info.name) {
-            out.user_data()
-                .insert_if_missing_threadsafe::<EdidHdrCapabilities, _>(|| caps);
-        }
+        crate::backend::wayland_udev::color_management::store_edid_hdr_capabilities(
+            out,
+            info.hdr_metadata.clone(),
+        );
     }
 }
 

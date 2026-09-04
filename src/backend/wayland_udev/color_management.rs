@@ -398,6 +398,40 @@ impl ColorManagerState {
     }
 }
 
+/// Where an output's parsed EDID HDR block lives.
+///
+/// Stored behind a lock and *replaced*, not inserted-if-missing. Lookup is by
+/// output name and an `Output` object is reused across a hotplug on the same
+/// connector, so a write-once slot would keep describing the panel that used
+/// to be there. That was survivable while the caps only sized the advertised
+/// image description; they now mint the CTA-861.3 blob the sink is told
+/// about, and telling a new panel the old panel's peak luminance and
+/// primaries is exactly the class of error the HDR queue exists to prevent.
+// Only the DRM/KMS backend reads an EDID; the nested backend has no
+// connector to read one from, so it never produces caps to store — but it
+// still *reads* the slot through `params_for_output`, which is why only the
+// setter is gated.
+#[cfg(feature = "backend-wayland-udev")]
+pub(crate) fn store_edid_hdr_capabilities(output: &Output, caps: Option<EdidHdrCapabilities>) {
+    let slot = output
+        .user_data()
+        .get_or_insert_threadsafe::<std::sync::Mutex<Option<EdidHdrCapabilities>>, _>(|| {
+            std::sync::Mutex::new(None)
+        });
+    *slot.lock_safe() = caps;
+}
+
+/// Read back what [`store_edid_hdr_capabilities`] stored. `None` when the
+/// output has no EDID HDR block — either because the panel advertises none,
+/// or because a hotplug replaced a panel that did with one that does not.
+#[must_use]
+pub(crate) fn output_edid_hdr_capabilities(output: &Output) -> Option<EdidHdrCapabilities> {
+    output
+        .user_data()
+        .get::<std::sync::Mutex<Option<EdidHdrCapabilities>>>()
+        .and_then(|slot| slot.lock_safe().clone())
+}
+
 fn params_for_output_policy(
     advanced_enabled: bool,
     hdr_metadata_active: bool,
@@ -414,7 +448,7 @@ pub(crate) fn params_for_output(output: &Output) -> ParametricParams {
     params_for_output_policy(
         advanced_color_management_enabled(),
         output_hdr_metadata_active(output),
-        output.user_data().get::<EdidHdrCapabilities>(),
+        output_edid_hdr_capabilities(output).as_ref(),
     )
 }
 
