@@ -462,6 +462,49 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-04 后半）：P1 前半——image-description commit latch 与亮度/tone-map 定义层已完成
+
+**Commit latch（纯协议状态机）**。surface 的 image description 从「协议请求即生效」
+改为标准双缓冲：新纯状态机 `SurfaceDescriptionLatch`（pending/current 两半，
+`Some(None)` 为 staged 移除）内嵌于 `ColorManagerState` 的逐 surface 表
+（`color_management.rs`）。`set_image_description` / `unset_image_description` 只
+stage 进 pending；`CompositorHandler::commit` 调用 `commit_surface_description`
+锁存进 current——smithay 在事务 apply 时逐 surface 触发该 hook（普通 surface 与
+desync subsurface 立即、sync subsurface 随 parent commit 触发），正好是协议对整棵
+surface 树的 commit 语义，subsurface 同步/异步无需额外分支。渲染/计划/IPC 仍只读
+current（`snapshot_surface_params` / `snapshot_surface_descriptions`），generation
+失效钟只在 committed 半区真正变化时推进（同 identity 重提交幂等）。`destroy` 按
+协议等于 unset（双缓冲 staged 移除，不再立即生效）；wl_surface 本体销毁时
+`CompositorHandler::destroyed` 清掉 latch 两半与 feedback bucket（顺带修了
+wl_surface 先死而 cm 对象不毁时描述与 feedback 滞留的泄漏）；cm 对象 `destroyed`
+钩子只在 wl_surface 已死时兜底。colocated 单测覆盖：set→commit 生效顺序、set 两次
+commit 一次（后者胜出）、commit 无 set 保持、unset 双缓冲、set+unset 提交前抵消、
+同 identity 幂等、destroy 清理 pending+current、idle 条目回收、generation 只在
+committed 变化时推进。
+
+**亮度基准与 tone-map 定义层（纯数学，未接入渲染，输出像素不变）**。
+`color_management::SDR_REFERENCE_WHITE_NITS = 203.0`：工作空间线性 1.0 的绝对锚点，
+取 BT.2408 HDR reference white（而非 scRGB 的 80 nits 惯例），与
+`color_policy::params_from_edid` 已外发的 `reference_lum = 203` 一致，选型依据写在
+常量文档。`color_pipeline` 新增：`PQ_MAX_LUMINANCE_NITS`(10 000)、
+`HLG_NOMINAL_PEAK_NITS`(1 000)、`pq_encode_nits`/`pq_decode_nits`、
+`hlg_encode_nits`/`hlg_decode_nits`、`nits_to_working_linear`/
+`working_linear_to_nits`、`working_space_scale(tf)`（PQ→10000/203、HLG→1000/203、
+SDR 系→1.0），以及 `ToneMapPolicy`（`ReferenceWhite`/`Clip`/`ReinhardShoulder`）+
+`for_peaks` 默认策略（装得下目标峰值→ReferenceWhite，否则 Clip）+
+`map_working_linear` 纯映射（Reinhard 为锚定 source peak 的 extended 形式，退化
+峰值回退 clip）。决策点已写进模块文档但**未接线**：ingress 端
+（`build_to_linear_srgb` 乘 scale 因子）与逐输出 delivery plan 端（`for_peaks`
+选型、`map_working_linear` 施加在输出 OETF 之前）。HDR enable 仍 fail-closed。
+单测覆盖 PQ/HLG nits 往返与已知参考点（100 nits↔0.5081、203 nits↔0.5807、HLG
+0.75↔265 nits）、working↔nits 锚点、逐 TF scale、policy 选型矩阵、clip 边界、
+Reinhard 端点/单调性/高光层次保持/退化峰值回退。
+
+验证：`cargo fmt --all -- --check`、`cargo test --locked`（lib 2632 passed =
+基线 2612 + 新增 20）、`cargo clippy --locked --lib --bins --tests --no-deps --
+-D warnings`、`cargo check --locked --all-targets`（默认与 --no-default-features）
+全绿；无显示会话，行为验证全部来自 colocated 单测。
+
 ### 进展（2026-09-04 末）：P0-4 帧尾 domain table + capture 独立 view 已完成
 
 帧尾 overlay 的颜色域归属集中到新模块 `compositor/tail_domain.rs`
@@ -591,9 +634,12 @@ exact-sRGB fallback。
    toolbar、toast/OSD、recording overlay 等必须逐类标注为 common-linear-aware，或保留具名
    blocker；capture/readback 要从明确编码的独立 view 派生，不能通过改变物理 scanout route
    来获得截图。
-5. **真实 HDR 语义尚不完整。** normalized linear-sRGB 目前没有统一 absolute-luminance/
-   working-white 或 tone mapping；非 D65 白点已经 Bradford 适应，surface description 仍尚未与
-   对应 `wl_surface.commit` 原子锁存。
+5. **真实 HDR 语义尚不完整（前半已完成）。** working-white/absolute-luminance 基准
+   （SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map policy 的定义层已落地
+   （定义层，未接入渲染决策）；image-description 已与对应 `wl_surface.commit` 原子
+   锁存（pending/current 双缓冲，subsurface 同步语义由 smithay 事务 apply 点继承）。
+   剩余：ingress rescale 与 delivery 端 tone-map 选型真正接进渲染计划（与第 6 条
+   一并验证）；非 D65 白点已 Bradford 适应；HDR enable 继续 fail-closed。
 6. **KMS 交付还不是 framebuffer 原子事务。** `DEGAMMA/CTM/GAMMA`、connector
    `Colorspace`/`HDR_OUTPUT_METADATA` 与目标 FB 必须同一 TEST_ONLY + atomic commit；还要
    明确要求并验证 HDR scanout 的 10-bit（或更高）format/plane/connector 链。direct scanout
@@ -623,10 +669,12 @@ exact-sRGB fallback。
 4. **P0：[已完成] 清理其余 linear-tail blocker** — `compositor/{tail_domain,damage,render,expose}.rs`
    - 建立帧尾 domain table，让每一类 overlay 要么在 final delivery 前绘制，要么有显式颜色
      adapter；capture/recording 使用独立、目标明确的 view，不再反向约束物理输出 route。
-5. **P1：补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
-   - 非 D65 Bradford CAT 已实现并测试。剩余：定义 working white/absolute
-     luminance、SDR/PQ/HLG 标尺与 tone-map policy；将 image-description
-     pending/current 双缓冲，只在匹配 surface commit 生效。
+5. **P1：[前半已完成] 补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
+   - 非 D65 Bradford CAT 已实现并测试。已完成：working white/absolute
+     luminance 基准（SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map
+     policy 定义层；image-description pending/current 双缓冲只在匹配
+     surface commit 锁存。剩余：把定义层数学接进渲染决策点（ingress
+     scale 与 delivery 端 tone-map 选型），与第 6 条 KMS 原子交付一并验证。
 6. **P1：KMS 原子交付与位深** — `src/backend/udev_kms.rs`
    - 将 plane FB、CRTC color stages 与 connector signalling 合并为同一受控 atomic request；
      跨 DRM device 或 10-bit 链路不完整时继续软件 SDR，不宣称 hardware HDR active。

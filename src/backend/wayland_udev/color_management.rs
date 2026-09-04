@@ -2,9 +2,12 @@
 ///
 /// The protocol lets clients describe surface colorimetry (HDR transfer curves,
 /// primaries, mastering metadata) and query per-output preferred image
-/// descriptions. Surface snapshots feed the compositor's per-window transform
-/// plans, while output preferences use an EDID HDR profile only while KMS is
-/// actively signalling that profile; the safe default is sRGB.
+/// descriptions. Surface descriptions are double-buffered state: protocol
+/// requests stage a pending value and only the matching `wl_surface.commit`
+/// latches it into the committed snapshot that feeds the compositor's
+/// per-window transform plans, while output preferences use an EDID HDR profile
+/// only while KMS is actively signalling that profile; the safe default is
+/// sRGB.
 ///
 /// Bound at version 1, so the v1 `ready` / `preferred_changed` events are sent
 /// (the v2 `ready2` / `preferred_changed2` variants will be added when we bump).
@@ -41,6 +44,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const COLOR_MANAGER_VERSION: u32 = 1;
+
+/// Absolute luminance of the compositor working space's unit white — the
+/// linear value 1.0 — in cd/m².
+///
+/// 203 cd/m² is the BT.2408 "HDR reference white": the level SDR graphics
+/// white is expected to occupy inside an HDR signal. Anchoring the normalized
+/// linear-sRGB working space there (rather than at the scRGB convention of
+/// 80 cd/m²) keeps SDR content unchanged — decoded SDR curves already produce
+/// 1.0 at white — while giving PQ/HLG decodes a fixed absolute scale, and it
+/// matches the `reference_lum = 203` this compositor already advertises for
+/// HDR-signalled outputs via `color_policy::params_from_edid`. The per
+/// transfer-function scale factors and tone-map policy that consume this
+/// anchor live in `color_pipeline`.
+pub(crate) const SDR_REFERENCE_WHITE_NITS: f32 = 203.0;
 
 #[derive(Debug, Default)]
 struct OutputHdrMetadataState {
@@ -85,6 +102,61 @@ pub struct SurfaceDescriptionRecord {
     pub params: ParametricParams,
 }
 
+/// Pending/current double buffer for one surface's image description.
+///
+/// wp-color-management-v1 declares `set_image_description` and
+/// `unset_image_description` (and thereby the surface object's `destroy`,
+/// which the protocol defines as an unset) double-buffered state applied at
+/// `wl_surface.commit`. Protocol requests therefore stage into `pending` and
+/// only the matching commit moves the value into `current`, which is the sole
+/// half the render and plan paths may read. `Some(None)` in `pending` is a
+/// staged removal.
+#[derive(Debug, Default)]
+pub(crate) struct SurfaceDescriptionLatch {
+    pending: Option<Option<SurfaceDescriptionRecord>>,
+    current: Option<SurfaceDescriptionRecord>,
+}
+
+impl SurfaceDescriptionLatch {
+    /// Stage a description for the next commit. The latest stage wins; a
+    /// staged value never becomes visible before its commit.
+    fn stage(&mut self, record: SurfaceDescriptionRecord) {
+        self.pending = Some(Some(record));
+    }
+
+    /// Stage removal of any committed description.
+    fn stage_removal(&mut self) {
+        self.pending = Some(None);
+    }
+
+    /// Apply the surface's `wl_surface.commit`: a staged value replaces the
+    /// committed one. Returns true only when the committed state actually
+    /// changed — a commit with nothing staged, and re-committing the same
+    /// immutable description identity, are both no-ops.
+    fn commit(&mut self) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        let changed = match (&pending, &self.current) {
+            (None, None) => false,
+            (Some(new), Some(old)) => new.identity != old.identity,
+            _ => true,
+        };
+        self.current = pending;
+        changed
+    }
+
+    /// The committed description, if any.
+    fn current(&self) -> Option<&SurfaceDescriptionRecord> {
+        self.current.as_ref()
+    }
+
+    /// Nothing staged and nothing committed — the map entry can be dropped.
+    fn is_idle(&self) -> bool {
+        self.pending.is_none() && self.current.is_none()
+    }
+}
+
 /// Bookkeeping for one surface's wp_color_management_surface_feedback_v1
 /// resources, the outputs the surface currently sits on, and the
 /// preferred image description we last emitted for it.
@@ -106,14 +178,16 @@ struct FeedbackBucket {
 pub struct ColorManagerState {
     id_counter: Arc<Mutex<u64>>,
     /// Monotonic invalidation clock for compositor copies of surface color
-    /// plans. Image descriptions are immutable once ready, so identity changes
-    /// and removals are the only transitions which need to advance it.
+    /// plans. Image descriptions are immutable once ready, and only changes to
+    /// the committed (current) half of a surface's latch advance it — staging
+    /// a pending value must not invalidate anything the renderer reads.
     surface_description_generation: AtomicU64,
-    /// Per-surface applied image description (set via
-    /// wp_color_management_surface_v1.set_image_description). Stores the full
-    /// parametric params so the render path can read them without re-walking
-    /// the protocol object graph.
-    pub surface_descriptions: Arc<Mutex<HashMap<ObjectId, SurfaceDescriptionRecord>>>,
+    /// Per-surface image-description latch keyed by wl_surface ObjectId.
+    /// `set_image_description` / `unset_image_description` stage the pending
+    /// half; the compositor commit hook (`CompositorHandler::commit`, invoked
+    /// by smithay when the surface's transaction applies) latches it into the
+    /// committed half that the snapshot methods expose to render/plan paths.
+    surface_descriptions: Arc<Mutex<HashMap<ObjectId, SurfaceDescriptionLatch>>>,
     /// Per-surface feedback tracking — resources, current output set, and
     /// last-emitted preferred description. Created lazily when a client first
     /// calls get_surface_feedback.
@@ -141,12 +215,47 @@ impl ColorManagerState {
         self.surface_description_generation.load(Ordering::Acquire)
     }
 
-    fn set_surface_description(&self, surface: ObjectId, record: SurfaceDescriptionRecord) -> bool {
+    /// Stage a description for the surface's next commit
+    /// (wp_color_management_surface_v1.set_image_description). The render path
+    /// keeps reading the previously committed description until
+    /// [`Self::commit_surface_description`] runs.
+    pub(crate) fn stage_surface_description(
+        &self,
+        surface: ObjectId,
+        record: SurfaceDescriptionRecord,
+    ) {
+        self.surface_descriptions
+            .lock_safe()
+            .entry(surface)
+            .or_default()
+            .stage(record);
+    }
+
+    /// Stage removal of the surface's committed description
+    /// (wp_color_management_surface_v1.unset_image_description; the surface
+    /// object's destroy request is protocol-defined as an unset). An unset on
+    /// a surface with no latch entry can never change committed state, so it
+    /// is dropped instead of growing the map.
+    pub(crate) fn stage_surface_description_removal(&self, surface: &ObjectId) {
+        if let Some(latch) = self.surface_descriptions.lock_safe().get_mut(surface) {
+            latch.stage_removal();
+        }
+    }
+
+    /// Latch the staged pending description at the surface's
+    /// `wl_surface.commit`. Returns true when the committed description
+    /// changed; only then is the invalidation clock advanced. Idle entries
+    /// (nothing staged, nothing committed) are dropped so surfaces that never
+    /// carry a description cannot accumulate here.
+    pub(crate) fn commit_surface_description(&self, surface: &ObjectId) -> bool {
         let mut descriptions = self.surface_descriptions.lock_safe();
-        let changed = descriptions
-            .get(&surface)
-            .is_none_or(|previous| previous.identity != record.identity);
-        descriptions.insert(surface, record);
+        let Some(latch) = descriptions.get_mut(surface) else {
+            return false;
+        };
+        let changed = latch.commit();
+        if latch.is_idle() {
+            descriptions.remove(surface);
+        }
         drop(descriptions);
         if changed {
             self.surface_description_generation
@@ -155,12 +264,16 @@ impl ColorManagerState {
         changed
     }
 
-    fn remove_surface_description(&self, surface: &ObjectId) -> bool {
+    /// Drop both halves of a surface's latch. Used when the wl_surface itself
+    /// is destroyed: no future commit can latch a staged value, and the
+    /// ObjectId must not linger past the surface's lifetime. Returns true when
+    /// a committed description was removed.
+    pub(crate) fn destroy_surface_description(&self, surface: &ObjectId) -> bool {
         let changed = self
             .surface_descriptions
             .lock_safe()
             .remove(surface)
-            .is_some();
+            .is_some_and(|latch| latch.current().is_some());
         if changed {
             self.surface_description_generation
                 .fetch_add(1, Ordering::AcqRel);
@@ -168,10 +281,11 @@ impl ColorManagerState {
         changed
     }
 
-    /// Snapshot the surface→description map in one lock acquisition. The
+    /// Snapshot the surface→committed-params map in one lock acquisition. The
     /// returned map is decoupled from the live state and safe to consult
     /// across many surfaces without re-locking per-surface (used by the
-    /// render-path color-management pass).
+    /// render-path color-management pass). Staged-but-uncommitted descriptions
+    /// are deliberately invisible here.
     #[allow(
         clippy::mutable_key_type,
         reason = "Wayland ObjectId hashes by stable protocol-object identity; its internal liveness flag is not part of Hash or Eq"
@@ -180,17 +294,22 @@ impl ColorManagerState {
         self.surface_descriptions
             .lock_safe()
             .iter()
-            .map(|(k, v)| (k.clone(), v.params.clone()))
+            .filter_map(|(k, latch)| {
+                latch
+                    .current()
+                    .map(|record| (k.clone(), record.params.clone()))
+            })
             .collect()
     }
 
-    /// Snapshot every surface that currently has an applied image description.
-    /// Used by the diagnostic IPC to report active color-managed clients.
+    /// Snapshot every surface that currently has a committed image
+    /// description. Used by the diagnostic IPC to report active color-managed
+    /// clients.
     pub fn snapshot_surface_descriptions(&self) -> Vec<(ObjectId, SurfaceDescriptionRecord)> {
         self.surface_descriptions
             .lock_safe()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter_map(|(k, latch)| latch.current().map(|record| (k.clone(), record.clone())))
             .collect()
     }
 
@@ -216,8 +335,11 @@ impl ColorManagerState {
             .and_then(|b| b.last_preferred.clone())
     }
 
-    /// Drop everything tied to a surface — called from the surface Dispatch's
-    /// destroyed hook so a leaked WlSurface doesn't pile up here forever.
+    /// Drop everything tied to a surface — called when the wl_surface itself
+    /// is destroyed (the compositor destroyed hook) and, as a disconnect-
+    /// ordering safety net, from the color-management surface Dispatch's
+    /// destroyed hook once the wl_surface is already dead, so a leaked
+    /// WlSurface doesn't pile up here forever.
     pub fn forget_surface(&self, surface: &ObjectId) {
         self.feedback.lock_safe().remove(surface);
     }
@@ -528,12 +650,12 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
     ) {
         match request {
             wp_color_management_surface_v1::Request::Destroy => {
-                let changed = state
-                    .color_manager
-                    .as_ref()
-                    .is_some_and(|cm| cm.remove_surface_description(&data.surface.id()));
-                if changed {
-                    state.needs_redraw = true;
+                // Protocol: destroy "does the same as unset_image_description",
+                // which is double-buffered — stage the removal and let the
+                // next wl_surface.commit apply it. The surface Dispatch's
+                // destroyed hook below handles wl_surface teardown.
+                if let Some(cm) = state.color_manager.as_ref() {
+                    cm.stage_surface_description_removal(&data.surface.id());
                 }
             }
             wp_color_management_surface_v1::Request::SetImageDescription {
@@ -542,7 +664,11 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
             } => {
                 // Pull the ready snapshot (id + params) out of the protocol
                 // object so the render path doesn't need to chase the
-                // wp_image_description_v1 resource later.
+                // wp_image_description_v1 resource later. The description is
+                // double-buffered: stage it pending, and only the matching
+                // wl_surface.commit (see CompositorHandler::commit) latches it
+                // into the committed snapshot the render path reads — staging
+                // alone changes nothing visible, so no redraw is needed yet.
                 let snapshot = image_description
                     .data::<ImageDescriptionData>()
                     .and_then(|d| match &*d.lock_safe() {
@@ -555,18 +681,14 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
                         ImageDescriptionState::Failed => None,
                     });
                 if let (Some(record), Some(cm)) = (snapshot, state.color_manager.as_ref()) {
-                    if cm.set_surface_description(data.surface.id(), record) {
-                        state.needs_redraw = true;
-                    }
+                    cm.stage_surface_description(data.surface.id(), record);
                 }
             }
             wp_color_management_surface_v1::Request::UnsetImageDescription => {
-                let changed = state
-                    .color_manager
-                    .as_ref()
-                    .is_some_and(|cm| cm.remove_surface_description(&data.surface.id()));
-                if changed {
-                    state.needs_redraw = true;
+                // Double-buffered like set: the committed description stays in
+                // force until the matching wl_surface.commit latches the removal.
+                if let Some(cm) = state.color_manager.as_ref() {
+                    cm.stage_surface_description_removal(&data.surface.id());
                 }
             }
             _ => {}
@@ -579,8 +701,17 @@ impl Dispatch<WpColorManagementSurfaceV1, SurfaceCmData> for JwmWaylandState {
         _resource: &WpColorManagementSurfaceV1,
         data: &SurfaceCmData,
     ) {
+        // This hook fires both for the destroy request above — wl_surface
+        // still alive, and the staged removal it left behind must survive
+        // until the next commit — and for wl_surface teardown, where both
+        // latch halves and the feedback bookkeeping must go. CompositorHandler
+        // ::destroyed performs the same purge when the wl_surface dies, so
+        // this branch is the disconnect-ordering safety net.
+        if data.surface.is_alive() {
+            return;
+        }
         if let Some(cm) = state.color_manager.as_ref() {
-            let changed = cm.remove_surface_description(&data.surface.id());
+            let changed = cm.destroy_surface_description(&data.surface.id());
             cm.forget_surface(&data.surface.id());
             if changed {
                 state.needs_redraw = true;
@@ -1001,6 +1132,170 @@ mod tests {
             primaries: Some(primaries),
             ..Default::default()
         }
+    }
+
+    fn record(identity: u64) -> SurfaceDescriptionRecord {
+        SurfaceDescriptionRecord {
+            identity,
+            params: color_policy::srgb_params(),
+        }
+    }
+
+    #[test]
+    fn latch_commit_applies_staged_description() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        assert!(latch.current().is_none());
+        latch.stage(record(7));
+        assert!(
+            latch.current().is_none(),
+            "staged state must not leak into the committed half before commit"
+        );
+        assert!(latch.commit());
+        assert_eq!(latch.current().map(|c| c.identity), Some(7));
+        // A commit with nothing staged changes nothing.
+        assert!(!latch.commit());
+        assert_eq!(latch.current().map(|c| c.identity), Some(7));
+    }
+
+    #[test]
+    fn latch_latest_stage_wins_before_commit() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        latch.stage(record(1));
+        latch.stage(record(2));
+        assert!(latch.commit());
+        assert_eq!(latch.current().map(|c| c.identity), Some(2));
+    }
+
+    #[test]
+    fn latch_staged_unset_removes_on_commit() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        latch.stage(record(3));
+        assert!(latch.commit());
+        latch.stage_removal();
+        assert_eq!(
+            latch.current().map(|c| c.identity),
+            Some(3),
+            "unset is double-buffered: the committed description survives until commit"
+        );
+        assert!(latch.commit());
+        assert!(latch.current().is_none());
+        assert!(latch.is_idle());
+    }
+
+    #[test]
+    fn latch_set_then_unset_before_commit_never_becomes_visible() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        latch.stage(record(4));
+        latch.stage_removal();
+        assert!(
+            !latch.commit(),
+            "nothing was committed before; removing nothing is no change"
+        );
+        assert!(latch.current().is_none());
+        assert!(latch.is_idle());
+    }
+
+    #[test]
+    fn latch_recommit_same_identity_is_no_change() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        latch.stage(record(9));
+        assert!(latch.commit());
+        latch.stage(record(9));
+        assert!(
+            !latch.commit(),
+            "re-committing the same immutable description identity must not count as a change"
+        );
+        // unset then re-set the same identity before commit: still no change.
+        latch.stage_removal();
+        latch.stage(record(9));
+        assert!(!latch.commit());
+        assert_eq!(latch.current().map(|c| c.identity), Some(9));
+    }
+
+    #[test]
+    fn latch_unset_without_current_is_noop() {
+        let mut latch = SurfaceDescriptionLatch::default();
+        latch.stage_removal();
+        assert!(!latch.commit());
+        assert!(latch.current().is_none());
+        assert!(latch.is_idle());
+    }
+
+    #[test]
+    fn color_manager_latches_only_at_commit_and_bumps_generation() {
+        let cm = ColorManagerState::new();
+        let surface = ObjectId::null();
+        let gen0 = cm.surface_description_generation();
+
+        cm.stage_surface_description(surface.clone(), record(11));
+        assert!(
+            cm.snapshot_surface_params().is_empty(),
+            "the render-visible snapshot must ignore pending state"
+        );
+        assert!(
+            cm.snapshot_surface_descriptions().is_empty(),
+            "the IPC-visible snapshot must ignore pending state"
+        );
+        assert_eq!(
+            cm.surface_description_generation(),
+            gen0,
+            "staging must not invalidate compositor copies"
+        );
+
+        assert!(cm.commit_surface_description(&surface));
+        assert_eq!(cm.snapshot_surface_params().len(), 1);
+        assert_eq!(cm.snapshot_surface_descriptions().len(), 1);
+        assert!(cm.surface_description_generation() > gen0);
+
+        // Commit with nothing staged: no change, no invalidation.
+        let gen1 = cm.surface_description_generation();
+        assert!(!cm.commit_surface_description(&surface));
+        assert_eq!(cm.surface_description_generation(), gen1);
+
+        // Staged removal stays invisible until its commit.
+        cm.stage_surface_description_removal(&surface);
+        assert_eq!(cm.snapshot_surface_params().len(), 1);
+        assert!(cm.commit_surface_description(&surface));
+        assert!(cm.snapshot_surface_params().is_empty());
+        assert!(cm.snapshot_surface_descriptions().is_empty());
+    }
+
+    #[test]
+    fn color_manager_destroy_purges_pending_and_current() {
+        let cm = ColorManagerState::new();
+        let surface = ObjectId::null();
+        cm.stage_surface_description(surface.clone(), record(12));
+        assert!(cm.commit_surface_description(&surface));
+        let gen_before = cm.surface_description_generation();
+
+        // A staged-but-uncommitted update must vanish together with the
+        // committed description when the wl_surface dies.
+        cm.stage_surface_description(surface.clone(), record(13));
+        assert!(cm.destroy_surface_description(&surface));
+        assert!(cm.snapshot_surface_params().is_empty());
+        assert!(
+            cm.surface_description_generation() > gen_before,
+            "removing a committed description must invalidate compositor copies"
+        );
+
+        // Destroying an idle surface reports no change and leaves no entry.
+        assert!(!cm.destroy_surface_description(&surface));
+        assert!(!cm.surface_descriptions.lock_safe().contains_key(&surface));
+    }
+
+    #[test]
+    fn color_manager_idle_latch_entries_are_dropped_at_commit() {
+        let cm = ColorManagerState::new();
+        let surface = ObjectId::null();
+        // set → unset → commit removes the whole entry instead of leaking it.
+        cm.stage_surface_description(surface.clone(), record(14));
+        cm.stage_surface_description_removal(&surface);
+        assert!(!cm.commit_surface_description(&surface));
+        assert!(!cm.surface_descriptions.lock_safe().contains_key(&surface));
+        // A bare unset on a surface with no description grows no entry.
+        cm.stage_surface_description_removal(&surface);
+        assert!(!cm.surface_descriptions.lock_safe().contains_key(&surface));
+        assert!(!cm.commit_surface_description(&surface));
     }
 
     /// The pure policy module encodes wp_color_manager_v1 enum values as

@@ -2838,6 +2838,19 @@ impl CompositorHandler for JwmWaylandState {
     }
 
     fn commit(&mut self, surface: &WlSurface) {
+        // wp-color-management double-buffer latch: move the image description
+        // staged by set/unset_image_description into the committed snapshot the
+        // render path reads. Smithay invokes this hook when the surface's
+        // transaction applies — immediately for plain surfaces and
+        // desynchronized subsurfaces, and at the parent commit for
+        // synchronized subsurfaces — which is exactly the protocol's commit
+        // point for the whole surface tree.
+        if let Some(cm) = self.color_manager.as_ref() {
+            if cm.commit_surface_description(&surface.id()) {
+                self.needs_redraw = true;
+            }
+        }
+
         // Snapshot the buffer assignment kind BEFORE on_commit_buffer_handler consumes it.
         // on_commit_buffer_handler calls RendererSurfaceState::update_buffer which takes
         // the buffer out of SurfaceAttributes::current().buffer via .take(). If we read
@@ -3073,6 +3086,16 @@ impl CompositorHandler for JwmWaylandState {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        // The wl_surface is gone: no future commit can latch a staged image
+        // description. Drop both latch halves and the feedback bookkeeping so
+        // the ObjectId cannot linger past the surface's lifetime.
+        if let Some(cm) = self.color_manager.as_ref() {
+            if cm.destroy_surface_description(&surface.id()) {
+                self.needs_redraw = true;
+            }
+            cm.forget_surface(&surface.id());
+        }
+
         // Cleanup any tracked popups as well.
         if self.popups.remove(&surface.id()).is_some() {
             self.popup_order.retain(|id| *id != surface.id());

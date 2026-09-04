@@ -13,12 +13,22 @@
 //! colors neutral when a client supplies custom primaries whose white point is
 //! not the compositor's D65 working white.
 //!
+//! The working space has one absolute anchor: linear 1.0 is
+//! [`SDR_REFERENCE_WHITE_NITS`] (203 cd/m², the BT.2408 HDR reference white).
+//! [`working_space_scale`] re-anchors decoded PQ/HLG content onto that scale,
+//! and [`ToneMapPolicy`] defines how content whose dynamic range exceeds an
+//! output's is remapped at delivery. Both are definition-layer math today: no
+//! render path consults them yet, and HDR signalling stays fail-closed. Their
+//! future decision points are ingress (`ColorTransform::build_to_linear_srgb`
+//! multiplies the decode by the scale factor) and the per-output delivery
+//! plan (where the output's transfer function and peak select the policy).
+//!
 //! It intentionally owns math and render plans only: GL state and uniform
 //! bindings stay in the compositor adapters. Keeping the calculations here
 //! gives CPU coverage for gamut/transfer math while strict headless GLES tests
 //! verify the uploaded plans and shader pixels without HDR hardware.
 
-use crate::backend::wayland_udev::color_management::ParametricParams;
+use crate::backend::wayland_udev::color_management::{ParametricParams, SDR_REFERENCE_WHITE_NITS};
 
 /// CIE xy chromaticities of a single primary (or the white point), in normalized
 /// space (i.e. raw xy, not the wp-color-management ×1_000_000 scaling).
@@ -327,6 +337,143 @@ fn hlg_forward(l: f32) -> f32 {
     } else {
         HLG_A * (12.0 * l - HLG_B).max(1e-12).ln() + HLG_C
     }
+}
+
+// --- Absolute luminance scales and tone mapping ---
+//
+// Definition-layer semantics for the working space's absolute anchor. No
+// render path consumes these yet; HDR enable stays fail-closed until the
+// ingress rescale, the delivery-time policy selection, and the KMS atomic
+// commit chain are all in place.
+
+/// SMPTE ST 2084 absolute range: PQ-encoded 1.0 is defined as 10 000 cd/m².
+pub const PQ_MAX_LUMINANCE_NITS: f32 = 10_000.0;
+
+/// BT.2100 HLG nominal peak luminance of the reference system, in cd/m². HLG
+/// is display-relative — a real display's peak follows its own OOTF — but
+/// 1 000 cd/m² is the fixed reference-system anchor used whenever an absolute
+/// scale is needed (e.g. placing HLG content into the working space).
+pub const HLG_NOMINAL_PEAK_NITS: f32 = 1_000.0;
+
+/// Convert an absolute luminance (cd/m²) into working-space linear units
+/// (1.0 = [`SDR_REFERENCE_WHITE_NITS`]).
+pub fn nits_to_working_linear(nits: f32) -> f32 {
+    nits / SDR_REFERENCE_WHITE_NITS
+}
+
+/// Convert a working-space linear value into absolute luminance (cd/m²).
+/// Inverse of [`nits_to_working_linear`].
+pub fn working_linear_to_nits(linear: f32) -> f32 {
+    linear * SDR_REFERENCE_WHITE_NITS
+}
+
+/// Absolute PQ decode: encoded 0..1 → cd/m².
+pub fn pq_decode_nits(encoded: f32) -> f32 {
+    pq_inverse(encoded.clamp(0.0, 1.0)) * PQ_MAX_LUMINANCE_NITS
+}
+
+/// Absolute PQ encode: cd/m² → encoded 0..1. Luminance outside the ST 2084
+/// range clamps to the range ends. Inverse of [`pq_decode_nits`].
+pub fn pq_encode_nits(nits: f32) -> f32 {
+    pq_forward((nits / PQ_MAX_LUMINANCE_NITS).clamp(0.0, 1.0))
+}
+
+/// HLG decode on the BT.2100 reference system: encoded 0..1 → cd/m² at the
+/// nominal peak. Real displays rescale the result via their own OOTF.
+pub fn hlg_decode_nits(encoded: f32) -> f32 {
+    hlg_inverse(encoded.clamp(0.0, 1.0)) * HLG_NOMINAL_PEAK_NITS
+}
+
+/// HLG encode on the BT.2100 reference system: cd/m² → encoded 0..1, clamped
+/// to the nominal range. Inverse of [`hlg_decode_nits`].
+pub fn hlg_encode_nits(nits: f32) -> f32 {
+    hlg_forward((nits / HLG_NOMINAL_PEAK_NITS).clamp(0.0, 1.0))
+}
+
+/// Scale factor re-anchoring a decoded source value into working-space linear.
+///
+/// Every [`TransferKind::inverse`] yields a normalized range whose 1.0 is the
+/// source's own reference: display white for SDR-style curves, 10 000 cd/m²
+/// for PQ, the BT.2100 nominal peak for HLG. Multiplying the decoded value by
+/// this factor expresses it in working-space units whose 1.0 is
+/// [`SDR_REFERENCE_WHITE_NITS`]. SDR curves map 1:1, which is why decoded SDR
+/// content already composites correctly without an explicit rescale.
+pub fn working_space_scale(tf: TransferKind) -> f32 {
+    match tf {
+        TransferKind::St2084Pq => PQ_MAX_LUMINANCE_NITS / SDR_REFERENCE_WHITE_NITS,
+        TransferKind::Hlg => HLG_NOMINAL_PEAK_NITS / SDR_REFERENCE_WHITE_NITS,
+        _ => 1.0,
+    }
+}
+
+/// Tone-mapping policy between content and output dynamic ranges, expressed in
+/// working-space linear units: 1.0 is the SDR reference white on both sides
+/// and HDR headroom is values above 1.0. Mapping is defined per component
+/// (R/G/B independently), keeping primaries and hue untouched.
+///
+/// The selection decision belongs to the per-output delivery plan: source
+/// peaks come from the committed surface image descriptions, the output's
+/// peak follows from its transfer function via [`working_space_scale`], and
+/// [`ToneMapPolicy::for_peaks`] picks the default. Nothing consults this type
+/// yet — it is the callee-ready definition for the HDR enable milestone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneMapPolicy {
+    /// Reference-white mapping for content that fits the target range (the
+    /// SDR→HDR case). Working-space values pass through unchanged: SDR white
+    /// (1.0 = 203 cd/m²) already sits at the BT.2408 HDR reference white, so
+    /// SDR content keeps its look while the output's headroom above 1.0 stays
+    /// available to native HDR content. A no-op remap by design.
+    ReferenceWhite,
+    /// Hard clip at the target peak. Preserves the SDR range exactly and is
+    /// fully predictable; the default for HDR content delivered to SDR
+    /// outputs.
+    Clip,
+    /// Extended-Reinhard shoulder compressing `[0, source_peak]` onto
+    /// `[0, target_peak]`. Trades a slight compression of the reference range
+    /// for preserved highlight gradation; the alternative for HDR→SDR when
+    /// clipping is judged too harsh.
+    ReinhardShoulder,
+}
+
+impl ToneMapPolicy {
+    /// Default policy for content with the given source peak delivered to an
+    /// output with the given target peak, both in working-space units.
+    /// Content that fits the target needs no compression.
+    pub fn for_peaks(source_peak_working: f32, target_peak_working: f32) -> Self {
+        if source_peak_working <= target_peak_working {
+            Self::ReferenceWhite
+        } else {
+            Self::Clip
+        }
+    }
+
+    /// Apply the policy to one working-space linear component. Peaks are the
+    /// source content's and target output's peaks in working units. Non-finite
+    /// input has undefined colorimetry per the wp-color-management spec and
+    /// propagates as-is.
+    pub fn map_working_linear(self, x: f32, source_peak: f32, target_peak: f32) -> f32 {
+        match self {
+            Self::ReferenceWhite => x,
+            Self::Clip => x.clamp(0.0, target_peak.max(0.0)),
+            Self::ReinhardShoulder => reinhard_shoulder(x, source_peak, target_peak),
+        }
+    }
+}
+
+/// Extended Reinhard with a white point: keeps 0 at 0 and maps `source_peak`
+/// exactly onto `target_peak`. Values above the source peak clip, and
+/// below-black input maps to 0. Content that already fits the target, and
+/// degenerate (non-positive or non-finite) peaks, fall back to a plain clip.
+fn reinhard_shoulder(x: f32, source_peak: f32, target_peak: f32) -> f32 {
+    if !(source_peak > 0.0) || !(target_peak > 0.0) || source_peak <= target_peak {
+        return x.clamp(0.0, target_peak.max(0.0));
+    }
+    // y = x(1 + x/w²)/(1+x) maps w → 1 with y'(x) = (1 + x/w²)²/(1+x)² > 0;
+    // the curve is only defined for x ≥ 0, so below-black input clamps first.
+    let x = x.max(0.0);
+    let w = source_peak;
+    let y = x * (1.0 + x / (w * w)) / (1.0 + x);
+    (y * target_peak).clamp(0.0, target_peak)
 }
 
 /// Whether a source carrying this description can use the legacy sRGB ingress
@@ -1313,6 +1460,170 @@ mod tests {
             let r = hlg_inverse(hlg_forward(l));
             assert!(approx_eq(r, l, 5e-5), "hlg round-trip at {l} got {r}");
         }
+    }
+
+    #[test]
+    fn luminance_anchors_match_documented_conventions() {
+        assert_eq!(PQ_MAX_LUMINANCE_NITS, 10_000.0);
+        assert_eq!(HLG_NOMINAL_PEAK_NITS, 1_000.0);
+        assert_eq!(SDR_REFERENCE_WHITE_NITS, 203.0);
+    }
+
+    #[test]
+    fn pq_nits_known_reference_points() {
+        // ST 2084 endpoints: encoded 1.0 ↔ 10 000 cd/m², 0 ↔ 0.
+        assert!(approx_eq(pq_decode_nits(1.0), 10_000.0, 1.0));
+        assert!(approx_eq(pq_decode_nits(0.0), 0.0, 1e-6));
+        // SMPTE reference: encoded ≈0.5081 ↔ 100 cd/m².
+        assert!(approx_eq(pq_decode_nits(0.5081), 100.0, 5.0));
+        // BT.2408 reference white: 203 cd/m² encodes to ≈0.5807.
+        assert!(approx_eq(pq_encode_nits(203.0), 0.5807, 1e-3));
+    }
+
+    #[test]
+    fn pq_nits_round_trips() {
+        for &nits in &[0.0_f32, 0.05, 1.0, 100.0, 203.0, 1_000.0, 4_000.0, 10_000.0] {
+            let r = pq_decode_nits(pq_encode_nits(nits));
+            assert!(
+                approx_eq(r, nits, nits.max(1.0) * 1e-3),
+                "pq nits round-trip at {nits} got {r}"
+            );
+        }
+        // Out-of-range luminance clamps to the ST 2084 ceiling / floor.
+        assert_eq!(pq_encode_nits(20_000.0), 1.0);
+        assert_eq!(pq_encode_nits(-1.0), pq_encode_nits(0.0));
+    }
+
+    #[test]
+    fn hlg_nits_known_point_and_round_trips() {
+        // BT.2100 reference system: encoded 1.0 ↔ the 1000 cd/m² nominal peak;
+        // encoded 0.75 ↔ linear 0.265 → 265 cd/m².
+        assert!(approx_eq(hlg_decode_nits(1.0), 1_000.0, 1e-2));
+        assert!(approx_eq(hlg_decode_nits(0.0), 0.0, 1e-6));
+        assert!(approx_eq(hlg_decode_nits(0.75), 265.0, 1.0));
+        for &nits in &[0.0_f32, 1.0, 100.0, 203.0, 500.0, 1_000.0] {
+            let r = hlg_decode_nits(hlg_encode_nits(nits));
+            assert!(
+                approx_eq(r, nits, nits.max(1.0) * 1e-3),
+                "hlg nits round-trip at {nits} got {r}"
+            );
+        }
+        assert!(approx_eq(hlg_encode_nits(2_000.0), 1.0, 1e-5));
+    }
+
+    #[test]
+    fn working_linear_nits_anchor_at_reference_white() {
+        assert!(approx_eq(working_linear_to_nits(1.0), 203.0, 1e-6));
+        assert!(approx_eq(nits_to_working_linear(203.0), 1.0, 1e-6));
+        for &nits in &[0.0_f32, 50.0, 203.0, 1_000.0, 10_000.0] {
+            let r = working_linear_to_nits(nits_to_working_linear(nits));
+            assert!(approx_eq(r, nits, 1e-2), "working↔nits at {nits} got {r}");
+        }
+    }
+
+    #[test]
+    fn working_space_scale_anchors_each_transfer() {
+        assert_eq!(working_space_scale(TransferKind::Srgb), 1.0);
+        assert_eq!(working_space_scale(TransferKind::Linear), 1.0);
+        assert_eq!(working_space_scale(TransferKind::Gamma22), 1.0);
+        assert_eq!(working_space_scale(TransferKind::Bt1886), 1.0);
+        assert_eq!(
+            working_space_scale(TransferKind::Power {
+                gamma_x10000: 22_000
+            }),
+            1.0
+        );
+        assert!(approx_eq(
+            working_space_scale(TransferKind::St2084Pq),
+            10_000.0 / 203.0,
+            1e-3
+        ));
+        assert!(approx_eq(
+            working_space_scale(TransferKind::Hlg),
+            1_000.0 / 203.0,
+            1e-4
+        ));
+        // Decoded PQ white 1.0 lands at 10 000 cd/m² in working units.
+        let pq_white_nits = working_linear_to_nits(working_space_scale(TransferKind::St2084Pq));
+        assert!(approx_eq(pq_white_nits, 10_000.0, 1.0));
+    }
+
+    #[test]
+    fn tone_map_policy_default_selection() {
+        let hdr_output_peak = 1_000.0 / 203.0; // 1000-nit HDR output in working units
+        let pq_content_peak = 10_000.0 / 203.0; // full-range PQ content
+        // SDR content into an HDR output fits: reference-white mapping.
+        assert_eq!(
+            ToneMapPolicy::for_peaks(1.0, hdr_output_peak),
+            ToneMapPolicy::ReferenceWhite
+        );
+        // PQ content into an SDR output exceeds it: clip by default.
+        assert_eq!(
+            ToneMapPolicy::for_peaks(pq_content_peak, 1.0),
+            ToneMapPolicy::Clip
+        );
+        // Equal peaks need no compression.
+        assert_eq!(
+            ToneMapPolicy::for_peaks(1.0, 1.0),
+            ToneMapPolicy::ReferenceWhite
+        );
+        // Non-finite input must not silently pick the pass-through policy.
+        assert_eq!(ToneMapPolicy::for_peaks(f32::NAN, 1.0), ToneMapPolicy::Clip);
+    }
+
+    #[test]
+    fn tone_map_reference_white_is_identity() {
+        for &x in &[0.0_f32, 0.5, 1.0, 4.9, 49.3] {
+            assert_eq!(
+                ToneMapPolicy::ReferenceWhite.map_working_linear(x, 1.0, 49.3),
+                x
+            );
+        }
+    }
+
+    #[test]
+    fn tone_map_clip_boundaries() {
+        let clip = ToneMapPolicy::Clip;
+        assert_eq!(clip.map_working_linear(-0.5, 49.3, 1.0), 0.0);
+        assert_eq!(clip.map_working_linear(0.5, 49.3, 1.0), 0.5);
+        assert_eq!(clip.map_working_linear(1.0, 49.3, 1.0), 1.0);
+        assert_eq!(clip.map_working_linear(12.0, 49.3, 1.0), 1.0);
+    }
+
+    #[test]
+    fn tone_map_reinhard_endpoints_monotonic_and_gradation() {
+        let src = 10_000.0 / 203.0; // full-range PQ content in working units
+        let dst = 1.0; // SDR output
+        let m = |x| ToneMapPolicy::ReinhardShoulder.map_working_linear(x, src, dst);
+        assert!(approx_eq(m(0.0), 0.0, 1e-6));
+        assert!(
+            approx_eq(m(src), dst, 1e-4),
+            "source peak must land on target peak"
+        );
+        let mut prev = m(0.0);
+        for i in 1..=64 {
+            let y = m(src * i as f32 / 64.0);
+            assert!(
+                y >= prev && y <= dst,
+                "reinhard must be monotone and in-range: {prev} -> {y}"
+            );
+            prev = y;
+        }
+        // Unlike clip, highlight gradation above reference white survives.
+        assert!(m(2.0) > m(1.0));
+        // Anything beyond the source peak still clips to the target peak.
+        assert_eq!(m(src * 2.0), dst);
+    }
+
+    #[test]
+    fn tone_map_reinhard_degenerate_peaks_fall_back_to_clip() {
+        let m = ToneMapPolicy::ReinhardShoulder;
+        assert_eq!(m.map_working_linear(2.0, f32::NAN, 1.0), 1.0);
+        assert_eq!(m.map_working_linear(2.0, 0.0, 1.0), 1.0);
+        assert_eq!(m.map_working_linear(-3.0, 49.3, 1.0), 0.0);
+        // Content that already fits the target is clamped, not compressed.
+        assert_eq!(m.map_working_linear(0.8, 1.0, 4.9), 0.8);
+        assert_eq!(m.map_working_linear(5.5, 1.0, 4.9), 4.9);
     }
 
     #[cfg(feature = "backend-wayland-udev")]
