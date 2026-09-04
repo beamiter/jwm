@@ -462,6 +462,86 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-04 末二）：P1-6 KMS 原子交付与位深门槛已完成
+
+**受控原子请求装配层（纯逻辑，可单测）。** `udev_kms.rs` 新增：
+`AtomicColorAssignment`（raw object/property/value，装配与测试不需要 live
+device）、`ScanoutColorPropertyHandles`（init 时一次性探测并缓存的 CRTC
+DEGAMMA_LUT/CTM/GAMMA_LUT 与 connector Colorspace——含 BT2020_RGB 枚举值——及
+HDR_OUTPUT_METADATA 句柄）、`ScanoutColorTarget`（`None`=不进请求、
+`Some(0)`=清中性、`Some(v)`=安装）、`build_atomic_color_request`（逐输出固定
+顺序 DEGAMMA→CTM→GAMMA→Colorspace→HDR_OUTPUT_METADATA；安装到不存在的属性=
+硬错误，清除不存在的属性=no-op）、`commit_atomic_color_request`（单个
+`AtomicModeReq`，TEST_ONLY 后正式 commit；legacy-only 设备直接拒绝而不是退回
+逐属性 ioctl——与 init 时中性 reset 同一条 fail-closed 规则。注意：此前
+legacy 驱动尚可经 `set_drm_property` fallback 安装 LUT/CTM，现在保持软件
+SDR，属有意的 fail-closed 行为差异）。
+
+**delivery group 单次提交。** `refresh_color_pipeline_offload` 的 CRTC stage 激活
+从「逐输出逐属性 commit + 软件 rollback 循环」重写为
+`apply_scanout_color_goals`：先为所有状态有变化的输出建齐新 blob（blob 在被
+commit 引用前是惰性的），再用一次 TEST_ONLY+commit 覆盖全部输出——内核原子性
+取代旧的 rollback 模拟，任何失败都不会有半切换状态落到 scanout，新 blob 全部
+销毁、tracked state 不动。失败后再补一次全清零请求让软件路由在已知 domain 下
+继续；清零也失败则由 `finish_color_pipeline_decision` 的一致性检查阻断呈现直到
+重试成功（与原 fail-closed 语义一致）。DEGAMMA 在同一请求里钉中性；
+`refresh_output_color_targets` 的 stale CTM+LUT teardown 同样改为一次原子清零。
+decision 的 hw 标志改由提交后的实际 tracked state 推导（报告硬件现在拥有什么，
+而不是请求了什么）。`install_gamma_lut`/`install_ctm`/`ctm_offload_allowed`
+随之删除——CTM 必须配 OETF 的约束已由单次提交结构化保证。
+
+**FB 配对（结构性说明）。** Smithay 的 `DrmCompositor` 内部拥有 FB commit，没有
+注入额外属性的钩子（已核对 vendored 源码 `drm/compositor`、`drm/surface`），FB
+无法并入同一个 ioctl。配对保证因此由「顺序 + 证据」构成：颜色请求严格先于该帧
+FB queue 提交，`invalidate_color_delivery_after_hardware_change` 使 last-success
+在颜色变化后立即失效，只有变化之后入队的帧到达 vblank 才会报告硬件路由；同时
+swapchain format 已进入 HDR 链验证（见下），被扫描 FB 的位深仍在受控判定之内。
+P2 若要字面意义的「FB+属性同一请求」，需要绕开 `DrmCompositor::queue_frame`
+自行提交 plane state——本轮未做，在此明确记录。
+
+**10-bit 链验证（fail-closed）。** 纯函数 `hdr_scanout_chain_gap` 按稳定优先级
+返回 `HdrScanoutChainGap`（CrossDevice → FramebufferBitDepth →
+PlaneFormatUnsupported → CrtcColorStagesMissing → ConnectorColorspaceMissing →
+ConnectorHdrMetadataMissing）：要求同一 DRM device、swapchain FB ≥10-bit
+（2101010/16161616f 系列，未知格式拒绝）、primary plane 支持该精确格式、CRTC
+具备 GAMMA_LUT+CTM、connector 具备 Colorspace 且枚举表含 BT2020_RGB、具备
+HDR_OUTPUT_METADATA。init 按输出缓存 `swapchain_fourcc`
+（`DrmCompositor::format()`）与 `primary_plane_formats`
+（`plane_info().formats`）。`set_hdr_metadata_for_output` 的 enable 分支先跑链
+验证，任何缺口直接拒绝、保持软件 SDR、不标记 active（backend.rs 的
+compositor 级 fail-closed 门禁不变，KMS 层自身同样 fail-closed）；signalling
+本体改为 Colorspace+HDR_OUTPUT_METADATA 同一受控请求（enable 时
+Colorspace=BT2020_RGB，disable 时双双回 Default/0），失败销毁新建 blob。一个
+小的行为差异：disable 路径在 connector 没有任何颜色属性时现在返回 Ok
+（无操作）而不是 "property not found"——该路径此前只在从未 enable 成功过
+的硬件上被用户显式 toggle-off 时触发。direct scanout 阻断与 HDR enable 的
+fail-closed 语义不变；SDR 输出行为与路由决策不变。
+
+单测（新增 10、删除 1 个随 `ctm_offload_allowed` 移除的）：请求装配的顺序/
+多输出单请求/安装到缺失属性报错/清除缺失属性 no-op/未触碰 stage 不进请求；
+位深分类（8/10/16/未知格式）；链验证全通、逐缺口 fail-closed 与优先级；
+goal↔tracked state 匹配矩阵。验证：`cargo fmt --all -- --check`、
+`cargo test --locked`（lib 2641 passed = 基线 2632 + 净增 9）、
+`cargo clippy --locked --lib --bins --tests --no-deps -- -D warnings`、
+`cargo check --locked --all-targets`（默认与 --no-default-features，后者仍只有
+5 个既有 X11 clipboard dead-code 警告）、`cargo test --locked
+--manifest-path bridge/Cargo.toml`（41 passed）全绿。无显示会话，行为验证
+全部来自 colocated 单测。
+
+**第 5 条剩余（tone-map 接线）本轮未动，精确记录待办：** 定义层接进渲染决策点
+需要 (a) ingress：`build_to_linear_srgb` 把 `working_space_scale(tf)` 折进 gamut
+matrix（标量可被 matrix 吸收，SDR 系 scale=1.0 时逐位不变）；(b) delivery：逐
+输出 plan 需要该输出可见 surface 的 source peak 聚合——这条 per-frame 数据通道
+目前不存在（`snapshot_surface_params` 只供 IPC），然后
+`ToneMapPolicy::for_peaks(source_peak, working_space_scale(output_tf))` 选型、在
+输出 OETF 前施加 `map_working_linear`——软件路径要改 scene-linear encode
+shader（新增 rescale/policy uniform；tone-map 是逐通道非线性，不能折进
+matrix），硬件路径要把 rescale+tone-map 烘进 `build_gamma_lut` 的 LUT 曲线；
+(c) 验收硬约束：SDR→SDR 与 SDR→HDR-with-SDR-output 每条既有路由逐像素
+identity（headless_render 现有 oracle 原样通过），HDR 路由仍在 fail-closed
+门后。ingress 与 delivery 必须同批落地，单独改 ingress 会让 PQ 内容在
+delivery 未接 rescale 时亮度错 49 倍。
+
 ### 进展（2026-09-04 后半）：P1 前半——image-description commit latch 与亮度/tone-map 定义层已完成
 
 **Commit latch（纯协议状态机）**。surface 的 image description 从「协议请求即生效」
@@ -638,12 +718,19 @@ exact-sRGB fallback。
    （SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map policy 的定义层已落地
    （定义层，未接入渲染决策）；image-description 已与对应 `wl_surface.commit` 原子
    锁存（pending/current 双缓冲，subsurface 同步语义由 smithay 事务 apply 点继承）。
-   剩余：ingress rescale 与 delivery 端 tone-map 选型真正接进渲染计划（与第 6 条
-   一并验证）；非 D65 白点已 Bradford 适应；HDR enable 继续 fail-closed。
-6. **KMS 交付还不是 framebuffer 原子事务。** `DEGAMMA/CTM/GAMMA`、connector
-   `Colorspace`/`HDR_OUTPUT_METADATA` 与目标 FB 必须同一 TEST_ONLY + atomic commit；还要
-   明确要求并验证 HDR scanout 的 10-bit（或更高）format/plane/connector 链。direct scanout
-   在未证明 profile passthrough 正确前继续阻断。
+   剩余：ingress rescale 与 delivery 端 tone-map 选型真正接进渲染计划——精确的
+   接线点、数据通道缺口与验收约束记录在上面 2026-09-04 末二的进展条目里；非
+   D65 白点已 Bradford 适应；HDR enable 继续 fail-closed。
+6. **[已完成] KMS 交付的原子事务与位深门槛。** CRTC color stages
+   （DEGAMMA/CTM/GAMMA）现在对整个 delivery group 以单个 TEST_ONLY + atomic
+   commit 编程（`apply_scanout_color_goals`，内核原子性取代软件 rollback），
+   connector `Colorspace`/`HDR_OUTPUT_METADATA` 经同一机制单次提交
+   （`set_hdr_metadata_for_output`）；HDR enable 之前先过 `hdr_scanout_chain_gap`
+   的 10-bit（或更高）format/plane/connector 链验证，任何缺口或跨 DRM device
+   都保持软件 SDR 且不宣称 hardware HDR active。FB 本身由 Smithay
+   DrmCompositor 内部提交（无属性注入钩子），FB 与颜色属性的配对由「颜色请求
+   严格先行 + last-success 失效钟」保证，swapchain format 位深由链验证覆盖。
+   direct scanout 在未证明 profile passthrough 正确前继续阻断。
 
 **落点与顺序**
 
@@ -674,10 +761,13 @@ exact-sRGB fallback。
      luminance 基准（SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map
      policy 定义层；image-description pending/current 双缓冲只在匹配
      surface commit 锁存。剩余：把定义层数学接进渲染决策点（ingress
-     scale 与 delivery 端 tone-map 选型），与第 6 条 KMS 原子交付一并验证。
-6. **P1：KMS 原子交付与位深** — `src/backend/udev_kms.rs`
-   - 将 plane FB、CRTC color stages 与 connector signalling 合并为同一受控 atomic request；
-     跨 DRM device 或 10-bit 链路不完整时继续软件 SDR，不宣称 hardware HDR active。
+     scale 与 delivery 端 tone-map 选型），接线点与像素 identity 验收约束
+     见 2026-09-04 末二进展条目末尾。
+6. **P1：[已完成] KMS 原子交付与位深** — `src/backend/udev_kms.rs`
+   - CRTC color stages 与 connector signalling 各自由同一受控 atomic
+     request（TEST_ONLY + commit）编程；跨 DRM device 或 10-bit 链路不完整时
+     继续软件 SDR，不宣称 hardware HDR active。FB 与颜色属性的同一请求受
+     Smithay DrmCompositor 结构限制，配对语义见进展条目。
 7. **P2：开放真实 HDR enable** — `src/backend/udev_kms.rs` 与 `src/jwm/ipc_handler.rs`
    - 只有工作域、全部可见 tail element、capture、atomic KMS 和位深门槛同时满足时，才提交
      `Colorspace` + HDR metadata + 匹配 FB；使 enable/disable、DPMS、gamma-control、

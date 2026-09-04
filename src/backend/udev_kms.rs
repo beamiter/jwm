@@ -163,12 +163,26 @@ struct KmsOutputState {
     /// `refresh_output_color_targets` replaces this target and drops any stale
     /// blob whenever the advertised output description changes.
     installed_ctm: Option<u64>,
+    /// Raw property handles of the scanout color chain (CRTC
+    /// DEGAMMA_LUT/CTM/GAMMA_LUT, connector Colorspace incl. its BT2020_RGB
+    /// enum value and HDR_OUTPUT_METADATA), probed once at output init. The
+    /// controlled atomic commit path programs these handles directly instead
+    /// of re-scanning every object's property list per transition.
+    color_property_handles: ScanoutColorPropertyHandles,
+    /// Format of the DRM swapchain the composited framebuffer is allocated
+    /// from. HDR chain validation requires the scanned-out framebuffer to be
+    /// 10-bit or deeper.
+    swapchain_fourcc: Fourcc,
+    /// Formats accepted by the primary plane (raw fourccs), probed once at
+    /// output init for the HDR scanout chain validation.
+    primary_plane_formats: Vec<u32>,
     /// Per-output target transfer function, refreshed after EDID attachment.
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
     /// Per-output sRGB→output-primaries 3x3 matrix, cached from the current
-    /// output description. Pushed via `install_ctm` together with the output
-    /// OETF LUT when hardware owns delivery; otherwise the same matrix is
-    /// consumed by that output's software region pass.
+    /// output description. Installed by `apply_scanout_color_goals` together
+    /// with the output OETF LUT in one atomic request when hardware owns
+    /// delivery; otherwise the same matrix is consumed by that output's
+    /// software region pass.
     output_ctm: [f32; 9],
     /// A live zwlr-gamma-control client owns the legacy CRTC ramp. While set,
     /// compositor OETF offload stays disabled and software output delivery
@@ -351,6 +365,341 @@ fn connector_color_property_neutral_value(name: &str) -> Option<u64> {
         "HDR_OUTPUT_METADATA" | "Colorspace" => Some(0),
         _ => None,
     }
+}
+
+// ============================================================
+// Controlled atomic color delivery (HDR P1-6)
+// ============================================================
+//
+// Every CRTC color stage (DEGAMMA/CTM/GAMMA) and both connector signalling
+// properties (Colorspace/HDR_OUTPUT_METADATA) are programmed through ONE
+// `AtomicModeReq` per delivery-group transition, always probed with TEST_ONLY
+// before the real commit. This replaces the earlier per-property commit
+// sequence, whose intermediate states (e.g. LUT bound while the paired CTM
+// was not yet installed) could reach scanout for frames in between.
+//
+// The target framebuffer itself is committed by Smithay's DrmCompositor,
+// which exposes no hook to merge extra properties into its internal atomic
+// commit. The FB pairing guarantee therefore comes from ordering and
+// evidence: the color request is committed strictly before the frame's FB is
+// queued, and `invalidate_color_delivery_after_hardware_change` refuses to
+// report any hardware delivery route until a vblank confirms a frame queued
+// after the color change. The swapchain format the FB carries is still part
+// of the HDR chain validation below, so the bit depth of the scanned-out
+// framebuffer is verified before HDR signalling may be programmed.
+
+/// One raw property assignment inside a controlled atomic color request.
+/// `object`/`property` are raw DRM ids so assembly and tests never need a
+/// live device; the executor converts them back into typed handles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AtomicColorAssignment {
+    object: u32,
+    property: u32,
+    value: u64,
+}
+
+/// Property handles of one output's scanout color chain, probed once at KMS
+/// construction. The controlled atomic commit programs these handles directly
+/// instead of re-scanning every object's property list per transition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScanoutColorPropertyHandles {
+    degamma_lut: Option<u32>,
+    ctm: Option<u32>,
+    gamma_lut: Option<u32>,
+    colorspace: Option<u32>,
+    /// Raw enum value of the connector Colorspace "BT2020_RGB" entry, required
+    /// to signal BT.2020 primaries alongside HDR metadata.
+    colorspace_bt2020_rgb: Option<u64>,
+    hdr_output_metadata: Option<u32>,
+}
+
+/// Complete desired color-chain state for one output in one atomic request.
+/// `None` leaves the stage out of the request entirely; `Some(0)` clears it
+/// (neutral stage / Default colorspace / SDR signalling); `Some(v)` installs
+/// a blob id or enum value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ScanoutColorTarget {
+    degamma_lut: Option<u64>,
+    ctm: Option<u64>,
+    gamma_lut: Option<u64>,
+    colorspace: Option<u64>,
+    hdr_output_metadata: Option<u64>,
+}
+
+/// Per-output input to the atomic request builder.
+#[derive(Clone, Copy, Debug)]
+struct AtomicColorOutputPlan {
+    crtc: u32,
+    connector: u32,
+    handles: ScanoutColorPropertyHandles,
+    target: ScanoutColorTarget,
+}
+
+fn push_color_assignment(
+    assignments: &mut Vec<AtomicColorAssignment>,
+    object: u32,
+    handle: Option<u32>,
+    value: Option<u64>,
+    name: &'static str,
+) -> Result<(), String> {
+    let Some(value) = value else {
+        // The stage is not part of this request at all.
+        return Ok(());
+    };
+    match handle {
+        Some(property) => {
+            assignments.push(AtomicColorAssignment {
+                object,
+                property,
+                value,
+            });
+            Ok(())
+        }
+        // Installing a stage the hardware never advertised is a hard error:
+        // the alternative is presenting pixels converted for a stage that
+        // does not exist. Clearing an absent property is a no-op because an
+        // unexposed stage is already in its neutral state.
+        None if value != 0 => Err(format!(
+            "cannot install {name}: property not present on the DRM object"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Assemble one controlled atomic request covering every planned output's
+/// CRTC color stages and connector signalling. The kernel applies the whole
+/// request or none of it; the stable per-output order (CRTC DEGAMMA_LUT → CTM
+/// → GAMMA_LUT, then connector Colorspace → HDR_OUTPUT_METADATA) only exists
+/// for deterministic logs and tests.
+fn build_atomic_color_request(
+    plans: &[AtomicColorOutputPlan],
+) -> Result<Vec<AtomicColorAssignment>, String> {
+    let mut assignments = Vec::new();
+    for plan in plans {
+        push_color_assignment(
+            &mut assignments,
+            plan.crtc,
+            plan.handles.degamma_lut,
+            plan.target.degamma_lut,
+            "DEGAMMA_LUT",
+        )?;
+        push_color_assignment(
+            &mut assignments,
+            plan.crtc,
+            plan.handles.ctm,
+            plan.target.ctm,
+            "CTM",
+        )?;
+        push_color_assignment(
+            &mut assignments,
+            plan.crtc,
+            plan.handles.gamma_lut,
+            plan.target.gamma_lut,
+            "GAMMA_LUT",
+        )?;
+        push_color_assignment(
+            &mut assignments,
+            plan.connector,
+            plan.handles.colorspace,
+            plan.target.colorspace,
+            "Colorspace",
+        )?;
+        push_color_assignment(
+            &mut assignments,
+            plan.connector,
+            plan.handles.hdr_output_metadata,
+            plan.target.hdr_output_metadata,
+            "HDR_OUTPUT_METADATA",
+        )?;
+    }
+    Ok(assignments)
+}
+
+/// Apply one assembled atomic color request: TEST_ONLY first, then the real
+/// commit. Legacy-only devices are refused instead of falling back to
+/// per-property ioctls — there is no all-or-nothing transaction there, and a
+/// partial color transition would leave scanout in a mixed domain (the same
+/// rule the init-time neutral reset already enforces).
+fn commit_atomic_color_request(
+    dev: &DrmDevice,
+    assignments: &[AtomicColorAssignment],
+) -> Result<(), String> {
+    use smithay::reexports::drm::control::atomic::AtomicModeReq;
+    use smithay::reexports::drm::control::{AtomicCommitFlags, RawResourceHandle, from_u32};
+
+    if assignments.is_empty() {
+        return Ok(());
+    }
+    if !dev.is_atomic() {
+        return Err(format!(
+            "refusing {} scanout color assignments without atomic modesetting",
+            assignments.len()
+        ));
+    }
+    let mut request = AtomicModeReq::new();
+    for assignment in assignments {
+        let object = RawResourceHandle::new(assignment.object)
+            .ok_or("invalid zero object id in atomic color request")?;
+        let property =
+            from_u32::<smithay::reexports::drm::control::property::Handle>(assignment.property)
+                .ok_or("invalid zero property handle in atomic color request")?;
+        request.add_raw_property(object, property, assignment.value);
+    }
+    dev.atomic_commit(AtomicCommitFlags::TEST_ONLY, request.clone())
+        .map_err(|e| format!("test atomic color commit failed: {e:?}"))?;
+    dev.atomic_commit(AtomicCommitFlags::empty(), request)
+        .map_err(|e| format!("atomic color commit failed: {e:?}"))
+}
+
+/// Desired CRTC color-stage contents for one output. `None` clears the stage;
+/// `Some` installs a fresh blob with the given payload. Both stages always
+/// move together: a CTM is linear-light math and must never scan out without
+/// the paired hardware OETF, which the single atomic commit now makes
+/// structural instead of sequential.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OutputScanoutColorGoal {
+    gamma_lut: Option<crate::backend::wayland_udev::color_pipeline::TransferKind>,
+    ctm: Option<[f32; 9]>,
+}
+
+impl OutputScanoutColorGoal {
+    const CLEAR: Self = Self {
+        gamma_lut: None,
+        ctm: None,
+    };
+}
+
+/// True when the tracked installed state already satisfies the goal, so the
+/// output can be left out of the atomic request entirely. The CTM compares
+/// by presence only: `refresh_output_color_targets` tears the blob down
+/// before caching a new matrix, so a live CTM blob always matches the cached
+/// `output_ctm`.
+fn scanout_color_goal_matches(
+    installed_gamma_lut: Option<(
+        u64,
+        crate::backend::wayland_udev::color_pipeline::TransferKind,
+    )>,
+    installed_ctm: Option<u64>,
+    goal: &OutputScanoutColorGoal,
+) -> bool {
+    let lut_ok = match (installed_gamma_lut, goal.gamma_lut) {
+        (Some((_, installed_tf)), Some(goal_tf)) => installed_tf == goal_tf,
+        (None, None) => true,
+        _ => false,
+    };
+    lut_ok && installed_ctm.is_some() == goal.ctm.is_some()
+}
+
+/// Per-channel bit depth of a scanout framebuffer format, when known.
+/// Unknown formats return `None` and fail HDR validation closed.
+fn scanout_format_channel_bits(fourcc: Fourcc) -> Option<u32> {
+    match fourcc {
+        Fourcc::Argb8888 | Fourcc::Xrgb8888 | Fourcc::Abgr8888 | Fourcc::Xbgr8888 => Some(8),
+        Fourcc::Argb2101010 | Fourcc::Xrgb2101010 | Fourcc::Abgr2101010 | Fourcc::Xbgr2101010 => {
+            Some(10)
+        }
+        Fourcc::Argb16161616f
+        | Fourcc::Xrgb16161616f
+        | Fourcc::Abgr16161616f
+        | Fourcc::Xbgr16161616f => Some(16),
+        _ => None,
+    }
+}
+
+/// Why HDR scanout signalling must stay fail-closed. Each gap is a distinct,
+/// diagnosable reason; the first gap in a stable precedence order is reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HdrScanoutChainGap {
+    /// The color stages live on a different DRM device than the scanout
+    /// framebuffer; programming them cannot change the scanned-out domain.
+    CrossDevice,
+    /// The framebuffer queued for scanout is not a 10-bit (or higher) format.
+    FramebufferBitDepth,
+    /// The primary plane cannot scan out the framebuffer's format.
+    PlaneFormatUnsupported,
+    /// The CRTC lacks the GAMMA_LUT/CTM stages the hardware output transform
+    /// (gamut conversion + OETF) needs.
+    CrtcColorStagesMissing,
+    /// The connector cannot signal BT.2020 primaries through Colorspace.
+    ConnectorColorspaceMissing,
+    /// The connector lacks the HDR_OUTPUT_METADATA property.
+    ConnectorHdrMetadataMissing,
+}
+
+/// Validate the complete 10-bit format/plane/connector chain for HDR scanout.
+/// `same_device` asserts the color stages and the scanout framebuffer live on
+/// one DRM device (structurally true for the single-device `KmsState`; the
+/// check is explicit so a future multi-GPU path cannot silently skip it).
+/// Any gap keeps software SDR delivery and must not claim hardware HDR active.
+fn hdr_scanout_chain_gap(
+    same_device: bool,
+    framebuffer_fourcc: Fourcc,
+    primary_plane_formats: &[u32],
+    handles: &ScanoutColorPropertyHandles,
+) -> Option<HdrScanoutChainGap> {
+    if !same_device {
+        return Some(HdrScanoutChainGap::CrossDevice);
+    }
+    let deep_enough =
+        scanout_format_channel_bits(framebuffer_fourcc).is_some_and(|bits| bits >= 10);
+    if !deep_enough {
+        return Some(HdrScanoutChainGap::FramebufferBitDepth);
+    }
+    if !primary_plane_formats.contains(&(framebuffer_fourcc as u32)) {
+        return Some(HdrScanoutChainGap::PlaneFormatUnsupported);
+    }
+    if handles.gamma_lut.is_none() || handles.ctm.is_none() {
+        return Some(HdrScanoutChainGap::CrtcColorStagesMissing);
+    }
+    if handles.colorspace.is_none() || handles.colorspace_bt2020_rgb.is_none() {
+        return Some(HdrScanoutChainGap::ConnectorColorspaceMissing);
+    }
+    if handles.hdr_output_metadata.is_none() {
+        return Some(HdrScanoutChainGap::ConnectorHdrMetadataMissing);
+    }
+    None
+}
+
+/// Create a GAMMA_LUT blob for `tf` with `size` entries. drm 0.14's
+/// `create_property_blob<T: Sized>` uses `size_of::<T>()` and can't accept a
+/// variable-length slice; Smithay solves this in PlaneDamageClips by calling
+/// `drm_ffi::mode::create_property_blob` directly on a `&mut [u8]` view of the
+/// array, and the same approach is used here.
+fn create_gamma_lut_blob(
+    dev: &DrmDevice,
+    tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    size: usize,
+) -> Result<u64, String> {
+    if size < 2 {
+        return Err(format!("GAMMA_LUT_SIZE={size} is below the minimum of 2"));
+    }
+    use std::os::unix::io::AsFd;
+    let mut lut = crate::backend::wayland_udev::color_pipeline::build_gamma_lut(tf, size);
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            lut.as_mut_ptr() as *mut u8,
+            std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorLut>()
+                * lut.len(),
+        )
+    };
+    let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
+        .map_err(|e| format!("create_property_blob(GAMMA_LUT) failed: {e:?}"))?;
+    Ok(u64::from(blob.blob_id))
+}
+
+/// Create a CTM blob from a row-major 3×3 sRGB→output-primaries matrix.
+fn create_ctm_blob(dev: &DrmDevice, matrix: [f32; 9]) -> Result<u64, String> {
+    use std::os::unix::io::AsFd;
+    let mut ctm = crate::backend::wayland_udev::color_pipeline::build_ctm(matrix);
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            &mut ctm as *mut _ as *mut u8,
+            std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorCtm>(),
+        )
+    };
+    let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
+        .map_err(|e| format!("create_property_blob(CTM) failed: {e:?}"))?;
+    Ok(u64::from(blob.blob_id))
 }
 
 /// Delivery-stage ownership chosen by `refresh_color_pipeline_offload`.
@@ -1221,17 +1570,6 @@ fn output_primaries_name(output: &Output) -> String {
         None if params.primaries.is_some() => "custom".into(),
         None => "srgb".into(),
     }
-}
-
-/// A CRTC CTM operates on linear light. It is therefore only valid when the
-/// output OETF has also moved into the CRTC GAMMA_LUT and the compositor is
-/// leaving scene-linear pixels for scanout.
-const fn ctm_offload_allowed(
-    gate_on: bool,
-    hw_encode_active: bool,
-    any_participating: bool,
-) -> bool {
-    gate_on && hw_encode_active && any_participating
 }
 
 const fn client_direct_scanout_presented(
@@ -2795,31 +3133,24 @@ impl KmsState {
                 continue;
             }
 
-            let mut teardown_ok = true;
-            if self.outputs[index].installed_gamma_lut.is_some() {
-                if let Err(error) = self.uninstall_gamma_lut(index) {
+            if self.outputs[index].installed_gamma_lut.is_some()
+                || self.outputs[index].installed_ctm.is_some()
+            {
+                // Clear the stale CTM+LUT pair in one atomic request: the two
+                // stages must leave scanout together, never one at a time.
+                if let Err(error) =
+                    self.apply_scanout_color_goals(&[(index, OutputScanoutColorGoal::CLEAR)])
+                {
                     log::warn!(
-                        "[kms-cm] stale LUT teardown on {} failed: {error}",
+                        "[kms-cm] stale color stage teardown on {} failed: {error}",
                         self.outputs[index].output_name,
                     );
-                    teardown_ok = false;
+                    // Keep the cached target paired with the tracked hardware
+                    // state. The per-frame refresh retries this transition and
+                    // suppresses presentation in the meantime.
+                    ready = false;
+                    continue;
                 }
-            }
-            if teardown_ok && self.outputs[index].installed_ctm.is_some() {
-                if let Err(error) = self.uninstall_ctm(index) {
-                    log::warn!(
-                        "[kms-cm] stale CTM teardown on {} failed: {error}",
-                        self.outputs[index].output_name,
-                    );
-                    teardown_ok = false;
-                }
-            }
-            if !teardown_ok {
-                // Keep the cached target paired with the tracked hardware
-                // state. The per-frame refresh retries this transition and
-                // suppresses presentation in the meantime.
-                ready = false;
-                continue;
             }
 
             self.outputs[index].output_tf = output_tf;
@@ -2991,23 +3322,55 @@ impl KmsState {
         Err("VRR_ENABLED property not found on CRTC".to_string())
     }
 
-    /// Push (or clear) the HDR_OUTPUT_METADATA connector property.
+    /// Push (or clear) the connector HDR signalling — HDR_OUTPUT_METADATA and
+    /// Colorspace together in ONE controlled atomic request (TEST_ONLY +
+    /// commit), so the sink never sees HDR metadata under a Default colorspace
+    /// or vice versa.
     ///
     /// Pass `Some(&blob)` (32-byte CTA-861.3 HDR Static Metadata) to put the
-    /// display into HDR mode, or `None` to revert to SDR (blob_id = 0).
-    /// The created blob is not destroyed — kernel cleans it up at FD close.
-    /// Per-output blob churn is tiny (config changes are rare), so the leak is
-    /// acceptable until/unless we add bookkeeping.
+    /// display into HDR mode, or `None` to revert to SDR (blob_id = 0,
+    /// Colorspace = Default). Enabling is fail-closed on the complete scanout
+    /// chain: same DRM device, a 10-bit-or-deeper swapchain framebuffer the
+    /// primary plane can scan out, the CRTC GAMMA_LUT/CTM stages, and both
+    /// connector signalling properties. Any gap keeps software SDR delivery
+    /// and never claims hardware HDR active. (The compositor-level gate in
+    /// `set_hdr_metadata` rejects enables earlier; this layer stays correct
+    /// even if that gate is lifted.)
     pub(super) fn set_hdr_metadata_for_output(
         &mut self,
         output_idx: usize,
         blob: Option<&[u8; 32]>,
     ) -> Result<(), String> {
-        let (conn_handle, smithay_output) = self
+        let (conn_handle, smithay_output, handles, swapchain_fourcc, plane_formats) = self
             .outputs
             .get(output_idx)
-            .map(|output| (output.connector, output.output.clone()))
+            .map(|output| {
+                (
+                    output.connector,
+                    output.output.clone(),
+                    output.color_property_handles,
+                    output.swapchain_fourcc,
+                    output.primary_plane_formats.clone(),
+                )
+            })
             .ok_or("output index out of range")?;
+
+        if blob.is_some()
+            && let Some(gap) = hdr_scanout_chain_gap(
+                // The scanout swapchain and the color stages both live on this
+                // KmsState's single DRM device (allocator and KMS fd derive
+                // from the same device fd).
+                true,
+                swapchain_fourcc,
+                &plane_formats,
+                &handles,
+            )
+        {
+            return Err(format!(
+                "HDR scanout chain incomplete ({gap:?}); keeping software SDR delivery"
+            ));
+        }
+
         let mgr = self.drm_output_manager.lock();
         let dev = mgr.device();
 
@@ -3023,21 +3386,36 @@ impl KmsState {
             0
         };
 
-        let mut property_result = Err("HDR_OUTPUT_METADATA property not found on connector".into());
-        if let Ok(props) = dev.get_properties(conn_handle) {
-            let (handles, _values) = props.as_props_and_values();
-            for &prop_handle in handles {
-                if let Ok(info) = dev.get_property(prop_handle) {
-                    if info.name().to_str() == Ok("HDR_OUTPUT_METADATA") {
-                        property_result =
-                            Self::set_drm_property(dev, conn_handle, prop_handle, blob_id);
-                        break;
-                    }
-                }
+        // Chain validation guarantees the BT2020_RGB enum value exists when
+        // enabling; clearing always targets the neutral Default (0).
+        let colorspace = if blob.is_some() {
+            handles.colorspace_bt2020_rgb.unwrap_or(0)
+        } else {
+            0
+        };
+        let plan = [AtomicColorOutputPlan {
+            crtc: u32::from(self.outputs[output_idx].crtc),
+            connector: u32::from(conn_handle),
+            handles,
+            target: ScanoutColorTarget {
+                // CRTC stages are owned by `apply_scanout_color_goals` and
+                // stay out of the signalling request.
+                degamma_lut: None,
+                ctm: None,
+                gamma_lut: None,
+                colorspace: Some(colorspace),
+                hdr_output_metadata: Some(blob_id),
+            },
+        }];
+        let commit_result = build_atomic_color_request(&plan)
+            .and_then(|assignments| commit_atomic_color_request(dev, &assignments));
+        if let Err(error) = commit_result {
+            if blob_id != 0 {
+                let _ = dev.destroy_property_blob(blob_id);
             }
+            return Err(error);
         }
         drop(mgr);
-        property_result?;
 
         crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
             &smithay_output,
@@ -3174,85 +3552,146 @@ impl KmsState {
     // KMS color pipeline activation (GAMMA_LUT + CTM)
     // ============================================================
 
-    /// Push a `GAMMA_LUT` blob for `tf` to the output's CRTC. Creates a fresh
-    /// blob, atomically sets the prop, then `destroy_property_blob`s any
-    /// previously-installed blob for the same output. Stores
-    /// `(blob_id, tf)` on `KmsOutputState.installed_gamma_lut`.
-    pub(super) fn install_gamma_lut(
+    /// Program every changed output's CRTC color stages in ONE controlled
+    /// atomic request (TEST_ONLY + commit), replacing the previous
+    /// per-property commit sequence whose intermediate states (e.g. LUT bound
+    /// while the paired CTM was not yet installed) could reach scanout. The
+    /// kernel's atomicity provides the all-or-nothing semantics the old
+    /// rollback loops emulated: on any failure no tracked state changes and
+    /// every newly created blob is destroyed. DEGAMMA is pinned to neutral in
+    /// the same request whenever the stage exists, so the complete
+    /// input→output color chain is always defined by one commit.
+    fn apply_scanout_color_goals(
         &mut self,
-        output_idx: usize,
-        tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
+        goals: &[(usize, OutputScanoutColorGoal)],
     ) -> Result<(), String> {
-        let output = self
-            .outputs
-            .get(output_idx)
-            .ok_or("output index out of range")?;
-        let crtc = output.crtc;
-        let caps = output
-            .color_pipeline_caps
-            .as_ref()
-            .ok_or("no color pipeline caps cached for output")?;
-        if !caps.gamma_lut_supported {
-            return Err("CRTC does not advertise GAMMA_LUT".to_string());
+        // Only outputs whose tracked state differs from the goal participate
+        // in the request; an unchanged output keeps its live blobs.
+        let changed: Vec<(usize, OutputScanoutColorGoal)> = goals
+            .iter()
+            .filter_map(|&(index, goal)| {
+                let output = self.outputs.get(index)?;
+                (!scanout_color_goal_matches(
+                    output.installed_gamma_lut,
+                    output.installed_ctm,
+                    &goal,
+                ))
+                .then_some((index, goal))
+            })
+            .collect();
+        if changed.is_empty() {
+            return Ok(());
         }
-        let size = caps.gamma_lut_size as usize;
-        if size < 2 {
-            return Err(format!("GAMMA_LUT_SIZE={size} is below the minimum of 2"));
-        }
-        let old_blob = output.installed_gamma_lut.map(|(id, _)| id);
 
-        let mut lut = crate::backend::wayland_udev::color_pipeline::build_gamma_lut(tf, size);
-        let mgr = self.drm_output_manager.lock();
-        let dev = mgr.device();
-        // drm 0.14's `create_property_blob<T: Sized>` uses `size_of::<T>()` and
-        // can't accept a variable-length slice. Smithay solves this in
-        // PlaneDamageClips by calling `drm_ffi::mode::create_property_blob`
-        // directly on a `&mut [u8]` view of the array.
-        let new_blob_id: u64 = {
-            use std::os::unix::io::AsFd;
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(
-                    lut.as_mut_ptr() as *mut u8,
-                    std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorLut>(
-                    ) * lut.len(),
-                )
+        struct StagedOutputBlobs {
+            index: usize,
+            gamma_lut: Option<(
+                u64,
+                crate::backend::wayland_udev::color_pipeline::TransferKind,
+            )>,
+            ctm: Option<u64>,
+        }
+
+        // Create every new blob before touching hardware. A blob is inert
+        // until an atomic commit references it, so unwinding after a failure
+        // only needs to destroy the freshly created ids.
+        let mut created: Vec<u64> = Vec::new();
+        let mut staged: Vec<StagedOutputBlobs> = Vec::new();
+        let result = (|state: &mut Self| {
+            let mut plans: Vec<AtomicColorOutputPlan> = Vec::new();
+            let commit_result = {
+                let mgr = state.drm_output_manager.lock();
+                let dev = mgr.device();
+                for &(index, goal) in &changed {
+                    let output = &state.outputs[index];
+                    let caps = output
+                        .color_pipeline_caps
+                        .as_ref()
+                        .ok_or("no color pipeline caps cached for output")?;
+                    let gamma_lut = match goal.gamma_lut {
+                        Some(tf) => {
+                            if !caps.gamma_lut_supported {
+                                return Err("CRTC does not advertise GAMMA_LUT".to_string());
+                            }
+                            let id = create_gamma_lut_blob(dev, tf, caps.gamma_lut_size as usize)?;
+                            created.push(id);
+                            Some((id, tf))
+                        }
+                        None => None,
+                    };
+                    let ctm = match goal.ctm {
+                        Some(matrix) => {
+                            if !caps.ctm_supported {
+                                return Err("CRTC does not advertise CTM".to_string());
+                            }
+                            let id = create_ctm_blob(dev, matrix)?;
+                            created.push(id);
+                            Some(id)
+                        }
+                        None => None,
+                    };
+                    plans.push(AtomicColorOutputPlan {
+                        crtc: u32::from(output.crtc),
+                        connector: u32::from(output.connector),
+                        handles: output.color_property_handles,
+                        target: ScanoutColorTarget {
+                            degamma_lut: Some(0),
+                            ctm: Some(ctm.unwrap_or(0)),
+                            gamma_lut: Some(gamma_lut.map(|(id, _)| id).unwrap_or(0)),
+                            // Connector signalling transitions are owned by
+                            // `set_hdr_metadata_for_output` and stay out of
+                            // the CRTC stage request.
+                            colorspace: None,
+                            hdr_output_metadata: None,
+                        },
+                    });
+                    staged.push(StagedOutputBlobs {
+                        index,
+                        gamma_lut,
+                        ctm,
+                    });
+                }
+                let assignments = build_atomic_color_request(&plans)?;
+                commit_atomic_color_request(dev, &assignments)
             };
-            let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
-                .map_err(|e| format!("create_property_blob(GAMMA_LUT) failed: {e:?}"))?;
-            u64::from(blob.blob_id)
+            commit_result.map(|_| plans.len())
+        })(self);
+
+        let committed = match result {
+            Ok(committed) => committed,
+            Err(error) => {
+                let mgr = self.drm_output_manager.lock();
+                for id in created {
+                    let _ = mgr.device().destroy_property_blob(id);
+                }
+                return Err(error);
+            }
         };
 
-        // Locate GAMMA_LUT property handle on the CRTC and set it.
-        let mut set_result: Result<(), String> =
-            Err("GAMMA_LUT property not found on CRTC".to_string());
-        if let Ok(props) = dev.get_properties(crtc) {
-            let (handles, _values) = props.as_props_and_values();
-            for &prop_handle in handles {
-                if let Ok(info) = dev.get_property(prop_handle) {
-                    if info.name().to_str() == Ok("GAMMA_LUT") {
-                        set_result = Self::set_drm_property(dev, crtc, prop_handle, new_blob_id);
-                        break;
-                    }
-                }
+        // The request is live: swap tracked state and release the replaced
+        // blobs (the commit atomically dropped their hardware references),
+        // then invalidate delivery evidence for every changed output so no
+        // pre-transition frame can be reported under the new color state.
+        let mut replaced: Vec<u64> = Vec::new();
+        for entry in &staged {
+            let output = &self.outputs[entry.index];
+            if let Some((id, _)) = output.installed_gamma_lut {
+                replaced.push(id);
+            }
+            replaced.extend(output.installed_ctm);
+        }
+        for entry in staged {
+            self.outputs[entry.index].installed_gamma_lut = entry.gamma_lut;
+            self.outputs[entry.index].installed_ctm = entry.ctm;
+            self.invalidate_color_delivery_after_hardware_change(entry.index);
+        }
+        {
+            let mgr = self.drm_output_manager.lock();
+            for id in replaced {
+                let _ = mgr.device().destroy_property_blob(id);
             }
         }
-        if let Err(e) = &set_result {
-            // Failed atomic commit → free the just-created blob, leave state untouched.
-            let _ = dev.destroy_property_blob(new_blob_id);
-            return Err(e.clone());
-        }
-        // Replace old blob (if any) only after the new one is live.
-        if let Some(old) = old_blob {
-            let _ = dev.destroy_property_blob(old);
-        }
-        drop(mgr);
-
-        self.outputs[output_idx].installed_gamma_lut = Some((new_blob_id, tf));
-        self.invalidate_color_delivery_after_hardware_change(output_idx);
-        log::info!(
-            "[kms-cm] installed GAMMA_LUT on {} (size={size}, tf={tf:?})",
-            self.outputs[output_idx].output_name,
-        );
+        log::info!("[kms-cm] atomic color stage commit covered {committed} output(s)");
         Ok(())
     }
 
@@ -3297,77 +3736,6 @@ impl KmsState {
         log::info!(
             "[kms-cm] uninstalled GAMMA_LUT on {}",
             self.outputs[output_idx].output_name
-        );
-        Ok(())
-    }
-
-    /// Install a 3×3 CTM (color transform matrix) on the CRTC. Mirrors
-    /// `install_gamma_lut`: variable-length blob via `drm_ffi::mode::
-    /// create_property_blob`, atomic prop bind, free-on-failure, replace-old-
-    /// after-success. The caller supplies the cached sRGB-to-output-primary
-    /// matrix for this CRTC (identity on an sRGB-primary output).
-    pub(super) fn install_ctm(
-        &mut self,
-        output_idx: usize,
-        matrix: [f32; 9],
-    ) -> Result<(), String> {
-        let output = self
-            .outputs
-            .get(output_idx)
-            .ok_or("output index out of range")?;
-        let crtc = output.crtc;
-        let caps = output
-            .color_pipeline_caps
-            .as_ref()
-            .ok_or("no color pipeline caps cached for output")?;
-        if !caps.ctm_supported {
-            return Err("CRTC does not advertise CTM".to_string());
-        }
-        let old_blob = output.installed_ctm;
-
-        let mut ctm = crate::backend::wayland_udev::color_pipeline::build_ctm(matrix);
-        let mgr = self.drm_output_manager.lock();
-        let dev = mgr.device();
-        let new_blob_id: u64 = {
-            use std::os::unix::io::AsFd;
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut ctm as *mut _ as *mut u8,
-                    std::mem::size_of::<crate::backend::wayland_udev::color_pipeline::DrmColorCtm>(
-                    ),
-                )
-            };
-            let blob = drm_ffi::mode::create_property_blob(dev.as_fd(), bytes)
-                .map_err(|e| format!("create_property_blob(CTM) failed: {e:?}"))?;
-            u64::from(blob.blob_id)
-        };
-
-        let mut set_result: Result<(), String> = Err("CTM property not found on CRTC".to_string());
-        if let Ok(props) = dev.get_properties(crtc) {
-            let (handles, _values) = props.as_props_and_values();
-            for &prop_handle in handles {
-                if let Ok(info) = dev.get_property(prop_handle) {
-                    if info.name().to_str() == Ok("CTM") {
-                        set_result = Self::set_drm_property(dev, crtc, prop_handle, new_blob_id);
-                        break;
-                    }
-                }
-            }
-        }
-        if let Err(e) = &set_result {
-            let _ = dev.destroy_property_blob(new_blob_id);
-            return Err(e.clone());
-        }
-        if let Some(old) = old_blob {
-            let _ = dev.destroy_property_blob(old);
-        }
-        drop(mgr);
-
-        self.outputs[output_idx].installed_ctm = Some(new_blob_id);
-        self.invalidate_color_delivery_after_hardware_change(output_idx);
-        log::info!(
-            "[kms-cm] installed CTM on {}",
-            self.outputs[output_idx].output_name,
         );
         Ok(())
     }
@@ -3517,159 +3885,87 @@ impl KmsState {
             software_regions,
         };
 
-        let Some(target) = uniform_tf.filter(|_| gate_on) else {
-            for i in 0..n {
-                if self.outputs[i].installed_gamma_lut.is_some() {
-                    let _ = self.uninstall_gamma_lut(i);
-                }
-                if self.outputs[i].installed_ctm.is_some() {
-                    let _ = self.uninstall_ctm(i);
-                }
-            }
-            return self.finish_color_pipeline_decision(decision, &participating);
-        };
-
-        // --- GAMMA_LUT activation: drop on non-participating, then cap-check
-        // and install all-or-nothing across participating outputs.
-        for i in 0..n {
-            if !participating[i] && self.outputs[i].installed_gamma_lut.is_some() {
-                let _ = self.uninstall_gamma_lut(i);
-            }
-        }
+        // --- CRTC color stage activation, one controlled atomic request.
+        //
+        // A CTM is linear-light math and only valid paired with the hardware
+        // OETF in GAMMA_LUT; both stages therefore move in the same commit
+        // instead of sequentially. `apply_scanout_color_goals` covers every
+        // output (participating or not) whose tracked state differs from the
+        // goal, so gate-off, DPMS-off participation drops, target changes,
+        // and capability shortfalls all converge on the same neutral-state
+        // request.
+        let target = uniform_tf.filter(|_| gate_on);
 
         let mut any_participating = false;
         let mut lut_capable = true;
+        let mut ctm_capable = true;
         for i in 0..n {
             if !participating[i] {
                 continue;
             }
             any_participating = true;
-            let cap_ok = self.outputs[i]
-                .color_pipeline_caps
-                .as_ref()
+            let caps = self.outputs[i].color_pipeline_caps.as_ref();
+            if !caps
                 .map(|c| c.gamma_lut_supported && c.gamma_lut_size >= 256)
-                .unwrap_or(false);
-            if !cap_ok {
+                .unwrap_or(false)
+            {
                 lut_capable = false;
-                break;
             }
-        }
-        if !any_participating || !lut_capable {
-            for i in 0..n {
-                if participating[i] && self.outputs[i].installed_gamma_lut.is_some() {
-                    let _ = self.uninstall_gamma_lut(i);
-                }
-            }
-        } else {
-            let mut lut_install_failed = false;
-            for i in 0..n {
-                if !participating[i] {
-                    continue;
-                }
-                if matches!(self.outputs[i].installed_gamma_lut, Some((_, t)) if t == target) {
-                    continue;
-                }
-                if let Err(e) = self.install_gamma_lut(i, target) {
-                    log::warn!(
-                        "[kms-cm] LUT install on {} failed ({e}); rolling back frame's LUTs",
-                        self.outputs[i].output_name,
-                    );
-                    for j in 0..n {
-                        if self.outputs[j].installed_gamma_lut.is_some() {
-                            let _ = self.uninstall_gamma_lut(j);
-                        }
-                    }
-                    lut_install_failed = true;
-                    break;
-                }
-            }
-            decision.hw_encode_active = !lut_install_failed;
-        }
-
-        // --- CTM activation: only after GAMMA_LUT succeeded for every
-        // participant. A CTM is linear-light math; applying it without the
-        // hardware OETF would transform shader-encoded pixels in the wrong
-        // domain. Install per-output `output_ctm` (sRGB → output primaries)
-        // all-or-nothing. When `hw_ctm_active`, the per-surface ColorTransform
-        // pass in backend.rs targets sRGB primaries so the FBO is uniform-sRGB
-        // and each CRTC's CTM converts to native primaries at scanout.
-        for i in 0..n {
-            if !participating[i] && self.outputs[i].installed_ctm.is_some() {
-                let _ = self.uninstall_ctm(i);
-            }
-        }
-
-        let mut ctm_capable =
-            ctm_offload_allowed(gate_on, decision.hw_encode_active, any_participating);
-        for i in 0..n {
-            if !participating[i] {
-                continue;
-            }
-            let cap_ok = self.outputs[i]
-                .color_pipeline_caps
-                .as_ref()
-                .map(|c| c.ctm_supported)
-                .unwrap_or(false);
-            if !cap_ok {
+            if !caps.map(|c| c.ctm_supported).unwrap_or(false) {
                 ctm_capable = false;
-                break;
             }
         }
-        if !ctm_capable {
-            for i in 0..n {
-                if participating[i] && self.outputs[i].installed_ctm.is_some() {
-                    let _ = self.uninstall_ctm(i);
-                }
+        let hw_pair_target = target.filter(|_| any_participating && lut_capable && ctm_capable);
+
+        // When `hw_pair_target` is set, the per-surface ColorTransform pass in
+        // backend.rs targets sRGB primaries so the FBO is uniform-sRGB and
+        // each CRTC's CTM converts to native primaries at scanout.
+        let goals: Vec<(usize, OutputScanoutColorGoal)> = (0..n)
+            .map(|i| {
+                let goal = match hw_pair_target.filter(|_| participating[i]) {
+                    Some(tf) => OutputScanoutColorGoal {
+                        gamma_lut: Some(tf),
+                        ctm: Some(self.outputs[i].output_ctm),
+                    },
+                    None => OutputScanoutColorGoal::CLEAR,
+                };
+                (i, goal)
+            })
+            .collect();
+        if let Err(error) = self.apply_scanout_color_goals(&goals) {
+            // Mirror the old rollback: return every output to neutral in a
+            // second all-or-nothing request so software delivery can proceed
+            // under a known domain. If even that fails, the tracked state no
+            // longer describes the hardware and the coherence check in
+            // `finish_color_pipeline_decision` blocks presentation until a
+            // later refresh resolves ownership.
+            log::warn!(
+                "[kms-cm] atomic color stage commit failed ({error}); clearing all stages to neutral"
+            );
+            let clear_goals: Vec<(usize, OutputScanoutColorGoal)> =
+                (0..n).map(|i| (i, OutputScanoutColorGoal::CLEAR)).collect();
+            if let Err(clear_error) = self.apply_scanout_color_goals(&clear_goals) {
+                log::warn!("[kms-cm] neutral clear commit also failed: {clear_error}");
             }
-        } else {
-            let mut ctm_install_failed = false;
-            for i in 0..n {
-                if !participating[i] || self.outputs[i].installed_ctm.is_some() {
-                    continue;
-                }
-                let matrix = self.outputs[i].output_ctm;
-                if let Err(e) = self.install_ctm(i, matrix) {
-                    log::warn!(
-                        "[kms-cm] CTM install on {} failed ({e}); rolling back frame's CTMs",
-                        self.outputs[i].output_name,
-                    );
-                    for j in 0..n {
-                        if self.outputs[j].installed_ctm.is_some() {
-                            let _ = self.uninstall_ctm(j);
-                        }
-                    }
-                    ctm_install_failed = true;
-                    break;
-                }
-            }
-            decision.hw_ctm_active = !ctm_install_failed;
         }
+
+        // Report what the hardware actually owns now, not what was requested:
+        // a failed commit leaves the previous state installed, and the
+        // coherence check below blocks presentation until a retry resolves
+        // ownership.
+        decision.hw_encode_active = hw_pair_target.is_some_and(|tf| {
+            (0..n).all(|i| {
+                !participating[i]
+                    || matches!(self.outputs[i].installed_gamma_lut, Some((_, t)) if t == tf)
+            })
+        });
+        decision.hw_ctm_active = hw_pair_target.is_some()
+            && (0..n).all(|i| !participating[i] || self.outputs[i].installed_ctm.is_some());
 
         if decision.hw_encode_active && decision.hw_ctm_active {
             // The CRTC pair consumes the common linear-sRGB texture directly;
             // no software output conversion remains.
             decision.software_regions = None;
-        } else {
-            // A hardware OETF without the matching linear-light gamut stage
-            // leaves no unambiguous domain for the shared framebuffer. Roll
-            // back every LUT and use the complete software plan (or the
-            // renderer's explicit global-sRGB fallback when it is unavailable).
-            if decision.hw_encode_active {
-                for i in 0..n {
-                    if self.outputs[i].installed_gamma_lut.is_some() {
-                        let _ = self.uninstall_gamma_lut(i);
-                    }
-                }
-            }
-            if decision.hw_ctm_active {
-                for i in 0..n {
-                    if self.outputs[i].installed_ctm.is_some() {
-                        let _ = self.uninstall_ctm(i);
-                    }
-                }
-            }
-            decision.hw_encode_active = false;
-            decision.hw_ctm_active = false;
         }
 
         self.finish_color_pipeline_decision(decision, &participating)
@@ -5442,19 +5738,31 @@ impl KmsState {
             }
 
             // Probe color-pipeline caps inline (the standalone helper takes
-            // &mut self which isn't available here).
-            let color_pipeline_caps = {
+            // &mut self which isn't available here). The same scan also
+            // captures the raw property handles the controlled atomic commit
+            // programs later, plus the connector signalling handles.
+            let (color_pipeline_caps, color_property_handles) = {
                 let mgr = drm_output_manager.lock();
                 let dev = mgr.device();
                 let mut caps = crate::backend::api::KmsColorPipelineCaps::default();
+                let mut color_handles = ScanoutColorPropertyHandles::default();
                 if let Ok(props) = dev.get_properties(p.crtc) {
                     let (handles, values) = props.as_props_and_values();
                     for (i, &prop_handle) in handles.iter().enumerate() {
                         if let Ok(info) = dev.get_property(prop_handle) {
                             match info.name().to_str().unwrap_or("") {
-                                "DEGAMMA_LUT" => caps.degamma_lut_supported = true,
-                                "GAMMA_LUT" => caps.gamma_lut_supported = true,
-                                "CTM" => caps.ctm_supported = true,
+                                "DEGAMMA_LUT" => {
+                                    caps.degamma_lut_supported = true;
+                                    color_handles.degamma_lut = Some(u32::from(prop_handle));
+                                }
+                                "GAMMA_LUT" => {
+                                    caps.gamma_lut_supported = true;
+                                    color_handles.gamma_lut = Some(u32::from(prop_handle));
+                                }
+                                "CTM" => {
+                                    caps.ctm_supported = true;
+                                    color_handles.ctm = Some(u32::from(prop_handle));
+                                }
                                 "DEGAMMA_LUT_SIZE" => caps.degamma_lut_size = values[i] as u32,
                                 "GAMMA_LUT_SIZE" => caps.gamma_lut_size = values[i] as u32,
                                 _ => {}
@@ -5462,8 +5770,53 @@ impl KmsState {
                         }
                     }
                 }
-                Some(caps)
+                if let Ok(props) = dev.get_properties(p.connector) {
+                    let (handles, _values) = props.as_props_and_values();
+                    for &prop_handle in handles {
+                        if let Ok(info) = dev.get_property(prop_handle) {
+                            match info.name().to_str().unwrap_or("") {
+                                "Colorspace" => {
+                                    color_handles.colorspace = Some(u32::from(prop_handle));
+                                    // The BT2020_RGB enum value is required to
+                                    // signal BT.2020 primaries for HDR; capture
+                                    // it from the property's enum table.
+                                    if let smithay::reexports::drm::control::property::ValueType::Enum(enums) = info.value_type() {
+                                        let (_raw, enum_values) = enums.values();
+                                        color_handles.colorspace_bt2020_rgb =
+                                            enum_values.iter().find_map(|entry| {
+                                                (entry.name().to_str() == Ok("BT2020_RGB"))
+                                                    .then_some(entry.value())
+                                            });
+                                    }
+                                }
+                                "HDR_OUTPUT_METADATA" => {
+                                    color_handles.hdr_output_metadata =
+                                        Some(u32::from(prop_handle));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                (Some(caps), color_handles)
             };
+
+            // Snapshot the framebuffer side of the scanout chain: the format
+            // the swapchain allocates for this output and the formats its
+            // primary plane can scan out. HDR signalling stays fail-closed
+            // unless this whole chain is 10-bit or deeper.
+            let swapchain_fourcc = drm_output.with_compositor(|compositor| compositor.format());
+            let primary_plane_formats: Vec<u32> = drm_output.with_compositor(|compositor| {
+                // Smithay's PlaneInfo carries a FormatSet (fourcc + modifiers);
+                // the chain validation only needs the fourccs.
+                compositor
+                    .surface()
+                    .plane_info()
+                    .formats
+                    .iter()
+                    .map(|format| format.code as u32)
+                    .collect()
+            });
 
             let refresh_interval = p
                 .frame_callback_throttle
@@ -5498,6 +5851,9 @@ impl KmsState {
                 color_pipeline_caps,
                 installed_gamma_lut: None,
                 installed_ctm: None,
+                color_property_handles,
+                swapchain_fourcc,
+                primary_plane_formats,
                 output_tf,
                 output_ctm,
                 legacy_gamma_override: false,
@@ -6932,20 +7288,24 @@ fn spawn_screenshot_png_write(
 #[cfg(test)]
 mod compositor_texture_ownership_tests {
     use super::{
-        ColorDeliveryPlan, ColorPipelineDecision, CrtcColorProperty, ExternalElementClass,
-        ExternalElementColorPlan, ExternalElementDisposition, FrameQueueBoundary,
+        AtomicColorAssignment, AtomicColorOutputPlan, ColorDeliveryPlan, ColorPipelineDecision,
+        CrtcColorProperty, ExternalElementClass, ExternalElementColorPlan,
+        ExternalElementDisposition, FrameQueueBoundary, HdrScanoutChainGap,
         InternalizedExternalFrame, LinearTailBlocker, OutputColorDeliveryTracker,
-        OutputColorRegionCandidate, OutputExternalElementPlan, QueuedFrameData,
-        class_is_staging_candidate, classify_external_element, client_direct_scanout_presented,
-        commit_staged_internalization, compositor_output_texture_identity_matches,
-        connector_color_property_neutral_value, crtc_color_property, ctm_offload_allowed,
-        direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
-        frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
-        legacy_color_delivery_attempt_needed, linear_tail_blocker_names, output_color_target,
-        plan_output_configuration_rollback, plan_software_color_regions, point_in_output,
-        prepared_color_delivery, rect_overlaps_output, rollback_mode_requires_restore,
-        rounded_pointer_location, smithay_transform_to_wl, submitted_color_delivery_observation,
-        vblank_is_not_older_than_queue, wl_transform_to_smithay,
+        OutputColorRegionCandidate, OutputExternalElementPlan, OutputScanoutColorGoal,
+        QueuedFrameData, ScanoutColorPropertyHandles, ScanoutColorTarget,
+        build_atomic_color_request, class_is_staging_candidate, classify_external_element,
+        client_direct_scanout_presented, commit_staged_internalization,
+        compositor_output_texture_identity_matches, connector_color_property_neutral_value,
+        crtc_color_property, direct_scanout_allowed_for_color_retry,
+        frame_flags_for_color_delivery, frame_watchdog_remaining, frame_watchdog_timeout,
+        gamma_ramp_is_identity, hdr_scanout_chain_gap, legacy_color_delivery_attempt_needed,
+        linear_tail_blocker_names, output_color_target, plan_output_configuration_rollback,
+        plan_software_color_regions, point_in_output, prepared_color_delivery,
+        rect_overlaps_output, rollback_mode_requires_restore, rounded_pointer_location,
+        scanout_color_goal_matches, scanout_format_channel_bits, smithay_transform_to_wl,
+        submitted_color_delivery_observation, vblank_is_not_older_than_queue,
+        wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
@@ -6994,14 +7354,6 @@ mod compositor_texture_ownership_tests {
         );
         assert!(render.contains("contains(&self.outputs[out_idx].output_name)"));
         assert!(render.contains("state.lock_surfaces.get(&out.output_name)"));
-    }
-
-    #[test]
-    fn ctm_offload_requires_successful_hardware_oetf() {
-        assert!(ctm_offload_allowed(true, true, true));
-        assert!(!ctm_offload_allowed(false, true, true));
-        assert!(!ctm_offload_allowed(true, false, true));
-        assert!(!ctm_offload_allowed(true, true, false));
     }
 
     #[test]
@@ -8198,5 +8550,331 @@ mod compositor_texture_ownership_tests {
                 .zip(IDENTITY_CTM)
                 .all(|(actual, expected)| (*actual - expected).abs() < 1e-5)
         );
+    }
+
+    // ---- HDR P1-6: controlled atomic color delivery + 10-bit chain ----
+
+    use smithay::backend::allocator::Fourcc;
+
+    fn full_chain_handles() -> ScanoutColorPropertyHandles {
+        ScanoutColorPropertyHandles {
+            degamma_lut: Some(10),
+            ctm: Some(11),
+            gamma_lut: Some(12),
+            colorspace: Some(20),
+            colorspace_bt2020_rgb: Some(1),
+            hdr_output_metadata: Some(21),
+        }
+    }
+
+    #[test]
+    fn atomic_color_request_covers_the_whole_chain_in_stable_order() {
+        let plan = AtomicColorOutputPlan {
+            crtc: 100,
+            connector: 200,
+            handles: full_chain_handles(),
+            target: ScanoutColorTarget {
+                degamma_lut: Some(0),
+                ctm: Some(501),
+                gamma_lut: Some(502),
+                colorspace: Some(1),
+                hdr_output_metadata: Some(503),
+            },
+        };
+        let assignments = build_atomic_color_request(&[plan]).expect("complete chain builds");
+        assert_eq!(
+            assignments,
+            vec![
+                // CRTC stages first: DEGAMMA stays pinned neutral, then the
+                // paired CTM + OETF LUT, then the connector signalling.
+                AtomicColorAssignment {
+                    object: 100,
+                    property: 10,
+                    value: 0
+                },
+                AtomicColorAssignment {
+                    object: 100,
+                    property: 11,
+                    value: 501
+                },
+                AtomicColorAssignment {
+                    object: 100,
+                    property: 12,
+                    value: 502
+                },
+                AtomicColorAssignment {
+                    object: 200,
+                    property: 20,
+                    value: 1
+                },
+                AtomicColorAssignment {
+                    object: 200,
+                    property: 21,
+                    value: 503
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn atomic_color_request_spans_every_output_in_one_request() {
+        let handles = full_chain_handles();
+        let target = ScanoutColorTarget {
+            degamma_lut: Some(0),
+            ctm: Some(0),
+            gamma_lut: Some(601),
+            colorspace: None,
+            hdr_output_metadata: None,
+        };
+        let plans = [
+            AtomicColorOutputPlan {
+                crtc: 100,
+                connector: 200,
+                handles,
+                target,
+            },
+            AtomicColorOutputPlan {
+                crtc: 101,
+                connector: 201,
+                handles,
+                target: ScanoutColorTarget {
+                    gamma_lut: Some(602),
+                    ..target
+                },
+            },
+        ];
+        let assignments = build_atomic_color_request(&plans).expect("multi-output request builds");
+        // One request object carries both CRTCs' stage transitions; the kernel
+        // applies all of them or none.
+        let objects: Vec<u32> = assignments.iter().map(|a| a.object).collect();
+        assert_eq!(objects, vec![100, 100, 100, 101, 101, 101]);
+        assert_eq!(assignments[2].value, 601);
+        assert_eq!(assignments[5].value, 602);
+    }
+
+    #[test]
+    fn atomic_color_request_refuses_to_install_a_stage_the_hardware_lacks() {
+        let plan = AtomicColorOutputPlan {
+            crtc: 100,
+            connector: 200,
+            handles: ScanoutColorPropertyHandles {
+                gamma_lut: Some(12),
+                ..ScanoutColorPropertyHandles::default()
+            },
+            target: ScanoutColorTarget {
+                ctm: Some(42),
+                ..ScanoutColorTarget::default()
+            },
+        };
+        let error = build_atomic_color_request(&[plan]).expect_err("install without property");
+        assert!(error.contains("CTM"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn atomic_color_request_treats_clearing_an_absent_stage_as_neutral_noop() {
+        let plan = AtomicColorOutputPlan {
+            crtc: 100,
+            connector: 200,
+            handles: ScanoutColorPropertyHandles::default(),
+            target: ScanoutColorTarget {
+                degamma_lut: Some(0),
+                ctm: Some(0),
+                gamma_lut: Some(0),
+                colorspace: Some(0),
+                hdr_output_metadata: Some(0),
+            },
+        };
+        assert!(
+            build_atomic_color_request(&[plan])
+                .expect("clears never fail")
+                .is_empty(),
+            "clearing an unexposed stage must not emit an assignment"
+        );
+    }
+
+    #[test]
+    fn atomic_color_request_leaves_untouched_stages_out() {
+        let plan = AtomicColorOutputPlan {
+            crtc: 100,
+            connector: 200,
+            handles: full_chain_handles(),
+            target: ScanoutColorTarget {
+                hdr_output_metadata: Some(77),
+                ..ScanoutColorTarget::default()
+            },
+        };
+        let assignments = build_atomic_color_request(&[plan]).expect("signalling-only request");
+        assert_eq!(
+            assignments,
+            vec![AtomicColorAssignment {
+                object: 200,
+                property: 21,
+                value: 77
+            }]
+        );
+    }
+
+    #[test]
+    fn scanout_format_bit_depth_classifies_known_layouts() {
+        assert_eq!(scanout_format_channel_bits(Fourcc::Argb8888), Some(8));
+        assert_eq!(scanout_format_channel_bits(Fourcc::Xbgr8888), Some(8));
+        assert_eq!(scanout_format_channel_bits(Fourcc::Argb2101010), Some(10));
+        assert_eq!(scanout_format_channel_bits(Fourcc::Xrgb2101010), Some(10));
+        assert_eq!(scanout_format_channel_bits(Fourcc::Xbgr16161616f), Some(16));
+        // YUV and unknown layouts carry no usable per-channel RGB depth and
+        // fail HDR validation closed.
+        assert_eq!(scanout_format_channel_bits(Fourcc::Nv12), None);
+    }
+
+    #[test]
+    fn hdr_scanout_chain_accepts_only_a_complete_10bit_path() {
+        let formats = [Fourcc::Xrgb2101010 as u32, Fourcc::Xrgb8888 as u32];
+        assert_eq!(
+            hdr_scanout_chain_gap(true, Fourcc::Xrgb2101010, &formats, &full_chain_handles()),
+            None,
+            "10-bit framebuffer + plane + CRTC stages + connector signalling"
+        );
+        assert_eq!(
+            hdr_scanout_chain_gap(
+                true,
+                Fourcc::Xrgb16161616f,
+                &[Fourcc::Xrgb16161616f as u32],
+                &full_chain_handles()
+            ),
+            None,
+            "16-bit float scanout also satisfies the bit-depth gate"
+        );
+    }
+
+    #[test]
+    fn hdr_scanout_chain_reports_each_gap_fail_closed() {
+        let formats = [Fourcc::Xrgb2101010 as u32];
+        let handles = full_chain_handles();
+        let gap = |same_device,
+                   fourcc: Fourcc,
+                   formats: &[u32],
+                   handles: &ScanoutColorPropertyHandles| {
+            hdr_scanout_chain_gap(same_device, fourcc, formats, handles)
+        };
+
+        assert_eq!(
+            gap(false, Fourcc::Xrgb2101010, &formats, &handles),
+            Some(HdrScanoutChainGap::CrossDevice)
+        );
+        assert_eq!(
+            gap(true, Fourcc::Argb8888, &formats, &handles),
+            Some(HdrScanoutChainGap::FramebufferBitDepth)
+        );
+        assert_eq!(
+            gap(true, Fourcc::Nv12, &formats, &handles),
+            Some(HdrScanoutChainGap::FramebufferBitDepth),
+            "unknown depth must not pass the 10-bit gate"
+        );
+        assert_eq!(
+            gap(true, Fourcc::Abgr2101010, &formats, &handles),
+            Some(HdrScanoutChainGap::PlaneFormatUnsupported),
+            "the exact swapchain format must be scanout-capable"
+        );
+        assert_eq!(
+            gap(
+                true,
+                Fourcc::Xrgb2101010,
+                &formats,
+                &ScanoutColorPropertyHandles {
+                    gamma_lut: None,
+                    ..handles
+                }
+            ),
+            Some(HdrScanoutChainGap::CrtcColorStagesMissing)
+        );
+        assert_eq!(
+            gap(
+                true,
+                Fourcc::Xrgb2101010,
+                &formats,
+                &ScanoutColorPropertyHandles {
+                    ctm: None,
+                    ..handles
+                }
+            ),
+            Some(HdrScanoutChainGap::CrtcColorStagesMissing)
+        );
+        assert_eq!(
+            gap(
+                true,
+                Fourcc::Xrgb2101010,
+                &formats,
+                &ScanoutColorPropertyHandles {
+                    colorspace_bt2020_rgb: None,
+                    ..handles
+                }
+            ),
+            Some(HdrScanoutChainGap::ConnectorColorspaceMissing),
+            "a Colorspace property without BT2020_RGB cannot signal HDR primaries"
+        );
+        assert_eq!(
+            gap(
+                true,
+                Fourcc::Xrgb2101010,
+                &formats,
+                &ScanoutColorPropertyHandles {
+                    hdr_output_metadata: None,
+                    ..handles
+                }
+            ),
+            Some(HdrScanoutChainGap::ConnectorHdrMetadataMissing)
+        );
+    }
+
+    #[test]
+    fn hdr_scanout_chain_gap_precedence_is_stable() {
+        let handles = ScanoutColorPropertyHandles::default();
+        // Everything broken: the cross-device gap dominates.
+        assert_eq!(
+            hdr_scanout_chain_gap(false, Fourcc::Argb8888, &[], &handles),
+            Some(HdrScanoutChainGap::CrossDevice)
+        );
+        // Only the connector side broken: Colorspace before HDR metadata.
+        assert_eq!(
+            hdr_scanout_chain_gap(
+                true,
+                Fourcc::Xrgb2101010,
+                &[Fourcc::Xrgb2101010 as u32],
+                &handles
+            ),
+            Some(HdrScanoutChainGap::CrtcColorStagesMissing)
+        );
+    }
+
+    #[test]
+    fn scanout_color_goal_matches_only_identical_tracked_state() {
+        let goal = OutputScanoutColorGoal {
+            gamma_lut: Some(TransferKind::St2084Pq),
+            ctm: Some(IDENTITY_CTM),
+        };
+        assert!(scanout_color_goal_matches(
+            Some((9, TransferKind::St2084Pq)),
+            Some(10),
+            &goal
+        ));
+        assert!(
+            !scanout_color_goal_matches(Some((9, TransferKind::Hlg)), Some(10), &goal),
+            "a different installed TF must re-enter the atomic request"
+        );
+        assert!(!scanout_color_goal_matches(None, Some(10), &goal));
+        assert!(!scanout_color_goal_matches(
+            Some((9, TransferKind::St2084Pq)),
+            None,
+            &goal
+        ));
+
+        let clear = OutputScanoutColorGoal::CLEAR;
+        assert!(scanout_color_goal_matches(None, None, &clear));
+        assert!(!scanout_color_goal_matches(
+            Some((9, TransferKind::Srgb)),
+            None,
+            &clear
+        ));
+        assert!(!scanout_color_goal_matches(None, Some(10), &clear));
     }
 }
