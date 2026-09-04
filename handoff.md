@@ -462,6 +462,91 @@ wayland 走键盘焦点），真机验证时优先试这一条链路。
 
 ## TODO: wayland_udev 消除帧尾颜色域缺口并建立可观测性（2026-08-11）
 
+### 进展（2026-09-04 末三）：P1-5 tone-map 定义层已接进渲染决策点
+
+末二条目记录的「第 5 条剩余」三件已同批落地（ingress 与 delivery 同批，
+不存在 PQ 内容 49 倍亮度的中间态）。
+
+**(a) ingress rescale。** `ColorTransform::build_to_linear_srgb` 把
+`working_space_scale(tf)` 折进 gamut matrix（标量逐通道一致，被 matrix
+吸收，shader 无第二次乘法）：PQ 内容解码后按 10000/203、HLG 按
+1000/203 落进工作空间。SDR 系 scale=1.0，`x * 1.0 == x` 在 IEEE-754
+下逐位相等，既有 SDR ingress 矩阵逐位不变（新单测
+`linear_srgb_ingress_rescale_is_bitwise_identity_for_the_sdr_family`
+对 sRGB/Gamma22/BT.1886/Power × sRGB/BT.2020 组合逐位钉住，HDR 系钉
+scale·gamut）。legacy encoded fallback 仍走 `ColorTransform::build`
+不受影响。逐窗口 shader（window/cube 共用 `u_color_matrix` 契约）自动
+继承，无 GLSL 改动。
+
+**(b) delivery tone-map。** 新类型 `OutputToneMapPlan { policy,
+source_peak_working, target_peak_working }`（color_pipeline.rs），
+`for_output(source_peak, output_tf)` 是唯一选型点（target =
+`working_space_scale(output_tf)`，同时充当 rescale 除数——把 working
+值重锚定到输出 TF 自身的归一化标尺后过 OETF），`IDENTITY` = 直通+单位
+除数。`OutputColorRegion` 携带 plan；帧尾 encode shader
+（`SCENE_LINEAR_ENCODE_FRAGMENT`）新增 `u_tone_map`（0=ReferenceWhite
+直通=GL 零初始化默认值）、`u_source_peak`、`u_target_peak`（≤0 视为 1.0，
+与 encode_tf=-1 的既有默认约定同构），在 gamut matrix 之后、输出 OETF
+之前按通道施加——tone-map 非线性不能折进 matrix。GLSL 与 Rust 的
+`map_working_linear`/`map_to_output_scale` 数学逐项对应（含 Reinhard
+退化回 clip）。`dispatch_output_color_regions` 在 `hw_encode_active`
+时替换 IDENTITY plan（硬件 LUT 已含 rescale，shader 不得二次施加）；
+transition snapshot、early-sRGB fallback、overview re-entry、capture
+view 四个既有 encode 调用点全部传 IDENTITY，字节行为不变。
+
+**per-frame 峰值数据通道（新建）。** backend.rs 帧循环在 delivery
+decision 之前新增纯函数 `aggregate_output_source_peaks`：full_scene 窗口
+矩形 × 输出逻辑矩形交集，取各输出可见窗口 committed image description
+的 `working_space_scale(tf)` 最大值，下限 1.0（全 SDR 输出恒直通 =
+改动前行为；未描述 surface 与 staged 外部元素按 SDR 计 1.0——staging 本就
+拒绝非 sRGB 描述，描述变更经 generation 钟触发重绘）。仅在
+cm_render_gate && scene_linear_color_path 时计算（snapshot 复用同一帧
+surface plans 的那份，仍一帧一次锁），经
+`refresh_color_pipeline_offload` 新参数 `source_peaks: &HashMap<String,
+f32>` 进 KMS，`OutputColorRegionCandidate` 携带进
+`plan_software_color_regions` 落成各 region 的 plan；`same_profile`
+重叠检查含 tone_map（镜像输出峰值冲突整体拒绝，fail-closed）。
+`OutputColorFrameState` 比较自动含 plan——峰值变化（HDR 窗口出现/跨
+输出移动/描述变更）即使几何不变也触发 full damage 重编码。
+
+**硬件路径 LUT 烘焙。** `build_gamma_lut_delivery(tf, plan, size)` 通用
+烘焙（tone-map + 重锚定 + OETF）；`build_gamma_lut_scanout(tf, size)`
+是 scanout  canonical 曲线，`create_gamma_lut_blob` 换用它。关键结构
+性事实（单测 `delivery_lut_clip_matches_scanout_curve_over_the_fb_domain`
+钉住）：在 FB 归一化域 [0,1] 上，`for_peaks` 可达的全部策略
+（ReferenceWhite 直通、Clip 在 target≥1 恒不触发）与 rescale OETF 逐
+字节一致，域外值由硬件 LUT 索引钳制——正是 Clip。因此
+`installed_gamma_lut` 仍以 `TransferKind` 为键，无逐帧 blob churn；
+SDR 系 LUT 与旧 `build_gamma_lut` 逐字节一致（
+`scanout_lut_is_byte_identical_to_legacy_ramp_for_the_sdr_family`），
+PQ/HLG 输出 LUT 末项锚定 203 nits（
+`scanout_lut_reanchors_hdr_transfers_onto_reference_white`）。将来若把
+ReinhardShoulder（峰值相关）接上硬件，必须先扩展该键——已注释在
+`build_gamma_lut_scanout` 文档。
+
+**oracle 修正说明（仅 HDR 路由）。** headless_render 两处 PQ region 断言
+（internalized 元素 Frame C、capture-view Frame C）的 CPU oracle 现在
+含 delivery 级（tone-map + rescale），与 region 安装的 plan 共享同一
+`OutputToneMapPlan`——SDR 内容在 PQ 输出上重锚定到 203 nits（改动前
+oracle 把 working 1.0 当 PQ 满量程 10000 nits，正是本轮要消除的错
+锚）。断言本身（tolerance、语义注释意图「单次 OETF」）未动；全部 SDR
+路由 oracle 原样通过，且 identity plan 经新 shader 代码路径与原样零
+初始化 uniform 渲染逐字节相等（新 GL 测试
+`wayland_scene_linear_encode_tone_map_matches_cpu_oracle` 同时钉
+PQ 锚点 148/255、Clip 上限、Reinhard 高光层次）。
+
+HDR enable 语义、direct scanout 阻断、末二的 KMS 原子交付均不变；HDR
+路由仍在 fail-closed 门后（`params_for_output` 在 HDR 未启用时恒 sRGB，
+故所有可达输出 TF 为 SDR，上述 PQ/HLG 交付路径为正确性预留）。验证：
+`cargo fmt --all -- --check`、`cargo test --locked`（lib 2654 passed =
+基线 2641 + 新增 13：color_pipeline 9、udev_kms 2、backend 聚合 1、
+GL shader 1；其余 target 全绿）、`cargo clippy --locked --lib --bins
+--tests --no-deps -- -D warnings`、`cargo check --locked --all-targets`
+与 `--no-default-features`（0 警告，既有的 5 个 X11 clipboard dead-code
+警告已不复存在）、`cargo test --locked --manifest-path
+bridge/Cargo.toml`（41 passed）全绿。无显示会话，行为验证全部来自
+colocated 单测与严格 surfaceless EGL oracle。
+
 ### 进展（2026-09-04 末二）：P1-6 KMS 原子交付与位深门槛已完成
 
 **受控原子请求装配层（纯逻辑，可单测）。** `udev_kms.rs` 新增：
@@ -714,13 +799,16 @@ exact-sRGB fallback。
    toolbar、toast/OSD、recording overlay 等必须逐类标注为 common-linear-aware，或保留具名
    blocker；capture/readback 要从明确编码的独立 view 派生，不能通过改变物理 scanout route
    来获得截图。
-5. **真实 HDR 语义尚不完整（前半已完成）。** working-white/absolute-luminance 基准
-   （SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map policy 的定义层已落地
-   （定义层，未接入渲染决策）；image-description 已与对应 `wl_surface.commit` 原子
-   锁存（pending/current 双缓冲，subsurface 同步语义由 smithay 事务 apply 点继承）。
-   剩余：ingress rescale 与 delivery 端 tone-map 选型真正接进渲染计划——精确的
-   接线点、数据通道缺口与验收约束记录在上面 2026-09-04 末二的进展条目里；非
-   D65 白点已 Bradford 适应；HDR enable 继续 fail-closed。
+5. **真实 HDR 语义尚不完整（定义层接线已完成）。** working-white/absolute-luminance 基准
+   （SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map policy 已落地，
+   且已接进渲染决策点：ingress rescale 折进 `build_to_linear_srgb` 的
+   gamut matrix（SDR 系逐位不变），delivery 端逐输出 plan
+   （`OutputToneMapPlan` + 新建 per-frame 峰值聚合通道）在输出 OETF 前
+   施加——软件 encode shader 新 uniform、硬件 GAMMA_LUT 烘焙均已接线，
+   接线细节与 SDR 逐像素 identity 验收见 2026-09-04 末三的进展条目；
+   image-description 已与对应 `wl_surface.commit` 原子锁存
+   （pending/current 双缓冲，subsurface 同步语义由 smithay 事务 apply 点
+   继承）。非 D65 白点已 Bradford 适应；HDR enable 继续 fail-closed。
 6. **[已完成] KMS 交付的原子事务与位深门槛。** CRTC color stages
    （DEGAMMA/CTM/GAMMA）现在对整个 delivery group 以单个 TEST_ONLY + atomic
    commit 编程（`apply_scanout_color_goals`，内核原子性取代软件 rollback），
@@ -756,13 +844,15 @@ exact-sRGB fallback。
 4. **P0：[已完成] 清理其余 linear-tail blocker** — `compositor/{tail_domain,damage,render,expose}.rs`
    - 建立帧尾 domain table，让每一类 overlay 要么在 final delivery 前绘制，要么有显式颜色
      adapter；capture/recording 使用独立、目标明确的 view，不再反向约束物理输出 route。
-5. **P1：[前半已完成] 补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
+5. **P1：[已完成] 补齐颜色语义** — `color_management.rs`、`color_pipeline.rs` 与 surface commit 路径
    - 非 D65 Bradford CAT 已实现并测试。已完成：working white/absolute
      luminance 基准（SDR white = 203 nits）、SDR/PQ/HLG 标尺互转与 tone-map
-     policy 定义层；image-description pending/current 双缓冲只在匹配
-     surface commit 锁存。剩余：把定义层数学接进渲染决策点（ingress
-     scale 与 delivery 端 tone-map 选型），接线点与像素 identity 验收约束
-     见 2026-09-04 末二进展条目末尾。
+     policy；image-description pending/current 双缓冲只在匹配
+     surface commit 锁存。定义层已接进渲染决策点：ingress scale 折进
+     `build_to_linear_srgb`，delivery 端逐输出 tone-map plan 经新建
+     per-frame 峰值通道驱动软件 encode shader 与硬件 LUT 烘焙
+     （见 2026-09-04 末三进展条目）；SDR 路由逐像素 identity 由既有
+     oracle 原样通过与新增 identity/LUT 一致性测试双重钉住。
 6. **P1：[已完成] KMS 原子交付与位深** — `src/backend/udev_kms.rs`
    - CRTC color stages 与 connector signalling 各自由同一受控 atomic
      request（TEST_ONLY + commit）编程；跨 DRM device 或 10-bit 链路不完整时

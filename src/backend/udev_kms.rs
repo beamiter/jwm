@@ -255,6 +255,9 @@ struct OutputColorRegionCandidate {
     transform: Transform,
     output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind,
     working_to_output_row_major: [f32; 9],
+    /// Aggregated source peak (working-space units) of the surfaces visible
+    /// on this output this frame; 1.0 when everything shown is SDR.
+    source_peak_working: f32,
 }
 
 fn physical_rects_overlap(a: [i32; 4], b: [i32; 4]) -> bool {
@@ -297,10 +300,15 @@ fn plan_software_color_regions(
             rect: [x, y, width, height],
             output_tf: candidate.output_tf,
             working_to_output_row_major: candidate.working_to_output_row_major,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::for_output(
+                candidate.source_peak_working,
+                candidate.output_tf,
+            ),
         };
         for previous in &regions {
             let same_profile = previous.output_tf == region.output_tf
-                && previous.working_to_output_row_major == region.working_to_output_row_major;
+                && previous.working_to_output_row_major == region.working_to_output_row_major
+                && previous.tone_map == region.tone_map;
             if !same_profile && physical_rects_overlap(previous.rect, region.rect) {
                 return None;
             }
@@ -660,7 +668,9 @@ fn hdr_scanout_chain_gap(
     None
 }
 
-/// Create a GAMMA_LUT blob for `tf` with `size` entries. drm 0.14's
+/// Create a GAMMA_LUT blob for `tf` with `size` entries. The baked curve is
+/// the delivery scanout ramp: the OETF re-anchored so framebuffer-linear 1.0
+/// is the 203 cd/m² reference white (`build_gamma_lut_scanout`). drm 0.14's
 /// `create_property_blob<T: Sized>` uses `size_of::<T>()` and can't accept a
 /// variable-length slice; Smithay solves this in PlaneDamageClips by calling
 /// `drm_ffi::mode::create_property_blob` directly on a `&mut [u8]` view of the
@@ -674,7 +684,7 @@ fn create_gamma_lut_blob(
         return Err(format!("GAMMA_LUT_SIZE={size} is below the minimum of 2"));
     }
     use std::os::unix::io::AsFd;
-    let mut lut = crate::backend::wayland_udev::color_pipeline::build_gamma_lut(tf, size);
+    let mut lut = crate::backend::wayland_udev::color_pipeline::build_gamma_lut_scanout(tf, size);
     let bytes = unsafe {
         std::slice::from_raw_parts_mut(
             lut.as_mut_ptr() as *mut u8,
@@ -3782,11 +3792,18 @@ impl KmsState {
     /// Returns the per-frame color-pipeline decision. Hardware ownership is a
     /// paired CTM+LUT transaction across every participating output; otherwise
     /// independently described software regions consume the common scene.
+    ///
+    /// `source_peaks` carries the frame's per-output aggregation of visible
+    /// surface source peaks (working-space units, keyed by output name); it
+    /// feeds each software region's delivery tone-map plan. Outputs missing
+    /// from the map default to the SDR reference (1.0), which selects the
+    /// pass-through policy — the exact pre-tone-map behavior.
     pub(super) fn refresh_color_pipeline_offload(
         &mut self,
         state: &crate::backend::wayland::state::JwmWaylandState,
         linear_tail_safe: bool,
         scene_linear_active: bool,
+        source_peaks: &std::collections::HashMap<String, f32>,
     ) -> ColorPipelineDecision {
         use crate::backend::wayland_udev::color_pipeline::TransferKind;
 
@@ -3856,6 +3873,10 @@ impl KmsState {
                 transform: output.output.current_transform(),
                 output_tf: output.output_tf,
                 working_to_output_row_major: output.output_ctm,
+                source_peak_working: source_peaks
+                    .get(&output.output_name)
+                    .copied()
+                    .unwrap_or(1.0),
             })
             .collect();
         let software_regions = plan_software_color_regions(&region_candidates);
@@ -7327,6 +7348,7 @@ mod compositor_texture_ownership_tests {
             transform: Transform::Normal,
             output_tf,
             working_to_output_row_major: IDENTITY_CTM,
+            source_peak_working: 1.0,
         }
     }
 
@@ -8528,6 +8550,57 @@ mod compositor_texture_ownership_tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn software_color_regions_carry_the_delivery_tone_map_plan() {
+        use crate::backend::wayland_udev::color_pipeline::{
+            OutputToneMapPlan, ToneMapPolicy, working_space_scale,
+        };
+
+        // Default (all-SDR) candidates select the pass-through policy on both
+        // SDR and HDR output transfers — the SDR pixel-identity baseline.
+        let regions = plan_software_color_regions(&[
+            color_region_candidate((0, 0), TransferKind::Srgb),
+            color_region_candidate((1920, 0), TransferKind::St2084Pq),
+        ])
+        .expect("supported layout");
+        assert_eq!(regions[0].tone_map, OutputToneMapPlan::IDENTITY);
+        assert_eq!(
+            regions[1].tone_map,
+            OutputToneMapPlan {
+                policy: ToneMapPolicy::ReferenceWhite,
+                source_peak_working: 1.0,
+                target_peak_working: working_space_scale(TransferKind::St2084Pq),
+            }
+        );
+
+        // HDR content visible on an SDR output selects Clip at reference white.
+        let mut hdr_on_sdr = color_region_candidate((0, 0), TransferKind::Srgb);
+        hdr_on_sdr.source_peak_working = working_space_scale(TransferKind::St2084Pq);
+        let regions = plan_software_color_regions(&[hdr_on_sdr]).expect("single supported output");
+        assert_eq!(
+            regions[0].tone_map,
+            OutputToneMapPlan {
+                policy: ToneMapPolicy::Clip,
+                source_peak_working: working_space_scale(TransferKind::St2084Pq),
+                target_peak_working: 1.0,
+            }
+        );
+    }
+
+    #[test]
+    fn software_color_regions_reject_overlapping_regions_with_different_peaks() {
+        // Mirrored outputs share one framebuffer area: one scissor rectangle
+        // can carry only one tone-map plan, so conflicting plans must reject
+        // the whole plan rather than pick one silently.
+        let base = color_region_candidate((0, 0), TransferKind::Srgb);
+        let mut hdr_content = base;
+        hdr_content.source_peak_working = 4.0;
+        assert!(plan_software_color_regions(&[base, hdr_content]).is_none());
+
+        // Identical peaks (true mirror of the same content) still pass.
+        assert!(plan_software_color_regions(&[base, base]).is_some());
     }
 
     #[test]

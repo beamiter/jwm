@@ -631,9 +631,21 @@ void main() {
 // The compositor uses it for each eligible physical output region, for the
 // conservative whole-frame sRGB fallback, and for local fallback re-entry.
 //
+// Between the gamut matrix and the OETF sits the delivery tone-map: the
+// per-channel policy remap of the output's `OutputToneMapPlan`, then a rescale
+// dividing by the plan's target peak to re-anchor working-space values (1.0 =
+// 203 cd/m²) onto the output transfer's native scale. It cannot fold into
+// `u_color_matrix` because the remap is nonlinear. The uniform contract keeps
+// the GL zero-initialized state exactly equivalent to the pre-tone-map
+// shader: `u_tone_map == 0` is the ReferenceWhite pass-through and a
+// non-positive `u_target_peak` falls back to the unit divisor, so legacy
+// callers that bind neither uniform get bitwise-identical output. Production
+// always binds all three explicitly.
+//
 // Uses BLUR_DOWN_VERTEX for the vertex stage (same gl_VertexID-based
 // fullscreen quad). The TF discriminant values match TransferKind in
-// color_pipeline.rs and the constants at the top of FRAGMENT_SHADER.
+// color_pipeline.rs and the constants at the top of FRAGMENT_SHADER; the
+// u_tone_map discriminants match ToneMapPolicy::shader_id.
 
 pub const SCENE_LINEAR_ENCODE_FRAGMENT: &str = r#"#version 300 es
 precision highp float;
@@ -646,10 +658,19 @@ const int TF_PQ = 4;
 const int TF_HLG = 5;
 const int TF_SRGB = 6;
 
+// ToneMapPolicy::shader_id discriminants. 0 is the pass-through and the GL
+// zero default at once.
+const int TM_REFERENCE_WHITE = 0;
+const int TM_CLIP = 1;
+const int TM_REINHARD_SHOULDER = 2;
+
 uniform sampler2D u_texture;
 uniform int   u_encode_tf;
 uniform float u_encode_gamma;
 uniform mat3  u_color_matrix;
+uniform int   u_tone_map;      // delivery tone-map policy (TM_*)
+uniform float u_source_peak;   // aggregated visible-content peak, working units
+uniform float u_target_peak;   // output peak, working units; also the rescale divisor
 in vec2 v_uv;
 out vec4 frag_color;
 
@@ -680,6 +701,30 @@ vec3 hlg_forward(vec3 l) {
     return mix(lo, hi, step(1.0 / 12.0, l));
 }
 
+// Delivery tone-map + rescale. Mirrors ToneMapPolicy::map_working_linear and
+// OutputToneMapPlan::map_to_output_scale in color_pipeline.rs; keep the math
+// (including the degenerate-peak clip fallback) in lockstep so the CPU
+// oracles track the shader.
+vec3 tone_map_delivery(vec3 c) {
+    float target = u_target_peak > 0.0 ? u_target_peak : 1.0;
+    if (u_tone_map == TM_CLIP) {
+        c = clamp(c, 0.0, target);
+    } else if (u_tone_map == TM_REINHARD_SHOULDER) {
+        float w = u_source_peak;
+        if (w > 0.0 && w > target) {
+            // Extended Reinhard anchored at the source peak:
+            // y = x(1 + x/w²)/(1 + x) maps w → 1.
+            vec3 x = max(c, vec3(0.0));
+            c = clamp(x * (vec3(1.0) + x / (w * w)) / (vec3(1.0) + x),
+                      vec3(0.0), vec3(1.0)) * target;
+        } else {
+            c = clamp(c, 0.0, target);
+        }
+    }
+    // ReferenceWhite (and the unbound-uniform legacy case): pass through.
+    return c / target;
+}
+
 void main() {
     // Both scene targets share one storage convention with the output FBO
     // (storage row r = scene row H-1-r, i.e. the window pass's projection).
@@ -689,12 +734,14 @@ void main() {
     // have in the encoded output FBO.
     vec4 texel = texture(u_texture, vec2(v_uv.x, 1.0 - v_uv.y));
     // The FP16 scene is stored in common linear-sRGB. Gamut-map each output
-    // region while values are still linear, then apply that output's OETF.
-    // Matrix math is valid directly on premultiplied RGB because it is linear
-    // and leaves alpha untouched. Production output storage is opaque after
-    // the background + source-over scene; alpha is passed through only so the
-    // fullscreen primitive remains deterministic in isolated shader tests.
-    vec3 c = u_color_matrix * texel.rgb;
+    // region while values are still linear, then tone-map and apply that
+    // output's OETF. Matrix math is valid directly on premultiplied RGB
+    // because it is linear and leaves alpha untouched; the tone-map stage is
+    // per-channel and therefore also commutes with premultiplication.
+    // Production output storage is opaque after the background + source-over
+    // scene; alpha is passed through only so the fullscreen primitive remains
+    // deterministic in isolated shader tests.
+    vec3 c = tone_map_delivery(u_color_matrix * texel.rgb);
     if (u_encode_tf == TF_LINEAR)       c = clamp(c, 0.0, 1.0);
     else if (u_encode_tf == TF_POWER)   c = clamp(pow(max(c, 0.0), vec3(1.0 / max(u_encode_gamma, 1e-3))), 0.0, 1.0);
     else if (u_encode_tf == TF_BT1886)  c = clamp(pow(max(c, 0.0), vec3(1.0 / 2.4)), 0.0, 1.0);

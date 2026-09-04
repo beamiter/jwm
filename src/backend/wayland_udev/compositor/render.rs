@@ -1273,8 +1273,10 @@ impl WaylandCompositor {
     // matrix and forward transfer. This serves a physical output region, the
     // whole-frame sRGB fallback, or the dedicated capture view (an explicitly
     // encoded sRGB view for screenshots/recording). encode_tf < 0 means "sRGB
-    // default"; encode_gamma is consulted only for TF_POWER. Blending is
-    // disabled.
+    // default"; encode_gamma is consulted only for TF_POWER. `tone_map` is the
+    // delivery tone-map plan applied between the gamut matrix and the OETF;
+    // `OutputToneMapPlan::IDENTITY` reproduces the legacy encode bit for bit.
+    // Blending is disabled.
     fn dispatch_scene_linear_encode_pass(
         &self,
         gl: &ffi::Gles2,
@@ -1283,6 +1285,7 @@ impl WaylandCompositor {
         encode_tf: i32,
         encode_gamma: f32,
         color_matrix_row_major: [f32; 9],
+        tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan,
         scissor: Option<[i32; 4]>,
     ) {
         unsafe {
@@ -1310,6 +1313,18 @@ impl WaylandCompositor {
             gl.Uniform1i(self.scene_linear_encode_uniforms.texture, 0);
             gl.Uniform1i(self.scene_linear_encode_uniforms.encode_tf, encode_tf);
             gl.Uniform1f(self.scene_linear_encode_uniforms.encode_gamma, encode_gamma);
+            gl.Uniform1i(
+                self.scene_linear_encode_uniforms.tone_map,
+                tone_map.policy.shader_id(),
+            );
+            gl.Uniform1f(
+                self.scene_linear_encode_uniforms.source_peak,
+                tone_map.source_peak_working,
+            );
+            gl.Uniform1f(
+                self.scene_linear_encode_uniforms.target_peak,
+                tone_map.target_peak_working,
+            );
             let color_matrix = crate::backend::wayland_udev::color_pipeline::matrix_to_column_major(
                 color_matrix_row_major,
             );
@@ -1386,6 +1401,14 @@ impl WaylandCompositor {
             } else {
                 region.working_to_output_row_major
             };
+            // When the CRTC pair owns delivery, its GAMMA_LUT already carries
+            // the tone-map and rescale bake; the shader must stay a no-op
+            // instead of applying the plan a second time.
+            let tone_map = if hw_encode_active {
+                crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY
+            } else {
+                region.tone_map
+            };
             self.dispatch_scene_linear_encode_pass(
                 gl,
                 projection,
@@ -1393,6 +1416,7 @@ impl WaylandCompositor {
                 transfer.shader_id(),
                 transfer.gamma_for_shader(),
                 matrix,
+                tone_map,
                 Some(scissor),
             );
         }
@@ -1710,6 +1734,7 @@ impl WaylandCompositor {
                     fallback.shader_id(),
                     fallback.gamma_for_shader(),
                     IDENTITY_CTM,
+                    crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
                     None,
                 );
             }
@@ -3205,6 +3230,7 @@ impl WaylandCompositor {
                 fallback.shader_id(),
                 fallback.gamma_for_shader(),
                 IDENTITY_CTM,
+                crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
                 None,
             );
             unsafe {
@@ -3270,6 +3296,7 @@ impl WaylandCompositor {
                             fallback.shader_id(),
                             fallback.gamma_for_shader(),
                             IDENTITY_CTM,
+                            crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
                             Some(scissor),
                         );
                         unsafe {
@@ -3757,6 +3784,9 @@ impl WaylandCompositor {
         }
         use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
         let capture_tf = TransferKind::Srgb;
+        // The capture view is canonical encoded sRGB: no tone-map, unit
+        // rescale. Values above reference white (HDR content) land in the
+        // OETF's own clamp, which coincides with the Clip policy.
         self.dispatch_scene_linear_encode_pass(
             gl,
             projection,
@@ -3764,6 +3794,7 @@ impl WaylandCompositor {
             capture_tf.shader_id(),
             capture_tf.gamma_for_shader(),
             IDENTITY_CTM,
+            crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
             None,
         );
         self.capture_view_fresh = true;

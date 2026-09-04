@@ -339,6 +339,37 @@ fn output_transform_pixel_oracle(
     ]
 }
 
+/// CPU model of one delivery-region encode with the tone-map stage wired:
+/// gamut matrix, then the plan's policy remap in working units, then the
+/// re-anchor division onto the output transfer's native scale, then the OETF.
+/// `OutputToneMapPlan::IDENTITY` reproduces the legacy (pre-tone-map) result
+/// exactly: pass-through policy and a unit divisor.
+fn planned_output_transform_pixel_oracle(
+    input_linear: [f32; 4],
+    matrix_row_major: [f32; 9],
+    plan: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan,
+    transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+) -> [u8; 4] {
+    let mapped = [
+        matrix_row_major[0] * input_linear[0]
+            + matrix_row_major[1] * input_linear[1]
+            + matrix_row_major[2] * input_linear[2],
+        matrix_row_major[3] * input_linear[0]
+            + matrix_row_major[4] * input_linear[1]
+            + matrix_row_major[5] * input_linear[2],
+        matrix_row_major[6] * input_linear[0]
+            + matrix_row_major[7] * input_linear[1]
+            + matrix_row_major[8] * input_linear[2],
+    ];
+    let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [
+        quantize(transfer.forward(plan.map_to_output_scale(mapped[0]))),
+        quantize(transfer.forward(plan.map_to_output_scale(mapped[1]))),
+        quantize(transfer.forward(plan.map_to_output_scale(mapped[2]))),
+        quantize(input_linear[3]),
+    ]
+}
+
 /// Render a fullscreen quad with `prog` over a solid `input` texel into a WxH
 /// RGBA8 FBO and return the center pixel. The input is a 2x2 solid texture with
 /// NEAREST/CLAMP_TO_EDGE, so every neighbour fetch returns the same texel —
@@ -1497,19 +1528,25 @@ fn wayland_per_output_transform_regions_are_pixel_isolated() {
     let regions = [
         OutputColorRegion {
             // Top-left-origin physical framebuffer coordinates.
+            // The tone_map field is not consulted here: this test drives the
+            // raw program and binds only the legacy uniforms, which exercises
+            // the zero-initialized (pass-through, unit-rescale) contract.
             rect: [1, 1, 3, 3],
             output_tf: TransferKind::Linear,
             working_to_output_row_major: IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         },
         OutputColorRegion {
             rect: [6, 0, 5, 4],
             output_tf: TransferKind::St2084Pq,
             working_to_output_row_major: ROTATE,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         },
         OutputColorRegion {
             rect: [2, 6, 6, 2],
             output_tf: TransferKind::Hlg,
             working_to_output_row_major: MIX,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         },
     ];
     let sentinel_pixels: Vec<u8> = SENTINEL
@@ -1708,6 +1745,233 @@ fn wayland_per_output_transform_regions_are_pixel_isolated() {
         }
         if scissor_was_enabled {
             gl.enable(glow::SCISSOR_TEST);
+        }
+    }
+}
+
+/// The delivery tone-map stage of the scene-linear encode shader, verified
+/// against the CPU oracle that shares the region's `OutputToneMapPlan`.
+/// Pins the three production behaviors: the SDR identity plan is byte-exact
+/// against the zero-initialized legacy uniform contract, the PQ-output
+/// rescale anchors SDR reference white at 203 cd/m², and the Reinhard
+/// shoulder keeps highlight gradation a plain clip would destroy.
+#[test]
+fn wayland_scene_linear_encode_tone_map_matches_cpu_oracle() {
+    use crate::backend::wayland_udev::color_pipeline::{
+        IDENTITY_CTM, OutputToneMapPlan, ToneMapPolicy, TransferKind, pq_encode_nits,
+        working_space_scale,
+    };
+
+    let Some(h) = HeadlessGl::new(GlApi::Gles3) else {
+        eprintln!("headless GL unavailable - skipping tone-map encode test");
+        return;
+    };
+    let gl = &h.gl;
+    const W: i32 = 8;
+    const H: i32 = 8;
+    let program = link(
+        gl,
+        super::shaders::BLUR_DOWN_VERTEX,
+        super::shaders::SCENE_LINEAR_ENCODE_FRAGMENT,
+    )
+    .expect("scene-linear encode shaders must link");
+
+    // The production dispatcher binds all three delivery uniforms on every
+    // call; the linker must not have optimized them out.
+    for name in ["u_tone_map", "u_source_peak", "u_target_peak"] {
+        assert!(
+            unsafe { gl.get_uniform_location(program, name) }.is_some(),
+            "scene-linear encode optimized out required uniform {name}"
+        );
+    }
+
+    unsafe {
+        let (vao, vbo) = create_quad_vao(gl);
+        let make_target = |internal_format: i32, pixel_type: u32| {
+            let texture = gl.create_texture().unwrap();
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                internal_format,
+                W,
+                H,
+                0,
+                glow::RGBA,
+                pixel_type,
+                glow::PixelUnpackData::Slice(None),
+            );
+            for filter in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, filter, glow::NEAREST as i32);
+            }
+            for wrap in [glow::TEXTURE_WRAP_S, glow::TEXTURE_WRAP_T] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, wrap, glow::CLAMP_TO_EDGE as i32);
+            }
+            let framebuffer = gl.create_framebuffer().unwrap();
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            assert_eq!(
+                gl.check_framebuffer_status(glow::FRAMEBUFFER),
+                glow::FRAMEBUFFER_COMPLETE
+            );
+            (framebuffer, texture)
+        };
+        let (output_fbo, output_texture) = make_target(glow::RGBA8 as i32, glow::UNSIGNED_BYTE);
+        let (linear_fbo, linear_texture) = make_target(glow::RGBA16F as i32, glow::HALF_FLOAT);
+
+        let dither_was_enabled = gl.is_enabled(glow::DITHER);
+        gl.disable(glow::DITHER);
+        gl.disable(glow::BLEND);
+        gl.disable(glow::SCISSOR_TEST);
+
+        // Render the encode pass over a solid working-linear input. `plan` =
+        // None leaves the delivery uniforms at their GL zero default, which
+        // the shader contract defines as the legacy pass-through behavior.
+        let run = |input: [f32; 4], transfer: TransferKind, plan: Option<OutputToneMapPlan>| {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(linear_fbo));
+            gl.viewport(0, 0, W, H);
+            gl.clear_color(input[0], input[1], input[2], input[3]);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(output_fbo));
+            gl.viewport(0, 0, W, H);
+            gl.use_program(Some(program));
+            let uniform = |name: &str| gl.get_uniform_location(program, name);
+            gl.uniform_4_f32(uniform("u_rect").as_ref(), 0.0, 0.0, W as f32, H as f32);
+            gl.uniform_matrix_4_f32_slice(
+                uniform("u_projection").as_ref(),
+                false,
+                &ortho(W as f32, H as f32),
+            );
+            gl.uniform_1_i32(uniform("u_texture").as_ref(), 0);
+            gl.uniform_1_i32(uniform("u_encode_tf").as_ref(), transfer.shader_id());
+            gl.uniform_1_f32(
+                uniform("u_encode_gamma").as_ref(),
+                transfer.gamma_for_shader(),
+            );
+            gl.uniform_matrix_3_f32_slice(uniform("u_color_matrix").as_ref(), false, &IDENTITY_CTM);
+            if let Some(plan) = plan {
+                gl.uniform_1_i32(uniform("u_tone_map").as_ref(), plan.policy.shader_id());
+                gl.uniform_1_f32(uniform("u_source_peak").as_ref(), plan.source_peak_working);
+                gl.uniform_1_f32(uniform("u_target_peak").as_ref(), plan.target_peak_working);
+            }
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(linear_texture));
+            gl.bind_vertex_array(Some(vao));
+            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            gl.bind_vertex_array(None);
+            read_center(gl, W, H)
+        };
+
+        // 1. SDR identity: the explicitly bound identity plan must reproduce
+        // the untouched-legacy-uniform render and the pre-tone-map CPU oracle
+        // byte for byte. Binary fractions are FP16-exact, keeping this strict.
+        let input = [0.25_f32, 0.5, 0.75, 1.0];
+        let legacy = run(input, TransferKind::Srgb, None);
+        let planned = run(input, TransferKind::Srgb, Some(OutputToneMapPlan::IDENTITY));
+        assert_eq!(
+            legacy, planned,
+            "identity tone-map plan changed SDR encode bytes"
+        );
+        assert_pixel(
+            planned,
+            output_transform_pixel_oracle(input, IDENTITY_CTM, TransferKind::Srgb),
+            1,
+            "identity plan diverged from the legacy sRGB oracle",
+        );
+
+        // 2. PQ output: the rescale re-anchors reference white onto the
+        // 10 000 cd/m² scale. Working 1.0 must encode as 203 nits.
+        let pq_plan = OutputToneMapPlan::for_output(1.0, TransferKind::St2084Pq);
+        assert_eq!(pq_plan.policy, ToneMapPolicy::ReferenceWhite);
+        let got = run([1.0, 1.0, 1.0, 1.0], TransferKind::St2084Pq, Some(pq_plan));
+        let anchor = (pq_encode_nits(203.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        assert_pixel(
+            got,
+            [anchor, anchor, anchor, 255],
+            1,
+            "PQ delivery must encode working 1.0 as 203 cd/m²",
+        );
+        let colored = [0.5_f32, 0.25, 0.75, 1.0];
+        assert_pixel(
+            run(colored, TransferKind::St2084Pq, Some(pq_plan)),
+            planned_output_transform_pixel_oracle(
+                colored,
+                IDENTITY_CTM,
+                pq_plan,
+                TransferKind::St2084Pq,
+            ),
+            1,
+            "PQ delivery encode diverged from the CPU oracle",
+        );
+
+        // 3. Clip: full-range PQ content onto an SDR output clamps at
+        // reference white; in-range content is untouched.
+        let pq_peak = working_space_scale(TransferKind::St2084Pq);
+        let clip_plan = OutputToneMapPlan::for_output(pq_peak, TransferKind::Srgb);
+        assert_eq!(clip_plan.policy, ToneMapPolicy::Clip);
+        let input = [2.0_f32, 0.5, 0.25, 1.0];
+        let got = run(input, TransferKind::Srgb, Some(clip_plan));
+        assert_pixel(
+            got,
+            planned_output_transform_pixel_oracle(
+                input,
+                IDENTITY_CTM,
+                clip_plan,
+                TransferKind::Srgb,
+            ),
+            1,
+            "clip delivery encode diverged from the CPU oracle",
+        );
+        assert_eq!(got[0], 255, "HDR highlight must clip at SDR white");
+
+        // 4. Reinhard shoulder: highlight gradation above reference white
+        // survives, and the shader matches the definition-layer curve.
+        let reinhard_plan = OutputToneMapPlan {
+            policy: ToneMapPolicy::ReinhardShoulder,
+            source_peak_working: pq_peak,
+            target_peak_working: 1.0,
+        };
+        let got = run(input, TransferKind::Srgb, Some(reinhard_plan));
+        assert_pixel(
+            got,
+            planned_output_transform_pixel_oracle(
+                input,
+                IDENTITY_CTM,
+                reinhard_plan,
+                TransferKind::Srgb,
+            ),
+            1,
+            "Reinhard delivery encode diverged from the CPU oracle",
+        );
+        let white = run(
+            [1.0_f32, 1.0, 1.0, 1.0],
+            TransferKind::Srgb,
+            Some(reinhard_plan),
+        );
+        assert!(
+            got[0] > white[0] && got[0] < 255,
+            "Reinhard shoulder must keep gradation between reference white and the clip: white={white:?} highlight={got:?}"
+        );
+
+        gl.use_program(None);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        gl.delete_buffer(vbo);
+        gl.delete_vertex_array(vao);
+        gl.delete_framebuffer(linear_fbo);
+        gl.delete_framebuffer(output_fbo);
+        gl.delete_texture(linear_texture);
+        gl.delete_texture(output_texture);
+        gl.delete_program(program);
+        if dither_was_enabled {
+            gl.enable(glow::DITHER);
         }
     }
 }
@@ -3340,11 +3604,16 @@ unsafe fn create_element_texture(
 
 /// CPU model of the internalized pipeline for one pixel: premultiplied
 /// encoded source → unpremultiply → sRGB ingress decode → premultiply →
-/// linear over-blend over the decoded background → output OETF.
+/// linear over-blend over the decoded background → the region's delivery
+/// tone-map plan → output OETF. The plan is taken from the region under test
+/// so the oracle and the shader share one delivery decision; the SDR plan is
+/// `OutputToneMapPlan::IDENTITY`, for which the tone-map stage is a bitwise
+/// no-op.
 fn internalized_pixel_oracle(
     src: [u8; 4],
     dst_encoded: [u8; 4],
     transfer: crate::backend::wayland_udev::color_pipeline::TransferKind,
+    tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan,
 ) -> [u8; 4] {
     use crate::backend::wayland_udev::color_pipeline::TransferKind;
     let src_a = f32::from(src[3]) / 255.0;
@@ -3358,9 +3627,9 @@ fn internalized_pixel_oracle(
     }
     let quantize = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
     [
-        quantize(transfer.forward(blended[0])),
-        quantize(transfer.forward(blended[1])),
-        quantize(transfer.forward(blended[2])),
+        quantize(transfer.forward(tone_map.map_to_output_scale(blended[0]))),
+        quantize(transfer.forward(tone_map.map_to_output_scale(blended[1]))),
+        quantize(transfer.forward(tone_map.map_to_output_scale(blended[2]))),
         quantize(src_a + (1.0 - src_a) * f32::from(dst_encoded[3]) / 255.0),
     ]
 }
@@ -3487,6 +3756,7 @@ fn wayland_scene_linear_route_preserves_window_scene_position() {
             rect: [0, 0, W, H],
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
             working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         };
         compositor.force_full_redraw();
         assert!(compositor.render_frame(
@@ -3633,6 +3903,7 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
             rect: [0, 0, W, H],
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
             working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         };
         compositor.force_full_redraw();
         assert!(compositor.render_frame(
@@ -3694,7 +3965,12 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
         let opaque = frame_pixel(&internalized_frame, W as usize, H as usize, 10, 20);
         assert_pixel(
             opaque,
-            internalized_pixel_oracle([200, 40, 40, 255], background, TransferKind::Srgb),
+            internalized_pixel_oracle(
+                [200, 40, 40, 255],
+                background,
+                TransferKind::Srgb,
+                srgb_region.tone_map,
+            ),
             2,
             "internalized opaque texel",
         );
@@ -3707,7 +3983,12 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
         let half_alpha = frame_pixel(&internalized_frame, W as usize, H as usize, 12, 20);
         assert_pixel(
             half_alpha,
-            internalized_pixel_oracle([0, 128, 0, 128], background, TransferKind::Srgb),
+            internalized_pixel_oracle(
+                [0, 128, 0, 128],
+                background,
+                TransferKind::Srgb,
+                srgb_region.tone_map,
+            ),
             2,
             "internalized half-alpha texel blends in linear light",
         );
@@ -3738,9 +4019,15 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
         );
 
         // Frame C — same staged elements through a PQ output region: exactly
-        // one OETF application over the linear blend.
+        // one OETF application over the linear blend, with the delivery
+        // rescale re-anchoring SDR content at 203 cd/m² on the PQ scale (the
+        // ReferenceWhite plan SDR content selects on a PQ output).
         let pq_region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
             output_tf: TransferKind::St2084Pq,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::for_output(
+                1.0,
+                TransferKind::St2084Pq,
+            ),
             ..srgb_region.clone()
         };
         compositor.force_full_redraw();
@@ -3757,19 +4044,34 @@ fn wayland_internalized_external_element_matches_legacy_srgb_scanout() {
         let pq_frame = read_fbo_frame(&gl, compositor.output_fbo, W, H);
         assert_pixel(
             frame_pixel(&pq_frame, W as usize, H as usize, 10, 20),
-            internalized_pixel_oracle([200, 40, 40, 255], background, TransferKind::St2084Pq),
+            internalized_pixel_oracle(
+                [200, 40, 40, 255],
+                background,
+                TransferKind::St2084Pq,
+                pq_region.tone_map,
+            ),
             3,
             "PQ opaque texel encodes the linear blend exactly once",
         );
         assert_pixel(
             frame_pixel(&pq_frame, W as usize, H as usize, 12, 20),
-            internalized_pixel_oracle([0, 128, 0, 128], background, TransferKind::St2084Pq),
+            internalized_pixel_oracle(
+                [0, 128, 0, 128],
+                background,
+                TransferKind::St2084Pq,
+                pq_region.tone_map,
+            ),
             3,
             "PQ half-alpha texel encodes the linear blend exactly once",
         );
         assert_pixel(
             frame_pixel(&pq_frame, W as usize, H as usize, 12, 22),
-            internalized_pixel_oracle([40, 40, 200, 255], background, TransferKind::St2084Pq),
+            internalized_pixel_oracle(
+                [40, 40, 200, 255],
+                background,
+                TransferKind::St2084Pq,
+                pq_region.tone_map,
+            ),
             3,
             "PQ overlap texel keeps the front element",
         );
@@ -3809,6 +4111,7 @@ fn wayland_internalized_external_element_moves_without_ghosting_under_partial_da
             rect: [0, 0, W, H],
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
             working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         };
 
         // Frame 1 places the element (this is the full-damage transition
@@ -4036,6 +4339,7 @@ fn wayland_tail_overlay_expose_matches_legacy_srgb_scanout() {
             rect: [0, 0, W, H],
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
             working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         };
         compositor.force_full_redraw();
         assert!(compositor.render_frame(
@@ -4125,6 +4429,7 @@ fn wayland_capture_view_is_route_neutral_and_explicitly_encoded() {
             rect: [0, 0, W, H],
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
             working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
         };
 
         // Frame A: deferred sRGB region route, no capture consumer. No view
@@ -4193,8 +4498,15 @@ fn wayland_capture_view_is_route_neutral_and_explicitly_encoded() {
 
         // Frame C: the scanout region encodes PQ. The capture view must stay
         // canonical sRGB while the scanout texture carries PQ-encoded pixels.
+        // The region's tone-map plan is the pass-through (ReferenceWhite) that
+        // SDR content selects on a PQ output, with the delivery rescale
+        // re-anchoring working values onto the 10 000 cd/m² PQ scale.
         let pq_region = crate::backend::wayland_udev::color_pipeline::OutputColorRegion {
             output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::St2084Pq,
+            tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::for_output(
+                1.0,
+                crate::backend::wayland_udev::color_pipeline::TransferKind::St2084Pq,
+            ),
             ..srgb_region.clone()
         };
         compositor.force_full_redraw();
@@ -4212,7 +4524,7 @@ fn wayland_capture_view_is_route_neutral_and_explicitly_encoded() {
         let pq_capture = read_fbo_frame(&gl, compositor.capture_view_fbo, W, H);
         assert_pixel(
             frame_pixel(&pq_scanout, W as usize, H as usize, 12, 22),
-            output_transform_pixel_oracle(
+            planned_output_transform_pixel_oracle(
                 [
                     crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb
                         .inverse(200.0 / 255.0),
@@ -4223,6 +4535,7 @@ fn wayland_capture_view_is_route_neutral_and_explicitly_encoded() {
                     1.0,
                 ],
                 crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+                pq_region.tone_map,
                 crate::backend::wayland_udev::color_pipeline::TransferKind::St2084Pq,
             ),
             3,
@@ -4336,6 +4649,7 @@ fn wayland_tail_overlay_snap_preview_matches_legacy_srgb_scanout() {
         rect: [0, 0, W, H],
         output_tf: crate::backend::wayland_udev::color_pipeline::TransferKind::Srgb,
         working_to_output_row_major: crate::backend::wayland_udev::color_pipeline::IDENTITY_CTM,
+        tone_map: crate::backend::wayland_udev::color_pipeline::OutputToneMapPlan::IDENTITY,
     };
     unsafe {
         let mut compositor = super::WaylandCompositor::new(&gl, W as u32, H as u32, false)

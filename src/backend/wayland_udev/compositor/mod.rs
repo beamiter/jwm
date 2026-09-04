@@ -412,6 +412,9 @@ pub(crate) struct SceneLinearEncodeUniforms {
     pub encode_tf: i32,
     pub encode_gamma: i32,
     pub color_matrix: i32,
+    pub tone_map: i32,
+    pub source_peak: i32,
+    pub target_peak: i32,
 }
 
 #[allow(dead_code)]
@@ -2146,6 +2149,9 @@ impl WaylandCompositor {
                 encode_tf: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_tf"),
                 encode_gamma: get_uniform_loc(gl, scene_linear_encode_program, "u_encode_gamma"),
                 color_matrix: get_uniform_loc(gl, scene_linear_encode_program, "u_color_matrix"),
+                tone_map: get_uniform_loc(gl, scene_linear_encode_program, "u_tone_map"),
+                source_peak: get_uniform_loc(gl, scene_linear_encode_program, "u_source_peak"),
+                target_peak: get_uniform_loc(gl, scene_linear_encode_program, "u_target_peak"),
             };
 
             let scene_linear_decode_uniforms = SceneLinearDecodeUniforms {

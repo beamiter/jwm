@@ -120,6 +120,40 @@ fn plan_frame_surface_color_transform(
         .and_then(|(_, output)| ColorTransform::build(surface, output))
 }
 
+/// Per-output aggregation of this frame's source peaks: the maximum
+/// working-space peak among the window rectangles intersecting each output,
+/// floored at the SDR reference (1.0). The delivery plan derives its tone-map
+/// policy from this channel (`OutputToneMapPlan::for_output`); a floor of 1.0
+/// means an all-SDR output always selects the pass-through policy, which is
+/// the exact pre-tone-map behavior. Windows without a committed image
+/// description, and every compositor-owned or staged-external element, are
+/// SDR by convention and contribute the floor.
+///
+/// Aggregation uses visible scene rectangles only: parked minimized-capture
+/// geometry is not a placement and must not raise an output's peak.
+fn aggregate_output_source_peaks(
+    windows: impl Iterator<Item = (Rectangle<i32, Logical>, f32)>,
+    outputs: &[(String, Rectangle<i32, Logical>)],
+) -> HashMap<String, f32> {
+    let windows: Vec<(Rectangle<i32, Logical>, f32)> = windows.collect();
+    outputs
+        .iter()
+        .map(|(name, output_rect)| {
+            let peak = windows
+                .iter()
+                .filter(|(rect, _)| {
+                    rect.intersection(*output_rect)
+                        .is_some_and(|overlap| overlap.size.w > 0 && overlap.size.h > 0)
+                })
+                // f32::max keeps the accumulator defined if a peak were NaN
+                // (working_space_scale never produces one; the fold stays
+                // total regardless).
+                .fold(1.0_f32, |acc, (_, peak)| acc.max(*peak));
+            (name.clone(), peak)
+        })
+        .collect()
+}
+
 fn region_fully_covers_rect(region: &RegionAttributes, target: Rectangle<i32, Logical>) -> bool {
     if target.size.w <= 0 || target.size.h <= 0 {
         return false;
@@ -5452,10 +5486,102 @@ impl Backend for UdevBackend {
                 }
 
                 let linear_tail_safe = compositor_tail_safe && external_element_plan.is_safe();
+                let cm_render_gate = crate::config::CONFIG
+                    .load()
+                    .behavior()
+                    .color_management_render_path;
+                use crate::backend::wayland_udev::color_management::params_for_output;
+                use crate::backend::wayland_udev::color_pipeline::{
+                    ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
+                };
+                use smithay::utils::{Logical, Point, Rectangle};
+
+                // Take the surface→committed-params map once per frame instead
+                // of acquiring the wp-color-management mutex per lookup. It
+                // feeds both the per-output source-peak aggregation below and
+                // the per-window surface plans further down.
+                #[allow(
+                    clippy::mutable_key_type,
+                    reason = "Wayland ObjectId hashes by stable protocol-object identity; the per-frame map avoids locking once per rendered surface"
+                )]
+                let surface_params_map = if cm_render_gate {
+                    self.state
+                        .color_manager
+                        .as_ref()
+                        .map(|cm| cm.snapshot_surface_params())
+                        .unwrap_or_default()
+                } else {
+                    Default::default()
+                };
+
+                // Per-output geometry for this frame, shared by the source-peak
+                // aggregation, the retained-plan context, and the legacy
+                // surface planner below.
+                let output_frames: Vec<(String, Rectangle<i32, Logical>)> = self
+                    .state
+                    .outputs
+                    .iter()
+                    .filter_map(|o| {
+                        let mode = o.current_mode()?;
+                        let scale = o.current_scale().fractional_scale();
+                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                        let logical_size = o.current_transform().transform_size(logical_size);
+                        let rect =
+                            Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                        Some((o.name(), rect))
+                    })
+                    .collect();
+                let output_cache: Vec<(Rectangle<i32, Logical>, ParametricParams)> = self
+                    .state
+                    .outputs
+                    .iter()
+                    .filter_map(|o| {
+                        let mode = o.current_mode()?;
+                        let scale = o.current_scale().fractional_scale();
+                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
+                        let logical_size = o.current_transform().transform_size(logical_size);
+                        let rect =
+                            Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
+                        let params = params_for_output(o);
+                        Some((rect, params))
+                    })
+                    .collect();
+
+                // Aggregate the frame's source peaks per output: the delivery
+                // tone-map plan for an output must cover the brightest content
+                // visible on it. Only the scene-linear path consumes the
+                // channel; with the gate off every surface composites as
+                // legacy SDR and the empty map defaults every output to the
+                // pass-through plan.
+                let output_source_peaks: HashMap<String, f32> = 'peaks: {
+                    if !(cm_render_gate && scene_linear_color_path) {
+                        break 'peaks HashMap::new();
+                    }
+                    let window_peaks = full_scene.iter().map(|&(win_id, x, y, w, h)| {
+                        let rect = Rectangle::<i32, Logical>::new(
+                            Point::from((x, y)),
+                            (w.max(1) as i32, h.max(1) as i32).into(),
+                        );
+                        let peak = self
+                            .state
+                            .surface_for_window(WindowId::from_raw(win_id))
+                            .and_then(|surface| surface_params_map.get(&surface.id()).cloned())
+                            .map(|params| {
+                                crate::backend::wayland_udev::color_pipeline::working_space_scale(
+                                    TransferKind::from_params(&params),
+                                )
+                            })
+                            .unwrap_or(1.0);
+                        (rect, peak)
+                    });
+                    aggregate_output_source_peaks(window_peaks, &output_frames)
+                };
+
                 let decision = kms.borrow_mut().refresh_color_pipeline_offload(
                     &self.state,
                     linear_tail_safe,
                     scene_linear_color_path,
+                    &output_source_peaks,
                 );
                 // The blocker list and the per-class IPC diagnostics derive
                 // from the same plan instance that gates the KMS assembly; the
@@ -5475,36 +5601,12 @@ impl Backend for UdevBackend {
                     self.state.needs_redraw = true;
                     break 'render_result false;
                 }
-                let cm_render_gate = crate::config::CONFIG
-                    .load()
-                    .behavior()
-                    .color_management_render_path;
-                use crate::backend::wayland_udev::color_management::params_for_output;
-                use crate::backend::wayland_udev::color_pipeline::{
-                    ColorSpacePrimaries, TransferKind, rgb_to_rgb_matrix,
-                };
-                use smithay::utils::{Logical, Point, Rectangle};
 
                 // The retained-plan generation includes output geometry and
                 // color targets even in common-linear mode. Surface transforms
                 // are output-independent there, but treating an EDID/profile
                 // transition as a boundary is the conservative rule for raw
                 // textures which may outlive their Wayland surface.
-                let output_cache: Vec<(Rectangle<i32, Logical>, ParametricParams)> = self
-                    .state
-                    .outputs
-                    .iter()
-                    .filter_map(|o| {
-                        let mode = o.current_mode()?;
-                        let scale = o.current_scale().fractional_scale();
-                        let logical_size = mode.size.to_f64().to_logical(scale).to_i32_round();
-                        let logical_size = o.current_transform().transform_size(logical_size);
-                        let rect =
-                            Rectangle::<i32, Logical>::new(o.current_location(), logical_size);
-                        let params = params_for_output(o);
-                        Some((rect, params))
-                    })
-                    .collect();
                 let retained_output_context = output_cache
                     .iter()
                     .map(|(rect, params)| {
@@ -5536,19 +5638,6 @@ impl Backend for UdevBackend {
                 // stale transform (and stale direct-scanout blocker).
                 compositor.clear_all_color_transforms();
                 if cm_render_gate {
-                    // Take the surface→params map once per frame instead of
-                    // acquiring the wp-color-management mutex per-window.
-                    #[allow(
-                        clippy::mutable_key_type,
-                        reason = "Wayland ObjectId hashes by stable protocol-object identity; the per-frame map avoids locking once per rendered surface"
-                    )]
-                    let surface_params_map = self
-                        .state
-                        .color_manager
-                        .as_ref()
-                        .map(|cm| cm.snapshot_surface_params())
-                        .unwrap_or_default();
-
                     // A successfully allocated scene-linear target is always
                     // canonical linear sRGB. Hidden minimized imports are not
                     // drawable scene entries, but they must receive the same
@@ -6683,6 +6772,46 @@ mod udev_backend_selection_tests {
             3,
             &[swipe_binding(3, "left")]
         ));
+    }
+
+    #[test]
+    fn output_source_peaks_aggregate_visible_windows_per_output() {
+        // Two side-by-side 1000x800 outputs.
+        let outputs = [
+            ("HDMI-A-1".to_string(), logical_rect(0, 0, 1000, 800)),
+            ("DP-1".to_string(), logical_rect(1000, 0, 1000, 800)),
+        ];
+        let pq_peak = 10_000.0 / 203.0;
+
+        // Per-output max: the PQ window raises only its own output.
+        let windows = [
+            (logical_rect(100, 100, 200, 200), 1.0),
+            (logical_rect(1200, 100, 200, 200), pq_peak),
+        ];
+        let peaks = aggregate_output_source_peaks(windows.into_iter(), &outputs);
+        assert_eq!(peaks["HDMI-A-1"], 1.0);
+        assert_eq!(peaks["DP-1"], pq_peak);
+
+        // A window straddling the boundary raises both outputs.
+        let windows = [(logical_rect(900, 100, 300, 200), pq_peak)];
+        let peaks = aggregate_output_source_peaks(windows.into_iter(), &outputs);
+        assert_eq!(peaks["HDMI-A-1"], pq_peak);
+        assert_eq!(peaks["DP-1"], pq_peak);
+
+        // Windows fully outside an output do not count, and an empty scene
+        // floors at the SDR reference so all-SDR outputs keep pass-through.
+        let windows = [(logical_rect(5000, 100, 200, 200), pq_peak)];
+        let peaks = aggregate_output_source_peaks(windows.into_iter(), &outputs);
+        assert_eq!(peaks["HDMI-A-1"], 1.0);
+        assert_eq!(peaks["DP-1"], 1.0);
+        let peaks = aggregate_output_source_peaks(std::iter::empty(), &outputs);
+        assert_eq!(peaks["HDMI-A-1"], 1.0);
+
+        // Zero-area intersections (edge-touching rectangles) are not visible.
+        let windows = [(logical_rect(1000, 0, 200, 200), pq_peak)];
+        let peaks = aggregate_output_source_peaks(windows.into_iter(), &outputs);
+        assert_eq!(peaks["HDMI-A-1"], 1.0);
+        assert_eq!(peaks["DP-1"], pq_peak);
     }
 
     #[test]

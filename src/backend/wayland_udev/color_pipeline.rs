@@ -17,11 +17,12 @@
 //! [`SDR_REFERENCE_WHITE_NITS`] (203 cd/m², the BT.2408 HDR reference white).
 //! [`working_space_scale`] re-anchors decoded PQ/HLG content onto that scale,
 //! and [`ToneMapPolicy`] defines how content whose dynamic range exceeds an
-//! output's is remapped at delivery. Both are definition-layer math today: no
-//! render path consults them yet, and HDR signalling stays fail-closed. Their
-//! future decision points are ingress (`ColorTransform::build_to_linear_srgb`
-//! multiplies the decode by the scale factor) and the per-output delivery
-//! plan (where the output's transfer function and peak select the policy).
+//! output's is remapped at delivery. Both are wired into the render decision
+//! points: ingress (`ColorTransform::build_to_linear_srgb` folds the scale
+//! factor into the gamut matrix, bitwise-identical for the SDR family whose
+//! scale is 1.0) and the per-output delivery plan ([`OutputToneMapPlan`],
+//! applied by the scene-linear encode shader before the output OETF and baked
+//! into the hardware GAMMA_LUT curve). HDR signalling stays fail-closed.
 //!
 //! It intentionally owns math and render plans only: GL state and uniform
 //! bindings stay in the compositor adapters. Keeping the calculations here
@@ -272,11 +273,48 @@ pub fn build_ctm(matrix: [f32; 9]) -> DrmColorCtm {
 /// range expected by the kernel. Caller guarantees `size >= 2`.
 #[cfg(feature = "backend-wayland-udev")]
 pub fn build_gamma_lut(tf: TransferKind, size: usize) -> Vec<DrmColorLut> {
+    build_gamma_lut_from(&mut |linear| tf.forward(linear), size)
+}
+
+/// Bake a full delivery plan into a hardware GAMMA_LUT: each entry tone-maps
+/// the framebuffer's working-linear value per the plan's policy, re-anchors
+/// onto `tf`'s native scale, and applies its OETF. Tone mapping is
+/// per-channel nonlinear, so it cannot fold into the paired CTM and must live
+/// in this curve.
+#[cfg(feature = "backend-wayland-udev")]
+pub fn build_gamma_lut_delivery(
+    tf: TransferKind,
+    plan: OutputToneMapPlan,
+    size: usize,
+) -> Vec<DrmColorLut> {
+    build_gamma_lut_from(
+        &mut |linear| tf.forward(plan.map_to_output_scale(linear)),
+        size,
+    )
+}
+
+/// The canonical scanout LUT for an output transfer: the rescaled OETF that
+/// anchors working-linear 1.0 at 203 cd/m² instead of the transfer's own
+/// maximum. No per-frame source peak is needed: over the framebuffer-normalized
+/// LUT domain [0, 1], every policy [`ToneMapPolicy::for_peaks`] can select
+/// coincides with this curve — `ReferenceWhite` is a pass-through, and `Clip`
+/// at a target peak ≥ 1.0 never engages inside the domain — while values
+/// beyond the domain are clipped by the hardware's own index clamp, which is
+/// exactly the `Clip` policy. The installed LUT can therefore stay keyed by
+/// `TransferKind` alone. Wiring a peak-dependent `ReinhardShoulder` selection
+/// to hardware must extend that key first.
+#[cfg(feature = "backend-wayland-udev")]
+pub fn build_gamma_lut_scanout(tf: TransferKind, size: usize) -> Vec<DrmColorLut> {
+    build_gamma_lut_delivery(tf, OutputToneMapPlan::for_output(1.0, tf), size)
+}
+
+#[cfg(feature = "backend-wayland-udev")]
+fn build_gamma_lut_from(curve: &mut dyn FnMut(f32) -> f32, size: usize) -> Vec<DrmColorLut> {
     let denom = (size - 1) as f32;
     (0..size)
         .map(|i| {
             let linear = i as f32 / denom;
-            let encoded = tf.forward(linear).clamp(0.0, 1.0);
+            let encoded = curve(linear).clamp(0.0, 1.0);
             let q = (encoded * 65535.0 + 0.5) as u32;
             let v = q.min(65535) as u16;
             DrmColorLut {
@@ -341,10 +379,12 @@ fn hlg_forward(l: f32) -> f32 {
 
 // --- Absolute luminance scales and tone mapping ---
 //
-// Definition-layer semantics for the working space's absolute anchor. No
-// render path consumes these yet; HDR enable stays fail-closed until the
-// ingress rescale, the delivery-time policy selection, and the KMS atomic
-// commit chain are all in place.
+// The working space's absolute anchor and the delivery-stage remapping. The
+// ingress rescale lives in `ColorTransform::build_to_linear_srgb`; the
+// delivery side is `OutputToneMapPlan` carried by every `OutputColorRegion`.
+// HDR enable stays fail-closed until the KMS atomic commit chain validates a
+// full 10-bit scanout path, so every reachable output still targets an SDR
+// transfer today.
 
 /// SMPTE ST 2084 absolute range: PQ-encoded 1.0 is defined as 10 000 cd/m².
 pub const PQ_MAX_LUMINANCE_NITS: f32 = 10_000.0;
@@ -412,10 +452,11 @@ pub fn working_space_scale(tf: TransferKind) -> f32 {
 /// (R/G/B independently), keeping primaries and hue untouched.
 ///
 /// The selection decision belongs to the per-output delivery plan: source
-/// peaks come from the committed surface image descriptions, the output's
-/// peak follows from its transfer function via [`working_space_scale`], and
-/// [`ToneMapPolicy::for_peaks`] picks the default. Nothing consults this type
-/// yet — it is the callee-ready definition for the HDR enable milestone.
+/// peaks are the per-frame aggregation of the committed surface image
+/// descriptions visible on that output, the output's peak follows from its
+/// transfer function via [`working_space_scale`], and
+/// [`ToneMapPolicy::for_peaks`] picks the default. `OutputToneMapPlan`
+/// carries the selected pair to the encode shader and the LUT bake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToneMapPolicy {
     /// Reference-white mapping for content that fits the target range (the
@@ -444,6 +485,20 @@ impl ToneMapPolicy {
             Self::ReferenceWhite
         } else {
             Self::Clip
+        }
+    }
+
+    /// Shader-side discriminant for the scene-linear encode pass's
+    /// `u_tone_map` uniform. Part of the Rust↔GLSL contract and MUST be kept
+    /// in lockstep with the tone-map branch in `SCENE_LINEAR_ENCODE_FRAGMENT`.
+    /// `ReferenceWhite` is 0 so the GL zero-initialized default (a caller that
+    /// never binds the uniform) is the pass-through — the exact pre-tone-map
+    /// shader behavior.
+    pub fn shader_id(self) -> i32 {
+        match self {
+            Self::ReferenceWhite => 0,
+            Self::Clip => 1,
+            Self::ReinhardShoulder => 2,
         }
     }
 
@@ -476,6 +531,68 @@ fn reinhard_shoulder(x: f32, source_peak: f32, target_peak: f32) -> f32 {
     (y * target_peak).clamp(0.0, target_peak)
 }
 
+/// Per-output delivery tone-map plan: the selected policy plus both peaks in
+/// working-space linear units (1.0 = [`SDR_REFERENCE_WHITE_NITS`] on both
+/// sides). Every [`OutputColorRegion`] carries one to the scene-linear encode
+/// pass, and the hardware delivery LUT bake derives from the same fields, so
+/// shader uniforms, LUT curves, and CPU test oracles all share this single
+/// selection point.
+///
+/// The target peak doubles as the delivery rescale divisor: after the policy
+/// remap, working values are divided by it to re-anchor onto the output
+/// transfer's native normalized scale (where 1.0 is display white for SDR
+/// curves, 10 000 cd/m² for PQ, the nominal peak for HLG) before the OETF.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputToneMapPlan {
+    pub policy: ToneMapPolicy,
+    /// Aggregated source peak of the surfaces visible on the output.
+    pub source_peak_working: f32,
+    /// The output's own peak, `working_space_scale(output_tf)`.
+    pub target_peak_working: f32,
+}
+
+impl OutputToneMapPlan {
+    /// Pass-through with unit rescale: the exact pre-tone-map delivery
+    /// behavior. Used where no peak aggregation applies — the whole-frame
+    /// sRGB fallback encode, the canonical sRGB capture view, and the shader
+    /// no-op substituted when the hardware CRTC pair owns delivery.
+    pub const IDENTITY: Self = Self {
+        policy: ToneMapPolicy::ReferenceWhite,
+        source_peak_working: 1.0,
+        target_peak_working: 1.0,
+    };
+
+    /// Select the delivery plan for one output from the aggregated source
+    /// peak of its visible surfaces and the output's transfer function.
+    pub fn for_output(source_peak_working: f32, output_tf: TransferKind) -> Self {
+        let target_peak_working = working_space_scale(output_tf);
+        Self {
+            policy: ToneMapPolicy::for_peaks(source_peak_working, target_peak_working),
+            source_peak_working,
+            target_peak_working,
+        }
+    }
+
+    /// Map one working-space linear component per this plan and re-anchor it
+    /// onto the output transfer's native scale. The result feeds
+    /// `TransferKind::forward`. A non-positive target (only constructible by
+    /// hand; `for_output` targets are always ≥ 1.0) falls back to the unit
+    /// divisor, mirroring the shader's unset-uniform legacy behavior. The
+    /// `IDENTITY` plan is a bitwise no-op: `ReferenceWhite` returns `x` and
+    /// `x / 1.0 == x` exactly in IEEE-754, which keeps every SDR delivery
+    /// route pixel-identical to the pre-tone-map pipeline.
+    pub fn map_to_output_scale(&self, x: f32) -> f32 {
+        let target = if self.target_peak_working > 0.0 {
+            self.target_peak_working
+        } else {
+            1.0
+        };
+        self.policy
+            .map_working_linear(x, self.source_peak_working, target)
+            / target
+    }
+}
+
 /// Whether a source carrying this description can use the legacy sRGB ingress
 /// unchanged: sRGB transfer plus sRGB/D65 primaries. Undescribed content is
 /// sRGB by convention; anything else (PQ/HLG, wide gamut, custom primaries)
@@ -504,12 +621,15 @@ pub struct ColorTransform {
 /// The scene entering this pass is always common linear sRGB. `rect` is
 /// `[x, y, width, height]` in physical framebuffer pixels; widths and heights
 /// are stored as `i32` so validation can reject malformed/non-positive KMS
-/// geometry before any GLES unsigned conversion occurs.
+/// geometry before any GLES unsigned conversion occurs. `tone_map` is the
+/// delivery tone-map plan applied between the gamut matrix and the output
+/// OETF (per-channel nonlinear, so it cannot fold into the matrix).
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutputColorRegion {
     pub rect: [i32; 4],
     pub output_tf: TransferKind,
     pub working_to_output_row_major: [f32; 9],
+    pub tone_map: OutputToneMapPlan,
 }
 
 /// Convert a row-major 3×3 matrix into the column-major memory order expected
@@ -542,16 +662,26 @@ impl ColorTransform {
     /// when its primaries are already sRGB. `forward_eotf` is deliberately
     /// `Linear`, documenting that the result is not output-encoded; the final
     /// per-output pass owns both the sRGB→output gamut map and output OETF.
+    ///
+    /// The absolute-luminance re-anchoring (`working_space_scale`) folds into
+    /// the gamut matrix: the scalar is uniform across channels, so the matrix
+    /// product absorbs it and the shader needs no second multiply. Decoded PQ
+    /// content thus lands in the working space at 10 000/203 per unit and HLG
+    /// at 1 000/203 per unit. The SDR family's scale is exactly 1.0, and
+    /// `x * 1.0 == x` bitwise in IEEE-754, so every SDR ingress route keeps
+    /// the pre-rescale matrix bit for bit.
     pub fn build_to_linear_srgb(surface: &ParametricParams) -> Self {
         let surface_prim = ColorSpacePrimaries::from_params(surface);
+        let tf = TransferKind::from_params(surface);
         let matrix = if primaries_match(&surface_prim, &ColorSpacePrimaries::SRGB_D65) {
             IDENTITY_3X3
         } else {
             rgb_to_rgb_matrix(&surface_prim, &ColorSpacePrimaries::SRGB_D65)
         };
+        let scale = working_space_scale(tf);
         Self {
-            inverse_eotf: TransferKind::from_params(surface),
-            matrix_row_major: matrix,
+            inverse_eotf: tf,
+            matrix_row_major: matrix.map(|component| component * scale),
             forward_eotf: TransferKind::Linear,
         }
     }
@@ -1033,10 +1163,81 @@ mod tests {
             tf_named: Some(13),
             ..Default::default()
         };
-        let identity = ColorTransform::build_to_linear_srgb(&srgb_hlg);
-        assert_eq!(identity.inverse_eotf, TransferKind::Hlg);
-        assert_eq!(identity.forward_eotf, TransferKind::Linear);
-        assert!(approx_mat(&identity.matrix_row_major, &IDENTITY_3X3, 1e-6));
+        let hlg = ColorTransform::build_to_linear_srgb(&srgb_hlg);
+        assert_eq!(hlg.inverse_eotf, TransferKind::Hlg);
+        assert_eq!(hlg.forward_eotf, TransferKind::Linear);
+        // sRGB primaries give an identity gamut map, but the ingress rescale
+        // still folds in: the matrix is the HLG working-space scale times I.
+        let scale = working_space_scale(TransferKind::Hlg);
+        for (index, component) in hlg.matrix_row_major.iter().enumerate() {
+            let expected = if [0, 4, 8].contains(&index) {
+                scale
+            } else {
+                0.0
+            };
+            assert!(
+                approx_eq(*component, expected, 1e-6),
+                "matrix[{index}] = {component}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_srgb_ingress_rescale_is_bitwise_identity_for_the_sdr_family() {
+        // Every SDR-family transfer keeps scale 1.0, so the folded matrix is
+        // bitwise identical to the pre-rescale gamut matrix — the pixel
+        // identity guarantee for all existing SDR routes.
+        for tf_named in [
+            9, /* sRGB */
+            2, /* Gamma22 */
+            1, /* BT.1886 */
+        ] {
+            for primaries_named in [1 /* sRGB */, 6 /* BT.2020 */] {
+                let params = ParametricParams {
+                    primaries_named: Some(primaries_named),
+                    tf_named: Some(tf_named),
+                    ..Default::default()
+                };
+                let transform = ColorTransform::build_to_linear_srgb(&params);
+                let expected_gamut = if primaries_named == 1 {
+                    IDENTITY_3X3
+                } else {
+                    rgb_to_rgb_matrix(
+                        &ColorSpacePrimaries::BT2020_D65,
+                        &ColorSpacePrimaries::SRGB_D65,
+                    )
+                };
+                assert_eq!(
+                    transform.matrix_row_major, expected_gamut,
+                    "SDR ingress matrix must stay bitwise identical (tf={tf_named}, primaries={primaries_named})"
+                );
+            }
+        }
+        // tf_power and Linear are SDR-family too.
+        let power = ParametricParams {
+            tf_power: Some(24_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            ColorTransform::build_to_linear_srgb(&power).matrix_row_major,
+            IDENTITY_3X3
+        );
+
+        // PQ/HLG fold their absolute scale into the same matrix.
+        for (tf_named, tf) in [(11, TransferKind::St2084Pq), (13, TransferKind::Hlg)] {
+            let params = ParametricParams {
+                primaries_named: Some(1),
+                tf_named: Some(tf_named),
+                ..Default::default()
+            };
+            let transform = ColorTransform::build_to_linear_srgb(&params);
+            let scale = working_space_scale(tf);
+            assert_eq!(
+                transform.matrix_row_major,
+                IDENTITY_3X3.map(|c| c * scale),
+                "HDR ingress matrix must be the scale times the sRGB gamut map"
+            );
+        }
     }
 
     #[test]
@@ -1258,7 +1459,12 @@ mod tests {
         let scene_linear = ColorTransform::build_to_linear_srgb(&invalid_surface);
         assert_eq!(scene_linear.inverse_eotf, TransferKind::St2084Pq);
         assert_eq!(scene_linear.forward_eotf, TransferKind::Linear);
-        assert_eq!(scene_linear.matrix_row_major, IDENTITY_3X3);
+        // The invalid gamut map fails closed to identity; the PQ ingress
+        // rescale still folds in, so the matrix is scale·I rather than I.
+        assert_eq!(
+            scene_linear.matrix_row_major,
+            IDENTITY_3X3.map(|c| c * working_space_scale(TransferKind::St2084Pq))
+        );
 
         let legacy = ColorTransform::build_explicit(&invalid_surface, &output);
         assert_eq!(legacy.inverse_eotf, TransferKind::St2084Pq);
@@ -1572,6 +1778,81 @@ mod tests {
     }
 
     #[test]
+    fn tone_map_shader_id_is_stable_and_zero_is_passthrough() {
+        // The scene-linear encode shader's tone-map branch and the GL
+        // zero-initialized default both depend on these exact values.
+        assert_eq!(ToneMapPolicy::ReferenceWhite.shader_id(), 0);
+        assert_eq!(ToneMapPolicy::Clip.shader_id(), 1);
+        assert_eq!(ToneMapPolicy::ReinhardShoulder.shader_id(), 2);
+    }
+
+    #[test]
+    fn output_tone_map_plan_selection_matrix() {
+        // SDR content onto any output fits: pass-through at the output's own
+        // target peak.
+        for tf in [
+            TransferKind::Srgb,
+            TransferKind::Gamma22,
+            TransferKind::St2084Pq,
+            TransferKind::Hlg,
+        ] {
+            let plan = OutputToneMapPlan::for_output(1.0, tf);
+            assert_eq!(plan.policy, ToneMapPolicy::ReferenceWhite);
+            assert_eq!(plan.target_peak_working, working_space_scale(tf));
+        }
+        // HDR content onto an SDR output clips at the SDR reference white.
+        let pq_peak = working_space_scale(TransferKind::St2084Pq);
+        let plan = OutputToneMapPlan::for_output(pq_peak, TransferKind::Srgb);
+        assert_eq!(plan.policy, ToneMapPolicy::Clip);
+        assert_eq!(plan.source_peak_working, pq_peak);
+        assert_eq!(plan.target_peak_working, 1.0);
+    }
+
+    #[test]
+    fn output_tone_map_plan_identity_is_bitwise_noop() {
+        // The identity plan (SDR content, SDR output) must reproduce the
+        // pre-tone-map delivery exactly, including signs and subnormals:
+        // ReferenceWhite returns x and x / 1.0 == x in IEEE-754.
+        for &x in &[
+            0.0_f32,
+            -0.0,
+            1.0,
+            -0.375,
+            49.25,
+            1.0e-30,
+            f32::MIN_POSITIVE,
+        ] {
+            assert_eq!(OutputToneMapPlan::IDENTITY.map_to_output_scale(x), x);
+        }
+    }
+
+    #[test]
+    fn output_tone_map_plan_rescales_and_clips() {
+        // SDR content onto a PQ output re-anchors onto the 10 000 cd/m² scale:
+        // working 1.0 (203 cd/m² reference white) lands at 203/10 000.
+        let pq_plan = OutputToneMapPlan::for_output(1.0, TransferKind::St2084Pq);
+        assert!(approx_eq(
+            pq_plan.map_to_output_scale(1.0),
+            203.0 / 10_000.0,
+            1e-6
+        ));
+        // PQ content onto an SDR output clips at the SDR reference white.
+        let sdr_plan = OutputToneMapPlan::for_output(
+            working_space_scale(TransferKind::St2084Pq),
+            TransferKind::Srgb,
+        );
+        assert_eq!(sdr_plan.map_to_output_scale(12.0), 1.0);
+        assert_eq!(sdr_plan.map_to_output_scale(0.5), 0.5);
+        // A hand-built degenerate target falls back to the unit divisor.
+        let degenerate = OutputToneMapPlan {
+            policy: ToneMapPolicy::ReferenceWhite,
+            source_peak_working: 1.0,
+            target_peak_working: 0.0,
+        };
+        assert_eq!(degenerate.map_to_output_scale(0.25), 0.25);
+    }
+
+    #[test]
     fn tone_map_reference_white_is_identity() {
         for &x in &[0.0_f32, 0.5, 1.0, 4.9, 49.3] {
             assert_eq!(
@@ -1707,5 +1988,126 @@ mod tests {
         for w in lut.windows(2) {
             assert!(w[1].red >= w[0].red, "non-monotonic at value {}", w[0].red);
         }
+    }
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn scanout_lut_is_byte_identical_to_legacy_ramp_for_the_sdr_family() {
+        // The delivery rescale divides by working_space_scale(tf) == 1.0 for
+        // every SDR curve, so the wired scanout bake must reproduce the legacy
+        // OETF-only ramp entry for entry. This is the hardware-path half of
+        // the SDR pixel-identity guarantee.
+        for tf in [
+            TransferKind::Linear,
+            TransferKind::Srgb,
+            TransferKind::Gamma22,
+            TransferKind::Bt1886,
+            TransferKind::Power {
+                gamma_x10000: 22_000,
+            },
+        ] {
+            let legacy = build_gamma_lut(tf, 256);
+            let scanout = build_gamma_lut_scanout(tf, 256);
+            assert_eq!(
+                legacy
+                    .iter()
+                    .map(|e| (e.red, e.green, e.blue))
+                    .collect::<Vec<_>>(),
+                scanout
+                    .iter()
+                    .map(|e| (e.red, e.green, e.blue))
+                    .collect::<Vec<_>>(),
+                "scanout LUT diverged from the legacy ramp for {tf:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn scanout_lut_reanchors_hdr_transfers_onto_reference_white() {
+        // PQ: the last entry (working 1.0 = 203 cd/m²) must encode 203 nits,
+        // not 10 000. Quantized: pq_encode_nits(203) ≈ 0.5807 × 65535.
+        let lut = build_gamma_lut_scanout(TransferKind::St2084Pq, 1024);
+        let last = lut[1023].red;
+        let expected = (pq_encode_nits(203.0) * 65535.0 + 0.5) as u16;
+        assert!(
+            (i32::from(last) - i32::from(expected)).abs() <= 2,
+            "PQ scanout LUT must anchor working 1.0 at 203 nits: got {last}, expected {expected}"
+        );
+        assert_eq!(lut[0].red, 0);
+        for w in lut.windows(2) {
+            assert!(w[1].red >= w[0].red, "PQ scanout LUT non-monotonic");
+        }
+
+        let lut = build_gamma_lut_scanout(TransferKind::Hlg, 1024);
+        let expected = (hlg_encode_nits(203.0) * 65535.0 + 0.5) as u16;
+        assert!(
+            (i32::from(lut[1023].red) - i32::from(expected)).abs() <= 2,
+            "HLG scanout LUT must anchor working 1.0 at 203 nits"
+        );
+    }
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn delivery_lut_clip_matches_scanout_curve_over_the_fb_domain() {
+        // The coincidence the KMS tracked state relies on: for every
+        // for_peaks-selected policy (ReferenceWhite, or Clip at a target
+        // peak ≥ 1.0), the baked curve over the framebuffer-normalized domain
+        // [0, 1] is the plain rescaled OETF, independent of the source peak.
+        let pq_peak = working_space_scale(TransferKind::St2084Pq);
+        for tf in [
+            TransferKind::Srgb,
+            TransferKind::St2084Pq,
+            TransferKind::Hlg,
+        ] {
+            let canonical = build_gamma_lut_scanout(tf, 256);
+            for plan in [
+                OutputToneMapPlan::for_output(1.0, tf),
+                OutputToneMapPlan::for_output(pq_peak, tf),
+            ] {
+                let baked = build_gamma_lut_delivery(tf, plan, 256);
+                assert_eq!(
+                    canonical.iter().map(|e| e.red).collect::<Vec<_>>(),
+                    baked.iter().map(|e| e.red).collect::<Vec<_>>(),
+                    "policy {:?} changed the LUT for {tf:?}",
+                    plan.policy
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "backend-wayland-udev")]
+    #[test]
+    fn delivery_lut_bakes_reinhard_shoulder_with_source_peak() {
+        // The peak-dependent policy: an SDR-output bake with full-range PQ
+        // content compresses highlights instead of clipping at the domain end.
+        let source_peak = working_space_scale(TransferKind::St2084Pq);
+        let plan = OutputToneMapPlan {
+            policy: ToneMapPolicy::ReinhardShoulder,
+            source_peak_working: source_peak,
+            target_peak_working: 1.0,
+        };
+        let lut = build_gamma_lut_delivery(TransferKind::Srgb, plan, 1024);
+        assert_eq!(lut[0].red, 0);
+        for w in lut.windows(2) {
+            assert!(w[1].red >= w[0].red, "Reinhard LUT non-monotonic");
+        }
+        // Every entry matches the CPU composition of the definition-layer
+        // map and the sRGB OETF.
+        for (i, entry) in lut.iter().enumerate() {
+            let x = i as f32 / 1023.0;
+            let expected = (TransferKind::Srgb
+                .forward(plan.map_to_output_scale(x))
+                .clamp(0.0, 1.0)
+                * 65535.0
+                + 0.5) as u32;
+            assert!(
+                (u32::from(entry.red)).abs_diff(expected) <= 1,
+                "entry {i}: lut={} expected={expected}",
+                entry.red
+            );
+        }
+        // The shoulder compresses: reference white no longer maps to the top.
+        assert!(lut[1023].red < 65535);
     }
 }
