@@ -190,9 +190,21 @@ struct Shared {
     /// talked into blessing whatever else asks while it holds the default
     /// agent registration.
     accepts_inbound: bool,
-    /// The one request bluez has outstanding. BlueZ serializes agent
-    /// requests per `Pair` call; a replacement means the first was withdrawn.
-    pending: Mutex<Option<oneshot::Sender<UserReply>>>,
+    /// The one request bluez has outstanding, tagged with the id jwm was
+    /// told about. BlueZ serializes agent requests per `Pair` call; a
+    /// replacement means the first was withdrawn.
+    ///
+    /// The id is what stops an answer landing on the wrong question. A
+    /// cookie identifies the session, not the request, so without it a `yes`
+    /// the user gave to one prompt could resolve whichever request happened
+    /// to be pending by the time the broadcast crossed the socket, the mpsc
+    /// queue and the scheduler — granting, say, an input-device profile on
+    /// the strength of a yes to an audio one, with the real question never
+    /// drawn.
+    pending: Mutex<Option<(u64, oneshot::Sender<UserReply>)>>,
+    /// Source of request ids. Monotonic within one session; jwm echoes it
+    /// back and anything else is dropped.
+    next_request_id: std::sync::atomic::AtomicU64,
     /// Set when a user-side rejection/cancel was seen, so the exit code says
     /// "cancelled" rather than reporting bluez's resulting error as failure.
     ended_by_user: AtomicBool,
@@ -200,10 +212,25 @@ struct Shared {
 }
 
 impl Shared {
-    fn lock_pending(&self) -> std::sync::MutexGuard<'_, Option<oneshot::Sender<UserReply>>> {
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, Option<(u64, oneshot::Sender<UserReply>)>> {
         self.pending
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Take the outstanding request only when `id` names it. `None` when
+    /// nothing is pending or the answer is for a request already gone.
+    fn take_pending(&self, id: u64) -> Option<oneshot::Sender<UserReply>> {
+        let mut pending = self.lock_pending();
+        match pending.as_ref() {
+            Some((pending_id, _)) if *pending_id == id => pending.take().map(|(_, reply)| reply),
+            _ => None,
+        }
+    }
+
+    fn mint_request_id(&self) -> u64 {
+        self.next_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     fn lock_target(&self) -> std::sync::MutexGuard<'_, Option<String>> {
@@ -277,7 +304,15 @@ impl PairingAgent {
             return;
         };
         let label = self.device_label(&target).await;
-        let args = prompt_args(&target, &self.shared.cookie, &label, &prompt);
+        // Display-only prompts expect no answer, so their id can never be
+        // matched by one; minting it anyway keeps the wire shape uniform.
+        let args = prompt_args(
+            &target,
+            &self.shared.cookie,
+            &label,
+            self.shared.mint_request_id(),
+            &prompt,
+        );
         let ipc = self.shared.ipc.clone();
         let sent =
             tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_prompt", args))
@@ -354,9 +389,10 @@ impl PairingAgent {
         let target = self.shared.target().unwrap_or_default();
         let label = self.device_label(&target).await;
         let (tx, rx) = oneshot::channel();
-        *self.shared.lock_pending() = Some(tx);
+        let request_id = self.shared.mint_request_id();
+        *self.shared.lock_pending() = Some((request_id, tx));
 
-        let args = prompt_args(&target, &self.shared.cookie, &label, &prompt);
+        let args = prompt_args(&target, &self.shared.cookie, &label, request_id, &prompt);
         let ipc = self.shared.ipc.clone();
         let sent =
             tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_prompt", args))
@@ -364,13 +400,13 @@ impl PairingAgent {
         match sent {
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
-                let _ = self.shared.lock_pending().take();
+                let _ = self.shared.take_pending(request_id);
                 return Err(AgentError::Canceled(format!(
                     "jwm did not accept the pairing prompt: {error}"
                 )));
             }
             Err(error) => {
-                let _ = self.shared.lock_pending().take();
+                let _ = self.shared.take_pending(request_id);
                 return Err(AgentError::Canceled(format!(
                     "could not reach jwm: {error}"
                 )));
@@ -382,7 +418,7 @@ impl PairingAgent {
             // Sender dropped without an answer: bluez cancelled the request.
             Ok(Err(_)) => Err(AgentError::Canceled("the prompt was withdrawn".to_string())),
             Err(_) => {
-                let _ = self.shared.lock_pending().take();
+                let _ = self.shared.take_pending(request_id);
                 Err(AgentError::Canceled(
                     "the pairing prompt went unanswered".to_string(),
                 ))
@@ -486,8 +522,9 @@ impl PairingAgent {
         }
         // BlueZ withdrew the outstanding request: the user can no longer
         // answer it, so the pending callback resolves as cancelled and the
-        // Pair call unwinds.
-        if let Some(reply) = self.shared.lock_pending().take() {
+        // Pair call unwinds. Whatever is pending is what bluez withdrew, so
+        // this takes it by identity rather than by id.
+        if let Some((_, reply)) = self.shared.lock_pending().take() {
             let _ = reply.send(UserReply::Cancelled);
         }
     }
@@ -538,7 +575,13 @@ fn device_path_from_managed_objects(
 /// Build the `bluetooth_pairing_prompt` command arguments. The passkey/code
 /// a prompt carries is display material, never a secret to keep off the wire
 /// — but it is never logged either.
-fn prompt_args(address: &str, cookie: &str, device_name: &str, prompt: &PromptRequest) -> Value {
+fn prompt_args(
+    address: &str,
+    cookie: &str,
+    device_name: &str,
+    request_id: u64,
+    prompt: &PromptRequest,
+) -> Value {
     let mut args = match prompt {
         PromptRequest::Pin => serde_json::json!({ "kind": "pin" }),
         PromptRequest::Confirm { passkey } => serde_json::json!({
@@ -559,6 +602,7 @@ fn prompt_args(address: &str, cookie: &str, device_name: &str, prompt: &PromptRe
     let object = args.as_object_mut().expect("prompt args are an object");
     object.insert("address".to_string(), Value::from(address));
     object.insert("cookie".to_string(), Value::from(cookie));
+    object.insert("request_id".to_string(), Value::from(request_id));
     if !device_name.is_empty() {
         object.insert("device_name".to_string(), Value::from(device_name));
     }
@@ -607,6 +651,9 @@ fn connect_budget(elapsed: Duration) -> Option<Duration> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResponseEvent {
     cookie: String,
+    /// Which request this answers. Absent from a bare cancel jwm sends with
+    /// no prompt on screen — that one is not answering anything.
+    request_id: Option<u64>,
     reply: UserReply,
 }
 
@@ -618,6 +665,7 @@ fn parse_response_event(event: &Value) -> Option<ResponseEvent> {
     }
     let payload = event.get("payload")?;
     let cookie = payload.get("cookie")?.as_str()?.to_string();
+    let request_id = payload.get("request_id").and_then(Value::as_u64);
     let accepted = payload.get("accepted")?.as_bool()?;
     let reply = if accepted {
         match payload.get("pin").and_then(Value::as_str) {
@@ -631,7 +679,11 @@ fn parse_response_event(event: &Value) -> Option<ResponseEvent> {
             _ => UserReply::Cancelled,
         }
     };
-    Some(ResponseEvent { cookie, reply })
+    Some(ResponseEvent {
+        cookie,
+        request_id,
+        reply,
+    })
 }
 
 /// The `get_bluetooth_pairing` self-heal: whether jwm still holds *this*
@@ -706,14 +758,17 @@ async fn pump_responses(
         if response.reply.is_user_termination() {
             shared.ended_by_user.store(true, Ordering::Relaxed);
         }
-        let pending = shared.lock_pending().take();
+        // Only the request jwm was actually answering. A stale answer — one
+        // whose request bluez already withdrew — resolves nothing, so it
+        // cannot be applied to whatever took its place.
+        let pending = response.request_id.and_then(|id| shared.take_pending(id));
         match pending {
             Some(reply) => {
                 let _ = reply.send(response.reply);
             }
             None => {
                 if response.reply.is_user_termination() {
-                    log::info!("cancel with no request outstanding: CancelPairing");
+                    log::info!("cancel with no matching request: CancelPairing");
                     let result = connection
                         .call_method(
                             Some(bluez_name()),
@@ -919,6 +974,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
         // anything else that rings while it does.
         accepts_inbound: false,
         pending: Mutex::new(None),
+        next_request_id: std::sync::atomic::AtomicU64::new(1),
         ended_by_user: AtomicBool::new(false),
         ipc: ipc.clone(),
     });
@@ -1112,9 +1168,6 @@ fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<Scan
     let mut paths: Vec<_> = objects.iter().collect();
     paths.sort_by_key(|(path, _)| path.as_str().to_string());
     for (_, interfaces) in paths {
-        if devices.len() >= MAX_DISCOVERED_DEVICES {
-            break;
-        }
         let Some(properties) = interfaces.get(&iface) else {
             continue;
         };
@@ -1128,12 +1181,24 @@ fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<Scan
         // Alias is what the user set (or bluez's own fallback); Name is what
         // the device announced. Prefer the former, and never show an empty
         // row: the address is a worse name but it is a name.
+        // The name is chosen by a stranger in radio range and ends up on
+        // jwm's picker, whose rows are joined with newlines and split back
+        // into lines — one embedded control character shifts every row below
+        // it off its own selection highlight. jwm sanitizes again; doing it
+        // here too keeps the wire itself clean.
         let name = managed_string(properties, "Alias")
             .or_else(|| managed_string(properties, "Name"))
-            .map(|name| name.trim().to_string())
+            .map(|name| {
+                name.trim()
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(MAX_DEVICE_NAME_CHARS)
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| address.clone());
-        let name: String = name.chars().take(MAX_DEVICE_NAME_CHARS).collect();
         let rssi = properties
             .get("RSSI")
             .and_then(|value| i16::try_from(value.clone()).ok());
@@ -1145,6 +1210,20 @@ fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<Scan
             rssi,
         });
     }
+    // Sort before the cap. Object-path order is MAC order, so truncating
+    // first would drop a connected device at `F0:…` behind sixty-four
+    // nameless beacons — in exactly the crowded room the cap is for. The
+    // ordering matches jwm's own `sort_devices`, so the two agree about
+    // which devices matter.
+    devices.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then_with(|| b.paired.cmp(&a.paired))
+            .then_with(|| b.rssi.is_some().cmp(&a.rssi.is_some()))
+            .then_with(|| b.rssi.cmp(&a.rssi))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    devices.truncate(MAX_DISCOVERED_DEVICES);
     devices
 }
 
@@ -1258,25 +1337,24 @@ pub async fn discover(seconds: u64) -> i32 {
 // Inbound window (`jwm-bridge accept`)
 // ---------------------------------------------------------------------------
 
-/// Read a boolean `Adapter1` property, so the window can put back exactly
-/// what it found rather than a guess.
-async fn adapter_flag(connection: &Connection, adapter: &OwnedObjectPath, name: &str) -> bool {
-    let body = (ADAPTER_IFACE, name);
+/// Set a `u32` `Adapter1` property. Used for the pairable/discoverable
+/// timeouts, which are what makes a killed helper self-healing.
+async fn set_adapter_u32(
+    connection: &Connection,
+    adapter: &OwnedObjectPath,
+    name: &str,
+    value: u32,
+) {
+    let body = (ADAPTER_IFACE, name, zbus::zvariant::Value::U32(value));
     let call = connection.call_method(
         Some(bluez_name()),
         adapter,
         Some(PROPERTIES_IFACE),
-        "Get",
+        "Set",
         &body,
     );
-    match tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
-        Ok(Ok(reply)) => reply
-            .body()
-            .deserialize::<zbus::zvariant::Value<'_>>()
-            .ok()
-            .and_then(|value| bool::try_from(value).ok())
-            .unwrap_or(false),
-        _ => false,
+    if let Ok(Err(error)) = tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
+        log::warn!("accept: could not set {name}: {error}");
     }
 }
 
@@ -1299,33 +1377,48 @@ async fn set_adapter_flag(
     }
 }
 
-/// The adapter flags an inbound window has to turn on, and what they were
-/// before, so teardown restores rather than clears.
+/// Make the controller reachable for the life of one inbound window.
 ///
 /// Without `Pairable` and `Discoverable` nothing can ask to bond in the first
 /// place — on a default session both are false — so the window would be
 /// armed, correct, and completely unreachable.
+///
+/// **Teardown clears both rather than restoring what it found.** Restoring a
+/// snapshot compounds: a second window overlapping the first would snapshot
+/// the `true` the first installed and write it back on the way out, leaving
+/// the controller pairable and discoverable indefinitely with no agent
+/// registered and nothing on screen saying so. Off is also the only safe
+/// direction to be wrong in, and jwm turns these on by no other route, so on
+/// a jwm session clearing *is* restoring.
+///
+/// The timeouts are the belt for what teardown cannot cover at all — a
+/// SIGKILL, or the session ending underneath the helper. BlueZ counts them
+/// down itself and clears both flags, so a helper that dies without
+/// unwinding still cannot leave the controller open past its own window.
 struct AdapterExposure {
     adapter: OwnedObjectPath,
-    pairable: bool,
-    discoverable: bool,
 }
 
 impl AdapterExposure {
     async fn open(connection: &Connection, adapter: OwnedObjectPath) -> AdapterExposure {
-        let exposure = AdapterExposure {
-            pairable: adapter_flag(connection, &adapter, "Pairable").await,
-            discoverable: adapter_flag(connection, &adapter, "Discoverable").await,
-            adapter,
-        };
+        let exposure = AdapterExposure { adapter };
+        let seconds = INBOUND_WINDOW.as_secs().min(u64::from(u32::MAX)) as u32;
+        set_adapter_u32(connection, &exposure.adapter, "PairableTimeout", seconds).await;
+        set_adapter_u32(
+            connection,
+            &exposure.adapter,
+            "DiscoverableTimeout",
+            seconds,
+        )
+        .await;
         set_adapter_flag(connection, &exposure.adapter, "Pairable", true).await;
         set_adapter_flag(connection, &exposure.adapter, "Discoverable", true).await;
         exposure
     }
 
     async fn close(&self, connection: &Connection) {
-        set_adapter_flag(connection, &self.adapter, "Pairable", self.pairable).await;
-        set_adapter_flag(connection, &self.adapter, "Discoverable", self.discoverable).await;
+        set_adapter_flag(connection, &self.adapter, "Pairable", false).await;
+        set_adapter_flag(connection, &self.adapter, "Discoverable", false).await;
     }
 }
 
@@ -1365,6 +1458,7 @@ pub async fn accept_session(ipc: JwmIpc, connection: Connection, cookie: &str) -
         cookie: cookie.to_string(),
         accepts_inbound: true,
         pending: Mutex::new(None),
+        next_request_id: std::sync::atomic::AtomicU64::new(1),
         ended_by_user: AtomicBool::new(false),
         ipc: ipc.clone(),
     });
@@ -1453,19 +1547,27 @@ async fn pump_inbound_responses(shared: Arc<Shared>, mut responses: mpsc::Receiv
             log::warn!("ignoring a pairing response for a foreign cookie");
             continue;
         }
-        if response.reply.is_user_termination() {
+        let terminal = response.reply.is_user_termination();
+        if terminal {
             shared.ended_by_user.store(true, Ordering::Relaxed);
         }
-        match shared.lock_pending().take() {
-            Some(reply) => {
-                let _ = reply.send(response.reply);
-            }
-            None => {
-                if response.reply.is_user_termination() {
-                    log::info!("accept: window closed by jwm");
-                    return;
-                }
-            }
+        // Answer the request this is an answer to, so bluez gets a real
+        // reply rather than a dropped channel. An answer whose request is
+        // already gone resolves nothing.
+        if let Some(reply) = response.request_id.and_then(|id| shared.take_pending(id)) {
+            let _ = reply.send(response.reply);
+        }
+        // ...but a rejection or a cancel closes the window either way.
+        //
+        // Returning only when nothing was pending was wrong in the case that
+        // matters most: the user pressing Esc or `n` on an authorization
+        // prompt IS a cancel with a request outstanding. jwm drops its
+        // session and says the window is shut, while this process would keep
+        // the controller pairable and discoverable, and keep bluez's default
+        // agent registration, for the rest of the sixty seconds.
+        if terminal {
+            log::info!("accept: window closed");
+            return;
         }
     }
 }
@@ -1832,7 +1934,7 @@ mod tests {
 
     #[test]
     fn prompt_args_carry_each_kind() {
-        let pin = prompt_args(ADDR, COOKIE, "", &PromptRequest::Pin);
+        let pin = prompt_args(ADDR, COOKIE, "", 1, &PromptRequest::Pin);
         assert_eq!(pin["kind"], "pin");
         assert_eq!(pin["address"], ADDR);
         assert_eq!(pin["cookie"], COOKIE);
@@ -1842,7 +1944,7 @@ mod tests {
         // is absent rather than an empty string jwm would have to ignore.
         assert!(pin.get("device_name").is_none());
 
-        let confirm = prompt_args(ADDR, COOKIE, "", &PromptRequest::Confirm { passkey: 42 });
+        let confirm = prompt_args(ADDR, COOKIE, "", 2, &PromptRequest::Confirm { passkey: 42 });
         assert_eq!(confirm["kind"], "confirm");
         assert_eq!(confirm["passkey"], 42);
 
@@ -1850,6 +1952,7 @@ mod tests {
             ADDR,
             COOKIE,
             "",
+            3,
             &PromptRequest::Display {
                 code: "1234".to_string(),
             },
@@ -1866,6 +1969,7 @@ mod tests {
             ADDR,
             COOKIE,
             "MX Master 3S",
+            4,
             &PromptRequest::Authorize { service: None },
         );
         assert_eq!(bond["kind"], "authorize");
@@ -1880,6 +1984,7 @@ mod tests {
             ADDR,
             COOKIE,
             "",
+            5,
             &PromptRequest::Authorize {
                 service: Some("0000110B-0000-1000-8000-00805F9B34FB".to_string()),
             },
@@ -1924,6 +2029,7 @@ mod tests {
             cookie: COOKIE.to_string(),
             accepts_inbound,
             pending: Mutex::new(None),
+            next_request_id: std::sync::atomic::AtomicU64::new(1),
             ended_by_user: AtomicBool::new(false),
             ipc: JwmIpc::with_socket(PathBuf::from("/nonexistent/jwm-ipc.sock")),
         };
@@ -2363,6 +2469,23 @@ mod tests {
             stream.flush().expect("flush response event");
         }
 
+        /// Answer the prompt frame `prompt`, echoing the request id it
+        /// carried. Answers are bound to the request they answer, so a test
+        /// that forgets the id is a test that does not resolve anything —
+        /// which is the property being protected.
+        fn answer(&self, prompt: &Value, mut payload: Value) {
+            let request_id = prompt["args"]["request_id"].clone();
+            assert!(
+                request_id.is_u64(),
+                "every prompt carries the id its answer must name: {prompt}"
+            );
+            payload
+                .as_object_mut()
+                .expect("answer payload is an object")
+                .insert("request_id".to_string(), request_id);
+            self.send_response(payload);
+        }
+
         fn recv_command(&self, name: &str) -> Value {
             let deadline = std::time::Instant::now() + Duration::from_secs(15);
             loop {
@@ -2561,13 +2684,18 @@ mod tests {
         assert_eq!(prompt["args"]["cookie"], COOKIE);
         assert!(prompt["args"]["service"].is_null(), "a bond request");
 
-        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": true}),
+        );
         assert!(
             call.await.expect("agent call task").is_ok(),
             "an allowed request returns success to bluez"
         );
 
-        // Closing the window ends the session and reports the outcome.
+        // Closing the window ends the session. A cancel with nothing on
+        // screen names no request, which is what makes it a close rather
+        // than an answer.
         jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": false}));
         let code = session.await.expect("session task");
         assert_eq!(code, EXIT_CANCELLED);
@@ -2579,6 +2707,55 @@ mod tests {
         // left discoverable behind the user.
         assert!(!*FakeBluezState::lock(&setup.state.pairable));
         assert!(!*FakeBluezState::lock(&setup.state.discoverable));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refusing_a_prompt_closes_the_window_and_puts_the_controller_back() {
+        let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
+            return;
+        };
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": null, "cookie": COOKIE,
+            "state": "working", "kind": "inbound",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+        let bluez = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(accept_session(ipc, connection, COOKIE));
+        let agent = await_registered_agent(&setup.state).await;
+        await_adapter_exposed(&setup.state).await;
+
+        let device = OwnedObjectPath::try_from(DEVICE_PATH).expect("device path");
+        let call = tokio::spawn({
+            let bluez = bluez.clone();
+            async move { call_agent(&bluez, &agent, "RequestAuthorization", &(device,)).await }
+        });
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+
+        // Esc or `n` on the prompt IS a cancel with a request outstanding —
+        // the common case, not the rare one. Answering it must also close
+        // the window: jwm drops its session and tells the user the window is
+        // shut, and a helper that kept looping would hold the controller
+        // pairable and discoverable, and bluez's default agent registration,
+        // for the rest of the sixty seconds.
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "rejected"}),
+        );
+        assert!(
+            call.await.expect("agent call task").is_err(),
+            "the refusal still reaches bluez as a failure"
+        );
+
+        assert_eq!(session.await.expect("session task"), EXIT_CANCELLED);
+        assert!(!*FakeBluezState::lock(&setup.state.pairable));
+        assert!(!*FakeBluezState::lock(&setup.state.discoverable));
+        assert_eq!(
+            FakeBluezState::lock(&setup.state.unregistered).as_deref(),
+            Some(INBOUND_AGENT_PATH)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2620,7 +2797,8 @@ mod tests {
             prompt["args"]["service"],
             "0000110B-0000-1000-8000-00805F9B34FB"
         );
-        jwm.send_response(
+        jwm.answer(
+            &prompt,
             serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "rejected"}),
         );
         assert!(
@@ -2702,7 +2880,10 @@ mod tests {
         assert_eq!(prompt["args"]["kind"], "confirm");
         assert_eq!(prompt["args"]["passkey"], 123_456);
 
-        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": true}),
+        );
 
         let done = jwm.recv_command("bluetooth_pairing_done");
         assert_eq!(done["command"], "bluetooth_pairing_done");
@@ -2748,8 +2929,11 @@ mod tests {
 
         let session = tokio::spawn(pair_session(ipc, connection, ADDR, COOKIE));
 
-        jwm.recv_command("bluetooth_pairing_prompt");
-        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+        let prompt = jwm.recv_command("bluetooth_pairing_prompt");
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": true}),
+        );
 
         let done = jwm.recv_command("bluetooth_pairing_done");
         // The bond is durable and the user asked for it; a profile that would
@@ -2781,9 +2965,10 @@ mod tests {
         assert_eq!(prompt["args"]["kind"], "confirm");
         assert_eq!(prompt["args"]["passkey"], 654_321);
 
-        jwm.send_response(serde_json::json!({
-            "cookie": COOKIE, "accepted": false, "reason": "rejected",
-        }));
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "rejected"}),
+        );
 
         let done = jwm.recv_command("bluetooth_pairing_done");
         assert_eq!(done["command"], "bluetooth_pairing_done");
@@ -2869,9 +3054,20 @@ mod tests {
         let prompt = jwm.recv_command("bluetooth_pairing_prompt");
         assert_eq!(prompt["args"]["kind"], "confirm");
 
-        // A stale answer from a dead session must not resolve the prompt.
-        jwm.send_response(serde_json::json!({"cookie": "deadbeefdeadbeef", "accepted": true}));
-        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+        // A stale answer from a dead session must not resolve the prompt,
+        // and neither must one that names no request or the wrong one — the
+        // cookie says which session, only the id says which question.
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": "deadbeefdeadbeef", "accepted": true}),
+        );
+        jwm.send_response(serde_json::json!({
+            "cookie": COOKIE, "accepted": true, "request_id": 99_999,
+        }));
+        jwm.answer(
+            &prompt,
+            serde_json::json!({"cookie": COOKIE, "accepted": true}),
+        );
 
         let done = jwm.recv_command("bluetooth_pairing_done");
         assert_eq!(done["args"]["ok"], true);

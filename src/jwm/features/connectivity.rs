@@ -676,6 +676,27 @@ const MAX_BLUETOOTH_DEVICES: usize = 64;
 const MAX_BLUETOOTH_DEVICE_LINES: usize = 1024;
 const MAX_BLUETOOTH_DEVICE_NAME_CHARS: usize = 248;
 
+/// Bound and sanitize a device name for the picker.
+///
+/// A name is chosen by the device, i.e. by a stranger in radio range. The
+/// picker draws its rows by joining them with newlines and splitting them
+/// back into lines, while the selection pill and the pointer hit-map are
+/// computed from the *item* count — so one embedded newline draws an extra
+/// line, shifts every row below it off its own highlight, and makes `Enter`
+/// act on a device other than the one that looks selected. Control
+/// characters are dropped rather than escaped: there is nothing a device
+/// needs them for. `parse_prompt_command` has applied the same rule to the
+/// name on the pairing wire from the start.
+fn sanitize_device_name(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_BLUETOOTH_DEVICE_NAME_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub(crate) fn is_bluetooth_address(address: &str) -> bool {
     let mut count = 0;
     for octet in address.split(':') {
@@ -712,13 +733,13 @@ pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
         {
             continue;
         }
-        let name = parts.next().unwrap_or(address).trim();
+        let name = sanitize_device_name(parts.next().unwrap_or(address));
         devices.push(BluetoothDevice {
             address: address.to_string(),
             name: if name.is_empty() {
                 address.to_string()
             } else {
-                name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect()
+                name
             },
             connected: false,
             paired: false,
@@ -768,20 +789,22 @@ pub fn parse_scan_output(output: &str) -> Vec<BluetoothDevice> {
             .find(|device| device.address.eq_ignore_ascii_case(address))
         {
             // A later Name: change can fill in a device first heard unnamed.
+            let name = sanitize_device_name(name);
             if !name.is_empty() && existing.name == existing.address {
-                existing.name = name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect();
+                existing.name = name;
             }
             continue;
         }
         if devices.len() >= MAX_BLUETOOTH_DEVICES {
             break;
         }
+        let name = sanitize_device_name(name);
         devices.push(BluetoothDevice {
             address: address.to_string(),
             name: if name.is_empty() {
                 address.to_string()
             } else {
-                name.chars().take(MAX_BLUETOOTH_DEVICE_NAME_CHARS).collect()
+                name
             },
             connected: false,
             paired: false,
@@ -822,10 +845,7 @@ pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
         return Vec::new();
     };
     let mut devices: Vec<BluetoothDevice> = Vec::new();
-    for entry in entries {
-        if devices.len() >= MAX_BLUETOOTH_DEVICES {
-            break;
-        }
+    for entry in entries.iter().take(MAX_BLUETOOTH_DEVICE_LINES) {
         let Some(address) = entry.get("address").and_then(serde_json::Value::as_str) else {
             continue;
         };
@@ -842,13 +862,8 @@ pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
         let name = entry
             .get("name")
             .and_then(serde_json::Value::as_str)
-            .map(str::trim)
+            .map(sanitize_device_name)
             .filter(|name| !name.is_empty())
-            .map(|name| {
-                name.chars()
-                    .take(MAX_BLUETOOTH_DEVICE_NAME_CHARS)
-                    .collect::<String>()
-            })
             .unwrap_or_else(|| address.clone());
         devices.push(BluetoothDevice {
             address,
@@ -867,6 +882,14 @@ pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
                 .and_then(|rssi| i16::try_from(rssi).ok()),
         });
     }
+    // Sort *before* the cap, so what survives it is what the user most likely
+    // wants. Truncating in wire order — which is object-path, i.e. MAC order
+    // — would drop a connected headset at `F0:…` behind sixty-four nameless
+    // beacons in a busy room, which is exactly the room the cap exists for.
+    // The `bluetoothctl` path could not do that: it listed remembered
+    // devices first and merged sightings into whatever room was left.
+    sort_devices(&mut devices);
+    devices.truncate(MAX_BLUETOOTH_DEVICES);
     devices
 }
 
@@ -973,31 +996,30 @@ const BRIDGE_DISCOVERY_SECONDS: u64 = 10;
 /// for process startup and the two bus round trips around it.
 const BRIDGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// Whether `jwm-bridge` can answer a device listing on this machine.
+/// Whether `jwm-bridge` is installed at all.
 ///
-/// Probed once, like [`bluetooth_tool`]: the helper is the same binary the
-/// pairing session already needs, so a session that can pair can also list,
-/// and one that cannot falls back to `bluetoothctl` text.
-fn bridge_discovery_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        // `discover 0` lists without touching the radio, so the probe is
-        // also a real answer — but it is the exit status that is cached,
-        // not the list.
-        connectivity_output(
-            "jwm-bridge",
-            &["discover", "0"],
-            CONNECTIVITY_QUERY_TIMEOUT,
-            MAX_CONNECTIVITY_OUTPUT_BYTES,
-        )
-        .is_ok_and(|output| output.status.success())
+/// A `PATH` walk, not an exec. `start_device_scan` and `start_discovery_scan`
+/// have to answer this *before* they spawn their worker — that is what
+/// decides whether there is a job to run — so it happens on the frame
+/// thread. Running the helper there would block the compositor for up to the
+/// query timeout on any session that has jwm-bridge but not `bluetoothctl`,
+/// which is precisely the stall the "jwm stays D-Bus-free so a wedged bus
+/// cannot hold a frame" rule exists to prevent. Whether the helper can
+/// actually answer is decided inside the worker, where it costs nothing.
+fn bridge_discovery_installed() -> bool {
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+    *INSTALLED.get_or_init(|| {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        std::env::split_paths(&path).any(|dir| dir.join("jwm-bridge").is_file())
     })
 }
 
 /// Ask `jwm-bridge` for the device list, scanning for `seconds` first.
 /// `None` when the helper is absent or failed, so the caller falls back.
 fn bridge_devices(seconds: u64) -> Option<Vec<BluetoothDevice>> {
-    if !bridge_discovery_available() {
+    if !bridge_discovery_installed() {
         return None;
     }
     let seconds = seconds.to_string();
@@ -1022,7 +1044,7 @@ fn bridge_devices(seconds: u64) -> Option<Vec<BluetoothDevice>> {
 /// thread.
 #[must_use]
 pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_available() {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_installed() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
@@ -1054,7 +1076,7 @@ pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
 /// headroom for process startup and the follow-up work.
 #[must_use]
 pub fn start_discovery_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_available() {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_installed() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
@@ -1837,6 +1859,68 @@ mod tests {
         // address, which is at least the handle they have.
         assert_eq!(devices[1].name, "7C:10:C9:AA:BB:CC");
         assert_eq!(devices[1].rssi, None);
+    }
+
+    #[test]
+    fn a_device_name_can_never_add_a_line_to_the_picker() {
+        // Rows are joined with newlines and split back into lines, while the
+        // selection pill and the pointer hit-map count *items* — so one
+        // embedded newline in a name chosen by a stranger in radio range
+        // draws an extra line and shifts every row below it off its own
+        // highlight, making Enter act on a device other than the one that
+        // looks selected.
+        let hostile = "Speaker\n\u{f293}   Office Speaker\u{1b}[2J";
+        let devices = parse_bridge_devices(&format!(
+            r#"[{{"address":"5C:FB:7C:1A:2B:3C","name":{}}}]"#,
+            serde_json::Value::from(hostile)
+        ));
+        assert_eq!(devices.len(), 1);
+        assert!(
+            !devices[0].name.chars().any(char::is_control),
+            "{:?}",
+            devices[0].name
+        );
+        assert!(!device_row(&devices[0]).contains('\n'));
+
+        // The text path gets the same treatment: `lines()` already stops a
+        // newline, but nothing stopped the rest.
+        let devices = parse_devices("Device 5C:FB:7C:1A:2B:3C Speaker\u{1b}[2Jx\n");
+        assert!(!devices[0].name.chars().any(char::is_control));
+        let devices = parse_scan_output("[NEW] Device 5C:FB:7C:1A:2B:3C Speaker\u{7}beep\n");
+        assert!(!devices[0].name.chars().any(char::is_control));
+
+        // A name that was *only* control characters is not a row the user
+        // can read; it falls back to the address like an empty one.
+        let devices = parse_bridge_devices(r#"[{"address":"5C:FB:7C:1A:2B:3C","name":""}]"#);
+        assert_eq!(devices[0].name, "5C:FB:7C:1A:2B:3C");
+    }
+
+    #[test]
+    fn the_device_cap_keeps_what_the_user_can_act_on() {
+        // The cap exists for a crowded room, which is exactly the room where
+        // truncating in wire order — object-path order, i.e. MAC order —
+        // would drop a connected headset at `F0:…` behind sixty-four
+        // nameless beacons.
+        let mut entries: Vec<String> = (0..(MAX_BLUETOOTH_DEVICES + 20))
+            .map(|index| {
+                format!(
+                    r#"{{"address":"00:BB:CC:{:02X}:{:02X}:{:02X}","rssi":-90}}"#,
+                    index / 256,
+                    index % 256,
+                    index % 7
+                )
+            })
+            .collect();
+        entries.push(
+            r#"{"address":"F0:FF:FF:FF:FF:FF","name":"WH-1000XM4","paired":true,"connected":true}"#
+                .to_string(),
+        );
+        let devices = parse_bridge_devices(&format!("[{}]", entries.join(",")));
+        assert_eq!(devices.len(), MAX_BLUETOOTH_DEVICES);
+        assert_eq!(
+            devices[0].name, "WH-1000XM4",
+            "the connected device survives the cap and leads the list"
+        );
     }
 
     #[test]

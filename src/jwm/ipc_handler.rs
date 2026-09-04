@@ -1660,7 +1660,11 @@ impl Jwm {
                         .to_string(),
                 );
             }
-            session.apply_prompt(command.prompt.clone(), std::time::Instant::now());
+            session.apply_prompt(
+                command.prompt.clone(),
+                command.request_id,
+                std::time::Instant::now(),
+            );
             self.features
                 .system_ui
                 .prompt_bluetooth_pairing(&command.prompt, session.device_name());

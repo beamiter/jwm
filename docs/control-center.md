@@ -316,9 +316,18 @@ whatever they were on the way out. Two questions can arrive:
   name is worse than both.
 
 `y` or `Enter` allows, `n` or `Esc` refuses, and refusing fails the request on
-the BlueZ side rather than letting it quietly succeed. An incoming pairing can
-also raise the ordinary PIN and passkey prompts, which behave exactly as they
-do outbound.
+the BlueZ side rather than letting it quietly succeed. Answering also closes
+the window — the controller stops being pairable and discoverable at that
+moment, not sixty seconds later. An incoming pairing can also raise the
+ordinary PIN and passkey prompts, which behave exactly as they do outbound.
+
+Every answer names the request it answers, not just the session, so an answer
+whose question BlueZ already withdrew resolves nothing rather than landing on
+whatever replaced it. Teardown turns `Pairable` and `Discoverable` off rather
+than restoring what it found — off is the only safe direction to be wrong in,
+and JWM turns them on by no other route — and it also sets BlueZ's own
+`PairableTimeout`/`DiscoverableTimeout` to the window length, so a helper
+killed outright still cannot leave the controller open past its window.
 
 The window binds to the first device that rings it and refuses every other
 one from then on, so the late-bound target is as narrow as an outbound

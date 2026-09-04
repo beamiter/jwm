@@ -165,6 +165,9 @@ pub struct PairingSession {
     phase: PairingPhase,
     started: Instant,
     prompt_started: Option<Instant>,
+    /// The helper's id for the prompt currently on screen, echoed back with
+    /// the answer. `None` when nothing is being asked.
+    request_id: Option<u64>,
 }
 
 impl PairingSession {
@@ -188,6 +191,7 @@ impl PairingSession {
             phase: PairingPhase::Working,
             started: now,
             prompt_started: None,
+            request_id: None,
         })
     }
 
@@ -204,6 +208,7 @@ impl PairingSession {
             phase: PairingPhase::Working,
             started: now,
             prompt_started: None,
+            request_id: None,
         }
     }
 
@@ -281,7 +286,14 @@ impl PairingSession {
     /// bluez asked something: move into the matching prompt phase. A second
     /// prompt replaces the first — bluez serializes agent requests per Pair
     /// call, so a fresh prompt means the previous one was withdrawn.
-    pub fn apply_prompt(&mut self, prompt: PairingPrompt, now: Instant) {
+    /// The helper's id for the prompt on screen, to echo with the answer.
+    #[must_use]
+    pub fn request_id(&self) -> Option<u64> {
+        self.request_id
+    }
+
+    pub fn apply_prompt(&mut self, prompt: PairingPrompt, request_id: Option<u64>, now: Instant) {
+        self.request_id = request_id;
         self.phase = match prompt {
             PairingPrompt::Pin => PairingPhase::AwaitingPin,
             PairingPrompt::Confirm { passkey } => PairingPhase::AwaitingConfirm { passkey },
@@ -296,6 +308,7 @@ impl PairingSession {
     pub fn clear_prompt(&mut self) {
         self.phase = PairingPhase::Working;
         self.prompt_started = None;
+        self.request_id = None;
     }
 
     /// Whether the current prompt has outlived [`PROMPT_TIMEOUT`].
@@ -409,6 +422,9 @@ fn fallback_entropy() -> u64 {
 pub struct PromptCommand {
     pub address: String,
     pub cookie: String,
+    /// Which request this prompt is; echoed back with the user's answer so a
+    /// late answer cannot resolve a request that replaced it.
+    pub request_id: Option<u64>,
     pub prompt: PairingPrompt,
     /// What to call the device on screen. An outbound session already has a
     /// name from the picker row and ignores this; an inbound window has
@@ -520,6 +536,7 @@ pub fn parse_prompt_command(args: &Value) -> Result<PromptCommand, String> {
     Ok(PromptCommand {
         address: address_field(args)?,
         cookie: cookie_field(args)?,
+        request_id: args.get("request_id").and_then(Value::as_u64),
         prompt,
         device_name,
     })
@@ -625,9 +642,17 @@ pub enum PairingAnswer<'a> {
 }
 
 /// Build the `bluetooth/pairing_response` event payload.
+///
+/// `request_id` names the prompt being answered — the helper's own counter,
+/// echoed back. The cookie identifies the *session*, not the request, so
+/// without the id an answer could resolve whatever request happened to be
+/// outstanding by the time the broadcast crossed the socket and the helper's
+/// scheduler: a `yes` given to one question granting a different one, with
+/// the real question never drawn. `None` is a cancel with nothing on screen,
+/// which answers nothing and is relayed as `CancelPairing` instead.
 #[must_use]
-pub fn response_payload(cookie: &str, answer: PairingAnswer<'_>) -> Value {
-    match answer {
+pub fn response_payload(cookie: &str, request_id: Option<u64>, answer: PairingAnswer<'_>) -> Value {
+    let mut payload = match answer {
         PairingAnswer::Pin(pin) => {
             serde_json::json!({ "cookie": cookie, "accepted": true, "pin": pin })
         }
@@ -640,7 +665,13 @@ pub fn response_payload(cookie: &str, answer: PairingAnswer<'_>) -> Value {
         PairingAnswer::Cancelled => {
             serde_json::json!({ "cookie": cookie, "accepted": false, "reason": "cancelled" })
         }
+    };
+    if let Some(request_id) = request_id
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("request_id".to_string(), Value::from(request_id));
     }
+    payload
 }
 
 /// The `get_bluetooth_pairing` query answer, which is also the helper's
@@ -700,7 +731,7 @@ mod tests {
         let mut session = session(now);
         assert_eq!(session.phase(), &PairingPhase::Working);
 
-        session.apply_prompt(PairingPrompt::Pin, now);
+        session.apply_prompt(PairingPrompt::Pin, Some(1), now);
         assert_eq!(session.phase(), &PairingPhase::AwaitingPin);
         assert!(session.phase().is_prompting());
 
@@ -708,7 +739,7 @@ mod tests {
         assert_eq!(session.phase(), &PairingPhase::Working);
         assert!(!session.phase().is_prompting());
 
-        session.apply_prompt(PairingPrompt::Confirm { passkey: 42 }, now);
+        session.apply_prompt(PairingPrompt::Confirm { passkey: 42 }, Some(2), now);
         assert_eq!(
             session.phase(),
             &PairingPhase::AwaitingConfirm { passkey: 42 }
@@ -719,6 +750,7 @@ mod tests {
             PairingPrompt::Display {
                 code: "1234".into(),
             },
+            Some(3),
             now,
         );
         assert_eq!(
@@ -735,7 +767,7 @@ mod tests {
         let mut session = session(now);
         assert!(!session.prompt_timed_out(now + PROMPT_TIMEOUT));
 
-        session.apply_prompt(PairingPrompt::Pin, now);
+        session.apply_prompt(PairingPrompt::Pin, Some(1), now);
         assert!(!session.prompt_timed_out(now + PROMPT_TIMEOUT - Duration::from_secs(1)));
         assert!(session.prompt_timed_out(now + PROMPT_TIMEOUT));
         assert!(!session.session_timed_out(now + PROMPT_TIMEOUT));
@@ -758,7 +790,7 @@ mod tests {
         let mut session = session(now);
         assert_eq!(session.next_timeout_in(now), Some(SESSION_TIMEOUT));
 
-        session.apply_prompt(PairingPrompt::Pin, now + Duration::from_secs(3));
+        session.apply_prompt(PairingPrompt::Pin, Some(4), now + Duration::from_secs(3));
         assert_eq!(
             session.next_timeout_in(now + Duration::from_secs(3)),
             Some(PROMPT_TIMEOUT)
@@ -1055,7 +1087,7 @@ b"}),
         assert_eq!(window["state"], "working");
 
         let mut prompting = PairingSession::inbound("cafe".to_string(), now);
-        prompting.apply_prompt(PairingPrompt::Authorize { service: None }, now);
+        prompting.apply_prompt(PairingPrompt::Authorize { service: None }, Some(9), now);
         assert_eq!(
             session_json(Some(&prompting))["state"],
             "awaiting_authorization"
@@ -1109,21 +1141,21 @@ b"}),
 
     #[test]
     fn response_payloads_carry_exactly_one_answer_shape() {
-        let pin = response_payload("c", PairingAnswer::Pin("1234"));
+        let pin = response_payload("c", Some(7), PairingAnswer::Pin("1234"));
         assert_eq!(pin["accepted"], true);
         assert_eq!(pin["pin"], "1234");
         assert!(pin.get("reason").is_none());
 
-        let confirmed = response_payload("c", PairingAnswer::Confirmed);
+        let confirmed = response_payload("c", Some(7), PairingAnswer::Confirmed);
         assert_eq!(confirmed["accepted"], true);
         assert!(confirmed.get("pin").is_none());
 
-        let rejected = response_payload("c", PairingAnswer::Rejected);
+        let rejected = response_payload("c", Some(7), PairingAnswer::Rejected);
         assert_eq!(rejected["accepted"], false);
         assert_eq!(rejected["reason"], "rejected");
         assert!(rejected.get("pin").is_none());
 
-        let cancelled = response_payload("c", PairingAnswer::Cancelled);
+        let cancelled = response_payload("c", None, PairingAnswer::Cancelled);
         assert_eq!(cancelled["accepted"], false);
         assert_eq!(cancelled["reason"], "cancelled");
     }
@@ -1139,7 +1171,11 @@ b"}),
         assert_eq!(json["cookie"], "0123456789abcdef");
         assert_eq!(json["state"], "working");
 
-        session.apply_prompt(PairingPrompt::Confirm { passkey: 7 }, Instant::now());
+        session.apply_prompt(
+            PairingPrompt::Confirm { passkey: 7 },
+            Some(11),
+            Instant::now(),
+        );
         assert_eq!(session_json(Some(&session))["state"], "awaiting_confirm");
     }
 }

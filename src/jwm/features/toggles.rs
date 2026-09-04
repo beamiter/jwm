@@ -982,6 +982,7 @@ impl Jwm {
                 // outstanding request. The session stays until the helper's
                 // `done` lands (its request failure unwinds Pair promptly).
                 let cookie = session.cookie().to_string();
+                let request_id = session.request_id();
                 if let Some(session) = &mut self.features.bluetooth_pairing {
                     session.clear_prompt();
                 }
@@ -990,6 +991,7 @@ impl Jwm {
                     crate::jwm::features::pairing::RESPONSE_EVENT,
                     crate::jwm::features::pairing::response_payload(
                         &cookie,
+                        request_id,
                         crate::jwm::features::pairing::PairingAnswer::Cancelled,
                     ),
                 );
@@ -1185,6 +1187,7 @@ impl Jwm {
             return;
         }
         let cookie = session.cookie().to_string();
+        let request_id = session.request_id();
         // The take hands the only copy over; wipe it once the broadcast is
         // out so the PIN does not linger in a freed allocation.
         let Some(mut pin) = self.features.system_ui.take_pairing_pin() else {
@@ -1195,7 +1198,7 @@ impl Jwm {
         }
         self.broadcast_ipc_event(
             pairing::RESPONSE_EVENT,
-            pairing::response_payload(&cookie, pairing::PairingAnswer::Pin(&pin)),
+            pairing::response_payload(&cookie, request_id, pairing::PairingAnswer::Pin(&pin)),
         );
         unsafe { pin.as_bytes_mut().fill(0) };
         self.features
@@ -1219,12 +1222,14 @@ impl Jwm {
             _ => return,
         };
         let cookie = session.cookie().to_string();
+        let request_id = session.request_id();
         session.clear_prompt();
         self.features.system_ui.cancel_pairing_prompt();
         self.broadcast_ipc_event(
             pairing::RESPONSE_EVENT,
             pairing::response_payload(
                 &cookie,
+                request_id,
                 if accepted {
                     pairing::PairingAnswer::Confirmed
                 } else {
@@ -1265,7 +1270,14 @@ impl Jwm {
         );
         self.broadcast_ipc_event(
             pairing::RESPONSE_EVENT,
-            pairing::response_payload(session.cookie(), pairing::PairingAnswer::Cancelled),
+            // The prompt on screen, when there is one: a cancel that answers
+            // an outstanding request must name it, and one with nothing on
+            // screen answers nothing and becomes a `CancelPairing` instead.
+            pairing::response_payload(
+                session.cookie(),
+                session.request_id(),
+                pairing::PairingAnswer::Cancelled,
+            ),
         );
         self.features.system_ui.cancel_pairing_prompt();
         self.features.system_ui.set_bluetooth_message(if inbound {
