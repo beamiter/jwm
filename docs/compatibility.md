@@ -32,12 +32,32 @@ and EGL/GBM behavior remain driver-sensitive.
 `vrr_max_fps` (240), and `game_classes` (window classes treated as games). What
 they do depends on the backend:
 
-- **Wayland DRM/KMS:** the compositor sets the kernel `VRR_ENABLED` CRTC
-  property on capable outputs (TEST_ONLY-probed atomic commit, legacy ioctl
-  fallback). `wp_tearing_control_manager_v1` is published when
-  `wayland_enable_tearing_control` is on (default true): client tearing hints
-  are recorded and observable through `jwm-tool get_tearing_hints`, but the DRM
-  page-flip path does not act on them yet, so frames never tear today.
+- **Wayland DRM/KMS:** a per-output presentation policy runs once per frame.
+  `VRR_ENABLED` is asserted while one mapped fullscreen client owns the output
+  — the same shape the direct-scanout policy tests — and cleared otherwise;
+  VRR on a composited desktop makes some panels flicker, so it follows the
+  content rather than staying on. It is programmed through Smithay's own
+  `use_vrr`, and only on outputs where the connector reports VRR can change
+  without a modeset. (Before that it was written straight onto the CRTC
+  property at output init, which never survived: Smithay re-asserts its own
+  cached VRR value in every atomic request it builds, so the enable was undone
+  by the very next page flip. `set_vrr_enabled` over IPC had the same
+  problem.)
+
+  `wp_tearing_control_manager_v1` is published when
+  `wayland_enable_tearing_control` is on (default true). Hints are
+  double-buffered and latched at `wl_surface.commit`, and the same policy
+  decides per output whether the frame would be flipped asynchronously —
+  but it never is, and the reason is reported rather than implied: JWM's
+  frame submission goes through Smithay's `DrmCompositor::queue_frame`, whose
+  submission step hardcodes its atomic commit flags and offers no way to
+  request `PAGE_FLIP_ASYNC`. `jwm-tool get_tearing_hints` and
+  `render_decisions.tearing` name that blocker
+  (`submission_cannot_request_async_flip`) per output, alongside the ones
+  that would apply anyway: a driver without
+  `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`, a frame that needs composition, a
+  colour-delivery retry, or pending surface state that forces a modesetting
+  commit.
 - **X11:** the X server owns DRM master, so no per-output VRR toggle is
   reachable through RandR or any X extension; `set_vrr_enabled` therefore
   returns an explicit "unsupported" error instead of pretending. The flags only

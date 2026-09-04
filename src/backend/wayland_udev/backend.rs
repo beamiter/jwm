@@ -3618,11 +3618,23 @@ impl BackendDiagnostics for UdevBackend {
         self.state.protocol_bind_counts_snapshot()
     }
 
+    fn compositor_presentation_statuses(
+        &self,
+    ) -> Vec<crate::backend::api::PresentationOutputStatus> {
+        self.kms
+            .as_ref()
+            .map(|kms| kms.borrow().presentation_output_statuses())
+            .unwrap_or_default()
+    }
+
     fn compositor_tearing_hint_count(&self) -> usize {
+        // Surfaces asking to tear, not surfaces that have ever held a
+        // control object: the map keeps an entry for every live object, and
+        // a client that binds one and stays on vsync is not demand.
         self.state
             .tearing_hints
             .as_ref()
-            .map(|hints| hints.lock_safe().len())
+            .map(crate::backend::wayland_udev::tearing_control::async_hint_count)
             .unwrap_or(0)
     }
 

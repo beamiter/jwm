@@ -236,6 +236,22 @@ pub struct DirectScanoutOutputStatus {
     pub reason: String,
 }
 
+/// What the per-output presentation policy decided for one output on the last
+/// rendered frame: whether VRR is asserted, whether the frame would have been
+/// flipped asynchronously, and — when it would not — the one named reason.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PresentationOutputStatus {
+    pub output_name: String,
+    /// A client on this output holds a committed `Async` tearing hint.
+    pub client_asked_to_tear: bool,
+    /// `VRR_ENABLED` as the policy asked for it this frame.
+    pub vrr: bool,
+    /// Whether this frame was submitted as an asynchronous (tearing) flip.
+    pub tearing: bool,
+    /// Stable snake_case blocker name when `tearing` is false.
+    pub blocker: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DirectScanoutStatus {
     pub enabled: bool,
@@ -2446,6 +2462,12 @@ pub trait BackendDiagnostics: Send {
 
     fn compositor_tearing_hint_count(&self) -> usize {
         0
+    }
+
+    /// Per-output presentation verdicts from the last rendered frame. Empty
+    /// on backends with no KMS presentation policy of their own.
+    fn compositor_presentation_statuses(&self) -> Vec<PresentationOutputStatus> {
+        Vec::new()
     }
 
     fn compositor_session_lock_surface_count(&self) -> usize {

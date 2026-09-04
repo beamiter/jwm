@@ -7,6 +7,17 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- The Wayland/KMS backend gained a per-output presentation policy, reported
+  per output through `get_tearing_hints` and `render_decisions`. VRR is
+  asserted while one mapped fullscreen client owns an output and cleared
+  otherwise, on connectors where it can change without a modeset. The
+  wp-tearing-control hint is now double-buffered and latched at
+  `wl_surface.commit` as the protocol specifies, a second
+  `wp_tearing_control_v1` on one surface raises `tearing_control_exists`, and
+  every output carries a named reason for why a client asking to tear is not
+  tearing — including `submission_cannot_request_async_flip`, which is the
+  honest answer today.
+
 - The Bluetooth picker can accept an *incoming* request: `a` arms a
   sixty-second window in which `jwm-bridge accept` registers a BlueZ agent,
   becomes the default agent, and makes the controller pairable and
@@ -140,6 +151,25 @@ monorepo use independent Semantic Versions.
 - Compatibility, upgrade, and release-process documentation.
 
 ### Changed
+
+- **Breaking (diagnostics):** `render_decisions` is schema version 2.
+  `tearing.active` now reports whether a frame was actually flipped
+  asynchronously; under version 1 it was literally "a client asked", which
+  made demand indistinguishable from an outcome — and since JWM does not
+  tear, it reported `active: true` for something that never happened. Client
+  demand moved to `tearing.client_demand`, `tearing.reason` carries a named
+  blocker, and `tearing.outputs` plus the new `vrr` block report per output.
+  `get_tearing_hints` keeps `active_surface_count` and gains the same
+  per-output rows.
+
+- VRR on the Wayland/KMS backend used to be written directly onto the CRTC
+  `VRR_ENABLED` property, both unconditionally at output init and through
+  `set_vrr_enabled` over IPC. Neither survived: Smithay re-asserts its own
+  cached VRR value in every atomic request it builds, so the property was
+  reset by the very next page flip while the IPC call reported success.
+  Both paths now go through Smithay's `use_vrr`. `set_vrr_enabled` fails
+  explicitly on connectors where VRR would require a modeset, rather than
+  silently taking a path that turns the next frame into a full commit.
 
 - Native X11 clipboard workers now block on the X socket plus an internal
   eventfd instead of waking on a 20 ms polling cadence. Their final backend or

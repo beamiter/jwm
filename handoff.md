@@ -4,6 +4,82 @@
 
 ---
 
+## 2026-09-04：十二轮收口之一（tearing hint 消费 / VRR clobber 修复）
+
+**先说结论：真正的 async page flip 这一轮不做，而且不是「没做完」——是做不了，
+本轮把「做不了」变成可诊断的具名 blocker。**
+
+**为什么做不了。** 钉住的 smithay rev（`e76f1af`）在
+`DrmOutput → DrmCompositor → DrmSurface` 整条链上没有任何 async flip 旋钮：
+`AtomicDrmSurface::page_flip`（`surface/atomic.rs:867-903`）把 commit flag 写死
+成 `PAGE_FLIP_EVENT | NONBLOCK`，全 `src/backend/drm/` 里 grep 不到一个
+`ASYNC`；`DrmCompositor::submit`/`PreparedFrame`/`QueuedFrame` 全是私有，
+`RenderFrameResult` 也不交出 framebuffer handle，所以绕过 `queue_frame` 自己发
+flip 同样不可行。要做就得 fork smithay + `[patch]`（Cargo.toml 目前没有
+`[patch]` 段），那是供应链决定不是代码决定，**不在本轮单方面做**。
+
+1. **hint 按协议双缓冲**（`tearing_control.rs` 重写）。协议原文：
+   `set_presentation_hint` 「will be applied on the next wl_surface.commit」，
+   对象 destroy 的回退 vsync 同样在下次 commit 生效。原实现在 request handler
+   里直接改 map，等于一个 hint 可能描述的不是它随行的那块 buffer——正是
+   `0477ddf` 给 image description 修过的同一个坑。现在 request 只 stage，
+   `CompositorHandler::commit` 落 latch（就在 `commit_surface_description`
+   旁边），下游只读 committed 半边。map 操作全部对 key 泛型，因此整套状态机不需
+   要 live display 造 `ObjectId` 就能单测。
+2. **修 hint 泄漏**（真 bug）。协议允许「销毁 wl_surface 但保留 control
+   对象」（用词是 should not must），而原来只在 *对象* 死时清表，
+   `CompositorHandler::destroyed` 完全没碰 `tearing_hints`。条目会活过
+   surface，键是一个 server 之后可能重新发给别人的 ObjectId——文件自己的注释
+   （旧 `:142`）正好点了这个危险，却只防住了另一个方向。
+3. **补 `tearing_control_exists` 协议错误**。同一 surface 两个 control 对象共享
+   一个 hint，销毁第二个会静默清掉第一个的 Async 请求，撕裂与否变成「客户端最
+   后销毁了哪个对象」的函数。
+4. **修 VRR clobber**（另一个真 bug，本机无 VRR 显示器但可从 smithay 源码证明）。
+   jwm 原来在 output init 无条件裸写 CRTC `VRR_ENABLED = 1`
+   （旧 `udev_kms.rs:5738`），`set_vrr_for_output` 走同一条裸写路径。但 smithay
+   的 `AtomicRequest::set_crtc`（`atomic.rs:1388-1413`）在**每一次** atomic
+   request 里都按自己缓存的 `vrr` 重新写这个属性，`page_flip`
+   （`atomic.rs:882`）也传 `self.state.vrr`——所以裸写在下一帧就被撤销，
+   IPC 却报成功。两条路径现在都走 `DrmCompositor::use_vrr`。
+   **必须 gate 在 `VrrSupport::Supported`**：`use_vrr`
+   （`atomic.rs:622-685`）在非快路径上只做 `ALLOW_MODESET | TEST_ONLY` 然后
+   *只*更新 `pending.vrr`，`current.vrr` 不动 → `commit_pending()` 变真 →
+   `DrmCompositor::submit`（`compositor/mod.rs:2548`）下一帧改走 `commit()`
+   分支。`RequiresModeset` 因此被显式拒绝而不是「试试看」。
+5. **逐输出 presentation 策略**（纯函数 `presentation_plan` +
+   `PresentationEvidence`/`PresentationBlocker`，就放在
+   `frame_flags_for_color_delivery` 旁边，风格照抄 `hdr_scanout_chain_gap`）。
+   VRR 跟内容走（单个 mapped 全屏窗口独占输出时开，合成桌面上关——静态画面上
+   开 VRR 会让部分面板闪），tearing 跟客户端请求走，两者读同一份证据、其中
+   「一个全屏客户端独占输出」直接复用 direct-scanout 的判定，三个决策因此不会
+   各自漂移。`commit_pending` 经
+   `with_compositor(|c| c.surface().commit_pending())` 进证据（第 4 条说明了
+   为什么它必须在里面）；`DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP` 在 init 探一次并缓存
+   ——驱动不支持时内核直接拒绝 async commit，而渲染循环把 queue 失败当设备故障
+   去 `activate(false)`，无条件尝试会让这条恢复路径每帧空转。
+6. **IPC 说真话，schema 升 v2**。`render_decisions.tearing.active` 原来字面就是
+   `hint_count > 0`——把「有人请求」当成「发生了撕裂」，而 jwm 根本不撕，于是
+   它一直在为一件从未发生的事报 `active: true`。v2 把需求挪到
+   `client_demand`，`active` 只表示真发生，`reason` 给具名 blocker，
+   `tearing.outputs` 与新的 `vrr` 块逐输出报告；`get_tearing_hints` 同样加逐
+   输出行。语义变了就必须升版本并同步下游：`tools/jwm_tool.rs` 的三处读取点
+   （render_decisions 打印、`vrr-tearing` 证据串、两处 tearing 打印）一并改，
+   否则诊断工具会静默说谎。
+7. **顺带订正两处过期文档**：`docs/compatibility.md` 和 `config.rs` 都声称
+   Wayland/KMS「设置 CRTC VRR_ENABLED 属性」——按第 4 条，那个设置活不过一帧。
+
+已知限制：**无 VRR 显示器、无 async-flip 能力驱动可实测**，本轮全部行为验证来
+自纯策略单测（blocker 优先级全表、VRR 与 tearing 的独立判据、wire name 唯一性）
+与 latch 状态机单测。async flip 的落点已经备好：`SUBMISSION_SUPPORTS_ASYNC_FLIP`
+一个常量翻成 true，策略就活，驱动能力探测已经在门前。
+
+验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
+`--no-default-features` 及 7 组 backend feature profile 全绿；
+`cargo test --locked` lib 2675 passed / 0 failed（上一条目 2665 + 新增 10：
+tearing_control latch 5、udev_kms 策略 4、ipc_handler tearing v2 1）。
+
+---
+
 ## 2026-09-04：十二轮补充（蓝牙 v2 之三：入站授权，用户手动开窗）
 
 v1 记录里 v2 候选的最后一项。**结论先说：做成「用户显式开一个 60s 窗口」，

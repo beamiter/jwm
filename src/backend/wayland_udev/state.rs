@@ -2851,6 +2851,18 @@ impl CompositorHandler for JwmWaylandState {
             }
         }
 
+        // wp-tearing-control double-buffer latch, at the same commit point
+        // and for the same reason: a presentation hint describes the buffer
+        // committed with it, not the one already on screen.
+        if let Some(hints) = self.tearing_hints.as_ref()
+            && crate::backend::wayland_udev::tearing_control::commit_surface_hint(
+                hints,
+                &surface.id(),
+            )
+        {
+            self.needs_redraw = true;
+        }
+
         // Snapshot the buffer assignment kind BEFORE on_commit_buffer_handler consumes it.
         // on_commit_buffer_handler calls RendererSurfaceState::update_buffer which takes
         // the buffer out of SurfaceAttributes::current().buffer via .take(). If we read
@@ -3094,6 +3106,16 @@ impl CompositorHandler for JwmWaylandState {
                 self.needs_redraw = true;
             }
             cm.forget_surface(&surface.id());
+        }
+
+        // Same reasoning for the tearing hint: the protocol only *asks* a
+        // client to destroy its wp_tearing_control_v1 when the surface goes,
+        // so without this the entry outlives the surface under an ObjectId
+        // the server may later hand to something unrelated.
+        if let Some(hints) = self.tearing_hints.as_ref()
+            && crate::backend::wayland_udev::tearing_control::forget_surface(hints, &surface.id())
+        {
+            self.needs_redraw = true;
         }
 
         // Cleanup any tracked popups as well.

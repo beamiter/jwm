@@ -2068,7 +2068,7 @@ fn smoke_manual_kms_checklist_json() -> serde_json::Value {
             "id": "vrr-tearing",
             "area": "game",
             "command": "jwm-tool wayland-status --json",
-            "evidence": "outputs[].vrr, tearing.active_surface_count, presentation_timing outputs",
+            "evidence": "render_decisions.vrr, render_decisions.tearing (active vs client_demand, per-output blockers), get_tearing_hints outputs, presentation_timing outputs",
         },
         {
             "id": "hdr-color",
@@ -3694,6 +3694,44 @@ fn run_capabilities(json_output: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// One line per output for the tearing/VRR verdicts, plus the demand count.
+///
+/// The count alone was the whole report before the compositor had a
+/// presentation policy, and it said nothing about *why* a client asking to
+/// tear was not tearing. Each output now carries its own named blocker.
+fn print_tearing_hints(tearing: &serde_json::Value) {
+    let count = tearing
+        .get("active_surface_count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("tearing_hints: active_surface_count={}", count);
+    let Some(outputs) = tearing.get("outputs").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for output in outputs {
+        println!(
+            "  {}: asked={} tearing={} vrr={} blocker={}",
+            output
+                .get("output")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown"),
+            output
+                .get("client_asked_to_tear")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            output
+                .get("tearing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            output.get("vrr").and_then(|v| v.as_bool()).unwrap_or(false),
+            output
+                .get("blocker")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none"),
+        );
+    }
+}
+
 fn response_data<'a>(
     responses: &'a serde_json::Value,
     name: &str,
@@ -3934,11 +3972,16 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
         let blur = decisions.get("blur").unwrap_or(&serde_json::Value::Null);
         let hdr = decisions.get("hdr").unwrap_or(&serde_json::Value::Null);
         let tearing = decisions.get("tearing").unwrap_or(&serde_json::Value::Null);
+        let vrr = decisions.get("vrr").unwrap_or(&serde_json::Value::Null);
         let color = decisions
             .get("color_pipeline")
             .unwrap_or(&serde_json::Value::Null);
+        // render_decisions schema v2 split what a client asked for from what
+        // the compositor did: `tearing.active` is now the outcome and
+        // `tearing.client_demand` the request. Printing only the outcome
+        // would hide a client waiting on a refusal, so both are shown.
         println!(
-            "render_decisions: scanout={}({}) blur={}({}) hdr={}({}) tearing={}({}) shader_fallback_outputs={}",
+            "render_decisions: scanout={}({}) blur={}({}) hdr={}({}) tearing={}(demand={} {}) vrr={} shader_fallback_outputs={}",
             scanout
                 .get("active")
                 .and_then(|v| v.as_bool())
@@ -3962,9 +4005,14 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             tearing
+                .get("client_demand")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            tearing
                 .get("reason")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown"),
+            vrr.get("active").and_then(|v| v.as_bool()).unwrap_or(false),
             color
                 .get("shader_fallback_output_count")
                 .and_then(|v| v.as_u64())
@@ -4449,11 +4497,7 @@ fn print_unified_wayland_status(status: &serde_json::Value) {
     }
 
     if let Some(tearing) = status.get("tearing") {
-        let count = tearing
-            .get("active_surface_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        println!("tearing_hints: active_surface_count={}", count);
+        print_tearing_hints(tearing);
     }
 
     if let Some(lock) = status.get("session_lock") {
@@ -4927,11 +4971,7 @@ fn run_wayland_status(json_output: bool) -> io::Result<i32> {
     }
 
     if let Some(tearing) = response_data(queries, "get_tearing_hints") {
-        let count = tearing
-            .get("active_surface_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        println!("tearing_hints: active_surface_count={}", count);
+        print_tearing_hints(tearing);
     }
 
     if let Some(lock) = response_data(queries, "get_session_lock") {

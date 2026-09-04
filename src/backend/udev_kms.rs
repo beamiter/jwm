@@ -1601,6 +1601,159 @@ const fn direct_scanout_allowed_for_color_retry(
     policy_eligible && !color_delivery_retry_required
 }
 
+/// Whether jwm's frame submission path can ask the kernel for an
+/// asynchronous (tearing) page flip at all.
+///
+/// It cannot. Every frame goes through Smithay's `DrmCompositor::queue_frame`,
+/// whose private submission step picks between `commit` and `page_flip` and
+/// hardcodes the atomic flags on both; `PAGE_FLIP_ASYNC` is never set, and
+/// nothing on `DrmOutput`/`DrmCompositor`/`DrmSurface` takes a flag to thread
+/// one through. Bypassing `queue_frame` is not available either: the prepared
+/// frame's plane state is private and `RenderFrameResult` hands back no
+/// framebuffer handle to rebuild it from.
+///
+/// So the policy below computes the decision, reports it, and stops there —
+/// which is the point: `get_tearing_hints` and the render decisions can now
+/// say *why* a client that asked to tear is not tearing, instead of implying
+/// it is. When the submission path grows the knob, flip this constant and the
+/// policy goes live with the driver-capability probe already gating it.
+const SUBMISSION_SUPPORTS_ASYNC_FLIP: bool = false;
+
+/// Why a frame is not presented the way a tearing client asked for it.
+/// First blocker wins, in the order [`presentation_plan`] tests them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PresentationBlocker {
+    /// The output is off, soft-disabled, or the session is not active.
+    OutputNotPresenting,
+    /// `behavior.wayland_enable_tearing_control` is off, so no client can
+    /// have asked in the first place.
+    TearingControlDisabled,
+    /// Nobody asked. Not a fault — the common case.
+    NoClientAskedToTear,
+    /// The frame needs composition: a cursor, an overlay or layer surface, an
+    /// effect, the system UI, a recording, or simply more than one window.
+    /// Exactly the direct-scanout policy's own verdict.
+    CompositedFrameRequired,
+    /// A colour-delivery observation retry needs one guaranteed swapchain
+    /// commit; a tearing flip must not defeat it.
+    ColorDeliveryRetryPending,
+    /// The surface has pending state, so Smithay's next submission takes the
+    /// modesetting `commit` branch rather than `page_flip`. Async flips apply
+    /// only to the latter.
+    ModesetCommitPending,
+    /// The kernel driver does not advertise `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`.
+    DriverCannotFlipAsync,
+    /// See [`SUBMISSION_SUPPORTS_ASYNC_FLIP`].
+    SubmissionCannotRequestAsyncFlip,
+}
+
+impl PresentationBlocker {
+    /// Stable snake_case name for IPC.
+    pub(super) const fn wire_name(self) -> &'static str {
+        match self {
+            Self::OutputNotPresenting => "output_not_presenting",
+            Self::TearingControlDisabled => "tearing_control_disabled",
+            Self::NoClientAskedToTear => "no_client_asked_to_tear",
+            Self::CompositedFrameRequired => "composited_frame_required",
+            Self::ColorDeliveryRetryPending => "color_delivery_retry_pending",
+            Self::ModesetCommitPending => "modeset_commit_pending",
+            Self::DriverCannotFlipAsync => "driver_cannot_flip_async",
+            Self::SubmissionCannotRequestAsyncFlip => "submission_cannot_request_async_flip",
+        }
+    }
+}
+
+/// Everything the per-output presentation decision reads, as plain data, so
+/// the whole policy is unit tested without a DRM device. Every field has one
+/// producer, named in its comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PresentationEvidence {
+    /// `behavior.vrr_enabled`.
+    pub vrr_configured: bool,
+    /// `DrmCompositor::vrr_supported(connector) == VrrSupport::Supported`.
+    /// `RequiresModeset` deliberately does not count: Smithay's `use_vrr`
+    /// falls back to a modesetting test commit there and leaves the surface
+    /// with pending state, turning the next frame into a full commit.
+    pub vrr_supported_without_modeset: bool,
+    /// `behavior.wayland_enable_tearing_control` (the protocol global).
+    pub tearing_control_enabled: bool,
+    /// The window that owns this output has a committed `Async` hint.
+    pub client_asked_to_tear: bool,
+    /// `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`, probed once per device.
+    pub driver_supports_async_flip: bool,
+    /// The direct-scanout policy's verdict: exactly one mapped fullscreen
+    /// window, no cursor, no overlay or layer surface, no effect, no system
+    /// UI, no recording. Both decisions want the same shape, so they read the
+    /// same answer rather than drifting apart.
+    pub fullscreen_client_owns_output: bool,
+    /// A colour-delivery observation retry is in flight for this output.
+    pub color_delivery_retry_required: bool,
+    /// `DrmSurface::commit_pending()` — the next submission is a modesetting
+    /// commit, not a page flip.
+    pub commit_pending: bool,
+    /// The output is on, not soft-disabled, and the session is active.
+    pub output_presenting: bool,
+}
+
+/// What the presentation policy decided for one output this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PresentationPlan {
+    /// What `VRR_ENABLED` should be for this output. Applied through
+    /// Smithay's own `use_vrr` so it survives the next page flip — writing
+    /// the property directly does not, because Smithay re-asserts its cached
+    /// value in every atomic request it builds.
+    pub vrr: bool,
+    /// Whether this frame would be flipped asynchronously. Always false while
+    /// [`SUBMISSION_SUPPORTS_ASYNC_FLIP`] is false.
+    pub tearing: bool,
+    /// Why not, when not.
+    pub blocker: Option<PresentationBlocker>,
+}
+
+/// Decide how one output presents this frame.
+///
+/// VRR and tearing are separate mechanisms that happen to want the same
+/// evidence. VRR follows the content: a single fullscreen client on a
+/// live output gets an adaptive refresh rate, and a composited desktop does
+/// not — enabling it on a static desktop makes some panels flicker, and it is
+/// the shape every other compositor settles on. Tearing follows the client's
+/// explicit request, and is refused for a long list of reasons the caller
+/// reports one at a time.
+pub(super) const fn presentation_plan(e: &PresentationEvidence) -> PresentationPlan {
+    let vrr = e.vrr_configured
+        && e.vrr_supported_without_modeset
+        && e.output_presenting
+        && e.fullscreen_client_owns_output;
+
+    // Hardware and configuration first, so a permanently incapable output
+    // reports the same reason regardless of what is on screen.
+    let blocker = if !e.output_presenting {
+        Some(PresentationBlocker::OutputNotPresenting)
+    } else if !e.tearing_control_enabled {
+        Some(PresentationBlocker::TearingControlDisabled)
+    } else if !e.client_asked_to_tear {
+        Some(PresentationBlocker::NoClientAskedToTear)
+    } else if !e.fullscreen_client_owns_output {
+        Some(PresentationBlocker::CompositedFrameRequired)
+    } else if e.color_delivery_retry_required {
+        Some(PresentationBlocker::ColorDeliveryRetryPending)
+    } else if e.commit_pending {
+        Some(PresentationBlocker::ModesetCommitPending)
+    } else if !e.driver_supports_async_flip {
+        Some(PresentationBlocker::DriverCannotFlipAsync)
+    } else if !SUBMISSION_SUPPORTS_ASYNC_FLIP {
+        Some(PresentationBlocker::SubmissionCannotRequestAsyncFlip)
+    } else {
+        None
+    };
+
+    PresentationPlan {
+        vrr,
+        tearing: blocker.is_none(),
+        blocker,
+    }
+}
+
 fn frame_flags_for_color_delivery(
     color_delivery_retry_required: bool,
     manual_surface_path: bool,
@@ -1699,6 +1852,12 @@ pub(super) struct KmsState {
     /// compositor scene eligibility: KMS can still reject because overlays,
     /// cursor, config gates, or per-output state require composition.
     last_direct_scanout_outputs: Vec<crate::backend::api::DirectScanoutOutputStatus>,
+    last_presentation_outputs: Vec<crate::backend::api::PresentationOutputStatus>,
+    /// `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`, probed once at init. A driver that
+    /// does not advertise it rejects an async atomic commit outright, and the
+    /// render loop treats a rejected queue as a device fault — so this is a
+    /// precondition, not a preference.
+    driver_supports_async_flip: bool,
 
     /// Mirrors the most recent `ColorPipelineDecision::delivery_blocked` so
     /// `render_if_needed` cannot submit an incompatible framebuffer after a
@@ -3311,25 +3470,28 @@ impl KmsState {
                 output.output_name
             ));
         }
-        let crtc = output.crtc;
-        let mgr = self.drm_output_manager.lock();
-        let dev = mgr.device();
-        if let Ok(props) = dev.get_properties(crtc) {
-            let (handles, _values) = props.as_props_and_values();
-            for &prop_handle in handles {
-                if let Ok(info) = dev.get_property(prop_handle) {
-                    if info.name().to_str() == Ok("VRR_ENABLED") {
-                        return Self::set_drm_property(
-                            dev,
-                            crtc,
-                            prop_handle,
-                            if enabled { 1 } else { 0 },
-                        );
-                    }
-                }
+        // Through Smithay, never through the raw property: it re-asserts its
+        // own cached VRR value in every atomic request it builds, so a direct
+        // write is undone by the next page flip — which is what used to
+        // happen to every enable this function reported as successful.
+        let connector = output.connector;
+        match output
+            .drm_output
+            .with_compositor(|c| c.vrr_supported(connector))
+        {
+            Ok(smithay::backend::drm::VrrSupport::Supported) => {}
+            Ok(smithay::backend::drm::VrrSupport::RequiresModeset) => {
+                return Err("this output cannot change VRR without a modeset; refusing".to_string());
             }
+            Ok(smithay::backend::drm::VrrSupport::NotSupported) => {
+                return Err("VRR is not supported on this output".to_string());
+            }
+            Err(error) => return Err(format!("could not query VRR support: {error:?}")),
         }
-        Err("VRR_ENABLED property not found on CRTC".to_string())
+        output
+            .drm_output
+            .with_compositor(|c| c.use_vrr(enabled))
+            .map_err(|error| format!("could not set VRR: {error:?}"))
     }
 
     /// Push (or clear) the connector HDR signalling — HDR_OUTPUT_METADATA and
@@ -5484,6 +5646,12 @@ impl KmsState {
         self.last_direct_scanout_outputs.clone()
     }
 
+    pub(super) fn presentation_output_statuses(
+        &self,
+    ) -> Vec<crate::backend::api::PresentationOutputStatus> {
+        self.last_presentation_outputs.clone()
+    }
+
     pub(super) fn presentation_timing_status(
         &self,
     ) -> crate::backend::api::PresentationTimingStatus {
@@ -5617,6 +5785,29 @@ impl KmsState {
             render_formats,
         );
 
+        // Probe the async page-flip capability once. A driver that does not
+        // advertise it rejects an async atomic commit outright, and the
+        // render loop treats a rejected queue as a device fault and tries to
+        // re-activate the backend — so an unconditional attempt would spin
+        // that recovery path every frame.
+        let driver_supports_async_flip = {
+            use smithay::reexports::drm::Device as _;
+            drm_output_manager
+                .device()
+                .get_driver_capability(
+                    smithay::reexports::drm::DriverCapability::AtomicASyncPageFlip,
+                )
+                .is_ok_and(|value| value != 0)
+        };
+        log::info!(
+            "[kms] atomic async page flip {} by the driver",
+            if driver_supports_async_flip {
+                "supported"
+            } else {
+                "unsupported"
+            }
+        );
+
         #[derive(Clone)]
         struct PendingOutputInit {
             crtc: crtc::Handle,
@@ -5735,28 +5926,13 @@ impl KmsState {
                 )
                 .map_err(|e| KmsInitError::InitializeOutput(format!("{e}")))?;
 
-            // Enable VRR (Variable Refresh Rate / FreeSync / Adaptive Sync) on the CRTC if supported.
-            {
-                let mgr = drm_output_manager.lock();
-                let dev = mgr.device();
-                if let Ok(props) = dev.get_properties(p.crtc) {
-                    let (handles, _values) = props.as_props_and_values();
-                    for &prop_handle in handles {
-                        if let Ok(info) = dev.get_property(prop_handle) {
-                            if info.name().to_str() == Ok("VRR_ENABLED") {
-                                match Self::set_drm_property(dev, p.crtc, prop_handle, 1) {
-                                    Err(e) => log::debug!(
-                                        "[kms] failed to enable VRR on crtc {:?}: {e}",
-                                        p.crtc
-                                    ),
-                                    Ok(()) => log::info!("[kms] VRR enabled on crtc {:?}", p.crtc),
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
+            // VRR is *not* asserted here any more. It used to be written
+            // straight onto the CRTC property at init, which never survived:
+            // Smithay re-asserts its own cached VRR value in every atomic
+            // request it builds, including every page flip, so the enable was
+            // undone by the very next frame. It now belongs to the per-frame
+            // presentation policy, applied through Smithay's `use_vrr` so the
+            // cache and the hardware agree.
 
             // Probe color-pipeline caps inline (the standalone helper takes
             // &mut self which isn't available here). The same scan also
@@ -5926,6 +6102,8 @@ impl KmsState {
             image_capture_toplevel_offscreen: None,
             last_presentation_time: None,
             last_direct_scanout_outputs: Vec::new(),
+            last_presentation_outputs: Vec::new(),
+            driver_supports_async_flip,
             // Construction has not established the neutral hardware baseline
             // yet. Even though the event loop cannot dispatch this handle until
             // `new` returns, keep the invariant explicit in the state itself.
@@ -6039,6 +6217,11 @@ impl KmsState {
         }
 
         self.last_direct_scanout_outputs.clear();
+        self.last_presentation_outputs.clear();
+        // One lock per frame, not one per output: the render body has an
+        // explicit no-allocation, no-churn contract.
+        let tearing_control_enabled = state.tearing_hints.is_some();
+        let vrr_configured = crate::config::CONFIG.load().behavior().vrr_enabled;
         let mut any_skipped = false;
         let mut any_failed = false;
         for out_idx in 0..self.outputs.len() {
@@ -6402,6 +6585,67 @@ impl KmsState {
                     eligible: direct_scanout_eligible,
                     reason: direct_scanout_reason,
                 });
+
+            // Presentation policy: VRR follows the content, tearing follows
+            // the client's request. Both read the direct-scanout verdict for
+            // "one fullscreen client owns this output", so the three
+            // decisions cannot drift apart.
+            let client_asked_to_tear = state.tearing_hints.as_ref().is_some_and(|hints| {
+                direct_scanout_policy_eligible
+                    && state.window_stack.first().is_some_and(|win| {
+                        state.surface_for_window(*win).is_some_and(|surface| {
+                            crate::backend::wayland_udev::tearing_control::committed_hint(
+                                hints,
+                                &surface.id(),
+                            ) == crate::backend::wayland_udev::tearing_control::TearingHint::Async
+                        })
+                    })
+            });
+            let out = &self.outputs[out_idx];
+            let (vrr_supported_without_modeset, commit_pending) =
+                out.drm_output.with_compositor(|compositor| {
+                    (
+                        matches!(
+                            compositor.vrr_supported(out.connector),
+                            Ok(smithay::backend::drm::VrrSupport::Supported)
+                        ),
+                        compositor.surface().commit_pending(),
+                    )
+                });
+            let plan = presentation_plan(&PresentationEvidence {
+                vrr_configured,
+                vrr_supported_without_modeset,
+                tearing_control_enabled,
+                client_asked_to_tear,
+                driver_supports_async_flip: self.driver_supports_async_flip,
+                fullscreen_client_owns_output: direct_scanout_policy_eligible,
+                color_delivery_retry_required,
+                commit_pending,
+                output_presenting: true,
+            });
+            // Edge-triggered, and only where Smithay says VRR can change
+            // without a modeset: `use_vrr` otherwise leaves the surface with
+            // pending state, which turns the very next frame into a full
+            // modesetting commit.
+            if plan.vrr != out.drm_output.with_compositor(|c| c.vrr_enabled())
+                && let Err(error) = out
+                    .drm_output
+                    .with_compositor(|compositor| compositor.use_vrr(plan.vrr))
+            {
+                log::debug!(
+                    "[kms] could not set VRR on crtc {:?}: {error:?}",
+                    self.outputs[out_idx].crtc
+                );
+            }
+            self.last_presentation_outputs
+                .push(crate::backend::api::PresentationOutputStatus {
+                    output_name: self.outputs[out_idx].output_name.clone(),
+                    client_asked_to_tear,
+                    vrr: plan.vrr,
+                    tearing: plan.tearing,
+                    blocker: plan.blocker.map(|blocker| blocker.wire_name().to_string()),
+                });
+            let out = &mut self.outputs[out_idx];
 
             let use_compositor = compositor.is_some() && !direct_scanout_eligible;
 
@@ -7314,19 +7558,19 @@ mod compositor_texture_ownership_tests {
         ExternalElementDisposition, FrameQueueBoundary, HdrScanoutChainGap,
         InternalizedExternalFrame, LinearTailBlocker, OutputColorDeliveryTracker,
         OutputColorRegionCandidate, OutputExternalElementPlan, OutputScanoutColorGoal,
-        QueuedFrameData, ScanoutColorPropertyHandles, ScanoutColorTarget,
-        build_atomic_color_request, class_is_staging_candidate, classify_external_element,
-        client_direct_scanout_presented, commit_staged_internalization,
-        compositor_output_texture_identity_matches, connector_color_property_neutral_value,
-        crtc_color_property, direct_scanout_allowed_for_color_retry,
-        frame_flags_for_color_delivery, frame_watchdog_remaining, frame_watchdog_timeout,
-        gamma_ramp_is_identity, hdr_scanout_chain_gap, legacy_color_delivery_attempt_needed,
-        linear_tail_blocker_names, output_color_target, plan_output_configuration_rollback,
-        plan_software_color_regions, point_in_output, prepared_color_delivery,
-        rect_overlaps_output, rollback_mode_requires_restore, rounded_pointer_location,
-        scanout_color_goal_matches, scanout_format_channel_bits, smithay_transform_to_wl,
-        submitted_color_delivery_observation, vblank_is_not_older_than_queue,
-        wl_transform_to_smithay,
+        PresentationEvidence, QueuedFrameData, SUBMISSION_SUPPORTS_ASYNC_FLIP,
+        ScanoutColorPropertyHandles, ScanoutColorTarget, build_atomic_color_request,
+        class_is_staging_candidate, classify_external_element, client_direct_scanout_presented,
+        commit_staged_internalization, compositor_output_texture_identity_matches,
+        connector_color_property_neutral_value, crtc_color_property,
+        direct_scanout_allowed_for_color_retry, frame_flags_for_color_delivery,
+        frame_watchdog_remaining, frame_watchdog_timeout, gamma_ramp_is_identity,
+        hdr_scanout_chain_gap, legacy_color_delivery_attempt_needed, linear_tail_blocker_names,
+        output_color_target, plan_output_configuration_rollback, plan_software_color_regions,
+        point_in_output, prepared_color_delivery, presentation_plan, rect_overlaps_output,
+        rollback_mode_requires_restore, rounded_pointer_location, scanout_color_goal_matches,
+        scanout_format_channel_bits, smithay_transform_to_wl, submitted_color_delivery_observation,
+        vblank_is_not_older_than_queue, wl_transform_to_smithay,
     };
     use crate::backend::wayland_udev::color_management::ParametricParams;
     use crate::backend::wayland_udev::color_pipeline::{IDENTITY_CTM, TransferKind};
@@ -7376,6 +7620,170 @@ mod compositor_texture_ownership_tests {
         );
         assert!(render.contains("contains(&self.outputs[out_idx].output_name)"));
         assert!(render.contains("state.lock_surfaces.get(&out.output_name)"));
+    }
+
+    /// A fullscreen tearing client on a live, capable output — the one shape
+    /// where every clause is satisfied. Each test below spoils exactly one
+    /// field, so a blocker's precedence is visible rather than incidental.
+    fn tearing_ready() -> PresentationEvidence {
+        PresentationEvidence {
+            vrr_configured: true,
+            vrr_supported_without_modeset: true,
+            tearing_control_enabled: true,
+            client_asked_to_tear: true,
+            driver_supports_async_flip: true,
+            fullscreen_client_owns_output: true,
+            color_delivery_retry_required: false,
+            commit_pending: false,
+            output_presenting: true,
+        }
+    }
+
+    #[test]
+    fn tearing_is_refused_for_one_named_reason_at_a_time() {
+        use super::PresentationBlocker as B;
+
+        // The whole point of the slice: everything else is satisfied and the
+        // frame still does not tear, because jwm's submission path cannot ask
+        // for an async flip. Reporting that is what stops `active: true` from
+        // describing a frame that never happened.
+        let ready = presentation_plan(&tearing_ready());
+        assert!(!ready.tearing);
+        assert_eq!(ready.blocker, Some(B::SubmissionCannotRequestAsyncFlip));
+        assert!(!SUBMISSION_SUPPORTS_ASYNC_FLIP, "flip this when it can");
+
+        let spoil = |mutate: fn(&mut PresentationEvidence)| {
+            let mut evidence = tearing_ready();
+            mutate(&mut evidence);
+            presentation_plan(&evidence).blocker
+        };
+
+        // Hardware and configuration are tested before content, so a
+        // permanently incapable output reports the same reason whatever is
+        // on screen.
+        assert_eq!(
+            spoil(|e| e.output_presenting = false),
+            Some(B::OutputNotPresenting)
+        );
+        assert_eq!(
+            spoil(|e| e.tearing_control_enabled = false),
+            Some(B::TearingControlDisabled)
+        );
+        assert_eq!(
+            spoil(|e| e.client_asked_to_tear = false),
+            Some(B::NoClientAskedToTear)
+        );
+        assert_eq!(
+            spoil(|e| e.fullscreen_client_owns_output = false),
+            Some(B::CompositedFrameRequired)
+        );
+        // A colour-delivery retry needs one guaranteed swapchain commit; a
+        // tearing flip must never be allowed to defeat it.
+        assert_eq!(
+            spoil(|e| e.color_delivery_retry_required = true),
+            Some(B::ColorDeliveryRetryPending)
+        );
+        // Pending surface state means the next submission takes Smithay's
+        // modesetting `commit` branch, where an async flip does not apply.
+        assert_eq!(
+            spoil(|e| e.commit_pending = true),
+            Some(B::ModesetCommitPending)
+        );
+        // An async commit on a driver without the capability is rejected,
+        // and the render loop reads a rejected queue as a device fault.
+        assert_eq!(
+            spoil(|e| e.driver_supports_async_flip = false),
+            Some(B::DriverCannotFlipAsync)
+        );
+    }
+
+    #[test]
+    fn blocker_precedence_names_the_condition_a_user_can_act_on_first() {
+        use super::PresentationBlocker as B;
+
+        // A dark output reports being dark, not the six other things that
+        // are also true of it.
+        let mut off = tearing_ready();
+        off.output_presenting = false;
+        off.client_asked_to_tear = false;
+        off.driver_supports_async_flip = false;
+        assert_eq!(
+            presentation_plan(&off).blocker,
+            Some(B::OutputNotPresenting)
+        );
+
+        // With the protocol global off, "nobody asked" is not the useful
+        // answer: nobody *could* ask.
+        let mut disabled = tearing_ready();
+        disabled.tearing_control_enabled = false;
+        disabled.client_asked_to_tear = false;
+        assert_eq!(
+            presentation_plan(&disabled).blocker,
+            Some(B::TearingControlDisabled)
+        );
+    }
+
+    #[test]
+    fn vrr_follows_the_content_and_ignores_whether_a_client_wants_to_tear() {
+        // A single fullscreen client on a live, capable output gets an
+        // adaptive refresh rate whether or not it asked to tear — the two
+        // mechanisms read the same evidence but answer different questions.
+        let mut quiet = tearing_ready();
+        quiet.client_asked_to_tear = false;
+        assert!(presentation_plan(&quiet).vrr);
+        assert!(presentation_plan(&tearing_ready()).vrr);
+
+        let denies = |mutate: fn(&mut PresentationEvidence)| {
+            let mut evidence = tearing_ready();
+            mutate(&mut evidence);
+            !presentation_plan(&evidence).vrr
+        };
+        // A composited desktop does not: VRR on a static screen makes some
+        // panels flicker, and every other compositor lands on the same rule.
+        assert!(denies(|e| e.fullscreen_client_owns_output = false));
+        assert!(denies(|e| e.output_presenting = false));
+        assert!(denies(|e| e.vrr_configured = false));
+        // RequiresModeset does not count as supported: Smithay's `use_vrr`
+        // falls back to a modesetting test commit there and leaves the
+        // surface with pending state, turning the next frame into a full
+        // commit.
+        assert!(denies(|e| e.vrr_supported_without_modeset = false));
+
+        // A colour-delivery retry forces composition but says nothing about
+        // refresh rate, so VRR is unaffected by it.
+        let mut retrying = tearing_ready();
+        retrying.color_delivery_retry_required = true;
+        assert!(presentation_plan(&retrying).vrr);
+    }
+
+    #[test]
+    fn every_blocker_has_a_distinct_stable_wire_name() {
+        use super::PresentationBlocker as B;
+
+        let all = [
+            B::OutputNotPresenting,
+            B::TearingControlDisabled,
+            B::NoClientAskedToTear,
+            B::CompositedFrameRequired,
+            B::ColorDeliveryRetryPending,
+            B::ModesetCommitPending,
+            B::DriverCannotFlipAsync,
+            B::SubmissionCannotRequestAsyncFlip,
+        ];
+        let mut names: Vec<&str> = all.iter().map(|b| b.wire_name()).collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "two blockers share a wire name");
+        assert!(
+            names.iter().all(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            }),
+            "{names:?}"
+        );
     }
 
     #[test]

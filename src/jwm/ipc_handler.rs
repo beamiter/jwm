@@ -803,6 +803,7 @@ fn render_decisions_json(
     outputs: &[serde_json::Value],
     color_delivery: Option<&serde_json::Value>,
     tearing_hint_count: usize,
+    presentation: &[crate::backend::api::PresentationOutputStatus],
     hdr_config_enabled: bool,
     blur_config_enabled: bool,
     color_render_path_enabled: bool,
@@ -1124,20 +1125,61 @@ fn render_decisions_json(
         },
     });
 
+    // schema v2: `tearing.active` reports what the compositor DID, not what
+    // a client asked for. Under v1 it was literally `hint_count > 0`, which
+    // made a client merely requesting tearing indistinguishable from a frame
+    // that actually tore — and JWM does not tear at all yet, so v1 reported
+    // `active: true` for something that never happened. Client demand moved
+    // to `client_demand`; every consumer reading `active` has to be updated
+    // with the version, which is why this is not a silent change.
+    let tearing_outputs = presentation
+        .iter()
+        .map(|output| {
+            serde_json::json!({
+                "output": output.output_name,
+                "client_asked_to_tear": output.client_asked_to_tear,
+                "vrr": output.vrr,
+                "tearing": output.tearing,
+                "blocker": output.blocker,
+            })
+        })
+        .collect::<Vec<_>>();
+    let tearing_active = presentation.iter().any(|output| output.tearing);
+    // Prefer the blocker from an output that actually had demand: one
+    // output's "nobody asked" is not the session's reason when another
+    // output has a client waiting.
+    let tearing_reason = if tearing_active {
+        Some("async_page_flip_issued".to_string())
+    } else {
+        presentation
+            .iter()
+            .find(|output| output.client_asked_to_tear)
+            .or_else(|| presentation.first())
+            .and_then(|output| output.blocker.clone())
+    };
+
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "observation_semantics": "tri_state_last_successful_presentation",
         "direct_scanout": direct_scanout_decision,
         "blur": blur_decision,
         "hdr": hdr_decision,
         "tearing": {
-            "active": tearing_hint_count > 0,
+            "active": tearing_active,
+            "client_demand": tearing_hint_count > 0,
             "hint_count": tearing_hint_count,
-            "reason": if tearing_hint_count > 0 {
-                "client_requested_tearing_control"
-            } else {
-                "no_active_tearing_hints"
-            },
+            "reason": tearing_reason,
+            "outputs": tearing_outputs,
+        },
+        "vrr": {
+            "active": presentation.iter().any(|output| output.vrr),
+            "outputs": presentation
+                .iter()
+                .map(|output| serde_json::json!({
+                    "output": output.output_name,
+                    "enabled": output.vrr,
+                }))
+                .collect::<Vec<_>>(),
         },
         "color_pipeline": color_pipeline_decision,
     })
@@ -2145,9 +2187,26 @@ impl Jwm {
                     "color_delivery": color_delivery,
                 })))
             }
-            "get_tearing_hints" => IpcResponse::ok(Some(serde_json::json!({
-                "active_surface_count": backend.compositor_tearing_hint_count(),
-            }))),
+            "get_tearing_hints" => {
+                // `active_surface_count` is client demand and always has
+                // been; `outputs` is what the compositor did with it, one
+                // row per output with a named reason when it did nothing.
+                let presentation = backend.compositor_presentation_statuses();
+                IpcResponse::ok(Some(serde_json::json!({
+                    "active_surface_count": backend.compositor_tearing_hint_count(),
+                    "tearing_outputs": presentation.iter().filter(|o| o.tearing).count(),
+                    "outputs": presentation
+                        .iter()
+                        .map(|output| serde_json::json!({
+                            "output": output.output_name,
+                            "client_asked_to_tear": output.client_asked_to_tear,
+                            "vrr": output.vrr,
+                            "tearing": output.tearing,
+                            "blocker": output.blocker,
+                        }))
+                        .collect::<Vec<_>>(),
+                })))
+            }
             "get_session_lock" => IpcResponse::ok(Some(serde_json::json!({
                 "locked": backend.compositor_session_locked(),
                 "lock_surface_count": backend.compositor_session_lock_surface_count(),
@@ -2442,12 +2501,14 @@ impl Jwm {
             })
         });
         let tearing_hint_count = backend.compositor_tearing_hint_count();
+        let presentation_statuses = backend.compositor_presentation_statuses();
         let render_decisions = render_decisions_json(
             direct_scanout.as_ref(),
             blur.as_ref(),
             &output_details,
             color_delivery.as_ref(),
             tearing_hint_count,
+            &presentation_statuses,
             cfg.behavior().hdr_enabled,
             cfg.behavior().blur_enabled,
             color_render_path_enabled,
@@ -2515,6 +2576,16 @@ impl Jwm {
             },
             "tearing": {
                 "active_surface_count": tearing_hint_count,
+                "outputs": presentation_statuses
+                    .iter()
+                    .map(|output| serde_json::json!({
+                        "output": output.output_name,
+                        "client_asked_to_tear": output.client_asked_to_tear,
+                        "vrr": output.vrr,
+                        "tearing": output.tearing,
+                        "blocker": output.blocker,
+                    }))
+                    .collect::<Vec<_>>(),
             },
             "session_lock": {
                 "locked": backend.compositor_session_locked(),
@@ -4008,6 +4079,93 @@ mod tests {
     }
 
     #[test]
+    fn tearing_reports_what_the_compositor_did_not_what_a_client_asked_for() {
+        use crate::backend::api::PresentationOutputStatus;
+
+        let status = |name: &str, asked: bool, vrr: bool, tearing: bool, blocker: Option<&str>| {
+            PresentationOutputStatus {
+                output_name: name.to_string(),
+                client_asked_to_tear: asked,
+                vrr,
+                tearing,
+                blocker: blocker.map(str::to_string),
+            }
+        };
+        let render = |presentation: &[PresentationOutputStatus], hints: usize| {
+            render_decisions_json(
+                None,
+                None,
+                &[],
+                None,
+                hints,
+                presentation,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+        };
+
+        // A client asked and the compositor refused: demand is true, the
+        // outcome is false, and the reason is the refusal — under v1 this
+        // read as `active: true`, which described a frame that never
+        // happened.
+        let refused = render(
+            &[status(
+                "HDMI-A-1",
+                true,
+                true,
+                false,
+                Some("submission_cannot_request_async_flip"),
+            )],
+            1,
+        );
+        assert_eq!(refused["tearing"]["active"], false);
+        assert_eq!(refused["tearing"]["client_demand"], true);
+        assert_eq!(
+            refused["tearing"]["reason"],
+            "submission_cannot_request_async_flip"
+        );
+        assert_eq!(refused["tearing"]["outputs"][0]["output"], "HDMI-A-1");
+        // VRR is a separate mechanism reading the same evidence, and it did
+        // fire even though tearing did not.
+        assert_eq!(refused["vrr"]["active"], true);
+        assert_eq!(refused["vrr"]["outputs"][0]["enabled"], true);
+
+        // The session's reason comes from an output that actually had a
+        // client waiting, not from whichever output happens to be first.
+        let mixed = render(
+            &[
+                status("DP-1", false, false, false, Some("no_client_asked_to_tear")),
+                status(
+                    "HDMI-A-1",
+                    true,
+                    true,
+                    false,
+                    Some("driver_cannot_flip_async"),
+                ),
+            ],
+            1,
+        );
+        assert_eq!(mixed["tearing"]["reason"], "driver_cannot_flip_async");
+
+        // And when a frame does tear, that is what it says.
+        let torn = render(&[status("HDMI-A-1", true, true, true, None)], 1);
+        assert_eq!(torn["tearing"]["active"], true);
+        assert_eq!(torn["tearing"]["reason"], "async_page_flip_issued");
+
+        // No outputs at all (every non-KMS backend): no demand, no outcome,
+        // no fabricated reason.
+        let none = render(&[], 0);
+        assert_eq!(none["tearing"]["active"], false);
+        assert_eq!(none["tearing"]["client_demand"], false);
+        assert!(none["tearing"]["reason"].is_null());
+        assert_eq!(none["vrr"]["active"], false);
+    }
+
+    #[test]
     fn render_decisions_reports_direct_scanout_blockers() {
         let decisions = render_decisions_json(
             Some(&serde_json::json!({
@@ -4023,6 +4181,7 @@ mod tests {
             &[],
             None,
             0,
+            &[],
             false,
             false,
             false,
@@ -4054,6 +4213,7 @@ mod tests {
             &[serde_json::json!({"hdr_capable": false})],
             None,
             1,
+            &[],
             true,
             true,
             true,
@@ -4070,7 +4230,12 @@ mod tests {
         );
         assert_eq!(decisions["hdr"]["requested_on_capable_output"], false);
         assert_eq!(decisions["hdr"]["reason"], "no_hdr_capable_outputs");
-        assert_eq!(decisions["tearing"]["active"], true);
+        // schema v2: a client asking to tear is demand, not an outcome. With
+        // no per-output verdicts there is nothing that tore.
+        assert_eq!(decisions["schema_version"], 2);
+        assert_eq!(decisions["tearing"]["active"], false);
+        assert_eq!(decisions["tearing"]["client_demand"], true);
+        assert_eq!(decisions["tearing"]["hint_count"], 1);
         assert_eq!(
             decisions["color_pipeline"]["active"],
             serde_json::Value::Null
@@ -4115,6 +4280,7 @@ mod tests {
             &[serde_json::json!({"hdr_capable": true})],
             Some(&delivery),
             0,
+            &[],
             true,
             false,
             true,
@@ -4176,6 +4342,7 @@ mod tests {
                 &[],
                 Some(delivery),
                 0,
+                &[],
                 true,
                 false,
                 true,
@@ -4299,6 +4466,7 @@ mod tests {
                 &[],
                 Some(delivery),
                 0,
+                &[],
                 true,
                 false,
                 true,
@@ -4447,6 +4615,7 @@ mod tests {
             &[serde_json::json!({"hdr_capable": true})],
             Some(&delivery),
             0,
+            &[],
             true,
             false,
             true,
@@ -4478,6 +4647,7 @@ mod tests {
             &[serde_json::json!({"hdr_capable": true})],
             Some(&sdr_partial),
             0,
+            &[],
             true,
             false,
             true,
