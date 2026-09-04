@@ -1546,9 +1546,9 @@ impl Jwm {
             if self.features.system_ui.is_bluetooth_picker() {
                 if done.ok {
                     log::info!("Bluetooth: paired with {device_name}");
-                    self.features
-                        .system_ui
-                        .set_bluetooth_message(format!("Paired {device_name}"));
+                    self.features.system_ui.set_bluetooth_message(
+                        crate::jwm::features::pairing::paired_message(&device_name, done.connected),
+                    );
                     if let Some(scan) = crate::jwm::features::connectivity::start_device_scan() {
                         self.features.bluetooth_scan = Some(self.track_background_job(scan));
                     }

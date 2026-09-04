@@ -28,25 +28,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .format_timestamp_secs()
         .init();
 
-    // One-shot subcommand: drive a single Bluetooth pairing against the
-    // system bus and exit. It never touches the session bus or the
-    // org.freedesktop.Notifications name, so it cannot disturb a long-lived
-    // bridge running in the same session.
+    // One-shot subcommands: drive a single Bluetooth verb against the system
+    // bus and exit. Neither touches the session bus or the
+    // org.freedesktop.Notifications name, so neither can disturb a
+    // long-lived bridge running in the same session.
     let mut argv = std::env::args().skip(1);
-    if argv.next().as_deref() == Some("pair") {
-        let Some(address) = argv.next() else {
-            eprintln!("usage: jwm-bridge pair <AA:BB:CC:DD:EE:FF>");
-            std::process::exit(bluez::EXIT_USAGE);
-        };
-        // The session cookie arrives over the environment, not argv: `ps`
-        // output is world-readable on machines without hidepid, and the
-        // cookie is what authorizes answers to the pairing prompt.
-        let cookie = std::env::var("JWM_PAIRING_COOKIE").unwrap_or_default();
-        if cookie.is_empty() {
-            eprintln!("jwm-bridge pair: JWM_PAIRING_COOKIE is not set");
-            std::process::exit(bluez::EXIT_USAGE);
+    match argv.next().as_deref() {
+        Some("pair") => {
+            let Some(address) = argv.next() else {
+                eprintln!("usage: jwm-bridge pair <AA:BB:CC:DD:EE:FF>");
+                std::process::exit(bluez::EXIT_USAGE);
+            };
+            // The session cookie arrives over the environment, not argv:
+            // `ps` output is world-readable on machines without hidepid, and
+            // the cookie is what authorizes answers to the pairing prompt.
+            let cookie = std::env::var("JWM_PAIRING_COOKIE").unwrap_or_default();
+            if cookie.is_empty() {
+                eprintln!("jwm-bridge pair: JWM_PAIRING_COOKIE is not set");
+                std::process::exit(bluez::EXIT_USAGE);
+            }
+            std::process::exit(bluez::run(&address, &cookie).await);
         }
-        std::process::exit(bluez::run(&address, &cookie).await);
+        // `discover [seconds]` prints a JSON array of what bluez knows;
+        // `discover 0` lists without touching the radio. No cookie: it
+        // reads nothing secret, answers on stdout rather than over the IPC
+        // socket, and can be run by hand to see what the picker sees.
+        Some("discover") => {
+            let seconds = match argv.next() {
+                None => bluez::DISCOVERY_DEFAULT_SECONDS,
+                Some(argument) => match argument.parse::<u64>() {
+                    Ok(seconds) => seconds,
+                    Err(_) => {
+                        eprintln!("usage: jwm-bridge discover [seconds]");
+                        std::process::exit(bluez::EXIT_USAGE);
+                    }
+                },
+            };
+            std::process::exit(bluez::discover(seconds).await);
+        }
+        _ => {}
     }
 
     log::info!("jwm-bridge {} starting", env!("CARGO_PKG_VERSION"));

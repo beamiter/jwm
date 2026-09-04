@@ -659,6 +659,14 @@ pub struct BluetoothDevice {
     pub name: String,
     pub connected: bool,
     pub paired: bool,
+    /// Signal strength in dBm, when the controller is hearing the device
+    /// right now. `None` for a remembered device out of range, and for every
+    /// device on the `bluetoothctl` path, which never reported it.
+    ///
+    /// A discovery scan in a populated room returns dozens of nameless
+    /// beacons; sorting those by name is sorting by MAC address. Proximity is
+    /// the only ordering that helps someone find the headset in their hand.
+    pub rssi: Option<i16>,
 }
 
 /// A remembered-device list should be tiny. These bounds keep malformed or
@@ -714,6 +722,8 @@ pub fn parse_devices(output: &str) -> Vec<BluetoothDevice> {
             },
             connected: false,
             paired: false,
+            // The text path never reported it; only the D-Bus helper does.
+            rssi: None,
         });
     }
     devices
@@ -775,6 +785,8 @@ pub fn parse_scan_output(output: &str) -> Vec<BluetoothDevice> {
             },
             connected: false,
             paired: false,
+            // The text path never reported it; only the D-Bus helper does.
+            rssi: None,
         });
     }
     devices
@@ -795,13 +807,87 @@ pub fn parse_device_info(output: &str) -> (bool, bool) {
     (connected, paired)
 }
 
+/// Parse `jwm-bridge discover`: a JSON array of
+/// `{address, name, paired, connected, rssi}`.
+///
+/// One `GetManagedObjects` round trip answers what the text path needed one
+/// `bluetoothctl info` child per device to learn, so a list parsed here needs
+/// no follow-up sweep. The payload comes from a helper reading remote-peer
+/// advertisements, so it is bounded exactly like the text path: the same
+/// device cap, the same name cap, addresses validated before they can become
+/// a command argument.
+#[must_use]
+pub fn parse_bridge_devices(output: &str) -> Vec<BluetoothDevice> {
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str(output.trim()) else {
+        return Vec::new();
+    };
+    let mut devices: Vec<BluetoothDevice> = Vec::new();
+    for entry in entries {
+        if devices.len() >= MAX_BLUETOOTH_DEVICES {
+            break;
+        }
+        let Some(address) = entry.get("address").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let address = address.to_uppercase();
+        if !is_bluetooth_address(&address) {
+            continue;
+        }
+        if devices
+            .iter()
+            .any(|device| device.address.eq_ignore_ascii_case(&address))
+        {
+            continue;
+        }
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| {
+                name.chars()
+                    .take(MAX_BLUETOOTH_DEVICE_NAME_CHARS)
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| address.clone());
+        devices.push(BluetoothDevice {
+            address,
+            name,
+            connected: entry
+                .get("connected")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            paired: entry
+                .get("paired")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            rssi: entry
+                .get("rssi")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|rssi| i16::try_from(rssi).ok()),
+        });
+    }
+    devices
+}
+
 /// Sort devices the way the picker lists them: connected first, then paired,
-/// then by name, so the thing the user is most likely to act on is on top.
+/// then — among devices in the same state — the strongest signal, then by
+/// name.
+///
+/// Signal comes before name because a discovery scan in a populated room
+/// returns dozens of nameless beacons whose "name" is their MAC address;
+/// alphabetical order over those is noise, while the device in the user's
+/// hand is reliably the loudest. Devices with no reading (everything on the
+/// `bluetoothctl` path, and remembered devices out of range) sort after the
+/// ones that were heard, and fall back to name among themselves — which is
+/// exactly the old ordering.
 pub fn sort_devices(devices: &mut [BluetoothDevice]) {
     devices.sort_by(|a, b| {
         b.connected
             .cmp(&a.connected)
             .then_with(|| b.paired.cmp(&a.paired))
+            .then_with(|| b.rssi.is_some().cmp(&a.rssi.is_some()))
+            .then_with(|| b.rssi.cmp(&a.rssi))
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 }
@@ -814,12 +900,20 @@ pub fn device_row(device: &BluetoothDevice) -> String {
     } else {
         " "
     };
+    // The trailing column says what the row is: its bond state, or — for a
+    // device that has neither, which is every row a discovery scan adds —
+    // how strongly the controller is hearing it. dBm is a negative number
+    // where closer to zero is nearer; it is printed raw because there is no
+    // honest way to turn one advertisement's RSSI into a percentage.
     let state = if device.connected {
-        "connected"
+        "connected".to_string()
     } else if device.paired {
-        "paired"
+        "paired".to_string()
     } else {
-        ""
+        device
+            .rssi
+            .map(|rssi| format!("{rssi} dBm"))
+            .unwrap_or_default()
     };
     format!(
         "\u{f293} {marker} {:<34} {state}",
@@ -872,13 +966,71 @@ fn merge_discovered(devices: &mut Vec<BluetoothDevice>, discovered: Vec<Bluetoot
     }
 }
 
+/// How long `jwm-bridge discover` scans for a picker refresh. The helper
+/// clamps anything larger; this is the number jwm asks for.
+const BRIDGE_DISCOVERY_SECONDS: u64 = 10;
+/// Deadline for the helper process, leaving room above its own scan window
+/// for process startup and the two bus round trips around it.
+const BRIDGE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Whether `jwm-bridge` can answer a device listing on this machine.
+///
+/// Probed once, like [`bluetooth_tool`]: the helper is the same binary the
+/// pairing session already needs, so a session that can pair can also list,
+/// and one that cannot falls back to `bluetoothctl` text.
+fn bridge_discovery_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        // `discover 0` lists without touching the radio, so the probe is
+        // also a real answer — but it is the exit status that is cached,
+        // not the list.
+        connectivity_output(
+            "jwm-bridge",
+            &["discover", "0"],
+            CONNECTIVITY_QUERY_TIMEOUT,
+            MAX_CONNECTIVITY_OUTPUT_BYTES,
+        )
+        .is_ok_and(|output| output.status.success())
+    })
+}
+
+/// Ask `jwm-bridge` for the device list, scanning for `seconds` first.
+/// `None` when the helper is absent or failed, so the caller falls back.
+fn bridge_devices(seconds: u64) -> Option<Vec<BluetoothDevice>> {
+    if !bridge_discovery_available() {
+        return None;
+    }
+    let seconds = seconds.to_string();
+    let output = connectivity_output(
+        "jwm-bridge",
+        &["discover", &seconds],
+        BRIDGE_DISCOVERY_TIMEOUT,
+        MAX_CONNECTIVITY_OUTPUT_BYTES,
+    )
+    .ok()
+    .filter(|output| output.status.success())?;
+    Some(parse_bridge_devices(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
 /// List known devices with their live state, on a worker thread.
+///
+/// The helper answers the whole list — names and live Paired/Connected — in
+/// one bus round trip. The `bluetoothctl` fallback needs `devices` plus one
+/// `info` child per device, which is why this has always run off the frame
+/// thread.
 #[must_use]
 pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_available() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
+        // Zero seconds: list what bluez remembers without powering up a scan.
+        if let Some(mut devices) = bridge_devices(0) {
+            sort_devices(&mut devices);
+            return devices;
+        }
         let mut devices = run("bluetoothctl", &["devices"])
             .map(|output| parse_devices(&output))
             .unwrap_or_default();
@@ -888,17 +1040,28 @@ pub fn start_device_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
     }))
 }
 
-/// Run a bounded discovery (`bluetoothctl --timeout 15 scan on`) and merge
-/// what it hears into the remembered list, on a worker thread.
+/// Run a bounded discovery and merge what it hears into the remembered list,
+/// on a worker thread.
 ///
-/// The scan window is fixed; the worker deadline leaves headroom for process
-/// startup and the follow-up `info` sweep over the merged list.
+/// `jwm-bridge discover` drives `Adapter1.StartDiscovery` and reads the whole
+/// object tree back — one list, with live Paired/Connected and the signal
+/// strength the text path parsed and threw away, and no per-device `info`
+/// children. Without the helper this falls back to
+/// `bluetoothctl --timeout 15 scan on`, whose sightings are merged into the
+/// remembered list and then swept for state.
+///
+/// Either way the scan window is fixed and the worker deadline leaves
+/// headroom for process startup and the follow-up work.
 #[must_use]
 pub fn start_discovery_scan() -> Option<BackgroundJob<Vec<BluetoothDevice>>> {
-    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) {
+    if bluetooth_tool() != Some(BluetoothTool::Bluetoothctl) && !bridge_discovery_available() {
         return None;
     }
     Some(BackgroundJob::spawn(|| {
+        if let Some(mut devices) = bridge_devices(BRIDGE_DISCOVERY_SECONDS) {
+            sort_devices(&mut devices);
+            return devices;
+        }
         let discovered = connectivity_output(
             "bluetoothctl",
             &["--timeout", "15", "scan", "on"],
@@ -1510,6 +1673,7 @@ mod tests {
             name: name.to_string(),
             connected,
             paired,
+            rssi: None,
         }
     }
 
@@ -1603,6 +1767,124 @@ mod tests {
     }
 
     #[test]
+    fn among_equals_the_loudest_device_is_the_one_in_your_hand() {
+        // A discovery scan in a populated room returns mostly nameless
+        // beacons, so the tie-break that matters is proximity, not the MAC
+        // address masquerading as a name.
+        let heard = |name: &str, rssi: i16| BluetoothDevice {
+            rssi: Some(rssi),
+            ..device(name, false, false)
+        };
+        let mut devices = vec![
+            heard("AA-BB-CC-00-00-01", -90),
+            heard("AA-BB-CC-00-00-02", -41),
+            heard("AA-BB-CC-00-00-03", -67),
+        ];
+        sort_devices(&mut devices);
+        let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "AA-BB-CC-00-00-02",
+                "AA-BB-CC-00-00-03",
+                "AA-BB-CC-00-00-01"
+            ]
+        );
+
+        // State still wins over signal: a connected device stays on top even
+        // when something unpaired is shouting next to it.
+        let mut mixed = vec![heard("Loud beacon", -30), device("Speaker", true, true)];
+        sort_devices(&mut mixed);
+        assert_eq!(mixed[0].name, "Speaker");
+
+        // The row shows the reading where a bond state would otherwise be,
+        // so a scan's worth of nameless devices is at least orderable by eye.
+        assert!(device_row(&heard("Beacon", -41)).contains("-41 dBm"));
+        assert!(device_row(&device("Speaker", true, true)).contains("connected"));
+        assert!(!device_row(&device("Keyboard", false, false)).contains("dBm"));
+
+        // Devices nobody heard sort after the ones that were, and keep the
+        // old alphabetical order among themselves.
+        let mut silent = vec![
+            device("Zeta", false, false),
+            heard("Quiet", -95),
+            device("Alpha", false, false),
+        ];
+        sort_devices(&mut silent);
+        let names: Vec<&str> = silent.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["Quiet", "Alpha", "Zeta"]);
+    }
+
+    #[test]
+    fn the_helper_device_list_parses_into_rows_without_a_follow_up_sweep() {
+        let devices = parse_bridge_devices(
+            r#"[
+              {"address":"5c:fb:7c:1a:2b:3c","name":"WH-1000XM4",
+               "paired":true,"connected":true,"rssi":-52},
+              {"address":"7C:10:C9:AA:BB:CC","name":"  ","paired":false,
+               "connected":false,"rssi":null}
+            ]"#,
+        );
+        assert_eq!(devices.len(), 2);
+        // Addresses are upper-cased so they match every other wire form.
+        assert_eq!(devices[0].address, "5C:FB:7C:1A:2B:3C");
+        assert_eq!(devices[0].name, "WH-1000XM4");
+        // Paired/Connected arrive with the list; no `bluetoothctl info` run.
+        assert!(devices[0].paired);
+        assert!(devices[0].connected);
+        assert_eq!(devices[0].rssi, Some(-52));
+        // A blank name is not a row the user can read: fall back to the
+        // address, which is at least the handle they have.
+        assert_eq!(devices[1].name, "7C:10:C9:AA:BB:CC");
+        assert_eq!(devices[1].rssi, None);
+    }
+
+    #[test]
+    fn helper_output_is_validated_the_way_bluetoothctl_output_is() {
+        // Not JSON, not an array, and an empty payload: all empty lists, not
+        // panics — the helper is a child process like any other.
+        assert!(parse_bridge_devices("bluetoothd crashed").is_empty());
+        assert!(parse_bridge_devices("{}").is_empty());
+        assert!(parse_bridge_devices("").is_empty());
+
+        // Entries that could not name a device are dropped rather than
+        // reaching the panel or, worse, a command argument.
+        let devices = parse_bridge_devices(
+            r#"[{"name":"no address"},
+                {"address":"not-an-address","name":"junk"},
+                {"address":"5C:FB:7C:1A:2B:3C","name":"Real"},
+                {"address":"5c:fb:7c:1a:2b:3c","name":"Duplicate"}]"#,
+        );
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].name, "Real");
+
+        // The device and name caps hold against a hostile helper payload.
+        let long = "x".repeat(MAX_BLUETOOTH_DEVICE_NAME_CHARS * 4);
+        let flood: Vec<String> = (0..(MAX_BLUETOOTH_DEVICES + 40))
+            .map(|index| {
+                format!(
+                    r#"{{"address":"AA:BB:CC:{:02X}:{:02X}:{:02X}","name":"{long}"}}"#,
+                    index / 256,
+                    index % 256,
+                    index % 11
+                )
+            })
+            .collect();
+        let devices = parse_bridge_devices(&format!("[{}]", flood.join(",")));
+        assert_eq!(devices.len(), MAX_BLUETOOTH_DEVICES);
+        assert!(
+            devices
+                .iter()
+                .all(|d| d.name.chars().count() <= MAX_BLUETOOTH_DEVICE_NAME_CHARS)
+        );
+
+        // An out-of-range RSSI is dropped rather than saturated: a wrong
+        // number would reorder the list.
+        let devices = parse_bridge_devices(r#"[{"address":"5C:FB:7C:1A:2B:3C","rssi":-99999}]"#);
+        assert_eq!(devices[0].rssi, None);
+    }
+
+    #[test]
     fn activating_a_device_toggles_its_connection() {
         assert_eq!(device_action(&device("Speaker", false, true)), "connect");
         assert_eq!(device_action(&device("Speaker", true, true)), "disconnect");
@@ -1660,6 +1942,7 @@ mod tests {
             name: "Speaker".to_string(),
             connected: false,
             paired: true,
+            rssi: None,
         }];
         let discovered = parse_scan_output(
             "[NEW] Device 5c:fb:7c:1a:2b:3c Speaker\n[NEW] Device 7C:10:C9:AA:BB:CC Keyboard\n",

@@ -3937,6 +3937,7 @@ mod tests {
             name: "WH-1000XM4".to_string(),
             connected: false,
             paired: false,
+            rssi: None,
         }]);
         panel
     }

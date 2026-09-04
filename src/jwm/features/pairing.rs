@@ -283,6 +283,12 @@ pub struct DoneCommand {
     pub cookie: String,
     pub ok: bool,
     pub error: Option<String>,
+    /// Whether the helper also brought the device's profiles up after the
+    /// bond landed. `None` when there was nothing to connect — a failed
+    /// pairing, or a helper too old to report it — which is why this is not
+    /// a plain `bool`: "did not connect" and "was never asked to" put
+    /// different words on the picker's status line.
+    pub connected: Option<bool>,
 }
 
 fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
@@ -374,7 +380,27 @@ pub fn parse_done_command(args: &Value) -> Result<DoneCommand, String> {
         cookie: cookie_field(args)?,
         ok,
         error,
+        // A pairing that failed has nothing to connect; a helper that does
+        // not send the field leaves the verdict unknown rather than false.
+        connected: ok
+            .then(|| args.get("connected").and_then(Value::as_bool))
+            .flatten(),
     })
+}
+
+/// The picker's status line after a pairing succeeded.
+///
+/// The bond is what the command asked for and it landed either way, so this
+/// never reads as a failure. It does distinguish the three outcomes, because
+/// "Paired" on a headset that is not playing anything is the report that
+/// sends a user back to the panel to find out why.
+#[must_use]
+pub fn paired_message(device_name: &str, connected: Option<bool>) -> String {
+    match connected {
+        Some(true) => format!("Connected {device_name}"),
+        Some(false) => format!("Paired {device_name} \u{2014} not connected"),
+        None => format!("Paired {device_name}"),
+    }
 }
 
 /// The user's answer to a prompt, broadcast as [`RESPONSE_EVENT`].
@@ -670,6 +696,50 @@ mod tests {
         ] {
             assert!(parse_done_command(&args).is_err(), "accepted {args}");
         }
+    }
+
+    #[test]
+    fn the_auto_connect_verdict_is_only_meaningful_on_a_successful_pairing() {
+        let connected = parse_done_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "ok": true, "connected": true,
+        }))
+        .unwrap();
+        assert_eq!(connected.connected, Some(true));
+
+        let bonded_only = parse_done_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "ok": true, "connected": false,
+        }))
+        .unwrap();
+        assert_eq!(bonded_only.connected, Some(false));
+
+        // A helper too old to report it leaves the verdict unknown rather
+        // than claiming the device did not connect.
+        let silent = parse_done_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "ok": true,
+        }))
+        .unwrap();
+        assert_eq!(silent.connected, None);
+
+        // A failed pairing had nothing to connect, so a stray field on that
+        // frame is ignored instead of putting a connect verdict on a failure.
+        let failed = parse_done_command(&serde_json::json!({
+            "address": ADDR, "cookie": "c", "ok": false, "connected": true,
+        }))
+        .unwrap();
+        assert_eq!(failed.connected, None);
+    }
+
+    #[test]
+    fn the_success_line_says_whether_the_device_is_actually_usable() {
+        assert_eq!(
+            paired_message("WH-1000XM4", Some(true)),
+            "Connected WH-1000XM4"
+        );
+        assert_eq!(
+            paired_message("WH-1000XM4", Some(false)),
+            "Paired WH-1000XM4 \u{2014} not connected"
+        );
+        assert_eq!(paired_message("WH-1000XM4", None), "Paired WH-1000XM4");
     }
 
     #[test]

@@ -1142,6 +1142,17 @@ impl Jwm {
         } else if keysym == keys::KEY_Down || keysym == keys::KEY_Tab {
             self.features.system_ui.move_selection(1);
         } else if keysym == keys::KEY_s {
+            // Coalesce, the way `ensure_connectivity_refresh` does: leaning
+            // on `s` used to detach a trail of still-running scans, and a
+            // real `Adapter1.StartDiscovery` session is refcounted per
+            // connection, so overlapping ones are worse than wasteful.
+            if self.features.bluetooth_scan.is_some() {
+                self.features
+                    .system_ui
+                    .set_bluetooth_message("Scanning\u{2026}");
+                self.sync_system_ui(backend);
+                return;
+            }
             match crate::jwm::features::connectivity::start_discovery_scan() {
                 Some(scan) => {
                     self.features.bluetooth_scan = Some(self.track_background_job(scan));
@@ -1155,6 +1166,10 @@ impl Jwm {
                     .set_bluetooth_message("bluetoothctl is not available"),
             }
         } else if keysym == keys::KEY_r {
+            if self.features.bluetooth_scan.is_some() {
+                self.sync_system_ui(backend);
+                return;
+            }
             match crate::jwm::features::connectivity::start_device_scan() {
                 Some(scan) => {
                     self.features.bluetooth_scan = Some(self.track_background_job(scan));

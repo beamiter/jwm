@@ -203,18 +203,40 @@ mistyped passphrase can be retried without rescanning.
 ## Bluetooth picker
 
 `Alt+Ctrl+F12` (`bluetooth_picker`), or `Enter` on the Bluetooth row, lists
-the devices the controller remembers: connected first, then paired, then by
-name. `Enter` connects the selected device, or disconnects it if it is already
-connected; on a device that was never bonded, `Enter` starts pairing (below).
-`s` runs a bounded fifteen-second discovery scan and merges what it hears into
-the list; `r` re-reads the remembered list; `Esc` — or `Alt+Ctrl+F12` again —
-closes.
+the devices the controller knows: connected first, then paired, then — among
+devices in the same state — strongest signal first, then by name. `Enter`
+connects the selected device, or disconnects it if it is already connected;
+on a device that was never bonded, `Enter` starts pairing (below). `s` runs a
+bounded discovery scan and merges what it hears into the list; `r` re-reads
+the list; `Esc` — or `Alt+Ctrl+F12` again — closes. Leaning on `s` does not
+stack scans: while one is running the key just says `Scanning…` again.
 
-Reading the list is one `bluetoothctl info` per device, so it runs on a worker
-thread like the Wi-Fi scan and the panel shows `Reading devices…` until it
-lands. After a connect or disconnect the list is re-read, so the row shows
-what actually took rather than what was asked — `bluetoothctl` exits 0 even
-when the attempt failed, so the outcome is read out of what it printed.
+### Where the list comes from
+
+`jwm-bridge discover [seconds]` drives `Adapter1.StartDiscovery` on the system
+bus and reads the whole BlueZ object tree back in one round trip, so a single
+child process answers names, bond state, connection state and signal strength
+together. `discover 0` lists what BlueZ already remembers without powering up
+a scan, which is what `r` and the panel's first paint use.
+
+Without the helper installed the picker falls back to what it always did:
+`bluetoothctl devices` for the list, `bluetoothctl --timeout 15 scan on` for
+discovery, and one `bluetoothctl info` child per device to learn whether each
+is paired or connected. That fan-out is why the read has always run on a
+worker thread and the panel shows `Reading devices…` until it lands — a room
+with sixty devices in it is exactly when the list is longest.
+
+Signal strength is shown only where a bond state would otherwise be, so it
+appears on the unpaired devices a scan turns up and nowhere else. It is
+printed as raw dBm (closer to zero is nearer) because one advertisement's
+RSSI does not honestly convert to a percentage — but it is enough to sort by,
+which matters when a scan returns thirty devices whose "name" is their own MAC
+address. The `bluetoothctl` fallback reports no RSSI at all; those rows sort
+after the ones that were heard and keep the old alphabetical order.
+
+After a connect or disconnect the list is re-read, so the row shows what
+actually took rather than what was asked — `bluetoothctl` exits 0 even when
+the attempt failed, so the outcome is read out of what it printed.
 
 ### Pairing
 
@@ -239,6 +261,24 @@ broadcasts the cancel, the helper fails its outstanding BlueZ request or calls
 unanswered prompt times out after 25 seconds; a helper that never reports back
 is given up on after 95 seconds. A successful pairing re-reads the device
 list; a failure leaves the reason on the status line and can be retried.
+
+### After the bond
+
+Pairing establishes a bond; it does not put the headset in your ears. Once
+`Device1.Pair` returns, the helper sets `Trusted` on the device and calls
+`Device1.Connect` before it exits, so the picker reports `Connected <name>`
+rather than leaving a device that needs a second `Enter`.
+
+`Trusted` is what lets BlueZ accept the device's *own* later reconnections
+without an agent to authorize them — without it a keyboard pairs cleanly and
+then never types again after a reboot. It is set because the user chose this
+device explicitly; the bond is the authorization.
+
+Neither step can fail the pairing. The connect borrows whatever is left of the
+session's 90-second wall clock (at most 15 seconds, and never the few seconds
+reserved for reporting the outcome), so a device that wandered out of range
+between bonding and connecting is reported as `Paired <name> — not connected`
+and the bond, which is already on disk, stands.
 
 The helper answers only callbacks naming the device it was started for and
 refuses inbound `RequestAuthorization`/`AuthorizeService` outright. Prompts

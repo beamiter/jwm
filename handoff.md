@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-09-04：十二轮（蓝牙 v2 之二：配对后自动连接 / D-Bus 发现）
+
+v1 记录里列的 v2 候选三项，本轮做掉后两项（入站授权见下一条目）。
+
+1. **配对后自动连接 + Trusted**（`bridge/src/bluez.rs`）。`Device1.Pair` 返回后，
+   同一个已解析的 device path 上先 `Properties.Set(Device1.Trusted = true)`
+   （本地簿记，不会卡在射频上；没有它，配对好的键盘重启后自己回连时会因为
+   没有 agent 授权服务而永远打不出字），再 `Device1.Connect`。两步都不能把
+   成功的配对变成失败：`done_args` 多一个 `connected` 字段（`ok=false` 时
+   恒 null——失败的配对没有东西可连），jwm 侧 `DoneCommand.connected:
+   Option<bool>` + `pairing::paired_message` 给出三种状态行
+   （`Connected X` / `Paired X — not connected` / `Paired X`）。
+   **时钟不加长，只借用**：`connect_budget(elapsed)` 从 90s 会话墙钟里扣掉
+   已用时间和 3s 上报余量，取 `min(剩余, 15s)`，不足 1s 就直接跳过并如实
+   上报——因为 jwm 的 `SESSION_TIMEOUT` 是 95s，超时后 `done` 会被拒收，
+   面板什么都不会显示。
+2. **发现改走 D-Bus**（新 `jwm-bridge discover [seconds]`）。
+   `Adapter1.StartDiscovery` + 一次 `GetManagedObjects` 就同时拿到
+   name/Alias、Paired、Connected 和 RSSI，取代「`bluetoothctl devices` +
+   每设备一个 `bluetoothctl info` 子进程」的扇出（64 设备上限 × 10s 超时
+   = 最坏 640s 挂在一个 worker 线程上）。`discover 0` = 只列不扫，`r` 和
+   面板首帧用它。**对象树必须在 StopDiscovery 之前读**：bluez 只在还听得见
+   设备时才挂 RSSI，扫描停掉之后再读就正好丢掉这一个字段（本机实测：
+   停后 33 个设备全 null，停前全部有值）。适配器选择偏好 Powered，同 Powered
+   按 path 排序保证多次刷新选同一个控制器。jwm 侧 `parse_bridge_devices`
+   纯解析，边界与文本路径同源（64 设备 / 248 字符名 / 地址校验后才可能变成
+   命令参数）；`jwm-bridge` 不在时整条回退 `bluetoothctl` 原路径。
+3. **顺带两处**：`BluetoothDevice.rssi` 落到 picker——同一 bond 状态内按信号
+   排序、未配对行右侧显示原始 dBm（不折算百分比，一次广播的 RSSI 没有诚实的
+   百分比换算；字形不涉及 U+F600 以上，`device_row` 守卫测试照常通过）。本机
+   实测一次扫描返回 33 台设备、其中 31 台的「名字」就是自己的 MAC，按名字排
+   等于按 MAC 排，信号是唯一有用的次序。另外 picker 的 `s`/`r` 现在与
+   `ensure_connectivity_refresh` 一样合并在途任务，不再叠一串还在跑的扫描
+   （真 `StartDiscovery` 是按连接引用计数的，叠加比浪费更糟）。
+
+已知限制：本机有 hci0 / bluez 5.64 且已上电，`discover` 全链路真机实测通过
+（含 RSSI）；但没有可配对的外设，所以 `Pair`→`Trusted`→`Connect` 这条路仍然
+只有私有 dbus-daemon + 假 org.bluez 的集成测试覆盖（新增 `FakeDevice::Connect`
+与可写 `Trusted` 属性，含「连不上仍算配对成功」一例）。
+
+验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
+`--no-default-features` 及 7 组 backend feature profile 全绿；
+`cargo test --locked` lib 2659 passed / 0 failed（基线 2654 + 新增 5：
+connectivity 3、pairing 2）；
+`cargo test --locked --manifest-path bridge/Cargo.toml` 49 passed / 0 failed
+（基线 41 + 新增 8：discovery 纯函数 6、connect 预算 1、集成 1）。
+
+---
+
 ## 2026-09-04：十一轮补充（蓝牙配对 v1 落地 / WM_HINTS 结案）
 
 1. **蓝牙配对 v1 已实施**（上一轮的设计落地）。控制中心蓝牙 picker：`s` 发现

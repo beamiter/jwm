@@ -7,6 +7,27 @@ monorepo use independent Semantic Versions.
 
 ### Added
 
+- Pairing a Bluetooth device now finishes the job: once the bond lands, the
+  `jwm-bridge pair` helper marks the device trusted and connects its
+  profiles, so a headset plays and a keyboard types without a second trip
+  through the picker, and so BlueZ accepts the device's own reconnections
+  later. The connect is bounded by whatever is left of the session's wall
+  clock and can never turn a successful pairing into a failure — the picker
+  says `Connected <name>`, or `Paired <name> — not connected` when the
+  profiles did not come up. `bluetooth_pairing_done` carries a new
+  `connected` field.
+
+- Bluetooth discovery and device listing now go through
+  `jwm-bridge discover [seconds]`, which drives `Adapter1.StartDiscovery` and
+  reads the whole BlueZ object tree in one round trip, instead of scraping
+  `bluetoothctl` and then spawning one `bluetoothctl info` child per device.
+  Rows gained the signal strength that path parsed and discarded: an unpaired
+  device shows its RSSI in dBm, and devices in the same bond state sort by
+  signal before name, so the device in your hand is at the top of a scan that
+  found thirty nameless beacons. `bluetoothctl` remains the fallback when the
+  helper is not installed, and repeated `s` now coalesces onto the running
+  scan instead of stacking another one.
+
 - The Bluetooth picker can now pair new devices: `s` runs a bounded discovery
   scan, and `Enter` on a device that was never bonded spawns the one-shot
   `jwm-bridge pair` helper, which registers a `KeyboardDisplay` BlueZ agent

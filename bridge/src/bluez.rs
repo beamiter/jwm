@@ -1,13 +1,26 @@
-//! One-shot Bluetooth pairing: `jwm-bridge pair <address>`.
+//! One-shot Bluetooth verbs on the system bus: `jwm-bridge pair <address>`
+//! and `jwm-bridge discover [seconds]`.
 //!
-//! Pairing needs an `org.bluez.Agent1` on the *system* bus answering PIN and
-//! passkey callbacks interactively — nothing the long-lived notification
-//! bridge does, and nothing the compositor (deliberately D-Bus-free) can do.
-//! This process is the narrow bridge for exactly one session: register an
-//! agent with the strongest capability jwm's picker can honor
+//! Both live here rather than in the compositor because both need the system
+//! bus, and jwm is deliberately D-Bus-free — its event loop stays synchronous
+//! and a wedged bus must not be able to stall a frame.
+//!
+//! **Pairing** needs an `org.bluez.Agent1` answering PIN and passkey
+//! callbacks interactively — nothing the long-lived notification bridge does
+//! either. This process is the narrow bridge for exactly one session:
+//! register an agent with the strongest capability jwm's picker can honor
 //! (`KeyboardDisplay`), call `Device1.Pair`, relay every callback to jwm's
 //! picker over the fast IPC commands, and turn the user's answer — broadcast
-//! back as a `bluetooth/pairing_response` event — into the agent reply.
+//! back as a `bluetooth/pairing_response` event — into the agent reply. A
+//! bond that lands is then trusted and connected, because "paired" is not
+//! what the user wanted; "the headset plays" is.
+//!
+//! **Discovery** replaces scraping `bluetoothctl --timeout N scan on`. One
+//! `GetManagedObjects` round trip answers Paired/Connected/Alias/RSSI for
+//! every device at once, where the text path needed one `bluetoothctl info`
+//! child per device. It prints a bounded JSON array and exits; BlueZ scopes a
+//! discovery session to the calling connection, so process exit stops the
+//! scan even if `StopDiscovery` never lands.
 //!
 //! Trust rules, all enforced here and in `jwm::features::pairing`:
 //!
@@ -19,7 +32,10 @@
 //! - PINs and passkeys are relayed but never logged.
 //! - Every wait is bounded: jwm withdraws a stale prompt after 25s, this
 //!   process answers no callback later than 35s after it arrived, and the
-//!   whole session has a 90s wall clock.
+//!   whole session has a 90s wall clock. Discovery has its own, shorter one.
+//! - Everything printed for jwm to parse is bounded here as well as there:
+//!   device names come from a remote peer and must never reach the panel at
+//!   arbitrary length.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,6 +52,8 @@ use crate::jwm_ipc::JwmIpc;
 const BLUEZ: &str = "org.bluez";
 const AGENT_MANAGER_IFACE: &str = "org.bluez.AgentManager1";
 const DEVICE_IFACE: &str = "org.bluez.Device1";
+const ADAPTER_IFACE: &str = "org.bluez.Adapter1";
+const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 
 /// Where this process serves its agent. The path dies with the process, so
 /// concurrent or successive helpers never fight over it.
@@ -50,6 +68,16 @@ pub const CAPABILITY: &str = "KeyboardDisplay";
 const PROMPT_WAIT: Duration = Duration::from_secs(35);
 /// Absolute bound on one pairing session.
 const WALL_CLOCK: Duration = Duration::from_secs(90);
+/// How long the post-pair `Connect` may take when the whole wall clock is
+/// still available. A profile negotiation that has not finished by then is
+/// reported as "paired but not connected" rather than held onto: the bond is
+/// what the user asked for and it is already durable.
+const CONNECT_WAIT: Duration = Duration::from_secs(15);
+/// Room reserved at the end of the wall clock for the `done` report, so a
+/// long `Connect` can never eat the frame that tells jwm what happened.
+const REPORT_SLACK: Duration = Duration::from_secs(3);
+/// Below this there is no point starting a `Connect` at all.
+const MIN_CONNECT_BUDGET: Duration = Duration::from_secs(1);
 /// Pairing traffic is a handful of frames; a small queue is plenty.
 const EVENT_QUEUE_CAPACITY: usize = 64;
 
@@ -64,6 +92,28 @@ pub const EXIT_CANCELLED: i32 = 2;
 pub const EXIT_ERROR: i32 = 3;
 /// Bad invocation (usage).
 pub const EXIT_USAGE: i32 = 64;
+/// The verb did what it said. Shares its value with [`EXIT_PAIRED`]; the
+/// pairing name is kept because the picker reads pairing exits by name.
+pub const EXIT_OK: i32 = 0;
+
+/// Longest discovery window a caller may ask for. Discovery keeps the radio
+/// busy and BlueZ's own `DiscoverableTimeout` is measured in minutes, so a
+/// picker refresh has no business running longer than this.
+const DISCOVERY_MAX_SECONDS: u64 = 30;
+/// What `jwm-bridge discover` scans for when no window is given — the same
+/// budget the `bluetoothctl` path used, minus the process-startup slack it
+/// needed.
+pub const DISCOVERY_DEFAULT_SECONDS: u64 = 10;
+/// Bound on one bus round trip. A wedged bluetoothd must not hold the worker
+/// thread jwm is waiting on.
+const DISCOVERY_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+/// As many devices as jwm's picker will keep (`MAX_BLUETOOTH_DEVICES`).
+/// Bounded on this side too: a crowded room is exactly when the list is
+/// longest, and stdout is the wire.
+const MAX_DISCOVERED_DEVICES: usize = 64;
+/// As many name characters as jwm's picker will keep
+/// (`MAX_BLUETOOTH_DEVICE_NAME_CHARS`). The name is remote-controlled input.
+const MAX_DEVICE_NAME_CHARS: usize = 248;
 
 /// Agent replies bluez understands. zbus's stock `Error` collapses to
 /// `org.freedesktop.DBus.Error.Failed` at dispatch; deriving `DBusError` keeps
@@ -385,13 +435,41 @@ fn prompt_args(address: &str, cookie: &str, prompt: &PromptRequest) -> Value {
 }
 
 /// Build the `bluetooth_pairing_done` command arguments.
-fn done_args(address: &str, cookie: &str, ok: bool, error: Option<&str>) -> Value {
+///
+/// `connected` is the post-pair auto-connect verdict and is meaningful only
+/// when `ok`: `Some(true)` the device is in use now, `Some(false)` the bond
+/// exists but the profile connection did not come up, `None` no connect was
+/// attempted (the pairing failed, so there was nothing to connect).
+fn done_args(
+    address: &str,
+    cookie: &str,
+    ok: bool,
+    error: Option<&str>,
+    connected: Option<bool>,
+) -> Value {
     serde_json::json!({
         "address": address,
         "cookie": cookie,
         "ok": ok,
         "error": error,
+        "connected": connected,
     })
+}
+
+/// How long the post-pair `Connect` may run, given how much of the session
+/// wall clock the pairing itself already spent.
+///
+/// The connect is a convenience on top of a bond that is already durable, so
+/// it borrows leftover time instead of extending the session: jwm drops its
+/// own session record shortly after this process's wall clock, and a `done`
+/// report that arrives after that is refused and the picker is left saying
+/// nothing happened. `None` means "no room left, skip it".
+fn connect_budget(elapsed: Duration) -> Option<Duration> {
+    let remaining = WALL_CLOCK
+        .saturating_sub(elapsed)
+        .saturating_sub(REPORT_SLACK);
+    let budget = remaining.min(CONNECT_WAIT);
+    (budget >= MIN_CONNECT_BUDGET).then_some(budget)
 }
 
 /// One `bluetooth/pairing_response` event from jwm.
@@ -443,8 +521,15 @@ fn session_matches(value: &Value, address: &str, cookie: &str) -> bool {
 
 /// Report the terminal outcome to jwm. Best effort by definition: when jwm
 /// is gone there is nothing left to inform.
-async fn report_done(ipc: &JwmIpc, address: &str, cookie: &str, ok: bool, error: Option<&str>) {
-    let args = done_args(address, cookie, ok, error);
+async fn report_done(
+    ipc: &JwmIpc,
+    address: &str,
+    cookie: &str,
+    ok: bool,
+    error: Option<&str>,
+    connected: Option<bool>,
+) {
+    let args = done_args(address, cookie, ok, error, connected);
     let ipc = ipc.clone();
     let sent =
         tokio::task::spawn_blocking(move || ipc.command("bluetooth_pairing_done", args)).await;
@@ -573,10 +658,84 @@ async fn agent_manager_call_path(
         .map(|_| ())
 }
 
+/// Mark a freshly bonded device trusted.
+///
+/// Without this every later service connection from the device raises an
+/// `AuthorizeService` callback, and with no agent registered bluez answers it
+/// by refusing — a keyboard that pairs fine and then never types. The user
+/// chose this device explicitly, so the bond carries the authorization.
+/// Best effort: a controller that refuses the property still leaves a usable
+/// bond, and the failure is worth a log line, not a failed pairing.
+async fn mark_trusted(connection: &Connection, device_path: &OwnedObjectPath) {
+    let result = connection
+        .call_method(
+            Some(bluez_name()),
+            device_path,
+            Some(PROPERTIES_IFACE),
+            "Set",
+            &(DEVICE_IFACE, "Trusted", zbus::zvariant::Value::Bool(true)),
+        )
+        .await;
+    if let Err(error) = result {
+        log::warn!("could not mark the device trusted: {error}");
+    }
+}
+
+/// Connect the profiles of a device that just finished bonding.
+///
+/// Pairing establishes the bond; it does not put the headset in your ears.
+/// BlueZ connects some devices on its own and leaves others waiting for an
+/// explicit `Connect`, so the picker used to need a second `Enter` for half
+/// the devices in existence. Bounded by `budget`: a device that wandered out
+/// of range must not hold the session open.
+async fn connect_device(
+    connection: &Connection,
+    device_path: &OwnedObjectPath,
+    budget: Duration,
+) -> Result<(), String> {
+    let call = connection.call_method(
+        Some(bluez_name()),
+        device_path,
+        Some(DEVICE_IFACE),
+        "Connect",
+        &(),
+    );
+    match tokio::time::timeout(budget, call).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("{error}")),
+        Err(_) => Err(format!("the device did not connect within {budget:?}")),
+    }
+}
+
+/// Trust and connect a device whose `Pair` just returned successfully.
+/// Returns whether the profile connection came up; the bond stands either
+/// way, so nothing here can turn a successful pairing into a failure.
+async fn settle_paired_device(
+    connection: &Connection,
+    device_path: &OwnedObjectPath,
+    elapsed: Duration,
+) -> bool {
+    mark_trusted(connection, device_path).await;
+    let Some(budget) = connect_budget(elapsed) else {
+        log::info!("paired, but no wall-clock budget left to connect the device");
+        return false;
+    };
+    match connect_device(connection, device_path, budget).await {
+        Ok(()) => true,
+        Err(error) => {
+            log::warn!("paired, but connecting the device failed: {error}");
+            false
+        }
+    }
+}
+
 /// Drive one pairing session to its end: register the agent, pair, relay
 /// callbacks both ways, report `done`, unregister. Returns the exit code.
 pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, cookie: &str) -> i32 {
     let target = address.to_uppercase();
+    // The post-pair connect borrows what is left of the wall clock rather
+    // than extending it; this is where that clock starts.
+    let session_started = std::time::Instant::now();
 
     // Self-heal before touching bluez: jwm may have cancelled between
     // spawning this process and now.
@@ -605,7 +764,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
 
     let Some(device_path) = find_device_path(&connection, &target).await else {
         log::warn!("pair {target}: no bluez device with that address");
-        report_done(&ipc, &target, cookie, false, Some("device not found")).await;
+        report_done(&ipc, &target, cookie, false, Some("device not found"), None).await;
         return EXIT_FAILED;
     };
 
@@ -633,6 +792,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
             cookie,
             false,
             Some("could not register the pairing agent"),
+            None,
         )
         .await;
         return EXIT_ERROR;
@@ -653,6 +813,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
             cookie,
             false,
             Some("bluez refused the pairing agent"),
+            None,
         )
         .await;
         return EXIT_FAILED;
@@ -689,7 +850,12 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
 
     match outcome {
         Ok(_) => {
-            report_done(&ipc, &target, cookie, true, None).await;
+            // The bond exists from here on. Trust and connect are the
+            // finishing moves that make the device usable without a second
+            // trip through the picker; neither can undo the pairing.
+            let connected =
+                settle_paired_device(&connection, &device_path, session_started.elapsed()).await;
+            report_done(&ipc, &target, cookie, true, None, Some(connected)).await;
             EXIT_PAIRED
         }
         Err(error) => {
@@ -699,7 +865,7 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
             } else {
                 format!("{error}")
             };
-            report_done(&ipc, &target, cookie, false, Some(&reason)).await;
+            report_done(&ipc, &target, cookie, false, Some(&reason), None).await;
             if cancelled {
                 EXIT_CANCELLED
             } else {
@@ -707,6 +873,235 @@ pub async fn pair_session(ipc: JwmIpc, connection: Connection, address: &str, co
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Discovery (`jwm-bridge discover`)
+// ---------------------------------------------------------------------------
+
+/// One device as printed for jwm's picker. Deliberately the same four facts
+/// the text path scraped, plus the RSSI that path parsed and threw away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScannedDevice {
+    address: String,
+    name: String,
+    paired: bool,
+    connected: bool,
+    /// Signal strength in dBm when bluez has heard the device this session.
+    /// Absent for a remembered device that is merely out of range.
+    rssi: Option<i16>,
+}
+
+impl ScannedDevice {
+    /// The wire shape jwm's `parse_bridge_devices` reads. Hand-built rather
+    /// than derived so the bridge keeps its dependency list at `serde_json`
+    /// alone — the schema is five fields and is pinned by a test on both
+    /// sides.
+    fn to_json(&self) -> Value {
+        serde_json::json!({
+            "address": self.address,
+            "name": self.name,
+            "paired": self.paired,
+            "connected": self.connected,
+            "rssi": self.rssi,
+        })
+    }
+}
+
+/// Read a boolean property out of a `GetManagedObjects` interface map,
+/// defaulting to false — an absent flag is not a true one.
+fn managed_bool(
+    properties: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    key: &str,
+) -> bool {
+    properties
+        .get(key)
+        .and_then(|value| bool::try_from(value.clone()).ok())
+        .unwrap_or(false)
+}
+
+fn managed_string(
+    properties: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+    key: &str,
+) -> Option<String> {
+    properties
+        .get(key)
+        .and_then(|value| String::try_from(value.clone()).ok())
+}
+
+/// Pick the controller to scan with: a powered adapter if there is one,
+/// otherwise the first adapter at all so the caller gets "not powered"
+/// rather than "no bluetooth". Machines with two controllers are rare and
+/// the picker has no way to choose between them, so first-wins is honest.
+fn adapter_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Option<OwnedObjectPath> {
+    let iface = zbus::names::InterfaceName::try_from(ADAPTER_IFACE).ok()?;
+    let mut fallback = None;
+    let mut paths: Vec<_> = objects.iter().collect();
+    // GetManagedObjects has no defined order; sort so hci0 beats hci1 every
+    // run and the same controller is used across refreshes.
+    paths.sort_by_key(|(path, _)| path.as_str().to_string());
+    for (path, interfaces) in paths {
+        let Some(properties) = interfaces.get(&iface) else {
+            continue;
+        };
+        if managed_bool(properties, "Powered") {
+            return Some(path.clone());
+        }
+        fallback.get_or_insert_with(|| path.clone());
+    }
+    fallback
+}
+
+/// Every `org.bluez.Device1` bluez currently knows about — remembered bonds
+/// and, during or just after a scan, whatever the radio has heard.
+fn devices_from_managed_objects(objects: &zbus::fdo::ManagedObjects) -> Vec<ScannedDevice> {
+    let Ok(iface) = zbus::names::InterfaceName::try_from(DEVICE_IFACE) else {
+        return Vec::new();
+    };
+    let mut devices: Vec<ScannedDevice> = Vec::new();
+    let mut paths: Vec<_> = objects.iter().collect();
+    paths.sort_by_key(|(path, _)| path.as_str().to_string());
+    for (_, interfaces) in paths {
+        if devices.len() >= MAX_DISCOVERED_DEVICES {
+            break;
+        }
+        let Some(properties) = interfaces.get(&iface) else {
+            continue;
+        };
+        let Some(address) = managed_string(properties, "Address") else {
+            continue;
+        };
+        let address = address.to_uppercase();
+        if !is_valid_address(&address) {
+            continue;
+        }
+        // Alias is what the user set (or bluez's own fallback); Name is what
+        // the device announced. Prefer the former, and never show an empty
+        // row: the address is a worse name but it is a name.
+        let name = managed_string(properties, "Alias")
+            .or_else(|| managed_string(properties, "Name"))
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| address.clone());
+        let name: String = name.chars().take(MAX_DEVICE_NAME_CHARS).collect();
+        let rssi = properties
+            .get("RSSI")
+            .and_then(|value| i16::try_from(value.clone()).ok());
+        devices.push(ScannedDevice {
+            address,
+            name,
+            paired: managed_bool(properties, "Paired"),
+            connected: managed_bool(properties, "Connected"),
+            rssi,
+        });
+    }
+    devices
+}
+
+/// Clamp a caller-supplied scan window. Zero is meaningful: "list what bluez
+/// already knows, do not touch the radio".
+fn discovery_window(seconds: u64) -> Duration {
+    Duration::from_secs(seconds.min(DISCOVERY_MAX_SECONDS))
+}
+
+async fn managed_objects(connection: &Connection) -> Option<zbus::fdo::ManagedObjects> {
+    let proxy = zbus::fdo::ObjectManagerProxy::builder(connection)
+        .destination(BLUEZ)
+        .ok()?
+        .path("/")
+        .ok()?
+        .build()
+        .await
+        .map_err(|error| log::warn!("discover: cannot build an ObjectManager proxy: {error}"))
+        .ok()?;
+    match tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, proxy.get_managed_objects()).await {
+        Ok(Ok(objects)) => Some(objects),
+        Ok(Err(error)) => {
+            log::warn!("discover: GetManagedObjects failed: {error}");
+            None
+        }
+        Err(_) => {
+            log::warn!("discover: GetManagedObjects did not answer in time");
+            None
+        }
+    }
+}
+
+/// One bounded `Adapter1` call. Discovery start/stop are both best effort:
+/// a controller that refuses to scan still has a device list worth printing,
+/// and process exit ends the scan whatever `StopDiscovery` did.
+async fn adapter_call(connection: &Connection, adapter: &OwnedObjectPath, method: &str) -> bool {
+    let call = connection.call_method(
+        Some(bluez_name()),
+        adapter,
+        Some(ADAPTER_IFACE),
+        method,
+        &(),
+    );
+    match tokio::time::timeout(DISCOVERY_CALL_TIMEOUT, call).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) => {
+            log::warn!("discover: {method} failed: {error}");
+            false
+        }
+        Err(_) => {
+            log::warn!("discover: {method} did not answer in time");
+            false
+        }
+    }
+}
+
+/// Entry point for `jwm-bridge discover`: list what bluez knows, optionally
+/// after running the radio for `seconds`. Prints a JSON array on stdout —
+/// jwm parses it on the worker thread that used to parse `bluetoothctl`.
+pub async fn discover(seconds: u64) -> i32 {
+    let connection = match zbus::connection::Builder::system() {
+        Ok(builder) => match builder.build().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                log::warn!("discover: cannot reach the system bus: {error}");
+                return EXIT_ERROR;
+            }
+        },
+        Err(error) => {
+            log::warn!("discover: no system bus address: {error}");
+            return EXIT_ERROR;
+        }
+    };
+
+    // Read the object tree while the scan is still running: bluez publishes
+    // RSSI on a device only for as long as it is hearing it, so a sweep
+    // taken after StopDiscovery loses exactly the field the text path never
+    // had. Stopping afterwards keeps the radio idle for the next refresh.
+    let window = discovery_window(seconds);
+    let mut scanning = None;
+    if !window.is_zero() {
+        match managed_objects(&connection)
+            .await
+            .as_ref()
+            .and_then(adapter_from_managed_objects)
+        {
+            Some(adapter) => {
+                if adapter_call(&connection, &adapter, "StartDiscovery").await {
+                    tokio::time::sleep(window).await;
+                    scanning = Some(adapter);
+                }
+            }
+            None => log::warn!("discover: no bluez adapter to scan with"),
+        }
+    }
+
+    let objects = managed_objects(&connection).await;
+    if let Some(adapter) = scanning {
+        adapter_call(&connection, &adapter, "StopDiscovery").await;
+    }
+    let Some(objects) = objects else {
+        return EXIT_ERROR;
+    };
+    let devices = devices_from_managed_objects(&objects);
+    let payload = Value::Array(devices.iter().map(ScannedDevice::to_json).collect());
+    println!("{payload}");
+    EXIT_OK
 }
 
 /// Entry point for `jwm-bridge pair`: connect the system bus and run one
@@ -739,7 +1134,15 @@ pub async fn run(address: &str, cookie: &str) -> i32 {
         Ok(code) => code,
         Err(_) => {
             log::warn!("pair {address}: exceeded the {WALL_CLOCK:?} wall clock");
-            report_done(&ipc, address, cookie, false, Some("pairing timed out")).await;
+            report_done(
+                &ipc,
+                address,
+                cookie,
+                false,
+                Some("pairing timed out"),
+                None,
+            )
+            .await;
             EXIT_ERROR
         }
     }
@@ -813,6 +1216,220 @@ mod tests {
         assert!(device_path_from_managed_objects(&managed_objects(&[]), ADDR).is_none());
     }
 
+    /// One object in a fabricated `GetManagedObjects` reply: where it lives,
+    /// which interface it implements, and the properties bluez would publish.
+    type ManagedEntry<'a> = (&'a str, &'a str, &'a [(&'a str, OwnedValue)]);
+
+    /// A `GetManagedObjects` reply built from [`ManagedEntry`] triples, so a
+    /// test can describe adapters and devices in one tree.
+    fn managed_tree(entries: &[ManagedEntry<'_>]) -> zbus::fdo::ManagedObjects {
+        let mut tree: zbus::fdo::ManagedObjects = HashMap::new();
+        for (path, interface, properties) in entries {
+            let properties: HashMap<String, OwnedValue> = properties
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), value.clone()))
+                .collect();
+            tree.entry(OwnedObjectPath::try_from(*path).expect("path"))
+                .or_default()
+                .insert(
+                    zbus::names::OwnedInterfaceName::try_from(*interface).expect("interface"),
+                    properties,
+                );
+        }
+        tree
+    }
+
+    fn text(value: &str) -> OwnedValue {
+        OwnedValue::from(zbus::zvariant::Str::from(value))
+    }
+
+    #[test]
+    fn a_powered_adapter_wins_and_the_choice_is_stable_across_runs() {
+        let objects = managed_tree(&[
+            (
+                "/org/bluez/hci1",
+                ADAPTER_IFACE,
+                &[("Powered", OwnedValue::from(true))],
+            ),
+            (
+                "/org/bluez/hci0",
+                ADAPTER_IFACE,
+                &[("Powered", OwnedValue::from(false))],
+            ),
+        ]);
+        assert_eq!(
+            adapter_from_managed_objects(&objects)
+                .expect("adapter")
+                .as_str(),
+            "/org/bluez/hci1"
+        );
+
+        // With nothing powered the caller still gets an adapter, so the
+        // failure reads as "not powered" rather than "no bluetooth". Two
+        // unpowered controllers resolve by path so refreshes agree.
+        let dark = managed_tree(&[
+            (
+                "/org/bluez/hci1",
+                ADAPTER_IFACE,
+                &[("Powered", OwnedValue::from(false))],
+            ),
+            (
+                "/org/bluez/hci0",
+                ADAPTER_IFACE,
+                &[("Powered", OwnedValue::from(false))],
+            ),
+        ]);
+        assert_eq!(
+            adapter_from_managed_objects(&dark)
+                .expect("adapter")
+                .as_str(),
+            "/org/bluez/hci0"
+        );
+
+        // A tree with only devices in it has no adapter.
+        let devices = managed_tree(&[(DEVICE_PATH, DEVICE_IFACE, &[("Address", text(ADDR))])]);
+        assert!(adapter_from_managed_objects(&devices).is_none());
+    }
+
+    #[test]
+    fn discovered_devices_carry_the_facts_the_text_path_had_to_shell_out_for() {
+        let objects = managed_tree(&[
+            (
+                "/org/bluez/hci0",
+                ADAPTER_IFACE,
+                &[("Powered", OwnedValue::from(true))],
+            ),
+            (
+                DEVICE_PATH,
+                DEVICE_IFACE,
+                &[
+                    ("Address", text(ADDR)),
+                    ("Alias", text("Studio Headphones")),
+                    ("Name", text("WH-1000XM4")),
+                    ("Paired", OwnedValue::from(true)),
+                    ("Connected", OwnedValue::from(true)),
+                    ("RSSI", OwnedValue::from(-63i16)),
+                ],
+            ),
+        ]);
+        let devices = devices_from_managed_objects(&objects);
+        assert_eq!(devices.len(), 1, "the adapter is not a device");
+        let device = &devices[0];
+        assert_eq!(device.address, ADDR);
+        // Alias is what the user renamed it to; Name is what it announced.
+        assert_eq!(device.name, "Studio Headphones");
+        assert!(device.paired);
+        assert!(device.connected);
+        assert_eq!(device.rssi, Some(-63));
+    }
+
+    #[test]
+    fn a_device_with_nothing_but_an_address_still_makes_a_usable_row() {
+        let objects = managed_tree(&[(
+            DEVICE_PATH,
+            DEVICE_IFACE,
+            // No Alias, no Name, no flags: bluez publishes exactly this for
+            // a beacon it has only just heard.
+            &[("Address", text("5c:fb:7c:1a:2b:3c"))],
+        )]);
+        let devices = devices_from_managed_objects(&objects);
+        assert_eq!(devices.len(), 1);
+        // The address is a poor name but never an empty row, and it is
+        // upper-cased so it matches everything else on the wire.
+        assert_eq!(devices[0].address, ADDR);
+        assert_eq!(devices[0].name, ADDR);
+        assert!(!devices[0].paired);
+        assert!(!devices[0].connected);
+        assert_eq!(devices[0].rssi, None);
+    }
+
+    #[test]
+    fn the_device_list_is_bounded_before_it_reaches_the_wire() {
+        // A remote peer controls both how many devices appear and what they
+        // are called; the picker's own caps are mirrored here so a crowded
+        // room cannot make stdout unbounded.
+        let long = "x".repeat(MAX_DEVICE_NAME_CHARS * 3);
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for index in 0..(MAX_DISCOVERED_DEVICES + 20) {
+            entries.push((
+                format!(
+                    "/org/bluez/hci0/dev_AA_BB_CC_{:02X}_{:02X}_{:02X}",
+                    index / 256,
+                    index % 256,
+                    index % 7
+                ),
+                format!(
+                    "AA:BB:CC:{:02X}:{:02X}:{:02X}",
+                    index / 256,
+                    index % 256,
+                    index % 7
+                ),
+            ));
+        }
+        type OwnedProperties<'a> = Vec<(&'a str, OwnedValue)>;
+        let properties: Vec<(&str, OwnedProperties<'_>)> = entries
+            .iter()
+            .map(|(path, address)| {
+                (
+                    path.as_str(),
+                    vec![("Address", text(address)), ("Alias", text(&long))],
+                )
+            })
+            .collect();
+        let borrowed: Vec<ManagedEntry<'_>> = properties
+            .iter()
+            .map(|(path, props)| (*path, DEVICE_IFACE, props.as_slice()))
+            .collect();
+        let devices = devices_from_managed_objects(&managed_tree(&borrowed));
+        assert_eq!(devices.len(), MAX_DISCOVERED_DEVICES);
+        assert!(
+            devices
+                .iter()
+                .all(|device| device.name.chars().count() <= MAX_DEVICE_NAME_CHARS)
+        );
+    }
+
+    #[test]
+    fn a_scan_window_is_clamped_and_zero_means_list_without_touching_the_radio() {
+        assert_eq!(discovery_window(0), Duration::ZERO);
+        assert_eq!(discovery_window(5), Duration::from_secs(5));
+        assert_eq!(
+            discovery_window(DISCOVERY_DEFAULT_SECONDS),
+            Duration::from_secs(DISCOVERY_DEFAULT_SECONDS)
+        );
+        assert_eq!(
+            discovery_window(u64::MAX),
+            Duration::from_secs(DISCOVERY_MAX_SECONDS)
+        );
+    }
+
+    #[test]
+    fn the_printed_device_shape_is_the_one_jwm_parses() {
+        let json = ScannedDevice {
+            address: ADDR.to_string(),
+            name: "Studio Headphones".to_string(),
+            paired: true,
+            connected: false,
+            rssi: Some(-40),
+        }
+        .to_json();
+        assert_eq!(json["address"], ADDR);
+        assert_eq!(json["name"], "Studio Headphones");
+        assert_eq!(json["paired"], true);
+        assert_eq!(json["connected"], false);
+        assert_eq!(json["rssi"], -40);
+        // An unheard device reports a null rather than a fabricated floor.
+        let quiet = ScannedDevice {
+            address: ADDR.to_string(),
+            name: ADDR.to_string(),
+            paired: true,
+            connected: false,
+            rssi: None,
+        }
+        .to_json();
+        assert!(quiet["rssi"].is_null());
+    }
+
     #[test]
     fn prompt_args_carry_each_kind() {
         let pin = prompt_args(ADDR, COOKIE, &PromptRequest::Pin);
@@ -839,12 +1456,45 @@ mod tests {
 
     #[test]
     fn done_args_carry_the_outcome() {
-        let done = done_args(ADDR, COOKIE, true, None);
+        let done = done_args(ADDR, COOKIE, true, None, Some(true));
         assert_eq!(done["ok"], true);
         assert!(done["error"].is_null());
-        let done = done_args(ADDR, COOKIE, false, Some("pairing cancelled"));
+        assert_eq!(done["connected"], true);
+        // Paired, but the profile connection did not come up: still a
+        // successful pairing, and the picker says so.
+        let done = done_args(ADDR, COOKIE, true, None, Some(false));
+        assert_eq!(done["ok"], true);
+        assert_eq!(done["connected"], false);
+        // A failed pairing has nothing to connect, so the verdict is absent
+        // rather than a false "not connected".
+        let done = done_args(ADDR, COOKIE, false, Some("pairing cancelled"), None);
         assert_eq!(done["ok"], false);
         assert_eq!(done["error"], "pairing cancelled");
+        assert!(done["connected"].is_null());
+    }
+
+    #[test]
+    fn the_connect_borrows_only_what_the_wall_clock_has_left() {
+        // A prompt-free pairing leaves the whole budget.
+        assert_eq!(connect_budget(Duration::ZERO), Some(CONNECT_WAIT));
+        assert_eq!(
+            connect_budget(Duration::from_secs(30)),
+            Some(CONNECT_WAIT),
+            "still far from the wall clock"
+        );
+        // Close to the wall clock the budget shrinks, always keeping the
+        // report slack for the `done` frame.
+        assert_eq!(
+            connect_budget(WALL_CLOCK - REPORT_SLACK - Duration::from_secs(4)),
+            Some(Duration::from_secs(4))
+        );
+        // Under the floor, and past the wall clock, there is no connect.
+        assert_eq!(
+            connect_budget(WALL_CLOCK - REPORT_SLACK - Duration::from_millis(500)),
+            None
+        );
+        assert_eq!(connect_budget(WALL_CLOCK), None);
+        assert_eq!(connect_budget(WALL_CLOCK + Duration::from_secs(60)), None);
     }
 
     #[test]
@@ -944,6 +1594,11 @@ mod tests {
         pair_calls: Mutex<usize>,
         cancel_pairing_calls: Mutex<usize>,
         agent_error_seen: Mutex<Option<String>>,
+        connect_calls: Mutex<usize>,
+        trusted: Mutex<bool>,
+        /// When set, `Connect` refuses, standing in for a device that bonded
+        /// and then walked out of range.
+        connect_fails: Mutex<bool>,
     }
 
     impl FakeBluezState {
@@ -1059,6 +1714,30 @@ mod tests {
         async fn cancel_pairing(&self) -> zbus::fdo::Result<()> {
             *FakeBluezState::lock(&self.state.cancel_pairing_calls) += 1;
             Ok(())
+        }
+
+        /// The post-pair auto-connect. A bonded device that cannot bring its
+        /// profiles up is the interesting case, so it is scriptable.
+        async fn connect(&self) -> zbus::fdo::Result<()> {
+            *FakeBluezState::lock(&self.state.connect_calls) += 1;
+            if *FakeBluezState::lock(&self.state.connect_fails) {
+                return Err(zbus::fdo::Error::Failed(
+                    "org.bluez.Error.Failed: br-connection-profile-unavailable".into(),
+                ));
+            }
+            Ok(())
+        }
+
+        /// Writable so the helper's `Trusted = true` lands somewhere the test
+        /// can read it back.
+        #[zbus(property)]
+        fn trusted(&self) -> bool {
+            *FakeBluezState::lock(&self.state.trusted)
+        }
+
+        #[zbus(property)]
+        fn set_trusted(&self, value: bool) {
+            *FakeBluezState::lock(&self.state.trusted) = value;
         }
     }
 
@@ -1279,9 +1958,16 @@ mod tests {
         let done = jwm.recv_command("bluetooth_pairing_done");
         assert_eq!(done["command"], "bluetooth_pairing_done");
         assert_eq!(done["args"]["ok"], true);
+        // v2: the bond is followed through to a usable device.
+        assert_eq!(done["args"]["connected"], true);
 
         let code = session.await.expect("session task");
         assert_eq!(code, EXIT_PAIRED);
+        assert!(
+            *FakeBluezState::lock(&setup.state.trusted),
+            "a device the user chose is trusted, so its services do not need a second answer"
+        );
+        assert_eq!(*FakeBluezState::lock(&setup.state.connect_calls), 1);
         assert_eq!(
             FakeBluezState::lock(&setup.state.capability).as_deref(),
             Some("KeyboardDisplay")
@@ -1296,6 +1982,36 @@ mod tests {
         );
         assert_eq!(*FakeBluezState::lock(&setup.state.pair_calls), 1);
         assert_eq!(*FakeBluezState::lock(&setup.state.cancel_pairing_calls), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_that_bonds_but_will_not_connect_still_counts_as_paired() {
+        let Some(setup) = fake_setup(PairScript::Confirm(123_456)).await else {
+            eprintln!("dbus-daemon unavailable; skipping the pairing integration test");
+            return;
+        };
+        *FakeBluezState::lock(&setup.state.connect_fails) = true;
+        let jwm = FakeJwm::start(serde_json::json!({
+            "active": true, "address": ADDR, "cookie": COOKIE, "state": "working",
+        }));
+        let ipc = JwmIpc::with_socket(jwm.socket.clone());
+        let connection = helper_connection(&setup.bus_address).await;
+
+        let session = tokio::spawn(pair_session(ipc, connection, ADDR, COOKIE));
+
+        jwm.recv_command("bluetooth_pairing_prompt");
+        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": true}));
+
+        let done = jwm.recv_command("bluetooth_pairing_done");
+        // The bond is durable and the user asked for it; a profile that would
+        // not come up is reported, never converted into a failed pairing.
+        assert_eq!(done["args"]["ok"], true);
+        assert!(done["args"]["error"].is_null());
+        assert_eq!(done["args"]["connected"], false);
+
+        assert_eq!(session.await.expect("session task"), EXIT_PAIRED);
+        assert_eq!(*FakeBluezState::lock(&setup.state.connect_calls), 1);
+        assert!(*FakeBluezState::lock(&setup.state.trusted));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
