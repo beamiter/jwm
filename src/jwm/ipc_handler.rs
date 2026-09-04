@@ -520,6 +520,34 @@ fn color_surface_summary_json(
     })
 }
 
+/// Whether a `color_delivery` snapshot records a presentation that carried HDR
+/// metadata — on one named output, or on any of them when `output` is `None`.
+///
+/// The paths here must match `api::ColorDeliveryStatus`'s serialization
+/// exactly: the per-output field is `output_name`, not `name`. A wrong path
+/// does not fail, it silently answers false forever, which would leave every
+/// HDR report reading as SDR on a display that had successfully switched.
+/// `presented_with_hdr_reads_the_real_serialized_shape` pins it against a
+/// value produced by serde rather than one written by hand.
+fn presented_with_hdr(color_delivery: Option<&serde_json::Value>, output: Option<&str>) -> bool {
+    color_delivery
+        .and_then(|delivery| delivery.get("outputs"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|outputs| {
+            outputs.iter().any(|entry| {
+                let named = output.is_none_or(|name| {
+                    entry.get("output_name").and_then(serde_json::Value::as_str) == Some(name)
+                });
+                named
+                    && entry
+                        .get("last_success")
+                        .and_then(|success| success.get("hdr_metadata_active"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            })
+        })
+}
+
 fn color_session_policy_json(
     outputs: &[crate::backend::api::OutputInfo],
     hdr_enabled: bool,
@@ -2450,20 +2478,7 @@ impl Jwm {
                         "ctm_supported": c.ctm_supported,
                     })
                 });
-                let hdr_signalled = color_delivery
-                    .as_ref()
-                    .and_then(|delivery| delivery.get("outputs"))
-                    .and_then(|outputs| outputs.as_array())
-                    .is_some_and(|outputs| {
-                        outputs.iter().any(|entry| {
-                            entry.get("name").and_then(serde_json::Value::as_str) == Some(&o.name)
-                                && entry
-                                    .get("last_success")
-                                    .and_then(|success| success.get("hdr_metadata_active"))
-                                    .and_then(serde_json::Value::as_bool)
-                                    == Some(true)
-                        })
-                    });
+                let hdr_signalled = presented_with_hdr(color_delivery.as_ref(), Some(&o.name));
                 let color_policy = output_color_policy_json(
                     o,
                     kms_color.as_ref(),
@@ -2557,19 +2572,7 @@ impl Jwm {
         let hdr_enable_refusals = backend.compositor_hdr_enable_refusals();
         // Observed, not configured: the only proof of what a display is being
         // told is the last frame that actually reached it.
-        let hdr_observed_active = color_delivery
-            .as_ref()
-            .and_then(|delivery| delivery.get("outputs"))
-            .and_then(|outputs| outputs.as_array())
-            .is_some_and(|outputs| {
-                outputs.iter().any(|output| {
-                    output
-                        .get("last_success")
-                        .and_then(|success| success.get("hdr_metadata_active"))
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                })
-            });
+        let hdr_observed_active = presented_with_hdr(color_delivery.as_ref(), None);
         let color_session_policy = color_session_policy_json(
             &outputs,
             cfg.behavior().hdr_enabled,
@@ -3439,8 +3442,8 @@ mod tests {
         fullscreen_screenshot_submission_response, optional_protocol_enabled_from_flags,
         output_color_policy_json, parse_benchmark_request, parse_command_batch_entries,
         parse_config_batch_changes, parse_optional_u32_ipc_arg, parse_required_i32_ipc_arg,
-        render_decisions_json, resolved_client_monitor_num, runtime_health, tagged_client_count,
-        workspace_layout_state,
+        presented_with_hdr, render_decisions_json, resolved_client_monitor_num, runtime_health,
+        tagged_client_count, workspace_layout_state,
     };
 
     /// A backend with no HDR signalling gate of its own reports no per-output
@@ -3813,6 +3816,88 @@ mod tests {
             value["delivery_route_observation"],
             "see_color_delivery_last_success"
         );
+    }
+
+    #[test]
+    fn presented_with_hdr_reads_the_real_serialized_shape() {
+        use crate::backend::api::{
+            ColorDeliveryOutputStatus, ColorDeliveryPresentationStatus, ColorDeliveryStatus,
+        };
+
+        let presentation = |hdr_metadata_active: bool| ColorDeliveryPresentationStatus {
+            generation: 3,
+            policy_sequence: 7,
+            route: "software_per_output_regions".into(),
+            working_space: "normalized_linear_srgb".into(),
+            target_transfer_function: "st2084_pq".into(),
+            target_primaries: "bt2020".into(),
+            hdr_metadata_active,
+            colorspace_signal: if hdr_metadata_active {
+                "bt2020_rgb".into()
+            } else {
+                "default_sdr".into()
+            },
+            fallback_reason: None,
+            presented_at_monotonic_ms: Some(1),
+            presented_ago_ms: Some(0),
+        };
+        // Built by serde from the real type, not written by hand: a lookup
+        // keyed on a field name that does not exist would silently answer
+        // false forever, and a hand-written fixture would encode the same
+        // mistake as the code it is checking.
+        let status = ColorDeliveryStatus {
+            schema_version: 1,
+            observation: "last_successful_presentation".into(),
+            generation: 3,
+            last_policy_decision: None,
+            outputs: vec![
+                ColorDeliveryOutputStatus {
+                    output_name: "HDMI-A-1".into(),
+                    participating: true,
+                    last_success: Some(presentation(true)),
+                },
+                ColorDeliveryOutputStatus {
+                    output_name: "DP-1".into(),
+                    participating: true,
+                    last_success: Some(presentation(false)),
+                },
+                ColorDeliveryOutputStatus {
+                    output_name: "DP-2".into(),
+                    participating: false,
+                    last_success: None,
+                },
+            ],
+        };
+        let value = serde_json::to_value(&status).expect("serialize");
+
+        assert!(presented_with_hdr(Some(&value), None), "any output");
+        assert!(presented_with_hdr(Some(&value), Some("HDMI-A-1")));
+        assert!(!presented_with_hdr(Some(&value), Some("DP-1")));
+        assert!(
+            !presented_with_hdr(Some(&value), Some("DP-2")),
+            "no success"
+        );
+        assert!(
+            !presented_with_hdr(Some(&value), Some("HDMI-A-2")),
+            "an output that is not in the snapshot is not a match"
+        );
+
+        // Backends with no colour delivery at all report nothing, rather than
+        // a fabricated answer.
+        assert!(!presented_with_hdr(None, None));
+        assert!(!presented_with_hdr(Some(&serde_json::json!({})), None));
+
+        // And with nothing presented yet, HDR is not claimed.
+        let unpresented = ColorDeliveryStatus {
+            outputs: vec![ColorDeliveryOutputStatus {
+                output_name: "HDMI-A-1".into(),
+                participating: true,
+                last_success: None,
+            }],
+            ..status
+        };
+        let value = serde_json::to_value(&unpresented).expect("serialize");
+        assert!(!presented_with_hdr(Some(&value), None));
     }
 
     #[test]

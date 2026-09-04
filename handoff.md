@@ -53,7 +53,13 @@
    验证 enable；现在与 `params_for_output` 同源。`colorspace_signal` 从
    `hdr_metadata_unspecified_colorspace` 改为 `bt2020_rgb`：请求里一直带的就是
    BT2020_RGB，报「unspecified」让「显示器被告知了什么」这唯一的证据失去意义。
-7. **新增 docs/hdr.md** 并接进 README 索引（本仓库此前没有任何 color/HDR/
+7. **DPMS/soft-disable 的撤回不发 commit**：连接器属性属于一台已经关掉的显示器，
+   那个 commit 会不会被接受是驱动相关的，而失败会把 `delivery_blocked` 打到**整
+   个 delivery group**——关掉一台副屏就能卡住其余所有输出的呈现。所以只清掉
+   tracked 标志（不呈现的输出本就不该被声称 active），亮回来时再发一次真 commit。
+   其余所有撤回照常 commit：那些输出正在呈现，把 BT.2020 盖在 sRGB 像素上正是本
+   队列要防的事。
+8. **新增 docs/hdr.md** 并接进 README 索引（本仓库此前没有任何 color/HDR/
    tearing/VRR 的用户文档）。
 
 已知限制（写进 docs/hdr.md 的 Limitations，不冒充完成）：**无真 HDR 显示器
@@ -64,8 +70,16 @@
 
 验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
 `--no-default-features` 及 7 组 backend feature profile 全绿；
-`cargo test --locked` lib 2683 passed / 0 failed（上一条目 2675 + 新增 8：
-udev_kms HDR 门禁/控制回路/atomic plan/选路 7、ipc_handler 逐输出 profile 1）。
+`cargo test --locked` lib 2685 passed / 0 failed（上一条目 2675 + 新增 10：
+udev_kms HDR 门禁/控制回路/atomic plan/选路/暗输出 8、ipc_handler 逐输出
+profile 1、序列化形状 1）。
+
+**自查抓到的一个 bug（已修，值得记一笔）**：逐输出 `hdr_signalled` 查找一度用
+`entry["name"]` 匹配，而 `api::ColorDeliveryOutputStatus` 的字段是
+`output_name`。这种错法不会报错，只会**永远静默返回 false**——切换成功的输出照
+旧报 sRGB，正好抵消第 6 条要修的东西。现在两处查找合并成 `presented_with_hdr`，
+并由 `presented_with_hdr_reads_the_real_serialized_shape` 用 **serde 真实序列化**
+的值钉住（手写 fixture 会把同一个错误抄进测试）。
 
 ---
 

@@ -4219,6 +4219,26 @@ impl KmsState {
                 HdrSignallingAction::Assert => true,
                 HdrSignallingAction::Withdraw => false,
             };
+            // A dark output is withdrawn by dropping the claim, not by
+            // committing to it.
+            //
+            // The connector properties belong to a display that is off or
+            // soft-disabled; whether that commit is even accepted is
+            // driver-dependent, and a failure here would set
+            // `delivery_blocked` for the whole delivery group — so switching
+            // one monitor off could hold presentation on every other one.
+            // Clearing the tracked flag is the honest half: nothing claims
+            // HDR is active on an output that is not presenting, and the
+            // reconciliation re-asserts with a fresh commit when it comes
+            // back.
+            if !want && refusal == Some(HdrEnableRefusal::OutputNotParticipating) {
+                crate::backend::wayland_udev::color_management::set_output_hdr_metadata_active(
+                    &self.outputs[index].output,
+                    false,
+                );
+                self.invalidate_color_delivery_after_hardware_change(index);
+                continue;
+            }
             let blob = if want {
                 match self.hdr_metadata_blob_for_output(index) {
                     Some(blob) => Some(blob),
@@ -8120,6 +8140,38 @@ mod compositor_texture_ownership_tests {
             spoil(|e| e.software_region_planned = false),
             Some(R::NoSoftwareDeliveryRegion)
         );
+    }
+
+    #[test]
+    fn a_dark_output_is_withdrawn_without_a_commit_to_a_display_that_is_off() {
+        use super::HdrEnableRefusal as R;
+        use super::HdrSignallingAction as A;
+        use super::hdr_signalling_action as act;
+
+        // DPMS off or soft-disabled is the one withdrawal that must not
+        // reach the connector: the commit's acceptance is driver-dependent
+        // with the output down, and a failure sets delivery_blocked for the
+        // whole group — switching one monitor off would hold presentation on
+        // every other one. The claim is dropped instead.
+        let mut dark = hdr_ready();
+        dark.participating = false;
+        assert_eq!(
+            hdr_enable_refusal(&dark),
+            Some(R::OutputNotParticipating),
+            "the reconciliation keys the no-commit path on exactly this reason"
+        );
+        assert_eq!(act(true, true, true), A::Withdraw);
+
+        // Every other withdrawal still commits: those are outputs that are
+        // presenting, where leaving the sink told BT.2020 over sRGB pixels is
+        // the error this whole queue exists to prevent.
+        for spoiled in [
+            R::LinearTailUnsafe,
+            R::LegacyGammaOverrideActive,
+            R::SceneLinearTargetInactive,
+        ] {
+            assert_ne!(spoiled, R::OutputNotParticipating);
+        }
     }
 
     #[test]

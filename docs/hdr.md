@@ -91,6 +91,14 @@ A withdrawal clears `Colorspace` to Default and the metadata blob to zero in
 the same controlled atomic request that set them, so the sink is never left
 told BT.2020 with no metadata behind it.
 
+The one exception is an output that has gone dark — DPMS off, or
+soft-disabled through wlr-output-management. There the claim is dropped
+without a commit: the properties belong to a display that is off, whether the
+commit is even accepted is driver-dependent, and a failure would hold
+presentation for every other output on the device. Nothing reports HDR active
+on an output that is not presenting, and the signal is re-asserted with a
+fresh commit when it comes back.
+
 ## What the reports mean
 
 ```sh
