@@ -4,6 +4,121 @@
 
 ---
 
+## 2026-09-04：十二轮复查（对抗式评审：21 条确认缺陷，全部修完）
+
+四条主线落地后跑了一轮对抗式代码评审（4 个维度并行审 + 每条发现 3 个不同视角
+的独立反驳者，2/3 反驳即判定为伪）。**34 条候选，21 条通过反驳存活并已全部修
+掉。**记在这里的重点不是「修了什么」，而是**为什么单靠自测抓不到**——这些几乎
+全是「代码看着对、语义悄悄反了」那一类。
+
+### 蓝牙（1 critical / 2 high / 2 medium）
+
+1. **入站窗口在拒绝时不关闭**（critical）。`pump_inbound_responses` 只在「终止
+   信号到达且没有 pending」时 return，可**在授权 prompt 上按 Esc 恰恰是「有
+   pending 的终止」**——最常见的那条路。终止被当成该请求的答复消费掉、循环继
+   续：jwm 丢掉会话、屏幕上说窗口已关，而 helper 还把控制器 Pairable +
+   Discoverable、还占着 bluez default agent，一直到 60s 走完。
+   顺带引出一个语义分裂：「撤回一个 prompt」和「关闭会话」原本是同一个 payload，
+   于是新增 `PairingAnswer::SessionClosed`（`reason: "closed"`），只有它关窗口。
+2. **AdapterExposure 恢复「它看到的值」会滚雪球**（high）。第二个窗口会把第一个
+   装上的 `true` 当作原值存下来再写回去，控制器就永久 Pairable+Discoverable 了。
+   改为**无条件清零**（jwm 不从别的路径开它，清零即恢复；且往「关」的方向错才是
+   安全的），并额外把 bluez 自己的 `PairableTimeout`/`DiscoverableTimeout` 设成
+   窗口长度——helper 被 SIGKILL 也不会把控制器留在开着。
+3. **设备名没过滤控制字符**（high）。picker 的行是「join 成换行、再按行拆开」画
+   的，而选中药丸和指针命中图按 **item 数**算——名字里一个 `\n` 就多画一行，
+   之后每一行都和自己的高亮错位，**Enter 会作用到另一台设备上**。文本路径因为按
+   `lines()` 切天然带不进换行，改走 JSON 反而把口子开了；`parse_prompt_command`
+   一开始就对 device_name 做了这件事，两条同源的远端字符串规矩不一致。
+4. **64 台上限在排序前按 MAC 序截断**（medium）。上限本来就是为「人多的房间」
+   准备的，而那正是已连接耳机排在 64 台无名信标后面被切掉的场景——旧文本路径做
+   不到这一点（它先列已记住的设备）。两侧都改成先排序后截断。
+5. **`bridge_discovery_available()` 在帧线程里 fork 子进程**（medium）。它必须在
+   `BackgroundJob::spawn` **之前**回答（它决定有没有任务），而 `&&` 只在
+   bluetoothctl 应答时短路——所以「有 jwm-bridge、没有 bluetoothctl」的会话第一
+   次开 picker 会卡住合成器最多 10s，正是「jwm 不碰 D-Bus，卡住的总线不能卡帧」
+   要防的那种停顿。改成 PATH 查找，能力探测挪进 worker。
+6. 另外补上**答复与问题的绑定**：`ask()` 在 prompt 还没送到 jwm 就装好回复通道，
+   而 response 只带 cookie（会话），不带请求标识。bluez 完全可以在广播穿过 socket
+   + mpsc + 双 worker 调度器的间隙撤回一个请求并发起下一个——那样用户对「音频
+   profile」说的 yes 会去授权「输入设备 profile」，而真正被授权的那个问题从未
+   画出来过。现在 prompt 带 `request_id`、答复回显，对不上的答复什么也不解决。
+
+### tearing / VRR（1 high / 4 medium）
+
+7. **`client_asked_to_tear` 和 direct-scanout 资格 AND 在一起**（high），而策略
+   函数又在「需要合成」之前先测它——于是**有客户端在请求撕裂时，报的却是
+   `no_client_asked_to_tear`**，`CompositedFrameRequired` 成了单测才到得了的死
+   代码，IPC 里「优先报有需求那个输出的 blocker」也永远匹配不到。证据拆成两个独
+   立事实：全屏窗口是否**覆盖本输出**、本帧是否需要合成。
+8. **VRR 读 direct-scanout 判定，错了两次**（medium ×2）。那个判定的窗口测试是
+   全局的，所以第二块空闲屏也会继承「存在一个全屏窗口」而拿到 VRR——正是策略注释
+   自己说要避免的静态画面闪烁；而它在有光标时恒假，于是**光标自动隐藏会让 VRR
+   一秒开关两次**，每次一个 mode-size dumb buffer + test commit + 面板级刷新率
+   重新协商。VRR 现在用逐输出包含测试，且完全不看合成与否。
+9. **`vrr_supported()` 每帧每输出调用**（medium）：两个 ioctl 外加重建整个
+   connector info，就为一个只在热插拔时变的答案，而这个循环自己声明了 no-alloc
+   契约。改成 init 探一次。
+10. **失败的 `use_vrr` 每帧重试**（medium）：`use_vrr` 失败时不写自己的缓存，而
+    守卫比的就是那个缓存——于是每帧重来一次 dumb buffer + test commit，永远，
+    只有 debug 日志。改成比「上次尝试值」，并把失败提到 warn。
+11. **`set_vrr_enabled` 仍被下一帧撤销**（低但要命）：上一条目刚宣称修好的
+    「静默成功」，只是把 smithay 缓存的角色换成了 jwm 自己的策略。改成 override
+    锁存，策略读它。
+12. **跳过的输出从报告里消失**（medium）：`vrr.active` 会在等 vblank 的那帧闪成
+    false（硬件里 VRR_ENABLED 明明是 1），两次连续读甚至对「有几个输出」都不一
+    致；soft-disable 的输出还保留着 VRR。跳过的输出现在照样出行，暗输出撤 VRR。
+13. **inert 对象的请求会复活已清除的表项**（medium）：协议自己推荐的顺序就是
+    「先销毁 surface，再销毁已 inert 的 control 对象」，第一步清表、第二步的
+    `stage_in` 用 `or_default` 又建回来——键是死 surface 的 id，永远等不到 commit
+    来清它。正是上一条目宣称修好的那个泄漏，从另一个方向漏回来。
+
+### HDR（1 critical / 3 high / 2 medium / 1 low）
+
+14. **镜像输出上 HDR 每帧开关一次**（critical）。断言 HDR 让两个同位输出的 TF
+    不同 → `plan_software_color_regions` 整体拒绝 → 下一帧因「无 software region」
+    撤回 → plan 恢复 → 再断言，永远。除了抖动本身，**每个循环里都有一帧是走
+    global-sRGB fallback 呈现、而 sink 被告知 PQ + BT.2020** ——恰恰是这个门禁存
+    在的意义。新增稳定的具名拒绝 `overlapping_output_profile_conflict`，排在路由
+    类拒绝之前（后者是同一重叠的下游后果）。
+15. **HDR_OUTPUT_METADATA blob 每次断言泄漏一个**（high）：只有 commit 失败才
+    释放。一次 toast 起落就是一个内核 blob。这条路在本队列之前是死代码（两个调用
+    点都传 None），泄漏是随 enable 一起来的。改成跟踪 + 替换/清除时销毁 + teardown
+    释放，与 `installed_gamma_lut`/`installed_ctm` 同规矩。
+16. **门禁与它的报告吃的不是同一份证据**（high）：帧循环的 `linear_tail_safe` =
+    compositor tail 判定 **且** external-element plan，两个 IPC 调用点只传了前
+    半。而普通桌面的光标本来就是 KMS-external 且无法内化——于是帧循环每帧都以
+    `linear_tail_unsafe` 拒绝，而 `jwm-tool` 印着「signalling permitted」、
+    session policy 还宣称 enable 可用。**一个策略函数并不能阻止漂移，如果调用者
+    喂给它不同的事实。**
+17. **`hdr_requested` 从不清除**（medium）：面板换成 SDR 之后请求还挂着，
+    `hdr_route_requested` 就永远真，**整组 delivery 永久失去硬件 CTM+LUT 路由**，
+    白付 software shader 的代价、没有日志、除非用户想得起来发一次 disable。永久性
+    拒绝现在会丢掉请求并记一行。
+18. **拒绝优先级把「一时性」排在「永久性」前面**（medium）：render path 关掉时
+    `scene_linear_active` 之所以假**正是因为** `offload_gate_on` 假，于是一时性
+    拒绝盖住了永久性拒绝，enable 命令对一个配置永远不可能满足的请求回了 Ok。
+19. **`hdr_signalling_enable_available` 与命令本身对「可用」的定义不一致**
+    （medium）：前者是「没有输出在拒绝」，后者只在永久性拒绝时失败——于是在稳态
+    走硬件路由的机器上，前者报 false，而实际发命令是会成功的。改由 backend 用
+    命令自己的规则回答。
+20. **descriptor 的 mastering primaries 可能说 BT.709**（low），而同一个 commit
+    把 Colorspace 设成 BT2020_RGB、software region 也在编 BT.2020：
+    `params_from_edid` 对任何 PQ/HLG 面板都升到 BT.2020 容器，`pick_primaries`
+    却只看 EDID 的 BT.2020 位。改成同一个谓词。
+21. **钉住选路子句的 const 源码断言永远不会失败**（high）：needle 字面量就在被
+    扫描的同一个文件里，`assert!(true)`。改成把 haystack 收窄到那个函数、needle
+    运行时拼接，并额外断言 needle 不出现在该函数之前。
+
+**没修的一条**：`edbc6b9` 的 commit body 写「+9 tests」但分解是 6+6=12（实际就是
+12）。不改写已落的历史，记在这里。
+
+验证：fmt / clippy -D warnings / `cargo check --locked --all-targets` /
+`--no-default-features` 及 7 组 backend feature profile 全绿；
+`cargo test --locked` lib 2691 passed / 0 failed；bridge 56 passed / 0 failed。
+
+---
+
 ## 2026-09-04：十二轮收口之二（HDR P2：条件式 enable，逐帧和解）
 
 **enable 不再是硬拒，但也不是一次性开关——它是一个控制回路。**
