@@ -33,16 +33,25 @@ and EGL/GBM behavior remain driver-sensitive.
 they do depends on the backend:
 
 - **Wayland DRM/KMS:** a per-output presentation policy runs once per frame.
-  `VRR_ENABLED` is asserted while one mapped fullscreen client owns the output
-  — the same shape the direct-scanout policy tests — and cleared otherwise;
-  VRR on a composited desktop makes some panels flicker, so it follows the
-  content rather than staying on. It is programmed through Smithay's own
-  `use_vrr`, and only on outputs where the connector reports VRR can change
-  without a modeset. (Before that it was written straight onto the CRTC
-  property at output init, which never survived: Smithay re-asserts its own
-  cached VRR value in every atomic request it builds, so the enable was undone
-  by the very next page flip. `set_vrr_enabled` over IPC had the same
-  problem.)
+  `VRR_ENABLED` is asserted while a mapped fullscreen window *covers that
+  output* and cleared otherwise; VRR on a static desktop makes some panels
+  flicker, so it follows the content. It follows only the content: a cursor
+  moving over the game, an overlay, or a colour-delivery retry do not change
+  it, because each change costs a mode-size test buffer and a test commit and
+  is a visible refresh renegotiation on many panels.
+
+  It is programmed through Smithay's own `use_vrr`, only on connectors that
+  report VRR can change without a modeset, and only when the value differs
+  from the last one attempted — a driver that refuses a value is not asked
+  again until the wanted value changes. `set_vrr_enabled` over IPC latches an
+  override the policy reads rather than programming the hardware directly;
+  without that the next rendered frame would recompute VRR from content and
+  undo the request.
+
+  (Before this, VRR was written straight onto the CRTC property at output
+  init and by `set_vrr_enabled`, and never survived: Smithay re-asserts its
+  own cached VRR value in every atomic request it builds, so the enable was
+  undone by the very next page flip while the IPC call reported success.)
 
   `wp_tearing_control_manager_v1` is published when
   `wayland_enable_tearing_control` is on (default true). Hints are

@@ -323,7 +323,10 @@ ordinary PIN and passkey prompts, which behave exactly as they do outbound.
 
 Every answer names the request it answers, not just the session, so an answer
 whose question BlueZ already withdrew resolves nothing rather than landing on
-whatever replaced it. Teardown turns `Pairable` and `Discoverable` off rather
+whatever replaced it. Closing the window and withdrawing one unanswered prompt
+are different answers on the wire, not the same one told apart by timing:
+refusing a device leaves the window armed for the next one, while `Esc` ends
+it. Teardown turns `Pairable` and `Discoverable` off rather
 than restoring what it found — off is the only safe direction to be wrong in,
 and JWM turns them on by no other route — and it also sets BlueZ's own
 `PairableTimeout`/`DiscoverableTimeout` to the window length, so a helper

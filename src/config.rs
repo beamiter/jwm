@@ -567,10 +567,12 @@ pub struct BehaviorConfig {
     /// Enable Variable Refresh Rate (VRR/G-Sync/FreeSync) support for game windows.
     ///
     /// On the Wayland/KMS backend this permits the per-frame presentation
-    /// policy to assert `VRR_ENABLED` while one mapped fullscreen client owns
+    /// policy to assert `VRR_ENABLED` while a mapped fullscreen window covers
     /// an output, on connectors where VRR can change without a modeset. It is
-    /// not asserted on a composited desktop: VRR on a static screen makes some
-    /// panels flicker.
+    /// not asserted on a desktop with no fullscreen window: VRR on a static
+    /// screen makes some panels flicker. A cursor over the window does not
+    /// change it — only the content does. `set_vrr_enabled` over IPC latches
+    /// an override that wins over this flag in both directions.
     ///
     /// On X11 the X server owns DRM master, so no per-output toggle is
     /// reachable: this flag only feeds the HUD/metrics "VRR active" state there,

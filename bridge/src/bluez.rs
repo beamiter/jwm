@@ -163,14 +163,24 @@ enum UserReply {
     Pin(String),
     Confirmed,
     Rejected,
+    /// One prompt withdrawn; the session lives on.
     Cancelled,
+    /// The session itself is over. An inbound window puts the controller
+    /// back here rather than waiting out its own clock.
+    SessionClosed,
 }
 
 impl UserReply {
     /// Whether this answer ends the pairing from the user's side — used to
     /// classify the session's exit code after `Pair` unwinds.
     fn is_user_termination(&self) -> bool {
-        matches!(self, Self::Rejected | Self::Cancelled)
+        matches!(self, Self::Rejected | Self::Cancelled | Self::SessionClosed)
+    }
+
+    /// Whether jwm has dropped the session, as opposed to withdrawing one
+    /// prompt from a session that is still running.
+    fn ends_the_session(&self) -> bool {
+        matches!(self, Self::SessionClosed)
     }
 }
 
@@ -367,7 +377,7 @@ impl PairingAgent {
                 "jwm answered an authorization with a PIN; refusing".to_string(),
             )),
             UserReply::Rejected => Err(AgentError::Rejected("refused by the user".to_string())),
-            UserReply::Cancelled => Err(AgentError::Canceled(
+            UserReply::Cancelled | UserReply::SessionClosed => Err(AgentError::Canceled(
                 "authorization prompt cancelled".to_string(),
             )),
         }
@@ -441,7 +451,9 @@ impl PairingAgent {
                 "jwm confirmed a PIN request; refusing to guess".to_string(),
             )),
             UserReply::Rejected => Err(AgentError::Rejected("PIN refused by the user".to_string())),
-            UserReply::Cancelled => Err(AgentError::Canceled("PIN prompt cancelled".to_string())),
+            UserReply::Cancelled | UserReply::SessionClosed => {
+                Err(AgentError::Canceled("PIN prompt cancelled".to_string()))
+            }
         }
     }
 
@@ -467,7 +479,7 @@ impl PairingAgent {
             UserReply::Rejected => Err(AgentError::Rejected(
                 "passkey refused by the user".to_string(),
             )),
-            UserReply::Cancelled => {
+            UserReply::Cancelled | UserReply::SessionClosed => {
                 Err(AgentError::Canceled("passkey prompt cancelled".to_string()))
             }
         }
@@ -498,7 +510,7 @@ impl PairingAgent {
             UserReply::Rejected => Err(AgentError::Rejected(
                 "passkeys did not match, says the user".to_string(),
             )),
-            UserReply::Cancelled => Err(AgentError::Canceled(
+            UserReply::Cancelled | UserReply::SessionClosed => Err(AgentError::Canceled(
                 "confirmation prompt cancelled".to_string(),
             )),
         }
@@ -676,6 +688,7 @@ fn parse_response_event(event: &Value) -> Option<ResponseEvent> {
     } else {
         match payload.get("reason").and_then(Value::as_str) {
             Some("rejected") => UserReply::Rejected,
+            Some("closed") => UserReply::SessionClosed,
             _ => UserReply::Cancelled,
         }
     };
@@ -1547,25 +1560,25 @@ async fn pump_inbound_responses(shared: Arc<Shared>, mut responses: mpsc::Receiv
             log::warn!("ignoring a pairing response for a foreign cookie");
             continue;
         }
-        let terminal = response.reply.is_user_termination();
-        if terminal {
+        if response.reply.is_user_termination() {
             shared.ended_by_user.store(true, Ordering::Relaxed);
         }
+        let closing = response.reply.ends_the_session();
         // Answer the request this is an answer to, so bluez gets a real
         // reply rather than a dropped channel. An answer whose request is
         // already gone resolves nothing.
         if let Some(reply) = response.request_id.and_then(|id| shared.take_pending(id)) {
             let _ = reply.send(response.reply);
         }
-        // ...but a rejection or a cancel closes the window either way.
-        //
-        // Returning only when nothing was pending was wrong in the case that
-        // matters most: the user pressing Esc or `n` on an authorization
-        // prompt IS a cancel with a request outstanding. jwm drops its
-        // session and says the window is shut, while this process would keep
-        // the controller pairable and discoverable, and keep bluez's default
-        // agent registration, for the rest of the sixty seconds.
-        if terminal {
+        // Closing the window has to happen here even when it answered an
+        // outstanding request — Esc on an authorization prompt IS a close
+        // with a request pending, which is the common case. Returning only
+        // when nothing was pending left the controller pairable and
+        // discoverable, and this process bluez's default agent, for the rest
+        // of the sixty seconds while jwm said the window was shut. A
+        // withdrawn prompt is not a close: the session lives on, so the
+        // window does too.
+        if closing {
             log::info!("accept: window closed");
             return;
         }
@@ -2202,6 +2215,8 @@ mod tests {
         /// the live controller) so the restore path is exercised.
         pairable: Mutex<bool>,
         discoverable: Mutex<bool>,
+        pairable_timeout: Mutex<u32>,
+        discoverable_timeout: Mutex<u32>,
     }
 
     impl FakeBluezState {
@@ -2273,6 +2288,28 @@ mod tests {
         #[zbus(property)]
         fn set_discoverable(&self, value: bool) {
             *FakeBluezState::lock(&self.state.discoverable) = value;
+        }
+
+        /// BlueZ's own countdown. The window sets it so a helper that is
+        /// killed outright still cannot leave the controller open.
+        #[zbus(property)]
+        fn pairable_timeout(&self) -> u32 {
+            *FakeBluezState::lock(&self.state.pairable_timeout)
+        }
+
+        #[zbus(property)]
+        fn set_pairable_timeout(&self, value: u32) {
+            *FakeBluezState::lock(&self.state.pairable_timeout) = value;
+        }
+
+        #[zbus(property)]
+        fn discoverable_timeout(&self) -> u32 {
+            *FakeBluezState::lock(&self.state.discoverable_timeout)
+        }
+
+        #[zbus(property)]
+        fn set_discoverable_timeout(&self, value: u32) {
+            *FakeBluezState::lock(&self.state.discoverable_timeout) = value;
         }
     }
 
@@ -2693,24 +2730,34 @@ mod tests {
             "an allowed request returns success to bluez"
         );
 
-        // Closing the window ends the session. A cancel with nothing on
-        // screen names no request, which is what makes it a close rather
-        // than an answer.
-        jwm.send_response(serde_json::json!({"cookie": COOKIE, "accepted": false}));
+        // Closing the window is its own answer shape: a prompt merely
+        // withdrawn leaves the window armed, so the two cannot be the same
+        // payload.
+        jwm.send_response(
+            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "closed"}),
+        );
         let code = session.await.expect("session task");
         assert_eq!(code, EXIT_CANCELLED);
         assert_eq!(
             FakeBluezState::lock(&setup.state.unregistered).as_deref(),
             Some(INBOUND_AGENT_PATH)
         );
-        // And the controller goes back to what it was, rather than being
-        // left discoverable behind the user.
+        // And the controller is put back, rather than left discoverable
+        // behind the user.
         assert!(!*FakeBluezState::lock(&setup.state.pairable));
         assert!(!*FakeBluezState::lock(&setup.state.discoverable));
+        // BlueZ's own countdown was armed too, so a helper killed outright
+        // could not have left it open either.
+        let window = INBOUND_WINDOW.as_secs() as u32;
+        assert_eq!(*FakeBluezState::lock(&setup.state.pairable_timeout), window);
+        assert_eq!(
+            *FakeBluezState::lock(&setup.state.discoverable_timeout),
+            window
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn refusing_a_prompt_closes_the_window_and_puts_the_controller_back() {
+    async fn closing_the_window_from_a_live_prompt_puts_the_controller_back() {
         let Some(setup) = fake_setup(PairScript::Confirm(1)).await else {
             eprintln!("dbus-daemon unavailable; skipping the inbound integration test");
             return;
@@ -2734,19 +2781,19 @@ mod tests {
         });
         let prompt = jwm.recv_command("bluetooth_pairing_prompt");
 
-        // Esc or `n` on the prompt IS a cancel with a request outstanding —
-        // the common case, not the rare one. Answering it must also close
-        // the window: jwm drops its session and tells the user the window is
-        // shut, and a helper that kept looping would hold the controller
-        // pairable and discoverable, and bluez's default agent registration,
-        // for the rest of the sixty seconds.
+        // Esc on an authorization prompt closes the window *with a request
+        // outstanding* — the common case, not the rare one. Answering it
+        // must also end the session: jwm drops its record and tells the user
+        // the window is shut, and a helper that kept looping would hold the
+        // controller pairable and discoverable, and bluez's default agent
+        // registration, for the rest of the sixty seconds.
         jwm.answer(
             &prompt,
-            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "rejected"}),
+            serde_json::json!({"cookie": COOKIE, "accepted": false, "reason": "closed"}),
         );
         assert!(
             call.await.expect("agent call task").is_err(),
-            "the refusal still reaches bluez as a failure"
+            "the outstanding request still fails for bluez"
         );
 
         assert_eq!(session.await.expect("session task"), EXIT_CANCELLED);

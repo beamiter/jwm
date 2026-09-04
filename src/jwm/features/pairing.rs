@@ -637,8 +637,14 @@ pub enum PairingAnswer<'a> {
     Confirmed,
     /// Confirm prompt actively refused (`n`).
     Rejected,
-    /// Esc, panel close, or prompt timeout.
+    /// One prompt withdrawn — it went unanswered for too long — while the
+    /// session itself lives on.
     Cancelled,
+    /// The session is over: Esc, the panel closing or handing over, or the
+    /// session's own deadline. An inbound window must put the controller
+    /// back at this point rather than at its outer bound, so the two are
+    /// distinct on the wire and not merely by timing.
+    SessionClosed,
 }
 
 /// Build the `bluetooth/pairing_response` event payload.
@@ -664,6 +670,9 @@ pub fn response_payload(cookie: &str, request_id: Option<u64>, answer: PairingAn
         }
         PairingAnswer::Cancelled => {
             serde_json::json!({ "cookie": cookie, "accepted": false, "reason": "cancelled" })
+        }
+        PairingAnswer::SessionClosed => {
+            serde_json::json!({ "cookie": cookie, "accepted": false, "reason": "closed" })
         }
     };
     if let Some(request_id) = request_id
@@ -1158,6 +1167,19 @@ b"}),
         let cancelled = response_payload("c", None, PairingAnswer::Cancelled);
         assert_eq!(cancelled["accepted"], false);
         assert_eq!(cancelled["reason"], "cancelled");
+
+        // Withdrawing one prompt and closing the session are different
+        // answers, not the same one told apart by timing: an inbound window
+        // must put the controller back at the close, and must stay armed
+        // through a prompt that merely went unanswered.
+        let closed = response_payload("c", Some(7), PairingAnswer::SessionClosed);
+        assert_eq!(closed["accepted"], false);
+        assert_eq!(closed["reason"], "closed");
+        assert_eq!(closed["request_id"], 7);
+        // A close with nothing on screen answers no request, which is what
+        // makes the helper relay it as CancelPairing rather than a reply.
+        let bare = response_payload("c", None, PairingAnswer::SessionClosed);
+        assert!(bare.get("request_id").is_none());
     }
 
     #[test]

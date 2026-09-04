@@ -1276,7 +1276,7 @@ impl Jwm {
             pairing::response_payload(
                 session.cookie(),
                 session.request_id(),
-                pairing::PairingAnswer::Cancelled,
+                pairing::PairingAnswer::SessionClosed,
             ),
         );
         self.features.system_ui.cancel_pairing_prompt();

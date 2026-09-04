@@ -191,6 +191,21 @@ struct KmsOutputState {
     legacy_gamma_override: bool,
     /// `true` while DPMS is off; the LUT install path skips this output.
     dpms_off: bool,
+    /// `VrrSupport::Supported` on this connector, probed once at init.
+    /// `vrr_supported` costs two ioctls and rebuilds the connector info for
+    /// an answer that only changes on hotplug, so it must not be in the
+    /// per-frame path.
+    vrr_supported_without_modeset: bool,
+    /// What `use_vrr` was last asked for, and whether it took.
+    ///
+    /// `use_vrr` only writes its cached value on success, so comparing the
+    /// plan against `vrr_enabled()` would retry a rejected change on every
+    /// frame — each retry allocating a mode-size dumb buffer and issuing test
+    /// commits, forever, behind a debug-level log line.
+    vrr_last_attempt: Option<bool>,
+    /// An explicit `set_vrr_enabled` request. The content policy owns VRR
+    /// otherwise.
+    vrr_override: Option<bool>,
     /// The user asked for HDR signalling on this output and has not asked for
     /// it back.
     ///
@@ -1902,11 +1917,22 @@ pub(super) struct PresentationEvidence {
     pub client_asked_to_tear: bool,
     /// `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`, probed once per device.
     pub driver_supports_async_flip: bool,
-    /// The direct-scanout policy's verdict: exactly one mapped fullscreen
-    /// window, no cursor, no overlay or layer surface, no effect, no system
-    /// UI, no recording. Both decisions want the same shape, so they read the
-    /// same answer rather than drifting apart.
-    pub fullscreen_client_owns_output: bool,
+    /// A mapped fullscreen window covers this output — a containment test,
+    /// not the direct-scanout verdict.
+    ///
+    /// VRR follows the *content*, and a cursor is not content: reading the
+    /// scanout verdict here meant a cursor appearing over a fullscreen game
+    /// turned adaptive sync off and its auto-hide turned it back on, at the
+    /// cost of a mode-size dumb buffer and a test commit each way. That
+    /// verdict is also global in its window test, so a second, idle head
+    /// would inherit "one fullscreen window exists" and get VRR while
+    /// showing a static screen.
+    pub fullscreen_client_covers_output: bool,
+    /// The direct-scanout policy's verdict for this output: no cursor, no
+    /// overlay or layer surface, no effect, no system UI, no recording.
+    /// Tearing needs it — an async flip is a primary-plane-only, no-modeset
+    /// commit — where VRR does not.
+    pub composited_frame_required: bool,
     /// A colour-delivery observation retry is in flight for this output.
     pub color_delivery_retry_required: bool,
     /// `DrmSurface::commit_pending()` — the next submission is a modesetting
@@ -1914,6 +1940,11 @@ pub(super) struct PresentationEvidence {
     pub commit_pending: bool,
     /// The output is on, not soft-disabled, and the session is active.
     pub output_presenting: bool,
+    /// A caller has forced VRR on or off through `set_vrr_enabled`. The
+    /// content policy owns VRR otherwise; without this the very next frame
+    /// would recompute it and undo an explicit request, which is the same
+    /// silently-successful call the raw-property write used to produce.
+    pub vrr_override: Option<bool>,
 }
 
 /// What the presentation policy decided for one output this frame.
@@ -1933,18 +1964,23 @@ pub(super) struct PresentationPlan {
 
 /// Decide how one output presents this frame.
 ///
-/// VRR and tearing are separate mechanisms that happen to want the same
-/// evidence. VRR follows the content: a single fullscreen client on a
-/// live output gets an adaptive refresh rate, and a composited desktop does
-/// not — enabling it on a static desktop makes some panels flicker, and it is
-/// the shape every other compositor settles on. Tearing follows the client's
-/// explicit request, and is refused for a long list of reasons the caller
-/// reports one at a time.
+/// VRR and tearing are separate mechanisms reading overlapping evidence, and
+/// the difference matters. VRR follows the *content*: a fullscreen client
+/// covering a live output gets an adaptive refresh rate, a static desktop
+/// does not (it makes some panels flicker), and a cursor moving over the game
+/// changes nothing — flipping adaptive sync with cursor visibility is both a
+/// user-visible refresh renegotiation and a mode-size buffer allocation each
+/// way. Tearing additionally needs the frame to be uncomposited, because an
+/// async flip is a primary-plane-only, no-modeset commit; it is refused for a
+/// list of reasons the caller reports one at a time.
 pub(super) const fn presentation_plan(e: &PresentationEvidence) -> PresentationPlan {
-    let vrr = e.vrr_configured
-        && e.vrr_supported_without_modeset
-        && e.output_presenting
-        && e.fullscreen_client_owns_output;
+    // Hardware capability and the output being alive bound VRR in every case;
+    // an explicit request overrides only the content half.
+    let vrr_possible = e.vrr_supported_without_modeset && e.output_presenting;
+    let vrr = match e.vrr_override {
+        Some(forced) => vrr_possible && forced,
+        None => vrr_possible && e.vrr_configured && e.fullscreen_client_covers_output,
+    };
 
     // Hardware and configuration first, so a permanently incapable output
     // reports the same reason regardless of what is on screen.
@@ -1954,7 +1990,7 @@ pub(super) const fn presentation_plan(e: &PresentationEvidence) -> PresentationP
         Some(PresentationBlocker::TearingControlDisabled)
     } else if !e.client_asked_to_tear {
         Some(PresentationBlocker::NoClientAskedToTear)
-    } else if !e.fullscreen_client_owns_output {
+    } else if !e.fullscreen_client_covers_output || e.composited_frame_required {
         Some(PresentationBlocker::CompositedFrameRequired)
     } else if e.color_delivery_retry_required {
         Some(PresentationBlocker::ColorDeliveryRetryPending)
@@ -2074,6 +2110,9 @@ pub(super) struct KmsState {
     /// cursor, config gates, or per-output state require composition.
     last_direct_scanout_outputs: Vec<crate::backend::api::DirectScanoutOutputStatus>,
     last_presentation_outputs: Vec<crate::backend::api::PresentationOutputStatus>,
+    /// The previous frame's verdicts, so an output that skipped this frame
+    /// carries its answer forward instead of vanishing from the report.
+    previous_presentation_outputs: Vec<crate::backend::api::PresentationOutputStatus>,
     /// `DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP`, probed once at init. A driver that
     /// does not advertise it rejects an async atomic commit outright, and the
     /// render loop treats a rejected queue as a device fault — so this is a
@@ -3697,28 +3736,30 @@ impl KmsState {
                 output.output_name
             ));
         }
-        // Through Smithay, never through the raw property: it re-asserts its
-        // own cached VRR value in every atomic request it builds, so a direct
-        // write is undone by the next page flip — which is what used to
-        // happen to every enable this function reported as successful.
-        let connector = output.connector;
-        match output
-            .drm_output
-            .with_compositor(|c| c.vrr_supported(connector))
-        {
-            Ok(smithay::backend::drm::VrrSupport::Supported) => {}
-            Ok(smithay::backend::drm::VrrSupport::RequiresModeset) => {
-                return Err("this output cannot change VRR without a modeset; refusing".to_string());
-            }
-            Ok(smithay::backend::drm::VrrSupport::NotSupported) => {
-                return Err("VRR is not supported on this output".to_string());
-            }
-            Err(error) => return Err(format!("could not query VRR support: {error:?}")),
+        if !output.vrr_supported_without_modeset {
+            return Err(
+                "VRR is unsupported on this output, or cannot change without a modeset".to_string(),
+            );
         }
-        output
-            .drm_output
-            .with_compositor(|c| c.use_vrr(enabled))
-            .map_err(|error| format!("could not set VRR: {error:?}"))
+        // Latch the request rather than program it here. Going straight to
+        // the hardware would be undone by the next rendered frame, which
+        // recomputes VRR from content — the same silently-successful call the
+        // raw CRTC-property write used to produce, with jwm's own policy
+        // playing the role Smithay's cache played. The override is what the
+        // policy reads, so an explicit request survives.
+        self.outputs[output_idx].vrr_override = Some(enabled);
+        self.needs_render = true;
+        Ok(())
+    }
+
+    /// Return one output's VRR to policy control, dropping any explicit
+    /// request.
+    #[allow(dead_code, reason = "IPC surface for a later `vrr auto` command")]
+    pub(super) fn clear_vrr_override(&mut self, output_idx: usize) {
+        if let Some(output) = self.outputs.get_mut(output_idx) {
+            output.vrr_override = None;
+            self.needs_render = true;
+        }
     }
 
     /// Push (or clear) the connector HDR signalling — HDR_OUTPUT_METADATA and
@@ -4316,6 +4357,82 @@ impl KmsState {
             hardware_pair_active: output.last_hardware_pair_active,
             delivery_blocked: self.color_pipeline_delivery_blocked,
         })
+    }
+
+    /// Report an output the frame loop skipped, so the per-output verdicts
+    /// describe every output rather than only the ones that rendered.
+    fn record_skipped_presentation(&mut self, index: usize, blocker: PresentationBlocker) {
+        let Some(output) = self.outputs.get(index) else {
+            return;
+        };
+        let status = crate::backend::api::PresentationOutputStatus {
+            output_name: output.output_name.clone(),
+            client_asked_to_tear: false,
+            vrr: output.vrr_last_attempt.unwrap_or(false),
+            tearing: false,
+            blocker: Some(blocker.wire_name().to_string()),
+        };
+        self.last_presentation_outputs.push(status);
+    }
+
+    /// Carry an output's previous verdict forward across a frame it did not
+    /// render. The hardware has not changed, so neither has the answer.
+    fn repeat_last_presentation(&mut self, index: usize) {
+        let Some(output) = self.outputs.get(index) else {
+            return;
+        };
+        let name = output.output_name.clone();
+        let vrr = output.vrr_last_attempt.unwrap_or(false);
+        let previous = self
+            .previous_presentation_outputs
+            .iter()
+            .find(|status| status.output_name == name)
+            .cloned();
+        self.last_presentation_outputs.push(
+            previous.unwrap_or(crate::backend::api::PresentationOutputStatus {
+                output_name: name,
+                client_asked_to_tear: false,
+                vrr,
+                tearing: false,
+                blocker: Some(
+                    PresentationBlocker::ModesetCommitPending
+                        .wire_name()
+                        .to_string(),
+                ),
+            }),
+        );
+    }
+
+    /// Drive one output's `VRR_ENABLED` to `want`, through Smithay so the
+    /// value survives the next page flip.
+    ///
+    /// Edge-triggered against the last *attempt*, not against Smithay's
+    /// cached value: `use_vrr` leaves that cache untouched when it fails, so
+    /// comparing against it would repeat a rejected change every frame — and
+    /// each attempt allocates a mode-size dumb buffer and runs test commits.
+    /// A rejected value is not retried until the desired value changes.
+    fn apply_vrr(&mut self, index: usize, want: bool) {
+        let Some(output) = self.outputs.get(index) else {
+            return;
+        };
+        if !output.vrr_supported_without_modeset || output.vrr_last_attempt == Some(want) {
+            return;
+        }
+        let crtc = output.crtc;
+        let result = output.drm_output.with_compositor(|c| c.use_vrr(want));
+        if let Err(error) = result {
+            log::warn!("[kms] could not set VRR on crtc {crtc:?}: {error:?}");
+        } else {
+            log::info!(
+                "[kms] VRR {} on crtc {crtc:?}",
+                if want { "enabled" } else { "disabled" }
+            );
+        }
+        // Recorded either way: a driver that refuses this value will refuse
+        // it again, and a per-frame retry is a per-frame allocation.
+        if let Some(output) = self.outputs.get_mut(index) {
+            output.vrr_last_attempt = Some(want);
+        }
     }
 
     /// Latch (or drop) the user's HDR request for one output. The commit
@@ -6450,6 +6567,17 @@ impl KmsState {
                 .frame_callback_throttle
                 .unwrap_or(std::time::Duration::from_millis(16));
             let output_name = p.output.name();
+            // Probed once: the answer changes only on hotplug, and asking
+            // costs two ioctls plus a rebuilt connector info struct.
+            // `RequiresModeset` deliberately does not count — Smithay's
+            // `use_vrr` falls back to a modesetting test commit there and
+            // leaves the surface with pending state, turning the next frame
+            // into a full commit.
+            let vrr_supported_without_modeset = drm_output
+                .with_compositor(|compositor| compositor.vrr_supported(p.connector))
+                .is_ok_and(|support| {
+                    matches!(support, smithay::backend::drm::VrrSupport::Supported)
+                });
             let output_params =
                 crate::backend::wayland_udev::color_management::params_for_output(&p.output);
             let (output_tf, output_ctm) = output_color_target(&output_params);
@@ -6485,6 +6613,9 @@ impl KmsState {
                 output_tf,
                 output_ctm,
                 legacy_gamma_override: false,
+                vrr_supported_without_modeset,
+                vrr_last_attempt: None,
+                vrr_override: None,
                 hdr_requested: false,
                 last_software_region_planned: false,
                 last_hardware_pair_active: false,
@@ -6537,6 +6668,7 @@ impl KmsState {
             last_presentation_time: None,
             last_direct_scanout_outputs: Vec::new(),
             last_presentation_outputs: Vec::new(),
+            previous_presentation_outputs: Vec::new(),
             driver_supports_async_flip,
             // Construction has not established the neutral hardware baseline
             // yet. Even though the event loop cannot dispatch this handle until
@@ -6651,7 +6783,7 @@ impl KmsState {
         }
 
         self.last_direct_scanout_outputs.clear();
-        self.last_presentation_outputs.clear();
+        self.previous_presentation_outputs = std::mem::take(&mut self.last_presentation_outputs);
         // One lock per frame, not one per output: the render body has an
         // explicit no-allocation, no-churn contract.
         let tearing_control_enabled = state.tearing_hints.is_some();
@@ -6664,16 +6796,28 @@ impl KmsState {
             // DrmOutput alive so a later `enable_head` Apply can resume.
             // Use the cached name throughout this per-output/per-frame path:
             // Smithay's `Output::name()` returns a newly allocated `String`.
-            if state
+            // Every output gets a row, including the ones this frame skips.
+            // VRR is persistent hardware state; reporting it through a
+            // channel that silently omits whatever did not render would make
+            // `vrr.active` flicker to false while `VRR_ENABLED` is 1, and
+            // make two consecutive status reads disagree about how many
+            // outputs exist.
+            let presenting = !state
                 .soft_disabled_outputs
                 .contains(&self.outputs[out_idx].output_name)
-                || self.outputs[out_idx].dpms_off
-            {
+                && !self.outputs[out_idx].dpms_off;
+            if !presenting {
+                // A dark output keeps no adaptive refresh rate.
+                self.apply_vrr(out_idx, false);
+                self.record_skipped_presentation(out_idx, PresentationBlocker::OutputNotPresenting);
                 continue;
             }
             let frame_pending = self.outputs[out_idx].frame_pending;
             if frame_pending {
                 any_skipped = true;
+                // Nothing about this output changed; repeat last frame's
+                // verdict rather than dropping it out of the report.
+                self.repeat_last_presentation(out_idx);
                 continue;
             }
             let color_delivery_retry_required = self.outputs[out_idx].color_delivery_retry_required;
@@ -7020,57 +7164,62 @@ impl KmsState {
                     reason: direct_scanout_reason,
                 });
 
-            // Presentation policy: VRR follows the content, tearing follows
-            // the client's request. Both read the direct-scanout verdict for
-            // "one fullscreen client owns this output", so the three
-            // decisions cannot drift apart.
-            let client_asked_to_tear = state.tearing_hints.as_ref().is_some_and(|hints| {
-                direct_scanout_policy_eligible
-                    && state.window_stack.first().is_some_and(|win| {
-                        state.surface_for_window(*win).is_some_and(|surface| {
-                            crate::backend::wayland_udev::tearing_control::committed_hint(
-                                hints,
-                                &surface.id(),
-                            ) == crate::backend::wayland_udev::tearing_control::TearingHint::Async
-                        })
+            // Presentation policy. Whether a fullscreen client *covers* this
+            // output is a containment test, deliberately not the
+            // direct-scanout verdict: that one is global in its window test
+            // and false whenever a cursor is up, and neither of those is a
+            // reason to change a refresh rate.
+            let covering_window = state.window_stack.iter().copied().find(|win| {
+                state.mapped_windows.contains(win)
+                    && state
+                        .window_is_fullscreen
+                        .get(win)
+                        .copied()
+                        .unwrap_or(false)
+                    && state.window_geometry.get(win).is_some_and(|geo| {
+                        rect_overlaps_output(
+                            (geo.x, geo.y),
+                            (
+                                i32::try_from(geo.w).unwrap_or(i32::MAX),
+                                i32::try_from(geo.h).unwrap_or(i32::MAX),
+                            ),
+                            self.outputs[out_idx].origin,
+                            self.outputs[out_idx].mode_size,
+                        )
                     })
             });
+            let client_asked_to_tear = state.tearing_hints.as_ref().is_some_and(|hints| {
+                covering_window.is_some_and(|win| {
+                    state.surface_for_window(win).is_some_and(|surface| {
+                        crate::backend::wayland_udev::tearing_control::committed_hint(
+                            hints,
+                            &surface.id(),
+                        ) == crate::backend::wayland_udev::tearing_control::TearingHint::Async
+                    })
+                })
+            });
             let out = &self.outputs[out_idx];
-            let (vrr_supported_without_modeset, commit_pending) =
-                out.drm_output.with_compositor(|compositor| {
-                    (
-                        matches!(
-                            compositor.vrr_supported(out.connector),
-                            Ok(smithay::backend::drm::VrrSupport::Supported)
-                        ),
-                        compositor.surface().commit_pending(),
-                    )
-                });
+            // `vrr_supported` walks the connector's properties and rebuilds
+            // its whole info struct — two ioctls with allocations, for an
+            // answer that only changes on hotplug. It is probed once at init.
+            let vrr_supported_without_modeset = out.vrr_supported_without_modeset;
+            let commit_pending = out
+                .drm_output
+                .with_compositor(|compositor| compositor.surface().commit_pending());
             let plan = presentation_plan(&PresentationEvidence {
                 vrr_configured,
                 vrr_supported_without_modeset,
                 tearing_control_enabled,
                 client_asked_to_tear,
                 driver_supports_async_flip: self.driver_supports_async_flip,
-                fullscreen_client_owns_output: direct_scanout_policy_eligible,
+                fullscreen_client_covers_output: covering_window.is_some(),
+                composited_frame_required: !direct_scanout_policy_eligible,
                 color_delivery_retry_required,
                 commit_pending,
                 output_presenting: true,
+                vrr_override: out.vrr_override,
             });
-            // Edge-triggered, and only where Smithay says VRR can change
-            // without a modeset: `use_vrr` otherwise leaves the surface with
-            // pending state, which turns the very next frame into a full
-            // modesetting commit.
-            if plan.vrr != out.drm_output.with_compositor(|c| c.vrr_enabled())
-                && let Err(error) = out
-                    .drm_output
-                    .with_compositor(|compositor| compositor.use_vrr(plan.vrr))
-            {
-                log::debug!(
-                    "[kms] could not set VRR on crtc {:?}: {error:?}",
-                    self.outputs[out_idx].crtc
-                );
-            }
+            self.apply_vrr(out_idx, plan.vrr);
             self.last_presentation_outputs
                 .push(crate::backend::api::PresentationOutputStatus {
                     output_name: self.outputs[out_idx].output_name.clone(),
@@ -8420,10 +8569,12 @@ mod compositor_texture_ownership_tests {
             tearing_control_enabled: true,
             client_asked_to_tear: true,
             driver_supports_async_flip: true,
-            fullscreen_client_owns_output: true,
+            fullscreen_client_covers_output: true,
+            composited_frame_required: false,
             color_delivery_retry_required: false,
             commit_pending: false,
             output_presenting: true,
+            vrr_override: None,
         }
     }
 
@@ -8462,7 +8613,14 @@ mod compositor_texture_ownership_tests {
             Some(B::NoClientAskedToTear)
         );
         assert_eq!(
-            spoil(|e| e.fullscreen_client_owns_output = false),
+            spoil(|e| e.fullscreen_client_covers_output = false),
+            Some(B::CompositedFrameRequired)
+        );
+        // And the same blocker for a frame that needs composition even
+        // though a fullscreen client does cover the output — a cursor, an
+        // overlay, an effect. An async flip is primary-plane-only.
+        assert_eq!(
+            spoil(|e| e.composited_frame_required = true),
             Some(B::CompositedFrameRequired)
         );
         // A colour-delivery retry needs one guaranteed swapchain commit; a
@@ -8499,6 +8657,10 @@ mod compositor_texture_ownership_tests {
             presentation_plan(&off).blocker,
             Some(B::OutputNotPresenting)
         );
+        assert!(
+            !presentation_plan(&off).vrr,
+            "a dark output keeps no adaptive refresh rate"
+        );
 
         // With the protocol global off, "nobody asked" is not the useful
         // answer: nobody *could* ask.
@@ -8512,10 +8674,11 @@ mod compositor_texture_ownership_tests {
     }
 
     #[test]
-    fn vrr_follows_the_content_and_ignores_whether_a_client_wants_to_tear() {
-        // A single fullscreen client on a live, capable output gets an
+    fn vrr_follows_the_content_and_nothing_else_on_screen() {
+        // A fullscreen client covering a live, capable output gets an
         // adaptive refresh rate whether or not it asked to tear — the two
-        // mechanisms read the same evidence but answer different questions.
+        // mechanisms read overlapping evidence but answer different
+        // questions.
         let mut quiet = tearing_ready();
         quiet.client_asked_to_tear = false;
         assert!(presentation_plan(&quiet).vrr);
@@ -8526,9 +8689,9 @@ mod compositor_texture_ownership_tests {
             mutate(&mut evidence);
             !presentation_plan(&evidence).vrr
         };
-        // A composited desktop does not: VRR on a static screen makes some
-        // panels flicker, and every other compositor lands on the same rule.
-        assert!(denies(|e| e.fullscreen_client_owns_output = false));
+        // A desktop with no fullscreen client does not: VRR on a static
+        // screen makes some panels flicker.
+        assert!(denies(|e| e.fullscreen_client_covers_output = false));
         assert!(denies(|e| e.output_presenting = false));
         assert!(denies(|e| e.vrr_configured = false));
         // RequiresModeset does not count as supported: Smithay's `use_vrr`
@@ -8537,11 +8700,55 @@ mod compositor_texture_ownership_tests {
         // commit.
         assert!(denies(|e| e.vrr_supported_without_modeset = false));
 
-        // A colour-delivery retry forces composition but says nothing about
-        // refresh rate, so VRR is unaffected by it.
+        // But a cursor moving over the game is not a reason to renegotiate
+        // the refresh rate — and each change costs a mode-size dumb buffer
+        // and a test commit, so an auto-hiding cursor would pay it twice a
+        // cycle. Same for a colour-delivery retry, which forces composition
+        // and says nothing about refresh.
+        let mut composited = tearing_ready();
+        composited.composited_frame_required = true;
+        assert!(presentation_plan(&composited).vrr);
+        assert!(!presentation_plan(&composited).tearing);
         let mut retrying = tearing_ready();
         retrying.color_delivery_retry_required = true;
         assert!(presentation_plan(&retrying).vrr);
+    }
+
+    #[test]
+    fn an_explicit_vrr_request_survives_the_next_frame_but_not_the_hardware() {
+        // The content policy owns VRR, so an explicit request has to be an
+        // override the policy reads — otherwise the very next rendered frame
+        // recomputes it and undoes the request, which is the same
+        // silently-successful call the raw property write used to produce.
+        let mut desktop = tearing_ready();
+        desktop.fullscreen_client_covers_output = false;
+        assert!(!presentation_plan(&desktop).vrr);
+        desktop.vrr_override = Some(true);
+        assert!(presentation_plan(&desktop).vrr);
+
+        // It overrides the content half in both directions...
+        let mut game = tearing_ready();
+        game.vrr_override = Some(false);
+        assert!(!presentation_plan(&game).vrr);
+
+        // ...and neither direction can force it past the hardware or onto an
+        // output that is not presenting.
+        let mut incapable = tearing_ready();
+        incapable.vrr_override = Some(true);
+        incapable.vrr_supported_without_modeset = false;
+        assert!(!presentation_plan(&incapable).vrr);
+        let mut dark = tearing_ready();
+        dark.vrr_override = Some(true);
+        dark.output_presenting = false;
+        assert!(!presentation_plan(&dark).vrr);
+
+        // An override also does not disable the switch: config off plus an
+        // explicit on is an explicit on.
+        let mut unconfigured = tearing_ready();
+        unconfigured.vrr_configured = false;
+        assert!(!presentation_plan(&unconfigured).vrr);
+        unconfigured.vrr_override = Some(true);
+        assert!(presentation_plan(&unconfigured).vrr);
     }
 
     #[test]

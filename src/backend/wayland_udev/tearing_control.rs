@@ -96,12 +96,20 @@ pub fn new_tearing_hint_map() -> TearingHintMap {
 // The state machine, over any key (pure)
 // ---------------------------------------------------------------------------
 
-fn stage_in<K: Eq + Hash + Clone>(
-    map: &mut HashMap<K, TearingHintLatch>,
-    key: &K,
-    hint: TearingHint,
-) {
-    map.entry(key.clone()).or_default().pending = Some(hint);
+/// Stage a hint on an existing entry.
+///
+/// It must not create one. Every legitimate staging comes from a control
+/// object, and `claim_control_in` created the entry when that object was
+/// made — so the only way to reach a missing entry is a request on an object
+/// whose `wl_surface` already died, which `forget_surface` purged. Creating
+/// there would resurrect an entry keyed by a dead surface id that no commit
+/// will ever arrive for, and nothing else would ever remove it: an unbounded
+/// leak, one per window closed in the order the protocol itself recommends
+/// (destroy the surface, then the now-inert control object).
+fn stage_in<K: Eq + Hash>(map: &mut HashMap<K, TearingHintLatch>, key: &K, hint: TearingHint) {
+    if let Some(latch) = map.get_mut(key) {
+        latch.pending = Some(hint);
+    }
 }
 
 fn commit_in<K: Eq + Hash>(map: &mut HashMap<K, TearingHintLatch>, key: &K) -> bool {
@@ -400,13 +408,39 @@ mod tests {
         assert!(!commit_in(&mut map, &A));
         assert!(!map.contains_key(A), "an idle entry is not kept forever");
 
-        // An Async hint is state worth keeping even with no object left.
+        // A dead object stages a revert alongside releasing its claim, so
+        // the entry survives that commit only because something is staged —
+        // and is gone by the one after.
         armed(&mut map, B);
         stage_in(&mut map, &B, TearingHint::Async);
         assert!(commit_in(&mut map, &B));
-        map.get_mut(B).expect("entry").control_alive = false;
-        assert!(!commit_in(&mut map, &B));
-        assert!(map.contains_key(B));
+        release_control_in(&mut map, &B);
+        assert!(commit_in(&mut map, &B), "the revert lands");
+        assert!(!map.contains_key(B), "and takes the entry with it");
+    }
+
+    #[test]
+    fn a_request_on_an_inert_object_does_not_resurrect_a_purged_entry() {
+        // The protocol's own recommendation is "destroy the surface, then
+        // destroy the now-inert control object". Step one purges the entry;
+        // step two must not put it back, because no commit will ever arrive
+        // for that surface id to take it away again.
+        let mut map = Hints::new();
+        armed(&mut map, A);
+        stage_in(&mut map, &A, TearingHint::Async);
+        assert!(commit_in(&mut map, &A));
+
+        assert!(map.remove(A).is_some(), "the surface died");
+        // The inert object's Destroy request stages a revert...
+        stage_in(&mut map, &A, TearingHint::Vsync);
+        // ...and its death releases the claim. Neither may recreate the
+        // entry.
+        release_control_in(&mut map, &A);
+        assert!(
+            !map.contains_key(A),
+            "an entry for a dead surface is never resurrected"
+        );
+        assert_eq!(async_count_in(&map), 0);
     }
 
     #[test]
