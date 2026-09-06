@@ -23,6 +23,11 @@ are out of order still behaves sensibly — the earlier one simply happens first
 Setting every stage to 0 switches the whole policy off, and JWM then never
 reads the idle clock at all.
 
+`jwm --check-config` reads these keys before a session ever starts: it warns
+when `idle_lock_secs` is below the floor described below, and when
+`idle_dim_level` falls outside `[0, 1]` — a level the dim stage replaces with
+`0.35`, saying so once in the log of the session that never ran the check.
+
 ## Why locking is off by default
 
 The lock screen authenticates against PAM. On a machine where PAM cannot be
@@ -52,11 +57,26 @@ desktop:
   that somebody is at the keyboard, so the lock stage does not re-arm for 60
   seconds afterwards. Dimming and the screen-off stage are unaffected.
 
-If a lock cannot be shown — something else holds the pointer grab, a menu is
-open — the attempt is retried every 5 seconds rather than abandoned for the
-rest of the idle period, so a passing grab does not silently leave an
-unattended desk unlocked. The first failure is a warning in the log and the
-repeats are at debug level.
+If a lock cannot be shown, what happens next depends on why, because an
+unattended session that stops asking stays unlocked until somebody touches
+the keyboard:
+
+- **Something that passes on its own** — another panel open, something else
+  holding the pointer grab — is retried every 5 seconds for as long as the
+  session stays idle.
+- **A refusal the backend could not explain** — it tried to start the
+  compositor the lock card draws on and the attempt returned an error, which
+  covers a VT switch, DRM master briefly held elsewhere and a momentary
+  renderer failure alike — is retried on the same 5-second interval, but only
+  12 times. That is about a minute of asking: long enough to outlast the
+  transient causes, bounded so a machine where it will never work is not
+  asked all night.
+- **A backend that reports it cannot start a compositor at all** is not asked
+  again inside this idle period. It is a statement about the backend rather
+  than about this moment; the next idle period asks once more.
+
+The first failure is a warning in the log and the repeats are at debug level;
+giving up is one final warning that says which of the two reasons it was.
 
 ## Powering the displays down
 
@@ -107,7 +127,9 @@ there. So:
 
 A backend with no idle clock is not guessed at: the policy simply does nothing,
 because dimming the screen of somebody who is working is worse than never
-dimming at all.
+dimming at all. A clock that stops answering mid-session is treated the same
+way, and whatever the policy had already dimmed is put back rather than left
+dark — nothing can notice the activity that would otherwise undo it.
 
 ### The X server's own blanker is switched off
 
@@ -117,11 +139,13 @@ reads, so a lock timeout longer than the server's blanking timeout (600 seconds
 on a stock server) would never be reached, and a dim would be undone every ten
 minutes for no reason.
 
-The first time the idle policy runs, JWM therefore switches the server's timer
-off, the same way `xset s off` does, and logs that it did. Its own stages
-replace it; `idle_screen_off_command` is how you get real blanking back. If you
-would rather keep the server's blanker, set every idle stage to 0 and JWM will
-not touch it.
+The first time the idle policy actually reads the clock, JWM therefore
+switches the server's timer off, the same way `xset s off` does, and logs that
+it did. Its own stages replace it; `idle_screen_off_command` is how you get
+real blanking back. If you would rather keep the server's blanker, set every
+idle stage to 0 and JWM will not touch it — and a server whose idle clock JWM
+cannot read never reaches that point either, so it keeps its own blanker
+instead of ending up with neither.
 
 ## Over IPC
 
@@ -135,7 +159,19 @@ jwm-tool msg toggle_idle_inhibit
 
 An `idle/state` event carrying the same payload is broadcast on the `idle`
 topic whenever anything changes, so a status bar can show a caffeine indicator
-without polling. Every timeout is settable live too:
+without polling.
+
+The three timeouts are the ones the policy will act on, not the numbers in the
+file, so a bar counting down to the lock counts down to the lock that actually
+happens: `lock_secs` reports the 60-second floor when `behavior.idle_lock_secs`
+is set below it, and `screen_off_secs` reports `0` whenever
+`idle_screen_off_command` is empty, however `behavior.idle_screen_off_secs` is
+set. `0` in any of the three means that stage will not fire. The query is
+therefore an answer about behaviour, not a way to read the configuration
+back: a panel that wants the numbers as written has to read the file
+(`jwm --print-config-path`).
+
+Every timeout is settable live too:
 
 ```sh
 jwm-tool msg set_config --args '{"key": "behavior.idle_lock_secs", "value": 600}'

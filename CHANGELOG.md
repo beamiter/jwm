@@ -40,13 +40,15 @@ monorepo use independent Semantic Versions.
   discoverable, so a device asking to bond (`RequestAuthorization`) or a
   bonded device asking for a profile (`AuthorizeService`) raises
   `Allow '<name>' to pair?` / `Allow '<name>' to use <profile>?` on the
-  panel. `y`/`Enter` allows, `n`/`Esc` refuses, and refusing fails the request
-  on the BlueZ side. Well-known profile UUIDs are named. This is off by
-  default and has no persistent form: with no window armed, BlueZ refuses
-  such requests and the controller is neither pairable nor discoverable. The
-  window binds to the first device that rings it and refuses every other one,
-  cannot coexist with a pairing session, and restores the adapter flags it
-  changed when it closes. `get_bluetooth_pairing` grows a `kind` field
+  panel. `y`/`Enter` allows and `n` refuses — refusing fails the request on
+  the BlueZ side rather than letting it quietly succeed — while `Esc` closes
+  the window, and answering leaves it armed for the device it bound to.
+  Well-known profile UUIDs are named. This is off by default and has no
+  persistent form: with no window armed, BlueZ refuses such requests and the
+  controller is neither pairable nor discoverable. The window binds to the
+  first device that rings it and refuses every other one,
+  cannot coexist with a pairing session, and turns the adapter flags it raised
+  back off when it closes. `get_bluetooth_pairing` grows a `kind` field
   (`outbound`/`inbound`) and reports a null address until a window binds.
 
 - Pairing a Bluetooth device now finishes the job: once the bond lands, the
@@ -167,6 +169,49 @@ monorepo use independent Semantic Versions.
 - Compatibility, upgrade, and release-process documentation.
 
 ### Changed
+
+- A notification that replaces one still on screen now updates that card in
+  place — same slot, same open spring, the countdown restarted on the new
+  text, and a hovered card left frozen under the pointer — instead of
+  stacking a second copy behind the first. A progress notification that
+  updates ten times is one card again, not four cards and a stack that
+  evicted everything else.
+
+- The notification history is no longer written from the compositor thread.
+  Every change (post, replace, dismiss, clear) is queued to a writer thread
+  that folds whatever arrives inside one second into a single atomic write,
+  and exit and restart flush what it still holds before the process leaves, so
+  a notification posted a moment before a restart is in the file the next
+  process reads. A burst now costs the disk one rename-and-fsync instead of
+  one per notification and no frame waits on an fsync; the price of the window
+  is that a crash can lose up to a second of history where a synchronous write
+  lost none.
+
+- An action key longer than 64 characters is dropped rather than kept. The key
+  travels back to its sender verbatim in `ActionInvoked`, so a shortened one
+  would name an action the sender never offered — and an unbounded key could
+  push a single record past the per-record budget the persisted history is
+  sized from, which cost the whole file at the next startup rather than that
+  one notification.
+
+- `get_idle_status` and the `idle/state` event report the timeouts the policy
+  will act on rather than the numbers in the configuration file: a
+  `behavior.idle_lock_secs` below the 60-second floor is reported as 60, and
+  `screen_off_secs` is `0` whenever `idle_screen_off_command` is empty, however
+  the timeout is set. A bar counting down to the lock now counts down to the
+  lock that will actually happen; the query is no longer a way to read the
+  configuration back. `jwm --check-config` also checks the two idle keys it
+  had been silent about — a lock timeout below the floor, and an
+  `idle_dim_level` outside `[0, 1]`, which the dim stage replaces with 0.35.
+
+- `get_power_status` and `get_audio_devices` answer from the control center's
+  cached snapshot instead of forking `powerprofilesctl` or `wpctl status` on
+  the frame thread, so a bar polling them can no longer stall a frame; a read
+  also warms that snapshot on a worker, at most once every two seconds. Both
+  payloads gained the marker that makes an empty answer unambiguous:
+  `profile_pending` beside a null `profile`, and `pending` beside two empty
+  device lists. True means "nothing has been read yet"; false means this
+  machine really has no such control.
 
 - **Breaking (diagnostics):** the colour-session policy object stopped
   hardcoding its HDR answers. `hdr_active` is now the last successful
@@ -625,6 +670,86 @@ monorepo use independent Semantic Versions.
   errors and explicitly tests the Linux action and D-Bus provider adapters.
 
 ### Fixed
+
+- The window switcher takes the same pointer grab every other clickable panel
+  takes, so `Alt+Tab`'s documented click behaviour is finally the real one: a
+  left click on a row commits that window and any other press cancels. The
+  panel draws its rows over the very windows they name, and with the pointer
+  left free X11 delivered the click to the window under the row instead. A
+  wheel scroll now browses the list rather than throwing the gesture away — a
+  touchpad flick with the modifier still held is asking for the next row. If
+  another client already holds the pointer the panel opens keyboard-only
+  instead of refusing.
+
+- A notification the 64-record history cap pushes out now emits its
+  `NotificationClosed` with reason 4. Nothing else was ever going to close it
+  — a toast reaching the end of its timeout closes no record — so a sender
+  waiting on `notify-send --wait` waited for a row that had already gone, and
+  a later `CloseNotification` for it found nothing to close.
+
+- A middle or right click on a toast card dismisses the card instead of
+  falling through to whatever is underneath. The stack docks exactly where a
+  monitor's tab strip lies, so the press used to close or focus the strip cell
+  hidden under the card. Only the left button invokes an action chip, and the
+  wheel is not a click: it dismisses nothing and goes to whatever is below.
+
+- The tags overview hit-tests the highlighted cell where it is drawn. That
+  cell is painted lifted about its own centre while the press was resolved
+  against the unlifted rectangle, so a click near the edge of the cell under
+  the pointer landed on its neighbour or in the gap. Overlaps resolve in paint
+  order, so the card drawn on top of a pixel is the one that answers for it.
+
+- A sticky window's wireframe in the tags overview no longer arms a drag
+  that could not mean anything — tagging it would rewrite a mask stickiness
+  ignores and the next `view` would put back — so the press settles as the
+  cell's click instead. The outline still draws, and goes live, in every cell.
+
+- The tags overview follows the selected monitor. `focus_monitor` over IPC and
+  activating a window on the other head both move the selection without
+  arranging anything, and the open grid went on describing the monitor it was
+  opened on while its hit-test read the live viewport.
+
+- A lock the backend refuses because it cannot start a compositor at all is no
+  longer retried every five seconds for the rest of the idle period, and a
+  refusal whose cause the backend could not explain (a VT switch, DRM master
+  briefly held elsewhere) is now retried on a budget of twelve attempts —
+  about a minute, enough to outlast the transient causes and bounded for a
+  machine where it will never work. Something that passes on its own, such as
+  a panel holding the pointer grab, is still retried for as long as the
+  session stays idle.
+
+- The idle policy no longer switches the X server's own blanker off before it
+  knows it has a clock of its own. A backend whose idle clock cannot be read
+  used to end up with neither policy: JWM's stages never ran and the server's
+  timer had already been disabled. A clock that stops answering mid-session
+  also puts back whatever the policy had dimmed, rather than leaving the
+  screen dark with nothing left to notice the activity that would undo it.
+
+- An inbound Bluetooth request you allowed is no longer reported as refused
+  when you then close the window: the outcome reads off what was actually
+  granted rather than off "the user ended the session", which closing always
+  makes true.
+
+- The prompt for an incoming Bluetooth request names the device that rang it
+  even in a crowded room. The name was looked up through the picker's
+  sorted, 64-device list, and an unpaired device with no RSSI sorts into the
+  tail — so the question that matters most was the one most likely to name a
+  bare MAC address.
+
+- Closing an inbound Bluetooth window puts BlueZ's adapter-wide
+  `PairableTimeout` and `DiscoverableTimeout` back where it found them. These
+  are persisted, machine-wide settings rather than per-client state, so
+  shortening them to the window length and walking away cut every other tool's
+  pairable and discoverable window on that machine to sixty seconds,
+  permanently. The window still only ever shortens a value longer than itself
+  (or the "forever" `0`), and never re-imposes one a previously killed helper
+  had already shortened.
+
+- CI runs the tests it was only compiling: the portal crate's unit tests now
+  execute in the portal job, and the bridge job installs `dbus-daemon` and
+  sets `JWM_REQUIRE_DBUS_DAEMON=1`, so the BlueZ tests that stand up a private
+  session bus fail loudly when the binary is missing instead of skipping
+  themselves and letting the job go green having run none of them.
 
 - Full-screen screenshot IPC now reports the asynchronous contract explicitly
   as `{status: "queued", path}`. It returns an error when destination/staging

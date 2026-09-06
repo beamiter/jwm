@@ -62,12 +62,36 @@ gate. A necessary exception belongs on the smallest item and must explain the
 invariant that makes it safe.
 
 Run focused tests while iterating, but run the applicable complete commands
-before opening a pull request. Portal changes use the independent build
-environment and scripts:
+before opening a pull request. The commands above test only the root package,
+so the portal and bridge crates carry their own. Portal changes run:
 
 ```bash
+(cd portal && cargo test --locked --all-targets)
 scripts/test-portal.sh
 ```
+
+The first is the portal's unit tests — restore tokens, the picker, dmabuf
+handling and the ScreenCast option parsing — which CI runs and which nothing
+else covers. The second is a different kind of check: a live D-Bus smoke test
+that needs the backend installed and a jwm Wayland session running, and it
+executes no unit tests, so neither stands in for the other.
+
+Building the portal at all needs PipeWire 1.2 development metadata; on a
+distribution that ships an older one, `bash scripts/ensure_pipewire.sh` builds
+a private libraries-only prefix and `--env` prints the `KEY=VALUE` lines to put
+in the environment first (which is what CI does).
+
+Bridge changes run:
+
+```bash
+(cd bridge && JWM_REQUIRE_DBUS_DAEMON=1 cargo test --locked --all-targets)
+```
+
+The environment variable turns a missing `dbus-daemon` from a silent skip into
+a failure, the way `JWM_REQUIRE_HEADLESS_GL` does for the GL tests: the BlueZ
+tests that stand up a private session bus are the only executed coverage of
+several pairing paths, and without the binary they skip themselves and the run
+still exits 0. Install the distribution's `dbus` package to have them run.
 
 ## Runtime validation
 

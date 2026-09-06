@@ -36,22 +36,31 @@ It is gated by `JWM_COLOR_MANAGEMENT_ADVANCED=1`.
 ## Why it might not be on
 
 Each output reports the first reason it has, in a fixed order — hardware,
-then configuration, then this frame's content:
+then configuration, then participation, then this frame's content. Everything
+above `output_not_participating` is permanent: it fails the enable command,
+and it drops a request the reconciliation is already carrying. Everything from
+`output_not_participating` down is momentary, and the latch carries the
+request across it. Participation sits on the boundary deliberately: testing it
+first (as it was before) let a soft-disabled SDR panel latch a request nothing
+could ever honour, answer `Ok` to `set_hdr_metadata`, and count towards
+`hdr_signalling_enable_available`.
 
 | Reason | Meaning |
 | --- | --- |
-| `output_not_participating` | DPMS off, or soft-disabled through wlr-output-management. |
 | `scanout_chain_*` | The 10-bit format / plane / CRTC-stage / connector-property chain is incomplete. Five variants name which link; a sixth, `scanout_chain_cross_device`, exists for a multi-GPU delivery path that does not exist yet and is never reported today. |
 | `edid_lacks_hdr_profile` | The panel's EDID advertises neither PQ nor HLG, so there is no CTA-861.3 blob that would describe it. |
+| `connector_commit_rejected` | The driver refused the last signalling commit. Nothing changed on the hardware, so no frame is held; the request is dropped instead of retried, and a fresh `set_hdr_metadata … enabled: true` is the one way to ask again. Only an answer the driver actually gave counts: a commit that never reached one — `EACCES` because DRM master is held elsewhere across a VT switch, `EBUSY` racing a modeset, a device on its way out — leaves the request standing, and the next frame that owns the device asks again. |
 | `advanced_color_management_disabled` | Clients are being told this output is exact sRGB. |
-| `scene_linear_target_inactive` | No FP16 common-linear target; the frame is composed in encoded sRGB. |
 | `color_pipeline_offload_disabled` | `kms_color_pipeline_offload` or the scene-linear render path is off. |
+| `software_region_topology_unsupported` | Some participating output is scaled, rotated, or placed at a negative origin. The single global framebuffer has no per-output scale or transform stage, so the region planner rejects the *whole* layout — and with it the software route HDR needs. Change the scale or transform; waiting does not help. |
+| `output_not_participating` | DPMS off, or soft-disabled through wlr-output-management. |
+| `scene_linear_target_inactive` | No FP16 common-linear target; the frame is composed in encoded sRGB. |
 | `linear_tail_unsafe` | Something in the frame tail — a toast, a session lock, an unimportable cursor tree — is assembled outside the common-linear pass, so the frame falls back to exact sRGB. |
 | `legacy_gamma_override_active` | A `zwlr-gamma-control` client owns this CRTC's ramp. |
 | `color_delivery_blocked` | KMS colour state is unresolved and presentation is being held. |
-| `hardware_lut_route_clips_hdr_headroom` | See below. |
-| `no_software_delivery_region` | No software delivery region covers this output, so nothing applies its transfer function. |
 | `overlapping_output_profile_conflict` | This output is mirrored onto another. Giving one of two cloned outputs a different transfer function makes the region plan fail, which would withdraw the signal the next frame and re-assert it the frame after — forever. |
+| `hardware_lut_route_clips_hdr_headroom` | See below. |
+| `no_software_delivery_region` | No software delivery region covers this output this frame, so nothing applies its transfer function. A layout the planner can *never* cover reports `software_region_topology_unsupported` above instead. |
 
 ```sh
 jwm-tool wayland-status --json | jq '.color_management.session_policy.hdr_enable_refusals'
@@ -93,19 +102,49 @@ the same controlled atomic request that set them, so the sink is never left
 told BT.2020 with no metadata behind it. The kernel blob a previous assert
 installed is destroyed when it is replaced or cleared.
 
+Every assert and every withdrawal also tells clients: each surface already on
+the output gets `wp_color_management_surface_feedback_v1.preferred_changed`
+and each bound `wp_color_management_output_v1` gets
+`image_description_changed`. Without that only surfaces *entering* the output
+learned of the switch, so a player mapped before the enable kept rendering
+sRGB into an output now told PQ.
+
 A refusal the user cannot wait out — an SDR panel appearing on the connector,
 the advanced switch going off — also *drops* the request rather than parking
 it, because a request that can never be honoured would still steer the
 delivery route away from the CRTC pair for every output, paying the software
 shader path for nothing.
 
-The one exception is an output that has gone dark — DPMS off, or
-soft-disabled through wlr-output-management. There the claim is dropped
-without a commit: the properties belong to a display that is off, whether the
-commit is even accepted is driver-dependent, and a failure would hold
-presentation for every other output on the device. Nothing reports HDR active
-on an output that is not presenting, and the signal is re-asserted with a
-fresh commit when it comes back.
+The one exception is an output that has gone dark *while a frame loop is
+running* — DPMS off, or soft-disabled through wlr-output-management. There the
+claim is dropped without a commit: the properties belong to a display that is
+off, whether the commit is even accepted is driver-dependent, and a failure
+would hold presentation for every other output on the device.
+
+That leaves the claim and the connector temporarily disagreeing, so the
+reconciliation reads *both*. `Colorspace` and `HDR_OUTPUT_METADATA` are
+persistent connector state — DPMS-off does not reset them, and on power-on the
+driver re-programs the infoframes from them — so the connector's own bit is
+the truth, and the first participating frame brings it back in line with a
+real commit: re-asserting if the request still stands, withdrawing if it was
+dropped meanwhile. Reading only the claim meant that dropping the request
+while the screen was dark left the panel told PQ/BT.2020 under sRGB-encoded
+frames for the rest of the session — the exact error this gate exists to
+prevent, reintroduced from the other direction.
+
+The DPMS path withdraws the signal directly as well. It runs *after* the DPMS
+property write and only when that write succeeded — the same rule the LUT/CTM
+teardown beside it follows, because withdrawing first would leave a panel that
+failed to blank lit under sRGB with the request still standing. That makes it
+a commit to a connector that is already down, so it is best-effort: a refusal
+drops the claim, keeps the tracked blob, and is retried at power-on — so a
+session with no effects compositor (and therefore no reconciliation) does not
+leave a dark panel signalled either.
+
+A latched request also survives a rebuild of the KMS state. A VT switch back
+and every connector hotplug construct fresh outputs; the request and any
+explicit `set_vrr_enabled` override are carried across by output name, and a
+name that is gone says so in the log rather than vanishing.
 
 ## What the reports mean
 
@@ -137,6 +176,16 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 
 ## Limitations
 
+- **Entering or leaving HDR may be a modeset.** amdgpu forces a full modeset
+  when the metadata blob appears or disappears and when `Colorspace` changes,
+  so the plain `TEST_ONLY` commit is refused with `EINVAL` there. The
+  signalling request (and only that request — the CRTC LUT/CTM stages are
+  never allowed a modeset) retries the test with `ALLOW_MODESET` and commits
+  that way when it passes, logging once. The consequence is that a
+  toast-driven withdraw/re-assert cycle is a mode switch on such drivers.
+  A commit the driver refuses both ways is reported as
+  `connector_commit_rejected` and drops the request, rather than being retried
+  every other frame behind a held frame.
 - **Not verified against a real HDR display.** The compositor is proven
   internally consistent — it never signals HDR over sRGB pixels, and the
   pixel maths is pinned by a surfaceless-EGL oracle at LSB tolerance — but no
@@ -159,8 +208,13 @@ than carrying it forward, and reports `null` until a replacement frame lands.
 ## Where it lives
 
 - `src/backend/udev_kms.rs` — `hdr_enable_refusal` (the policy),
-  `hdr_signalling_action` (the control loop), `hdr_scanout_chain_gap` (the
-  10-bit chain), `set_hdr_metadata_for_output` (the atomic request).
+  `hdr_signalling_action` and `hdr_withdrawal_reaches_connector` (the control
+  loop), `hdr_scanout_chain_gap` (the 10-bit chain),
+  `set_hdr_metadata_for_output` (the atomic request),
+  `carry_latched_intents` (surviving a rebuild).
+- `src/backend/wayland_udev/color_management.rs` —
+  `ColorManagerState::on_output_description_changed`, the client half of an
+  assert or withdrawal.
 - `src/backend/hdr_metadata.rs` — the CTA-861.3 static metadata blob.
 - `src/backend/edid.rs`, `src/backend/color_policy.rs` — EDID HDR capabilities
   and the image description they imply.

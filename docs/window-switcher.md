@@ -73,8 +73,24 @@ modal panel.
 
 ## Pointer
 
-The pointer stays free: clicking a row commits that window, clicking
-anywhere else cancels.
+The switcher takes the same button grab every other clickable panel takes,
+so every press reaches the panel rather than the window its rows are drawn
+over — which matters because the row a click lands on is drawn over exactly
+that window. A left click on a row commits it; a left click anywhere else,
+and any other button anywhere, cancels.
+
+The wheel is the exception, and it browses rather than cancels: a scroll
+over the panel steps the highlight the way it does on every other panel,
+because a touchpad flick while the modifier is still held is asking for the
+next row, not for the switch in flight to be thrown away. A scroll on the
+dimmed area outside the panel does nothing, and neither does a horizontal
+one anywhere — there is nothing sideways to browse.
+
+If another client already holds the pointer — a drag in flight, a menu's own
+grab — the gesture is not spent on it: `Alt+Tab` is a keyboard gesture first,
+so the panel opens keyboard-only and a click then behaves as it did before
+the grab existed (on X11 the server may deliver it to the window under the
+panel).
 
 ## Where it lives
 

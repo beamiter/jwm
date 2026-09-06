@@ -251,7 +251,7 @@ Three prompt shapes exist, all naming the device:
 - **PIN entry** — the device shows a code, you type it. Masked like the Wi-Fi
   passphrase, 1-16 characters, `Enter` submits.
 - **Numeric comparison** — `Confirm passkey 123456 on '<name>'?`. `y` or
-  `Enter` confirms, `n` or `Esc` rejects.
+  `Enter` confirms, `n` rejects the passkey, and `Esc` cancels the pairing.
 - **Display** — `Enter 1234 on '<name>'`: type the code on the device itself;
   the panel takes no input.
 
@@ -305,8 +305,8 @@ first place.
 `jwm-bridge accept`, which registers an `org.bluez.Agent1` at
 `/org/jwm/inbound_agent`, becomes the default agent (inbound requests go to
 the default agent, so without this the window would be registered and never
-called), and turns on `Adapter1.Pairable` and `Discoverable` — restoring
-whatever they were on the way out. Two questions can arrive:
+called), and turns on `Adapter1.Pairable` and `Discoverable`, which it clears
+again at teardown (see below). Two questions can arrive:
 
 - **Bond request** (`RequestAuthorization`) — `Allow '<name>' to pair?`
 - **Service request** (`AuthorizeService`) — `Allow '<name>' to use <profile>?`,
@@ -315,22 +315,28 @@ whatever they were on the way out. Two questions can arrive:
   because an unrecognized UUID is a worse answer than a name and an invented
   name is worse than both.
 
-`y` or `Enter` allows, `n` or `Esc` refuses, and refusing fails the request on
-the BlueZ side rather than letting it quietly succeed. Answering also closes
-the window — the controller stops being pairable and discoverable at that
-moment, not sixty seconds later. An incoming pairing can also raise the
-ordinary PIN and passkey prompts, which behave exactly as they do outbound.
+`y` or `Enter` allows a request and `n` refuses it — refusing fails the
+request on the BlueZ side rather than letting it quietly succeed — and either
+way the window stays armed, bound to that same device, until you close it.
+`Esc` (or closing/replacing the panel) closes the window: the controller stops
+being pairable and discoverable at that moment, not sixty seconds later. An
+incoming pairing can also raise the ordinary PIN and passkey prompts, which
+behave exactly as they do outbound.
 
 Every answer names the request it answers, not just the session, so an answer
 whose question BlueZ already withdrew resolves nothing rather than landing on
 whatever replaced it. Closing the window and withdrawing one unanswered prompt
 are different answers on the wire, not the same one told apart by timing:
-refusing a device leaves the window armed for the next one, while `Esc` ends
-it. Teardown turns `Pairable` and `Discoverable` off rather
-than restoring what it found — off is the only safe direction to be wrong in,
-and JWM turns them on by no other route — and it also sets BlueZ's own
-`PairableTimeout`/`DiscoverableTimeout` to the window length, so a helper
-killed outright still cannot leave the controller open past its window.
+answering leaves the window armed for the device it bound to, while `Esc`
+closes it. Teardown turns `Pairable` and `Discoverable` off rather than
+restoring what it found — off is the only safe direction to be wrong in, and
+JWM turns them on by no other route. It also lowers BlueZ's own
+`PairableTimeout`/`DiscoverableTimeout` to the window length while the window
+is open — but these are adapter-wide, persisted settings, not per-client
+state, so a normal teardown restores whatever it found (only ever shortening a
+value that was longer, or the "forever" `0`, never re-imposing one a previous
+run already shortened). A helper killed outright never runs that teardown, so
+BlueZ's own countdown is the belt that still clears the flags at the window.
 
 The window binds to the first device that rings it and refuses every other
 one from then on, so the late-bound target is as narrow as an outbound
@@ -422,3 +428,27 @@ reading actually changed) and `power/profile`; the `network` topic carries
 reports is what `set_audio_device` takes — a wpctl node id or a PulseAudio
 node name, depending on which tool the session uses. The `audio` subscription
 topic carries `audio/devices` after a switch.
+
+### Reading them is free, and says when it has nothing yet
+
+Both `get_power_status` and `get_audio_devices` answer out of the same cached
+snapshot the control center itself draws from, rather than forking
+`powerprofilesctl` or `wpctl` under the frame that is being composited — so a
+bar may poll them as often as it likes. Each read also warms that snapshot —
+on a worker thread, and at most one read every two seconds however fast the
+polling is — so this poll is what makes the *next* one current.
+
+The price of answering from memory is that an empty answer is ambiguous, so
+each payload carries a marker that resolves it:
+
+- `get_power_status` adds `profile_pending`. `profile: null` with
+  `"profile_pending": true` means no read has landed yet; with
+  `"profile_pending": false` it means this machine offers no profile control
+  at all.
+- `get_audio_devices` adds `pending`. Two empty lists with `"pending": true`
+  mean the same "not read yet"; with `"pending": false` they mean this session
+  has nothing to switch (an `amixer`-only box, or no sound server). A list
+  with devices in it is an answer either way, so `pending` is then `false`.
+
+A consumer that reads an empty answer as "absent" will be wrong on a cold
+start; one poll later it is right.

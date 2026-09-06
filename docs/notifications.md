@@ -32,9 +32,21 @@ draws above toasts, and the lock screen hides them entirely.
 
 Cards answer the pointer. Hovering one freezes its countdown — the timer
 resumes from the frozen point when the pointer leaves, so reading a long
-body never races the fade. A left-click on the card body dismisses it with
-a quick 120 ms fade-out; the click is swallowed before window dispatch, so
-it never falls through to the client underneath the card.
+body never races the fade. A click on the card body dismisses it with a
+quick 120 ms fade-out; the click is swallowed before window dispatch, so it
+never falls through to the client underneath the card. Every button
+dismisses, not only the left one: the stack docks exactly where a monitor's
+tab strip lies, so a middle or right press falling past the card would close
+or focus the strip cell hidden under it. Only the left button invokes an
+action chip. The wheel (X11 buttons 4-7) is not a click — it dismisses
+nothing and goes to whatever is under the card. Dismissing a card is not
+closing the notification: the row stays in the center (see
+[closes](#the-d-bus-bridge)).
+
+A notification that replaces one still on screen updates that card in place
+rather than stacking a second copy — same slot, same open spring, countdown
+restarted on the new text — which is how a progress notification stays one
+card. A hovered card being replaced stays frozen under the pointer.
 
 ## Notification center
 
@@ -66,14 +78,21 @@ separate pointer button.
 `Up`/`Down` always move *between* rows and `Left`/`Right` always move *within*
 the highlighted one — the same rule the control center and the calendar follow.
 
-The history holds 64 records; the oldest is evicted beyond that. It survives
-a restart: every change (post, replace, dismiss, clear) is written through to
-`$XDG_DATA_HOME/jwm/notification-history` — `~/.local/share/jwm/` when
-`XDG_DATA_HOME` is unset — and read back on startup. The file is a compact
-JSON document carrying a `version` field (currently `1`) and the identifier
-counter alongside the records, written atomically with `0600` permissions. A
-missing, oversized, or malformed file simply starts an empty history rather
-than failing startup.
+The history holds 64 records; the oldest is evicted beyond that, and its
+sender is told (see [closes](#the-d-bus-bridge)) because nothing else would
+ever close it. The history survives a restart: every change (post, replace,
+dismiss, clear) is queued to `$XDG_DATA_HOME/jwm/notification-history` —
+`~/.local/share/jwm/` when `XDG_DATA_HOME` is unset — and read back on
+startup. A writer thread owns the file: changes falling inside a one-second
+window share one write, so a progress notification updating ten times a
+second costs one rename-and-fsync rather than ten and the compositor thread
+never waits on an fsync. Shutdown and restart flush the pending snapshot
+before the process leaves, so the next one reads what you just saw; a crash
+loses at most that one-second window. The file is a compact JSON document
+carrying a `version` field (currently `1`) and the identifier counter
+alongside the records, written atomically with `0600` permissions. A missing,
+oversized, or malformed file simply starts an empty history rather than
+failing startup.
 
 ## Action buttons
 
@@ -91,8 +110,8 @@ in that order, which is what the specification expects.
 
 A toast card for a notification with actions shows up to three of them as
 chips along its bottom edge, accent-outlined, with an accent wash on the
-chip under the pointer. Clicking a chip invokes the action through the same
-pipeline as the notification center — `ActionInvoked`, then the record
+chip under the pointer. Left-clicking a chip invokes the action through the
+same pipeline as the notification center — `ActionInvoked`, then the record
 closes as dismissed — while clicking the card body still just dismisses the
 toast. A click on a card that is already fading out is swallowed without
 invoking anything twice. Chips follow their own sanitation: an action with
@@ -112,9 +131,12 @@ Rules worth knowing, all unit tested:
   cap displaces the last kept one rather than being dropped, since it is the
   key `Enter` runs.
 - **An action with no key is dropped** — invoking it would hand the sender an
-  empty string, which tells it nothing. A blank label falls back to its key,
-  because a chip with no text cannot be aimed at. Repeated keys are kept, both
-  of them: dropping one would slide every later label onto the wrong chip.
+  empty string, which tells it nothing. A key longer than 64 characters is
+  dropped as well, rather than truncated: the key goes back out over
+  `ActionInvoked` verbatim, so a shortened one would name an action the sender
+  never offered. A blank label falls back to its key, because a chip with no
+  text cannot be aimed at. Repeated keys are kept, both of them: dropping one
+  would slide every later label onto the wrong chip.
 - **A digit beyond the offered count does nothing.**
 - **Replacing a notification replaces its buttons**, so a progress
   notification that stops offering *Cancel* stops showing it.
@@ -155,9 +177,26 @@ Mapping rules, all unit tested in `bridge/src/notifications.rs`:
   separately from the compositor, so a new bridge talking to an older jwm is a
   real deployment, and a jwm new enough to read `actions` ignores the field.
 
-jwm owns the identifiers and every close, so a toast that expired, a row the
-user dismissed, and a `CloseNotification` call all emit exactly one
-`NotificationClosed` with the specification's reason code.
+jwm owns the identifiers and every close: a record emits exactly one
+`NotificationClosed`, carrying the specification's reason code.
+
+| Reason | What closed the record |
+| --- | --- |
+| `2` dismissed | the user dismissed the row in the notification center, or invoked one of its actions (`ActionInvoked` first, then the close) |
+| `3` requested | `CloseNotification`, or the `close_notification` IPC with no explicit reason |
+| `4` undefined | the history was cleared, or the 64-record cap evicted the record |
+| `1` expired | only when a caller asks for it — `close_notification` with `"reason": 1` |
+
+The *record* is what closes, not the card. A toast reaching the end of its
+timeout — or clicked away — takes the card off the screen and leaves the
+notification in the center, where its buttons still work. That is deliberate:
+the center exists to act on what scrolled past, and a sender that has been
+told "closed" is entitled to forget the notification and ignore a later
+`ActionInvoked` for it, so closing every card as it faded would quietly
+disarm the history's action chips. The visible consequence is that
+`notify-send --wait` returns when the row leaves the center — dismissed,
+cleared, or pushed out by the cap — rather than when the card fades; the
+cap's close is what bounds that wait.
 
 ## Posting a toast directly
 
@@ -196,6 +235,16 @@ subscription topic carrying `notification/posted`, `notification/closed`, and
 X11 notification windows from external daemons. Suppressed notifications are
 still recorded, marked in the notification center, and still emit their
 `notification/posted` event.
+
+The runtime toggle is your most recent word: a configuration reload that left
+`behavior.do_not_disturb` where it was keeps the toggle, while a reload whose
+value moved adopts the file and tells the bars with a `dnd/toggle` event.
+
+jwm's own configuration-reload toast follows the same rule as any normal
+notification — a quiet screen stays quiet, and the `config/reload` event
+still reaches the bars. A *failed* reload is critical (urgency 2) and shows
+anyway: it is the one piece of news you would rather have now than find in a
+log.
 
 ## Built-in events
 

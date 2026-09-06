@@ -10,9 +10,16 @@ current development/testing contract, not a production-support promise.
 | X11RB | Primary development backend; integrated compositor | Inherits X11's session-wide trust model; server/driver extensions vary |
 | XCB | Differential policy coverage with X11RB | Parity tests cannot cover every server, extension, or GPU |
 | Wayland DRM/KMS | Direct-session development backend | Needs DRM/GBM/EGL, input, seat permissions, and real-hardware validation |
-| Nested Wayland | CI/development smoke backends | Not a production DRM/KMS substitute; capture is absent where unsupported |
+| Nested Wayland | CI/development smoke backends | Not a production DRM/KMS substitute; capture is absent where unsupported; no shell panels or lock screen |
 | XWayland | Available in Wayland sessions | Inherits X11 isolation limits and application/driver quirks |
 | Portal/bars | Optional, separate components | Portal needs PipeWire 1.2 metadata; some toolkit bars have narrower gates |
+
+The shell panels — the control center and its pickers, the window switcher,
+the tags overview, the lock screen — draw through JWM's own compositor, and
+the nested Wayland backends cannot start one, so on those they refuse to open
+rather than half-appearing. Everything that does not need a panel (layouts,
+tags, keybindings, IPC) works there, which is what makes them useful for
+development.
 
 The binary-bundle design currently targets **x86_64 Linux built on Ubuntu
 22.04**. The host must provide compatible graphics, input, seat, audio, D-Bus,
@@ -43,10 +50,19 @@ they do depends on the backend:
   It is programmed through Smithay's own `use_vrr`, only on connectors that
   report VRR can change without a modeset, and only when the value differs
   from the last one attempted — a driver that refuses a value is not asked
-  again until the wanted value changes. `set_vrr_enabled` over IPC latches an
-  override the policy reads rather than programming the hardware directly;
-  without that the next rendered frame would recompute VRR from content and
-  undo the request.
+  again until the wanted value changes. A toggle Smithay could satisfy only
+  through its modeset fallback is undone again and VRR control is withdrawn
+  from that output for the rest of the session: the probe said no modeset was
+  needed, the commit said otherwise, and a full modesetting commit per
+  fullscreen window is worse than no VRR at all. `get_outputs` reports
+  `vrr.supported` from the same probe the enable command gates on, so it
+  cannot invite a `set_vrr_enabled` it would then refuse, and what a frame
+  reports as VRR-active is what the last `use_vrr` actually took rather than
+  what it was asked for.
+
+  `set_vrr_enabled` over IPC latches an override the policy reads rather than
+  programming the hardware directly; without that the next rendered frame
+  would recompute VRR from content and undo the request.
 
   (Before this, VRR was written straight onto the CRTC property at output
   init and by `set_vrr_enabled`, and never survived: Smithay re-asserts its

@@ -42,7 +42,12 @@ the release settles what the gesture meant.
 
 - Moving the pointer over a cell highlights it. Mouse and keyboard share the
   one highlight, so you can mix them freely; the dead space between cells
-  leaves the highlight where it is.
+  leaves the highlight where it is. The highlighted cell is drawn slightly
+  lifted, and the hit-test reads it lifted too, so a press lands on the cell
+  the eye sees rather than on the smaller rectangle underneath — including
+  the sliver of gap the lift now covers. Where the lift overhangs a
+  neighbour, the card painted last owns the pixel, which is again what is
+  drawn on top.
 - Clicking a cell — press and release on the same cell — jumps to that tag
   and closes, exactly like `Return`.
 - Dragging a window's wireframe from its cell onto another cell moves the
@@ -51,7 +56,11 @@ the release settles what the gesture meant.
   the target tag — the dwm `tag()` semantics of `Mod1+Shift+N`, shared with
   the same code path — so a window that sat on several tags ends up on only
   the drop target. Dropping on the dimmed desktop or the panel's dead space
-  commits nothing and simply lets the press go.
+  commits nothing and simply lets the press go. A sticky window's wireframe
+  is the one that cannot be dragged: it draws in every cell, but tagging it
+  would rewrite a mask stickiness ignores and the next `view` would put back,
+  so a press on it settles as the cell's click instead of arming a drag that
+  could not mean anything.
 - Clicking the dimmed desktop around the panel closes without switching,
   exactly like `Esc`. The cancel answers on the press; a release that lands
   on the scrim after starting on a cell never cancels, so a misdrag stays
@@ -89,6 +98,12 @@ rebuild the cells in place; the highlight is a tag index, so a rebuild cannot
 shift what it means. If a config reload shrinks `tags_length` under an open
 grid, an out-of-range highlight commits as a cancel instead of jumping
 nowhere.
+
+The grid follows the selected monitor as well. `focus_monitor` over IPC, or
+an activation of a window on the other head, moves the selection without
+arranging anything; the open grid notices on the next frame and rebuilds for
+the monitor it moved to, so the card, its cells and the hit-test never end up
+describing a screen you are not looking at.
 
 ## Limitations
 
